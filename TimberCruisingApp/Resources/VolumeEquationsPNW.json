@@ -1,0 +1,57 @@
+{
+  "_comment": "Spec §6.2 VolumeEquation records for the PNW starter set. Bruce DF and Chambers-Foltz WH are the canonical coastal-PNW total cubic-volume forms commonly referenced in USFS/BLM cruising literature. The coefficients below are PLACEHOLDERS pending verification against a primary source — see Phase 0 open questions. Callers that need production cruise numbers must replace them before use.",
+  "equations": [
+    {
+      "id": "bruce-df-pnw",
+      "form": "bruce",
+      "coefficients": {
+        "b0": -2.60,
+        "b1": 1.80,
+        "b2": 1.10,
+        "merchFraction": 0.85
+      },
+      "unitsIn": "cm,m",
+      "unitsOut": "m3",
+      "sourceCitation": "PLACEHOLDER — Bruce & DeMars / Flewelling & McFadden coastal PNW DF CVTS form; coefficients to be verified against primary source."
+    },
+    {
+      "id": "chambers-foltz-wh-pnw",
+      "form": "chambers_foltz",
+      "coefficients": {
+        "b0": -2.50,
+        "b1": 1.85,
+        "b2": 1.05,
+        "merchFraction": 0.85
+      },
+      "unitsIn": "cm,m",
+      "unitsOut": "m3",
+      "sourceCitation": "PLACEHOLDER — Chambers & Foltz (1979) western hemlock total cubic volume; coefficients to be verified."
+    },
+    {
+      "id": "schumacher-hall-rc-placeholder",
+      "form": "schumacher_hall",
+      "coefficients": {
+        "a": 0.0001,
+        "b": 2.0,
+        "c": 1.0,
+        "merchFraction": 0.85
+      },
+      "unitsIn": "cm,m",
+      "unitsOut": "m3",
+      "sourceCitation": "PLACEHOLDER — generic SI Schumacher-Hall parameters for western redcedar; not from a published source. Replace before any production cruise."
+    },
+    {
+      "id": "schumacher-hall-ra-placeholder",
+      "form": "schumacher_hall",
+      "coefficients": {
+        "a": 0.00008,
+        "b": 2.0,
+        "c": 1.0,
+        "merchFraction": 0.85
+      },
+      "unitsIn": "cm,m",
+      "unitsOut": "m3",
+      "sourceCitation": "PLACEHOLDER — generic SI Schumacher-Hall parameters for red alder; not from a published source. Replace before any production cruise."
+    }
+  ]
+}

@@ -1,0 +1,171 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<model type="com.apple.IDECoreDataModeler.DataModel" documentVersion="1.0" lastSavedToolsVersion="22758" systemVersion="24A335" minimumToolsVersion="Automatic" sourceLanguage="Swift" userDefinedModelVersionIdentifier="">
+    <entity name="ProjectEntity" representedClassName="Persistence.ProjectEntity" syncable="YES" codeGenerationType="manual">
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="name" attributeType="String"/>
+        <attribute name="projectDescription" attributeType="String"/>
+        <attribute name="owner" attributeType="String"/>
+        <attribute name="createdAt" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="updatedAt" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="units" attributeType="String"/>
+        <attribute name="breastHeightConvention" attributeType="String"/>
+        <attribute name="slopeCorrection" attributeType="Boolean" usesScalarValueType="YES"/>
+        <attribute name="lidarBiasMm" attributeType="Float" usesScalarValueType="YES"/>
+        <attribute name="depthNoiseMm" attributeType="Float" usesScalarValueType="YES"/>
+        <attribute name="dbhCorrectionAlpha" attributeType="Float" usesScalarValueType="YES"/>
+        <attribute name="dbhCorrectionBeta" attributeType="Float" usesScalarValueType="YES"/>
+        <attribute name="vioDriftFraction" attributeType="Float" usesScalarValueType="YES"/>
+        <uniquenessConstraints>
+            <uniquenessConstraint><constraint value="id"/></uniquenessConstraint>
+        </uniquenessConstraints>
+    </entity>
+    <entity name="StratumEntity" representedClassName="Persistence.StratumEntity" syncable="YES" codeGenerationType="manual">
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="projectId" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="name" attributeType="String"/>
+        <attribute name="areaAcres" attributeType="Float" usesScalarValueType="YES"/>
+        <attribute name="polygonGeoJSON" attributeType="String"/>
+        <uniquenessConstraints>
+            <uniquenessConstraint><constraint value="id"/></uniquenessConstraint>
+        </uniquenessConstraints>
+    </entity>
+    <entity name="CruiseDesignEntity" representedClassName="Persistence.CruiseDesignEntity" syncable="YES" codeGenerationType="manual">
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="projectId" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="plotType" attributeType="String"/>
+        <attribute name="plotAreaAcres" optional="YES" attributeType="Float" usesScalarValueType="NO"/>
+        <attribute name="baf" optional="YES" attributeType="Float" usesScalarValueType="NO"/>
+        <attribute name="samplingScheme" attributeType="String"/>
+        <attribute name="gridSpacingMeters" optional="YES" attributeType="Float" usesScalarValueType="NO"/>
+        <uniquenessConstraints>
+            <uniquenessConstraint><constraint value="id"/></uniquenessConstraint>
+        </uniquenessConstraints>
+    </entity>
+    <entity name="PlannedPlotEntity" representedClassName="Persistence.PlannedPlotEntity" syncable="YES" codeGenerationType="manual">
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="projectId" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="stratumId" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="plotNumber" attributeType="Integer 32" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="plannedLat" attributeType="Double" usesScalarValueType="YES"/>
+        <attribute name="plannedLon" attributeType="Double" usesScalarValueType="YES"/>
+        <attribute name="visited" attributeType="Boolean" usesScalarValueType="YES"/>
+        <uniquenessConstraints>
+            <uniquenessConstraint><constraint value="id"/></uniquenessConstraint>
+        </uniquenessConstraints>
+    </entity>
+    <entity name="PlotEntity" representedClassName="Persistence.PlotEntity" syncable="YES" codeGenerationType="manual">
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="projectId" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="plannedPlotId" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="plotNumber" attributeType="Integer 32" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="centerLat" attributeType="Double" usesScalarValueType="YES"/>
+        <attribute name="centerLon" attributeType="Double" usesScalarValueType="YES"/>
+        <attribute name="positionSource" attributeType="String"/>
+        <attribute name="positionTier" attributeType="String"/>
+        <attribute name="gpsNSamples" attributeType="Integer 32" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="gpsMedianHAccuracyM" attributeType="Float" usesScalarValueType="YES"/>
+        <attribute name="gpsSampleStdXyM" attributeType="Float" usesScalarValueType="YES"/>
+        <attribute name="offsetWalkM" optional="YES" attributeType="Float" usesScalarValueType="NO"/>
+        <attribute name="slopeDeg" attributeType="Float" usesScalarValueType="YES"/>
+        <attribute name="aspectDeg" attributeType="Float" usesScalarValueType="YES"/>
+        <attribute name="plotAreaAcres" attributeType="Float" usesScalarValueType="YES"/>
+        <attribute name="startedAt" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="closedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="closedBy" optional="YES" attributeType="String"/>
+        <attribute name="notes" attributeType="String" defaultValueString=""/>
+        <attribute name="coverPhotoPath" optional="YES" attributeType="String"/>
+        <attribute name="panoramaPath" optional="YES" attributeType="String"/>
+        <uniquenessConstraints>
+            <uniquenessConstraint><constraint value="id"/></uniquenessConstraint>
+        </uniquenessConstraints>
+    </entity>
+    <entity name="TreeEntity" representedClassName="Persistence.TreeEntity" syncable="YES" codeGenerationType="manual">
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="plotId" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="treeNumber" attributeType="Integer 32" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="speciesCode" attributeType="String"/>
+        <attribute name="status" attributeType="String"/>
+        <attribute name="dbhCm" attributeType="Float" usesScalarValueType="YES"/>
+        <attribute name="dbhMethod" attributeType="String"/>
+        <attribute name="dbhSigmaMm" optional="YES" attributeType="Float" usesScalarValueType="NO"/>
+        <attribute name="dbhRmseMm" optional="YES" attributeType="Float" usesScalarValueType="NO"/>
+        <attribute name="dbhCoverageDeg" optional="YES" attributeType="Float" usesScalarValueType="NO"/>
+        <attribute name="dbhNInliers" optional="YES" attributeType="Integer 32" usesScalarValueType="NO"/>
+        <attribute name="dbhConfidence" attributeType="String"/>
+        <attribute name="dbhIsIrregular" attributeType="Boolean" usesScalarValueType="YES"/>
+        <attribute name="heightM" optional="YES" attributeType="Float" usesScalarValueType="NO"/>
+        <attribute name="heightMethod" optional="YES" attributeType="String"/>
+        <attribute name="heightSource" optional="YES" attributeType="String"/>
+        <attribute name="heightSigmaM" optional="YES" attributeType="Float" usesScalarValueType="NO"/>
+        <attribute name="heightDHM" optional="YES" attributeType="Float" usesScalarValueType="NO"/>
+        <attribute name="heightAlphaTopDeg" optional="YES" attributeType="Float" usesScalarValueType="NO"/>
+        <attribute name="heightAlphaBaseDeg" optional="YES" attributeType="Float" usesScalarValueType="NO"/>
+        <attribute name="heightConfidence" optional="YES" attributeType="String"/>
+        <attribute name="bearingFromCenterDeg" optional="YES" attributeType="Float" usesScalarValueType="NO"/>
+        <attribute name="distanceFromCenterM" optional="YES" attributeType="Float" usesScalarValueType="NO"/>
+        <attribute name="boundaryCall" optional="YES" attributeType="String"/>
+        <attribute name="crownClass" optional="YES" attributeType="String"/>
+        <attribute name="damageCodesJSON" attributeType="String" defaultValueString="[]"/>
+        <attribute name="isMultistem" attributeType="Boolean" usesScalarValueType="YES"/>
+        <attribute name="parentTreeId" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="notes" attributeType="String" defaultValueString=""/>
+        <attribute name="photoPath" optional="YES" attributeType="String"/>
+        <attribute name="rawScanPath" optional="YES" attributeType="String"/>
+        <attribute name="createdAt" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="updatedAt" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="deletedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <uniquenessConstraints>
+            <uniquenessConstraint><constraint value="id"/></uniquenessConstraint>
+        </uniquenessConstraints>
+    </entity>
+    <entity name="SpeciesConfigEntity" representedClassName="Persistence.SpeciesConfigEntity" syncable="YES" codeGenerationType="manual">
+        <attribute name="code" attributeType="String"/>
+        <attribute name="commonName" attributeType="String"/>
+        <attribute name="scientificName" attributeType="String"/>
+        <attribute name="volumeEquationId" attributeType="String"/>
+        <attribute name="merchTopDibCm" attributeType="Float" usesScalarValueType="YES"/>
+        <attribute name="stumpHeightCm" attributeType="Float" usesScalarValueType="YES"/>
+        <attribute name="expectedDbhMinCm" attributeType="Float" usesScalarValueType="YES"/>
+        <attribute name="expectedDbhMaxCm" attributeType="Float" usesScalarValueType="YES"/>
+        <attribute name="expectedHeightMinM" attributeType="Float" usesScalarValueType="YES"/>
+        <attribute name="expectedHeightMaxM" attributeType="Float" usesScalarValueType="YES"/>
+        <uniquenessConstraints>
+            <uniquenessConstraint><constraint value="code"/></uniquenessConstraint>
+        </uniquenessConstraints>
+    </entity>
+    <entity name="VolumeEquationEntity" representedClassName="Persistence.VolumeEquationEntity" syncable="YES" codeGenerationType="manual">
+        <attribute name="id" attributeType="String"/>
+        <attribute name="form" attributeType="String"/>
+        <attribute name="coefficientsJSON" attributeType="String" defaultValueString="{}"/>
+        <attribute name="unitsIn" attributeType="String"/>
+        <attribute name="unitsOut" attributeType="String"/>
+        <attribute name="sourceCitation" attributeType="String"/>
+        <uniquenessConstraints>
+            <uniquenessConstraint><constraint value="id"/></uniquenessConstraint>
+        </uniquenessConstraints>
+    </entity>
+    <entity name="HeightDiameterFitEntity" representedClassName="Persistence.HeightDiameterFitEntity" syncable="YES" codeGenerationType="manual">
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="projectId" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="speciesCode" attributeType="String"/>
+        <attribute name="modelForm" attributeType="String"/>
+        <attribute name="coefficientsJSON" attributeType="String" defaultValueString="{}"/>
+        <attribute name="nObs" attributeType="Integer 32" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="rmse" attributeType="Float" usesScalarValueType="YES"/>
+        <attribute name="updatedAt" attributeType="Date" usesScalarValueType="NO"/>
+        <uniquenessConstraints>
+            <uniquenessConstraint><constraint value="id"/></uniquenessConstraint>
+        </uniquenessConstraints>
+    </entity>
+    <elements>
+        <element name="ProjectEntity" positionX="-63" positionY="-18" width="128" height="240"/>
+        <element name="StratumEntity" positionX="160" positionY="-18" width="128" height="120"/>
+        <element name="CruiseDesignEntity" positionX="160" positionY="120" width="128" height="150"/>
+        <element name="PlannedPlotEntity" positionX="-63" positionY="240" width="128" height="150"/>
+        <element name="PlotEntity" positionX="160" positionY="290" width="128" height="360"/>
+        <element name="TreeEntity" positionX="-63" positionY="400" width="128" height="540"/>
+        <element name="SpeciesConfigEntity" positionX="380" positionY="-18" width="128" height="195"/>
+        <element name="VolumeEquationEntity" positionX="380" positionY="220" width="128" height="135"/>
+        <element name="HeightDiameterFitEntity" positionX="380" positionY="360" width="128" height="165"/>
+    </elements>
+</model>

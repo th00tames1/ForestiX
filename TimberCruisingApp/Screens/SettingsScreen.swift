@@ -27,6 +27,13 @@ public struct SettingsScreen: View {
                 .onChange(of: unitSystem) { _, new in settings.unitSystem = new }
             }
 
+            Section(header: Text("Calibration"),
+                    footer: Text("Wall fit captures the LiDAR depth noise and " +
+                                 "bias; cylinder fit estimates a linear DBH correction.")) {
+                NavigationLink("LiDAR Calibration") { CalibrationScreen() }
+                    .accessibilityIdentifier("settings.calibrationLink")
+            }
+
             Section(header: Text("Basemap tiles"),
                     footer: Text("No tile provider ships by default. Paste an XYZ template that substitutes {z}/{x}/{y}. Confirm you've reviewed the provider's usage policy before downloading.")) {
                 TextField("https://tile.example.com/{z}/{x}/{y}.png", text: $tileTemplate)

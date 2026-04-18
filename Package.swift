@@ -27,6 +27,7 @@ let package = Package(
         .library(name: "Geo", targets: ["Geo"]),
         .library(name: "Basemap", targets: ["Basemap"]),
         .library(name: "Export", targets: ["Export"]),
+        .library(name: "Sensors", targets: ["Sensors"]),
         .library(name: "UI", targets: ["UI"])
     ],
     dependencies: [
@@ -81,17 +82,25 @@ let package = Package(
             dependencies: ["Common", "Models", "Geo"],
             path: "TimberCruisingApp/Export"
         ),
+        // MARK: - Phase 2
+
+        .target(
+            name: "Sensors",
+            dependencies: ["Common", "Models"],
+            path: "TimberCruisingApp/Sensors"
+        ),
+
         .target(
             name: "UI",
             dependencies: [
                 "Common", "Models", "Persistence",
-                "InventoryEngine", "Geo", "Basemap", "Export"
+                "InventoryEngine", "Geo", "Basemap", "Export", "Sensors"
             ],
             path: "TimberCruisingApp",
             exclude: [
                 "Common", "Models", "Persistence", "InventoryEngine",
-                "Geo", "Basemap", "Export",
-                "AR", "Positioning", "Sensors"
+                "Geo", "Basemap", "Export", "Sensors",
+                "AR", "Positioning"
             ],
             sources: ["App", "Screens", "ViewModels"]
         ),
@@ -117,6 +126,11 @@ let package = Package(
             name: "ExportTests",
             dependencies: ["Export", "Models", "Geo", "Common"],
             path: "Tests/ExportTests"
+        ),
+        .testTarget(
+            name: "SensorsTests",
+            dependencies: ["Sensors", "Models", "Common"],
+            path: "Tests/SensorsTests"
         ),
         .testTarget(
             name: "UISnapshotTests",

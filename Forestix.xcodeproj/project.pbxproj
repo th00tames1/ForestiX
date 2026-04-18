@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		2000C1022F93060000100933 /* UI in Frameworks */ = {isa = PBXBuildFile; productRef = 2000C1012F93060000100933 /* UI */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		2000C0CA2F93051200100933 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -52,6 +56,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				2000C1022F93060000100933 /* UI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -112,6 +117,7 @@
 			);
 			name = Forestix;
 			packageProductDependencies = (
+				2000C1012F93060000100933 /* UI */,
 			);
 			productName = Forestix;
 			productReference = 2000C0B92F93050F00100933 /* Forestix.app */;
@@ -195,6 +201,9 @@
 			);
 			mainGroup = 2000C0B02F93050F00100933;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				2000C1002F93060000100933 /* XCLocalSwiftPackageReference "." */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 2000C0BA2F93050F00100933 /* Products */;
 			projectDirPath = "";
@@ -558,6 +567,20 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		2000C1002F93060000100933 /* XCLocalSwiftPackageReference "." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = .;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		2000C1012F93060000100933 /* UI */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = UI;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 2000C0B12F93050F00100933 /* Project object */;
 }

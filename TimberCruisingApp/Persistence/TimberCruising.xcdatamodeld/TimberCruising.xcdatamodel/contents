@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <model type="com.apple.IDECoreDataModeler.DataModel" documentVersion="1.0" lastSavedToolsVersion="22758" systemVersion="24A335" minimumToolsVersion="Automatic" sourceLanguage="Swift" userDefinedModelVersionIdentifier="">
-    <entity name="ProjectEntity" representedClassName="Persistence.ProjectEntity" syncable="YES" codeGenerationType="manual">
+    <entity name="ProjectEntity" representedClassName="Persistence.ProjectEntity" syncable="YES">
         <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="name" attributeType="String"/>
         <attribute name="projectDescription" attributeType="String"/>
@@ -19,7 +19,7 @@
             <uniquenessConstraint><constraint value="id"/></uniquenessConstraint>
         </uniquenessConstraints>
     </entity>
-    <entity name="StratumEntity" representedClassName="Persistence.StratumEntity" syncable="YES" codeGenerationType="manual">
+    <entity name="StratumEntity" representedClassName="Persistence.StratumEntity" syncable="YES">
         <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="projectId" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="name" attributeType="String"/>
@@ -29,7 +29,7 @@
             <uniquenessConstraint><constraint value="id"/></uniquenessConstraint>
         </uniquenessConstraints>
     </entity>
-    <entity name="CruiseDesignEntity" representedClassName="Persistence.CruiseDesignEntity" syncable="YES" codeGenerationType="manual">
+    <entity name="CruiseDesignEntity" representedClassName="Persistence.CruiseDesignEntity" syncable="YES">
         <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="projectId" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="plotType" attributeType="String"/>
@@ -41,7 +41,7 @@
             <uniquenessConstraint><constraint value="id"/></uniquenessConstraint>
         </uniquenessConstraints>
     </entity>
-    <entity name="PlannedPlotEntity" representedClassName="Persistence.PlannedPlotEntity" syncable="YES" codeGenerationType="manual">
+    <entity name="PlannedPlotEntity" representedClassName="Persistence.PlannedPlotEntity" syncable="YES">
         <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="projectId" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="stratumId" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
@@ -53,7 +53,7 @@
             <uniquenessConstraint><constraint value="id"/></uniquenessConstraint>
         </uniquenessConstraints>
     </entity>
-    <entity name="PlotEntity" representedClassName="Persistence.PlotEntity" syncable="YES" codeGenerationType="manual">
+    <entity name="PlotEntity" representedClassName="Persistence.PlotEntity" syncable="YES">
         <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="projectId" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="plannedPlotId" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
@@ -79,7 +79,7 @@
             <uniquenessConstraint><constraint value="id"/></uniquenessConstraint>
         </uniquenessConstraints>
     </entity>
-    <entity name="TreeEntity" representedClassName="Persistence.TreeEntity" syncable="YES" codeGenerationType="manual">
+    <entity name="TreeEntity" representedClassName="Persistence.TreeEntity" syncable="YES">
         <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="plotId" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="treeNumber" attributeType="Integer 32" defaultValueString="0" usesScalarValueType="YES"/>
@@ -118,7 +118,7 @@
             <uniquenessConstraint><constraint value="id"/></uniquenessConstraint>
         </uniquenessConstraints>
     </entity>
-    <entity name="SpeciesConfigEntity" representedClassName="Persistence.SpeciesConfigEntity" syncable="YES" codeGenerationType="manual">
+    <entity name="SpeciesConfigEntity" representedClassName="Persistence.SpeciesConfigEntity" syncable="YES">
         <attribute name="code" attributeType="String"/>
         <attribute name="commonName" attributeType="String"/>
         <attribute name="scientificName" attributeType="String"/>
@@ -133,7 +133,7 @@
             <uniquenessConstraint><constraint value="code"/></uniquenessConstraint>
         </uniquenessConstraints>
     </entity>
-    <entity name="VolumeEquationEntity" representedClassName="Persistence.VolumeEquationEntity" syncable="YES" codeGenerationType="manual">
+    <entity name="VolumeEquationEntity" representedClassName="Persistence.VolumeEquationEntity" syncable="YES">
         <attribute name="id" attributeType="String"/>
         <attribute name="form" attributeType="String"/>
         <attribute name="coefficientsJSON" attributeType="String" defaultValueString="{}"/>
@@ -144,7 +144,7 @@
             <uniquenessConstraint><constraint value="id"/></uniquenessConstraint>
         </uniquenessConstraints>
     </entity>
-    <entity name="HeightDiameterFitEntity" representedClassName="Persistence.HeightDiameterFitEntity" syncable="YES" codeGenerationType="manual">
+    <entity name="HeightDiameterFitEntity" representedClassName="Persistence.HeightDiameterFitEntity" syncable="YES">
         <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="projectId" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="speciesCode" attributeType="String"/>

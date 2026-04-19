@@ -106,6 +106,27 @@ public final class AddTreeFlowViewModel: ObservableObject {
         return (live.map(\.treeNumber).max() ?? 0) + 1
     }
 
+    // MARK: - Apply scan results (Phase 7.1)
+    //
+    // The DBH and Height scan screens hand back full result records.
+    // These setters let AddTreeFlowScreen forward those into the VM
+    // without leaking Sensors-module types into ViewModels — the screen
+    // imports Sensors and unpacks each field at the call site.
+
+    public func applyDBHScan(diameterCm: Float,
+                             confidence: ConfidenceTier) {
+        self.dbhCm = diameterCm
+        self.dbhMethod = .lidarPartialArcSingleView
+        self.dbhConfidence = confidence
+    }
+
+    public func applyHeightScan(heightM: Float,
+                                confidence: ConfidenceTier) {
+        self.heightM = heightM
+        self.heightMethod = .vioWalkoffTangent
+        self.heightConfidence = confidence
+    }
+
     // MARK: - Navigation
 
     public func advance() {

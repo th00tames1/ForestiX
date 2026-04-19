@@ -18,9 +18,12 @@ import Sensors
 public struct DBHScanScreen: View {
 
     @StateObject private var viewModel: DBHScanViewModel
+    public var onResult: (DBHResult) -> Void = { _ in }
 
-    public init(viewModel: @autoclosure @escaping () -> DBHScanViewModel) {
+    public init(viewModel: @autoclosure @escaping () -> DBHScanViewModel,
+                onResult: @escaping (DBHResult) -> Void = { _ in }) {
         _viewModel = StateObject(wrappedValue: viewModel())
+        self.onResult = onResult
     }
 
     public var body: some View {
@@ -48,6 +51,14 @@ public struct DBHScanScreen: View {
         #endif
         .onAppear { viewModel.onAppear() }
         .onDisappear { viewModel.onDisappear() }
+        .onChange(of: viewModel.result?.diameterCm) { _, newValue in
+            // Fire the host callback as soon as the VM publishes a result.
+            // The host (e.g. AddTreeFlowScreen) decides whether to dismiss
+            // the cover or stay on screen for retake.
+            if newValue != nil, let r = viewModel.result {
+                onResult(r)
+            }
+        }
     }
 
     // MARK: - Chrome

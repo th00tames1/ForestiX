@@ -19,9 +19,12 @@ import Sensors
 public struct HeightScanScreen: View {
 
     @StateObject private var viewModel: HeightScanViewModel
+    public var onResult: (HeightResult) -> Void = { _ in }
 
-    public init(viewModel: @autoclosure @escaping () -> HeightScanViewModel) {
+    public init(viewModel: @autoclosure @escaping () -> HeightScanViewModel,
+                onResult: @escaping (HeightResult) -> Void = { _ in }) {
         _viewModel = StateObject(wrappedValue: viewModel())
+        self.onResult = onResult
     }
 
     public var body: some View {
@@ -39,6 +42,11 @@ public struct HeightScanScreen: View {
         #endif
         .onAppear { viewModel.onAppear() }
         .onDisappear { viewModel.onDisappear() }
+        .onChange(of: viewModel.result?.heightM) { _, newValue in
+            if newValue != nil, let r = viewModel.result {
+                onResult(r)
+            }
+        }
     }
 
     // MARK: - Overlay chrome per stage

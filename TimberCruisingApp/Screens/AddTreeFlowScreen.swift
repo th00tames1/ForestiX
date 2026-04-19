@@ -3,15 +3,21 @@
 // 5-step stepper UI driven by AddTreeFlowViewModel:
 //   1. Species quick-tap (recent 5 species, 3-col grid, 56pt buttons) +
 //      alphabetical search list fallback.
-//   2. DBH number entry + method picker + irregular toggle.
+//   2. DBH number entry + method picker + irregular toggle + LiDAR scan.
 //   3. Height (only shown when subsample rule demands it; skippable).
 //   4. Extras (status, crown class, damage, notes, bearing/distance).
 //   5. Review (confidence tiers, red-tier warning, Save + Save & add stem).
+//
+// Phase 7.1 fix: the "Scan with LiDAR" buttons in the DBH and Height
+// steps present DBHScanScreen / HeightScanScreen as fullScreenCovers
+// and write results back into the stepper VM, so the cruiser doesn't
+// have to type measurements by hand.
 
 import SwiftUI
 import Models
 import Common
 import InventoryEngine
+import Sensors
 
 public struct AddTreeFlowScreen: View {
 
@@ -19,6 +25,9 @@ public struct AddTreeFlowScreen: View {
     @Environment(\.dismiss) private var dismiss
 
     public var onSaved: (Tree) -> Void = { _ in }
+
+    @State private var presentingDBHScan = false
+    @State private var presentingHeightScan = false
 
     public init(viewModel: @autoclosure @escaping () -> AddTreeFlowViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel())
@@ -45,6 +54,54 @@ public struct AddTreeFlowScreen: View {
         } message: {
             Text(viewModel.errorMessage ?? "")
         }
+        #if os(iOS)
+        .fullScreenCover(isPresented: $presentingDBHScan) {
+            NavigationStack {
+                DBHScanScreen(
+                    viewModel: DBHScanViewModel(
+                        calibration: calibration(from: viewModel.project)),
+                    onResult: { result in
+                        viewModel.applyDBHScan(
+                            diameterCm: result.diameterCm,
+                            confidence: result.confidence)
+                        presentingDBHScan = false
+                    })
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Close") { presentingDBHScan = false }
+                    }
+                }
+            }
+        }
+        .fullScreenCover(isPresented: $presentingHeightScan) {
+            NavigationStack {
+                HeightScanScreen(
+                    viewModel: HeightScanViewModel(
+                        calibration: calibration(from: viewModel.project)),
+                    onResult: { result in
+                        viewModel.applyHeightScan(
+                            heightM: result.heightM,
+                            confidence: result.confidence)
+                        presentingHeightScan = false
+                    })
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Close") { presentingHeightScan = false }
+                    }
+                }
+            }
+        }
+        #endif
+    }
+
+    /// Pull the live calibration values off the project so the scan
+    /// screens get the cruiser's wall + cylinder fits applied.
+    private func calibration(from project: Project) -> ProjectCalibration {
+        ProjectCalibration(
+            depthNoiseMm: project.depthNoiseMm,
+            dbhCorrectionAlpha: project.dbhCorrectionAlpha,
+            dbhCorrectionBeta: project.dbhCorrectionBeta,
+            vioDriftFraction: project.vioDriftFraction)
     }
 
     private var errorBinding: Binding<Bool> {
@@ -168,6 +225,24 @@ public struct AddTreeFlowScreen: View {
 
     private var dbhStep: some View {
         Form {
+            Section {
+                Button {
+                    presentingDBHScan = true
+                } label: {
+                    Label("Scan with LiDAR",
+                          systemImage: "scanner.fill")
+                        .frame(maxWidth: .infinity, minHeight: 56)
+                        .font(.headline)
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("addTree.dbhScanButton")
+                .disabled(!DeviceCapabilities.hasLiDAR)
+                if !DeviceCapabilities.hasLiDAR {
+                    Text("This device has no LiDAR. Use the caliper or visual estimate below.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
             Section("DBH (cm)") {
                 HStack {
                     TextField("0.0", value: $viewModel.dbhCm, format: .number)
@@ -209,6 +284,18 @@ public struct AddTreeFlowScreen: View {
                 Text("Subsample rule requires a measured height for this tree.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
+            }
+            Section {
+                Button {
+                    presentingHeightScan = true
+                } label: {
+                    Label("Scan with VIO walk-off",
+                          systemImage: "scanner.fill")
+                        .frame(maxWidth: .infinity, minHeight: 56)
+                        .font(.headline)
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("addTree.heightScanButton")
             }
             Section("Height (m)") {
                 HStack {

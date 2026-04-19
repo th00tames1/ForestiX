@@ -24,6 +24,13 @@ public final class AppEnvironment: ObservableObject {
     public let hdFitRepository: any HeightDiameterFitRepository
     public let settings: AppSettings
 
+    /// Raw Core Data stack — exposed for Phase 7 backup/restore, which
+    /// needs to migrate the persistent store file as a whole unit.
+    /// Regular feature code should talk to the repositories above; only
+    /// infrastructure (backup, reset, schema-migration) should touch
+    /// the stack directly.
+    public let coreDataStack: CoreDataStack?
+
     public init(
         projectRepository: any ProjectRepository,
         stratumRepository: any StratumRepository,
@@ -34,7 +41,8 @@ public final class AppEnvironment: ObservableObject {
         speciesRepository: any SpeciesConfigRepository,
         volumeEquationRepository: any VolumeEquationRepository,
         hdFitRepository: any HeightDiameterFitRepository,
-        settings: AppSettings
+        settings: AppSettings,
+        coreDataStack: CoreDataStack? = nil
     ) {
         self.projectRepository = projectRepository
         self.stratumRepository = stratumRepository
@@ -46,6 +54,7 @@ public final class AppEnvironment: ObservableObject {
         self.volumeEquationRepository = volumeEquationRepository
         self.hdFitRepository = hdFitRepository
         self.settings = settings
+        self.coreDataStack = coreDataStack
     }
 
     /// Wrap a shared Core Data stack with its default repositories.
@@ -60,7 +69,8 @@ public final class AppEnvironment: ObservableObject {
             speciesRepository: CoreDataSpeciesConfigRepository(stack: stack),
             volumeEquationRepository: CoreDataVolumeEquationRepository(stack: stack),
             hdFitRepository: CoreDataHeightDiameterFitRepository(stack: stack),
-            settings: settings
+            settings: settings,
+            coreDataStack: stack
         )
     }
 

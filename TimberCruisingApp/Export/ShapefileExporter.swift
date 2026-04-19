@@ -30,6 +30,7 @@
 // explicitly so GIS readers (QGIS, ArcGIS, OGR) pick it up.
 
 import Foundation
+import Common
 import Models
 
 public enum ShapefileExporterError: Error, CustomStringConvertible {
@@ -452,36 +453,6 @@ private func parseStratumPolygon(_ json: String) throws -> ShapeGeometry? {
 }
 
 // MARK: - Binary helpers
-
-extension Data {
-    mutating func appendBE(_ v: Int32) {
-        var bigEndian = v.bigEndian
-        Swift.withUnsafeBytes(of: &bigEndian) { self.append(contentsOf: $0) }
-    }
-
-    mutating func appendLE(_ v: Int16) {
-        var littleEndian = v.littleEndian
-        Swift.withUnsafeBytes(of: &littleEndian) { self.append(contentsOf: $0) }
-    }
-
-    mutating func appendLE(_ v: Int32) {
-        var littleEndian = v.littleEndian
-        Swift.withUnsafeBytes(of: &littleEndian) { self.append(contentsOf: $0) }
-    }
-
-    mutating func appendLE(_ v: UInt32) {
-        var littleEndian = v.littleEndian
-        Swift.withUnsafeBytes(of: &littleEndian) { self.append(contentsOf: $0) }
-    }
-
-    mutating func appendLE(_ v: UInt16) {
-        var littleEndian = v.littleEndian
-        Swift.withUnsafeBytes(of: &littleEndian) { self.append(contentsOf: $0) }
-    }
-
-    mutating func appendLE(_ v: Double) {
-        // IEEE 754 double-precision, little-endian (shapefile convention).
-        var bits = v.bitPattern.littleEndian
-        Swift.withUnsafeBytes(of: &bits) { self.append(contentsOf: $0) }
-    }
-}
+//
+// The Data.appendLE / appendBE helpers live in Common/DataBinary.swift
+// so both ZipWriter (Common) and this file (Export) can share them.

@@ -127,6 +127,11 @@ let package = Package(
         // MARK: - Tests
 
         .testTarget(
+            name: "CommonTests",
+            dependencies: ["Common"],
+            path: "Tests/CommonTests"
+        ),
+        .testTarget(
             name: "InventoryEngineTests",
             dependencies: ["InventoryEngine", "Models", "Common"],
             path: "Tests/InventoryEngineTests"

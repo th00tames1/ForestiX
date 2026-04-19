@@ -22,11 +22,11 @@
 
 import Foundation
 
-enum ZipWriter {
+public enum ZipWriter {
 
     /// Produce an uncompressed ZIP archive containing the supplied
     /// (filename → data) pairs, preserving input order.
-    static func storedArchive(files: [(String, Data)]) -> Data {
+    public static func storedArchive(files: [(String, Data)]) -> Data {
         var archive = Data()
         struct CentralEntry {
             let name: String
@@ -141,7 +141,7 @@ enum ZipWriter {
         return table
     }()
 
-    static func crc32(of data: Data) -> UInt32 {
+    public static func crc32(of data: Data) -> UInt32 {
         var c: UInt32 = 0xFFFFFFFF
         data.withUnsafeBytes { (buf: UnsafeRawBufferPointer) in
             for byte in buf {

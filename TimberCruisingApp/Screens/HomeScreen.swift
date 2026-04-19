@@ -1,6 +1,11 @@
 // Home screen — list Projects + "New Project" entry point. Spec §3.1 REQ-PRJ-001.
+//
+// Phase 7 additions: a stacked banner area that surfaces device-level
+// health (no LiDAR → manual-only mode, low battery → conserve power) and
+// any in-progress plot from the last 24 h (crash-recovery resume prompt).
 
 import SwiftUI
+import Common
 import Models
 
 public struct HomeScreen: View {
@@ -51,6 +56,9 @@ public struct HomeScreen: View {
             emptyState
         } else {
             List {
+                DeviceHealthBanners()
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
                 ForEach(viewModel.projects) { project in
                     NavigationLink {
                         ProjectDashboardScreen(project: project)
@@ -96,6 +104,56 @@ public struct HomeScreen: View {
         }
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - Device health banners
+
+/// Stack of device-level banners surfaced at the top of Home:
+/// • LiDAR-absent → "manual-only mode"
+/// • Battery ≤ 15% (and not charging) → "conserve power"
+private struct DeviceHealthBanners: View {
+    @State private var battery = BatteryState.current()
+
+    var body: some View {
+        VStack(spacing: 8) {
+            if !DeviceCapabilities.hasLiDAR {
+                banner(tint: .orange,
+                       title: "Manual-only mode",
+                       body: "This device has no LiDAR sensor. DBH will need a caliper, height will need a tape. All project and export features remain available.")
+            }
+            if battery.isLow {
+                banner(tint: .red,
+                       title: "Low battery (\(Int(battery.level * 100))%)",
+                       body: "Scan auto-save has stepped up to every 10 seconds to protect in-progress work. Charge before your next plot.")
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .task { battery = BatteryState.current() }
+    }
+
+    @ViewBuilder private func banner(tint: Color,
+                                     title: String,
+                                     body: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: tint == .red
+                  ? "exclamationmark.triangle.fill"
+                  : "info.circle.fill")
+                .font(.title3)
+                .foregroundStyle(.white)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.subheadline).bold()
+                    .foregroundStyle(.white)
+                Text(body).font(.caption)
+                    .foregroundStyle(.white.opacity(0.95))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+        }
+        .padding(10)
+        .background(tint)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
 

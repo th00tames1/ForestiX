@@ -124,6 +124,10 @@ public struct ProjectDashboardScreen: View {
 
     private var toolsSection: some View {
         Section("Tools") {
+            NavigationLink("Pre-field check") {
+                PreFieldChecklistScreen(project: viewModel.project)
+            }
+            .accessibilityIdentifier("dashboard.preFieldCheck")
             NavigationLink("Export plan") {
                 ExportScreen(project: viewModel.project)
             }

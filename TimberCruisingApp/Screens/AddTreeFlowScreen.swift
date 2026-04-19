@@ -91,6 +91,14 @@ public struct AddTreeFlowScreen: View {
     private var speciesStep: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                VoiceSpeciesPicker(
+                    candidates: allSpeciesSorted().map { sp in
+                        (code: sp.code,
+                         commonName: sp.commonName,
+                         scientificName: sp.scientificName)
+                    },
+                    onMatch: { viewModel.speciesCode = $0 }
+                )
                 if !viewModel.recentSpeciesCodes.isEmpty {
                     Text("Recent")
                         .font(.headline)

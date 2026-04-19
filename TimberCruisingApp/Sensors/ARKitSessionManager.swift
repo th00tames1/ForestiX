@@ -89,6 +89,10 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
     @Published public private(set) var trackingStatus: TrackingStatus = .notAvailable
     @Published public private(set) var latestDepthFrame: ARDepthFrame?
     @Published public private(set) var isRunning = false
+    /// Live camera position in ARKit world space (column 3 of the
+    /// camera transform). Used by Offset-from-Opening / VIOChain to
+    /// snapshot where the user is standing at each confirmation.
+    @Published public private(set) var currentCameraWorldPosition: SIMD3<Float>?
 
     public static var supportsLiDAR: Bool {
         ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
@@ -132,10 +136,13 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
     public nonisolated func session(_ session: ARSession, didUpdate frame: ARFrame) {
         let converted = Self.convert(frame: frame)
         let status = Self.mapTrackingState(frame.camera.trackingState)
+        let t = frame.camera.transform
+        let camPos = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
         Task { @MainActor [weak self] in
             guard let self else { return }
             if status != .normal { self.trackedStateWasAlwaysNormal = false }
             self.trackingStatus = status
+            self.currentCameraWorldPosition = camPos
             if let converted { self.latestDepthFrame = converted }
         }
     }
@@ -213,6 +220,7 @@ public final class ARKitSessionManager: ObservableObject {
     @Published public private(set) var trackingStatus: TrackingStatus = .notAvailable
     @Published public private(set) var latestDepthFrame: ARDepthFrame?
     @Published public private(set) var isRunning = false
+    @Published public private(set) var currentCameraWorldPosition: SIMD3<Float>?
 
     public static var supportsLiDAR: Bool { false }
 

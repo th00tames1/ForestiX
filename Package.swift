@@ -29,6 +29,7 @@ let package = Package(
         .library(name: "Export", targets: ["Export"]),
         .library(name: "Sensors", targets: ["Sensors"]),
         .library(name: "AR", targets: ["AR"]),
+        .library(name: "Positioning", targets: ["Positioning"]),
         .library(name: "UI", targets: ["UI"])
     ],
     dependencies: [
@@ -99,12 +100,20 @@ let package = Package(
             path: "TimberCruisingApp/AR"
         ),
 
+        // MARK: - Phase 4
+
+        .target(
+            name: "Positioning",
+            dependencies: ["Common", "Models"],
+            path: "TimberCruisingApp/Positioning"
+        ),
+
         .target(
             name: "UI",
             dependencies: [
                 "Common", "Models", "Persistence",
                 "InventoryEngine", "Geo", "Basemap", "Export",
-                "Sensors", "AR"
+                "Sensors", "AR", "Positioning"
             ],
             path: "TimberCruisingApp",
             exclude: [
@@ -146,6 +155,11 @@ let package = Package(
             name: "ARTests",
             dependencies: ["AR", "Common"],
             path: "Tests/ARTests"
+        ),
+        .testTarget(
+            name: "PositioningTests",
+            dependencies: ["Positioning", "Models", "Common"],
+            path: "Tests/PositioningTests"
         ),
         .testTarget(
             name: "UISnapshotTests",

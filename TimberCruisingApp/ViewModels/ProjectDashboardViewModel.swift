@@ -14,23 +14,35 @@ public final class ProjectDashboardViewModel: ObservableObject {
 
     @Published public private(set) var strata: [Stratum] = []
     @Published public private(set) var plannedPlots: [PlannedPlot] = []
+    @Published public private(set) var design: CruiseDesign?
     @Published public var errorMessage: String?
     @Published public var toastMessage: String?
 
     public let project: Project
     private var stratumRepository: (any StratumRepository)?
     private var plannedPlotRepository: (any PlannedPlotRepository)?
+    private var designRepository: (any CruiseDesignRepository)?
 
     public init(project: Project) { self.project = project }
 
     public func configure(with environment: AppEnvironment) {
         if stratumRepository == nil { stratumRepository = environment.stratumRepository }
         if plannedPlotRepository == nil { plannedPlotRepository = environment.plannedPlotRepository }
+        if designRepository == nil { designRepository = environment.cruiseDesignRepository }
     }
 
     public func refresh() {
         refreshStrata()
         refreshPlannedPlots()
+        refreshDesign()
+    }
+
+    // MARK: - Cruise design
+
+    public func refreshDesign() {
+        guard let repo = designRepository else { return }
+        do { design = try repo.forProject(project.id).first }
+        catch { errorMessage = "Failed to load cruise design: \(error)" }
     }
 
     // MARK: - Strata

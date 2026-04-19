@@ -23,6 +23,7 @@ public struct ProjectDashboardScreen: View {
             summarySection
             strataSection
             planSection
+            cruiseSection
             toolsSection
         }
         .navigationTitle(viewModel.project.name)
@@ -119,6 +120,25 @@ public struct ProjectDashboardScreen: View {
                 PlotMapScreen(project: viewModel.project)
             }
             .accessibilityIdentifier("dashboard.plotMap")
+        }
+    }
+
+    @ViewBuilder
+    private var cruiseSection: some View {
+        Section("Field work") {
+            if let design = viewModel.design {
+                NavigationLink {
+                    CruiseFlowScreen(project: viewModel.project,
+                                     design: design)
+                } label: {
+                    Label("Go cruise", systemImage: "figure.walk.circle.fill")
+                }
+                .accessibilityIdentifier("dashboard.goCruise")
+            } else {
+                Label("Finish Design cruise first to enable field work.",
+                      systemImage: "lock.circle")
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 

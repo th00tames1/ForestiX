@@ -410,6 +410,9 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Forestix uses the camera for AR-based DBH measurement, tree height scans, and plot boundary visualisation.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Forestix needs location access to navigate between plots, record plot centers with GPS averaging, and produce exportable track logs.";
+				INFOPLIST_KEY_NSMotionUsageDescription = "Forestix reads device motion to measure the phone's pitch at the moment a tree-height scan is captured (spec \u00a77.2).";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Forestix uses the microphone only while you hold the mic button during species entry. Audio is processed on-device and never leaves the phone.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Forestix recognises species names you say aloud, entirely on-device, so you can pick a species without taking off gloves.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -441,6 +444,9 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Forestix uses the camera for AR-based DBH measurement, tree height scans, and plot boundary visualisation.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Forestix needs location access to navigate between plots, record plot centers with GPS averaging, and produce exportable track logs.";
+				INFOPLIST_KEY_NSMotionUsageDescription = "Forestix reads device motion to measure the phone's pitch at the moment a tree-height scan is captured (spec \u00a77.2).";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Forestix uses the microphone only while you hold the mic button during species entry. Audio is processed on-device and never leaves the phone.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Forestix recognises species names you say aloud, entirely on-device, so you can pick a species without taking off gloves.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

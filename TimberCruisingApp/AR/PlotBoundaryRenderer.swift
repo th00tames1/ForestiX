@@ -154,8 +154,11 @@ public extension PlotBoundaryRenderer {
                                            : SIMD3<Float>(1, 0, 0)
             let right = simd_normalize(simd_cross(up, forward))
             let trueUp = simd_cross(forward, right)
+            // `simd_quatf(_: matrix_float3x3)` exists on macOS but the iOS
+            // SDK exposes only the unlabelled initialiser. Pass positionally
+            // so the call compiles on both platforms.
             let rot = simd_quatf(
-                matrix: matrix_float3x3(columns: (right, trueUp, forward)))
+                matrix_float3x3(columns: (right, trueUp, forward)))
             segment.transform = Transform(
                 scale: .one,
                 rotation: rot,

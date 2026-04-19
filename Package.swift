@@ -28,6 +28,7 @@ let package = Package(
         .library(name: "Basemap", targets: ["Basemap"]),
         .library(name: "Export", targets: ["Export"]),
         .library(name: "Sensors", targets: ["Sensors"]),
+        .library(name: "AR", targets: ["AR"]),
         .library(name: "UI", targets: ["UI"])
     ],
     dependencies: [
@@ -53,7 +54,7 @@ let package = Package(
         ),
         .target(
             name: "Persistence",
-            dependencies: ["Common", "Models"],
+            dependencies: ["Common", "Models", "InventoryEngine"],
             path: "TimberCruisingApp/Persistence",
             resources: [
                 .process("TimberCruising.xcdatamodeld")
@@ -90,17 +91,26 @@ let package = Package(
             path: "TimberCruisingApp/Sensors"
         ),
 
+        // MARK: - Phase 3
+
+        .target(
+            name: "AR",
+            dependencies: ["Common", "Models"],
+            path: "TimberCruisingApp/AR"
+        ),
+
         .target(
             name: "UI",
             dependencies: [
                 "Common", "Models", "Persistence",
-                "InventoryEngine", "Geo", "Basemap", "Export", "Sensors"
+                "InventoryEngine", "Geo", "Basemap", "Export",
+                "Sensors", "AR"
             ],
             path: "TimberCruisingApp",
             exclude: [
                 "Common", "Models", "Persistence", "InventoryEngine",
-                "Geo", "Basemap", "Export", "Sensors",
-                "AR", "Positioning"
+                "Geo", "Basemap", "Export", "Sensors", "AR",
+                "Positioning"
             ],
             sources: ["App", "Screens", "ViewModels"]
         ),
@@ -131,6 +141,11 @@ let package = Package(
             name: "SensorsTests",
             dependencies: ["Sensors", "Models", "Common"],
             path: "Tests/SensorsTests"
+        ),
+        .testTarget(
+            name: "ARTests",
+            dependencies: ["AR", "Common"],
+            path: "Tests/ARTests"
         ),
         .testTarget(
             name: "UISnapshotTests",

@@ -25,22 +25,27 @@ public struct ProjectCalibration: Sendable, Equatable {
     /// Cylinder calibration: `DBH_true = alpha + beta · DBH_raw_cm`.
     public var dbhCorrectionAlpha: Float
     public var dbhCorrectionBeta: Float
+    /// §7.2 VIO drift fraction — σ_d = vioDriftFraction · d_h. Default 0.02.
+    public var vioDriftFraction: Float
 
     public init(
         depthNoiseMm: Float,
         dbhCorrectionAlpha: Float,
-        dbhCorrectionBeta: Float
+        dbhCorrectionBeta: Float,
+        vioDriftFraction: Float = 0.02
     ) {
         self.depthNoiseMm = depthNoiseMm
         self.dbhCorrectionAlpha = dbhCorrectionAlpha
         self.dbhCorrectionBeta = dbhCorrectionBeta
+        self.vioDriftFraction = vioDriftFraction
     }
 
     /// Neutral calibration — pre-calibration projects start here.
     public static let identity = ProjectCalibration(
         depthNoiseMm: 5.0,
         dbhCorrectionAlpha: 0,
-        dbhCorrectionBeta: 1)
+        dbhCorrectionBeta: 1,
+        vioDriftFraction: 0.02)
 }
 
 public struct DBHScanInput: Sendable {

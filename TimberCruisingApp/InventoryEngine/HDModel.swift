@@ -79,7 +79,8 @@ public enum HDModel {
         observations: [(dbhCm: Float, heightM: Float)],
         minN: Int = 8,
         maxIters: Int = 50,
-        tol: Float = 1e-6
+        tol: Float = 1e-6,
+        initial: (a: Float, b: Float)? = nil
     ) throws -> Fit {
         let clean = observations.filter { $0.dbhCm > 0 && $0.heightM > 1.3 }
         guard clean.count >= minN else {
@@ -88,9 +89,9 @@ public enum HDModel {
         let dMean = clean.reduce(Float(0)) { $0 + $1.dbhCm } / Float(clean.count)
         guard dMean > 0 else { throw FitError.degenerateInput(reason: "DBH mean = 0") }
 
-        // §7.4 initial guess.
-        var a: Float = 0.1 * dMean
-        var b: Float = 0.05
+        // §7.4 initial guess, or warm-start from the caller's prior fit.
+        var a: Float = initial?.a ?? (0.1 * dMean)
+        var b: Float = initial?.b ?? 0.05
 
         for _ in 0..<maxIters {
             // Normal equations for min ||y − H(p)||²:
@@ -134,10 +135,54 @@ public enum HDModel {
         return Fit(a: a, b: b, nObs: clean.count, rmse: rmse)
     }
 
+    // MARK: - Rolling update (§7.4 "on plot close")
+
+    /// Rolling refit. Callers assemble *all* measured (dbh, height)
+    /// observations for the species — prior + newly-added — and hand
+    /// them in. When `previous` is non-nil, Gauss-Newton warms up from
+    /// its coefficients for faster convergence and better stability
+    /// when the new observations barely move the fit.
+    public static func update(
+        previous: Fit?,
+        observations: [(dbhCm: Float, heightM: Float)],
+        minN: Int = 8,
+        maxIters: Int = 50,
+        tol: Float = 1e-6
+    ) throws -> Fit {
+        let warm: (a: Float, b: Float)? = previous.map { (a: $0.a, b: $0.b) }
+        return try fit(
+            observations: observations,
+            minN: minN,
+            maxIters: maxIters,
+            tol: tol,
+            initial: warm)
+    }
+
     // MARK: - Imputation
 
     /// §7.4 Step 4: predict H for a tree lacking a measured height.
     public static func impute(dbhCm: Float, fit: Fit) -> Float {
         predict(dbhCm: dbhCm, a: fit.a, b: fit.b)
+    }
+}
+
+// MARK: - HeightDiameterFit coefficient bridge
+
+public extension HDModel.Fit {
+    /// Persistence-side dictionary form used by `HeightDiameterFit.coefficients`.
+    var coefficients: [String: Float] {
+        ["a": a, "b": b]
+    }
+
+    /// Rehydrate a `Fit` from `HeightDiameterFit.coefficients`. Returns
+    /// nil when the dictionary is missing `a` or `b` (e.g. from a
+    /// future model form that used different keys).
+    static func fromCoefficients(
+        _ dict: [String: Float],
+        nObs: Int,
+        rmse: Float
+    ) -> HDModel.Fit? {
+        guard let a = dict["a"], let b = dict["b"] else { return nil }
+        return HDModel.Fit(a: a, b: b, nObs: nObs, rmse: rmse)
     }
 }

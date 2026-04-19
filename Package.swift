@@ -143,7 +143,7 @@ let package = Package(
         ),
         .testTarget(
             name: "ExportTests",
-            dependencies: ["Export", "Models", "Geo", "Common"],
+            dependencies: ["Export", "Models", "Geo", "Common", "InventoryEngine"],
             path: "Tests/ExportTests"
         ),
         .testTarget(

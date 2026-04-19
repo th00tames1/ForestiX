@@ -162,6 +162,20 @@ let package = Package(
             path: "Tests/PositioningTests"
         ),
         .testTarget(
+            name: "PersistenceIntegrationTests",
+            dependencies: [
+                "Persistence", "Models", "Common", "InventoryEngine"
+            ],
+            path: "Tests/PersistenceIntegrationTests"
+        ),
+        .testTarget(
+            name: "UIFlowTests",
+            dependencies: [
+                "UI", "Persistence", "Models", "Common", "InventoryEngine"
+            ],
+            path: "Tests/UIFlowTests"
+        ),
+        .testTarget(
             name: "UISnapshotTests",
             dependencies: [
                 "UI",

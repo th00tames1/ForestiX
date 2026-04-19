@@ -17,6 +17,24 @@ public enum BreastHeightConvention: String, Codable, Sendable {
     case uphill, mid, any, custom
 }
 
+/// Spec REQ-HGT-007 + §7.4. Rule for when a tree gets a measured height vs.
+/// imputed from the H–D model. Stored on `CruiseDesign`.
+///
+/// Cases:
+///   - `.allTrees`  — measure every live tree.
+///   - `.none`      — impute every tree (historical datasets, dense stands).
+///   - `.everyKth(k:)` — measure one in every k live trees, indexed by
+///     `treeNumber` within the plot. First tree of a plot always measured.
+///   - `.perSpeciesCount(minPerSpeciesOnPlot:)` — keep measuring until at
+///     least N live trees of that species on the plot have a measured
+///     height; subsequent trees of that species get imputed.
+public enum HeightSubsampleRule: Codable, Sendable, Equatable {
+    case allTrees
+    case none
+    case everyKth(k: Int)
+    case perSpeciesCount(minPerSpeciesOnPlot: Int)
+}
+
 public enum PositionSource: String, Codable, Sendable {
     case gpsAveraged, vioOffset, vioChain, externalRTK, manual
 }
@@ -103,6 +121,7 @@ public struct CruiseDesign: Identifiable, Codable, Sendable {
     public var baf: Float?                  // required if variableRadius
     public var samplingScheme: SamplingScheme
     public var gridSpacingMeters: Float?    // required if systematicGrid
+    public var heightSubsampleRule: HeightSubsampleRule
 
     public init(
         id: UUID,
@@ -111,7 +130,8 @@ public struct CruiseDesign: Identifiable, Codable, Sendable {
         plotAreaAcres: Float?,
         baf: Float?,
         samplingScheme: SamplingScheme,
-        gridSpacingMeters: Float?
+        gridSpacingMeters: Float?,
+        heightSubsampleRule: HeightSubsampleRule = .everyKth(k: 5)
     ) {
         self.id = id
         self.projectId = projectId
@@ -120,6 +140,7 @@ public struct CruiseDesign: Identifiable, Codable, Sendable {
         self.baf = baf
         self.samplingScheme = samplingScheme
         self.gridSpacingMeters = gridSpacingMeters
+        self.heightSubsampleRule = heightSubsampleRule
     }
 }
 

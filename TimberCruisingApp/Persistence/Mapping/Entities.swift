@@ -42,6 +42,7 @@ public final class CruiseDesignEntity: NSManagedObject {
     @NSManaged public var baf: NSNumber?
     @NSManaged public var samplingScheme: String
     @NSManaged public var gridSpacingMeters: NSNumber?
+    @NSManaged public var heightSubsampleRuleJSON: String
 }
 
 @objc(PlannedPlotEntity)

@@ -27,11 +27,18 @@ public final class CoreDataStack {
         try self.init(configuration: .sqlite(url: CoreDataStack.defaultStoreURL()))
     }
 
-    public init(configuration: Configuration) throws {
-        guard let model = Self.loadModel() else {
+    public init(configuration: Configuration,
+                model: NSManagedObjectModel? = nil) throws {
+        let resolvedModel: NSManagedObjectModel
+        if let injected = model {
+            resolvedModel = injected
+        } else if let loaded = Self.loadModel() {
+            resolvedModel = loaded
+        } else {
             throw CoreDataError.modelNotFound
         }
-        let container = NSPersistentContainer(name: "TimberCruising", managedObjectModel: model)
+        let container = NSPersistentContainer(name: "TimberCruising",
+                                              managedObjectModel: resolvedModel)
 
         let description = NSPersistentStoreDescription()
         switch configuration {

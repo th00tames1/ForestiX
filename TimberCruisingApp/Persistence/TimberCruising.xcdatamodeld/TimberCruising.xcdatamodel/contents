@@ -37,6 +37,7 @@
         <attribute name="baf" optional="YES" attributeType="Float" usesScalarValueType="NO"/>
         <attribute name="samplingScheme" attributeType="String"/>
         <attribute name="gridSpacingMeters" optional="YES" attributeType="Float" usesScalarValueType="NO"/>
+        <attribute name="heightSubsampleRuleJSON" attributeType="String" defaultValueString="{&quot;everyKth&quot;:{&quot;k&quot;:5}}"/>
         <uniquenessConstraints>
             <uniquenessConstraint><constraint value="id"/></uniquenessConstraint>
         </uniquenessConstraints>

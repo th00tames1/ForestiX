@@ -17,6 +17,11 @@ public final class AppEnvironment: ObservableObject {
     public let stratumRepository: any StratumRepository
     public let cruiseDesignRepository: any CruiseDesignRepository
     public let plannedPlotRepository: any PlannedPlotRepository
+    public let plotRepository: any PlotRepository
+    public let treeRepository: any TreeRepository
+    public let speciesRepository: any SpeciesConfigRepository
+    public let volumeEquationRepository: any VolumeEquationRepository
+    public let hdFitRepository: any HeightDiameterFitRepository
     public let settings: AppSettings
 
     public init(
@@ -24,12 +29,22 @@ public final class AppEnvironment: ObservableObject {
         stratumRepository: any StratumRepository,
         cruiseDesignRepository: any CruiseDesignRepository,
         plannedPlotRepository: any PlannedPlotRepository,
+        plotRepository: any PlotRepository,
+        treeRepository: any TreeRepository,
+        speciesRepository: any SpeciesConfigRepository,
+        volumeEquationRepository: any VolumeEquationRepository,
+        hdFitRepository: any HeightDiameterFitRepository,
         settings: AppSettings
     ) {
         self.projectRepository = projectRepository
         self.stratumRepository = stratumRepository
         self.cruiseDesignRepository = cruiseDesignRepository
         self.plannedPlotRepository = plannedPlotRepository
+        self.plotRepository = plotRepository
+        self.treeRepository = treeRepository
+        self.speciesRepository = speciesRepository
+        self.volumeEquationRepository = volumeEquationRepository
+        self.hdFitRepository = hdFitRepository
         self.settings = settings
     }
 
@@ -40,6 +55,11 @@ public final class AppEnvironment: ObservableObject {
             stratumRepository: CoreDataStratumRepository(stack: stack),
             cruiseDesignRepository: CoreDataCruiseDesignRepository(stack: stack),
             plannedPlotRepository: CoreDataPlannedPlotRepository(stack: stack),
+            plotRepository: CoreDataPlotRepository(stack: stack),
+            treeRepository: CoreDataTreeRepository(stack: stack),
+            speciesRepository: CoreDataSpeciesConfigRepository(stack: stack),
+            volumeEquationRepository: CoreDataVolumeEquationRepository(stack: stack),
+            hdFitRepository: CoreDataHeightDiameterFitRepository(stack: stack),
             settings: settings
         )
     }

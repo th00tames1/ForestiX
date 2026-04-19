@@ -16,6 +16,11 @@ public protocol TreeRepository {
     func hardDelete(id: UUID) throws
     func listByPlot(_ plotId: UUID, includeDeleted: Bool) throws -> [Tree]
     func bySpeciesInProject(_ projectId: UUID, speciesCode: String, includeDeleted: Bool) throws -> [Tree]
+
+    /// Top-N species codes by live-tree count within a project, ordered by
+    /// frequency descending. Used by the AddTreeFlow species quick-tap grid.
+    /// Soft-deleted trees are excluded.
+    func recentSpeciesCodes(projectId: UUID, limit: Int) throws -> [String]
 }
 
 public extension TreeRepository {
@@ -89,6 +94,35 @@ public final class CoreDataTreeRepository: TreeRepository {
             return try fetchMany(TreeEntity.self, entityName: "TreeEntity",
                                  predicate: pred, sort: sort, in: ctx)
                 .map { try TreeMapper.toStruct($0) }
+        }
+    }
+
+    public func recentSpeciesCodes(projectId: UUID, limit: Int) throws -> [String] {
+        guard limit > 0 else { return [] }
+        return try performRead(stack: stack) { ctx in
+            // First find plot ids for this project, then count trees per
+            // species in a single Core Data fetch.
+            let plotReq = NSFetchRequest<PlotEntity>(entityName: "PlotEntity")
+            plotReq.predicate = NSPredicate(format: "projectId == %@", projectId as CVarArg)
+            let plotIds = try ctx.fetch(plotReq).map(\.id)
+            guard !plotIds.isEmpty else { return [] }
+
+            let treeReq = NSFetchRequest<TreeEntity>(entityName: "TreeEntity")
+            treeReq.predicate = NSPredicate(
+                format: "plotId IN %@ AND deletedAt == nil", plotIds as NSArray)
+            treeReq.propertiesToFetch = ["speciesCode"]
+            let trees = try ctx.fetch(treeReq)
+
+            var counts: [String: Int] = [:]
+            for t in trees { counts[t.speciesCode, default: 0] += 1 }
+            return counts
+                .sorted { lhs, rhs in
+                    lhs.value != rhs.value
+                        ? lhs.value > rhs.value
+                        : lhs.key < rhs.key
+                }
+                .prefix(limit)
+                .map(\.key)
         }
     }
 

@@ -109,6 +109,8 @@ public enum CruiseDesignMapper {
         e.baf = s.baf.map(NSNumber.init(value:))
         e.samplingScheme = s.samplingScheme.rawValue
         e.gridSpacingMeters = s.gridSpacingMeters.map(NSNumber.init(value:))
+        e.heightSubsampleRuleJSON = (try? encodeRule(s.heightSubsampleRule))
+            ?? defaultRuleJSON
     }
 
     public static func toStruct(_ e: CruiseDesignEntity) throws -> CruiseDesign {
@@ -118,6 +120,7 @@ public enum CruiseDesignMapper {
         guard let ss = SamplingScheme(rawValue: e.samplingScheme) else {
             throw CoreDataError.mappingFailed("CruiseDesign.samplingScheme '\(e.samplingScheme)'")
         }
+        let rule = (try? decodeRule(e.heightSubsampleRuleJSON)) ?? .everyKth(k: 5)
         return CruiseDesign(
             id: e.id,
             projectId: e.projectId,
@@ -125,8 +128,23 @@ public enum CruiseDesignMapper {
             plotAreaAcres: e.plotAreaAcres?.floatValue,
             baf: e.baf?.floatValue,
             samplingScheme: ss,
-            gridSpacingMeters: e.gridSpacingMeters?.floatValue
+            gridSpacingMeters: e.gridSpacingMeters?.floatValue,
+            heightSubsampleRule: rule
         )
+    }
+
+    private static let defaultRuleJSON = #"{"everyKth":{"k":5}}"#
+
+    private static func encodeRule(_ r: HeightSubsampleRule) throws -> String {
+        let data = try JSONEncoder().encode(r)
+        return String(data: data, encoding: .utf8) ?? defaultRuleJSON
+    }
+
+    private static func decodeRule(_ s: String) throws -> HeightSubsampleRule {
+        guard let data = s.data(using: .utf8) else {
+            throw CoreDataError.mappingFailed("CruiseDesign.heightSubsampleRuleJSON utf8")
+        }
+        return try JSONDecoder().decode(HeightSubsampleRule.self, from: data)
     }
 }
 

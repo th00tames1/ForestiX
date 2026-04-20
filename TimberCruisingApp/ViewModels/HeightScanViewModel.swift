@@ -89,12 +89,15 @@ public final class HeightScanViewModel: ObservableObject {
 
     // Stable ids for each of the three marker roles so the RealityKit
     // anchors aren't torn down and rebuilt on every state transition.
-    private static let anchorMarkerId = UUID(
-        uuidString: "00000000-A0A0-0000-0000-000000000001")!
-    private static let topMarkerId = UUID(
-        uuidString: "00000000-A0A0-0000-0000-000000000002")!
-    private static let baseMarkerId = UUID(
-        uuidString: "00000000-A0A0-0000-0000-000000000003")!
+    // Force-unwrap is avoided so a future typo can't crash the scan —
+    // the `?? UUID()` fallback degrades to per-frame anchor churn
+    // instead of an abort.
+    private static let anchorMarkerId =
+        UUID(uuidString: "00000000-A0A0-0000-0000-000000000001") ?? UUID()
+    private static let topMarkerId =
+        UUID(uuidString: "00000000-A0A0-0000-0000-000000000002") ?? UUID()
+    private static let baseMarkerId =
+        UUID(uuidString: "00000000-A0A0-0000-0000-000000000003") ?? UUID()
 
     private var trackingCancellable: AnyCancellable?
     private var depthCancellable: AnyCancellable?

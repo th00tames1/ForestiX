@@ -203,7 +203,12 @@ public struct QuickMeasureHomeScreen: View {
                         confidenceRaw: result.confidence.rawValue,
                         method: result.method.rawValue))
                     presentingDBHScan = false
-                })
+                },
+                // Quick Measure users benefit from the live LiDAR mesh
+                // overlay — it's the simplest "yes the scan is working"
+                // visual cue, and it's diagnostic when measurements fail.
+                // The full AddTreeFlow keeps the clean view by default.
+                showMeshOverlay: true)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Close") { presentingDBHScan = false }
@@ -225,7 +230,8 @@ public struct QuickMeasureHomeScreen: View {
                         confidenceRaw: result.confidence.rawValue,
                         method: result.method.rawValue))
                     presentingHeightScan = false
-                })
+                },
+                showMeshOverlay: true)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Close") { presentingHeightScan = false }

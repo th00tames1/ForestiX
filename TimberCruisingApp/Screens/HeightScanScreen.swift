@@ -21,11 +21,17 @@ public struct HeightScanScreen: View {
 
     @StateObject private var viewModel: HeightScanViewModel
     public var onResult: (HeightResult) -> Void = { _ in }
+    /// When true, overlays the ARKit scene-reconstruction mesh on top of
+    /// the camera feed — useful visual confirmation that LiDAR is
+    /// sampling the scene while the cruiser walks off and aims.
+    public var showMeshOverlay: Bool = false
 
     public init(viewModel: @autoclosure @escaping () -> HeightScanViewModel,
-                onResult: @escaping (HeightResult) -> Void = { _ in }) {
+                onResult: @escaping (HeightResult) -> Void = { _ in },
+                showMeshOverlay: Bool = false) {
         _viewModel = StateObject(wrappedValue: viewModel())
         self.onResult = onResult
+        self.showMeshOverlay = showMeshOverlay
     }
 
     public var body: some View {
@@ -33,7 +39,8 @@ public struct HeightScanScreen: View {
             // Live AR camera feed shared with the HeightScanViewModel's
             // session — without this the cruiser couldn't see the tree
             // base / top to aim at.
-            ARCameraView(manager: viewModel.session)
+            ARCameraView(manager: viewModel.session,
+                         debugMeshOverlay: showMeshOverlay)
                 .ignoresSafeArea()
             overlayChrome
             VStack {

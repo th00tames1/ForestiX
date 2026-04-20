@@ -1,4 +1,4 @@
-// swift-tools-version: 5.9
+// swift-tools-version: 6.0
 // TimberCruisingApp — Phase 0 + Phase 1
 // Spec: timber_cruising_app_design.md §8 (Module & File Layout), §9.2 Phase 0 & Phase 1
 //
@@ -16,7 +16,12 @@ import PackageDescription
 let package = Package(
     name: "TimberCruisingApp",
     platforms: [
-        .iOS(.v17),
+        // Must match (or be ≤) the hosting Xcode project's deployment
+        // target. The Forestix.xcodeproj app target is iOS 18.2, so we
+        // bump the package to .v18 — otherwise SPM compiles against
+        // iOS 17 regardless and rejects iOS-18-only APIs like
+        // `MeshResource.generateCylinder(height:radius:)`.
+        .iOS(.v18),
         .macOS(.v14)   // enables `swift test` on developer macOS hosts
     ],
     products: [
@@ -188,5 +193,11 @@ let package = Package(
             ],
             path: "Tests/UISnapshotTests"
         )
-    ]
+    ],
+    // We're on swift-tools-version 6.0 so we can use .v18 in platforms,
+    // but the rest of the codebase was written against Swift 5 semantics
+    // (especially its concurrency model). Pinning the language mode to
+    // .v5 keeps the build green without a full Swift 6 migration, which
+    // is its own multi-day project.
+    swiftLanguageModes: [.v5]
 )

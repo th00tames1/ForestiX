@@ -75,6 +75,8 @@ public struct CruiseDesignScreen: View {
                 .accessibilityIdentifier("design.generate")
             }
 
+            speciesSection
+
             if let message = viewModel.validationMessage {
                 Section {
                     Label(message, systemImage: "exclamationmark.triangle")
@@ -99,6 +101,80 @@ public struct CruiseDesignScreen: View {
         } message: {
             Text(viewModel.errorMessage ?? "")
         }
+    }
+
+    // MARK: - Species & equations section
+    //
+    // Phase 7.3 — added after the abstract audit found that the design
+    // screen had no surface for the species + volume-equation catalogue,
+    // leaving the cruiser unable to confirm which species were
+    // available for this project. We render a read-only list here;
+    // add / edit of species is a Phase 8 CRUD task.
+
+    @ViewBuilder
+    private var speciesSection: some View {
+        Section(
+            header: Text("Species & volume equations"),
+            footer: Text(viewModel.availableSpecies.isEmpty
+                ? "No species loaded. Re-install the app so the Pacific Northwest seed (DF, WH, RC, RA) is re-imported."
+                : "These species + volume equations are available for this project. Coefficients marked PLACEHOLDER in the source citation should be replaced with locally-calibrated values before production cruising — see docs/VOLUME_EQUATIONS.md.")
+        ) {
+            if viewModel.availableSpecies.isEmpty {
+                Text("No species configured.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(viewModel.availableSpecies, id: \.code) { sp in
+                    speciesRow(sp)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func speciesRow(_ sp: Models.SpeciesConfig) -> some View {
+        let eq = viewModel.volumeEquationsById[sp.volumeEquationId]
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(sp.code)
+                    .font(.body.monospaced().bold())
+                    .frame(width: 44, alignment: .leading)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(sp.commonName)
+                    Text(sp.scientificName)
+                        .font(.caption.italic())
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            if let eq = eq {
+                HStack(spacing: 6) {
+                    Text(eq.form)
+                        .font(.caption.monospaced())
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(Color.accentColor.opacity(0.12))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                    if eq.sourceCitation
+                        .uppercased().contains("PLACEHOLDER") {
+                        Label("placeholder",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .labelStyle(.titleAndIcon)
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    } else {
+                        Label("verified",
+                              systemImage: "checkmark.seal.fill")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    }
+                }
+            } else {
+                Label("Missing equation \(sp.volumeEquationId)",
+                      systemImage: "exclamationmark.octagon.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+        .padding(.vertical, 2)
     }
 }
 

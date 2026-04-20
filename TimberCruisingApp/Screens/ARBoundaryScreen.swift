@@ -29,13 +29,13 @@ public struct ARBoundaryScreen: View {
 
     public var body: some View {
         ZStack {
-            // Live AR camera so the cruiser can see trees outlined
-            // against the rendered ring. The boundary ring itself is
-            // an ARAnchor inside the same ARSession (handled by the
-            // VM); this view-representable just provides the camera
-            // background.
-            ARCameraView(manager: viewModel.session,
-                         debugMeshOverlay: false)
+            // Live AR camera feed + boundary ring anchored at plot
+            // centre. `ARBoundarySceneView` subscribes to the VM's
+            // `ringVertices` / `centerWorld` and rebuilds the
+            // RealityKit ModelEntity whenever they change — so the
+            // cruiser actually sees the 72-segment ring on the
+            // ground rather than the previous black rectangle.
+            ARBoundarySceneView(viewModel: viewModel)
                 .ignoresSafeArea()
             centerReticle
             VStack {

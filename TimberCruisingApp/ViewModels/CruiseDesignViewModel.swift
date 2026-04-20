@@ -24,6 +24,8 @@ public final class CruiseDesignViewModel: ObservableObject {
     // MARK: - Feedback
 
     @Published public private(set) var plannedCount: Int = 0
+    @Published public private(set) var availableSpecies: [SpeciesConfig] = []
+    @Published public private(set) var volumeEquationsById: [String: VolumeEquation] = [:]
     @Published public var errorMessage: String?
     @Published public var toastMessage: String?
 
@@ -32,6 +34,8 @@ public final class CruiseDesignViewModel: ObservableObject {
     private var stratumRepository: (any StratumRepository)?
     private var plannedPlotRepository: (any PlannedPlotRepository)?
     private var designRepository: (any CruiseDesignRepository)?
+    private var speciesRepository: (any SpeciesConfigRepository)?
+    private var volumeEquationRepository: (any VolumeEquationRepository)?
 
     public init(project: Project) { self.project = project }
 
@@ -39,6 +43,8 @@ public final class CruiseDesignViewModel: ObservableObject {
         if stratumRepository == nil { stratumRepository = environment.stratumRepository }
         if plannedPlotRepository == nil { plannedPlotRepository = environment.plannedPlotRepository }
         if designRepository == nil { designRepository = environment.cruiseDesignRepository }
+        if speciesRepository == nil { speciesRepository = environment.speciesRepository }
+        if volumeEquationRepository == nil { volumeEquationRepository = environment.volumeEquationRepository }
     }
 
     // MARK: - Validation
@@ -154,6 +160,15 @@ public final class CruiseDesignViewModel: ObservableObject {
                 if let b = existing.baf { bafString = "\(b)" }
                 samplingScheme = existing.samplingScheme
                 if let g = existing.gridSpacingMeters { gridSpacingMetersString = "\(g)" }
+            }
+            if let speciesRepo = speciesRepository {
+                availableSpecies = try speciesRepo.list()
+                    .sorted { $0.commonName < $1.commonName }
+            }
+            if let volRepo = volumeEquationRepository {
+                let eqs = try volRepo.list()
+                volumeEquationsById = Dictionary(
+                    uniqueKeysWithValues: eqs.map { ($0.id, $0) })
             }
         } catch {
             errorMessage = "Failed to load cruise design: \(error)"

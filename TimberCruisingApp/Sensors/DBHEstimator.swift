@@ -400,6 +400,27 @@ public enum DBHEstimator {
 
     // MARK: - Live preview (single-frame, no RANSAC)
 
+    /// Result of the cheap single-frame preview fit. Used by the scan
+    /// HUD to render a live DBH estimate, a 3D cylinder marker placed
+    /// in the AR scene, and a distance-to-center readout.
+    public struct PreviewFit: Equatable, Sendable {
+        /// Estimated trunk diameter in centimetres.
+        public let diameterCm: Double
+        /// Trunk centre in world XZ metres (height is set by the caller —
+        /// usually the camera Y for the DBH row).
+        public let centerWorldXZ: SIMD2<Double>
+        /// Trunk radius in metres.
+        public let radiusM: Double
+
+        public init(diameterCm: Double,
+                    centerWorldXZ: SIMD2<Double>,
+                    radiusM: Double) {
+            self.diameterCm = diameterCm
+            self.centerWorldXZ = centerWorldXZ
+            self.radiusM = radiusM
+        }
+    }
+
     /// Single-frame approximation used by the scan HUD to show a live
     /// DBH estimate near the crosshair while the cruiser is aiming.
     ///
@@ -412,25 +433,27 @@ public enum DBHEstimator {
     ///      stem pixels within ±15 cm of that depth (same strip the
     ///      burst uses).
     ///   3. Back-project the leftmost and rightmost strip pixels into
-    ///      world XZ and return the chord distance as the diameter
-    ///      estimate.
+    ///      world XZ. The chord between them is the trunk diameter;
+    ///      their midpoint is the trunk surface centre on the near
+    ///      side. Shifting inward by one radius along the camera view
+    ///      direction gives the cylinder centre.
     ///
     /// Looking roughly head-on at the trunk, the strip's left and right
     /// silhouette columns are tangent to the cylinder surface — so the
     /// chord between their back-projections is the trunk diameter as
-    /// seen from the camera (not a radius, not a partial arc). Accuracy
-    /// is good enough (≈ ±2 cm when aimed head-on, worse with oblique
-    /// angles) to guide the cruiser; the real measurement still runs
-    /// the full §7.1 pipeline on capture.
+    /// seen from the camera. Accuracy is good enough (≈ ±2 cm when
+    /// aimed head-on, worse with oblique angles) to guide the cruiser;
+    /// the real measurement still runs the full §7.1 pipeline on
+    /// capture.
     ///
     /// Returns nil when the preview can't be trusted at all
     /// (out-of-range depth, strip too short, etc.).
-    public static func previewDiameterCm(
+    public static func previewFit(
         frame: ARDepthFrame,
         tapPixel: SIMD2<Double>,
         guideRowY: Int,
         deltaDepth: Float = 0.15
-    ) -> Double? {
+    ) -> PreviewFit? {
         guard let dTap = medianDepth(around: tapPixel, frame: frame, radius: 2)
         else { return nil }
         guard (0.5...3.0).contains(dTap) else { return nil }
@@ -460,11 +483,44 @@ public enum DBHEstimator {
         let dz = right.y - left.y    // SIMD2 y-slot holds world-Z here
         let chordM = (dx * dx + dz * dz).squareRoot()
         let diameterCm = chordM * 100
+        let radiusM = chordM / 2.0
 
         // Reject wild values so we don't flash obviously-wrong numbers
         // mid-aim. The §7.1 sanity tree does the same on the final fit.
         guard (5.0...200.0).contains(diameterCm) else { return nil }
-        return diameterCm
+
+        // Near-side midpoint between the two silhouette hits — i.e. the
+        // trunk surface facing the camera.
+        let nearMid = SIMD2<Double>((left.x + right.x) / 2.0,
+                                     (left.y + right.y) / 2.0)
+        // Shift inward (away from camera) by one radius along the
+        // camera-to-surface direction to land at the cylinder axis.
+        let cam = frame.cameraPoseWorld.columns.3
+        let cameraXZ = SIMD2<Double>(Double(cam.x), Double(cam.z))
+        let toSurface = nearMid - cameraXZ
+        let dist = (toSurface.x * toSurface.x + toSurface.y * toSurface.y).squareRoot()
+        let unit: SIMD2<Double> = dist > 1e-6
+            ? SIMD2(toSurface.x / dist, toSurface.y / dist)
+            : SIMD2(0, 1)
+        let center = nearMid + SIMD2(unit.x * radiusM, unit.y * radiusM)
+
+        return PreviewFit(
+            diameterCm: diameterCm,
+            centerWorldXZ: center,
+            radiusM: radiusM)
+    }
+
+    /// Back-compat helper — returns just the diameter when only the
+    /// scalar is wanted.
+    public static func previewDiameterCm(
+        frame: ARDepthFrame,
+        tapPixel: SIMD2<Double>,
+        guideRowY: Int,
+        deltaDepth: Float = 0.15
+    ) -> Double? {
+        previewFit(frame: frame, tapPixel: tapPixel,
+                   guideRowY: guideRowY,
+                   deltaDepth: deltaDepth)?.diameterCm
     }
 
     // MARK: - Rejection formatting

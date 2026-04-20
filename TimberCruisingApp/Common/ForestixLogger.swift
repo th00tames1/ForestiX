@@ -1,6 +1,6 @@
 // Phase 7 — local-only analytics + structured logging.
 //
-// ## Privacy model (spec Phase 7): "Local crash log 만 수집 (privacy, 서버 전송 없음)"
+// ## Privacy model (spec Phase 7): "Collect local crash log only (no server upload)"
 //
 // Every event goes to two sinks:
 //   1. `os_log` (Console.app / Instruments) — structured category "Forestix"

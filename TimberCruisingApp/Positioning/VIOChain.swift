@@ -75,8 +75,8 @@ public struct VIOChain: Sendable, Equatable {
     /// Compute the lat/lon of a new plot reached by walking to
     /// `destinationPointWorld`, inheriting from the most recent anchor.
     /// Returns nil if the chain is empty, tracking broke, or the walk
-    /// exceeds the budget (REQ-CTR-003 "200 m 초과 이동 구간은 체인
-    /// 끊고 재시작").
+    /// exceeds the budget (REQ-CTR-003 "break and restart the chain
+    /// on walks exceeding 200 m").
     public func transfer(
         to destinationPointWorld: SIMD3<Float>,
         trackingStateWasNormalThroughout: Bool

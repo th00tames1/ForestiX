@@ -21,6 +21,10 @@ public struct HeightScanScreen: View {
 
     @StateObject private var viewModel: HeightScanViewModel
     public var onResult: (HeightResult) -> Void = { _ in }
+    /// Fires when the cruiser explicitly accepts the result shown on
+    /// screen (state → .accepted). Hosts that want to persist only on
+    /// user confirmation should use this instead of `onResult`.
+    public var onAccept: (HeightResult) -> Void = { _ in }
     /// When true, overlays the ARKit scene-reconstruction mesh on top of
     /// the camera feed — useful visual confirmation that LiDAR is
     /// sampling the scene while the cruiser walks off and aims.
@@ -28,19 +32,24 @@ public struct HeightScanScreen: View {
 
     public init(viewModel: @autoclosure @escaping () -> HeightScanViewModel,
                 onResult: @escaping (HeightResult) -> Void = { _ in },
+                onAccept: @escaping (HeightResult) -> Void = { _ in },
                 showMeshOverlay: Bool = false) {
         _viewModel = StateObject(wrappedValue: viewModel())
         self.onResult = onResult
+        self.onAccept = onAccept
         self.showMeshOverlay = showMeshOverlay
     }
 
     public var body: some View {
         ZStack {
             // Live AR camera feed shared with the HeightScanViewModel's
-            // session — without this the cruiser couldn't see the tree
-            // base / top to aim at.
+            // session. The scene markers come from the VM and pin the
+            // anchor / top / base reference points in world space so
+            // the cruiser can pan away and come back without losing
+            // track of where the measurement started.
             ARCameraView(manager: viewModel.session,
-                         debugMeshOverlay: showMeshOverlay)
+                         debugMeshOverlay: showMeshOverlay,
+                         sceneMarkers: viewModel.sceneMarkers)
                 .ignoresSafeArea()
             overlayChrome
             VStack {
@@ -57,6 +66,11 @@ public struct HeightScanScreen: View {
         .onChange(of: viewModel.result?.heightM) { _, newValue in
             if newValue != nil, let r = viewModel.result {
                 onResult(r)
+            }
+        }
+        .onChange(of: viewModel.state) { _, newState in
+            if newState == .accepted, let r = viewModel.result {
+                onAccept(r)
             }
         }
     }

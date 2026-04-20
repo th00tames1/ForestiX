@@ -15,6 +15,7 @@ import simd
 import Common
 import Models
 import Sensors
+import AR
 
 @MainActor
 public final class HeightScanViewModel: ObservableObject {
@@ -79,6 +80,21 @@ public final class HeightScanViewModel: ObservableObject {
     /// (REQ-HGT-004: "sample count logged").
     @Published public private(set) var alphaTopSampleCount: Int = 0
     @Published public private(set) var alphaBaseSampleCount: Int = 0
+
+    /// World-anchored markers rendered by `ARCameraView` so the cruiser
+    /// can see where the anchor / top / base points landed and find
+    /// them again after panning the camera away. Rebuilt whenever one
+    /// of the three reference points is set or cleared.
+    @Published public private(set) var sceneMarkers: [ARSceneMarker] = []
+
+    // Stable ids for each of the three marker roles so the RealityKit
+    // anchors aren't torn down and rebuilt on every state transition.
+    private static let anchorMarkerId = UUID(
+        uuidString: "00000000-A0A0-0000-0000-000000000001")!
+    private static let topMarkerId = UUID(
+        uuidString: "00000000-A0A0-0000-0000-000000000002")!
+    private static let baseMarkerId = UUID(
+        uuidString: "00000000-A0A0-0000-0000-000000000003")!
 
     private var trackingCancellable: AnyCancellable?
     private var depthCancellable: AnyCancellable?
@@ -168,6 +184,7 @@ public final class HeightScanViewModel: ObservableObject {
         state = .anchorSet
         state = .walking
         updateLiveHint(standingPointWorld: standingPointWorld)
+        rebuildSceneMarkers()
     }
 
     /// Step (b) — called on every ARKit frame while the user walks back
@@ -197,6 +214,7 @@ public final class HeightScanViewModel: ObservableObject {
         standingPointWorldAtAimTop = standingPointWorld
         state = .aimTopCaptured
         state = .aimBaseArmed
+        rebuildSceneMarkers()
     }
 
     /// Step (d) — Aim Base tap. α_base = median pitch over ±200 ms.
@@ -209,6 +227,7 @@ public final class HeightScanViewModel: ObservableObject {
         alphaBaseRad = Float(median)
         alphaBaseSampleCount = pitchBuffer.sampleCount(centeredOn: tapTime)
         compute()
+        rebuildSceneMarkers()
     }
 
     /// Tries the strict 400 ms window first (matches the spec), then
@@ -265,6 +284,7 @@ public final class HeightScanViewModel: ObservableObject {
         standingPointWorldAtAimTop = standingPointWorld
         state = .aimTopCaptured
         state = .aimBaseArmed
+        rebuildSceneMarkers()
     }
 
     /// Test/preview hook: push α_base directly, skipping the IMU buffer.
@@ -274,6 +294,7 @@ public final class HeightScanViewModel: ObservableObject {
         else { return }
         self.alphaBaseRad = alphaBaseRad
         compute()
+        rebuildSceneMarkers()
     }
 
     public func retake() {
@@ -288,6 +309,7 @@ public final class HeightScanViewModel: ObservableObject {
         alphaBaseSampleCount = 0
         trackingDroppedDuringMeasurement = false
         state = .idle
+        rebuildSceneMarkers()
     }
 
     public func accept() {
@@ -331,6 +353,68 @@ public final class HeightScanViewModel: ObservableObject {
         let r = HeightEstimator.estimate(input: input)
         result = r
         state = (r.confidence == .red) ? .rejected : .computed
+    }
+
+    // MARK: - Scene marker geometry
+
+    /// Rebuilds the three world-anchored markers that visualise the
+    /// measurement. Called on every state transition that adds or
+    /// clears one of the reference points.
+    ///
+    /// Geometry:
+    /// • Anchor marker — exact `anchorPointWorld` (the tree-base pose
+    ///   captured when the cruiser touched the phone to the stem).
+    /// • Top marker — same XZ as the anchor, elevated by
+    ///   `standing.y + d_h · tan(α_top)`. The top of the tree sits
+    ///   directly above the base, so the two share a horizontal
+    ///   position; only the Y differs by the instrument-triangle rise.
+    /// • Base marker — same shape, using `α_base`. Lands near ground
+    ///   level when the cruiser correctly aimed at the tree base.
+    private func rebuildSceneMarkers() {
+        var markers: [ARSceneMarker] = []
+
+        if let anchor = anchorPointWorld {
+            markers.append(ARSceneMarker(
+                id: Self.anchorMarkerId,
+                worldPosition: anchor,
+                shape: .sphere(radiusM: 0.08),
+                colorRGBA: SIMD4(1.00, 0.30, 0.30, 1.00)))  // red
+        }
+
+        if let anchor = anchorPointWorld,
+           let standing = standingPointWorldAtAimTop,
+           let alphaTop = alphaTopRad {
+            let dh = horizontalDistance(from: standing, to: anchor)
+            let y = standing.y + dh * tan(alphaTop)
+            let top = SIMD3<Float>(anchor.x, y, anchor.z)
+            markers.append(ARSceneMarker(
+                id: Self.topMarkerId,
+                worldPosition: top,
+                shape: .sphere(radiusM: 0.08),
+                colorRGBA: SIMD4(1.00, 0.85, 0.15, 1.00)))  // yellow
+        }
+
+        if let anchor = anchorPointWorld,
+           let standing = standingPointWorldAtAimTop,
+           let alphaBase = alphaBaseRad {
+            let dh = horizontalDistance(from: standing, to: anchor)
+            let y = standing.y + dh * tan(alphaBase)
+            let base = SIMD3<Float>(anchor.x, y, anchor.z)
+            markers.append(ARSceneMarker(
+                id: Self.baseMarkerId,
+                worldPosition: base,
+                shape: .sphere(radiusM: 0.08),
+                colorRGBA: SIMD4(0.25, 0.85, 0.35, 1.00)))  // green
+        }
+
+        sceneMarkers = markers
+    }
+
+    private func horizontalDistance(from a: SIMD3<Float>,
+                                    to b: SIMD3<Float>) -> Float {
+        let dx = a.x - b.x
+        let dz = a.z - b.z
+        return (dx * dx + dz * dz).squareRoot()
     }
 
     // MARK: - Walk-hint geometry

@@ -12,8 +12,52 @@
 // already running. The session's camera background renders through
 // untouched, so the overlay chrome (guide line / crosshair / banner)
 // floats over a live picture of the tree.
+//
+// World-anchored 3D markers
+// -------------------------
+// Callers can pass an `[ARSceneMarker]` array describing spheres /
+// cylinders to render at specific world positions. Markers diff by id —
+// the view keeps them attached to world-space anchors so they stay put
+// when the cruiser moves the phone, even if the anchor briefly leaves
+// the frame. Used by DBHScanScreen to overlay the fitted trunk cylinder
+// and by HeightScanScreen to mark the anchor / top / base world points.
 
 import SwiftUI
+
+// MARK: - Public marker surface (cross-platform)
+
+/// Declarative description of a 3D marker rendered inside the AR scene.
+/// The concrete RealityKit entity is owned by `ARCameraView`'s
+/// coordinator; callers just flip this value and SwiftUI diffs it.
+public struct ARSceneMarker: Identifiable, Equatable {
+
+    public enum Shape: Equatable {
+        /// Filled sphere — used for anchor / top / base point pins.
+        case sphere(radiusM: Float)
+        /// Vertical cylinder (Y-up) — used for the fitted DBH trunk.
+        /// `heightM` is the total visual height; the cylinder is centred
+        /// on `worldPosition`.
+        case cylinder(radiusM: Float, heightM: Float)
+    }
+
+    public let id: UUID
+    public var worldPosition: SIMD3<Float>
+    public var shape: Shape
+    /// sRGB colour, straight 0…1 channels. Alpha < 1 yields a translucent
+    /// material so the camera feed shows through (useful for the DBH
+    /// cylinder). Keep saturated for visibility against foliage.
+    public var colorRGBA: SIMD4<Float>
+
+    public init(id: UUID = UUID(),
+                worldPosition: SIMD3<Float>,
+                shape: Shape,
+                colorRGBA: SIMD4<Float>) {
+        self.id = id
+        self.worldPosition = worldPosition
+        self.shape = shape
+        self.colorRGBA = colorRGBA
+    }
+}
 
 #if canImport(ARKit) && os(iOS)
 
@@ -25,10 +69,26 @@ public struct ARCameraView: UIViewRepresentable {
 
     public let session: ARSession
     public var debugMeshOverlay: Bool
+    public var sceneMarkers: [ARSceneMarker]
 
-    public init(session: ARSession, debugMeshOverlay: Bool = false) {
+    public init(session: ARSession,
+                debugMeshOverlay: Bool = false,
+                sceneMarkers: [ARSceneMarker] = []) {
         self.session = session
         self.debugMeshOverlay = debugMeshOverlay
+        self.sceneMarkers = sceneMarkers
+    }
+
+    public func makeCoordinator() -> Coordinator { Coordinator() }
+
+    public final class Coordinator {
+        /// Map marker.id → the AnchorEntity representing it in the scene.
+        /// Used to diff on `updateUIView` so we don't tear down and
+        /// rebuild every marker on every frame.
+        var markerAnchors: [UUID: AnchorEntity] = [:]
+        /// Cached shape per marker so we only rebuild the mesh when the
+        /// shape itself changes (not when just the position moved).
+        var markerShapes: [UUID: ARSceneMarker.Shape] = [:]
     }
 
     public func makeUIView(context: Context) -> ARView {
@@ -56,6 +116,65 @@ public struct ARCameraView: UIViewRepresentable {
         } else {
             view.debugOptions.remove(.showSceneUnderstanding)
         }
+        applyMarkers(to: view, coordinator: context.coordinator)
+    }
+
+    // MARK: - Marker diffing
+
+    private func applyMarkers(to view: ARView, coordinator: Coordinator) {
+        let newIds = Set(sceneMarkers.map(\.id))
+        let oldIds = Set(coordinator.markerAnchors.keys)
+
+        // Remove anchors that have vanished from the list.
+        for staleId in oldIds.subtracting(newIds) {
+            if let anchor = coordinator.markerAnchors.removeValue(forKey: staleId) {
+                view.scene.removeAnchor(anchor)
+            }
+            coordinator.markerShapes.removeValue(forKey: staleId)
+        }
+
+        // Add new or update existing anchors in place.
+        for marker in sceneMarkers {
+            if let existing = coordinator.markerAnchors[marker.id] {
+                existing.transform.translation = marker.worldPosition
+                // Rebuild the model only if the shape actually changed —
+                // colour / scale changes share the same mesh template.
+                if coordinator.markerShapes[marker.id] != marker.shape {
+                    for child in existing.children {
+                        child.removeFromParent()
+                    }
+                    existing.addChild(Self.makeEntity(for: marker))
+                    coordinator.markerShapes[marker.id] = marker.shape
+                }
+            } else {
+                let anchor = AnchorEntity(world: marker.worldPosition)
+                anchor.addChild(Self.makeEntity(for: marker))
+                view.scene.addAnchor(anchor)
+                coordinator.markerAnchors[marker.id] = anchor
+                coordinator.markerShapes[marker.id] = marker.shape
+            }
+        }
+    }
+
+    private static func makeEntity(for marker: ARSceneMarker) -> ModelEntity {
+        let mesh: MeshResource = {
+            switch marker.shape {
+            case .sphere(let r):
+                return .generateSphere(radius: r)
+            case .cylinder(let r, let h):
+                return .generateCylinder(height: h, radius: r)
+            }
+        }()
+        let uiColor = UIColor(
+            red:   CGFloat(marker.colorRGBA.x),
+            green: CGFloat(marker.colorRGBA.y),
+            blue:  CGFloat(marker.colorRGBA.z),
+            alpha: CGFloat(marker.colorRGBA.w))
+        // Unlit materials ignore environment lighting, so the marker keeps
+        // a vivid, uniform colour against variable forest lighting — this
+        // is a diagnostic / HUD overlay, not a "believable" 3D asset.
+        let material = UnlitMaterial(color: uiColor)
+        return ModelEntity(mesh: mesh, materials: [material])
     }
 }
 
@@ -64,7 +183,9 @@ public struct ARCameraView: UIViewRepresentable {
 // Non-iOS hosts (macOS test runner) keep building. The placeholder is
 // the same black rectangle DBHScanScreen used to show on its own.
 public struct ARCameraView: View {
-    public init(session: Any, debugMeshOverlay: Bool = false) {}
+    public init(session: Any,
+                debugMeshOverlay: Bool = false,
+                sceneMarkers: [ARSceneMarker] = []) {}
     public var body: some View { Color.black }
 }
 
@@ -74,15 +195,22 @@ public struct ARCameraView: View {
 
 #if canImport(ARKit) && os(iOS)
 extension ARCameraView {
-    public init(manager: ARKitSessionManager, debugMeshOverlay: Bool = false) {
+    public init(manager: ARKitSessionManager,
+                debugMeshOverlay: Bool = false,
+                sceneMarkers: [ARSceneMarker] = []) {
         self.init(session: manager.session,
-                  debugMeshOverlay: debugMeshOverlay)
+                  debugMeshOverlay: debugMeshOverlay,
+                  sceneMarkers: sceneMarkers)
     }
 }
 #else
 extension ARCameraView {
-    public init(manager: Any, debugMeshOverlay: Bool = false) {
-        self.init(session: manager, debugMeshOverlay: debugMeshOverlay)
+    public init(manager: Any,
+                debugMeshOverlay: Bool = false,
+                sceneMarkers: [ARSceneMarker] = []) {
+        self.init(session: manager,
+                  debugMeshOverlay: debugMeshOverlay,
+                  sceneMarkers: sceneMarkers)
     }
 }
 #endif

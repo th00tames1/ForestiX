@@ -75,10 +75,10 @@ public final class StratumDrawViewModel: ObservableObject {
 
     public var vertexCountLabel: String {
         switch vertices.count {
-        case 0: return "지도에서 모서리 점을 찍어주세요"
-        case 1: return "1 개 찍힘 — 최소 3 개 필요"
-        case 2: return "2 개 찍힘 — 1 개 더"
-        default: return "\(vertices.count) 개 찍힘 · 닫힌 도형"
+        case 0: return "Tap the corners on the map"
+        case 1: return "1 point — need at least 3"
+        case 2: return "2 points — one more to go"
+        default: return "\(vertices.count) points · closed polygon"
         }
     }
 
@@ -86,11 +86,11 @@ public final class StratumDrawViewModel: ObservableObject {
 
     public func save() {
         guard let repo = stratumRepository else {
-            errorMessage = "저장소에 연결되지 않았습니다. 앱을 재시작 후 다시 시도해 주세요."
+            errorMessage = "Repository not connected. Restart the app and try again."
             return
         }
         guard canSave else {
-            errorMessage = "최소 3 개의 점과 구역 이름이 필요합니다."
+            errorMessage = "At least 3 points and a stratum name are required."
             return
         }
         isSaving = true
@@ -120,7 +120,7 @@ public final class StratumDrawViewModel: ObservableObject {
             _ = try repo.create(stratum)
             didSave = true
         } catch {
-            errorMessage = "저장에 실패했습니다: \(error.localizedDescription). 저장 공간을 확인한 뒤 다시 시도하세요."
+            errorMessage = "Save failed: \(error.localizedDescription). Check available storage and try again."
         }
     }
 

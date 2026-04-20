@@ -79,31 +79,64 @@ public struct HomeScreen: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "tree.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(.green.opacity(0.8))
-            Text("No projects yet")
-                .font(.title3)
-                .bold()
-            Text("Create a project to define strata, generate a sampling plan, and export the plan as CSV or GeoJSON.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
-            Button {
-                viewModel.isPresentingNewProject = true
-            } label: {
-                Text("Create first project")
-                    .bold()
-                    .frame(minHeight: 44)
-                    .frame(maxWidth: .infinity)
+        ScrollView {
+            VStack(spacing: 20) {
+                Image(systemName: "tree.fill")
+                    .font(.system(size: 54))
+                    .foregroundStyle(.green.opacity(0.8))
+                    .padding(.top, 24)
+                Text("Forestix 에 오신 걸 환영해요")
+                    .font(.title2).bold()
+                Text("스마트폰으로 목재 크루즈(timber cruise) 를 수행하는 앱입니다. LiDAR 로 가슴높이 직경(DBH)을, AR 로 수고를 측정하고, 자동으로 임분 통계를 계산합니다.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
+
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("이렇게 시작하세요").font(.headline)
+                    onboardingStep(n: 1, text: "**프로젝트 만들기** — 이름·단위·담당자 입력")
+                    onboardingStep(n: 2, text: "**지도에서 구역 그리기** — 벌채 블록의 모서리를 탭")
+                    onboardingStep(n: 3, text: "**크루즈 디자인** — 플롯 크기, 샘플링 방식")
+                    onboardingStep(n: 4, text: "**현장 측정** — 플롯 방문 → 나무 추가 → 자동 통계")
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(18)
+                .background(.tint.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 14))
+                .padding(.horizontal, 20)
+
+                Button {
+                    viewModel.isPresentingNewProject = true
+                } label: {
+                    Label("첫 프로젝트 만들기", systemImage: "plus.circle.fill")
+                        .font(.headline)
+                        .frame(minHeight: 56)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .padding(.horizontal, 20)
+
+                Text("모든 데이터는 기기에만 저장됩니다. 서버로 전송되지 않아요.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .padding(.bottom, 20)
             }
-            .buttonStyle(.borderedProminent)
-            .padding(.horizontal, 32)
         }
-        .padding()
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func onboardingStep(n: Int, text: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            ZStack {
+                Circle().fill(Color.accentColor.opacity(0.20))
+                    .frame(width: 24, height: 24)
+                Text("\(n)").font(.caption.bold())
+                    .foregroundStyle(Color.accentColor)
+            }
+            Text(.init(text))
+                .font(.subheadline)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
 

@@ -20,11 +20,18 @@ public struct DBHScanScreen: View {
 
     @StateObject private var viewModel: DBHScanViewModel
     public var onResult: (DBHResult) -> Void = { _ in }
+    /// When true, overlays the ARKit scene-reconstruction mesh on top of
+    /// the camera feed so the cruiser can visually confirm that LiDAR is
+    /// actually sampling the trunk surface. Safe on non-LiDAR devices
+    /// (the overlay simply won't render anything).
+    public var showMeshOverlay: Bool = false
 
     public init(viewModel: @autoclosure @escaping () -> DBHScanViewModel,
-                onResult: @escaping (DBHResult) -> Void = { _ in }) {
+                onResult: @escaping (DBHResult) -> Void = { _ in },
+                showMeshOverlay: Bool = false) {
         _viewModel = StateObject(wrappedValue: viewModel())
         self.onResult = onResult
+        self.showMeshOverlay = showMeshOverlay
     }
 
     public var body: some View {
@@ -33,7 +40,8 @@ public struct DBHScanScreen: View {
             // DBHScanViewModel is consuming depth frames from. Snapshot
             // tests (macOS host) fall back to a black background via
             // ARCameraView's #else branch.
-            ARCameraView(manager: viewModel.session)
+            ARCameraView(manager: viewModel.session,
+                         debugMeshOverlay: showMeshOverlay)
                 .ignoresSafeArea()
 
             GeometryReader { geo in
@@ -44,6 +52,11 @@ public struct DBHScanScreen: View {
                 .frame(width: geo.size.width, height: geo.size.height)
             }
             .accessibilityElement(children: .ignore)
+
+            // Screen-wide tap catcher — the spec's "tap trunk center"
+            // gesture was missing from the view. Sits between the AR
+            // feed and the bottom action panel so buttons still win.
+            tapCatcher
 
             VStack {
                 Spacer()
@@ -64,6 +77,28 @@ public struct DBHScanScreen: View {
                 onResult(r)
             }
         }
+    }
+
+    // MARK: - Tap capture
+
+    /// Transparent overlay that forwards taps on the AR region to the
+    /// view model. The bottom action panel sits above this on the
+    /// Z-axis, so button taps continue to work — this catcher only
+    /// receives taps that miss the panel.
+    private var tapCatcher: some View {
+        Color.clear
+            .contentShape(Rectangle())
+            .accessibilityIdentifier("dbhScan.tapCatcher")
+            .onTapGesture {
+                // The crosshair sits at screen centre and the ViewModel
+                // uses `guideRow = depth.height / 2` for the fit, so a
+                // tap pixel at the depth-map centre aligns the fit with
+                // the crosshair the cruiser just lined up on the trunk.
+                let frame = viewModel.session.latestDepthFrame
+                let width  = Double(frame?.width  ?? 256)
+                let height = Double(frame?.height ?? 192)
+                viewModel.tap(at: SIMD2(width / 2.0, height / 2.0))
+            }
     }
 
     // MARK: - Chrome

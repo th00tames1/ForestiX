@@ -71,12 +71,24 @@ public final class DBHScanViewModel: ObservableObject {
     // MARK: - Lifecycle
 
     public func onAppear() {
-        guard isLiDARSupported else { state = .manualEntry; return }
-        if state == .idle || state == .accepted || state == .rejected {
-            state = .aligning
-        }
+        // Always start the AR session — even on non-LiDAR devices we want
+        // the camera feed to render so the cruiser can see what they're
+        // pointing at while entering DBH manually. `session.run()` is
+        // internally guarded against unsupported configurations, so it's
+        // safe to call on any device.
         session.run()
         subscribeToDepth()
+
+        if isLiDARSupported {
+            if state == .idle || state == .accepted || state == .rejected {
+                state = .aligning
+            }
+        } else {
+            // No LiDAR → caliper / tape workflow. Camera still visible
+            // behind the manual-entry panel so the cruiser can frame the
+            // measurement.
+            state = .manualEntry
+        }
     }
 
     public func onDisappear() {

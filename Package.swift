@@ -96,7 +96,7 @@ let package = Package(
 
         .target(
             name: "AR",
-            dependencies: ["Common", "Models"],
+            dependencies: ["Common", "Models", "Sensors"],
             path: "TimberCruisingApp/AR"
         ),
 

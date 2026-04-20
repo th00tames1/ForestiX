@@ -98,7 +98,11 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
         ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
     }
 
-    private let session: ARSession
+    /// Exposed read-only so a SwiftUI `ARViewContainer` can share the
+    /// same session for camera-feed rendering — without it, the scan
+    /// screens render only their overlay chrome over a black background
+    /// and the cruiser can't see what they're aiming at.
+    public let session: ARSession
     private var trackedStateWasAlwaysNormal = true
 
     public override init() {

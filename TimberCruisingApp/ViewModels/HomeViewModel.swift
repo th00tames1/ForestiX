@@ -41,6 +41,13 @@ public final class HomeViewModel: ObservableObject {
             return
         }
         let now = Date()
+        // Calibration defaults match spec §7.10 "identity" values:
+        // depthNoiseMm = 5 mm (typical iPhone LiDAR rated noise),
+        // bias = 0, DBH correction is identity (α = 0, β = 1).
+        // The cruiser can run the wall + cylinder calibration in
+        // Settings → Run Calibration to refine these for their device.
+        // Without these defaults the Pre-field check would block on a
+        // calibration row that's purely clerical.
         let project = Project(
             id: UUID(),
             name: trimmed,
@@ -52,7 +59,7 @@ public final class HomeViewModel: ObservableObject {
             breastHeightConvention: .uphill,
             slopeCorrection: true,
             lidarBiasMm: 0,
-            depthNoiseMm: 0,
+            depthNoiseMm: 5,
             dbhCorrectionAlpha: 0,
             dbhCorrectionBeta: 1,
             vioDriftFraction: 0.02

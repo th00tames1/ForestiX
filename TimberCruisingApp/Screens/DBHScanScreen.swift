@@ -14,6 +14,7 @@ import SwiftUI
 import Common
 import Models
 import Sensors
+import AR
 
 public struct DBHScanScreen: View {
 
@@ -28,8 +29,12 @@ public struct DBHScanScreen: View {
 
     public var body: some View {
         ZStack {
-            // AR view placeholder — real AR layer is added in Phase 2.1.
-            Color.black.ignoresSafeArea()
+            // Live AR camera feed wired to the same ARSession the
+            // DBHScanViewModel is consuming depth frames from. Snapshot
+            // tests (macOS host) fall back to a black background via
+            // ARCameraView's #else branch.
+            ARCameraView(manager: viewModel.session)
+                .ignoresSafeArea()
 
             GeometryReader { geo in
                 ZStack {

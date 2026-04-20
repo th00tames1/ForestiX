@@ -74,10 +74,23 @@ public final class AppEnvironment: ObservableObject {
         )
     }
 
-    /// Production factory. Loads the on-disk SQLite store at its default URL.
+    /// Production factory. Loads the on-disk SQLite store at its default URL
+    /// and seeds the PNW species + volume-equation starter set on first
+    /// launch (idempotent — won't overwrite the cruiser's edits later).
     public static func live() throws -> AppEnvironment {
         let stack = try CoreDataStack()
-        return AppEnvironment(stack: stack, settings: AppSettings.live())
+        let env = AppEnvironment(stack: stack, settings: AppSettings.live())
+        do {
+            _ = try SeedDataLoader.bootstrapIfNeeded(
+                speciesRepo: env.speciesRepository,
+                volRepo: env.volumeEquationRepository)
+        } catch {
+            // Surface but don't crash — the cruiser can manually add
+            // species via Settings (Phase 7.2.x). Log so the analytics
+            // export will contain the failure.
+            print("⚠️ Seed bootstrap failed: \(error)")
+        }
+        return env
     }
 
     /// SwiftUI-preview / snapshot-test factory. Spins up an in-memory store

@@ -36,6 +36,9 @@ public final class CalibrationViewModel: ObservableObject {
     @Published public var newTrueCm: String = ""
 
     public let session: ARKitSessionManager
+    private var depthSubscription: AnyCancellable?
+    private var collectedPoints: [SIMD3<Double>] = []
+    private let targetWallFrames = 30
 
     public init(session: ARKitSessionManager? = nil) {
         self.session = session ?? ARKitSessionManager()
@@ -55,7 +58,118 @@ public final class CalibrationViewModel: ObservableObject {
         }
     }
 
-    public func resetWall() { wall = .idle }
+    /// Begin live wall-scan collection. Subscribes to the ARKit depth
+    /// frame stream, back-projects each frame's centre 21×21 patch into
+    /// world space, accumulates 30 frames, then runs `WallCalibration.fit`.
+    /// On macOS the session is a no-op stub and this is a no-op.
+    public func startWallScan() {
+        guard case .idle = wall else { return }
+        wall = .scanning(progress: 0)
+        collectedPoints = []
+        session.run()
+        depthSubscription = session.$latestDepthFrame
+            .compactMap { $0 }
+            .sink { [weak self] frame in
+                guard let self else { return }
+                self.appendPatch(from: frame)
+            }
+    }
+
+    public func cancelWallScan() {
+        depthSubscription?.cancel()
+        depthSubscription = nil
+        collectedPoints = []
+        wall = .idle
+        session.pause()
+    }
+
+    private func appendPatch(from frame: ARDepthFrame) {
+        // Back-project a 21x21 patch from the depth-map center into
+        // world space. Filter NaN / zero.
+        let cx = frame.width / 2
+        let cy = frame.height / 2
+        let half = 10
+        let cameraToWorld = frame.cameraPoseWorld
+        for dy in -half...half {
+            for dx in -half...half {
+                let x = cx + dx, y = cy + dy
+                guard x >= 0, x < frame.width,
+                      y >= 0, y < frame.height else { continue }
+                let d = frame.depth(atX: x, y: y)
+                guard d.isFinite, d > 0.1, d < 5.0 else { continue }
+                // Pinhole back-projection.
+                let fx = frame.intrinsics.columns.0.x
+                let fy = frame.intrinsics.columns.1.y
+                let px = frame.intrinsics.columns.2.x
+                let py = frame.intrinsics.columns.2.y
+                let xCam = (Float(x) - px) * d / fx
+                let yCam = (Float(y) - py) * d / fy
+                let pCam = SIMD4<Float>(xCam, yCam, -d, 1)
+                // simd_float4x4 column-major × column-vector: hand-roll
+                // because the * operator's overload set differs across
+                // SDK versions and isn't available as `simd_mul` either.
+                let c0 = cameraToWorld.columns.0 * pCam.x
+                let c1 = cameraToWorld.columns.1 * pCam.y
+                let c2 = cameraToWorld.columns.2 * pCam.z
+                let c3 = cameraToWorld.columns.3 * pCam.w
+                let pWorld = c0 + c1 + c2 + c3
+                collectedPoints.append(SIMD3<Double>(
+                    Double(pWorld.x), Double(pWorld.y), Double(pWorld.z)))
+            }
+        }
+
+        let frames = collectedPoints.count / 441   // 21*21
+        let progress = min(1.0, Double(frames) / Double(targetWallFrames))
+        wall = .scanning(progress: progress)
+
+        if frames >= targetWallFrames {
+            depthSubscription?.cancel()
+            depthSubscription = nil
+            session.pause()
+            finishWallScan(points: collectedPoints)
+        }
+    }
+
+    public func resetWall() {
+        depthSubscription?.cancel()
+        depthSubscription = nil
+        collectedPoints = []
+        wall = .idle
+    }
+
+    // MARK: - Apply to project
+
+    /// Write the (wall, cylinder) results back into a Project struct,
+    /// returning a fresh Project. The caller is responsible for
+    /// persisting via the ProjectRepository.
+    public func applyTo(project: Project) -> Project {
+        var updated = project
+        if case .computed(let w) = wall {
+            updated.depthNoiseMm = Float(w.depthNoiseMm)
+            updated.lidarBiasMm = Float(w.depthBiasMm)
+        }
+        if case .computed(let c, _) = cylinder {
+            updated.dbhCorrectionAlpha = Float(c.alpha)
+            updated.dbhCorrectionBeta = Float(c.beta)
+        }
+        updated.updatedAt = Date()
+        return updated
+    }
+
+    /// Apply spec §7.10 identity / sensible defaults without scanning.
+    /// Lets a cruiser get into the field on a freshly installed phone
+    /// without standing in front of a wall first; the values match the
+    /// nominal iPhone LiDAR datasheet noise (5 mm) and an identity DBH
+    /// correction (α = 0, β = 1).
+    public static func sensibleDefaultsApplied(to project: Project) -> Project {
+        var updated = project
+        updated.depthNoiseMm = 5
+        updated.lidarBiasMm = 0
+        updated.dbhCorrectionAlpha = 0
+        updated.dbhCorrectionBeta = 1
+        updated.updatedAt = Date()
+        return updated
+    }
 
     // MARK: - Cylinder procedure
 

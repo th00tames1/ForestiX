@@ -29,7 +29,14 @@ public struct ARBoundaryScreen: View {
 
     public var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            // Live AR camera so the cruiser can see trees outlined
+            // against the rendered ring. The boundary ring itself is
+            // an ARAnchor inside the same ARSession (handled by the
+            // VM); this view-representable just provides the camera
+            // background.
+            ARCameraView(manager: viewModel.session,
+                         debugMeshOverlay: false)
+                .ignoresSafeArea()
             centerReticle
             VStack {
                 Spacer()

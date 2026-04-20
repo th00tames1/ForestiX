@@ -148,6 +148,13 @@ public struct ProjectDashboardScreen: View {
                 PreFieldChecklistScreen(project: viewModel.project)
             }
             .accessibilityIdentifier("dashboard.preFieldCheck")
+            NavigationLink("Calibrate this project") {
+                CalibrationScreen(
+                    viewModel: CalibrationViewModel(),
+                    project: viewModel.project,
+                    projectRepo: environment.projectRepository)
+            }
+            .accessibilityIdentifier("dashboard.calibrateProject")
             NavigationLink("Export plan") {
                 ExportScreen(project: viewModel.project)
             }

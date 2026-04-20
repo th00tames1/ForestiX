@@ -15,6 +15,7 @@ import SwiftUI
 import Common
 import Models
 import Sensors
+import AR
 
 public struct HeightScanScreen: View {
 
@@ -29,7 +30,11 @@ public struct HeightScanScreen: View {
 
     public var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            // Live AR camera feed shared with the HeightScanViewModel's
+            // session — without this the cruiser couldn't see the tree
+            // base / top to aim at.
+            ARCameraView(manager: viewModel.session)
+                .ignoresSafeArea()
             overlayChrome
             VStack {
                 Spacer()

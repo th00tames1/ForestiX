@@ -20,6 +20,11 @@ public struct DBHScanScreen: View {
 
     @StateObject private var viewModel: DBHScanViewModel
     public var onResult: (DBHResult) -> Void = { _ in }
+    /// Fired when the cruiser explicitly accepts the on-screen result
+    /// (state → .accepted). Use this for flows that want to persist the
+    /// reading only after the cruiser has confirmed it — Quick Measure
+    /// doesn't record a measurement until Accept is tapped.
+    public var onAccept: (DBHResult) -> Void = { _ in }
     /// When true, overlays the ARKit scene-reconstruction mesh on top of
     /// the camera feed so the cruiser can visually confirm that LiDAR is
     /// actually sampling the trunk surface. Safe on non-LiDAR devices
@@ -28,9 +33,11 @@ public struct DBHScanScreen: View {
 
     public init(viewModel: @autoclosure @escaping () -> DBHScanViewModel,
                 onResult: @escaping (DBHResult) -> Void = { _ in },
+                onAccept: @escaping (DBHResult) -> Void = { _ in },
                 showMeshOverlay: Bool = false) {
         _viewModel = StateObject(wrappedValue: viewModel())
         self.onResult = onResult
+        self.onAccept = onAccept
         self.showMeshOverlay = showMeshOverlay
     }
 
@@ -39,9 +46,13 @@ public struct DBHScanScreen: View {
             // Live AR camera feed wired to the same ARSession the
             // DBHScanViewModel is consuming depth frames from. Snapshot
             // tests (macOS host) fall back to a black background via
-            // ARCameraView's #else branch.
+            // ARCameraView's #else branch. The cylinder marker renders
+            // the live single-frame fit as a translucent blue cylinder
+            // at the trunk's world position — world-anchored, so it
+            // stays locked to the tree as the phone moves.
             ARCameraView(manager: viewModel.session,
-                         debugMeshOverlay: showMeshOverlay)
+                         debugMeshOverlay: showMeshOverlay,
+                         sceneMarkers: cylinderMarkers)
                 .ignoresSafeArea()
 
             GeometryReader { geo in
@@ -75,6 +86,14 @@ public struct DBHScanScreen: View {
             // the cover or stay on screen for retake.
             if newValue != nil, let r = viewModel.result {
                 onResult(r)
+            }
+        }
+        .onChange(of: viewModel.state) { _, newState in
+            // Separate "accept" hook so callers that want to persist
+            // only on an explicit user confirmation (Quick Measure) can
+            // distinguish a fitted preview from a committed reading.
+            if newState == .accepted, let r = viewModel.result {
+                onAccept(r)
             }
         }
     }
@@ -123,23 +142,64 @@ public struct DBHScanScreen: View {
     }
 
     /// Small pill floating below the crosshair with the live DBH
-    /// estimate. Rendered only while a preview value is available
-    /// (the VM clears it during capture / after accept / etc.).
+    /// estimate plus the camera-to-stem-axis distance. Both clear
+    /// themselves once capture begins so the numbers don't argue with
+    /// the final fit.
     @ViewBuilder
     private var livePreviewBadge: some View {
         if let cm = viewModel.previewDbhCm {
-            Text(String(format: "~ %.1f cm", cm))
-                .font(.caption.bold())
-                .monospacedDigit()
-                .foregroundStyle(.white)
-                .padding(.horizontal, 8).padding(.vertical, 4)
-                .background(.black.opacity(0.55))
-                .clipShape(Capsule())
-                .accessibilityIdentifier("dbhScan.livePreview")
+            VStack(spacing: 3) {
+                Text(String(format: "~ %.1f cm", cm))
+                    .font(.caption.bold())
+                    .monospacedDigit()
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 8).padding(.vertical, 4)
+                    .background(.black.opacity(0.55))
+                    .clipShape(Capsule())
+                    .accessibilityIdentifier("dbhScan.livePreview")
+                if let d = viewModel.distanceToStemCenterM {
+                    Text(String(format: "%.2f m to center", d))
+                        .font(.caption2)
+                        .monospacedDigit()
+                        .foregroundStyle(.white.opacity(0.85))
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(.black.opacity(0.40))
+                        .clipShape(Capsule())
+                        .accessibilityIdentifier("dbhScan.distanceBadge")
+                }
+            }
         } else {
-            Color.clear.frame(height: 20)
+            Color.clear.frame(height: 40)
         }
     }
+
+    // MARK: - AR markers
+
+    /// Blue translucent cylinder rendered at the live preview fit.
+    /// The cylinder is 1 m tall centred on the guide-row world Y so
+    /// it visually "sleeves" the trunk at DBH height. Empty when no
+    /// preview is available.
+    private var cylinderMarkers: [ARSceneMarker] {
+        guard let fit = viewModel.previewFit,
+              let y = viewModel.guideRowWorldY
+        else { return [] }
+        let pos = SIMD3<Float>(
+            Float(fit.centerWorldXZ.x),
+            y,
+            Float(fit.centerWorldXZ.y))   // SIMD2.y = world Z
+        return [
+            ARSceneMarker(
+                id: Self.cylinderMarkerId,
+                worldPosition: pos,
+                shape: .cylinder(radiusM: Float(fit.radiusM), heightM: 1.0),
+                colorRGBA: SIMD4(0.30, 0.65, 1.00, 0.45))
+        ]
+    }
+
+    /// Stable UUID so the cylinder anchor doesn't get torn down and
+    /// rebuilt on every frame — just its position / radius updates.
+    private static let cylinderMarkerId: UUID = UUID(
+        uuidString: "0DBHC415-0000-0000-0000-000000000001")!
 
     // MARK: - Bottom panel
 

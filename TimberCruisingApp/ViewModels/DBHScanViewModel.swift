@@ -41,6 +41,16 @@ public final class DBHScanViewModel: ObservableObject {
     /// before a formal capture. nil when the strip can't be trusted.
     /// The authoritative measurement still runs the full §7.1 burst.
     @Published public private(set) var previewDbhCm: Double?
+    /// Full single-frame preview fit — exposes centre + radius so the
+    /// scan screen can overlay a 3D cylinder at the trunk's world
+    /// position and show distance from the camera to the stem axis.
+    @Published public private(set) var previewFit: DBHEstimator.PreviewFit?
+    /// Horizontal distance from the camera to the preview's stem axis.
+    /// Updated on every depth frame; nil when no preview is available.
+    @Published public private(set) var distanceToStemCenterM: Float?
+    /// World-space Y (metres) of the guide row, used by the 3D cylinder
+    /// so it's rendered at DBH height instead of floating in mid-air.
+    @Published public private(set) var guideRowWorldY: Float?
 
     // MARK: - Dependencies
 
@@ -132,12 +142,30 @@ public final class DBHScanViewModel: ObservableObject {
         // the real result takes over.
         switch state {
         case .aligning, .armed, .rejected:
-            previewDbhCm = DBHEstimator.previewDiameterCm(
+            let fit = DBHEstimator.previewFit(
                 frame: frame,
                 tapPixel: SIMD2(Double(cx), Double(cy)),
                 guideRowY: cy)
+            previewFit = fit
+            previewDbhCm = fit?.diameterCm
+
+            // Distance readout — camera position XZ vs stem axis XZ.
+            // Uses the frame's own camera pose to stay consistent with
+            // the fit's reference frame.
+            let pose = frame.cameraPoseWorld
+            guideRowWorldY = pose.columns.3.y
+            if let f = fit {
+                let camXZ = SIMD2<Double>(Double(pose.columns.3.x),
+                                           Double(pose.columns.3.z))
+                let d = f.centerWorldXZ - camXZ
+                distanceToStemCenterM = Float((d.x * d.x + d.y * d.y).squareRoot())
+            } else {
+                distanceToStemCenterM = nil
+            }
         case .capturing, .fitted, .accepted, .manualEntry, .idle:
             previewDbhCm = nil
+            previewFit = nil
+            distanceToStemCenterM = nil
         }
     }
 

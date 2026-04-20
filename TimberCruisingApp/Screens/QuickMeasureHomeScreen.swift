@@ -70,8 +70,8 @@ public struct QuickMeasureHomeScreen: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("빠른 측정").font(.largeTitle).bold()
-            Text("나무 직경(DBH)과 수고를 바로 측정하세요. 프로젝트 설정은 필요 없어요.")
+            Text("Quick Measure").font(.largeTitle).bold()
+            Text("Measure tree diameter (DBH) and height directly — no project setup required.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -83,8 +83,8 @@ public struct QuickMeasureHomeScreen: View {
     private var actionCards: some View {
         VStack(spacing: 12) {
             actionCard(
-                title: "직경 측정 (DBH)",
-                subtitle: "LiDAR로 가슴높이 직경을 스캔",
+                title: "Diameter (DBH)",
+                subtitle: "Scan breast-height diameter with LiDAR",
                 systemImage: "ruler",
                 tint: .green
             ) {
@@ -93,8 +93,8 @@ public struct QuickMeasureHomeScreen: View {
             .accessibilityIdentifier("quickMeasure.dbhButton")
 
             actionCard(
-                title: "수고 측정 (Height)",
-                subtitle: "AR로 나무 높이를 계산",
+                title: "Height",
+                subtitle: "Measure tree height with AR",
                 systemImage: "arrow.up.and.down",
                 tint: .blue
             ) {
@@ -143,7 +143,7 @@ public struct QuickMeasureHomeScreen: View {
     private var historySection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("최근 측정").font(.headline)
+                Text("Recent measurements").font(.headline)
                 Spacer()
                 if !history.entries.isEmpty {
                     Button {
@@ -175,10 +175,10 @@ public struct QuickMeasureHomeScreen: View {
             Image(systemName: "tray")
                 .font(.title2)
                 .foregroundStyle(.tertiary)
-            Text("아직 측정 기록이 없어요")
+            Text("No measurements yet")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-            Text("측정을 시작하면 여기에 시간순으로 쌓입니다.")
+            Text("Start a scan and your readings will appear here in chronological order.")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
@@ -195,7 +195,12 @@ public struct QuickMeasureHomeScreen: View {
             DBHScanScreen(
                 viewModel: DBHScanViewModel(
                     calibration: .identity),
-                onResult: { result in
+                // Deliberately no onResult wiring — the cruiser needs to
+                // see the on-screen result, then explicitly confirm via
+                // Accept before we persist or close. `onAccept` below is
+                // the single source of truth for "this reading goes
+                // into the history".
+                onAccept: { result in
                     history.append(QuickMeasureEntry(
                         kind: .dbh,
                         value: Double(result.diameterCm),
@@ -222,7 +227,7 @@ public struct QuickMeasureHomeScreen: View {
             HeightScanScreen(
                 viewModel: HeightScanViewModel(
                     calibration: .identity),
-                onResult: { result in
+                onAccept: { result in
                     history.append(QuickMeasureEntry(
                         kind: .height,
                         value: Double(result.heightM),
@@ -264,9 +269,12 @@ private struct HistoryRow: View {
                 .foregroundStyle(entry.kind == .dbh ? Color.green : Color.blue)
                 .frame(width: 28)
             VStack(alignment: .leading, spacing: 2) {
-                Text(valueLabel)
-                    .font(.headline)
-                    .monospacedDigit()
+                HStack(spacing: 8) {
+                    Text(valueLabel)
+                        .font(.headline)
+                        .monospacedDigit()
+                    confidenceBadge
+                }
                 Text(secondaryLabel)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -276,7 +284,7 @@ private struct HistoryRow: View {
                 Button(role: .destructive) {
                     onDelete()
                 } label: {
-                    Label("삭제", systemImage: "trash")
+                    Label("Delete", systemImage: "trash")
                 }
             } label: {
                 Image(systemName: "ellipsis")
@@ -312,7 +320,36 @@ private struct HistoryRow: View {
         } else {
             sigma = ""
         }
-        return "\(when) · \(entry.confidenceRaw)\(sigma)"
+        return "\(when)\(sigma)"
+    }
+
+    // MARK: - Confidence badge
+
+    /// Translates the raw `green` / `yellow` / `red` tier the scan engine
+    /// records (spec §7.9) into a cruiser-legible quality label. "red"
+    /// on its own is meaningless to someone who hasn't read the spec;
+    /// "Low quality" tells them to retake.
+    private var confidenceBadge: some View {
+        let (label, color) = tierLabel(entry.confidenceRaw)
+        return Text(label)
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(color.opacity(0.18))
+            .overlay(
+                Capsule().stroke(color.opacity(0.8), lineWidth: 0.5)
+            )
+            .foregroundStyle(color)
+            .clipShape(Capsule())
+    }
+
+    private func tierLabel(_ raw: String) -> (String, Color) {
+        switch raw {
+        case "green":  return ("Good",        .green)
+        case "yellow": return ("Usable",      .orange)
+        case "red":    return ("Low quality", .red)
+        default:       return (raw.capitalized, .secondary)
+        }
     }
 }
 

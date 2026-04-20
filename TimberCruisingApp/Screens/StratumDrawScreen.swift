@@ -33,17 +33,17 @@ public struct StratumDrawScreen: View {
             mapArea
             controlPanel
         }
-        .navigationTitle("구역 그리기")
+        .navigationTitle("Draw stratum")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .task { viewModel.configure(with: environment) }
-        .alert("오류",
+        .alert("Error",
                isPresented: Binding(
                 get: { viewModel.errorMessage != nil },
                 set: { if !$0 { viewModel.errorMessage = nil } })
         ) {
-            Button("확인", role: .cancel) { viewModel.errorMessage = nil }
+            Button("OK", role: .cancel) { viewModel.errorMessage = nil }
         } message: {
             Text(viewModel.errorMessage ?? "")
         }
@@ -56,9 +56,9 @@ public struct StratumDrawScreen: View {
 
     @ViewBuilder private var helpBanner: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Label("사용법", systemImage: "hand.tap.fill")
+            Label("How to use", systemImage: "hand.tap.fill")
                 .font(.subheadline.bold())
-            Text("지도 위에서 벌채 구역의 **모서리를 순서대로 탭**하세요. 최소 3 개의 점을 찍으면 자동으로 면적이 계산됩니다. 실수하면 [되돌리기] 로 마지막 점을 지울 수 있어요.")
+            Text("**Tap the corners of the cutting block in order** on the map. Area is computed once you've placed at least 3 points. Tap **Undo** to remove the last point if you mis-tapped.")
                 .font(.caption)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -109,7 +109,7 @@ public struct StratumDrawScreen: View {
             Image(systemName: "map")
                 .font(.system(size: 40))
                 .foregroundStyle(.secondary)
-            Text("지도는 iOS 에서만 표시됩니다")
+            Text("Map is iOS-only")
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -126,7 +126,7 @@ public struct StratumDrawScreen: View {
                     Text(viewModel.vertexCountLabel)
                         .font(.subheadline.bold())
                     if viewModel.areaAcres > 0 {
-                        Text(String(format: "면적: %.3f 에이커", viewModel.areaAcres))
+                        Text(String(format: "Area: %.3f acres", viewModel.areaAcres))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -135,18 +135,18 @@ public struct StratumDrawScreen: View {
                 Button {
                     viewModel.removeLast()
                 } label: {
-                    Label("되돌리기", systemImage: "arrow.uturn.backward")
+                    Label("Undo", systemImage: "arrow.uturn.backward")
                 }
                 .disabled(viewModel.vertices.isEmpty)
                 Button(role: .destructive) {
                     viewModel.clear()
                 } label: {
-                    Label("지우기", systemImage: "trash")
+                    Label("Clear", systemImage: "trash")
                 }
                 .disabled(viewModel.vertices.isEmpty)
             }
 
-            TextField("구역 이름 (예: 1구획, 북쪽블록)",
+            TextField("Stratum name (e.g. Block 1, North block)",
                       text: $viewModel.name)
                 .textFieldStyle(.roundedBorder)
                 #if os(iOS)
@@ -159,7 +159,7 @@ public struct StratumDrawScreen: View {
             } label: {
                 HStack {
                     if viewModel.isSaving { ProgressView() }
-                    Text(viewModel.isSaving ? "저장 중…" : "구역 저장")
+                    Text(viewModel.isSaving ? "Saving…" : "Save stratum")
                         .bold()
                 }
                 .frame(maxWidth: .infinity, minHeight: 56)

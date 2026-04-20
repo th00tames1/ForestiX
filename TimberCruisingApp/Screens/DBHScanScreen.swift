@@ -113,10 +113,32 @@ public struct DBHScanScreen: View {
 
     private var crosshair: some View {
         let color: Color = viewModel.crosshairIsStable ? .green : .red
-        return Circle()
-            .strokeBorder(color, lineWidth: 2)
-            .frame(width: 28, height: 28)
-            .accessibilityIdentifier("dbhScan.crosshair")
+        return VStack(spacing: 6) {
+            Circle()
+                .strokeBorder(color, lineWidth: 2)
+                .frame(width: 28, height: 28)
+                .accessibilityIdentifier("dbhScan.crosshair")
+            livePreviewBadge
+        }
+    }
+
+    /// Small pill floating below the crosshair with the live DBH
+    /// estimate. Rendered only while a preview value is available
+    /// (the VM clears it during capture / after accept / etc.).
+    @ViewBuilder
+    private var livePreviewBadge: some View {
+        if let cm = viewModel.previewDbhCm {
+            Text(String(format: "~ %.1f cm", cm))
+                .font(.caption.bold())
+                .monospacedDigit()
+                .foregroundStyle(.white)
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(.black.opacity(0.55))
+                .clipShape(Capsule())
+                .accessibilityIdentifier("dbhScan.livePreview")
+        } else {
+            Color.clear.frame(height: 20)
+        }
     }
 
     // MARK: - Bottom panel

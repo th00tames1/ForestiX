@@ -398,6 +398,75 @@ public enum DBHEstimator {
         return sd / mean
     }
 
+    // MARK: - Live preview (single-frame, no RANSAC)
+
+    /// Single-frame approximation used by the scan HUD to show a live
+    /// DBH estimate near the crosshair while the cruiser is aiming.
+    ///
+    /// This is intentionally much cheaper than the full `estimate(input:)`
+    /// pipeline:
+    ///
+    ///   1. Take a 5×5 median depth at `tapPixel`. If it's outside the
+    ///      0.5–3.0 m scan band, no preview.
+    ///   2. Walk the guide row outwards from the tap column to gather
+    ///      stem pixels within ±15 cm of that depth (same strip the
+    ///      burst uses).
+    ///   3. Back-project the leftmost and rightmost strip pixels into
+    ///      world XZ and return the chord distance as the diameter
+    ///      estimate.
+    ///
+    /// Looking roughly head-on at the trunk, the strip's left and right
+    /// silhouette columns are tangent to the cylinder surface — so the
+    /// chord between their back-projections is the trunk diameter as
+    /// seen from the camera (not a radius, not a partial arc). Accuracy
+    /// is good enough (≈ ±2 cm when aimed head-on, worse with oblique
+    /// angles) to guide the cruiser; the real measurement still runs
+    /// the full §7.1 pipeline on capture.
+    ///
+    /// Returns nil when the preview can't be trusted at all
+    /// (out-of-range depth, strip too short, etc.).
+    public static func previewDiameterCm(
+        frame: ARDepthFrame,
+        tapPixel: SIMD2<Double>,
+        guideRowY: Int,
+        deltaDepth: Float = 0.15
+    ) -> Double? {
+        guard let dTap = medianDepth(around: tapPixel, frame: frame, radius: 2)
+        else { return nil }
+        guard (0.5...3.0).contains(dTap) else { return nil }
+
+        let strip = extractGuideRowStemStrip(
+            frame: frame,
+            guideRowY: guideRowY,
+            tapColumn: Int(tapPixel.x.rounded()),
+            dTap: dTap,
+            deltaDepth: deltaDepth)
+        guard let leftCol = strip.first, let rightCol = strip.last,
+              rightCol > leftCol
+        else { return nil }
+
+        let left = BackProjection.worldXZ(
+            x: Double(leftCol), y: Double(guideRowY),
+            depth: Double(frame.depth(atX: leftCol, y: guideRowY)),
+            intrinsics: frame.intrinsics,
+            cameraPoseWorld: frame.cameraPoseWorld)
+        let right = BackProjection.worldXZ(
+            x: Double(rightCol), y: Double(guideRowY),
+            depth: Double(frame.depth(atX: rightCol, y: guideRowY)),
+            intrinsics: frame.intrinsics,
+            cameraPoseWorld: frame.cameraPoseWorld)
+
+        let dx = right.x - left.x
+        let dz = right.y - left.y    // SIMD2 y-slot holds world-Z here
+        let chordM = (dx * dx + dz * dz).squareRoot()
+        let diameterCm = chordM * 100
+
+        // Reject wild values so we don't flash obviously-wrong numbers
+        // mid-aim. The §7.1 sanity tree does the same on the final fit.
+        guard (5.0...200.0).contains(diameterCm) else { return nil }
+        return diameterCm
+    }
+
     // MARK: - Rejection formatting
 
     private static func firstFailingRejectReason(_ checks: [Check]) -> String? {

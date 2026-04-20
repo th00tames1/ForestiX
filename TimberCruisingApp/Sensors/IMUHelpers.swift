@@ -127,6 +127,15 @@ public final class IMUPitchBuffer {
         samples.removeAll()
     }
 
+    /// Most recent buffered sample's pitch, if any. Used by the scan
+    /// view model as a last-resort fallback when the preferred ±200 ms
+    /// and ±600 ms windows are both empty (e.g. the IMU stream paused
+    /// for longer than expected) — always beats silently dropping the
+    /// user's tap.
+    public func mostRecentPitch() -> Double? {
+        samples.last?.pitchRad
+    }
+
     private func evictOlderThan(_ cutoff: TimeInterval) {
         if let firstKeep = samples.firstIndex(where: { $0.timestamp >= cutoff }) {
             if firstKeep > 0 { samples.removeFirst(firstKeep) }

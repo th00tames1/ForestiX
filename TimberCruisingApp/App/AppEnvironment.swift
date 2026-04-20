@@ -23,6 +23,9 @@ public final class AppEnvironment: ObservableObject {
     public let volumeEquationRepository: any VolumeEquationRepository
     public let hdFitRepository: any HeightDiameterFitRepository
     public let settings: AppSettings
+    /// Local, project-less DBH / Height log surfaced on the Quick Measure
+    /// home. Independent of Core Data — see QuickMeasureHistory.swift.
+    public let quickMeasureHistory: QuickMeasureHistory
 
     /// Raw Core Data stack — exposed for Phase 7 backup/restore, which
     /// needs to migrate the persistent store file as a whole unit.
@@ -42,6 +45,7 @@ public final class AppEnvironment: ObservableObject {
         volumeEquationRepository: any VolumeEquationRepository,
         hdFitRepository: any HeightDiameterFitRepository,
         settings: AppSettings,
+        quickMeasureHistory: QuickMeasureHistory? = nil,
         coreDataStack: CoreDataStack? = nil
     ) {
         self.projectRepository = projectRepository
@@ -54,11 +58,16 @@ public final class AppEnvironment: ObservableObject {
         self.volumeEquationRepository = volumeEquationRepository
         self.hdFitRepository = hdFitRepository
         self.settings = settings
+        self.quickMeasureHistory = quickMeasureHistory ?? QuickMeasureHistory()
         self.coreDataStack = coreDataStack
     }
 
     /// Wrap a shared Core Data stack with its default repositories.
-    public convenience init(stack: CoreDataStack, settings: AppSettings) {
+    public convenience init(
+        stack: CoreDataStack,
+        settings: AppSettings,
+        quickMeasureHistory: QuickMeasureHistory? = nil
+    ) {
         self.init(
             projectRepository: CoreDataProjectRepository(stack: stack),
             stratumRepository: CoreDataStratumRepository(stack: stack),
@@ -70,6 +79,7 @@ public final class AppEnvironment: ObservableObject {
             volumeEquationRepository: CoreDataVolumeEquationRepository(stack: stack),
             hdFitRepository: CoreDataHeightDiameterFitRepository(stack: stack),
             settings: settings,
+            quickMeasureHistory: quickMeasureHistory,
             coreDataStack: stack
         )
     }
@@ -98,7 +108,10 @@ public final class AppEnvironment: ObservableObject {
     public static func preview() -> AppEnvironment {
         do {
             let stack = try CoreDataStack(configuration: .inMemory)
-            return AppEnvironment(stack: stack, settings: AppSettings.ephemeral())
+            return AppEnvironment(
+                stack: stack,
+                settings: AppSettings.ephemeral(),
+                quickMeasureHistory: QuickMeasureHistory.ephemeral())
         } catch {
             fatalError("AppEnvironment.preview(): in-memory stack failed: \(error)")
         }

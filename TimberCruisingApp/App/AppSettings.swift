@@ -21,6 +21,7 @@ public final class AppSettings: ObservableObject {
         public static let tileURLTemplate         = "tc.tileURLTemplate"
         public static let tileProviderLabel       = "tc.tileProviderLabel"
         public static let providerUsageAck        = "tc.providerUsageAcknowledged"
+        public static let advancedMode            = "tc.advancedMode"
     }
 
     private let defaults: UserDefaults
@@ -69,5 +70,15 @@ public final class AppSettings: ObservableObject {
     public var providerUsageAcknowledged: Bool {
         get { defaults.bool(forKey: Keys.providerUsageAck) }
         set { defaults.set(newValue, forKey: Keys.providerUsageAck); objectWillChange.send() }
+    }
+
+    /// When `true`, the full project/plot/cruise workflow is shown at
+    /// app launch. When `false` (the default for new users), Forestix
+    /// boots straight into Quick Measure — just DBH + Height — so
+    /// cruisers who only want a one-off measurement aren't forced
+    /// through project setup.
+    public var advancedMode: Bool {
+        get { defaults.bool(forKey: Keys.advancedMode) }
+        set { defaults.set(newValue, forKey: Keys.advancedMode); objectWillChange.send() }
     }
 }

@@ -66,6 +66,16 @@ public final class DBHScanViewModel: ObservableObject {
     private var burstTap: SIMD2<Double> = .zero
     private var depthCancellable: AnyCancellable?
 
+    /// Last time `previewFit` was recomputed (ProcessInfo uptime).
+    /// Used to throttle the relatively expensive strip-extract +
+    /// back-projection work to ~10 Hz so the scan HUD doesn't churn
+    /// SwiftUI every ARKit frame.
+    private var lastPreviewUpdate: TimeInterval = 0
+    /// Minimum interval between preview recomputations. 100 ms is well
+    /// below human reaction time for reading the number, and it cut
+    /// the scan-screen lag dramatically on device.
+    private let previewMinIntervalSec: TimeInterval = 0.1
+
     // MARK: - Construction
 
     public init(
@@ -136,35 +146,50 @@ public final class DBHScanViewModel: ObservableObject {
             if burstBuffer.count >= burstSize { finishCapture() }
         }
 
-        // Live preview — runs cheaply on every depth frame while the
-        // cruiser is lining up the shot. Only refresh the HUD number in
-        // states where a preview makes sense; once capture is locked in,
-        // the real result takes over.
+        // Live preview — expensive work gated by a throttle so it runs
+        // at ~10 Hz instead of ARKit's 60 Hz. State-change side effects
+        // (e.g. clearing the cylinder marker when capture begins) still
+        // happen immediately so we don't flash stale numbers.
+        let previewable: Bool
         switch state {
-        case .aligning, .armed, .rejected:
-            let fit = DBHEstimator.previewFit(
-                frame: frame,
-                tapPixel: SIMD2(Double(cx), Double(cy)),
-                guideRowY: cy)
-            previewFit = fit
-            previewDbhCm = fit?.diameterCm
+        case .aligning, .armed, .rejected: previewable = true
+        case .capturing, .fitted, .accepted, .manualEntry, .idle:
+            previewable = false
+        }
 
-            // Distance readout — camera position XZ vs stem axis XZ.
-            // Uses the frame's own camera pose to stay consistent with
-            // the fit's reference frame.
-            let pose = frame.cameraPoseWorld
-            guideRowWorldY = pose.columns.3.y
-            if let f = fit {
-                let camXZ = SIMD2<Double>(Double(pose.columns.3.x),
-                                           Double(pose.columns.3.z))
-                let d = f.centerWorldXZ - camXZ
-                distanceToStemCenterM = Float((d.x * d.x + d.y * d.y).squareRoot())
-            } else {
+        if !previewable {
+            // Immediate clear — don't wait for the throttle so the
+            // cylinder overlay doesn't linger over a committed result.
+            if previewFit != nil {
+                previewFit = nil
+                previewDbhCm = nil
                 distanceToStemCenterM = nil
             }
-        case .capturing, .fitted, .accepted, .manualEntry, .idle:
-            previewDbhCm = nil
-            previewFit = nil
+            return
+        }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastPreviewUpdate >= previewMinIntervalSec else { return }
+        lastPreviewUpdate = now
+
+        let fit = DBHEstimator.previewFit(
+            frame: frame,
+            tapPixel: SIMD2(Double(cx), Double(cy)),
+            guideRowY: cy)
+        previewFit = fit
+        previewDbhCm = fit?.diameterCm
+
+        // Distance readout — camera position XZ vs stem axis XZ.
+        // Uses the frame's own camera pose to stay consistent with the
+        // fit's reference frame.
+        let pose = frame.cameraPoseWorld
+        guideRowWorldY = pose.columns.3.y
+        if let f = fit {
+            let camXZ = SIMD2<Double>(Double(pose.columns.3.x),
+                                       Double(pose.columns.3.z))
+            let d = f.centerWorldXZ - camXZ
+            distanceToStemCenterM = Float((d.x * d.x + d.y * d.y).squareRoot())
+        } else {
             distanceToStemCenterM = nil
         }
     }

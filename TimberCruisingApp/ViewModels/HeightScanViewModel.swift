@@ -76,6 +76,13 @@ public final class HeightScanViewModel: ObservableObject {
     /// for both taps, so we lock it on the first tap and reuse it.
     private var standingPointWorldAtAimTop: SIMD3<Float>?
 
+    /// World hit point for the Aim Top / Aim Base taps, if the host
+    /// supplied one (e.g. from a screen-centre raycast). Purely for
+    /// marker visualisation — height math still runs on α_top / α_base
+    /// + d_h, which is the spec's authoritative input.
+    private var topAimedWorld: SIMD3<Float>?
+    private var baseAimedWorld: SIMD3<Float>?
+
     /// Last sample count folded into α_top / α_base for diagnostics
     /// (REQ-HGT-004: "sample count logged").
     @Published public private(set) var alphaTopSampleCount: Int = 0
@@ -179,10 +186,23 @@ public final class HeightScanViewModel: ObservableObject {
     /// Caller supplies the current ARKit camera position so the anchor
     /// is placed in world frame.
     public func anchorHere(standingPointWorld: SIMD3<Float>) {
-        anchorPointWorld = standingPointWorld
+        anchorHere(anchorPointWorld: standingPointWorld,
+                   standingPointWorld: standingPointWorld)
+    }
+
+    /// Richer overload that separates the tree-base anchor from the
+    /// cruiser's current standing pose. Use this when the host has a
+    /// screen-centre raycast — pass the hit world point as the anchor
+    /// and the live camera pose as the standing point. The height
+    /// algorithm only cares about the horizontal distance between them.
+    public func anchorHere(anchorPointWorld: SIMD3<Float>,
+                           standingPointWorld: SIMD3<Float>) {
+        self.anchorPointWorld = anchorPointWorld
         alphaTopRad = nil
         alphaBaseRad = nil
         standingPointWorldAtAimTop = nil
+        topAimedWorld = nil
+        baseAimedWorld = nil
         trackingDroppedDuringMeasurement = false
         state = .anchorSet
         state = .walking
@@ -208,27 +228,35 @@ public final class HeightScanViewModel: ObservableObject {
     }
 
     /// Step (c) — Aim Top tap. α_top = median pitch over ±200 ms.
+    /// `aimedAtWorld` is an optional hint from a screen-centre raycast
+    /// used purely for the top-marker position. If nil, the marker
+    /// falls back to (anchor.xz, standing.y + d_h · tan(α_top)).
     public func captureTop(at tapTime: TimeInterval,
-                           standingPointWorld: SIMD3<Float>) {
+                           standingPointWorld: SIMD3<Float>,
+                           aimedAtWorld: SIMD3<Float>? = nil) {
         guard state == .aimTopArmed, anchorPointWorld != nil else { return }
         guard let median = resilientMedianPitch(tapTime: tapTime) else { return }
         alphaTopRad = Float(median)
         alphaTopSampleCount = pitchBuffer.sampleCount(centeredOn: tapTime)
         standingPointWorldAtAimTop = standingPointWorld
+        topAimedWorld = aimedAtWorld
         state = .aimTopCaptured
         state = .aimBaseArmed
         rebuildSceneMarkers()
     }
 
     /// Step (d) — Aim Base tap. α_base = median pitch over ±200 ms.
-    /// Triggers estimation.
-    public func captureBase(at tapTime: TimeInterval) {
+    /// Triggers estimation. `aimedAtWorld` is the same optional raycast
+    /// hint used for the base marker.
+    public func captureBase(at tapTime: TimeInterval,
+                            aimedAtWorld: SIMD3<Float>? = nil) {
         guard state == .aimBaseArmed, anchorPointWorld != nil,
               alphaTopRad != nil, standingPointWorldAtAimTop != nil
         else { return }
         guard let median = resilientMedianPitch(tapTime: tapTime) else { return }
         alphaBaseRad = Float(median)
         alphaBaseSampleCount = pitchBuffer.sampleCount(centeredOn: tapTime)
+        baseAimedWorld = aimedAtWorld
         compute()
         rebuildSceneMarkers()
     }
@@ -245,32 +273,37 @@ public final class HeightScanViewModel: ObservableObject {
         return pitchBuffer.mostRecentPitch()
     }
 
-    /// Button-handler entry for the Anchor Here tap. Pulls the current
-    /// camera position from the ARKit session; no-op if no frame yet.
-    public func anchorHereNow() {
-        guard let p = currentCameraTranslation() else { return }
-        anchorHere(standingPointWorld: p)
+    /// Button-handler entry for the Anchor Here tap. `screenCenterHit`
+    /// is an optional world point from the host's raycast — when
+    /// present, it's used as the tree-base anchor. Without it we fall
+    /// back to the camera position (spec's "touch phone to tree base"
+    /// flow).
+    public func anchorHereNow(screenCenterHit: SIMD3<Float>? = nil) {
+        guard let cam = currentCameraTranslation() else { return }
+        let anchor = screenCenterHit ?? cam
+        anchorHere(anchorPointWorld: anchor,
+                   standingPointWorld: cam)
     }
 
     /// Button-handler entry for Aim Top. Uses the current camera pose +
-    /// the current timestamp to drive the IMU median.
+    /// the current timestamp to drive the IMU median. `screenCenterHit`,
+    /// when non-nil, seeds the top-marker position.
     ///
     /// Timestamp MUST match the CMDeviceMotion clock — those samples are
     /// stamped with `ProcessInfo.systemUptime` (seconds since boot), NOT
     /// `Date().timeIntervalSinceReferenceDate` (seconds since 2001).
-    /// Passing the wrong clock here made the ±200 ms median window miss
-    /// every buffered sample, which is why the Aim Top button appeared
-    /// to do nothing even with a healthy IMU stream.
-    public func captureTopNow() {
+    public func captureTopNow(screenCenterHit: SIMD3<Float>? = nil) {
         let p = currentCameraTranslation() ?? .zero
         captureTop(at: nowForPitchBuffer(),
-                   standingPointWorld: p)
+                   standingPointWorld: p,
+                   aimedAtWorld: screenCenterHit)
     }
 
     /// Button-handler entry for Aim Base. Same clock convention as
     /// `captureTopNow()` — see the Aim Top docstring.
-    public func captureBaseNow() {
-        captureBase(at: nowForPitchBuffer())
+    public func captureBaseNow(screenCenterHit: SIMD3<Float>? = nil) {
+        captureBase(at: nowForPitchBuffer(),
+                    aimedAtWorld: screenCenterHit)
     }
 
     /// Monotonic clock matching `CMDeviceMotion.timestamp`. Keep one
@@ -305,6 +338,8 @@ public final class HeightScanViewModel: ObservableObject {
         alphaTopRad = nil
         alphaBaseRad = nil
         standingPointWorldAtAimTop = nil
+        topAimedWorld = nil
+        baseAimedWorld = nil
         result = nil
         dhMeters = 0
         walkHintMeters = 0
@@ -384,30 +419,48 @@ public final class HeightScanViewModel: ObservableObject {
                 colorRGBA: SIMD4(1.00, 0.30, 0.30, 1.00)))  // red
         }
 
-        if let anchor = anchorPointWorld,
-           let standing = standingPointWorldAtAimTop,
-           let alphaTop = alphaTopRad {
-            let dh = horizontalDistance(from: standing, to: anchor)
-            let y = standing.y + dh * tan(alphaTop)
-            let top = SIMD3<Float>(anchor.x, y, anchor.z)
-            markers.append(ARSceneMarker(
-                id: Self.topMarkerId,
-                worldPosition: top,
-                shape: .sphere(radiusM: 0.08),
-                colorRGBA: SIMD4(1.00, 0.85, 0.15, 1.00)))  // yellow
+        // Prefer the raycast hit if the host supplied one — that's the
+        // exact pixel the cruiser was pointing at. Otherwise compute a
+        // fallback position on the anchor's vertical axis at the
+        // α-derived height (still visible, just less pixel-accurate).
+        if let alphaTop = alphaTopRad {
+            let position: SIMD3<Float>? = {
+                if let hit = topAimedWorld { return hit }
+                if let anchor = anchorPointWorld,
+                   let standing = standingPointWorldAtAimTop {
+                    let dh = horizontalDistance(from: standing, to: anchor)
+                    let y = standing.y + dh * tan(alphaTop)
+                    return SIMD3<Float>(anchor.x, y, anchor.z)
+                }
+                return nil
+            }()
+            if let p = position {
+                markers.append(ARSceneMarker(
+                    id: Self.topMarkerId,
+                    worldPosition: p,
+                    shape: .sphere(radiusM: 0.08),
+                    colorRGBA: SIMD4(1.00, 0.85, 0.15, 1.00)))  // yellow
+            }
         }
 
-        if let anchor = anchorPointWorld,
-           let standing = standingPointWorldAtAimTop,
-           let alphaBase = alphaBaseRad {
-            let dh = horizontalDistance(from: standing, to: anchor)
-            let y = standing.y + dh * tan(alphaBase)
-            let base = SIMD3<Float>(anchor.x, y, anchor.z)
-            markers.append(ARSceneMarker(
-                id: Self.baseMarkerId,
-                worldPosition: base,
-                shape: .sphere(radiusM: 0.08),
-                colorRGBA: SIMD4(0.25, 0.85, 0.35, 1.00)))  // green
+        if let alphaBase = alphaBaseRad {
+            let position: SIMD3<Float>? = {
+                if let hit = baseAimedWorld { return hit }
+                if let anchor = anchorPointWorld,
+                   let standing = standingPointWorldAtAimTop {
+                    let dh = horizontalDistance(from: standing, to: anchor)
+                    let y = standing.y + dh * tan(alphaBase)
+                    return SIMD3<Float>(anchor.x, y, anchor.z)
+                }
+                return nil
+            }()
+            if let p = position {
+                markers.append(ARSceneMarker(
+                    id: Self.baseMarkerId,
+                    worldPosition: p,
+                    shape: .sphere(radiusM: 0.08),
+                    colorRGBA: SIMD4(0.25, 0.85, 0.35, 1.00)))  // green
+            }
         }
 
         sceneMarkers = markers

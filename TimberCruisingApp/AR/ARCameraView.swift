@@ -70,13 +70,19 @@ public struct ARCameraView: UIViewRepresentable {
     public let session: ARSession
     public var debugMeshOverlay: Bool
     public var sceneMarkers: [ARSceneMarker]
+    /// Optional raycaster that gets bound to the underlying ARView on
+    /// creation so callers can fire screen-centre raycasts (Height
+    /// scan uses this for Anchor / Aim Top / Aim Base).
+    public var raycaster: ARCenterRaycaster?
 
     public init(session: ARSession,
                 debugMeshOverlay: Bool = false,
-                sceneMarkers: [ARSceneMarker] = []) {
+                sceneMarkers: [ARSceneMarker] = [],
+                raycaster: ARCenterRaycaster? = nil) {
         self.session = session
         self.debugMeshOverlay = debugMeshOverlay
         self.sceneMarkers = sceneMarkers
+        self.raycaster = raycaster
     }
 
     public func makeCoordinator() -> Coordinator { Coordinator() }
@@ -104,6 +110,7 @@ public struct ARCameraView: UIViewRepresentable {
         view.renderOptions.insert(.disableMotionBlur)
         // Camera background fills behind any SwiftUI overlay we put
         // above this view — no need to set background colour.
+        raycaster?.arview = view
         return view
     }
 
@@ -115,6 +122,11 @@ public struct ARCameraView: UIViewRepresentable {
             view.debugOptions.insert(.showSceneUnderstanding)
         } else {
             view.debugOptions.remove(.showSceneUnderstanding)
+        }
+        // Rebind on every update in case the binding instance changed
+        // (SwiftUI can recreate helpers across view updates).
+        if raycaster?.arview !== view {
+            raycaster?.arview = view
         }
         applyMarkers(to: view, coordinator: context.coordinator)
     }
@@ -170,11 +182,19 @@ public struct ARCameraView: UIViewRepresentable {
             green: CGFloat(marker.colorRGBA.y),
             blue:  CGFloat(marker.colorRGBA.z),
             alpha: CGFloat(marker.colorRGBA.w))
-        // Unlit materials ignore environment lighting, so the marker keeps
-        // a vivid, uniform colour against variable forest lighting — this
-        // is a diagnostic / HUD overlay, not a "believable" 3D asset.
-        let material = UnlitMaterial(color: uiColor)
-        return ModelEntity(mesh: mesh, materials: [material])
+
+        // Opaque markers (alpha ≥ 1) get SimpleMaterial so they pick up
+        // environment lighting and look like actual 3D balls. Translucent
+        // markers (the DBH trunk cylinder at 0.45 alpha) need blending
+        // that SimpleMaterial doesn't do — fall back to UnlitMaterial,
+        // which renders the alpha correctly at the cost of flat shading.
+        let isOpaque = marker.colorRGBA.w >= 0.999
+        let materials: [any RealityKit.Material] = isOpaque
+            ? [SimpleMaterial(color: uiColor,
+                              roughness: 0.5,
+                              isMetallic: false)]
+            : [UnlitMaterial(color: uiColor)]
+        return ModelEntity(mesh: mesh, materials: materials)
     }
 }
 
@@ -185,7 +205,8 @@ public struct ARCameraView: UIViewRepresentable {
 public struct ARCameraView: View {
     public init(session: Any,
                 debugMeshOverlay: Bool = false,
-                sceneMarkers: [ARSceneMarker] = []) {}
+                sceneMarkers: [ARSceneMarker] = [],
+                raycaster: ARCenterRaycaster? = nil) {}
     public var body: some View { Color.black }
 }
 
@@ -197,20 +218,24 @@ public struct ARCameraView: View {
 extension ARCameraView {
     public init(manager: ARKitSessionManager,
                 debugMeshOverlay: Bool = false,
-                sceneMarkers: [ARSceneMarker] = []) {
+                sceneMarkers: [ARSceneMarker] = [],
+                raycaster: ARCenterRaycaster? = nil) {
         self.init(session: manager.session,
                   debugMeshOverlay: debugMeshOverlay,
-                  sceneMarkers: sceneMarkers)
+                  sceneMarkers: sceneMarkers,
+                  raycaster: raycaster)
     }
 }
 #else
 extension ARCameraView {
     public init(manager: Any,
                 debugMeshOverlay: Bool = false,
-                sceneMarkers: [ARSceneMarker] = []) {
+                sceneMarkers: [ARSceneMarker] = [],
+                raycaster: ARCenterRaycaster? = nil) {
         self.init(session: manager,
                   debugMeshOverlay: debugMeshOverlay,
-                  sceneMarkers: sceneMarkers)
+                  sceneMarkers: sceneMarkers,
+                  raycaster: raycaster)
     }
 }
 #endif

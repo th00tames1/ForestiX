@@ -16,10 +16,12 @@ import Common
 import Models
 import Sensors
 import AR
+import simd
 
 public struct HeightScanScreen: View {
 
     @StateObject private var viewModel: HeightScanViewModel
+    @StateObject private var raycaster = ARCenterRaycaster()
     public var onResult: (HeightResult) -> Void = { _ in }
     /// Fires when the cruiser explicitly accepts the result shown on
     /// screen (state → .accepted). Hosts that want to persist only on
@@ -46,10 +48,13 @@ public struct HeightScanScreen: View {
             // session. The scene markers come from the VM and pin the
             // anchor / top / base reference points in world space so
             // the cruiser can pan away and come back without losing
-            // track of where the measurement started.
+            // track of where the measurement started. The raycaster
+            // captures a weak ref to the ARView so button handlers can
+            // turn "cruiser tapped while aiming here" into a world hit.
             ARCameraView(manager: viewModel.session,
                          debugMeshOverlay: showMeshOverlay,
-                         sceneMarkers: viewModel.sceneMarkers)
+                         sceneMarkers: viewModel.sceneMarkers,
+                         raycaster: raycaster)
                 .ignoresSafeArea()
             overlayChrome
             VStack {
@@ -77,25 +82,56 @@ public struct HeightScanScreen: View {
 
     // MARK: - Overlay chrome per stage
 
+    /// Always-visible centre crosshair so the cruiser can see exactly
+    /// which world point each button will capture. Label changes with
+    /// state to explain what the next tap will do.
     @ViewBuilder
     private var overlayChrome: some View {
-        switch viewModel.state {
-        case .aimTopArmed:
-            crosshair(label: "Aim at treetop")
-                .accessibilityIdentifier("heightScan.crosshair.top")
-        case .aimBaseArmed:
-            crosshair(label: "Aim at tree base")
-                .accessibilityIdentifier("heightScan.crosshair.base")
-        default:
-            EmptyView()
+        if let label = crosshairLabel {
+            crosshair(label: label)
+                .accessibilityIdentifier(crosshairIdentifier)
         }
     }
 
+    private var crosshairLabel: String? {
+        switch viewModel.state {
+        case .idle, .anchorSet: return "Aim at tree base"
+        case .walking:          return "Walk back — aim stays on tree"
+        case .aimTopArmed:      return "Aim at treetop"
+        case .aimBaseArmed:     return "Aim at tree base"
+        case .aimTopCaptured,
+             .computed,
+             .rejected,
+             .accepted,
+             .manualEntry:
+            return nil
+        }
+    }
+
+    private var crosshairIdentifier: String {
+        switch viewModel.state {
+        case .aimTopArmed:  return "heightScan.crosshair.top"
+        case .aimBaseArmed: return "heightScan.crosshair.base"
+        default:            return "heightScan.crosshair"
+        }
+    }
+
+    /// Ring + cross mark — the cross explicitly pinpoints the world
+    /// pixel a raycast will sample from, making "what am I actually
+    /// tagging" unambiguous.
     private func crosshair(label: String) -> some View {
         VStack(spacing: 8) {
-            Circle()
-                .strokeBorder(Color.yellow, lineWidth: 2)
-                .frame(width: 36, height: 36)
+            ZStack {
+                Circle()
+                    .strokeBorder(Color.yellow, lineWidth: 2)
+                    .frame(width: 36, height: 36)
+                Rectangle()
+                    .fill(Color.yellow)
+                    .frame(width: 14, height: 1.5)
+                Rectangle()
+                    .fill(Color.yellow)
+                    .frame(width: 1.5, height: 14)
+            }
             Text(label)
                 .font(.caption.bold())
                 .foregroundStyle(.white)
@@ -251,7 +287,7 @@ public struct HeightScanScreen: View {
         switch viewModel.state {
         case .idle, .anchorSet:
             HStack(spacing: 12) {
-                Button("Anchor Here") { viewModel.anchorHereNow() }
+                Button("Anchor Here") { anchorTap() }
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("heightScan.anchorButton")
                 Button("Manual") { viewModel.enterManualEntry() }
@@ -267,7 +303,7 @@ public struct HeightScanScreen: View {
             }
         case .aimTopArmed, .aimTopCaptured:
             HStack(spacing: 12) {
-                Button("Aim Top") { viewModel.captureTopNow() }
+                Button("Aim Top") { aimTopTap() }
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("heightScan.aimTopButton")
                 Button("Retake") { viewModel.retake() }
@@ -275,7 +311,7 @@ public struct HeightScanScreen: View {
             }
         case .aimBaseArmed:
             HStack(spacing: 12) {
-                Button("Aim Base") { viewModel.captureBaseNow() }
+                Button("Aim Base") { aimBaseTap() }
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("heightScan.aimBaseButton")
                 Button("Retake") { viewModel.retake() }
@@ -318,5 +354,33 @@ public struct HeightScanScreen: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(tint.opacity(0.8))
             .cornerRadius(8)
+    }
+
+    // MARK: - Tap handlers with raycast
+
+    /// Anchor tap — the crosshair is on the tree base, so screen-centre
+    /// raycasts the ground plane and that hit becomes the anchor.
+    /// Without a hit we fall back to the camera position (spec flow).
+    private func anchorTap() {
+        viewModel.anchorHereNow(screenCenterHit: raycaster.screenCenterHit())
+    }
+
+    /// Aim Top — crosshair on treetop. The sky has no plane, so the
+    /// raycast will almost always miss. Instead, project the camera's
+    /// forward ray out to the known horizontal distance `d_h` so the
+    /// yellow marker lands roughly at the treetop the cruiser aimed at.
+    private func aimTopTap() {
+        let hit = raycaster.screenCenterHit()
+            ?? raycaster.forwardPointAtHorizontalDistance(viewModel.dhMeters)
+        viewModel.captureTopNow(screenCenterHit: hit)
+    }
+
+    /// Aim Base — crosshair near the ground at the tree base. Ground
+    /// raycast should nearly always hit. Fall back to the same forward-
+    /// projection as Aim Top on the rare miss.
+    private func aimBaseTap() {
+        let hit = raycaster.screenCenterHit()
+            ?? raycaster.forwardPointAtHorizontalDistance(viewModel.dhMeters)
+        viewModel.captureBaseNow(screenCenterHit: hit)
     }
 }

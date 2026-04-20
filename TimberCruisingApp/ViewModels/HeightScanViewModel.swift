@@ -137,13 +137,21 @@ public final class HeightScanViewModel: ObservableObject {
             }
     }
 
-    /// Read the current ARKit camera translation, if any frame has
-    /// landed. Returns nil on platforms without ARKit or before the
-    /// first frame.
+    /// Read the current ARKit camera translation in world space. Falls
+    /// back through two sources in order:
+    ///   1. `session.currentCameraWorldPosition` — published on every
+    ///      ARFrame regardless of whether LiDAR is available, so this
+    ///      works on non-LiDAR devices too.
+    ///   2. `session.latestDepthFrame?.cameraPoseWorld` — secondary path
+    ///      kept for preview / test sessions that only exercise depth.
+    /// Returns nil only before any frame has arrived.
     private func currentCameraTranslation() -> SIMD3<Float>? {
-        guard let frame = session.latestDepthFrame else { return nil }
-        let c = frame.cameraPoseWorld.columns.3
-        return SIMD3<Float>(c.x, c.y, c.z)
+        if let p = session.currentCameraWorldPosition { return p }
+        if let frame = session.latestDepthFrame {
+            let c = frame.cameraPoseWorld.columns.3
+            return SIMD3<Float>(c.x, c.y, c.z)
+        }
+        return nil
     }
 
     // MARK: - §4.4 transitions
@@ -183,7 +191,7 @@ public final class HeightScanViewModel: ObservableObject {
     public func captureTop(at tapTime: TimeInterval,
                            standingPointWorld: SIMD3<Float>) {
         guard state == .aimTopArmed, anchorPointWorld != nil else { return }
-        guard let median = pitchBuffer.medianPitch(centeredOn: tapTime) else { return }
+        guard let median = resilientMedianPitch(tapTime: tapTime) else { return }
         alphaTopRad = Float(median)
         alphaTopSampleCount = pitchBuffer.sampleCount(centeredOn: tapTime)
         standingPointWorldAtAimTop = standingPointWorld
@@ -197,10 +205,22 @@ public final class HeightScanViewModel: ObservableObject {
         guard state == .aimBaseArmed, anchorPointWorld != nil,
               alphaTopRad != nil, standingPointWorldAtAimTop != nil
         else { return }
-        guard let median = pitchBuffer.medianPitch(centeredOn: tapTime) else { return }
+        guard let median = resilientMedianPitch(tapTime: tapTime) else { return }
         alphaBaseRad = Float(median)
         alphaBaseSampleCount = pitchBuffer.sampleCount(centeredOn: tapTime)
         compute()
+    }
+
+    /// Tries the strict 400 ms window first (matches the spec), then
+    /// falls back to a wider 1200 ms window, then to the most recent
+    /// sample regardless of age. Returns nil only if the buffer is
+    /// completely empty — which means the IMU never delivered anything,
+    /// at which point we genuinely can't compute a height.
+    private func resilientMedianPitch(tapTime: TimeInterval) -> Double? {
+        if let m = pitchBuffer.medianPitch(centeredOn: tapTime) { return m }
+        if let m = pitchBuffer.medianPitch(centeredOn: tapTime,
+                                           windowMs: 1200) { return m }
+        return pitchBuffer.mostRecentPitch()
     }
 
     /// Button-handler entry for the Anchor Here tap. Pulls the current
@@ -212,15 +232,29 @@ public final class HeightScanViewModel: ObservableObject {
 
     /// Button-handler entry for Aim Top. Uses the current camera pose +
     /// the current timestamp to drive the IMU median.
+    ///
+    /// Timestamp MUST match the CMDeviceMotion clock — those samples are
+    /// stamped with `ProcessInfo.systemUptime` (seconds since boot), NOT
+    /// `Date().timeIntervalSinceReferenceDate` (seconds since 2001).
+    /// Passing the wrong clock here made the ±200 ms median window miss
+    /// every buffered sample, which is why the Aim Top button appeared
+    /// to do nothing even with a healthy IMU stream.
     public func captureTopNow() {
-        guard let p = currentCameraTranslation() else { return }
-        captureTop(at: Date().timeIntervalSinceReferenceDate,
+        let p = currentCameraTranslation() ?? .zero
+        captureTop(at: nowForPitchBuffer(),
                    standingPointWorld: p)
     }
 
-    /// Button-handler entry for Aim Base. Uses the current timestamp.
+    /// Button-handler entry for Aim Base. Same clock convention as
+    /// `captureTopNow()` — see the Aim Top docstring.
     public func captureBaseNow() {
-        captureBase(at: Date().timeIntervalSinceReferenceDate)
+        captureBase(at: nowForPitchBuffer())
+    }
+
+    /// Monotonic clock matching `CMDeviceMotion.timestamp`. Keep one
+    /// source so every tap and every sample agree.
+    private func nowForPitchBuffer() -> TimeInterval {
+        ProcessInfo.processInfo.systemUptime
     }
 
     /// Test/preview hook: push α_top directly, skipping the IMU buffer.

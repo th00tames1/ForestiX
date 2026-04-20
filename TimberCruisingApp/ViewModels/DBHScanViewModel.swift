@@ -36,6 +36,11 @@ public final class DBHScanViewModel: ObservableObject {
     @Published public private(set) var crosshairIsStable: Bool = false
     @Published public var manualDbhCm: String = ""
     @Published public private(set) var unsupportedBanner: String?
+    /// Cheap single-frame DBH estimate updated in real time while the
+    /// cruiser is aiming. Lets the HUD show "~ 34 cm" near the crosshair
+    /// before a formal capture. nil when the strip can't be trusted.
+    /// The authoritative measurement still runs the full §7.1 burst.
+    @Published public private(set) var previewDbhCm: Double?
 
     // MARK: - Dependencies
 
@@ -119,6 +124,20 @@ public final class DBHScanViewModel: ObservableObject {
         if state == .capturing {
             burstBuffer.append(frame)
             if burstBuffer.count >= burstSize { finishCapture() }
+        }
+
+        // Live preview — runs cheaply on every depth frame while the
+        // cruiser is lining up the shot. Only refresh the HUD number in
+        // states where a preview makes sense; once capture is locked in,
+        // the real result takes over.
+        switch state {
+        case .aligning, .armed, .rejected:
+            previewDbhCm = DBHEstimator.previewDiameterCm(
+                frame: frame,
+                tapPixel: SIMD2(Double(cx), Double(cy)),
+                guideRowY: cy)
+        case .capturing, .fitted, .accepted, .manualEntry, .idle:
+            previewDbhCm = nil
         }
     }
 

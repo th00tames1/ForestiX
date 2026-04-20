@@ -198,8 +198,12 @@ public struct DBHScanScreen: View {
 
     /// Stable UUID so the cylinder anchor doesn't get torn down and
     /// rebuilt on every frame — just its position / radius updates.
-    private static let cylinderMarkerId: UUID = UUID(
-        uuidString: "0DBHC415-0000-0000-0000-000000000001")!
+    /// Must be a valid hex UUID: 0-9 / a-f only, no alphabetic filler.
+    /// The `?? UUID()` fallback keeps a typo from crashing the scan
+    /// screen — worst case the cylinder anchor gets rebuilt each
+    /// frame instead of diffed, which is ugly but not fatal.
+    private static let cylinderMarkerId: UUID =
+        UUID(uuidString: "00DBC415-0000-0000-0000-000000000001") ?? UUID()
 
     // MARK: - Bottom panel
 

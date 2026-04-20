@@ -36,6 +36,7 @@ public struct SettingsScreen: View {
 
     public var body: some View {
         Form {
+            modeSection
             unitsSection
             calibrationSection
             basemapSection
@@ -120,6 +121,21 @@ public struct SettingsScreen: View {
     }
 
     // MARK: - Sections
+
+    private var modeSection: some View {
+        Section(
+            header: Text("Mode"),
+            footer: Text("Advanced mode unlocks the full Forestix workflow — projects, stratum drawing, cruise design, and plot-level stand summaries. Leave it off to keep the app focused on one-off DBH / Height measurements.")
+        ) {
+            Toggle(isOn: Binding(
+                get: { settings.advancedMode },
+                set: { settings.advancedMode = $0 })
+            ) {
+                Label("Advanced mode", systemImage: "gear.badge")
+            }
+            .accessibilityIdentifier("settings.advancedMode")
+        }
+    }
 
     private var unitsSection: some View {
         Section("Units") {

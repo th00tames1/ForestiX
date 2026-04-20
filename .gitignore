@@ -13,3 +13,6 @@ Package.resolved
 
 # Test artifacts
 *.xcresult
+
+# Claude Code worktrees + config
+.claude/

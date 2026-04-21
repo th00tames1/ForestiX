@@ -18,6 +18,26 @@ import AR
 
 public struct DBHScanScreen: View {
 
+    /// Diagnostic overlay mode for the AR feed. Cruisers can toggle
+    /// between views in the top-right corner to judge what the scan
+    /// has picked up — the LiDAR-reconstructed mesh is informative
+    /// when the trunk is in full view, while ARKit's feature points
+    /// (rendered as a sparse 3D speckle) help you see whether tracking
+    /// is healthy when the mesh is sparse.
+    public enum DiagnosticOverlay: String, CaseIterable, Equatable {
+        case off
+        case mesh
+        case points
+
+        var label: String {
+            switch self {
+            case .off:    return "Off"
+            case .mesh:   return "Mesh"
+            case .points: return "Points"
+            }
+        }
+    }
+
     @StateObject private var viewModel: DBHScanViewModel
     public var onResult: (DBHResult) -> Void = { _ in }
     /// Fired when the cruiser explicitly accepts the on-screen result
@@ -25,11 +45,8 @@ public struct DBHScanScreen: View {
     /// reading only after the cruiser has confirmed it — Quick Measure
     /// doesn't record a measurement until Accept is tapped.
     public var onAccept: (DBHResult) -> Void = { _ in }
-    /// When true, overlays the ARKit scene-reconstruction mesh on top of
-    /// the camera feed so the cruiser can visually confirm that LiDAR is
-    /// actually sampling the trunk surface. Safe on non-LiDAR devices
-    /// (the overlay simply won't render anything).
-    public var showMeshOverlay: Bool = false
+
+    @State private var overlay: DiagnosticOverlay
 
     public init(viewModel: @autoclosure @escaping () -> DBHScanViewModel,
                 onResult: @escaping (DBHResult) -> Void = { _ in },
@@ -38,7 +55,7 @@ public struct DBHScanScreen: View {
         _viewModel = StateObject(wrappedValue: viewModel())
         self.onResult = onResult
         self.onAccept = onAccept
-        self.showMeshOverlay = showMeshOverlay
+        _overlay = State(initialValue: showMeshOverlay ? .mesh : .off)
     }
 
     public var body: some View {
@@ -51,7 +68,8 @@ public struct DBHScanScreen: View {
             // at the trunk's world position — world-anchored, so it
             // stays locked to the tree as the phone moves.
             ARCameraView(manager: viewModel.session,
-                         debugMeshOverlay: showMeshOverlay,
+                         debugMeshOverlay: overlay == .mesh,
+                         debugPointsOverlay: overlay == .points,
                          sceneMarkers: cylinderMarkers)
                 .ignoresSafeArea()
 
@@ -71,11 +89,12 @@ public struct DBHScanScreen: View {
             tapCatcher
 
             VStack {
+                overlayPicker
                 Spacer()
                 bottomPanel
             }
         }
-        .navigationTitle("DBH Scan")
+        .navigationTitle("Diameter")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -96,6 +115,28 @@ public struct DBHScanScreen: View {
             if newState == .accepted, let r = viewModel.result {
                 onAccept(r)
             }
+        }
+    }
+
+    // MARK: - Diagnostic overlay picker
+
+    /// Three-way segmented control pinned to the top-right corner.
+    /// Lets the cruiser flip between no overlay, the LiDAR mesh, or
+    /// ARKit's feature points without leaving the scan flow.
+    private var overlayPicker: some View {
+        HStack {
+            Spacer()
+            Picker("Overlay", selection: $overlay) {
+                ForEach(DiagnosticOverlay.allCases, id: \.self) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 200)
+            .background(.ultraThinMaterial, in: Capsule())
+            .accessibilityIdentifier("dbhScan.overlayPicker")
+            .padding(.trailing, ForestixSpace.sm)
+            .padding(.top, ForestixSpace.xs)
         }
     }
 
@@ -179,16 +220,16 @@ public struct DBHScanScreen: View {
     }
 
     /// Two pills floating below the crosshair:
-    ///   • "DBH ~ 34.5 cm"  — the diameter estimate (bold, primary)
+    ///   • "Ø ~ 34.5 cm"  — the diameter estimate (bold, primary)
     ///   • "1.25 m to center" — camera-to-stem-axis distance (dimmer)
-    /// The two values were previously unlabelled "~ 34.5 cm" + "1.25 m"
-    /// which looked like two distances. Making the diameter explicit
-    /// as "DBH" removes that ambiguity.
+    /// The diameter pill uses the ⌀ symbol (U+2300) rather than "DBH"
+    /// because cruisers don't always measure at breast height —
+    /// "diameter" is the generic term.
     @ViewBuilder
     private var livePreviewBadge: some View {
         if let cm = viewModel.previewDbhCm {
             VStack(spacing: 3) {
-                Text(String(format: "DBH ~ %.1f cm", cm))
+                Text(String(format: "⌀ ~ %.1f cm", cm))
                     .font(.caption.bold())
                     .monospacedDigit()
                     .foregroundStyle(.white)
@@ -279,14 +320,14 @@ public struct DBHScanScreen: View {
     private var statusText: String {
         switch viewModel.state {
         case .idle:         return "Starting camera…"
-        case .aligning:     return "Align guide to DBH, uphill side. Tap stem center."
-        case .armed:        return "Depth stable. Tap the trunk center."
+        case .aligning:     return "Align guide to the trunk, uphill side. Tap the stem centre."
+        case .armed:        return "Depth stable. Tap the trunk centre."
         case .capturing:    return "Capturing… hold steady."
         case .fitted:       return "Scan complete. Accept, retake, or add a second view."
         case .accepted:     return "Saved."
         case .rejected:     return viewModel.result?.rejectionReason
                                  ?? "Scan rejected. Try again."
-        case .manualEntry:  return "Enter DBH manually in cm."
+        case .manualEntry:  return "Enter diameter manually in cm."
         }
     }
 
@@ -294,7 +335,7 @@ public struct DBHScanScreen: View {
     private func resultPanel(_ r: DBHResult) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text("DBH: \(String(format: "%.1f", r.diameterCm)) cm")
+                Text("Diameter: \(String(format: "%.1f", r.diameterCm)) cm")
                     .font(.title3).bold()
                 Spacer()
                 tierChip(r.confidence)
@@ -326,7 +367,7 @@ public struct DBHScanScreen: View {
     @ViewBuilder
     private var manualEntryPanel: some View {
         HStack {
-            TextField("DBH in cm", text: $viewModel.manualDbhCm)
+            TextField("Diameter in cm", text: $viewModel.manualDbhCm)
                 .textFieldStyle(.roundedBorder)
                 #if os(iOS)
                 .keyboardType(.decimalPad)

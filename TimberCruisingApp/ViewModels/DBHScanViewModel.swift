@@ -89,7 +89,7 @@ public final class DBHScanViewModel: ObservableObject {
         self.isLiDARSupported = ARKitSessionManager.supportsLiDAR
         if !isLiDARSupported {
             unsupportedBanner = "LiDAR not supported on this device. " +
-                                "Use Manual Entry to record DBH."
+                                "Use Manual Entry to record the diameter."
         }
     }
 
@@ -294,7 +294,7 @@ public extension DBHScanViewModel {
         if unsupported {
             self.unsupportedBanner =
                 "LiDAR not supported on this device. " +
-                "Use Manual Entry to record DBH."
+                "Use Manual Entry to record the diameter."
         }
     }
 }

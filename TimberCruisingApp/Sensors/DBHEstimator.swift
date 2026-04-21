@@ -174,8 +174,39 @@ public enum DBHEstimator {
         // Optional raw-PLY sidecar (REQ-DBH-007).
         let rawPath = input.rawPointsWriter?(cleaned)
 
+        // Step 8.5: chord-based silhouette sanity (catches pathological
+        // RANSAC inflation only).
+        //
+        // On small arcs, three nearly-collinear points let RANSAC fit
+        // any huge circle and still claim all points as inliers. On
+        // device a cruiser would see "40 cm" in the live preview and
+        // "120 cm" as the final measurement — RANSAC passed every § 7.9
+        // sanity check on the pathological fit.
+        //
+        // The observed silhouette chord — the XZ bounding-box diagonal
+        // of the cleaned point cloud — is a lower bound on the true
+        // diameter that never diverges. A RANSAC fit whose diameter is
+        // more than 3× the chord is definitely wrong, and we fall back
+        // to the chord (which for realistic forest-cruise observations
+        // sits within 70–100 % of the true diameter).
+        //
+        // The 3× threshold is deliberately loose: on clean 45–60° arcs
+        // the chord is half the diameter (ratio ≈ 2.0–2.6), and we
+        // don't want to override those correct fits. Only egregious
+        // inflations trigger.
+        let chordDiameterM = chordDiameterFromCloud(cleaned)
+        var r = fit.circle.radius
+        var chordOverride = false
+        if chordDiameterM > 0.025 {
+            let fittedDiameterM = 2.0 * r
+            let ratio = fittedDiameterM / chordDiameterM
+            if ratio > 3.0 || ratio < 0.33 {
+                r = chordDiameterM / 2.0
+                chordOverride = true
+            }
+        }
+
         // Step 9: sanity tree.
-        let r = fit.circle.radius
         let checks: [Check] = [
             check(fit.inliers.count >= 20, sev: .reject,
                   reason: "n_inliers < 20"),
@@ -198,7 +229,11 @@ public enum DBHEstimator {
             check(radiusCoV <= 0.10, sev: .reject,
                   reason: "frame burst radius CoV > 10%"),
             check(radiusCoV <= 0.05, sev: .warn,
-                  reason: "frame burst radius CoV 5–10%")
+                  reason: "frame burst radius CoV 5–10%"),
+            // Extra warn when we had to override with the chord fallback
+            // so the cruiser knows the fit didn't fully converge.
+            check(!chordOverride, sev: .warn,
+                  reason: "Fit disagreed with silhouette; using chord")
         ]
         let tier = combineChecks(checks)
         let rejectionReason: String?
@@ -334,6 +369,28 @@ public enum DBHEstimator {
         return (sumSq / Double(inliers.count)).squareRoot()
     }
 
+    /// Observed silhouette chord in metres — the XZ bounding-box
+    /// diagonal of a point cloud drawn from the trunk's front arc.
+    /// For arcs smaller than a hemisphere (the common case) the
+    /// bounding-box diagonal is within a couple of percent of the
+    /// true chord between the leftmost and rightmost stem pixels,
+    /// and therefore within a few percent of the trunk diameter.
+    /// Used as an independent sanity check against the RANSAC radius.
+    static func chordDiameterFromCloud(_ points: [SIMD2<Double>]) -> Double {
+        guard !points.isEmpty else { return 0 }
+        var minX =  Double.infinity, maxX = -Double.infinity
+        var minZ =  Double.infinity, maxZ = -Double.infinity
+        for p in points {
+            if p.x < minX { minX = p.x }
+            if p.x > maxX { maxX = p.x }
+            if p.y < minZ { minZ = p.y }
+            if p.y > maxZ { maxZ = p.y }
+        }
+        let dx = maxX - minX
+        let dz = maxZ - minZ
+        return (dx * dx + dz * dz).squareRoot()
+    }
+
     /// Unwrapped angular span of a set of points around `center`.
     /// Computed as 2π minus the largest gap between adjacent angles.
     static func arcCoverageDeg(
@@ -430,33 +487,24 @@ public enum DBHEstimator {
         }
     }
 
-    /// Single-frame approximation used by the scan HUD to show a live
-    /// DBH estimate near the crosshair while the cruiser is aiming.
+    /// Single-frame preview that runs a direct Taubin circle fit on the
+    /// back-projected stem strip — the same geometric model the full
+    /// pipeline uses, just single-frame and without RANSAC / outlier
+    /// removal. The previous chord-based preview always under-read the
+    /// diameter on large trees (the chord of a tangent-limited strip
+    /// is shorter than the true diameter), so the cruiser saw the live
+    /// number disagree with the final burst measurement by 20–30 %.
+    /// A direct circle fit removes that systematic bias.
     ///
-    /// This is intentionally much cheaper than the full `estimate(input:)`
-    /// pipeline:
+    /// Returns nil when:
+    ///   • tap depth is outside the 0.5–3.0 m scan band
+    ///   • the strip is too short to fit a circle
+    ///   • the fitted radius falls outside a sanity range
+    ///   • the chord-based estimate (still computed as a fallback)
+    ///     wildly disagrees with the fit (another inflated-fit guard)
     ///
-    ///   1. Take a 5×5 median depth at `tapPixel`. If it's outside the
-    ///      0.5–3.0 m scan band, no preview.
-    ///   2. Walk the guide row outwards from the tap column to gather
-    ///      stem pixels within ±15 cm of that depth (same strip the
-    ///      burst uses).
-    ///   3. Back-project the leftmost and rightmost strip pixels into
-    ///      world XZ. The chord between them is the trunk diameter;
-    ///      their midpoint is the trunk surface centre on the near
-    ///      side. Shifting inward by one radius along the camera view
-    ///      direction gives the cylinder centre.
-    ///
-    /// Looking roughly head-on at the trunk, the strip's left and right
-    /// silhouette columns are tangent to the cylinder surface — so the
-    /// chord between their back-projections is the trunk diameter as
-    /// seen from the camera. Accuracy is good enough (≈ ±2 cm when
-    /// aimed head-on, worse with oblique angles) to guide the cruiser;
-    /// the real measurement still runs the full §7.1 pipeline on
-    /// capture.
-    ///
-    /// Returns nil when the preview can't be trusted at all
-    /// (out-of-range depth, strip too short, etc.).
+    /// The chord is also kept for the HUD fit-line overlay, which
+    /// spans the actual strip endpoints.
     public static func previewFit(
         frame: ARDepthFrame,
         tapPixel: SIMD2<Double>,
@@ -474,44 +522,72 @@ public enum DBHEstimator {
             dTap: dTap,
             deltaDepth: deltaDepth)
         guard let leftCol = strip.first, let rightCol = strip.last,
-              rightCol > leftCol
+              rightCol > leftCol,
+              strip.count >= 6
         else { return nil }
 
-        let left = BackProjection.worldXZ(
-            x: Double(leftCol), y: Double(guideRowY),
-            depth: Double(frame.depth(atX: leftCol, y: guideRowY)),
-            intrinsics: frame.intrinsics,
-            cameraPoseWorld: frame.cameraPoseWorld)
-        let right = BackProjection.worldXZ(
-            x: Double(rightCol), y: Double(guideRowY),
-            depth: Double(frame.depth(atX: rightCol, y: guideRowY)),
-            intrinsics: frame.intrinsics,
-            cameraPoseWorld: frame.cameraPoseWorld)
+        // Back-project every strip pixel, not just the endpoints — this
+        // is what the single-frame Taubin fit wants.
+        var stripPoints: [SIMD2<Double>] = []
+        stripPoints.reserveCapacity(strip.count)
+        for col in strip {
+            let depth = frame.depth(atX: col, y: guideRowY)
+            guard depth > 0 else { continue }
+            let p = BackProjection.worldXZ(
+                x: Double(col), y: Double(guideRowY),
+                depth: Double(depth),
+                intrinsics: frame.intrinsics,
+                cameraPoseWorld: frame.cameraPoseWorld)
+            stripPoints.append(p)
+        }
+        guard stripPoints.count >= 6 else { return nil }
 
-        let dx = right.x - left.x
-        let dz = right.y - left.y    // SIMD2 y-slot holds world-Z here
+        // Endpoints power the fit-line overlay + chord sanity guard.
+        let leftWorld  = stripPoints.first!
+        let rightWorld = stripPoints.last!
+        let dx = rightWorld.x - leftWorld.x
+        let dz = rightWorld.y - leftWorld.y
         let chordM = (dx * dx + dz * dz).squareRoot()
-        let diameterCm = chordM * 100
-        let radiusM = chordM / 2.0
 
-        // Reject wild values so we don't flash obviously-wrong numbers
-        // mid-aim. The §7.1 sanity tree does the same on the final fit.
+        // Direct Taubin fit on the single frame. For real tangent-limited
+        // observations the arc is wide enough (typically 90–150°) that
+        // Taubin recovers the diameter to within a couple of percent.
+        guard let circle = TaubinFit.fit(points: stripPoints) else {
+            return nil
+        }
+        var radiusM = circle.radius
+        var diameterCm = 2.0 * radiusM * 100.0
+
+        // Fall back to the chord if Taubin produced anything absurd:
+        // either outside the sanity range, or inflated relative to the
+        // chord (same small-arc trap as RANSAC).
+        let chordTooShort = chordM < 0.03
+        let diameterOutOfRange = !(5.0...200.0).contains(diameterCm)
+        let inflatedVsChord = chordM > 0.025 && (diameterCm / 100.0) / chordM > 3.0
+        if diameterOutOfRange || inflatedVsChord {
+            guard !chordTooShort else { return nil }
+            radiusM = chordM / 2.0
+            diameterCm = chordM * 100.0
+        }
         guard (5.0...200.0).contains(diameterCm) else { return nil }
 
-        // Near-side midpoint between the two silhouette hits — i.e. the
-        // trunk surface facing the camera.
-        let nearMid = SIMD2<Double>((left.x + right.x) / 2.0,
-                                     (left.y + right.y) / 2.0)
-        // Shift inward (away from camera) by one radius along the
-        // camera-to-surface direction to land at the cylinder axis.
-        let cam = frame.cameraPoseWorld.columns.3
-        let cameraXZ = SIMD2<Double>(Double(cam.x), Double(cam.z))
-        let toSurface = nearMid - cameraXZ
-        let dist = (toSurface.x * toSurface.x + toSurface.y * toSurface.y).squareRoot()
-        let unit: SIMD2<Double> = dist > 1e-6
-            ? SIMD2(toSurface.x / dist, toSurface.y / dist)
-            : SIMD2(0, 1)
-        let center = nearMid + SIMD2(unit.x * radiusM, unit.y * radiusM)
+        // Fit centre. Taubin gives one directly; use it if available,
+        // otherwise derive from the chord midpoint + radius shift.
+        let center: SIMD2<Double>
+        if !diameterOutOfRange && !inflatedVsChord {
+            center = SIMD2(circle.cx, circle.cy)
+        } else {
+            let nearMid = SIMD2<Double>((leftWorld.x + rightWorld.x) / 2.0,
+                                         (leftWorld.y + rightWorld.y) / 2.0)
+            let cam = frame.cameraPoseWorld.columns.3
+            let cameraXZ = SIMD2<Double>(Double(cam.x), Double(cam.z))
+            let toSurface = nearMid - cameraXZ
+            let dist = (toSurface.x * toSurface.x + toSurface.y * toSurface.y).squareRoot()
+            let unit: SIMD2<Double> = dist > 1e-6
+                ? SIMD2(toSurface.x / dist, toSurface.y / dist)
+                : SIMD2(0, 1)
+            center = nearMid + SIMD2(unit.x * radiusM, unit.y * radiusM)
+        }
 
         let widthDbl = Double(frame.width)
         let leftFrac = widthDbl > 0 ? Double(leftCol) / widthDbl : 0

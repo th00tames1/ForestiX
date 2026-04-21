@@ -310,20 +310,17 @@ public struct DBHScanScreen: View {
     }
 
     private func tierChip(_ tier: ConfidenceTier) -> some View {
-        let (label, color): (String, Color) = {
-            switch tier {
-            case .green:  return ("green",  .green)
-            case .yellow: return ("yellow", .yellow)
-            case .red:    return ("red",    .red)
-            }
-        }()
-        return Text(label)
-            .font(.caption2).bold()
-            .padding(.horizontal, 8).padding(.vertical, 4)
-            .background(color.opacity(0.3))
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(color, lineWidth: 1))
-            .cornerRadius(6)
-            .foregroundStyle(color)
+        let d = ConfidenceStyle.descriptor(for: tier.rawValue)
+        return Text(d.label.uppercased())
+            .font(.system(size: 10, weight: .semibold, design: .default))
+            .tracking(0.8)
+            .padding(.horizontal, 8).padding(.vertical, 3)
+            .overlay(
+                RoundedRectangle(cornerRadius: ForestixRadius.chip,
+                                 style: .continuous)
+                    .stroke(d.color, lineWidth: 0.75)
+            )
+            .foregroundStyle(d.color)
     }
 
     @ViewBuilder

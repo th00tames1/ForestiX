@@ -58,6 +58,7 @@ public struct DBHScanScreen: View {
             GeometryReader { geo in
                 ZStack {
                     guideLine(height: geo.size.height)
+                    fitChord(in: geo.size)
                     crosshair
                 }
                 .frame(width: geo.size.width, height: geo.size.height)
@@ -130,6 +131,42 @@ public struct DBHScanScreen: View {
             .accessibilityIdentifier("dbhScan.guideLine")
     }
 
+    /// Bright green horizontal segment spanning the trunk edges the
+    /// single-frame fit identified along the guide row — a visual
+    /// "this is what I'm measuring" so the cruiser can tell when the
+    /// fit has locked onto the trunk vs wandered into the background.
+    /// Only drawn once the crosshair has stabilised; hidden during
+    /// capture / fit / accept so it doesn't distract from the result.
+    @ViewBuilder
+    private func fitChord(in size: CGSize) -> some View {
+        if let fit = viewModel.previewFit,
+           viewModel.crosshairIsStable,
+           fit.stripRightFraction > fit.stripLeftFraction {
+            let x0 = size.width * CGFloat(fit.stripLeftFraction)
+            let x1 = size.width * CGFloat(fit.stripRightFraction)
+            let y  = size.height / 2
+            ZStack(alignment: .topLeading) {
+                // Main chord line
+                Rectangle()
+                    .fill(Color.green.opacity(0.9))
+                    .frame(width: x1 - x0, height: 3)
+                    .position(x: (x0 + x1) / 2, y: y)
+                // Left end cap
+                Rectangle()
+                    .fill(Color.green)
+                    .frame(width: 2, height: 16)
+                    .position(x: x0, y: y)
+                // Right end cap
+                Rectangle()
+                    .fill(Color.green)
+                    .frame(width: 2, height: 16)
+                    .position(x: x1, y: y)
+            }
+            .accessibilityIdentifier("dbhScan.fitChord")
+            .allowsHitTesting(false)
+        }
+    }
+
     private var crosshair: some View {
         let color: Color = viewModel.crosshairIsStable ? .green : .red
         return VStack(spacing: 6) {
@@ -141,15 +178,17 @@ public struct DBHScanScreen: View {
         }
     }
 
-    /// Small pill floating below the crosshair with the live DBH
-    /// estimate plus the camera-to-stem-axis distance. Both clear
-    /// themselves once capture begins so the numbers don't argue with
-    /// the final fit.
+    /// Two pills floating below the crosshair:
+    ///   • "DBH ~ 34.5 cm"  — the diameter estimate (bold, primary)
+    ///   • "1.25 m to center" — camera-to-stem-axis distance (dimmer)
+    /// The two values were previously unlabelled "~ 34.5 cm" + "1.25 m"
+    /// which looked like two distances. Making the diameter explicit
+    /// as "DBH" removes that ambiguity.
     @ViewBuilder
     private var livePreviewBadge: some View {
         if let cm = viewModel.previewDbhCm {
             VStack(spacing: 3) {
-                Text(String(format: "~ %.1f cm", cm))
+                Text(String(format: "DBH ~ %.1f cm", cm))
                     .font(.caption.bold())
                     .monospacedDigit()
                     .foregroundStyle(.white)

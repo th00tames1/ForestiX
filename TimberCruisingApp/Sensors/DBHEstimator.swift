@@ -411,13 +411,22 @@ public enum DBHEstimator {
         public let centerWorldXZ: SIMD2<Double>
         /// Trunk radius in metres.
         public let radiusM: Double
+        /// Leftmost stem strip pixel, normalised to 0...1 of frame width.
+        /// Used by the HUD to draw a 2D fit-chord overlay across the trunk.
+        public let stripLeftFraction: Double
+        /// Rightmost stem strip pixel, same normalisation.
+        public let stripRightFraction: Double
 
         public init(diameterCm: Double,
                     centerWorldXZ: SIMD2<Double>,
-                    radiusM: Double) {
+                    radiusM: Double,
+                    stripLeftFraction: Double,
+                    stripRightFraction: Double) {
             self.diameterCm = diameterCm
             self.centerWorldXZ = centerWorldXZ
             self.radiusM = radiusM
+            self.stripLeftFraction = stripLeftFraction
+            self.stripRightFraction = stripRightFraction
         }
     }
 
@@ -504,10 +513,15 @@ public enum DBHEstimator {
             : SIMD2(0, 1)
         let center = nearMid + SIMD2(unit.x * radiusM, unit.y * radiusM)
 
+        let widthDbl = Double(frame.width)
+        let leftFrac = widthDbl > 0 ? Double(leftCol) / widthDbl : 0
+        let rightFrac = widthDbl > 0 ? Double(rightCol) / widthDbl : 1
         return PreviewFit(
             diameterCm: diameterCm,
             centerWorldXZ: center,
-            radiusM: radiusM)
+            radiusM: radiusM,
+            stripLeftFraction: leftFrac,
+            stripRightFraction: rightFrac)
     }
 
     /// Back-compat helper — returns just the diameter when only the

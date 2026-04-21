@@ -102,7 +102,7 @@ public struct QuickMeasureHomeScreen: View {
             VStack(spacing: 0) {
                 instrumentRow(
                     title: "Diameter",
-                    subtitle: "Breast-height (1.3 m) via LiDAR",
+                    subtitle: "Stem diameter via LiDAR · DBH recommended",
                     glyph: "ruler",
                     accessibilityId: "quickMeasure.dbhButton"
                 ) { presentingDBHScan = true }
@@ -359,7 +359,7 @@ private struct LogEntryRow: View {
 
     private var typeLabel: String {
         switch entry.kind {
-        case .dbh:    return "DBH"
+        case .dbh:    return "DIA"
         case .height: return "HGT"
         }
     }

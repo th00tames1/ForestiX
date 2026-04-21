@@ -69,6 +69,13 @@ public struct ARCameraView: UIViewRepresentable {
 
     public let session: ARSession
     public var debugMeshOverlay: Bool
+    /// Renders ARKit's visual feature points — the sparse 3D tracking
+    /// points VIO uses — as an overlay. Not the LiDAR point cloud (no
+    /// public SDK surface for that), but looks similar: a speckle of
+    /// dots on surfaces the scene understanding has locked onto. A
+    /// useful diagnostic view when the mesh hides what the scan is
+    /// actually seeing.
+    public var debugPointsOverlay: Bool
     public var sceneMarkers: [ARSceneMarker]
     /// Optional raycaster that gets bound to the underlying ARView on
     /// creation so callers can fire screen-centre raycasts (Height
@@ -77,10 +84,12 @@ public struct ARCameraView: UIViewRepresentable {
 
     public init(session: ARSession,
                 debugMeshOverlay: Bool = false,
+                debugPointsOverlay: Bool = false,
                 sceneMarkers: [ARSceneMarker] = [],
                 raycaster: ARCenterRaycaster? = nil) {
         self.session = session
         self.debugMeshOverlay = debugMeshOverlay
+        self.debugPointsOverlay = debugPointsOverlay
         self.sceneMarkers = sceneMarkers
         self.raycaster = raycaster
     }
@@ -104,9 +113,7 @@ public struct ARCameraView: UIViewRepresentable {
         // Attach to the externally-owned session — DO NOT call run() here;
         // the ARKitSessionManager owns the session lifecycle.
         view.session = session
-        if debugMeshOverlay {
-            view.debugOptions.insert(.showSceneUnderstanding)
-        }
+        applyDebugOptions(to: view)
         view.renderOptions.insert(.disableMotionBlur)
         // Camera background fills behind any SwiftUI overlay we put
         // above this view — no need to set background colour.
@@ -118,17 +125,26 @@ public struct ARCameraView: UIViewRepresentable {
         if view.session !== session {
             view.session = session
         }
-        if debugMeshOverlay {
-            view.debugOptions.insert(.showSceneUnderstanding)
-        } else {
-            view.debugOptions.remove(.showSceneUnderstanding)
-        }
+        applyDebugOptions(to: view)
         // Rebind on every update in case the binding instance changed
         // (SwiftUI can recreate helpers across view updates).
         if raycaster?.arview !== view {
             raycaster?.arview = view
         }
         applyMarkers(to: view, coordinator: context.coordinator)
+    }
+
+    private func applyDebugOptions(to view: ARView) {
+        if debugMeshOverlay {
+            view.debugOptions.insert(.showSceneUnderstanding)
+        } else {
+            view.debugOptions.remove(.showSceneUnderstanding)
+        }
+        if debugPointsOverlay {
+            view.debugOptions.insert(.showFeaturePoints)
+        } else {
+            view.debugOptions.remove(.showFeaturePoints)
+        }
     }
 
     // MARK: - Marker diffing
@@ -205,6 +221,7 @@ public struct ARCameraView: UIViewRepresentable {
 public struct ARCameraView: View {
     public init(session: Any,
                 debugMeshOverlay: Bool = false,
+                debugPointsOverlay: Bool = false,
                 sceneMarkers: [ARSceneMarker] = [],
                 raycaster: ARCenterRaycaster? = nil) {}
     public var body: some View { Color.black }
@@ -218,10 +235,12 @@ public struct ARCameraView: View {
 extension ARCameraView {
     public init(manager: ARKitSessionManager,
                 debugMeshOverlay: Bool = false,
+                debugPointsOverlay: Bool = false,
                 sceneMarkers: [ARSceneMarker] = [],
                 raycaster: ARCenterRaycaster? = nil) {
         self.init(session: manager.session,
                   debugMeshOverlay: debugMeshOverlay,
+                  debugPointsOverlay: debugPointsOverlay,
                   sceneMarkers: sceneMarkers,
                   raycaster: raycaster)
     }
@@ -230,10 +249,12 @@ extension ARCameraView {
 extension ARCameraView {
     public init(manager: Any,
                 debugMeshOverlay: Bool = false,
+                debugPointsOverlay: Bool = false,
                 sceneMarkers: [ARSceneMarker] = [],
                 raycaster: ARCenterRaycaster? = nil) {
         self.init(session: manager,
                   debugMeshOverlay: debugMeshOverlay,
+                  debugPointsOverlay: debugPointsOverlay,
                   sceneMarkers: sceneMarkers,
                   raycaster: raycaster)
     }

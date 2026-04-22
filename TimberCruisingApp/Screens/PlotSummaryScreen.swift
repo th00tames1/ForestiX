@@ -47,7 +47,7 @@ public struct PlotSummaryScreen: View {
     private var errorBinding: Binding<Bool> {
         Binding(
             get: { viewModel.errorMessage != nil },
-            set: { _ in })
+            set: { if !$0 { viewModel.clearError() } })
     }
 
     private var closedBanner: some View {

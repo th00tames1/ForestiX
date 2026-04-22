@@ -15,6 +15,14 @@ public final class ProjectDashboardViewModel: ObservableObject {
     @Published public private(set) var strata: [Stratum] = []
     @Published public private(set) var plannedPlots: [PlannedPlot] = []
     @Published public private(set) var design: CruiseDesign?
+    /// Count of plots that have been closed (have `closedAt != nil`).
+    /// Drives the step-3 "Measure in the field" progress check — the
+    /// old dashboard hard-coded `done: false` here so the step never
+    /// turned green even after a full cruise.
+    @Published public private(set) var closedPlotCount: Int = 0
+    /// Count of any Plot rows (closed or not) that exist for this
+    /// project. Used so the Close banner can say "8 of 12 plots done".
+    @Published public private(set) var totalPlotCount: Int = 0
     @Published public var errorMessage: String?
     @Published public var toastMessage: String?
 
@@ -22,6 +30,7 @@ public final class ProjectDashboardViewModel: ObservableObject {
     private var stratumRepository: (any StratumRepository)?
     private var plannedPlotRepository: (any PlannedPlotRepository)?
     private var designRepository: (any CruiseDesignRepository)?
+    private var plotRepository: (any PlotRepository)?
 
     public init(project: Project) { self.project = project }
 
@@ -29,12 +38,29 @@ public final class ProjectDashboardViewModel: ObservableObject {
         if stratumRepository == nil { stratumRepository = environment.stratumRepository }
         if plannedPlotRepository == nil { plannedPlotRepository = environment.plannedPlotRepository }
         if designRepository == nil { designRepository = environment.cruiseDesignRepository }
+        if plotRepository == nil { plotRepository = environment.plotRepository }
     }
 
     public func refresh() {
         refreshStrata()
         refreshPlannedPlots()
         refreshDesign()
+        refreshPlotProgress()
+    }
+
+    /// Reloads the closed / total plot counts. Called on every
+    /// dashboard appear so the step-3 progress check reflects work
+    /// the cruiser did inside Go Cruise without needing a full
+    /// `refresh()` round-trip on each detail-screen pop.
+    public func refreshPlotProgress() {
+        guard let repo = plotRepository else { return }
+        do {
+            let plots = try repo.listByProject(project.id)
+            totalPlotCount = plots.count
+            closedPlotCount = plots.filter { $0.closedAt != nil }.count
+        } catch {
+            // Non-fatal — dashboard progress is informational only.
+        }
     }
 
     // MARK: - Cruise design

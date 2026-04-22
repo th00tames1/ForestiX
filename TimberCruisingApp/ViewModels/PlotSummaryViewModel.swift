@@ -129,6 +129,13 @@ public final class PlotSummaryViewModel: ObservableObject {
     /// Close the plot: stamp closedAt/closedBy, persist, then run the H–D
     /// rolling update across all project species with ≥ 8 measured heights.
     /// All work is synchronous on the @MainActor — REQ §7.4 budget <500ms.
+    ///
+    /// Integrity note: the plot-update and the H–D fit writes are two
+    /// separate Core Data transactions (see RepositoryHelpers). If the
+    /// H–D rollup throws *after* the plot row has already been stamped
+    /// closedAt, we roll back the closedAt on the plot so the flow
+    /// isn't stranded in a half-closed state — the cruiser sees the
+    /// error, hits retry, and the close works atomically next time.
     public func close(closedBy: String = "field") {
         guard validation.canClose else { return }
         guard !isClosing else { return }
@@ -136,6 +143,7 @@ public final class PlotSummaryViewModel: ObservableObject {
         defer { isClosing = false }
 
         let startWall = Date()
+        let originalPlot = plot
         var p = plot
         let now = Date()
         p.closedAt = now
@@ -144,13 +152,25 @@ public final class PlotSummaryViewModel: ObservableObject {
         do {
             plot = try plotRepo.update(p)
             closedAt = plot.closedAt
-            try updateProjectHDFits(now: now)
+            do {
+                try updateProjectHDFits(now: now)
+            } catch {
+                // Rollback the closedAt stamp — the HD rollup is a
+                // required side-effect of closing, so a failure leaves
+                // the plot logically open.
+                plot = (try? plotRepo.update(originalPlot)) ?? originalPlot
+                closedAt = plot.closedAt
+                throw error
+            }
             hdFitDurationMs = Date().timeIntervalSince(startWall) * 1000
             errorMessage = nil
         } catch {
-            errorMessage = "Close failed: \(error.localizedDescription)"
+            errorMessage = "Close failed: \(error.localizedDescription). Your trees are saved; try again when you have signal."
         }
     }
+
+    /// External reset for the error alert.
+    public func clearError() { errorMessage = nil }
 
     /// Loop over every species in the project, gather all measured heights
     /// from every closed plot + the just-closed plot, and run the rolling fit.

@@ -107,6 +107,9 @@ public final class TreeDetailViewModel: ObservableObject {
         }
     }
 
+    /// External reset for the error alert.
+    public func clearError() { errorMessage = nil }
+
     // MARK: - Preview
 
     public static func preview(tree: Tree? = nil) -> TreeDetailViewModel {

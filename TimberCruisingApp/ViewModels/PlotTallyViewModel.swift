@@ -146,6 +146,12 @@ public final class PlotTallyViewModel: ObservableObject {
         refresh()
     }
 
+    /// External reset for the error alert — lets the view bind
+    /// `isPresented` via a reactive Binding that clears state on
+    /// dismissal (so repeat errors show up again, which the original
+    /// `set: { _ in }` binding silently dropped).
+    public func clearError() { errorMessage = nil }
+
     /// Next tree number (live count + 1). Used by AddTreeFlow to pre-fill.
     public var nextTreeNumber: Int {
         (liveTrees.map(\.treeNumber).max() ?? 0) + 1

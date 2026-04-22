@@ -74,11 +74,14 @@ public struct NavigationScreen: View {
     }
 
     private var tierColor: Color {
+        // 4 GPS tiers collapse to the design system's 3 instrument hues:
+        // A → good, B/C → usable, D → bad. Keeps navigation-screen
+        // colours consistent with the rest of the app (no raw system
+        // .green/.yellow/.orange competing with muted tokens elsewhere).
         switch viewModel.tier {
-        case .A: return .green
-        case .B: return .yellow
-        case .C: return .orange
-        case .D: return .red
+        case .A: return ForestixPalette.confidenceOk
+        case .B, .C: return ForestixPalette.confidenceWarn
+        case .D: return ForestixPalette.confidenceBad
         }
     }
 

@@ -107,7 +107,7 @@ public struct AddTreeFlowScreen: View {
     private var errorBinding: Binding<Bool> {
         Binding(
             get: { viewModel.errorMessage != nil },
-            set: { _ in })
+            set: { if !$0 { viewModel.clearError() } })
     }
 
     // MARK: - Progress strip
@@ -125,9 +125,9 @@ public struct AddTreeFlowScreen: View {
     }
 
     private func color(for step: AddTreeFlowViewModel.Step) -> Color {
-        if step.rawValue < viewModel.currentStep.rawValue { return .accentColor }
-        if step == viewModel.currentStep { return .accentColor.opacity(0.7) }
-        return Color(white: 0.85)
+        if step.rawValue < viewModel.currentStep.rawValue { return ForestixPalette.primary }
+        if step == viewModel.currentStep { return ForestixPalette.primary.opacity(0.6) }
+        return ForestixPalette.divider
     }
 
     // MARK: - Step content
@@ -213,7 +213,7 @@ public struct AddTreeFlowScreen: View {
             .frame(maxWidth: .infinity, minHeight: 56)
         }
         .buttonStyle(.borderedProminent)
-        .tint(viewModel.speciesCode == code ? .accentColor : Color(white: 0.85))
+        .tint(viewModel.speciesCode == code ? ForestixPalette.primary : ForestixPalette.surface)
         .foregroundStyle(viewModel.speciesCode == code ? .white : .primary)
     }
 
@@ -454,11 +454,7 @@ public struct AddTreeFlowScreen: View {
     }
 
     private func tierColor(_ tier: ConfidenceTier) -> Color {
-        switch tier {
-        case .green: return .green
-        case .yellow: return .yellow
-        case .red: return .red
-        }
+        ConfidenceStyle.descriptor(for: tier.rawValue).color
     }
 
     // MARK: - Action bar

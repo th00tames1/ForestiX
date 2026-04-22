@@ -32,7 +32,7 @@ public struct PlotTallyScreen: View {
             statsStrip
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
-                .background(Color(white: 0.95))
+                .background(ForestixPalette.surfaceRaised)
             treeList
             Divider()
             actionRow
@@ -41,11 +41,42 @@ public struct PlotTallyScreen: View {
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                // Close Plot is consequential (stamps closedAt, runs
+                // HD rollup, ends the plot) — moved up to the nav
+                // bar so a glove brush on a big bottom button can't
+                // terminate the plot by accident.
+                Button(role: .destructive) {
+                    closingPlot = true
+                } label: {
+                    Label("Close Plot", systemImage: "lock.fill")
+                }
+                .tint(ForestixPalette.confidenceBad)
+                .accessibilityIdentifier("plotTally.closePlotNav")
+            }
+        }
         .onAppear { viewModel.refresh() }
         .alert("Error", isPresented: errorBinding) {
             Button("OK", role: .cancel) { }
         } message: {
             Text(viewModel.errorMessage ?? "")
+        }
+        .confirmationDialog(
+            "Close this plot?",
+            isPresented: $closingPlot,
+            titleVisibility: .visible
+        ) {
+            Button("Review + close", role: .destructive) {
+                closingPlot = false
+                onClosePlot()
+            }
+            Button("Keep tallying", role: .cancel) {
+                closingPlot = false
+            }
+        } message: {
+            let n = viewModel.liveTrees.count
+            Text("\(n) live tree\(n == 1 ? "" : "s") tallied. Closing pushes to Summary where you can confirm or re-open.")
         }
     }
 
@@ -54,7 +85,7 @@ public struct PlotTallyScreen: View {
     private var errorBinding: Binding<Bool> {
         Binding(
             get: { viewModel.errorMessage != nil },
-            set: { _ in })
+            set: { if !$0 { viewModel.clearError() } })
     }
 
     // MARK: - Stats strip
@@ -168,26 +199,21 @@ public struct PlotTallyScreen: View {
     }
 
     private func color(for tier: ConfidenceTier) -> Color {
-        switch tier {
-        case .green: return .green
-        case .yellow: return .yellow
-        case .red: return .red
-        }
+        // Route through ConfidenceStyle so every surface shows the
+        // same muted instrument-grade tier hue. Raw system .green /
+        // .yellow / .red read like traffic lights — not the tone
+        // DesignSystem.swift is trying to establish.
+        ConfidenceStyle.descriptor(for: tier.rawValue).color
     }
 
     // MARK: - Action row
-
+    //
+    // Only "Add Tree" lives here — Close Plot moved to the toolbar as
+    // a destructive primary action. The action you press 30+ times
+    // per plot deserves the big bottom button; the terminal action
+    // shouldn't share the same tap zone.
     private var actionRow: some View {
         HStack(spacing: 12) {
-            Button {
-                onClosePlot()
-            } label: {
-                Text("Close Plot")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.large)
-
             Button {
                 onAddTree()
             } label: {
@@ -196,6 +222,7 @@ public struct PlotTallyScreen: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
+            .accessibilityIdentifier("plotTally.addTree")
         }
         .padding(16)
     }

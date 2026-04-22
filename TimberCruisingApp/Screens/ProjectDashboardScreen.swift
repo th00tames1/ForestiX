@@ -49,7 +49,15 @@ public struct ProjectDashboardScreen: View {
         }
         #endif
         .task {
+            // Happens once on first appear so configure() runs against
+            // the freshly-available AppEnvironment.
             viewModel.configure(with: environment)
+            viewModel.refresh()
+        }
+        .onAppear {
+            // Fires every time the dashboard re-appears (e.g. popping
+            // back from CruiseDesign or PlotTally) — without this the
+            // Planned plots count + step-2 progress stayed stale.
             viewModel.refresh()
         }
         .alert("Something went wrong",
@@ -77,10 +85,15 @@ public struct ProjectDashboardScreen: View {
                 stepRow(n: 2, done: viewModel.design != nil && !viewModel.plannedPlots.isEmpty,
                         title: "Design cruise + generate plots",
                         hint: "Pick plot size and spacing — sample plots are generated automatically.")
-                stepRow(n: 3, done: false,
+                stepRow(n: 3, done: viewModel.closedPlotCount > 0,
                         title: "Measure in the field (Go Cruise)",
                         hint: "Walk to each plot and measure trees one by one. DBH via LiDAR, height via AR.")
-                stepRow(n: 4, done: false,
+                // Step 4 unlocks once every planned plot has been
+                // closed — we don't track "has exported" separately
+                // (no repo column for it) so this stands in as the
+                // most useful green-when-done signal.
+                stepRow(n: 4, done: !viewModel.plannedPlots.isEmpty
+                            && viewModel.closedPlotCount >= viewModel.plannedPlots.count,
                         title: "Review + export",
                         hint: "Check stand statistics and export to PDF / CSV / GeoJSON.")
             }
@@ -237,7 +250,12 @@ public struct ProjectDashboardScreen: View {
     @ViewBuilder
     private var cruiseSection: some View {
         Section {
-            if let design = viewModel.design {
+            // Go Cruise unlocks only with BOTH a saved design AND
+            // generated plots — otherwise CruiseFlowScreen hits the
+            // "No planned plots yet" dead-end (design saved via the
+            // manual scheme generates zero plots, which used to let
+            // the user walk into an unusable flow).
+            if let design = viewModel.design, !viewModel.plannedPlots.isEmpty {
                 NavigationLink {
                     CruiseFlowScreen(project: viewModel.project,
                                      design: design)
@@ -246,7 +264,7 @@ public struct ProjectDashboardScreen: View {
                         Label("Go Cruise",
                               systemImage: "figure.walk.circle.fill")
                             .font(.body.bold())
-                        Text("Navigate to plot → record center → AR boundary → add trees")
+                        Text(cruiseSubtitle)
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -268,6 +286,20 @@ public struct ProjectDashboardScreen: View {
         } header: {
             Text("③ Field measurement")
         }
+    }
+
+    // MARK: - Helpers
+
+    /// Second line of the Go Cruise row — shows progress vs total so
+    /// the cruiser doesn't have to drill into the plot list to see
+    /// how many plots remain.
+    private var cruiseSubtitle: String {
+        let total = viewModel.plannedPlots.count
+        let closed = viewModel.closedPlotCount
+        if closed == 0 {
+            return "Navigate to plot → record center → AR boundary → add trees"
+        }
+        return "\(closed) of \(total) plot\(total == 1 ? "" : "s") closed"
     }
 
     // MARK: - Tools (step 4 + misc)

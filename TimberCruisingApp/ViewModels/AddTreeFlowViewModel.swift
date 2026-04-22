@@ -287,6 +287,9 @@ public final class AddTreeFlowViewModel: ObservableObject {
         }
     }
 
+    /// External reset for the error alert.
+    public func clearError() { errorMessage = nil }
+
     /// Prepare for a follow-up multistem child. Retains species + placement
     /// from the parent, clears DBH/height/number, flags child as multistem,
     /// and returns to the DBH step.

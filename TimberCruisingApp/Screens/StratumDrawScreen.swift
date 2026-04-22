@@ -113,7 +113,7 @@ public struct StratumDrawScreen: View {
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(white: 0.95))
+        .background(ForestixPalette.surfaceRaised)
     }
     #endif
 

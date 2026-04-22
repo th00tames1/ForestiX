@@ -100,6 +100,10 @@ public final class AppEnvironment: ObservableObject {
             // export will contain the failure.
             print("⚠️ Seed bootstrap failed: \(error)")
         }
+        // Housekeeping on every launch: delete Quick Measure CSV
+        // exports older than a week so Documents/ doesn't silently
+        // accumulate months of stale files.
+        QuickMeasureHistory.sweepOldExports()
         return env
     }
 

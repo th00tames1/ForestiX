@@ -39,6 +39,7 @@ public struct QuickMeasureHomeScreen: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: ForestixSpace.lg) {
                     masthead
+                    capacityNoticeRow
                     instrumentSection
                     historySection
                 }
@@ -212,12 +213,14 @@ public struct QuickMeasureHomeScreen: View {
     private var logTable: some View {
         VStack(spacing: 0) {
             logHeaderRow
-            ForEach(history.entries.indices, id: \.self) { index in
-                let entry = history.entries[index]
+            // `\.id` (Identifiable) not `\.indices` — positional
+            // identity invalidates row state on every middle-delete,
+            // killing swipe animations and menu state mid-gesture.
+            ForEach(history.entries) { entry in
                 LogEntryRow(entry: entry) {
                     history.delete(id: entry.id)
                 }
-                if index < history.entries.count - 1 {
+                if entry.id != history.entries.last?.id {
                     Rectangle()
                         .fill(ForestixPalette.divider)
                         .frame(height: 0.5)
@@ -228,15 +231,38 @@ public struct QuickMeasureHomeScreen: View {
         .forestixPanel()
     }
 
+    /// Compact toast that surfaces when the log is within 5 % of its
+    /// capacity — the cruiser sees it before silent truncation kicks
+    /// in on the next write.
+    @ViewBuilder
+    private var capacityNoticeRow: some View {
+        if history.isNearCapacity {
+            HStack(spacing: ForestixSpace.xs) {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(ForestixPalette.confidenceWarn)
+                Text("Log nearing capacity — export CSV soon to archive older readings.")
+                    .font(ForestixType.caption)
+                    .foregroundStyle(ForestixPalette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+            .padding(ForestixSpace.sm)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .forestixPanel(raised: true)
+        }
+    }
+
     private var logHeaderRow: some View {
         HStack(spacing: ForestixSpace.sm) {
             Text("TYPE").frame(width: 52, alignment: .leading)
             Text("VALUE").frame(width: 96, alignment: .trailing)
-            Text("±σ").frame(width: 60, alignment: .trailing)
+            // "PREC" (precision) instead of the raw Greek σ — matches
+            // surveyor vocabulary and avoids a math glyph mid-header.
+            Text("PREC").frame(width: 64, alignment: .trailing)
             Spacer(minLength: 0)
             Text("QUALITY")
         }
-        .font(.system(size: 10, weight: .semibold, design: .default))
+        .font(ForestixType.sectionHead)
         .tracking(1.2)
         .foregroundStyle(ForestixPalette.textTertiary)
         .padding(.horizontal, ForestixSpace.md)
@@ -324,7 +350,7 @@ private struct LogEntryRow: View {
             Text(sigmaText)
                 .font(ForestixType.dataSmall)
                 .foregroundStyle(ForestixPalette.textTertiary)
-                .frame(width: 60, alignment: .trailing)
+                .frame(width: 64, alignment: .trailing)
 
             Spacer(minLength: 0)
 
@@ -338,7 +364,7 @@ private struct LogEntryRow: View {
                 }
             } label: {
                 Image(systemName: "ellipsis")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(ForestixType.bodyBold)
                     .foregroundStyle(ForestixPalette.textTertiary)
                     .padding(.horizontal, ForestixSpace.xs)
                     .contentShape(Rectangle())
@@ -349,12 +375,18 @@ private struct LogEntryRow: View {
         .padding(.vertical, ForestixSpace.sm)
         .overlay(alignment: .bottomLeading) {
             Text(timestampText)
-                .font(.system(size: 10, weight: .regular, design: .default))
+                .font(ForestixType.dataSmall)
                 .foregroundStyle(ForestixPalette.textTertiary)
                 .padding(.leading, ForestixSpace.md)
                 .padding(.bottom, 2)
                 .allowsHitTesting(false)
         }
+        // Note: swipe-to-delete requires the row to live inside a
+        // `List` — this log is rendered in a VStack / forestixPanel
+        // for tighter visual control, so the ellipsis menu remains
+        // the only deletion affordance. Converting the log to List
+        // swipeActions would trade the data-table look for default
+        // iOS row chrome. Tracked as a follow-up.
     }
 
     private var typeLabel: String {
@@ -365,17 +397,12 @@ private struct LogEntryRow: View {
     }
 
     private var valueText: String {
-        switch entry.kind {
-        case .dbh:    return String(format: "%.1f cm", entry.value)
-        case .height: return String(format: "%.1f m",  entry.value)
-        }
+        String(format: "%.1f %@", entry.value, entry.valueUnit)
     }
 
     private var sigmaText: String {
         guard let s = entry.sigma, s > 0 else { return "—" }
-        let unit = (entry.kind == .dbh) ? "mm" : "m"
-        let v = (entry.kind == .dbh) ? s : s
-        return String(format: "±%.1f %@", v, unit)
+        return String(format: "±%.1f %@", s, entry.sigmaUnit)
     }
 
     private var timestampText: String {
@@ -394,7 +421,7 @@ private struct ConfidenceChip: View {
     var body: some View {
         let d = ConfidenceStyle.descriptor(for: rawTier)
         return Text(d.label.uppercased())
-            .font(.system(size: 10, weight: .semibold, design: .default))
+            .font(ForestixType.sectionHead)
             .tracking(0.8)
             .padding(.horizontal, ForestixSpace.xs)
             .padding(.vertical, 3)

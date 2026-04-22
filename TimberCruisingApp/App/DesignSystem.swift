@@ -145,10 +145,14 @@ public enum ConfidenceStyle {
     /// descriptor. The returned colour is from the design palette, so
     /// every confidence-adjacent UI surface renders the same hue.
     public static func descriptor(for rawTier: String) -> Descriptor {
+        // Parallel construction — all adjectives, all short, all fit
+        // the same chip width. "Usable" vs "Low quality" mixed an
+        // adjective with a noun phrase and wrapped awkwardly in the
+        // FIELD LOG's narrow QUALITY column.
         switch rawTier {
-        case "green":  return Descriptor(label: "Good",        color: ForestixPalette.confidenceOk)
-        case "yellow": return Descriptor(label: "Usable",      color: ForestixPalette.confidenceWarn)
-        case "red":    return Descriptor(label: "Low quality", color: ForestixPalette.confidenceBad)
+        case "green":  return Descriptor(label: "Good",  color: ForestixPalette.confidenceOk)
+        case "yellow": return Descriptor(label: "Fair",  color: ForestixPalette.confidenceWarn)
+        case "red":    return Descriptor(label: "Check", color: ForestixPalette.confidenceBad)
         default:       return Descriptor(label: rawTier.capitalized,
                                           color: ForestixPalette.textSecondary)
         }

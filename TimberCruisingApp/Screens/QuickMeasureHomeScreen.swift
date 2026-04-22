@@ -1,28 +1,31 @@
 // Quick Measure home — the default Forestix entry point (when
 // AppSettings.advancedMode == false).
 //
-// Design pattern: hub-and-spoke. The home is deliberately minimal —
-// a short masthead and four large navigation rows, each leading to a
-// dedicated screen. No inline log table, no inline capacity banner,
-// no embedded stats. Everything the cruiser can do lives behind one
-// explicit tap.
+// Layout: bento-grid hub. The screen is built from three tiers that
+// communicate priority through size, not through color or copy:
 //
-// This replaces an earlier "dashboard-style" layout that stacked
-// masthead + capacity warning + INSTRUMENT panel + FIELD LOG table
-// on a single scroll view. In user testing that screen read as
-// "crammed" — too many things competing for the cruiser's first
-// glance. Now:
+//   Tier 1 — two hero cards (Diameter, Height). These are the primary
+//            measurement actions a cruiser performs all day. Each is
+//            a tall card with a decorative glyph, gradient surface,
+//            and a "Start scan" capsule — the visual weight reflects
+//            usage weight.
 //
-//   Home (this file)
-//    ├─ Diameter      → DBHScanScreen   (fullScreenCover)
-//    ├─ Height        → HeightScanScreen (fullScreenCover)
-//    ├─ Field log     → FieldLogScreen   (NavigationLink)
-//    └─ Settings      → SettingsScreen   (NavigationLink)
+//   Tier 2 — a compact stats strip (Today / Total / Last reading).
+//            Horizontal, three cells, monospaced — reads like an
+//            instrument readout, not a dashboard.
 //
-// Each spoke owns its own chrome; the hub just routes. Matches the
-// hub-and-spoke pattern in Apple's HIG (and apps like Leica DISTO
-// Plan, which surfaces its main features as a small grid of large
-// tiles on the first screen).
+//   Tier 3 — two supporting tiles (Field log, Settings) in a 2-col
+//            grid. Same height, same chrome, smaller than the hero
+//            cards. Navigation-only; their detail lives on their
+//            own screens.
+//
+// Why this structure: an earlier revision stacked masthead + capacity
+// warning + INSTRUMENT panel + FIELD LOG table on a single scroll,
+// which read as a crammed dashboard; a follow-up flattened everything
+// to equal-sized rows, which lost the hierarchy. The bento pattern —
+// popularized on Apple's own product pages and surveyed by the iOS
+// design community as the dominant 2025-2026 hub style — keeps the
+// hierarchy explicit: bigger means more important.
 
 import SwiftUI
 import Common
@@ -43,13 +46,15 @@ public struct QuickMeasureHomeScreen: View {
     public var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: ForestixSpace.lg) {
+                VStack(alignment: .leading, spacing: ForestixSpace.md) {
                     masthead
-                    hubRows
-                    footerStats
+                    diameterHero
+                    heightHero
+                    statsStrip
+                    supportingGrid
                 }
                 .padding(.horizontal, ForestixSpace.md)
-                .padding(.top, ForestixSpace.md)
+                .padding(.top, ForestixSpace.sm)
                 .padding(.bottom, ForestixSpace.xl)
             }
             .background(ForestixPalette.canvas.ignoresSafeArea())
@@ -73,47 +78,91 @@ public struct QuickMeasureHomeScreen: View {
 
     // MARK: - Masthead
 
-    /// Single-line title. The earlier version had a marketing tagline
-    /// underneath ("LiDAR diameter · AR height · no project required")
-    /// that the designer review flagged as App Store copy — pro
-    /// instrument tools don't need to pitch themselves on the power-on
-    /// screen.
     private var masthead: some View {
-        Text("Quick measure")
-            .font(ForestixType.title)
-            .foregroundStyle(ForestixPalette.textPrimary)
-            .padding(.top, ForestixSpace.xs)
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Quick measure")
+                .font(ForestixType.title)
+                .foregroundStyle(ForestixPalette.textPrimary)
+            Text(masterheadSubtitle)
+                .font(ForestixType.caption)
+                .foregroundStyle(ForestixPalette.textTertiary)
+        }
+        .padding(.top, ForestixSpace.xs)
+        .padding(.bottom, ForestixSpace.xs)
     }
 
-    // MARK: - Hub rows
+    private var masterheadSubtitle: String {
+        if history.entries.isEmpty {
+            return "Handheld instrument · start a scan below"
+        }
+        if history.isNearCapacity {
+            return "Log nearing capacity — export soon"
+        }
+        return "\(todayCount) today · \(history.entries.count) total"
+    }
 
-    private var hubRows: some View {
-        VStack(spacing: ForestixSpace.sm) {
-            HubRow(
-                title: "Diameter",
-                subtitle: "Breast-height scan via LiDAR",
-                systemImage: "ruler",
-                accessibilityId: "quickMeasure.dbhButton"
-            ) {
-                presentingDBHScan = true
+    // MARK: - Hero cards
+
+    private var diameterHero: some View {
+        MeasurementHeroCard(
+            title: "Diameter",
+            subtitle: "Breast-height scan via LiDAR",
+            systemImage: "ruler",
+            ctaLabel: "Start scan",
+            accessibilityId: "quickMeasure.dbhButton"
+        ) {
+            presentingDBHScan = true
+        }
+    }
+
+    private var heightHero: some View {
+        MeasurementHeroCard(
+            title: "Height",
+            subtitle: "AR tangent method · walk-off",
+            systemImage: "arrow.up.and.down",
+            ctaLabel: "Start scan",
+            accessibilityId: "quickMeasure.heightButton"
+        ) {
+            presentingHeightScan = true
+        }
+    }
+
+    // MARK: - Stats strip
+
+    /// Three-cell instrument-style readout. Hidden when there's no
+    /// history — the masthead subtitle already carries the "nothing
+    /// to show" messaging.
+    @ViewBuilder
+    private var statsStrip: some View {
+        if !history.entries.isEmpty {
+            HStack(spacing: 0) {
+                StatsCell(value: "\(todayCount)", label: "TODAY")
+                StatsCellDivider()
+                StatsCell(value: "\(history.entries.count)", label: "TOTAL")
+                StatsCellDivider()
+                StatsCell(value: lastRelative, label: "LAST")
             }
+            .padding(.vertical, ForestixSpace.sm)
+            .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: ForestixRadius.card,
+                                 style: .continuous)
+                    .fill(ForestixPalette.surface))
+            .overlay(
+                RoundedRectangle(cornerRadius: ForestixRadius.card,
+                                 style: .continuous)
+                    .stroke(ForestixPalette.divider, lineWidth: 0.5))
+        }
+    }
 
-            HubRow(
-                title: "Height",
-                subtitle: "Tangent method via AR + IMU",
-                systemImage: "arrow.up.and.down",
-                accessibilityId: "quickMeasure.heightButton"
-            ) {
-                presentingHeightScan = true
-            }
+    // MARK: - Supporting grid (Field log + Settings)
 
-            // Field log and Settings both push onto the NavigationStack
-            // rather than present a sheet — matches the rest of the
-            // hub's "one screen per spoke" rhythm.
+    private var supportingGrid: some View {
+        HStack(spacing: ForestixSpace.sm) {
             NavigationLink {
                 FieldLogScreen()
             } label: {
-                HubRowLabel(
+                SupportingTile(
                     title: "Field log",
                     subtitle: fieldLogSubtitle,
                     systemImage: "list.bullet.rectangle",
@@ -126,11 +175,9 @@ public struct QuickMeasureHomeScreen: View {
             NavigationLink {
                 SettingsScreen()
             } label: {
-                HubRowLabel(
+                SupportingTile(
                     title: "Settings",
-                    subtitle: settings.advancedMode
-                        ? "Advanced mode on · calibration · backup"
-                        : "Units · calibration · advanced mode",
+                    subtitle: settings.advancedMode ? "Advanced · on" : "Units · calibration",
                     systemImage: "gearshape",
                     trailingBadge: nil)
             }
@@ -139,37 +186,24 @@ public struct QuickMeasureHomeScreen: View {
         }
     }
 
-    private var fieldLogSubtitle: String {
-        if history.entries.isEmpty {
-            return "No readings yet"
-        }
-        if history.isNearCapacity {
-            return "Nearing capacity — export soon"
-        }
-        return "Recent readings and CSV export"
+    // MARK: - Derived stats
+
+    private var todayCount: Int {
+        history.entries.filter {
+            Calendar.current.isDateInToday($0.createdAt)
+        }.count
     }
 
-    // MARK: - Footer stats
+    private var lastRelative: String {
+        guard let first = history.entries.first else { return "—" }
+        let fmt = RelativeDateTimeFormatter()
+        fmt.unitsStyle = .abbreviated
+        return fmt.localizedString(for: first.createdAt, relativeTo: Date())
+    }
 
-    /// Single line of tertiary text at the bottom — pure status, not
-    /// a control. Gives the cruiser a glanceable "you've done N today"
-    /// without recreating the old dashboard's inline log. Hidden when
-    /// there are zero readings so the screen is genuinely empty.
-    @ViewBuilder
-    private var footerStats: some View {
-        if !history.entries.isEmpty {
-            let todayCount = history.entries.filter {
-                Calendar.current.isDateInToday($0.createdAt)
-            }.count
-            HStack {
-                Spacer()
-                Text("\(todayCount) today · \(history.entries.count) total")
-                    .font(ForestixType.caption)
-                    .foregroundStyle(ForestixPalette.textTertiary)
-                Spacer()
-            }
-            .padding(.top, ForestixSpace.xs)
-        }
+    private var fieldLogSubtitle: String {
+        if history.entries.isEmpty { return "No readings yet" }
+        return "\(history.entries.count) readings"
     }
 
     // MARK: - Scan covers (iOS only)
@@ -221,85 +255,197 @@ public struct QuickMeasureHomeScreen: View {
     #endif
 }
 
-// MARK: - Hub row (Button variant)
+// MARK: - Measurement hero card
 
-/// Action-button hub row — used for Diameter and Height because they
-/// present a fullScreenCover rather than pushing a destination.
-private struct HubRow: View {
+/// Large featured card for a primary measurement action. Visual
+/// weight deliberately heavier than the supporting tiles below so
+/// Tier 1 reads as Tier 1 at a glance.
+///
+/// Anatomy (top to bottom, left to right):
+///   • Decorative glyph — 56 pt, top-right corner, low-opacity
+///     primary tint. Acts as a watermark, not a control.
+///   • Title — `ForestixType.title` scaled down to 22 pt semibold,
+///     anchored bottom-left.
+///   • Subtitle — one line of caption copy under the title.
+///   • "Start scan" capsule — primary-coloured filled capsule at
+///     the bottom-right with a forward chevron. Looks like a button
+///     because it IS the button; the whole card is tappable but the
+///     capsule is where the eye lands.
+///
+/// Background is a subtle vertical gradient inside the primary-muted
+/// tone, with a hairline border and a soft 2 pt shadow. The gradient
+/// gives the card depth without turning into a marketing banner.
+private struct MeasurementHeroCard: View {
     let title: String
     let subtitle: String
     let systemImage: String
+    let ctaLabel: String
     let accessibilityId: String
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            HubRowLabel(title: title,
-                        subtitle: subtitle,
-                        systemImage: systemImage,
-                        trailingBadge: nil)
+            ZStack(alignment: .topTrailing) {
+                // Decorative glyph as a watermark.
+                Image(systemName: systemImage)
+                    .font(.system(size: 72, weight: .regular))
+                    .foregroundStyle(ForestixPalette.primary.opacity(0.18))
+                    .padding(.top, ForestixSpace.md)
+                    .padding(.trailing, ForestixSpace.md)
+                    .accessibilityHidden(true)
+
+                VStack(alignment: .leading, spacing: 0) {
+                    Spacer(minLength: 0)
+                    Text(title)
+                        .font(.system(size: 26, weight: .semibold))
+                        .foregroundStyle(ForestixPalette.textPrimary)
+                    Text(subtitle)
+                        .font(ForestixType.caption)
+                        .foregroundStyle(ForestixPalette.textSecondary)
+                        .padding(.top, 2)
+                    HStack {
+                        Spacer()
+                        HStack(spacing: 6) {
+                            Text(ctaLabel)
+                                .font(ForestixType.bodyBold)
+                            Image(systemName: "arrow.forward")
+                                .font(.system(size: 13, weight: .bold))
+                        }
+                        .foregroundStyle(Color.white)
+                        .padding(.horizontal, ForestixSpace.md)
+                        .padding(.vertical, ForestixSpace.xs)
+                        .background(
+                            Capsule().fill(ForestixPalette.primary))
+                    }
+                    .padding(.top, ForestixSpace.md)
+                }
+                .padding(ForestixSpace.md)
+            }
+            .frame(height: 160)
+            .background(heroBackground)
+            .overlay(
+                RoundedRectangle(cornerRadius: ForestixRadius.card,
+                                 style: .continuous)
+                    .stroke(ForestixPalette.primary.opacity(0.15),
+                            lineWidth: 0.5))
+            .clipShape(RoundedRectangle(cornerRadius: ForestixRadius.card,
+                                         style: .continuous))
+            .shadow(color: Color.black.opacity(0.04),
+                    radius: 8, x: 0, y: 2)
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier(accessibilityId)
+        .accessibilityLabel("\(title). \(subtitle). \(ctaLabel).")
+    }
+
+    /// Subtle vertical gradient — lighter at top, a touch more saturated
+    /// at the bottom. Keeps cards feeling dimensional without drifting
+    /// into consumer-app territory.
+    private var heroBackground: LinearGradient {
+        LinearGradient(
+            colors: [
+                ForestixPalette.primary.opacity(0.06),
+                ForestixPalette.primary.opacity(0.14)
+            ],
+            startPoint: .top,
+            endPoint: .bottom)
     }
 }
 
-// MARK: - Hub row label (shared content)
+// MARK: - Stats strip cells
 
-/// Visual body of a hub row — glyph tile, title + subtitle, trailing
-/// chevron (or optional count badge). Shared between Button-backed
-/// rows and NavigationLink-backed rows so the visual is identical.
-///
-/// Target height ≈ 76 pt so it comfortably meets Apple's 44 pt tap
-/// target on any iPhone, with room to breathe. Only 4 of these on
-/// the whole home screen, so they can afford the extra vertical
-/// weight.
-private struct HubRowLabel: View {
+private struct StatsCell: View {
+    let value: String
+    let label: String
+
+    var body: some View {
+        VStack(spacing: 2) {
+            Text(value)
+                .font(ForestixType.dataLarge)
+                .foregroundStyle(ForestixPalette.textPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+            Text(label)
+                .font(ForestixType.sectionHead)
+                .tracking(1.2)
+                .foregroundStyle(ForestixPalette.textTertiary)
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+private struct StatsCellDivider: View {
+    var body: some View {
+        Rectangle()
+            .fill(ForestixPalette.divider)
+            .frame(width: 0.5, height: 28)
+    }
+}
+
+// MARK: - Supporting tile
+
+/// Secondary tile used for Field log + Settings. Half the width of a
+/// hero card, and a different anatomy: glyph top-left (inside its own
+/// small tile), stacked title + subtitle, trailing chevron at the
+/// bottom-right. Optional count badge pinned to the top-right.
+private struct SupportingTile: View {
     let title: String
     let subtitle: String
     let systemImage: String
     let trailingBadge: String?
 
     var body: some View {
-        HStack(spacing: ForestixSpace.md) {
-            ZStack {
-                RoundedRectangle(cornerRadius: ForestixRadius.control,
-                                 style: .continuous)
-                    .fill(ForestixPalette.primaryMuted)
-                    .frame(width: 48, height: 48)
-                Image(systemName: systemImage)
-                    .font(.system(size: 20, weight: .medium))
-                    .foregroundStyle(ForestixPalette.primary)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                     style: .continuous)
+                        .fill(ForestixPalette.primaryMuted)
+                        .frame(width: 36, height: 36)
+                    Image(systemName: systemImage)
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(ForestixPalette.primary)
+                }
+                Spacer()
+                if let badge = trailingBadge {
+                    Text(badge)
+                        .font(ForestixType.dataSmall)
+                        .foregroundStyle(ForestixPalette.textSecondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(
+                            Capsule().fill(ForestixPalette.surfaceRaised))
+                }
             }
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(ForestixType.bodyBold)
-                    .foregroundStyle(ForestixPalette.textPrimary)
-                Text(subtitle)
-                    .font(ForestixType.caption)
-                    .foregroundStyle(ForestixPalette.textSecondary)
-            }
-            Spacer(minLength: ForestixSpace.xs)
-            if let badge = trailingBadge {
-                Text(badge)
-                    .font(ForestixType.dataSmall)
+            Spacer(minLength: ForestixSpace.sm)
+            HStack(alignment: .bottom) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(ForestixType.bodyBold)
+                        .foregroundStyle(ForestixPalette.textPrimary)
+                    Text(subtitle)
+                        .font(ForestixType.caption)
+                        .foregroundStyle(ForestixPalette.textSecondary)
+                        .lineLimit(2)
+                }
+                Spacer()
+                Image(systemName: "chevron.forward")
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(ForestixPalette.textTertiary)
-                    .padding(.horizontal, ForestixSpace.xs)
-                    .padding(.vertical, 3)
-                    .background(
-                        Capsule().fill(ForestixPalette.surfaceRaised))
             }
-            Image(systemName: "chevron.forward")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(ForestixPalette.textTertiary)
         }
-        .padding(.horizontal, ForestixSpace.md)
-        .padding(.vertical, ForestixSpace.sm)
-        .frame(minHeight: 76)
+        .padding(ForestixSpace.md)
+        .frame(height: 112, alignment: .topLeading)
+        .frame(maxWidth: .infinity)
         .background(
             RoundedRectangle(cornerRadius: ForestixRadius.card,
                              style: .continuous)
                 .fill(ForestixPalette.surface))
-        .contentShape(Rectangle())
+        .overlay(
+            RoundedRectangle(cornerRadius: ForestixRadius.card,
+                             style: .continuous)
+                .stroke(ForestixPalette.divider, lineWidth: 0.5))
+        .shadow(color: Color.black.opacity(0.03),
+                radius: 6, x: 0, y: 1)
     }
 }

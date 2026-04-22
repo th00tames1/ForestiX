@@ -18,26 +18,6 @@ import AR
 
 public struct DBHScanScreen: View {
 
-    /// Diagnostic overlay mode for the AR feed. Cruisers can toggle
-    /// between views in the top-right corner to judge what the scan
-    /// has picked up — the LiDAR-reconstructed mesh is informative
-    /// when the trunk is in full view, while ARKit's feature points
-    /// (rendered as a sparse 3D speckle) help you see whether tracking
-    /// is healthy when the mesh is sparse.
-    public enum DiagnosticOverlay: String, CaseIterable, Equatable {
-        case off
-        case mesh
-        case points
-
-        var label: String {
-            switch self {
-            case .off:    return "Off"
-            case .mesh:   return "Mesh"
-            case .points: return "Points"
-            }
-        }
-    }
-
     @StateObject private var viewModel: DBHScanViewModel
     public var onResult: (DBHResult) -> Void = { _ in }
     /// Fired when the cruiser explicitly accepts the on-screen result
@@ -46,7 +26,11 @@ public struct DBHScanScreen: View {
     /// doesn't record a measurement until Accept is tapped.
     public var onAccept: (DBHResult) -> Void = { _ in }
 
-    @State private var overlay: DiagnosticOverlay
+    // Two independent diagnostic overlays — cruisers asked to see the
+    // mesh and the VIO feature points at the same time, so they're no
+    // longer mutually exclusive. Either, both, or neither can be on.
+    @State private var meshOn: Bool
+    @State private var pointsOn: Bool
 
     public init(viewModel: @autoclosure @escaping () -> DBHScanViewModel,
                 onResult: @escaping (DBHResult) -> Void = { _ in },
@@ -55,7 +39,8 @@ public struct DBHScanScreen: View {
         _viewModel = StateObject(wrappedValue: viewModel())
         self.onResult = onResult
         self.onAccept = onAccept
-        _overlay = State(initialValue: showMeshOverlay ? .mesh : .off)
+        _meshOn   = State(initialValue: showMeshOverlay)
+        _pointsOn = State(initialValue: false)
     }
 
     public var body: some View {
@@ -68,8 +53,8 @@ public struct DBHScanScreen: View {
             // at the trunk's world position — world-anchored, so it
             // stays locked to the tree as the phone moves.
             ARCameraView(manager: viewModel.session,
-                         debugMeshOverlay: overlay == .mesh,
-                         debugPointsOverlay: overlay == .points,
+                         debugMeshOverlay: meshOn,
+                         debugPointsOverlay: pointsOn,
                          sceneMarkers: cylinderMarkers)
                 .ignoresSafeArea()
 
@@ -118,26 +103,58 @@ public struct DBHScanScreen: View {
         }
     }
 
-    // MARK: - Diagnostic overlay picker
+    // MARK: - Diagnostic overlay toggles
 
-    /// Three-way segmented control pinned to the top-right corner.
-    /// Lets the cruiser flip between no overlay, the LiDAR mesh, or
-    /// ARKit's feature points without leaving the scan flow.
+    /// Two independent capsule toggles pinned to the top-right corner.
+    /// Mesh and Points can be on at the same time — useful when the
+    /// cruiser wants to judge both surface reconstruction AND tracking
+    /// coverage at a single glance.
     private var overlayPicker: some View {
-        HStack {
+        HStack(spacing: ForestixSpace.xs) {
             Spacer()
-            Picker("Overlay", selection: $overlay) {
-                ForEach(DiagnosticOverlay.allCases, id: \.self) { mode in
-                    Text(mode.label).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 200)
-            .background(.ultraThinMaterial, in: Capsule())
-            .accessibilityIdentifier("dbhScan.overlayPicker")
-            .padding(.trailing, ForestixSpace.sm)
-            .padding(.top, ForestixSpace.xs)
+            overlayChip(label: "Mesh",
+                        systemImage: "square.grid.3x3",
+                        isOn: $meshOn,
+                        accessibilityId: "dbhScan.overlay.mesh")
+            overlayChip(label: "Points",
+                        systemImage: "circle.grid.3x3.fill",
+                        isOn: $pointsOn,
+                        accessibilityId: "dbhScan.overlay.points")
         }
+        .padding(.trailing, ForestixSpace.sm)
+        .padding(.top, ForestixSpace.xs)
+    }
+
+    private func overlayChip(label: String,
+                             systemImage: String,
+                             isOn: Binding<Bool>,
+                             accessibilityId: String) -> some View {
+        Button {
+            isOn.wrappedValue.toggle()
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 11, weight: .semibold))
+                Text(label)
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .padding(.horizontal, ForestixSpace.sm)
+            .padding(.vertical, 6)
+            .foregroundStyle(isOn.wrappedValue
+                             ? Color.white
+                             : Color.white.opacity(0.75))
+            .background(
+                Capsule()
+                    .fill(isOn.wrappedValue
+                          ? ForestixPalette.primary.opacity(0.85)
+                          : Color.black.opacity(0.35))
+            )
+            .overlay(
+                Capsule().stroke(Color.white.opacity(0.20), lineWidth: 0.5)
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier(accessibilityId)
     }
 
     // MARK: - Tap capture

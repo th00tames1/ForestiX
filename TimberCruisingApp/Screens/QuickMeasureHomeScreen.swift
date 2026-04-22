@@ -1,21 +1,28 @@
-// Quick Measure entry point — the default Forestix home when "Advanced
-// mode" is OFF (AppSettings.advancedMode == false).
+// Quick Measure home — the default Forestix entry point (when
+// AppSettings.advancedMode == false).
 //
-// A cruiser who just wants one-off tree diameter or tree height
-// readings shouldn't have to spin up a Project → Stratum → CruiseDesign
-// → PlannedPlot → Plot → Tree chain. This screen launches DBHScanScreen
-// / HeightScanScreen directly against `ProjectCalibration.identity` and
-// logs results into QuickMeasureHistory (UserDefaults-backed sidecar —
-// see QuickMeasureHistory.swift).
+// Design pattern: hub-and-spoke. The home is deliberately minimal —
+// a short masthead and four large navigation rows, each leading to a
+// dedicated screen. No inline log table, no inline capacity banner,
+// no embedded stats. Everything the cruiser can do lives behind one
+// explicit tap.
 //
-// Power users flip `advancedMode` on inside Settings (gear icon in the
-// toolbar) to surface the full project workflow.
+// This replaces an earlier "dashboard-style" layout that stacked
+// masthead + capacity warning + INSTRUMENT panel + FIELD LOG table
+// on a single scroll view. In user testing that screen read as
+// "crammed" — too many things competing for the cruiser's first
+// glance. Now:
 //
-// Layout philosophy (see DesignSystem.swift): this is a professional
-// instrument. Measurement cards are restrained, the recent readings
-// area reads like a field log — tabular monospaced values, muted tier
-// chips, no saturated colour cards. A cruiser should feel like they're
-// using a tool, not browsing a catalogue.
+//   Home (this file)
+//    ├─ Diameter      → DBHScanScreen   (fullScreenCover)
+//    ├─ Height        → HeightScanScreen (fullScreenCover)
+//    ├─ Field log     → FieldLogScreen   (NavigationLink)
+//    └─ Settings      → SettingsScreen   (NavigationLink)
+//
+// Each spoke owns its own chrome; the hub just routes. Matches the
+// hub-and-spoke pattern in Apple's HIG (and apps like Leica DISTO
+// Plan, which surfaces its main features as a small grid of large
+// tiles on the first screen).
 
 import SwiftUI
 import Common
@@ -30,7 +37,6 @@ public struct QuickMeasureHomeScreen: View {
 
     @State private var presentingDBHScan = false
     @State private var presentingHeightScan = false
-    @State private var shareURL: URL?
 
     public init() {}
 
@@ -39,12 +45,11 @@ public struct QuickMeasureHomeScreen: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: ForestixSpace.lg) {
                     masthead
-                    capacityNoticeRow
-                    instrumentSection
-                    historySection
+                    hubRows
+                    footerStats
                 }
                 .padding(.horizontal, ForestixSpace.md)
-                .padding(.top, ForestixSpace.sm)
+                .padding(.top, ForestixSpace.md)
                 .padding(.bottom, ForestixSpace.xl)
             }
             .background(ForestixPalette.canvas.ignoresSafeArea())
@@ -58,235 +63,122 @@ public struct QuickMeasureHomeScreen: View {
                         .tracking(2.0)
                         .foregroundStyle(ForestixPalette.textPrimary)
                 }
-                ToolbarItem(placement: .primaryAction) {
-                    NavigationLink {
-                        SettingsScreen()
-                    } label: {
-                        Image(systemName: "gearshape")
-                            .foregroundStyle(ForestixPalette.textSecondary)
-                    }
-                    .accessibilityIdentifier("quickMeasure.settingsLink")
-                }
             }
             #if os(iOS)
             .fullScreenCover(isPresented: $presentingDBHScan) { dbhCover }
             .fullScreenCover(isPresented: $presentingHeightScan) { heightCover }
-            .sheet(item: Binding(
-                get: { shareURL.map(ShareWrapper.init) },
-                set: { shareURL = $0?.url })
-            ) { wrapper in
-                QuickMeasureShareSheet(url: wrapper.url)
-            }
             #endif
         }
     }
 
     // MARK: - Masthead
 
+    /// Single-line title. The earlier version had a marketing tagline
+    /// underneath ("LiDAR diameter · AR height · no project required")
+    /// that the designer review flagged as App Store copy — pro
+    /// instrument tools don't need to pitch themselves on the power-on
+    /// screen.
     private var masthead: some View {
-        VStack(alignment: .leading, spacing: ForestixSpace.xxs) {
-            Text("Quick measure")
-                .font(ForestixType.title)
-                .foregroundStyle(ForestixPalette.textPrimary)
-            Text("LiDAR diameter · AR height · no project required")
-                .font(ForestixType.caption)
-                .foregroundStyle(ForestixPalette.textSecondary)
-        }
-        .padding(.top, ForestixSpace.xs)
+        Text("Quick measure")
+            .font(ForestixType.title)
+            .foregroundStyle(ForestixPalette.textPrimary)
+            .padding(.top, ForestixSpace.xs)
     }
 
-    // MARK: - Instrument section
+    // MARK: - Hub rows
 
-    private var instrumentSection: some View {
-        VStack(alignment: .leading, spacing: ForestixSpace.xs) {
-            sectionHeader("INSTRUMENT")
-            VStack(spacing: 0) {
-                instrumentRow(
-                    title: "Diameter",
-                    subtitle: "Stem diameter via LiDAR · DBH recommended",
-                    glyph: "ruler",
-                    accessibilityId: "quickMeasure.dbhButton"
-                ) { presentingDBHScan = true }
-
-                Rectangle()
-                    .fill(ForestixPalette.divider)
-                    .frame(height: 0.5)
-                    .padding(.leading, 56)
-
-                instrumentRow(
-                    title: "Height",
-                    subtitle: "Tangent method via AR + IMU",
-                    glyph: "arrow.up.and.down",
-                    accessibilityId: "quickMeasure.heightButton"
-                ) { presentingHeightScan = true }
-            }
-            .forestixPanel()
-        }
-    }
-
-    private func instrumentRow(title: String,
-                               subtitle: String,
-                               glyph: String,
-                               accessibilityId: String,
-                               action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: ForestixSpace.sm) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: ForestixRadius.control,
-                                     style: .continuous)
-                        .fill(ForestixPalette.primaryMuted)
-                        .frame(width: 40, height: 40)
-                    Image(systemName: glyph)
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundStyle(ForestixPalette.primary)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(ForestixType.bodyBold)
-                        .foregroundStyle(ForestixPalette.textPrimary)
-                    Text(subtitle)
-                        .font(ForestixType.caption)
-                        .foregroundStyle(ForestixPalette.textSecondary)
-                }
-                Spacer(minLength: ForestixSpace.xs)
-                Image(systemName: "chevron.forward")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(ForestixPalette.textTertiary)
-            }
-            .padding(.horizontal, ForestixSpace.md)
-            .padding(.vertical, ForestixSpace.sm)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier(accessibilityId)
-    }
-
-    // MARK: - History section
-
-    private var historySection: some View {
-        VStack(alignment: .leading, spacing: ForestixSpace.xs) {
-            HStack(alignment: .firstTextBaseline) {
-                sectionHeader("FIELD LOG")
-                Spacer()
-                if !history.entries.isEmpty {
-                    Text("\(history.entries.count)")
-                        .font(ForestixType.dataSmall)
-                        .foregroundStyle(ForestixPalette.textTertiary)
-                    Button {
-                        shareURL = history.exportCSV()
-                    } label: {
-                        Label("Export CSV",
-                              systemImage: "square.and.arrow.up")
-                            .font(ForestixType.caption)
-                            .foregroundStyle(ForestixPalette.primary)
-                    }
-                    .accessibilityIdentifier("quickMeasure.exportCSV")
-                }
+    private var hubRows: some View {
+        VStack(spacing: ForestixSpace.sm) {
+            HubRow(
+                title: "Diameter",
+                subtitle: "Breast-height scan via LiDAR",
+                systemImage: "ruler",
+                accessibilityId: "quickMeasure.dbhButton"
+            ) {
+                presentingDBHScan = true
             }
 
-            if history.entries.isEmpty {
-                emptyLog
-            } else {
-                logTable
+            HubRow(
+                title: "Height",
+                subtitle: "Tangent method via AR + IMU",
+                systemImage: "arrow.up.and.down",
+                accessibilityId: "quickMeasure.heightButton"
+            ) {
+                presentingHeightScan = true
             }
-        }
-    }
 
-    private var emptyLog: some View {
-        VStack(alignment: .center, spacing: ForestixSpace.xs) {
-            Image(systemName: "tray")
-                .font(.system(size: 22, weight: .light))
-                .foregroundStyle(ForestixPalette.textTertiary)
-            Text("No readings yet")
-                .font(ForestixType.body)
-                .foregroundStyle(ForestixPalette.textSecondary)
-            Text("Completed measurements appear here in chronological order.")
-                .font(ForestixType.caption)
-                .foregroundStyle(ForestixPalette.textTertiary)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, ForestixSpace.lg)
-        .forestixPanel()
-    }
-
-    private var logTable: some View {
-        VStack(spacing: 0) {
-            logHeaderRow
-            // `\.id` (Identifiable) not `\.indices` — positional
-            // identity invalidates row state on every middle-delete,
-            // killing swipe animations and menu state mid-gesture.
-            ForEach(history.entries) { entry in
-                LogEntryRow(entry: entry) {
-                    history.delete(id: entry.id)
-                }
-                if entry.id != history.entries.last?.id {
-                    Rectangle()
-                        .fill(ForestixPalette.divider)
-                        .frame(height: 0.5)
-                        .padding(.leading, ForestixSpace.md)
-                }
+            // Field log and Settings both push onto the NavigationStack
+            // rather than present a sheet — matches the rest of the
+            // hub's "one screen per spoke" rhythm.
+            NavigationLink {
+                FieldLogScreen()
+            } label: {
+                HubRowLabel(
+                    title: "Field log",
+                    subtitle: fieldLogSubtitle,
+                    systemImage: "list.bullet.rectangle",
+                    trailingBadge: history.entries.isEmpty
+                        ? nil : "\(history.entries.count)")
             }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("quickMeasure.fieldLogButton")
+
+            NavigationLink {
+                SettingsScreen()
+            } label: {
+                HubRowLabel(
+                    title: "Settings",
+                    subtitle: settings.advancedMode
+                        ? "Advanced mode on · calibration · backup"
+                        : "Units · calibration · advanced mode",
+                    systemImage: "gearshape",
+                    trailingBadge: nil)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("quickMeasure.settingsLink")
         }
-        .forestixPanel()
     }
 
-    /// Compact toast that surfaces when the log is within 5 % of its
-    /// capacity — the cruiser sees it before silent truncation kicks
-    /// in on the next write.
-    @ViewBuilder
-    private var capacityNoticeRow: some View {
+    private var fieldLogSubtitle: String {
+        if history.entries.isEmpty {
+            return "No readings yet"
+        }
         if history.isNearCapacity {
-            HStack(spacing: ForestixSpace.xs) {
-                Image(systemName: "exclamationmark.triangle")
-                    .foregroundStyle(ForestixPalette.confidenceWarn)
-                Text("Log nearing capacity — export CSV soon to archive older readings.")
+            return "Nearing capacity — export soon"
+        }
+        return "Recent readings and CSV export"
+    }
+
+    // MARK: - Footer stats
+
+    /// Single line of tertiary text at the bottom — pure status, not
+    /// a control. Gives the cruiser a glanceable "you've done N today"
+    /// without recreating the old dashboard's inline log. Hidden when
+    /// there are zero readings so the screen is genuinely empty.
+    @ViewBuilder
+    private var footerStats: some View {
+        if !history.entries.isEmpty {
+            let todayCount = history.entries.filter {
+                Calendar.current.isDateInToday($0.createdAt)
+            }.count
+            HStack {
+                Spacer()
+                Text("\(todayCount) today · \(history.entries.count) total")
                     .font(ForestixType.caption)
-                    .foregroundStyle(ForestixPalette.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 0)
+                    .foregroundStyle(ForestixPalette.textTertiary)
+                Spacer()
             }
-            .padding(ForestixSpace.sm)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .forestixPanel(raised: true)
+            .padding(.top, ForestixSpace.xs)
         }
     }
 
-    private var logHeaderRow: some View {
-        HStack(spacing: ForestixSpace.sm) {
-            Text("TYPE").frame(width: 52, alignment: .leading)
-            Text("VALUE").frame(width: 96, alignment: .trailing)
-            // "PREC" (precision) instead of the raw Greek σ — matches
-            // surveyor vocabulary and avoids a math glyph mid-header.
-            Text("PREC").frame(width: 64, alignment: .trailing)
-            Spacer(minLength: 0)
-            Text("QUALITY")
-        }
-        .font(ForestixType.sectionHead)
-        .tracking(1.2)
-        .foregroundStyle(ForestixPalette.textTertiary)
-        .padding(.horizontal, ForestixSpace.md)
-        .padding(.vertical, ForestixSpace.xs)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(ForestixPalette.surfaceRaised.opacity(0.5))
-    }
-
-    private func sectionHeader(_ text: String) -> some View {
-        Text(text)
-            .font(ForestixType.sectionHead)
-            .tracking(1.5)
-            .foregroundStyle(ForestixPalette.textSecondary)
-    }
-
-    // MARK: - Scan covers (iOS only — AR sessions don't run on macOS host)
+    // MARK: - Scan covers (iOS only)
 
     #if os(iOS)
     private var dbhCover: some View {
         NavigationStack {
             DBHScanScreen(
                 viewModel: DBHScanViewModel(calibration: .identity),
-                // Persist on Accept only so a retake doesn't pollute
-                // the log with intermediate readings.
                 onAccept: { result in
                     history.append(QuickMeasureEntry(
                         kind: .dbh,
@@ -329,124 +221,85 @@ public struct QuickMeasureHomeScreen: View {
     #endif
 }
 
-// MARK: - Log row
+// MARK: - Hub row (Button variant)
 
-private struct LogEntryRow: View {
-    let entry: QuickMeasureEntry
-    let onDelete: () -> Void
+/// Action-button hub row — used for Diameter and Height because they
+/// present a fullScreenCover rather than pushing a destination.
+private struct HubRow: View {
+    let title: String
+    let subtitle: String
+    let systemImage: String
+    let accessibilityId: String
+    let action: () -> Void
 
     var body: some View {
-        HStack(spacing: ForestixSpace.sm) {
-            Text(typeLabel)
-                .font(ForestixType.dataSmall)
-                .foregroundStyle(ForestixPalette.textSecondary)
-                .frame(width: 52, alignment: .leading)
+        Button(action: action) {
+            HubRowLabel(title: title,
+                        subtitle: subtitle,
+                        systemImage: systemImage,
+                        trailingBadge: nil)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier(accessibilityId)
+    }
+}
 
-            Text(valueText)
-                .font(ForestixType.data)
-                .foregroundStyle(ForestixPalette.textPrimary)
-                .frame(width: 96, alignment: .trailing)
+// MARK: - Hub row label (shared content)
 
-            Text(sigmaText)
-                .font(ForestixType.dataSmall)
-                .foregroundStyle(ForestixPalette.textTertiary)
-                .frame(width: 64, alignment: .trailing)
+/// Visual body of a hub row — glyph tile, title + subtitle, trailing
+/// chevron (or optional count badge). Shared between Button-backed
+/// rows and NavigationLink-backed rows so the visual is identical.
+///
+/// Target height ≈ 76 pt so it comfortably meets Apple's 44 pt tap
+/// target on any iPhone, with room to breathe. Only 4 of these on
+/// the whole home screen, so they can afford the extra vertical
+/// weight.
+private struct HubRowLabel: View {
+    let title: String
+    let subtitle: String
+    let systemImage: String
+    let trailingBadge: String?
 
-            Spacer(minLength: 0)
-
-            ConfidenceChip(rawTier: entry.confidenceRaw)
-
-            Menu {
-                Button(role: .destructive) {
-                    onDelete()
-                } label: {
-                    Label("Delete", systemImage: "trash")
-                }
-            } label: {
-                Image(systemName: "ellipsis")
+    var body: some View {
+        HStack(spacing: ForestixSpace.md) {
+            ZStack {
+                RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                 style: .continuous)
+                    .fill(ForestixPalette.primaryMuted)
+                    .frame(width: 48, height: 48)
+                Image(systemName: systemImage)
+                    .font(.system(size: 20, weight: .medium))
+                    .foregroundStyle(ForestixPalette.primary)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
                     .font(ForestixType.bodyBold)
+                    .foregroundStyle(ForestixPalette.textPrimary)
+                Text(subtitle)
+                    .font(ForestixType.caption)
+                    .foregroundStyle(ForestixPalette.textSecondary)
+            }
+            Spacer(minLength: ForestixSpace.xs)
+            if let badge = trailingBadge {
+                Text(badge)
+                    .font(ForestixType.dataSmall)
                     .foregroundStyle(ForestixPalette.textTertiary)
                     .padding(.horizontal, ForestixSpace.xs)
-                    .contentShape(Rectangle())
+                    .padding(.vertical, 3)
+                    .background(
+                        Capsule().fill(ForestixPalette.surfaceRaised))
             }
-            .accessibilityIdentifier("quickMeasure.row.menu")
+            Image(systemName: "chevron.forward")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(ForestixPalette.textTertiary)
         }
         .padding(.horizontal, ForestixSpace.md)
         .padding(.vertical, ForestixSpace.sm)
-        .overlay(alignment: .bottomLeading) {
-            Text(timestampText)
-                .font(ForestixType.dataSmall)
-                .foregroundStyle(ForestixPalette.textTertiary)
-                .padding(.leading, ForestixSpace.md)
-                .padding(.bottom, 2)
-                .allowsHitTesting(false)
-        }
-        // Note: swipe-to-delete requires the row to live inside a
-        // `List` — this log is rendered in a VStack / forestixPanel
-        // for tighter visual control, so the ellipsis menu remains
-        // the only deletion affordance. Converting the log to List
-        // swipeActions would trade the data-table look for default
-        // iOS row chrome. Tracked as a follow-up.
-    }
-
-    private var typeLabel: String {
-        switch entry.kind {
-        case .dbh:    return "DIA"
-        case .height: return "HGT"
-        }
-    }
-
-    private var valueText: String {
-        String(format: "%.1f %@", entry.value, entry.valueUnit)
-    }
-
-    private var sigmaText: String {
-        guard let s = entry.sigma, s > 0 else { return "—" }
-        return String(format: "±%.1f %@", s, entry.sigmaUnit)
-    }
-
-    private var timestampText: String {
-        let rel = RelativeDateTimeFormatter()
-        rel.unitsStyle = .abbreviated
-        return rel.localizedString(for: entry.createdAt, relativeTo: Date())
-            .uppercased()
+        .frame(minHeight: 76)
+        .background(
+            RoundedRectangle(cornerRadius: ForestixRadius.card,
+                             style: .continuous)
+                .fill(ForestixPalette.surface))
+        .contentShape(Rectangle())
     }
 }
-
-// MARK: - Confidence chip
-
-private struct ConfidenceChip: View {
-    let rawTier: String
-
-    var body: some View {
-        let d = ConfidenceStyle.descriptor(for: rawTier)
-        return Text(d.label.uppercased())
-            .font(ForestixType.sectionHead)
-            .tracking(0.8)
-            .padding(.horizontal, ForestixSpace.xs)
-            .padding(.vertical, 3)
-            .overlay(
-                RoundedRectangle(cornerRadius: ForestixRadius.chip,
-                                 style: .continuous)
-                    .stroke(d.color, lineWidth: 0.75)
-            )
-            .foregroundStyle(d.color)
-    }
-}
-
-// MARK: - Share-sheet wrapper (iOS only)
-
-#if os(iOS)
-private struct ShareWrapper: Identifiable {
-    let url: URL
-    var id: URL { url }
-}
-
-private struct QuickMeasureShareSheet: UIViewControllerRepresentable {
-    let url: URL
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: [url], applicationActivities: nil)
-    }
-    func updateUIViewController(_: UIActivityViewController, context: Context) {}
-}
-#endif

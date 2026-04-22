@@ -110,19 +110,30 @@ public struct CruiseFlowScreen: View {
     }
 
     private func plotRow(_ pp: PlannedPlot, visited: Bool) -> some View {
-        HStack {
-            Text("Plot \(pp.plotNumber)").bold()
-            Spacer()
-            if visited {
-                Label("visited", systemImage: "checkmark.circle.fill")
-                    .labelStyle(.iconOnly)
-                    .foregroundStyle(.green)
+        HStack(spacing: ForestixSpace.sm) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Plot \(pp.plotNumber)")
+                    .font(ForestixType.bodyBold)
+                Text(coordinatesCaption(pp))
+                    .font(ForestixType.dataSmall)
+                    .foregroundStyle(ForestixPalette.textTertiary)
             }
-            Text(String(format: "%.5f, %.5f", pp.plannedLat, pp.plannedLon))
-                .font(.caption.monospaced())
-                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+            if visited {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(ForestixPalette.confidenceOk)
+                    .accessibilityLabel("Visited")
+            }
         }
         .contentShape(Rectangle())
+    }
+
+    /// Compact lat/lon line for the plot row. 4 decimals = ~11 m
+    /// precision — enough for the cruiser to recognise a plot they've
+    /// already seen on a paper map, without the six-decimal-float
+    /// wall-of-text the old row used to show.
+    private func coordinatesCaption(_ pp: PlannedPlot) -> String {
+        String(format: "%.4f, %.4f", pp.plannedLat, pp.plannedLon)
     }
 
     // MARK: - Route table

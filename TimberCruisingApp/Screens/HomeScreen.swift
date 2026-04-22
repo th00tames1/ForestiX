@@ -59,6 +59,17 @@ public struct HomeScreen: View {
                 DeviceHealthBanners()
                     .listRowInsets(EdgeInsets())
                     .listRowBackground(Color.clear)
+                // Crash-recovery banners for plots left open in the
+                // last 24 h. Tap the banner to jump into the owning
+                // project; dismiss to silence for this launch.
+                ForEach(viewModel.resumeCandidates) { candidate in
+                    ResumeBanner(
+                        candidate: candidate,
+                        project: projectFor(id: candidate.plot.projectId),
+                        onDismiss: { viewModel.dismissResume(id: candidate.id) })
+                        .listRowInsets(EdgeInsets())
+                        .listRowBackground(Color.clear)
+                }
                 ForEach(viewModel.projects) { project in
                     NavigationLink {
                         ProjectDashboardScreen(project: project)
@@ -76,6 +87,10 @@ public struct HomeScreen: View {
             .listStyle(.insetGrouped)
             #endif
         }
+    }
+
+    private func projectFor(id: UUID) -> Project? {
+        viewModel.projects.first { $0.id == id }
     }
 
     private var emptyState: some View {
@@ -137,6 +152,67 @@ public struct HomeScreen: View {
                 .font(.subheadline)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+}
+
+// MARK: - Resume banner
+
+/// Crash-recovery banner surfaced on the home screen when a plot was
+/// left open in the last 24 hours. Tapping it navigates into the
+/// owning project's dashboard so the cruiser can resume (deep-link
+/// straight into the tally would require plumbing through the whole
+/// CruiseFlowCoordinator, which is out of scope here — the cruiser
+/// is one extra tap away, not silently stranded).
+private struct ResumeBanner: View {
+    let candidate: ResumeCandidate
+    let project: Project?
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "arrow.counterclockwise.circle.fill")
+                .font(.title3)
+                .foregroundStyle(.white)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Resume in-progress plot")
+                    .font(.subheadline).bold()
+                    .foregroundStyle(.white)
+                Text(candidate.summary
+                     + (project.map { " · \($0.name)" } ?? ""))
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.95))
+                    .fixedSize(horizontal: false, vertical: true)
+                if let project {
+                    HStack(spacing: 8) {
+                        NavigationLink {
+                            ProjectDashboardScreen(project: project)
+                        } label: {
+                            Text("Open project")
+                                .font(.caption.bold())
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(.white.opacity(0.22))
+                                .clipShape(Capsule())
+                                .foregroundStyle(.white)
+                        }
+                        Button("Dismiss", action: onDismiss)
+                            .font(.caption.bold())
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .overlay(Capsule().stroke(.white.opacity(0.5), lineWidth: 0.5))
+                            .foregroundStyle(.white)
+                    }
+                    .padding(.top, 4)
+                }
+            }
+            Spacer()
+        }
+        .padding(12)
+        .background(ForestixPalette.primary)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .accessibilityIdentifier("home.resumeBanner")
     }
 }
 

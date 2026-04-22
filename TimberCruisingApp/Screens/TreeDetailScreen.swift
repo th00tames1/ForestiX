@@ -48,7 +48,7 @@ public struct TreeDetailScreen: View {
     private var errorBinding: Binding<Bool> {
         Binding(
             get: { viewModel.errorMessage != nil },
-            set: { _ in })
+            set: { if !$0 { viewModel.clearError() } })
     }
 
     private var identitySection: some View {
@@ -247,10 +247,6 @@ public struct TreeDetailScreen: View {
     }
 
     private func tierColor(_ tier: ConfidenceTier) -> Color {
-        switch tier {
-        case .green: return .green
-        case .yellow: return .yellow
-        case .red: return .red
-        }
+        ConfidenceStyle.descriptor(for: tier.rawValue).color
     }
 }

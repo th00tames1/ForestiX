@@ -19,6 +19,7 @@ import AR
 public struct DBHScanScreen: View {
 
     @StateObject private var viewModel: DBHScanViewModel
+    @Environment(\.scenePhase) private var scenePhase
     public var onResult: (DBHResult) -> Void = { _ in }
     /// Fired when the cruiser explicitly accepts the on-screen result
     /// (state → .accepted). Use this for flows that want to persist the
@@ -99,6 +100,18 @@ public struct DBHScanScreen: View {
             // distinguish a fitted preview from a committed reading.
             if newState == .accepted, let r = viewModel.result {
                 onAccept(r)
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            // Stop the AR session + depth subscription when the user
+            // backgrounds the app — without this the camera, LiDAR,
+            // and Combine chain keep running inside a screen that's
+            // no longer on screen, drain battery fast, and return
+            // from background with a stale tracking state.
+            switch phase {
+            case .active:     viewModel.onAppear()
+            case .inactive, .background: viewModel.onDisappear()
+            @unknown default: break
             }
         }
     }
@@ -182,11 +195,21 @@ public struct DBHScanScreen: View {
     // MARK: - Chrome
 
     private func guideLine(height: CGFloat) -> some View {
-        Rectangle()
-            .fill(Color(white: 0.5).opacity(0.5))
-            .frame(height: 1.5)
-            .position(x: UIScreenWidth() / 2, y: height / 2)
-            .accessibilityIdentifier("dbhScan.guideLine")
+        // Dual-stroke line for sun-glare readability: a thin dark halo
+        // under a bright white line. On either a bright sky or dark
+        // foliage background, at least one of the two strokes has
+        // enough contrast to stay visible.
+        ZStack {
+            Rectangle()
+                .fill(Color.black.opacity(0.55))
+                .frame(height: 3)
+            Rectangle()
+                .fill(Color.white.opacity(0.9))
+                .frame(height: 1.5)
+        }
+        .frame(height: 3)
+        .position(x: UIScreenWidth() / 2, y: height / 2)
+        .accessibilityIdentifier("dbhScan.guideLine")
     }
 
     /// Bright green horizontal segment spanning the trunk edges the
@@ -226,12 +249,25 @@ public struct DBHScanScreen: View {
     }
 
     private var crosshair: some View {
-        let color: Color = viewModel.crosshairIsStable ? .green : .red
+        let color: Color = viewModel.crosshairIsStable
+            ? ForestixPalette.confidenceOk
+            : ForestixPalette.confidenceBad
         return VStack(spacing: 6) {
-            Circle()
-                .strokeBorder(color, lineWidth: 2)
-                .frame(width: 28, height: 28)
-                .accessibilityIdentifier("dbhScan.crosshair")
+            // Dual-stroke ring — dark halo underneath the coloured
+            // ring so the crosshair stays visible against both sky
+            // and foliage. Same pattern applied to the fit chord.
+            ZStack {
+                Circle()
+                    .strokeBorder(Color.black.opacity(0.6), lineWidth: 4)
+                    .frame(width: 32, height: 32)
+                Circle()
+                    .strokeBorder(color, lineWidth: 2)
+                    .frame(width: 28, height: 28)
+            }
+            .accessibilityIdentifier("dbhScan.crosshair")
+            .accessibilityLabel(viewModel.crosshairIsStable
+                                ? "Depth stable — tap to capture"
+                                : "Aligning — move closer or steadier")
             livePreviewBadge
         }
     }
@@ -247,20 +283,18 @@ public struct DBHScanScreen: View {
         if let cm = viewModel.previewDbhCm {
             VStack(spacing: 3) {
                 Text(String(format: "⌀ ~ %.1f cm", cm))
-                    .font(.caption.bold())
-                    .monospacedDigit()
+                    .font(ForestixType.data)
                     .foregroundStyle(.white)
                     .padding(.horizontal, 8).padding(.vertical, 4)
-                    .background(.black.opacity(0.55))
+                    .background(Color.black.opacity(0.65))
                     .clipShape(Capsule())
                     .accessibilityIdentifier("dbhScan.livePreview")
                 if let d = viewModel.distanceToStemCenterM {
                     Text(String(format: "%.2f m to center", d))
-                        .font(.caption2)
-                        .monospacedDigit()
+                        .font(ForestixType.dataSmall)
                         .foregroundStyle(.white.opacity(0.85))
                         .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(.black.opacity(0.40))
+                        .background(Color.black.opacity(0.45))
                         .clipShape(Capsule())
                         .accessibilityIdentifier("dbhScan.distanceBadge")
                 }
@@ -350,21 +384,39 @@ public struct DBHScanScreen: View {
 
     @ViewBuilder
     private func resultPanel(_ r: DBHResult) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("Diameter: \(String(format: "%.1f", r.diameterCm)) cm")
-                    .font(.title3).bold()
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                // Monospaced number so the value aligns with the FIELD
+                // LOG on the home screen — a cruiser reading the log
+                // expects the same glyph widths everywhere.
+                Text(String(format: "%.1f cm", r.diameterCm))
+                    .font(ForestixType.dataLarge)
+                    .foregroundStyle(.white)
                 Spacer()
                 tierChip(r.confidence)
             }
-            Text(String(
-                format: "Arc: %.0f°   RMSE: %.1f mm   σ_r: %.1f mm   n: %d",
-                r.arcCoverageDeg, r.rmseMm, r.sigmaRmm, r.nInliers))
-                .font(.caption)
+            Text(tierHint(r.confidence))
+                .font(ForestixType.caption)
                 .foregroundStyle(.white.opacity(0.9))
+            Text(String(
+                format: "arc %.0f°   rmse %.1f mm   σ_r %.1f mm   n %d",
+                r.arcCoverageDeg, r.rmseMm, r.sigmaRmm, r.nInliers))
+                .font(ForestixType.dataSmall)
+                .foregroundStyle(.white.opacity(0.65))
         }
         .foregroundStyle(.white)
         .accessibilityIdentifier("dbhScan.resultPanel")
+    }
+
+    /// Short cruiser-actionable sentence matching the tier. The spec
+    /// metrics below stay for diagnostics; this line tells the cruiser
+    /// what to actually do next.
+    private func tierHint(_ tier: ConfidenceTier) -> String {
+        switch tier {
+        case .green:  return "Good — wide arc, low scatter. Safe to record."
+        case .yellow: return "Fair — narrow arc or noisier fit. Consider a second pass."
+        case .red:    return "Check — step left 1 m and retake, or enter manually."
+        }
     }
 
     private func tierChip(_ tier: ConfidenceTier) -> some View {

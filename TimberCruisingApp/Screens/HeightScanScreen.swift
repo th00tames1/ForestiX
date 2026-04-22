@@ -22,6 +22,7 @@ public struct HeightScanScreen: View {
 
     @StateObject private var viewModel: HeightScanViewModel
     @StateObject private var raycaster = ARCenterRaycaster()
+    @Environment(\.scenePhase) private var scenePhase
     public var onResult: (HeightResult) -> Void = { _ in }
     /// Fires when the cruiser explicitly accepts the result shown on
     /// screen (state → .accepted). Hosts that want to persist only on
@@ -78,6 +79,16 @@ public struct HeightScanScreen: View {
                 onAccept(r)
             }
         }
+        .onChange(of: scenePhase) { _, phase in
+            // Same rationale as DBH scan: without this the ARKit
+            // session, CoreMotion pitch buffer, and depth subscription
+            // all keep running while the app is backgrounded.
+            switch phase {
+            case .active:     viewModel.onAppear()
+            case .inactive, .background: viewModel.onDisappear()
+            @unknown default: break
+            }
+        }
     }
 
     // MARK: - Overlay chrome per stage
@@ -121,22 +132,35 @@ public struct HeightScanScreen: View {
     /// tagging" unambiguous.
     private func crosshair(label: String) -> some View {
         VStack(spacing: 8) {
+            // Dual-stroke + dark halo for sun-glare readability: a
+            // plain yellow ring disappears against sky. The black
+            // halo underneath gives the chrome contrast against any
+            // background.
             ZStack {
                 Circle()
-                    .strokeBorder(Color.yellow, lineWidth: 2)
+                    .strokeBorder(Color.black.opacity(0.6), lineWidth: 4)
+                    .frame(width: 40, height: 40)
+                Circle()
+                    .strokeBorder(ForestixPalette.confidenceWarn, lineWidth: 2)
                     .frame(width: 36, height: 36)
                 Rectangle()
-                    .fill(Color.yellow)
+                    .fill(Color.black.opacity(0.6))
+                    .frame(width: 16, height: 3.5)
+                Rectangle()
+                    .fill(Color.black.opacity(0.6))
+                    .frame(width: 3.5, height: 16)
+                Rectangle()
+                    .fill(ForestixPalette.confidenceWarn)
                     .frame(width: 14, height: 1.5)
                 Rectangle()
-                    .fill(Color.yellow)
+                    .fill(ForestixPalette.confidenceWarn)
                     .frame(width: 1.5, height: 14)
             }
             Text(label)
-                .font(.caption.bold())
+                .font(ForestixType.dataSmall)
                 .foregroundStyle(.white)
                 .padding(.horizontal, 8).padding(.vertical, 4)
-                .background(.black.opacity(0.5))
+                .background(Color.black.opacity(0.65))
                 .cornerRadius(4)
         }
     }
@@ -204,12 +228,12 @@ public struct HeightScanScreen: View {
 
     private var walkingReadout: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(String(format: "d_h = %.1f m", viewModel.dhMeters))
-                .font(.title3).bold()
+            Text(String(format: "d_h %.1f m", viewModel.dhMeters))
+                .font(ForestixType.dataLarge)
                 .foregroundStyle(.white)
             Text(walkHintText)
-                .font(.callout)
-                .foregroundStyle(.yellow)
+                .font(ForestixType.caption)
+                .foregroundStyle(ForestixPalette.confidenceWarn)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityIdentifier("heightScan.walkingReadout")
@@ -230,24 +254,40 @@ public struct HeightScanScreen: View {
 
     @ViewBuilder
     private func resultPanel(_ r: HeightResult) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("H = \(String(format: "%.1f", r.heightM)) m "
-                     + "± \(String(format: "%.1f", r.sigmaHm)) m")
-                    .font(.title3).bold()
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(String(format: "%.1f m", r.heightM))
+                    .font(ForestixType.dataLarge)
+                    .foregroundStyle(.white)
+                Text(String(format: "± %.1f m", r.sigmaHm))
+                    .font(ForestixType.dataSmall)
+                    .foregroundStyle(.white.opacity(0.75))
                 Spacer()
                 tierChip(r.confidence)
             }
+            Text(tierHint(r.confidence))
+                .font(ForestixType.caption)
+                .foregroundStyle(.white.opacity(0.9))
             Text(String(
-                format: "d_h = %.1f m, α_top = %.1f°, α_base = %.1f°",
+                format: "d_h %.1f m   α_top %.1f°   α_base %.1f°",
                 r.dHm,
                 Double(r.alphaTopRad) * 180 / .pi,
                 Double(r.alphaBaseRad) * 180 / .pi))
-                .font(.caption)
-                .foregroundStyle(.white.opacity(0.9))
+                .font(ForestixType.dataSmall)
+                .foregroundStyle(.white.opacity(0.65))
         }
         .foregroundStyle(.white)
         .accessibilityIdentifier("heightScan.resultPanel")
+    }
+
+    /// Actionable one-liner per tier — same pattern as the Diameter
+    /// result panel so the cruiser gets consistent guidance.
+    private func tierHint(_ tier: ConfidenceTier) -> String {
+        switch tier {
+        case .green:  return "Good — geometry in sweet spot."
+        case .yellow: return "Fair — long walk-off or steep aim. Acceptable."
+        case .red:    return "Check — retake, or enter a tape estimate manually."
+        }
     }
 
     private func tierChip(_ tier: ConfidenceTier) -> some View {

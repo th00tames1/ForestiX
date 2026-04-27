@@ -37,6 +37,7 @@ public struct SettingsScreen: View {
     public var body: some View {
         Form {
             modeSection
+            regionSection
             unitsSection
             calibrationSection
             basemapSection
@@ -121,6 +122,24 @@ public struct SettingsScreen: View {
     }
 
     // MARK: - Sections
+
+    private var regionSection: some View {
+        Section(
+            header: Text("Region"),
+            footer: Text("Pre-loads the FIA species set for your timber region — affects which species appear in scan-time pickers.")
+        ) {
+            Picker("Region",
+                   selection: Binding(
+                    get: { settings.region ?? .all },
+                    set: { settings.region = $0; settings.regionPickerSeen = true })
+            ) {
+                ForEach(Region.allCases) { r in
+                    Text(r.displayName).tag(r)
+                }
+            }
+            .accessibilityIdentifier("settings.region")
+        }
+    }
 
     private var modeSection: some View {
         Section(

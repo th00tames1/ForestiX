@@ -23,6 +23,7 @@ public struct HeightScanScreen: View {
     @StateObject private var viewModel: HeightScanViewModel
     @StateObject private var raycaster = ARCenterRaycaster()
     @Environment(\.scenePhase) private var scenePhase
+    @EnvironmentObject private var settings: AppSettings
     public var onResult: (HeightResult) -> Void = { _ in }
     /// Fires when the cruiser explicitly accepts the result shown on
     /// screen (state → .accepted). Hosts that want to persist only on
@@ -237,7 +238,8 @@ public struct HeightScanScreen: View {
 
     private var walkingReadout: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(String(format: "d_h %.1f m", viewModel.dhMeters))
+            Text("d_h " + MeasurementFormatter.distance(
+                m: Double(viewModel.dhMeters), in: settings.unitSystem))
                 .font(ForestixType.dataLarge)
                 .foregroundStyle(.white)
             Text(walkHintText)
@@ -265,10 +267,12 @@ public struct HeightScanScreen: View {
     private func resultPanel(_ r: HeightResult) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
-                Text(String(format: "%.1f m", r.heightM))
+                Text(MeasurementFormatter.height(
+                    m: Double(r.heightM), in: settings.unitSystem))
                     .font(ForestixType.dataLarge)
                     .foregroundStyle(.white)
-                Text(String(format: "± %.1f m", r.sigmaHm))
+                Text(MeasurementFormatter.heightSigma(
+                    m: Double(r.sigmaHm), in: settings.unitSystem))
                     .font(ForestixType.dataSmall)
                     .foregroundStyle(.white.opacity(0.75))
                 Spacer()
@@ -315,7 +319,10 @@ public struct HeightScanScreen: View {
 
     private var manualEntryPanel: some View {
         HStack {
-            TextField("Height in metres", text: $viewModel.manualHeightM)
+            TextField(settings.unitSystem == .metric
+                      ? "Height in metres"
+                      : "Height in feet",
+                      text: $viewModel.manualHeightM)
                 .textFieldStyle(.roundedBorder)
                 #if os(iOS)
                 .keyboardType(.decimalPad)

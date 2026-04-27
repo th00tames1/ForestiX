@@ -20,6 +20,7 @@
 
 import SwiftUI
 import Models
+import Sensors
 
 public struct FieldLogScreen: View {
 
@@ -69,6 +70,28 @@ public struct FieldLogScreen: View {
 
     private var populatedList: some View {
         List {
+            // Plot summary card — shows BA / TPA / QMD + stocking
+            // gauge + species mix for the active plot. Hidden on
+            // hosts with fewer than two readings (gauge needs data).
+            if let plotID = history.activePlotID,
+               let plot = history.plot(id: plotID) {
+                let plotEntries = history.entries(forPlot: plotID)
+                if plotEntries.count >= 1 {
+                    Section {
+                        PlotSummaryCard(
+                            plot: plot,
+                            entries: plotEntries,
+                            unitSystem: settings.unitSystem,
+                            logRule: settings.logRule)
+                            .listRowInsets(EdgeInsets(
+                                top: ForestixSpace.sm,
+                                leading: ForestixSpace.md,
+                                bottom: ForestixSpace.sm,
+                                trailing: ForestixSpace.md))
+                            .listRowBackground(Color.clear)
+                    }
+                }
+            }
             Section {
                 summaryHeader
                     .listRowInsets(EdgeInsets(top: ForestixSpace.sm,

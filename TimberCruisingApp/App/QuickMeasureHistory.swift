@@ -497,7 +497,7 @@ public final class QuickMeasureHistory: ObservableObject {
     }
 
     /// Returns a brief description of an existing tree's measurements
-    /// (e.g. "DIA 34.5 cm · HGT 28 m") for the picker UI. Returns
+    /// (e.g. "DBH 34.5 cm · Height 28 m") for the picker UI. Returns
     /// `nil` if the log has nothing for that tree number.
     public func summary(forTreeNumber n: Int) -> String? {
         let owned = entries.filter { $0.treeNumber == n }
@@ -506,10 +506,10 @@ public final class QuickMeasureHistory: ObservableObject {
         let hgt = owned.first { $0.kind == .height }
         var parts: [String] = []
         if let d = dbh {
-            parts.append(String(format: "DIA %.1f cm", d.value))
+            parts.append(String(format: "DBH %.1f cm", d.value))
         }
         if let h = hgt {
-            parts.append(String(format: "HGT %.1f m", h.value))
+            parts.append(String(format: "Height %.1f m", h.value))
         }
         if parts.isEmpty { return "—" }
         return parts.joined(separator: " · ")

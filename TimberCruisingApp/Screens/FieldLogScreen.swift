@@ -231,9 +231,9 @@ private struct FieldLogColumnHeader: View {
         HStack(spacing: ForestixSpace.sm) {
             Text("TYPE").frame(width: 52, alignment: .leading)
             Text("VALUE").frame(width: 96, alignment: .trailing)
-            Text("PREC").frame(width: 64, alignment: .trailing)
+            Text("PRECISION").frame(width: 64, alignment: .trailing)
             Spacer(minLength: 0)
-            Text("QUAL")
+            Text("QUALITY")
         }
         .font(ForestixType.sectionHead)
         .tracking(1.2)
@@ -296,8 +296,8 @@ private struct FieldLogRow: View {
 
     private var typeLabel: String {
         switch entry.kind {
-        case .dbh:    return "DIA"
-        case .height: return "HGT"
+        case .dbh:    return "DBH"
+        case .height: return "Height"
         }
     }
 

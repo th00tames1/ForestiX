@@ -114,7 +114,7 @@ final class HeightScanScreenSnapshotTests: XCTestCase {
     func testRejected() {
         let vm = HeightScanViewModel.preview(
             state: .rejected,
-            result: redResult(reason: "d_h < 3 m"))
+            result: redResult(reason: "Walked back less than 3 m"))
         assertSnapshot(of: host(vm), as: .image(on: .iPhone13))
     }
 

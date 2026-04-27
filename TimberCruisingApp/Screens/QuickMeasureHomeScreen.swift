@@ -287,7 +287,9 @@ public struct QuickMeasureHomeScreen: View {
                         sigma: Double(result.sigmaRmm),
                         confidenceRaw: result.confidence.rawValue,
                         method: result.method.rawValue,
-                        treeNumber: pendingTreeNumber))
+                        treeNumber: pendingTreeNumber,
+                        plotID: history.activePlotID,
+                        position: .dbh))
                     presentingDBHScan = false
                 },
                 showMeshOverlay: true)
@@ -315,7 +317,8 @@ public struct QuickMeasureHomeScreen: View {
                         sigma: Double(result.sigmaHm),
                         confidenceRaw: result.confidence.rawValue,
                         method: result.method.rawValue,
-                        treeNumber: pendingTreeNumber))
+                        treeNumber: pendingTreeNumber,
+                        plotID: history.activePlotID))
                     presentingHeightScan = false
                 },
                 showMeshOverlay: true)

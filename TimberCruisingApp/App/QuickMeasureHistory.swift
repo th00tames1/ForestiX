@@ -25,6 +25,67 @@ import Models
 
 // MARK: - Entry
 
+/// Lightweight Quick Measure plot — owned entirely by `QuickMeasureHistory`,
+/// distinct from the Core Data plot used by the Advanced cruise
+/// workflow. Quick Measure cruisers can group readings into plots
+/// (each with a name, optional unit, optional acreage) without
+/// committing to the full project / stratum / cruise design pipeline.
+/// A single "default" plot exists at all times so the simplest
+/// "tap Diameter, scan, save" path keeps working with no setup.
+public struct QuickMeasurePlot: Codable, Identifiable, Sendable, Equatable {
+    public let id: UUID
+    /// Human-friendly plot name. The default plot is always called
+    /// "Quick measurements" and can't be deleted.
+    public var name: String
+    /// Optional management unit / stand name — multi-unit cruise
+    /// support per SilvaCruise. Empty string treated as nil.
+    public var unitName: String
+    /// Plot acreage. nil = unknown / unset.
+    public var acres: Double?
+    /// Plot type — fixed-radius / variable / tally / measure.
+    public var typeRaw: String
+    /// BAF for variable-radius (ft²/ac) — ignored for other types.
+    public var baf: Double?
+    /// Plot-radius in feet for fixed-radius plots.
+    public var radiusFt: Double?
+    public let createdAt: Date
+    /// True for the auto-created "Quick measurements" plot.
+    public let isDefault: Bool
+
+    public init(id: UUID = UUID(),
+                name: String,
+                unitName: String = "",
+                acres: Double? = nil,
+                typeRaw: String = "fixed",
+                baf: Double? = nil,
+                radiusFt: Double? = nil,
+                createdAt: Date = Date(),
+                isDefault: Bool = false) {
+        self.id = id
+        self.name = name
+        self.unitName = unitName
+        self.acres = acres
+        self.typeRaw = typeRaw
+        self.baf = baf
+        self.radiusFt = radiusFt
+        self.createdAt = createdAt
+        self.isDefault = isDefault
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id        = try c.decode(UUID.self,   forKey: .id)
+        self.name      = try c.decode(String.self, forKey: .name)
+        self.unitName  = (try? c.decode(String.self, forKey: .unitName)) ?? ""
+        self.acres     = try c.decodeIfPresent(Double.self, forKey: .acres)
+        self.typeRaw   = (try? c.decode(String.self, forKey: .typeRaw)) ?? "fixed"
+        self.baf       = try c.decodeIfPresent(Double.self, forKey: .baf)
+        self.radiusFt  = try c.decodeIfPresent(Double.self, forKey: .radiusFt)
+        self.createdAt = try c.decode(Date.self,   forKey: .createdAt)
+        self.isDefault = (try? c.decode(Bool.self, forKey: .isDefault)) ?? false
+    }
+}
+
 public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
 
     public enum Kind: String, Codable, Sendable {
@@ -32,25 +93,48 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         case height
     }
 
+    /// Where on the stem the reading was taken — DBH (1.3 m), butt,
+    /// upper stem at a specific height, or stump. Optional; older
+    /// entries default to `dbh` for diameter readings.
+    public enum StemPosition: String, Codable, Sendable, CaseIterable {
+        case dbh
+        case butt
+        case upperStem
+        case stump
+
+        public var displayName: String {
+            switch self {
+            case .dbh:        return "DBH"
+            case .butt:       return "Butt"
+            case .upperStem:  return "Upper stem"
+            case .stump:      return "Stump"
+            }
+        }
+    }
+
     public let id: UUID
     public let kind: Kind
-    /// DBH is stored in centimetres; Height in metres. The display layer
-    /// converts to imperial if the user's unit preference says so.
     public let value: Double
-    /// Precision (1σ). DBH sigma is stored in millimetres; Height sigma
-    /// in metres — mirrors the scan result types. Display + CSV always
-    /// include the unit alongside the number so readers can't mix them
-    /// up.
     public let sigma: Double?
     public let confidenceRaw: String
     public let method: String
     public let createdAt: Date
-    /// Optional tree identifier — a small monotonic integer the cruiser
-    /// chooses (or auto-generates) before each scan so DBH and Height
-    /// readings on the same stem can be linked. Optional + decoded
-    /// with a default in the Codable init below so older sidecar
-    /// entries written before this field existed still load.
     public let treeNumber: Int?
+
+    /// Plot the reading belongs to. Older entries (pre-Phase 2) and
+    /// the auto-migrated default-plot entries share the same default
+    /// plot id assigned by `QuickMeasureHistory`.
+    public let plotID: UUID?
+    /// FIA species code — short string the regional species lists
+    /// surface (e.g. "DF", "PP", "RO"). nil = unspecified.
+    public let speciesCode: String?
+    /// Stem position the reading was taken at. nil = legacy entry.
+    public let position: StemPosition?
+    /// Damage codes — multiple short tags ("sweep", "fork",
+    /// "broken-top", "rot"). Empty array = no damage noted.
+    public let damageCodes: [String]
+    /// Free-text cruiser note. nil = no note.
+    public let note: String?
 
     public init(
         id: UUID = UUID(),
@@ -60,7 +144,12 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         confidenceRaw: String,
         method: String,
         createdAt: Date = Date(),
-        treeNumber: Int? = nil
+        treeNumber: Int? = nil,
+        plotID: UUID? = nil,
+        speciesCode: String? = nil,
+        position: StemPosition? = nil,
+        damageCodes: [String] = [],
+        note: String? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -70,9 +159,14 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         self.method = method
         self.createdAt = createdAt
         self.treeNumber = treeNumber
+        self.plotID = plotID
+        self.speciesCode = speciesCode
+        self.position = position
+        self.damageCodes = damageCodes
+        self.note = note
     }
 
-    // Custom decoding so entries written before `treeNumber` existed
+    // Custom decoding so entries written before any new field existed
     // still parse cleanly — the schema-version header lets us add
     // fields like this without forcing a destructive migration.
     public init(from decoder: Decoder) throws {
@@ -84,7 +178,12 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         self.confidenceRaw = try c.decode(String.self, forKey: .confidenceRaw)
         self.method        = try c.decode(String.self, forKey: .method)
         self.createdAt     = try c.decode(Date.self,   forKey: .createdAt)
-        self.treeNumber    = try c.decodeIfPresent(Int.self, forKey: .treeNumber)
+        self.treeNumber    = try c.decodeIfPresent(Int.self,   forKey: .treeNumber)
+        self.plotID        = try c.decodeIfPresent(UUID.self,  forKey: .plotID)
+        self.speciesCode   = try c.decodeIfPresent(String.self, forKey: .speciesCode)
+        self.position      = try c.decodeIfPresent(StemPosition.self, forKey: .position)
+        self.damageCodes   = (try? c.decode([String].self, forKey: .damageCodes)) ?? []
+        self.note          = try c.decodeIfPresent(String.self, forKey: .note)
     }
 
     /// Unit string for `value`. `cm` for diameter, `m` for height.
@@ -113,14 +212,24 @@ public final class QuickMeasureHistory: ObservableObject {
 
     public enum Keys {
         public static let entries = "tc.quickMeasure.entries"
+        public static let plots   = "tc.quickMeasure.plots"
+        public static let activePlot = "tc.quickMeasure.activePlot"
     }
 
     /// Current schema version stamped on every JSONL sidecar write.
-    /// Bump when `QuickMeasureEntry` gains or removes a non-optional
-    /// field; add a matching case to `migrate(_:to:)`.
-    public static let schemaVersion: Int = 1
+    /// Bumped to 2 in Phase 2 — entries gained plotID / speciesCode /
+    /// position / damageCodes / note fields; a `QuickMeasurePlot` set
+    /// is also persisted alongside.
+    public static let schemaVersion: Int = 2
 
     @Published public private(set) var entries: [QuickMeasureEntry] = []
+    /// All Quick Measure plots known to the app, newest first. Always
+    /// contains at least the auto-created default plot.
+    @Published public private(set) var plots: [QuickMeasurePlot] = []
+    /// Currently-selected plot — readings save into this plot unless
+    /// the cruiser explicitly picks another one. Defaults to the
+    /// default plot on a fresh install.
+    @Published public var activePlotID: UUID?
     /// Fires `true` when a new append has pushed the history within
     /// 5 % of the cap — the UI can surface a toast so the cruiser
     /// archives before silent truncation kicks in.
@@ -135,11 +244,24 @@ public final class QuickMeasureHistory: ObservableObject {
                 sidecarURL: URL? = nil) {
         self.defaults = defaults
         self.capacity = capacity
-        // Resolved lazily on first access so the class itself stays
-        // constructible from non-main-actor callsites (tests, etc.).
         let resolved = sidecarURL ?? Self.defaultSidecarURL()
         self.sidecarURL = resolved
         self.entries = Self.loadBest(defaults: defaults, sidecar: resolved)
+        self.plots   = Self.loadPlots(from: defaults)
+
+        // First-launch + Phase-2 migration: ensure a default plot
+        // exists and every legacy entry without a plotID is moved
+        // into it. Mutates `entries` + `plots` and persists once.
+        bootstrapDefaultPlotIfNeeded()
+
+        if let raw = defaults.string(forKey: Keys.activePlot),
+           let id = UUID(uuidString: raw),
+           plots.contains(where: { $0.id == id }) {
+            self.activePlotID = id
+        } else {
+            self.activePlotID = plots.first(where: { $0.isDefault })?.id
+        }
+
         self.recomputeCapacityFlag()
     }
 
@@ -181,6 +303,133 @@ public final class QuickMeasureHistory: ObservableObject {
         rewriteSidecar()
         persistCache()
         recomputeCapacityFlag()
+    }
+
+    // MARK: - Plot management
+
+    /// Adds a new plot to the front of the plot list, persists, and
+    /// makes it the active plot.
+    @discardableResult
+    public func createPlot(name: String,
+                            unitName: String = "",
+                            acres: Double? = nil,
+                            typeRaw: String = "fixed",
+                            baf: Double? = nil,
+                            radiusFt: Double? = nil) -> QuickMeasurePlot {
+        let plot = QuickMeasurePlot(
+            name: name, unitName: unitName, acres: acres,
+            typeRaw: typeRaw, baf: baf, radiusFt: radiusFt,
+            createdAt: Date(), isDefault: false)
+        plots.insert(plot, at: 0)
+        activePlotID = plot.id
+        persistPlots()
+        return plot
+    }
+
+    public func renamePlot(id: UUID, to newName: String) {
+        guard let idx = plots.firstIndex(where: { $0.id == id }) else { return }
+        plots[idx].name = newName
+        persistPlots()
+    }
+
+    public func deletePlot(id: UUID) {
+        // Default plot is permanent — protects the migrated legacy
+        // log from accidental deletion.
+        guard let idx = plots.firstIndex(where: { $0.id == id }),
+              !plots[idx].isDefault else { return }
+        plots.remove(at: idx)
+        // Re-home any orphaned entries to the default plot.
+        let defaultID = plots.first(where: { $0.isDefault })?.id
+        let updated = entries.map { entry -> QuickMeasureEntry in
+            guard entry.plotID == id else { return entry }
+            return QuickMeasureEntry(
+                id: entry.id, kind: entry.kind, value: entry.value,
+                sigma: entry.sigma, confidenceRaw: entry.confidenceRaw,
+                method: entry.method, createdAt: entry.createdAt,
+                treeNumber: entry.treeNumber,
+                plotID: defaultID,
+                speciesCode: entry.speciesCode, position: entry.position,
+                damageCodes: entry.damageCodes, note: entry.note)
+        }
+        entries = updated
+        if activePlotID == id {
+            activePlotID = defaultID
+        }
+        persistPlots()
+        rewriteSidecar()
+        persistCache()
+    }
+
+    public func setActivePlot(id: UUID) {
+        guard plots.contains(where: { $0.id == id }) else { return }
+        activePlotID = id
+        defaults.set(id.uuidString, forKey: Keys.activePlot)
+    }
+
+    /// Convenience accessor for filtering displays by current plot.
+    public func entries(forPlot id: UUID?) -> [QuickMeasureEntry] {
+        guard let id else { return entries }
+        return entries.filter { ($0.plotID ?? defaultPlotID()) == id }
+    }
+
+    public func plot(id: UUID) -> QuickMeasurePlot? {
+        plots.first { $0.id == id }
+    }
+
+    public func defaultPlotID() -> UUID? {
+        plots.first(where: { $0.isDefault })?.id
+    }
+
+    /// Bootstraps the default plot on first launch and re-homes any
+    /// legacy entries that pre-date Phase 2 (no `plotID`) into it.
+    /// Idempotent — safe to call on every init.
+    private func bootstrapDefaultPlotIfNeeded() {
+        if !plots.contains(where: { $0.isDefault }) {
+            let def = QuickMeasurePlot(
+                name: "Quick measurements",
+                unitName: "",
+                acres: nil,
+                typeRaw: "fixed",
+                createdAt: entries.last?.createdAt ?? Date(),
+                isDefault: true)
+            plots.append(def)
+        }
+        guard let defaultID = plots.first(where: { $0.isDefault })?.id
+        else { return }
+
+        var migrated = false
+        let updated = entries.map { entry -> QuickMeasureEntry in
+            if entry.plotID == nil {
+                migrated = true
+                return QuickMeasureEntry(
+                    id: entry.id, kind: entry.kind, value: entry.value,
+                    sigma: entry.sigma, confidenceRaw: entry.confidenceRaw,
+                    method: entry.method, createdAt: entry.createdAt,
+                    treeNumber: entry.treeNumber,
+                    plotID: defaultID,
+                    speciesCode: entry.speciesCode, position: entry.position,
+                    damageCodes: entry.damageCodes, note: entry.note)
+            }
+            return entry
+        }
+        if migrated {
+            entries = updated
+            rewriteSidecar()
+            persistCache()
+        }
+        persistPlots()
+    }
+
+    private func persistPlots() {
+        do {
+            let data = try JSONEncoder().encode(plots)
+            defaults.set(data, forKey: Keys.plots)
+        } catch {}
+    }
+
+    private static func loadPlots(from defaults: UserDefaults) -> [QuickMeasurePlot] {
+        guard let data = defaults.data(forKey: Keys.plots) else { return [] }
+        return (try? JSONDecoder().decode([QuickMeasurePlot].self, from: data)) ?? []
     }
 
     // MARK: - Tree identity helpers
@@ -259,21 +508,32 @@ public final class QuickMeasureHistory: ObservableObject {
             .replacingOccurrences(of: ":", with: "-")
         let url = dir.appendingPathComponent("quick-measure-\(stamp).csv")
 
-        let headers = ["id", "timestamp", "kind", "value", "value_unit",
-                       "sigma", "sigma_unit", "confidence", "method"]
+        let headers = ["id", "timestamp", "plot", "tree", "kind",
+                       "value", "value_unit", "sigma", "sigma_unit",
+                       "species", "position", "damage", "note",
+                       "confidence", "method"]
         var out = headers.map(Self.csvField).joined(separator: ",")
         out += "\r\n"
 
         for e in entries {
             let sigma = e.sigma.map { String(format: "%.3f", $0) } ?? ""
+            let plotName = e.plotID
+                .flatMap { id in plots.first { $0.id == id } }
+                .map(\.name) ?? ""
             let row = [
                 e.id.uuidString,
                 iso.string(from: e.createdAt),
+                plotName,
+                e.treeNumber.map(String.init) ?? "",
                 e.kind.rawValue,
                 String(format: "%.3f", e.value),
                 e.valueUnit,
                 sigma,
                 e.sigma == nil ? "" : e.sigmaUnit,
+                e.speciesCode ?? "",
+                e.position?.rawValue ?? "",
+                e.damageCodes.joined(separator: "|"),
+                e.note ?? "",
                 e.confidenceRaw,
                 e.method
             ].map(Self.csvField).joined(separator: ",")

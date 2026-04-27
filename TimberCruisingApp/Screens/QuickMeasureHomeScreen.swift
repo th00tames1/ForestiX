@@ -232,6 +232,18 @@ public struct QuickMeasureHomeScreen: View {
 
             HStack(spacing: ForestixSpace.sm) {
                 NavigationLink {
+                    ReconCruiseScreen()
+                } label: {
+                    SupportingTile(
+                        title: "Recon cruise",
+                        subtitle: "Quick BA tally · sample-size sizing",
+                        systemImage: "scope",
+                        trailingBadge: nil)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("quickMeasure.reconButton")
+
+                NavigationLink {
                     SettingsScreen()
                 } label: {
                     SupportingTile(
@@ -242,13 +254,6 @@ public struct QuickMeasureHomeScreen: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("quickMeasure.settingsLink")
-
-                // Empty placeholder so the second row stays balanced
-                // even with one tile. Replace with another spoke later
-                // (e.g. Calibration shortcut) when one earns the slot.
-                Color.clear
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 112)
             }
         }
     }

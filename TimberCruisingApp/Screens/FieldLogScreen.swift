@@ -232,14 +232,29 @@ private struct FieldLogRow: View {
 
                 TierChip(rawTier: entry.confidenceRaw)
             }
-            Text(timestampText)
-                .font(ForestixType.dataSmall)
-                .foregroundStyle(ForestixPalette.textTertiary)
-                .padding(.leading, 52 + ForestixSpace.sm)
+            HStack(spacing: 6) {
+                if let n = entry.treeNumber {
+                    Text("#\(n)")
+                        .font(ForestixType.dataSmall)
+                        .foregroundStyle(ForestixPalette.primary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .overlay(
+                            Capsule()
+                                .stroke(ForestixPalette.primary.opacity(0.4),
+                                        lineWidth: 0.5))
+                }
+                Text(timestampText)
+                    .font(ForestixType.dataSmall)
+                    .foregroundStyle(ForestixPalette.textTertiary)
+            }
+            .padding(.leading, 52 + ForestixSpace.sm)
         }
         .padding(.vertical, 2)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(typeLabel) \(valueText), precision \(sigmaText), \(entry.confidenceRaw)")
+        .accessibilityLabel(
+            (entry.treeNumber.map { "Tree \($0). " } ?? "") +
+            "\(typeLabel) \(valueText), precision \(sigmaText), \(entry.confidenceRaw)")
     }
 
     private var typeLabel: String {

@@ -58,7 +58,16 @@ public struct HeightScanScreen: View {
                          raycaster: raycaster)
                 .ignoresSafeArea()
             overlayChrome
-            VStack {
+            VStack(spacing: 0) {
+                // Same GPS-accuracy strip as the Diameter scan — gives
+                // the cruiser a single-glance read on canopy quality
+                // before they anchor.
+                HStack {
+                    GPSAccuracyBadge()
+                    Spacer()
+                }
+                .padding(.horizontal, ForestixSpace.sm)
+                .padding(.top, ForestixSpace.xs)
                 Spacer()
                 bottomPanel
             }

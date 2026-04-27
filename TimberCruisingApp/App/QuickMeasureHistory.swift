@@ -45,6 +45,12 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
     public let confidenceRaw: String
     public let method: String
     public let createdAt: Date
+    /// Optional tree identifier — a small monotonic integer the cruiser
+    /// chooses (or auto-generates) before each scan so DBH and Height
+    /// readings on the same stem can be linked. Optional + decoded
+    /// with a default in the Codable init below so older sidecar
+    /// entries written before this field existed still load.
+    public let treeNumber: Int?
 
     public init(
         id: UUID = UUID(),
@@ -53,7 +59,8 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         sigma: Double?,
         confidenceRaw: String,
         method: String,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        treeNumber: Int? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -62,6 +69,22 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         self.confidenceRaw = confidenceRaw
         self.method = method
         self.createdAt = createdAt
+        self.treeNumber = treeNumber
+    }
+
+    // Custom decoding so entries written before `treeNumber` existed
+    // still parse cleanly — the schema-version header lets us add
+    // fields like this without forcing a destructive migration.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id            = try c.decode(UUID.self,   forKey: .id)
+        self.kind          = try c.decode(Kind.self,   forKey: .kind)
+        self.value         = try c.decode(Double.self, forKey: .value)
+        self.sigma         = try c.decodeIfPresent(Double.self, forKey: .sigma)
+        self.confidenceRaw = try c.decode(String.self, forKey: .confidenceRaw)
+        self.method        = try c.decode(String.self, forKey: .method)
+        self.createdAt     = try c.decode(Date.self,   forKey: .createdAt)
+        self.treeNumber    = try c.decodeIfPresent(Int.self, forKey: .treeNumber)
     }
 
     /// Unit string for `value`. `cm` for diameter, `m` for height.
@@ -158,6 +181,55 @@ public final class QuickMeasureHistory: ObservableObject {
         rewriteSidecar()
         persistCache()
         recomputeCapacityFlag()
+    }
+
+    // MARK: - Tree identity helpers
+
+    /// Most recently used tree number across the log. Used by the
+    /// scan flow to offer "Continue tree #N" without forcing the
+    /// cruiser to retype the number every time.
+    public var lastTreeNumber: Int? {
+        entries.first(where: { $0.treeNumber != nil })?.treeNumber
+    }
+
+    /// All distinct tree numbers in the log, sorted ascending. Lets
+    /// the picker show a quick history of trees the cruiser has
+    /// already started — they can resume measuring an older one.
+    public var distinctTreeNumbers: [Int] {
+        var seen = Set<Int>()
+        var out: [Int] = []
+        for e in entries {
+            if let n = e.treeNumber, !seen.contains(n) {
+                seen.insert(n)
+                out.append(n)
+            }
+        }
+        return out.sorted()
+    }
+
+    /// Next tree number to suggest when the cruiser starts a new tree.
+    /// `max(existing) + 1`, or 1 on a fresh log.
+    public var suggestedNextTreeNumber: Int {
+        (distinctTreeNumbers.max() ?? 0) + 1
+    }
+
+    /// Returns a brief description of an existing tree's measurements
+    /// (e.g. "DIA 34.5 cm · HGT 28 m") for the picker UI. Returns
+    /// `nil` if the log has nothing for that tree number.
+    public func summary(forTreeNumber n: Int) -> String? {
+        let owned = entries.filter { $0.treeNumber == n }
+        guard !owned.isEmpty else { return nil }
+        let dbh = owned.first { $0.kind == .dbh }
+        let hgt = owned.first { $0.kind == .height }
+        var parts: [String] = []
+        if let d = dbh {
+            parts.append(String(format: "DIA %.1f cm", d.value))
+        }
+        if let h = hgt {
+            parts.append(String(format: "HGT %.1f m", h.value))
+        }
+        if parts.isEmpty { return "—" }
+        return parts.joined(separator: " · ")
     }
 
     // MARK: CSV export

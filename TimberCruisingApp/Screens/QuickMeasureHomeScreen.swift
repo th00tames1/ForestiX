@@ -40,6 +40,12 @@ public struct QuickMeasureHomeScreen: View {
 
     @State private var presentingDBHScan = false
     @State private var presentingHeightScan = false
+    /// Tree-identity sheet routing. Set when the cruiser taps a hero
+    /// card; cleared when they pick a tree number or cancel. The
+    /// scan cover then opens with `pendingTreeNumber` populated so
+    /// the saved entry carries the chosen identity.
+    @State private var pendingScanKind: TreeIdentitySheet.ScanKind?
+    @State private var pendingTreeNumber: Int?
 
     public init() {}
 
@@ -68,6 +74,27 @@ public struct QuickMeasureHomeScreen: View {
                         .tracking(2.0)
                         .foregroundStyle(ForestixPalette.textPrimary)
                 }
+            }
+            .sheet(item: Binding(
+                get: { pendingScanKind.map(IdentifiableScanKind.init) },
+                set: { newValue in
+                    if newValue == nil { pendingScanKind = nil }
+                })
+            ) { wrapped in
+                TreeIdentitySheet(
+                    scanKind: wrapped.kind,
+                    history: history,
+                    onPick: { number in
+                        pendingTreeNumber = number
+                        switch wrapped.kind {
+                        case .diameter: presentingDBHScan = true
+                        case .height:   presentingHeightScan = true
+                        }
+                        pendingScanKind = nil
+                    },
+                    onCancel: {
+                        pendingScanKind = nil
+                    })
             }
             #if os(iOS)
             .fullScreenCover(isPresented: $presentingDBHScan) { dbhCover }
@@ -111,7 +138,10 @@ public struct QuickMeasureHomeScreen: View {
             ctaLabel: "Start scan",
             accessibilityId: "quickMeasure.dbhButton"
         ) {
-            presentingDBHScan = true
+            // Pre-scan: pick which tree this reading belongs to.
+            // The actual cover opens once the cruiser picks a
+            // tree number in TreeIdentitySheet.
+            pendingScanKind = .diameter
         }
     }
 
@@ -123,7 +153,7 @@ public struct QuickMeasureHomeScreen: View {
             ctaLabel: "Start scan",
             accessibilityId: "quickMeasure.heightButton"
         ) {
-            presentingHeightScan = true
+            pendingScanKind = .height
         }
     }
 
@@ -219,13 +249,19 @@ public struct QuickMeasureHomeScreen: View {
                         value: Double(result.diameterCm),
                         sigma: Double(result.sigmaRmm),
                         confidenceRaw: result.confidence.rawValue,
-                        method: result.method.rawValue))
+                        method: result.method.rawValue,
+                        treeNumber: pendingTreeNumber))
                     presentingDBHScan = false
                 },
                 showMeshOverlay: true)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Close") { presentingDBHScan = false }
+                }
+                if let n = pendingTreeNumber {
+                    ToolbarItem(placement: .principal) {
+                        TreeBadge(number: n)
+                    }
                 }
             }
         }
@@ -241,7 +277,8 @@ public struct QuickMeasureHomeScreen: View {
                         value: Double(result.heightM),
                         sigma: Double(result.sigmaHm),
                         confidenceRaw: result.confidence.rawValue,
-                        method: result.method.rawValue))
+                        method: result.method.rawValue,
+                        treeNumber: pendingTreeNumber))
                     presentingHeightScan = false
                 },
                 showMeshOverlay: true)
@@ -249,10 +286,48 @@ public struct QuickMeasureHomeScreen: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Close") { presentingHeightScan = false }
                 }
+                if let n = pendingTreeNumber {
+                    ToolbarItem(placement: .principal) {
+                        TreeBadge(number: n)
+                    }
+                }
             }
         }
     }
     #endif
+}
+
+// MARK: - Tree badge (shown on scan cover toolbar)
+
+/// Small "Tree #N" pill that lives in the scan cover's nav bar so
+/// the cruiser can confirm which tree they're recording into without
+/// dismissing the cover.
+private struct TreeBadge: View {
+    let number: Int
+    var body: some View {
+        Text("Tree #\(number)")
+            .font(ForestixType.dataSmall)
+            .foregroundStyle(ForestixPalette.primary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .overlay(
+                Capsule().stroke(ForestixPalette.primary.opacity(0.5),
+                                  lineWidth: 0.75))
+    }
+}
+
+// MARK: - Sheet item wrapper
+
+/// SwiftUI's `.sheet(item:)` requires `Identifiable`. The scan-kind
+/// enum doesn't carry an identifier on its own, so wrap it.
+private struct IdentifiableScanKind: Identifiable {
+    let kind: TreeIdentitySheet.ScanKind
+    var id: String {
+        switch kind {
+        case .diameter: return "diameter"
+        case .height:   return "height"
+        }
+    }
 }
 
 // MARK: - Measurement hero card

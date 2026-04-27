@@ -40,8 +40,13 @@ public struct DBHScanScreen: View {
         _viewModel = StateObject(wrappedValue: viewModel())
         self.onResult = onResult
         self.onAccept = onAccept
-        _meshOn   = State(initialValue: showMeshOverlay)
-        _pointsOn = State(initialValue: false)
+        // Both diagnostic overlays default ON — the cruiser asked to
+        // see the mesh AND the feature points at the same time as soon
+        // as the scan opens, instead of having to flip both toggles by
+        // hand on every entry. The chips on the top-right still let
+        // them turn either off if the overlay obscures the trunk.
+        _meshOn   = State(initialValue: true)
+        _pointsOn = State(initialValue: true)
     }
 
     public var body: some View {
@@ -63,7 +68,21 @@ public struct DBHScanScreen: View {
                 ZStack {
                     guideLine(height: geo.size.height)
                     fitChord(in: geo.size)
-                    crosshair
+                    // Crosshair ring is now positioned by GeometryReader
+                    // at exactly (centerX, midY) so the guide line
+                    // passes through the centre of the ring, not above
+                    // or below it. The live preview pills sit
+                    // independently below — they're no longer in a
+                    // VStack with the ring (which was pushing the ring
+                    // off-centre).
+                    crosshairRing
+                        .position(x: geo.size.width / 2,
+                                  y: geo.size.height / 2)
+                    livePreviewBadge
+                        .position(x: geo.size.width / 2,
+                                  y: geo.size.height / 2
+                                       + Self.crosshairOuterRadius
+                                       + 28)
                 }
                 .frame(width: geo.size.width, height: geo.size.height)
             }
@@ -74,7 +93,8 @@ public struct DBHScanScreen: View {
             // feed and the bottom action panel so buttons still win.
             tapCatcher
 
-            VStack {
+            VStack(spacing: 0) {
+                topStrip
                 overlayPicker
                 Spacer()
                 bottomPanel
@@ -114,6 +134,20 @@ public struct DBHScanScreen: View {
             @unknown default: break
             }
         }
+    }
+
+    // MARK: - Top status strip
+
+    /// Thin row pinned just under the nav bar. Shows the GPS accuracy
+    /// badge on the left so the cruiser can tell from the scan screen
+    /// whether they're under canopy without leaving the flow.
+    private var topStrip: some View {
+        HStack {
+            GPSAccuracyBadge()
+            Spacer()
+        }
+        .padding(.horizontal, ForestixSpace.sm)
+        .padding(.top, ForestixSpace.xs)
     }
 
     // MARK: - Diagnostic overlay toggles
@@ -212,6 +246,16 @@ public struct DBHScanScreen: View {
         .accessibilityIdentifier("dbhScan.guideLine")
     }
 
+    /// Outer radius of the crosshair ring (including the dark halo).
+    /// Used as a layout anchor for the live preview pills so they sit
+    /// just below the ring without overlapping it.
+    private static let crosshairOuterRadius: CGFloat = 36
+    /// Vertical extent (above + below the chord) of the side
+    /// indicators. Tall, deliberately visible bars — the cruiser
+    /// asked for more pop on these so a "fit locked" reads at a
+    /// glance even with the trunk only partly in frame.
+    private static let chordIndicatorHalfHeight: CGFloat = 22
+
     /// Bright green horizontal segment spanning the trunk edges the
     /// single-frame fit identified along the guide row — a visual
     /// "this is what I'm measuring" so the cruiser can tell when the
@@ -226,50 +270,62 @@ public struct DBHScanScreen: View {
             let x0 = size.width * CGFloat(fit.stripLeftFraction)
             let x1 = size.width * CGFloat(fit.stripRightFraction)
             let y  = size.height / 2
+            let half = Self.chordIndicatorHalfHeight
             ZStack(alignment: .topLeading) {
-                // Main chord line
+                // Main chord line — slightly thicker so it reads
+                // even when overdrawn on top of the LiDAR mesh.
                 Rectangle()
-                    .fill(Color.green.opacity(0.9))
-                    .frame(width: x1 - x0, height: 3)
+                    .fill(ForestixPalette.confidenceOk.opacity(0.95))
+                    .frame(width: x1 - x0, height: 4)
                     .position(x: (x0 + x1) / 2, y: y)
-                // Left end cap
-                Rectangle()
-                    .fill(Color.green)
-                    .frame(width: 2, height: 16)
-                    .position(x: x0, y: y)
-                // Right end cap
-                Rectangle()
-                    .fill(Color.green)
-                    .frame(width: 2, height: 16)
-                    .position(x: x1, y: y)
+                // Left side indicator — tall vertical bar with a dark
+                // halo for sun-readability. Length is 2 × half so it
+                // pops well above and below the chord line.
+                sideIndicator(x: x0, y: y, half: half)
+                // Right side indicator
+                sideIndicator(x: x1, y: y, half: half)
             }
             .accessibilityIdentifier("dbhScan.fitChord")
             .allowsHitTesting(false)
         }
     }
 
-    private var crosshair: some View {
+    /// Trunk-side indicator: dark halo bar with a coloured bar on
+    /// top, centred at (x, y) and 2×half tall.
+    private func sideIndicator(x: CGFloat, y: CGFloat, half: CGFloat) -> some View {
+        ZStack {
+            Rectangle()
+                .fill(Color.black.opacity(0.55))
+                .frame(width: 5, height: 2 * half)
+            Rectangle()
+                .fill(ForestixPalette.confidenceOk)
+                .frame(width: 3, height: 2 * half)
+        }
+        .position(x: x, y: y)
+    }
+
+    private var crosshairRing: some View {
         let color: Color = viewModel.crosshairIsStable
             ? ForestixPalette.confidenceOk
             : ForestixPalette.confidenceBad
-        return VStack(spacing: 6) {
+        let outer = Self.crosshairOuterRadius * 2     // 72 pt total
+        let inner = outer - 8                          // ring inset
+        return ZStack {
             // Dual-stroke ring — dark halo underneath the coloured
             // ring so the crosshair stays visible against both sky
-            // and foliage. Same pattern applied to the fit chord.
-            ZStack {
-                Circle()
-                    .strokeBorder(Color.black.opacity(0.6), lineWidth: 4)
-                    .frame(width: 32, height: 32)
-                Circle()
-                    .strokeBorder(color, lineWidth: 2)
-                    .frame(width: 28, height: 28)
-            }
-            .accessibilityIdentifier("dbhScan.crosshair")
-            .accessibilityLabel(viewModel.crosshairIsStable
-                                ? "Depth stable — tap to capture"
-                                : "Aligning — move closer or steadier")
-            livePreviewBadge
+            // and foliage. Sized to match the cruiser's request for
+            // a clearly-visible target ring on the AR feed.
+            Circle()
+                .strokeBorder(Color.black.opacity(0.6), lineWidth: 5)
+                .frame(width: outer, height: outer)
+            Circle()
+                .strokeBorder(color, lineWidth: 2.5)
+                .frame(width: inner, height: inner)
         }
+        .accessibilityIdentifier("dbhScan.crosshair")
+        .accessibilityLabel(viewModel.crosshairIsStable
+                            ? "Depth stable — tap to capture"
+                            : "Aligning — move closer or steadier")
     }
 
     /// Two pills floating below the crosshair:

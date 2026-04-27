@@ -179,7 +179,7 @@ public struct QuickMeasureHomeScreen: View {
 
     private var masthead: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("Quick measure")
+            Text("Forestix")
                 .font(ForestixType.title)
                 .foregroundStyle(ForestixPalette.textPrimary)
             Text(masterheadSubtitle)
@@ -192,7 +192,7 @@ public struct QuickMeasureHomeScreen: View {
 
     private var masterheadSubtitle: String {
         if history.entries.isEmpty {
-            return "Handheld instrument · start a scan below"
+            return "Tap to measure · open Projects for cruise workflow"
         }
         if history.isNearCapacity {
             return "Log nearing capacity — export soon"
@@ -276,6 +276,32 @@ public struct QuickMeasureHomeScreen: View {
                 .accessibilityIdentifier("quickMeasure.fieldLogButton")
 
                 NavigationLink {
+                    HomeScreen()
+                } label: {
+                    SupportingTile(
+                        title: "Projects",
+                        subtitle: "Stratum · cruise design · field tally",
+                        systemImage: "folder",
+                        trailingBadge: nil)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("quickMeasure.projectsButton")
+            }
+
+            HStack(spacing: ForestixSpace.sm) {
+                NavigationLink {
+                    ReconCruiseScreen()
+                } label: {
+                    SupportingTile(
+                        title: "Recon cruise",
+                        subtitle: "Quick BA tally · sample sizing",
+                        systemImage: "scope",
+                        trailingBadge: nil)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("quickMeasure.reconButton")
+
+                NavigationLink {
                     ReferenceLibraryScreen()
                 } label: {
                     SupportingTile(
@@ -290,28 +316,23 @@ public struct QuickMeasureHomeScreen: View {
 
             HStack(spacing: ForestixSpace.sm) {
                 NavigationLink {
-                    ReconCruiseScreen()
-                } label: {
-                    SupportingTile(
-                        title: "Recon cruise",
-                        subtitle: "Quick BA tally · sample-size sizing",
-                        systemImage: "scope",
-                        trailingBadge: nil)
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("quickMeasure.reconButton")
-
-                NavigationLink {
                     SettingsScreen()
                 } label: {
                     SupportingTile(
                         title: "Settings",
-                        subtitle: settings.advancedMode ? "Advanced · on" : "Units · calibration",
+                        subtitle: "Region · units · calibration · backup",
                         systemImage: "gearshape",
                         trailingBadge: nil)
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("quickMeasure.settingsLink")
+
+                // Empty placeholder so the third row stays balanced.
+                // Slot is reserved for a future spoke (e.g. crash
+                // recovery / sync indicator).
+                Color.clear
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 112)
             }
         }
     }

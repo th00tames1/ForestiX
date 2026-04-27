@@ -4,31 +4,27 @@
 //
 // The library is NOT an executable, so no `@App`/`@main` lives here.
 //
-// Routing: when `AppSettings.advancedMode == false` (the default) the
-// app opens into QuickMeasureHomeScreen — direct DBH / Height scans
-// without project setup. Flipping the toggle on in Settings swaps to
-// the full HomeScreen (project list → plots → cruise workflow).
+// Phase 7: unified mode. Forestix used to ship two parallel UIs —
+// "Quick Measure" for one-off scans and an "Advanced" project /
+// plot / cruise workflow gated behind a Settings toggle. Cruisers
+// pointed out the obvious: just make the project workflow as
+// approachable as Quick Measure, and there's no need for two homes.
+// QuickMeasureHomeScreen now serves as THE home, with projects
+// surfaced as a supporting spoke. The `advancedMode` property is
+// retained for back-compat but no longer drives view selection.
 
 import SwiftUI
 
 public struct RootView: View {
 
     @StateObject private var environment: AppEnvironment
-    @ObservedObject private var settings: AppSettings
 
     public init(environment: AppEnvironment) {
         _environment = StateObject(wrappedValue: environment)
-        _settings = ObservedObject(wrappedValue: environment.settings)
     }
 
     public var body: some View {
-        Group {
-            if settings.advancedMode {
-                HomeScreen()
-            } else {
-                QuickMeasureHomeScreen()
-            }
-        }
+        QuickMeasureHomeScreen()
         .environmentObject(environment)
         .environmentObject(environment.settings)
         .environmentObject(environment.quickMeasureHistory)
@@ -52,9 +48,6 @@ public struct RootView: View {
                     typeRaw: "fixed")
                 history.setActivePlot(id: plot.id)
             }
-            // Force home view ON so the cruiser sees the just-set
-            // active plot reflected in the masthead.
-            settings.advancedMode = false
         }
     }
 

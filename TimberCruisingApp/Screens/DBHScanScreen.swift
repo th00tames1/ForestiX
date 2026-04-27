@@ -498,7 +498,7 @@ public struct DBHScanScreen: View {
                 .font(ForestixType.caption)
                 .foregroundStyle(.white.opacity(0.9))
             Text(String(
-                format: "arc %.0f°   rmse %.1f mm   σ_r %.1f mm   n %d",
+                format: "Arc %.0f° · Fit error %.1f mm · Radius precision ±%.1f mm · %d points",
                 r.arcCoverageDeg, r.rmseMm, r.sigmaRmm, r.nInliers))
                 .font(ForestixType.dataSmall)
                 .foregroundStyle(.white.opacity(0.65))

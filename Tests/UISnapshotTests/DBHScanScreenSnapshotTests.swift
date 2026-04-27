@@ -100,7 +100,7 @@ final class DBHScanScreenSnapshotTests: XCTestCase {
     func testRejected() {
         let vm = DBHScanViewModel.preview(
             state: .rejected,
-            result: redResult(reason: "arc_coverage_deg < 45°"))
+            result: redResult(reason: "Trunk arc coverage below 45°"))
         assertSnapshot(of: host(vm), as: .image(on: .iPhone13))
     }
 

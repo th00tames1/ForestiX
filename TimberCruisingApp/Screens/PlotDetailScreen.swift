@@ -118,8 +118,8 @@ public struct PlotDetailScreen: View {
     private func treesTab(plot: QuickMeasurePlot) -> some View {
         let entries = history.entries(forPlot: plotID)
         // Group entries by tree number; each row in the tab is a
-        // tree, not a measurement, so cruisers see "Tree 7 — DIA
-        // 34.5 cm + HGT 28.2 m" together.
+        // tree, not a measurement, so cruisers see "Tree 7 — DBH
+        // 34.5 cm + Height 28.2 m" together.
         let byTree = Dictionary(grouping: entries) { $0.treeNumber ?? -1 }
             .sorted { ($0.key) < ($1.key) }
         return VStack(alignment: .leading, spacing: ForestixSpace.sm) {
@@ -224,13 +224,13 @@ private struct TreeRowCard: View {
             Spacer()
             VStack(alignment: .trailing, spacing: 2) {
                 if let d = dbh {
-                    Text("DIA " + MeasurementFormatter.diameter(
+                    Text("DBH " + MeasurementFormatter.diameter(
                         cm: d.value, in: unitSystem))
                         .font(ForestixType.data)
                         .foregroundStyle(ForestixPalette.textPrimary)
                 }
                 if let h = hgt {
-                    Text("HGT " + MeasurementFormatter.height(
+                    Text("Height " + MeasurementFormatter.height(
                         m: h.value, in: unitSystem))
                         .font(ForestixType.dataSmall)
                         .foregroundStyle(ForestixPalette.textSecondary)

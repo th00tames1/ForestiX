@@ -52,6 +52,16 @@ public final class HeightScanViewModel: ObservableObject {
     /// (REQ-HGT-005). Latched until retake().
     @Published public private(set) var trackingDroppedDuringMeasurement: Bool = false
 
+    /// Set when the cruiser tapped Anchor Here but neither the LiDAR
+    /// mesh nor the plane raycast returned a world hit — happens when
+    /// the device is still building scene mesh, the cruiser is too
+    /// close to the trunk for an estimated plane to fit, or AR tracking
+    /// hasn't fully initialised. Replaces the silent fall-back to the
+    /// camera position that previously biased d_h by the cruiser-to-
+    /// tree offset. Cleared once a real anchor is captured or `retake()`
+    /// runs.
+    @Published public private(set) var anchorFailureReason: String?
+
     /// Walk-back geometry target. Default 30 m per Phase 3 Decision Q4.
     /// 0.6 · H_expected ≤ d_h ≤ 1.0 · H_expected gives the sweet spot.
     @Published public var expectedHeightM: Float = 30
@@ -204,6 +214,7 @@ public final class HeightScanViewModel: ObservableObject {
         topAimedWorld = nil
         baseAimedWorld = nil
         trackingDroppedDuringMeasurement = false
+        anchorFailureReason = nil
         state = .anchorSet
         state = .walking
         updateLiveHint(standingPointWorld: standingPointWorld)
@@ -274,15 +285,33 @@ public final class HeightScanViewModel: ObservableObject {
     }
 
     /// Button-handler entry for the Anchor Here tap. `screenCenterHit`
-    /// is an optional world point from the host's raycast — when
-    /// present, it's used as the tree-base anchor. Without it we fall
-    /// back to the camera position (spec's "touch phone to tree base"
-    /// flow).
+    /// MUST be a real world hit from the host's raycast (LiDAR mesh →
+    /// plane fallback). When nil, the anchor is REFUSED — silently
+    /// substituting the camera position used to bias d_h by the
+    /// cruiser-to-tree offset (typically 0.5–1.5 m), which on a 30 m
+    /// walk-off feeds straight into a 2–5 % systematic height error.
+    /// Surfaces `anchorFailureReason` so the UI can show a banner.
     public func anchorHereNow(screenCenterHit: SIMD3<Float>? = nil) {
-        guard let cam = currentCameraTranslation() else { return }
-        let anchor = screenCenterHit ?? cam
+        guard let cam = currentCameraTranslation() else {
+            anchorFailureReason =
+                "AR tracking not ready yet — wait a moment, then try again."
+            return
+        }
+        guard let anchor = screenCenterHit else {
+            anchorFailureReason =
+                "Couldn't find a surface at the crosshair. Move the phone "
+                + "until the LiDAR mesh covers the tree base, then tap "
+                + "Anchor Here again."
+            return
+        }
         anchorHere(anchorPointWorld: anchor,
                    standingPointWorld: cam)
+    }
+
+    /// Lets the host clear `anchorFailureReason` from a banner-dismiss
+    /// gesture without driving a full `retake()`.
+    public func clearAnchorFailure() {
+        anchorFailureReason = nil
     }
 
     /// Button-handler entry for Aim Top. Uses the current camera pose +
@@ -346,6 +375,7 @@ public final class HeightScanViewModel: ObservableObject {
         alphaTopSampleCount = 0
         alphaBaseSampleCount = 0
         trackingDroppedDuringMeasurement = false
+        anchorFailureReason = nil
         state = .idle
         rebuildSceneMarkers()
     }

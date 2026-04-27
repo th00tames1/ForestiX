@@ -218,6 +218,11 @@ public struct HeightScanScreen: View {
                     tint: .orange)
                     .accessibilityIdentifier("heightScan.trackingBanner")
             }
+            if let reason = viewModel.anchorFailureReason {
+                bannerView(reason, tint: .orange)
+                    .accessibilityIdentifier("heightScan.anchorFailureBanner")
+                    .onTapGesture { viewModel.clearAnchorFailure() }
+            }
             statusBanner
             stagePanel
             actionRow
@@ -240,7 +245,7 @@ public struct HeightScanScreen: View {
     private var statusText: String {
         switch viewModel.state {
         case .idle, .anchorSet:   return "Touch phone to tree base."
-        case .walking:            return "Walk back. Live d_h shown below."
+        case .walking:            return "Walk back. Live walk-back distance shown below."
         case .aimTopArmed:        return "Aim at treetop, then tap Aim Top."
         case .aimTopCaptured:     return "Top captured."
         case .aimBaseArmed:       return "Aim at tree base, then tap Aim Base."
@@ -270,7 +275,7 @@ public struct HeightScanScreen: View {
 
     private var walkingReadout: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("d_h " + MeasurementFormatter.distance(
+            Text("Walked back " + MeasurementFormatter.distance(
                 m: Double(viewModel.dhMeters), in: settings.unitSystem))
                 .font(ForestixType.dataLarge)
                 .foregroundStyle(.white)
@@ -314,7 +319,7 @@ public struct HeightScanScreen: View {
                 .font(ForestixType.caption)
                 .foregroundStyle(.white.opacity(0.9))
             Text(String(
-                format: "d_h %.1f m   α_top %.1f°   α_base %.1f°",
+                format: "Walk-back %.1f m · Top angle %.1f° · Base angle %.1f°",
                 r.dHm,
                 Double(r.alphaTopRad) * 180 / .pi,
                 Double(r.alphaBaseRad) * 180 / .pi))

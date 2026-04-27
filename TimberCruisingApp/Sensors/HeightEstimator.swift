@@ -77,7 +77,7 @@ public enum HeightEstimator {
             return red(input: input,
                        dh: dh,
                        reason: "Too close; step back "
-                               + "(d_h = \(String(format: "%.1f", dh)) m)")
+                               + "(walked back \(String(format: "%.1f", dh)) m so far)")
         }
         if abs(input.alphaTopRad) > maxAlphaTopRadRed {
             return red(input: input,
@@ -117,16 +117,16 @@ public enum HeightEstimator {
         let checks: [Check] = [
             check(sigmaH / H <= sigmaRatioYellow,
                   sev: .warn,
-                  reason: "σ_H/H > 0.05"),
+                  reason: "Height precision worse than ±5%"),
             check(dh <= yellowDhMeters,
                   sev: .warn,
-                  reason: "d_h > 25 m"),
+                  reason: "Walked back more than 25 m"),
             check(abs(input.alphaTopRad) <= maxAlphaTopRadYellow,
                   sev: .warn,
-                  reason: "|α_top| > 75°"),
+                  reason: "Top aim angle steeper than 75°"),
             check(dh <= highDriftDhMeters,
                   sev: .warn,
-                  reason: "d_h > 30 m (high drift)")
+                  reason: "Walked back more than 30 m (tracking drift risk)")
         ]
         let tier = combineChecks(checks)
 

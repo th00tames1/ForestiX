@@ -309,6 +309,29 @@ public final class AddTreeFlowViewModel: ObservableObject {
         currentStep = .dbh
     }
 
+    /// Reset the form to a clean state so the cruiser can keep
+    /// adding trees back-to-back without the cover dismissing.
+    /// Recent species + status defaults survive (most cruisers tag
+    /// the same species several stems in a row); everything else
+    /// returns to its initial value. Resets the step to .species.
+    public func resetForNextTree() {
+        savedTree = nil
+        parentTreeId = nil
+        isMultistem = false
+        dbhCm = 0
+        dbhIsIrregular = false
+        heightM = nil
+        heightMethod = nil
+        heightConfidence = nil
+        damageCodes = []
+        notes = ""
+        bearingFromCenterDeg = nil
+        distanceFromCenterM = nil
+        redTierWarning = nil
+        history.removeAll()
+        currentStep = .species
+    }
+
     // MARK: - Preview
 
     public static func preview(

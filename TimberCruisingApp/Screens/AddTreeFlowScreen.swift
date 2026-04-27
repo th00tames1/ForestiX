@@ -473,12 +473,35 @@ public struct AddTreeFlowScreen: View {
                     .controlSize(.large)
             }
             if viewModel.currentStep == .review {
-                Button("Save") {
-                    viewModel.save()
-                    if viewModel.errorMessage == nil {
-                        dismiss()
+                // Three save paths so the cruiser doesn't get
+                // dumped back to the plot list after every tree:
+                //   • Save & add stem    (multi-stem child of this tree)
+                //   • Save & next tree   (stay in flow, fresh tree)
+                //   • Save               (close flow, go to plot)
+                Menu {
+                    Button("Save & add stem") {
+                        viewModel.save()
+                        if viewModel.errorMessage == nil {
+                            viewModel.prepareMultistemChild()
+                        }
                     }
+                    Button("Save & next tree") {
+                        viewModel.save()
+                        if viewModel.errorMessage == nil {
+                            viewModel.resetForNextTree()
+                        }
+                    }
+                    Button("Save & close") {
+                        viewModel.save()
+                        if viewModel.errorMessage == nil {
+                            dismiss()
+                        }
+                    }
+                } label: {
+                    Label("Save", systemImage: "checkmark")
+                        .padding(.horizontal, 4)
                 }
+                .menuStyle(.button)
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .disabled(viewModel.isSaving)

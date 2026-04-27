@@ -51,6 +51,10 @@ public struct QuickMeasureHomeScreen: View {
     /// initial launch, and we hold the sheet open until the user
     /// picks or skips.
     @State private var presentingRegionPicker = false
+    /// Post-measurement continuation prompt. Driven by which scan
+    /// just finished; nil means no continuation is queued.
+    @State private var continuationOrigin: MeasurementContinuationSheet.Origin?
+    @State private var continuationTreeNumber: Int?
 
     public init() {}
 
@@ -108,12 +112,66 @@ public struct QuickMeasureHomeScreen: View {
             .sheet(isPresented: $presentingRegionPicker) {
                 RegionPickerSheet()
             }
+            .sheet(item: Binding(
+                get: { continuationOrigin.map { ContinuationItem(origin: $0) } },
+                set: { newValue in if newValue == nil { continuationOrigin = nil } })
+            ) { item in
+                if let n = continuationTreeNumber {
+                    MeasurementContinuationSheet(
+                        origin: item.origin,
+                        treeNumber: n,
+                        treeAlreadyHasHeight: hasHeight(forTree: n)
+                    ) { action in
+                        handleContinuation(action, lastTreeNumber: n)
+                    }
+                }
+            }
             .task {
                 // First-launch UX: auto-present the region picker once.
                 if !settings.regionPickerSeen {
                     presentingRegionPicker = true
                 }
             }
+        }
+    }
+
+    // MARK: - Continuation routing
+
+    private func hasHeight(forTree n: Int) -> Bool {
+        history.entries.contains {
+            $0.treeNumber == n && $0.kind == .height
+        }
+    }
+
+    private func handleContinuation(
+        _ action: MeasurementContinuationSheet.NextAction,
+        lastTreeNumber n: Int
+    ) {
+        // Clear the continuation routing first; whatever we open
+        // next sets its own state.
+        continuationOrigin = nil
+        continuationTreeNumber = nil
+
+        switch action {
+        case .measureHeightSameTree:
+            // Re-use the same tree number — no Tree Identity sheet.
+            pendingTreeNumber = n
+            // Brief delay so the just-dismissed sheet animates out
+            // before the full-screen cover animates in. Without it
+            // the two animations collide and the cover sometimes
+            // fails to present.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                presentingHeightScan = true
+            }
+
+        case .startNewTreeDiameter:
+            // Same launching pattern as a fresh hub tap.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                pendingScanKind = .diameter
+            }
+
+        case .done:
+            break  // already at hub
         }
     }
 
@@ -298,7 +356,16 @@ public struct QuickMeasureHomeScreen: View {
                         position: meta.position ?? .dbh,
                         damageCodes: meta.damageCodes,
                         note: meta.note.isEmpty ? nil : meta.note))
+                    let n = pendingTreeNumber
                     presentingDBHScan = false
+                    // Queue the continuation prompt so the next
+                    // logical action (height on the same tree, or
+                    // the next tree's diameter) is one tap away
+                    // instead of dumping the cruiser back to home.
+                    if let n {
+                        continuationTreeNumber = n
+                        continuationOrigin = .afterDiameter
+                    }
                 },
                 showMeshOverlay: true)
             .toolbar {
@@ -330,7 +397,12 @@ public struct QuickMeasureHomeScreen: View {
                         speciesCode: meta.speciesCode,
                         damageCodes: meta.damageCodes,
                         note: meta.note.isEmpty ? nil : meta.note))
+                    let n = pendingTreeNumber
                     presentingHeightScan = false
+                    if let n {
+                        continuationTreeNumber = n
+                        continuationOrigin = .afterHeight
+                    }
                 },
                 showMeshOverlay: true)
             .toolbar {
@@ -377,6 +449,18 @@ private struct IdentifiableScanKind: Identifiable {
         switch kind {
         case .diameter: return "diameter"
         case .height:   return "height"
+        }
+    }
+}
+
+/// Wrapper for the continuation-sheet origin so it can drive an
+/// `Identifiable`-keyed `.sheet(item:)`.
+private struct ContinuationItem: Identifiable {
+    let origin: MeasurementContinuationSheet.Origin
+    var id: String {
+        switch origin {
+        case .afterDiameter: return "afterDiameter"
+        case .afterHeight:   return "afterHeight"
         }
     }
 }

@@ -78,7 +78,8 @@ public struct ProjectDashboardScreen: View {
         Section {
             VStack(alignment: .leading, spacing: 10) {
                 Text("How this works")
-                    .font(.headline)
+                    .font(ForestixType.bodyBold)
+                    .foregroundStyle(ForestixPalette.textPrimary)
                 stepRow(n: 1, done: !viewModel.strata.isEmpty,
                         title: "Define strata",
                         hint: "Draw boundaries on the map, or import GeoJSON / KML.")
@@ -88,10 +89,6 @@ public struct ProjectDashboardScreen: View {
                 stepRow(n: 3, done: viewModel.closedPlotCount > 0,
                         title: "Measure in the field (Go Cruise)",
                         hint: "Walk to each plot and measure trees one by one. DBH via LiDAR, height via AR.")
-                // Step 4 unlocks once every planned plot has been
-                // closed — we don't track "has exported" separately
-                // (no repo column for it) so this stands in as the
-                // most useful green-when-done signal.
                 stepRow(n: 4, done: !viewModel.plannedPlots.isEmpty
                             && viewModel.closedPlotCount >= viewModel.plannedPlots.count,
                         title: "Review + export",
@@ -99,7 +96,10 @@ public struct ProjectDashboardScreen: View {
             }
             .padding(.vertical, 4)
         } header: {
-            Text("Guide")
+            Text("GUIDE")
+                .font(ForestixType.sectionHead)
+                .tracking(1.5)
+                .foregroundStyle(ForestixPalette.textTertiary)
         }
     }
 
@@ -107,7 +107,8 @@ public struct ProjectDashboardScreen: View {
         HStack(alignment: .top, spacing: 10) {
             ZStack {
                 Circle()
-                    .fill(done ? Color.green : Color.accentColor.opacity(0.15))
+                    .fill(done ? ForestixPalette.confidenceOk
+                          : ForestixPalette.primaryMuted)
                     .frame(width: 28, height: 28)
                 if done {
                     Image(systemName: "checkmark")
@@ -116,12 +117,16 @@ public struct ProjectDashboardScreen: View {
                 } else {
                     Text("\(n)")
                         .font(.caption.bold())
-                        .foregroundStyle(Color.accentColor)
+                        .foregroundStyle(ForestixPalette.primary)
                 }
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.subheadline.bold())
-                Text(hint).font(.caption).foregroundStyle(.secondary)
+                Text(title)
+                    .font(ForestixType.bodyBold)
+                    .foregroundStyle(ForestixPalette.textPrimary)
+                Text(hint)
+                    .font(ForestixType.caption)
+                    .foregroundStyle(ForestixPalette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()

@@ -22,6 +22,8 @@
 
 import Foundation
 import Models
+import Common
+import Sensors
 
 // MARK: - Entry
 
@@ -558,6 +560,178 @@ public final class QuickMeasureHistory: ObservableObject {
     /// because the surrounding quotes escape them.
     private static func csvField(_ s: String) -> String {
         "\"" + s.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+    }
+
+    // MARK: - Multi-table CSV bundle (Arboreal-style 5-file export)
+
+    /// Writes a ZIP bundle containing five CSV files modelled on the
+    /// Arboreal Forest export schema:
+    ///
+    ///   • Samples.csv      — one row per plot
+    ///   • Trees.csv        — one row per (plot, treeNumber) pair
+    ///   • Stems.csv        — one row per diameter measurement
+    ///   • Heights.csv      — one row per height measurement
+    ///   • Calculations.csv — per-plot derived stats (BA/ac, TPA,
+    ///                        QMD, mean H, BF/ac when DBH+H present)
+    ///
+    /// Returns the URL of the generated zip in Documents/Exports/,
+    /// or nil if the log is empty / disk write failed.
+    public func exportBundle(logRule: LogRule = .scribner) -> URL? {
+        guard !entries.isEmpty else { return nil }
+
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime]
+
+        // -- Samples.csv --
+        var samples = "id,name,unit,acres,type,baf_ft2_ac,radius_ft,created\r\n"
+        for p in plots {
+            let row = [
+                p.id.uuidString,
+                p.name,
+                p.unitName,
+                p.acres.map { String(format: "%.3f", $0) } ?? "",
+                p.typeRaw,
+                p.baf.map { String(format: "%.0f", $0) } ?? "",
+                p.radiusFt.map { String(format: "%.1f", $0) } ?? "",
+                iso.string(from: p.createdAt)
+            ].map(Self.csvField).joined(separator: ",")
+            samples += row + "\r\n"
+        }
+
+        // -- Trees.csv (plot × treeNumber, with first-found metadata) --
+        var trees = "plot_id,plot,tree_number,species,damage,note\r\n"
+        let byPlotTree = Dictionary(grouping: entries) { e -> String in
+            "\(e.plotID?.uuidString ?? "")|\(e.treeNumber ?? -1)"
+        }
+        for (_, group) in byPlotTree.sorted(by: { $0.key < $1.key }) {
+            guard let any = group.first else { continue }
+            let plotName = any.plotID
+                .flatMap { id in plots.first { $0.id == id } }?.name ?? ""
+            let species = group.compactMap { $0.speciesCode }.first ?? ""
+            let dmg = Set(group.flatMap { $0.damageCodes }).joined(separator: "|")
+            let note = group.compactMap { $0.note }.first ?? ""
+            let row = [
+                any.plotID?.uuidString ?? "",
+                plotName,
+                any.treeNumber.map(String.init) ?? "",
+                species, dmg, note
+            ].map(Self.csvField).joined(separator: ",")
+            trees += row + "\r\n"
+        }
+
+        // -- Stems.csv (one per DBH measurement) --
+        var stems = "id,plot_id,tree_number,timestamp,dbh_cm,sigma_mm,position,confidence,method\r\n"
+        for e in entries where e.kind == .dbh {
+            let row = [
+                e.id.uuidString,
+                e.plotID?.uuidString ?? "",
+                e.treeNumber.map(String.init) ?? "",
+                iso.string(from: e.createdAt),
+                String(format: "%.3f", e.value),
+                e.sigma.map { String(format: "%.3f", $0) } ?? "",
+                e.position?.rawValue ?? "",
+                e.confidenceRaw, e.method
+            ].map(Self.csvField).joined(separator: ",")
+            stems += row + "\r\n"
+        }
+
+        // -- Heights.csv (one per Height measurement) --
+        var heights = "id,plot_id,tree_number,timestamp,height_m,sigma_m,confidence,method\r\n"
+        for e in entries where e.kind == .height {
+            let row = [
+                e.id.uuidString,
+                e.plotID?.uuidString ?? "",
+                e.treeNumber.map(String.init) ?? "",
+                iso.string(from: e.createdAt),
+                String(format: "%.3f", e.value),
+                e.sigma.map { String(format: "%.3f", $0) } ?? "",
+                e.confidenceRaw, e.method
+            ].map(Self.csvField).joined(separator: ",")
+            heights += row + "\r\n"
+        }
+
+        // -- Calculations.csv (per-plot summary) --
+        var calcs = "plot_id,plot,trees,ba_per_acre_ft2,tpa,qmd_cm,mean_h_m,total_bf,bf_per_acre,log_rule\r\n"
+        for p in plots {
+            let plotEntries = entries.filter { $0.plotID == p.id }
+            guard !plotEntries.isEmpty else { continue }
+            let byTree = Dictionary(grouping: plotEntries) { $0.treeNumber ?? -1 }
+            let dbhTrees = byTree.compactMap { (_, group) -> (Double, Double?)? in
+                guard let dbh = group.first(where: { $0.kind == .dbh })?.value
+                else { return nil }
+                let h = group.first(where: { $0.kind == .height })?.value
+                return (dbh, h)
+            }
+            guard !dbhTrees.isEmpty else { continue }
+            let acres = max(p.acres ?? 0.1, 0.05)
+            let baFt2 = dbhTrees.map { (dbh, _) -> Double in
+                let inches = dbh / 2.54
+                return 0.005454 * inches * inches
+            }.reduce(0, +)
+            let baPerAcre = baFt2 / acres
+            let tpa = Double(dbhTrees.count) / acres
+            let qmd = (dbhTrees.map { $0.0 * $0.0 }.reduce(0, +)
+                       / Double(dbhTrees.count)).squareRoot()
+            let heightsM = dbhTrees.compactMap { $0.1 }
+            let meanH = heightsM.isEmpty
+                ? "" : String(format: "%.2f",
+                              heightsM.reduce(0, +) / Double(heightsM.count))
+            var bfTotal: Double = 0
+            for (dbh, hOpt) in dbhTrees {
+                guard let h = hOpt,
+                      let bf = VolumeConversion.boardFeet(
+                          dbhCm: dbh, totalHeightM: h, rule: logRule)
+                else { continue }
+                bfTotal += bf
+            }
+            let bfPerAcre = bfTotal > 0
+                ? String(format: "%.0f", bfTotal / acres) : ""
+            let row = [
+                p.id.uuidString,
+                p.name,
+                String(dbhTrees.count),
+                String(format: "%.1f", baPerAcre),
+                String(format: "%.1f", tpa),
+                String(format: "%.2f", qmd),
+                meanH,
+                bfTotal > 0 ? String(format: "%.0f", bfTotal) : "",
+                bfPerAcre,
+                logRule.rawValue
+            ].map(Self.csvField).joined(separator: ",")
+            calcs += row + "\r\n"
+        }
+
+        // -- ZIP it --
+        let bom = Data([0xEF, 0xBB, 0xBF])
+        func payload(_ s: String) -> Data {
+            var d = bom
+            d.append(s.data(using: .utf8) ?? Data())
+            return d
+        }
+        let archive = ZipWriter.storedArchive(files: [
+            ("Samples.csv",      payload(samples)),
+            ("Trees.csv",        payload(trees)),
+            ("Stems.csv",        payload(stems)),
+            ("Heights.csv",      payload(heights)),
+            ("Calculations.csv", payload(calcs))
+        ])
+
+        let fm = FileManager.default
+        guard let docs = try? fm.url(for: .documentDirectory,
+                                     in: .userDomainMask,
+                                     appropriateFor: nil, create: true)
+        else { return nil }
+        let dir = docs.appendingPathComponent("Exports", isDirectory: true)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let stamp = iso.string(from: Date())
+            .replacingOccurrences(of: ":", with: "-")
+        let url = dir.appendingPathComponent("quick-measure-bundle-\(stamp).zip")
+        do {
+            try archive.write(to: url)
+            return url
+        } catch {
+            return nil
+        }
     }
 
     /// Delete export CSVs older than `maxAge` from the `Exports`

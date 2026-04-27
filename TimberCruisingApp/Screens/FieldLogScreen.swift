@@ -46,13 +46,23 @@ public struct FieldLogScreen: View {
         .toolbar {
             if !history.entries.isEmpty {
                 ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        shareURL = history.exportCSV()
+                    Menu {
+                        Button {
+                            shareURL = history.exportCSV()
+                        } label: {
+                            Label("CSV (single file)", systemImage: "doc.text")
+                        }
+                        Button {
+                            shareURL = history.exportBundle(
+                                logRule: settings.logRule)
+                        } label: {
+                            Label("Bundle (5-file zip)", systemImage: "doc.zipper")
+                        }
                     } label: {
-                        Label("Export CSV", systemImage: "square.and.arrow.up")
+                        Label("Export", systemImage: "square.and.arrow.up")
                             .foregroundStyle(ForestixPalette.primary)
                     }
-                    .accessibilityIdentifier("fieldLog.exportCSV")
+                    .accessibilityIdentifier("fieldLog.exportMenu")
                 }
             }
         }

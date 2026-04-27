@@ -19,10 +19,12 @@
 // powers the screen — no changes to the durability / schema layer.
 
 import SwiftUI
+import Models
 
 public struct FieldLogScreen: View {
 
     @EnvironmentObject private var history: QuickMeasureHistory
+    @EnvironmentObject private var settings: AppSettings
     @State private var shareURL: URL?
 
     public init() {}
@@ -86,7 +88,8 @@ public struct FieldLogScreen: View {
 
             Section {
                 ForEach(history.entries) { entry in
-                    FieldLogRow(entry: entry)
+                    FieldLogRow(entry: entry,
+                                unitSystem: settings.unitSystem)
                         .listRowBackground(ForestixPalette.surface)
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                             Button(role: .destructive) {
@@ -209,6 +212,7 @@ private struct FieldLogColumnHeader: View {
 
 private struct FieldLogRow: View {
     let entry: QuickMeasureEntry
+    let unitSystem: UnitSystem
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -265,12 +269,18 @@ private struct FieldLogRow: View {
     }
 
     private var valueText: String {
-        String(format: "%.1f %@", entry.value, entry.valueUnit)
+        switch entry.kind {
+        case .dbh:    return MeasurementFormatter.diameter(cm: entry.value, in: unitSystem)
+        case .height: return MeasurementFormatter.height(m:  entry.value, in: unitSystem)
+        }
     }
 
     private var sigmaText: String {
         guard let s = entry.sigma, s > 0 else { return "—" }
-        return String(format: "±%.1f %@", s, entry.sigmaUnit)
+        switch entry.kind {
+        case .dbh:    return MeasurementFormatter.diameterSigma(mm: s, in: unitSystem)
+        case .height: return MeasurementFormatter.heightSigma(m:  s, in: unitSystem)
+        }
     }
 
     private var timestampText: String {

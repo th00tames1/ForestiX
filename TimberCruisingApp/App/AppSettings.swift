@@ -22,6 +22,8 @@ public final class AppSettings: ObservableObject {
         public static let tileProviderLabel       = "tc.tileProviderLabel"
         public static let providerUsageAck        = "tc.providerUsageAcknowledged"
         public static let advancedMode            = "tc.advancedMode"
+        public static let region                  = "tc.region"
+        public static let regionPickerSeen        = "tc.regionPickerSeen"
     }
 
     private let defaults: UserDefaults
@@ -80,5 +82,31 @@ public final class AppSettings: ObservableObject {
     public var advancedMode: Bool {
         get { defaults.bool(forKey: Keys.advancedMode) }
         set { defaults.set(newValue, forKey: Keys.advancedMode); objectWillChange.send() }
+    }
+
+    /// Pre-loaded regional species filter. nil = no region picked yet
+    /// (RegionPickerSheet hasn't been shown / has been dismissed).
+    /// "all" = explicit "show every species" choice.
+    public var region: Region? {
+        get {
+            guard let raw = defaults.string(forKey: Keys.region) else { return nil }
+            return Region(rawValue: raw)
+        }
+        set {
+            if let r = newValue {
+                defaults.set(r.rawValue, forKey: Keys.region)
+            } else {
+                defaults.removeObject(forKey: Keys.region)
+            }
+            objectWillChange.send()
+        }
+    }
+
+    /// Has the region picker been presented at least once? Tracked
+    /// separately from `region` so dismissing without picking still
+    /// counts as "seen" — we don't want to nag the user on every launch.
+    public var regionPickerSeen: Bool {
+        get { defaults.bool(forKey: Keys.regionPickerSeen) }
+        set { defaults.set(newValue, forKey: Keys.regionPickerSeen); objectWillChange.send() }
     }
 }

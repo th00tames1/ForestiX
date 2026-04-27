@@ -46,6 +46,11 @@ public struct QuickMeasureHomeScreen: View {
     /// the saved entry carries the chosen identity.
     @State private var pendingScanKind: TreeIdentitySheet.ScanKind?
     @State private var pendingTreeNumber: Int?
+    /// First-run region picker auto-present. Driven by
+    /// `settings.regionPickerSeen` — flips false → true once on
+    /// initial launch, and we hold the sheet open until the user
+    /// picks or skips.
+    @State private var presentingRegionPicker = false
 
     public init() {}
 
@@ -100,6 +105,15 @@ public struct QuickMeasureHomeScreen: View {
             .fullScreenCover(isPresented: $presentingDBHScan) { dbhCover }
             .fullScreenCover(isPresented: $presentingHeightScan) { heightCover }
             #endif
+            .sheet(isPresented: $presentingRegionPicker) {
+                RegionPickerSheet()
+            }
+            .task {
+                // First-launch UX: auto-present the region picker once.
+                if !settings.regionPickerSeen {
+                    presentingRegionPicker = true
+                }
+            }
         }
     }
 
@@ -188,31 +202,54 @@ public struct QuickMeasureHomeScreen: View {
     // MARK: - Supporting grid (Field log + Settings)
 
     private var supportingGrid: some View {
-        HStack(spacing: ForestixSpace.sm) {
-            NavigationLink {
-                FieldLogScreen()
-            } label: {
-                SupportingTile(
-                    title: "Field log",
-                    subtitle: fieldLogSubtitle,
-                    systemImage: "list.bullet.rectangle",
-                    trailingBadge: history.entries.isEmpty
-                        ? nil : "\(history.entries.count)")
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("quickMeasure.fieldLogButton")
+        VStack(spacing: ForestixSpace.sm) {
+            HStack(spacing: ForestixSpace.sm) {
+                NavigationLink {
+                    FieldLogScreen()
+                } label: {
+                    SupportingTile(
+                        title: "Field log",
+                        subtitle: fieldLogSubtitle,
+                        systemImage: "list.bullet.rectangle",
+                        trailingBadge: history.entries.isEmpty
+                            ? nil : "\(history.entries.count)")
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("quickMeasure.fieldLogButton")
 
-            NavigationLink {
-                SettingsScreen()
-            } label: {
-                SupportingTile(
-                    title: "Settings",
-                    subtitle: settings.advancedMode ? "Advanced · on" : "Units · calibration",
-                    systemImage: "gearshape",
-                    trailingBadge: nil)
+                NavigationLink {
+                    ReferenceLibraryScreen()
+                } label: {
+                    SupportingTile(
+                        title: "Reference",
+                        subtitle: "Formulas · log rules · conversions",
+                        systemImage: "book",
+                        trailingBadge: nil)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("quickMeasure.referenceButton")
             }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("quickMeasure.settingsLink")
+
+            HStack(spacing: ForestixSpace.sm) {
+                NavigationLink {
+                    SettingsScreen()
+                } label: {
+                    SupportingTile(
+                        title: "Settings",
+                        subtitle: settings.advancedMode ? "Advanced · on" : "Units · calibration",
+                        systemImage: "gearshape",
+                        trailingBadge: nil)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("quickMeasure.settingsLink")
+
+                // Empty placeholder so the second row stays balanced
+                // even with one tile. Replace with another spoke later
+                // (e.g. Calibration shortcut) when one earns the slot.
+                Color.clear
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 112)
+            }
         }
     }
 

@@ -20,6 +20,7 @@ public struct DBHScanScreen: View {
 
     @StateObject private var viewModel: DBHScanViewModel
     @Environment(\.scenePhase) private var scenePhase
+    @EnvironmentObject private var settings: AppSettings
     public var onResult: (DBHResult) -> Void = { _ in }
     /// Fired when the cruiser explicitly accepts the on-screen result
     /// (state → .accepted). Use this for flows that want to persist the
@@ -138,13 +139,15 @@ public struct DBHScanScreen: View {
 
     // MARK: - Top status strip
 
-    /// Thin row pinned just under the nav bar. Shows the GPS accuracy
-    /// badge on the left so the cruiser can tell from the scan screen
-    /// whether they're under canopy without leaving the flow.
+    /// Thin row pinned just under the nav bar. GPS accuracy on the
+    /// left, device tilt on the right — both are critical preconditions
+    /// for an accurate scan and the cruiser can sanity-check both at
+    /// a glance without leaving the flow.
     private var topStrip: some View {
-        HStack {
+        HStack(spacing: ForestixSpace.xs) {
             GPSAccuracyBadge()
             Spacer()
+            TiltBadge()
         }
         .padding(.horizontal, ForestixSpace.sm)
         .padding(.top, ForestixSpace.xs)
@@ -338,7 +341,8 @@ public struct DBHScanScreen: View {
     private var livePreviewBadge: some View {
         if let cm = viewModel.previewDbhCm {
             VStack(spacing: 3) {
-                Text(String(format: "⌀ ~ %.1f cm", cm))
+                Text("⌀ ~ " + MeasurementFormatter.diameter(
+                    cm: cm, in: settings.unitSystem))
                     .font(ForestixType.data)
                     .foregroundStyle(.white)
                     .padding(.horizontal, 8).padding(.vertical, 4)
@@ -346,7 +350,8 @@ public struct DBHScanScreen: View {
                     .clipShape(Capsule())
                     .accessibilityIdentifier("dbhScan.livePreview")
                 if let d = viewModel.distanceToStemCenterM {
-                    Text(String(format: "%.2f m to center", d))
+                    Text(MeasurementFormatter.distance(
+                        m: Double(d), in: settings.unitSystem) + " to center")
                         .font(ForestixType.dataSmall)
                         .foregroundStyle(.white.opacity(0.85))
                         .padding(.horizontal, 6).padding(.vertical, 2)
@@ -445,7 +450,8 @@ public struct DBHScanScreen: View {
                 // Monospaced number so the value aligns with the FIELD
                 // LOG on the home screen — a cruiser reading the log
                 // expects the same glyph widths everywhere.
-                Text(String(format: "%.1f cm", r.diameterCm))
+                Text(MeasurementFormatter.diameter(
+                    cm: Double(r.diameterCm), in: settings.unitSystem))
                     .font(ForestixType.dataLarge)
                     .foregroundStyle(.white)
                 Spacer()
@@ -492,7 +498,10 @@ public struct DBHScanScreen: View {
     @ViewBuilder
     private var manualEntryPanel: some View {
         HStack {
-            TextField("Diameter in cm", text: $viewModel.manualDbhCm)
+            TextField(settings.unitSystem == .metric
+                      ? "Diameter in cm"
+                      : "Diameter in inches",
+                      text: $viewModel.manualDbhCm)
                 .textFieldStyle(.roundedBorder)
                 #if os(iOS)
                 .keyboardType(.decimalPad)

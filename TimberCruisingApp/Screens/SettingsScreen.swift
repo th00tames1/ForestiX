@@ -37,7 +37,11 @@ public struct SettingsScreen: View {
 
     public var body: some View {
         Form {
-            modeSection
+            // modeSection (Advanced mode toggle) intentionally
+            // hidden — Phase 7 unified the two homes so the toggle
+            // no longer drives anything. The `advancedMode` property
+            // on AppSettings is preserved for back-compat but the
+            // Settings UI doesn't expose it any more.
             regionSection
             unitsSection
             logRuleSection

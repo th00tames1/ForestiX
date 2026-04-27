@@ -26,7 +26,31 @@ public struct DBHScanScreen: View {
     /// (state → .accepted). Use this for flows that want to persist the
     /// reading only after the cruiser has confirmed it — Quick Measure
     /// doesn't record a measurement until Accept is tapped.
-    public var onAccept: (DBHResult) -> Void = { _ in }
+    /// `metadata` carries the species / position / damage / note the
+    /// cruiser optionally attached via `ScanMetadataSheet`.
+    public var onAccept: (DBHResult, ScanMetadata) -> Void = { _, _ in }
+
+    public struct ScanMetadata {
+        public var speciesCode: String?
+        public var position: QuickMeasureEntry.StemPosition?
+        public var damageCodes: [String]
+        public var note: String
+        public init(speciesCode: String? = nil,
+                    position: QuickMeasureEntry.StemPosition? = nil,
+                    damageCodes: [String] = [],
+                    note: String = "") {
+            self.speciesCode = speciesCode
+            self.position = position
+            self.damageCodes = damageCodes
+            self.note = note
+        }
+    }
+
+    @State private var metaSpecies: String?
+    @State private var metaPosition: QuickMeasureEntry.StemPosition? = .dbh
+    @State private var metaDamage: [String] = []
+    @State private var metaNote: String = ""
+    @State private var presentingMetadata = false
 
     // Two independent diagnostic overlays — cruisers asked to see the
     // mesh and the VIO feature points at the same time, so they're no
@@ -36,7 +60,7 @@ public struct DBHScanScreen: View {
 
     public init(viewModel: @autoclosure @escaping () -> DBHScanViewModel,
                 onResult: @escaping (DBHResult) -> Void = { _ in },
-                onAccept: @escaping (DBHResult) -> Void = { _ in },
+                onAccept: @escaping (DBHResult, ScanMetadata) -> Void = { _, _ in },
                 showMeshOverlay: Bool = false) {
         _viewModel = StateObject(wrappedValue: viewModel())
         self.onResult = onResult
@@ -120,8 +144,21 @@ public struct DBHScanScreen: View {
             // only on an explicit user confirmation (Quick Measure) can
             // distinguish a fitted preview from a committed reading.
             if newState == .accepted, let r = viewModel.result {
-                onAccept(r)
+                let meta = ScanMetadata(
+                    speciesCode: metaSpecies,
+                    position: metaPosition,
+                    damageCodes: metaDamage,
+                    note: metaNote)
+                onAccept(r, meta)
             }
+        }
+        .sheet(isPresented: $presentingMetadata) {
+            ScanMetadataSheet(
+                kind: .diameter,
+                speciesCode: $metaSpecies,
+                position: $metaPosition,
+                damageCodes: $metaDamage,
+                note: $metaNote)
         }
         .onChange(of: scenePhase) { _, phase in
             // Stop the AR session + depth subscription when the user
@@ -465,9 +502,39 @@ public struct DBHScanScreen: View {
                 r.arcCoverageDeg, r.rmseMm, r.sigmaRmm, r.nInliers))
                 .font(ForestixType.dataSmall)
                 .foregroundStyle(.white.opacity(0.65))
+            HStack {
+                Spacer()
+                Button {
+                    presentingMetadata = true
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "tag")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text(metadataChipLabel)
+                            .font(ForestixType.dataSmall)
+                    }
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .overlay(Capsule().stroke(.white.opacity(0.4), lineWidth: 0.5))
+                    .foregroundStyle(.white)
+                }
+                .accessibilityIdentifier("dbhScan.editMetadata")
+            }
+            .padding(.top, 2)
         }
         .foregroundStyle(.white)
         .accessibilityIdentifier("dbhScan.resultPanel")
+    }
+
+    /// Pill label for the metadata-edit chip — surfaces what's
+    /// already attached so the cruiser doesn't have to open the
+    /// sheet to remember.
+    private var metadataChipLabel: String {
+        var bits: [String] = []
+        if let s = metaSpecies, !s.isEmpty { bits.append(s) }
+        if let p = metaPosition, p != .dbh { bits.append(p.displayName) }
+        if !metaDamage.isEmpty { bits.append("\(metaDamage.count) tag") }
+        if bits.isEmpty { return "Add details" }
+        return bits.joined(separator: " · ")
     }
 
     /// Short cruiser-actionable sentence matching the tier. The spec

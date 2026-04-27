@@ -28,7 +28,27 @@ public struct HeightScanScreen: View {
     /// Fires when the cruiser explicitly accepts the result shown on
     /// screen (state → .accepted). Hosts that want to persist only on
     /// user confirmation should use this instead of `onResult`.
-    public var onAccept: (HeightResult) -> Void = { _ in }
+    /// `metadata` carries optional species / damage / note attached
+    /// via `ScanMetadataSheet`.
+    public var onAccept: (HeightResult, ScanMetadata) -> Void = { _, _ in }
+
+    public struct ScanMetadata {
+        public var speciesCode: String?
+        public var damageCodes: [String]
+        public var note: String
+        public init(speciesCode: String? = nil,
+                    damageCodes: [String] = [],
+                    note: String = "") {
+            self.speciesCode = speciesCode
+            self.damageCodes = damageCodes
+            self.note = note
+        }
+    }
+
+    @State private var metaSpecies: String?
+    @State private var metaDamage: [String] = []
+    @State private var metaNote: String = ""
+    @State private var presentingMetadata = false
     /// When true, overlays the ARKit scene-reconstruction mesh on top of
     /// the camera feed — useful visual confirmation that LiDAR is
     /// sampling the scene while the cruiser walks off and aims.
@@ -36,7 +56,7 @@ public struct HeightScanScreen: View {
 
     public init(viewModel: @autoclosure @escaping () -> HeightScanViewModel,
                 onResult: @escaping (HeightResult) -> Void = { _ in },
-                onAccept: @escaping (HeightResult) -> Void = { _ in },
+                onAccept: @escaping (HeightResult, ScanMetadata) -> Void = { _, _ in },
                 showMeshOverlay: Bool = false) {
         _viewModel = StateObject(wrappedValue: viewModel())
         self.onResult = onResult
@@ -86,8 +106,20 @@ public struct HeightScanScreen: View {
         }
         .onChange(of: viewModel.state) { _, newState in
             if newState == .accepted, let r = viewModel.result {
-                onAccept(r)
+                let meta = ScanMetadata(
+                    speciesCode: metaSpecies,
+                    damageCodes: metaDamage,
+                    note: metaNote)
+                onAccept(r, meta)
             }
+        }
+        .sheet(isPresented: $presentingMetadata) {
+            ScanMetadataSheet(
+                kind: .height,
+                speciesCode: $metaSpecies,
+                position: .constant(nil),
+                damageCodes: $metaDamage,
+                note: $metaNote)
         }
         .onChange(of: scenePhase) { _, phase in
             // Same rationale as DBH scan: without this the ARKit
@@ -288,9 +320,35 @@ public struct HeightScanScreen: View {
                 Double(r.alphaBaseRad) * 180 / .pi))
                 .font(ForestixType.dataSmall)
                 .foregroundStyle(.white.opacity(0.65))
+            HStack {
+                Spacer()
+                Button {
+                    presentingMetadata = true
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "tag")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text(metadataChipLabel)
+                            .font(ForestixType.dataSmall)
+                    }
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .overlay(Capsule().stroke(.white.opacity(0.4), lineWidth: 0.5))
+                    .foregroundStyle(.white)
+                }
+                .accessibilityIdentifier("heightScan.editMetadata")
+            }
+            .padding(.top, 2)
         }
         .foregroundStyle(.white)
         .accessibilityIdentifier("heightScan.resultPanel")
+    }
+
+    private var metadataChipLabel: String {
+        var bits: [String] = []
+        if let s = metaSpecies, !s.isEmpty { bits.append(s) }
+        if !metaDamage.isEmpty { bits.append("\(metaDamage.count) tag") }
+        if bits.isEmpty { return "Add details" }
+        return bits.joined(separator: " · ")
     }
 
     /// Actionable one-liner per tier — same pattern as the Diameter

@@ -11,6 +11,7 @@ import UniformTypeIdentifiers
 #endif
 import Common
 import Models
+import Sensors
 
 public struct SettingsScreen: View {
 
@@ -39,6 +40,7 @@ public struct SettingsScreen: View {
             modeSection
             regionSection
             unitsSection
+            logRuleSection
             calibrationSection
             basemapSection
             backupSection
@@ -153,6 +155,24 @@ public struct SettingsScreen: View {
                 Label("Advanced mode", systemImage: "gear.badge")
             }
             .accessibilityIdentifier("settings.advancedMode")
+        }
+    }
+
+    private var logRuleSection: some View {
+        Section(
+            header: Text("Log rule"),
+            footer: Text("Determines board-foot volume from DBH + height. Scribner is the USFS Western default; Doyle dominates the Eastern US; International ¼″ is the most accurate but rarely used in practice.")
+        ) {
+            Picker("Log rule",
+                   selection: Binding(
+                    get: { settings.logRule },
+                    set: { settings.logRule = $0 })
+            ) {
+                ForEach(LogRule.allCases, id: \.self) { r in
+                    Text(r.displayName).tag(r)
+                }
+            }
+            .accessibilityIdentifier("settings.logRule")
         }
     }
 

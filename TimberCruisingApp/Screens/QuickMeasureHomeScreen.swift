@@ -280,7 +280,7 @@ public struct QuickMeasureHomeScreen: View {
         NavigationStack {
             DBHScanScreen(
                 viewModel: DBHScanViewModel(calibration: .identity),
-                onAccept: { result in
+                onAccept: { result, meta in
                     history.append(QuickMeasureEntry(
                         kind: .dbh,
                         value: Double(result.diameterCm),
@@ -289,7 +289,10 @@ public struct QuickMeasureHomeScreen: View {
                         method: result.method.rawValue,
                         treeNumber: pendingTreeNumber,
                         plotID: history.activePlotID,
-                        position: .dbh))
+                        speciesCode: meta.speciesCode,
+                        position: meta.position ?? .dbh,
+                        damageCodes: meta.damageCodes,
+                        note: meta.note.isEmpty ? nil : meta.note))
                     presentingDBHScan = false
                 },
                 showMeshOverlay: true)
@@ -310,7 +313,7 @@ public struct QuickMeasureHomeScreen: View {
         NavigationStack {
             HeightScanScreen(
                 viewModel: HeightScanViewModel(calibration: .identity),
-                onAccept: { result in
+                onAccept: { result, meta in
                     history.append(QuickMeasureEntry(
                         kind: .height,
                         value: Double(result.heightM),
@@ -318,7 +321,10 @@ public struct QuickMeasureHomeScreen: View {
                         confidenceRaw: result.confidence.rawValue,
                         method: result.method.rawValue,
                         treeNumber: pendingTreeNumber,
-                        plotID: history.activePlotID))
+                        plotID: history.activePlotID,
+                        speciesCode: meta.speciesCode,
+                        damageCodes: meta.damageCodes,
+                        note: meta.note.isEmpty ? nil : meta.note))
                     presentingHeightScan = false
                 },
                 showMeshOverlay: true)

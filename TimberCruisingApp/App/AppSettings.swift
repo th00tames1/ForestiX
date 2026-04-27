@@ -12,6 +12,7 @@
 
 import Foundation
 import Models
+import Sensors
 
 @MainActor
 public final class AppSettings: ObservableObject {
@@ -24,6 +25,7 @@ public final class AppSettings: ObservableObject {
         public static let advancedMode            = "tc.advancedMode"
         public static let region                  = "tc.region"
         public static let regionPickerSeen        = "tc.regionPickerSeen"
+        public static let logRule                 = "tc.logRule"
     }
 
     private let defaults: UserDefaults
@@ -108,5 +110,19 @@ public final class AppSettings: ObservableObject {
     public var regionPickerSeen: Bool {
         get { defaults.bool(forKey: Keys.regionPickerSeen) }
         set { defaults.set(newValue, forKey: Keys.regionPickerSeen); objectWillChange.send() }
+    }
+
+    /// Default log rule for board-foot volume calculations.
+    /// Defaults to Scribner Decimal C — USFS standard west of the
+    /// Mississippi. Eastern cruisers flip to Doyle once.
+    public var logRule: LogRule {
+        get {
+            let raw = defaults.string(forKey: Keys.logRule) ?? LogRule.scribner.rawValue
+            return LogRule(rawValue: raw) ?? .scribner
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: Keys.logRule)
+            objectWillChange.send()
+        }
     }
 }

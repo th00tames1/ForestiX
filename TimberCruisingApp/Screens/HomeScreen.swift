@@ -271,19 +271,34 @@ private struct DeviceHealthBanners: View {
 private struct ProjectRow: View {
     let project: Project
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(project.name).font(.headline)
-            HStack(spacing: 8) {
-                Text(project.owner.isEmpty ? "No owner" : project.owner)
-                Text("·").foregroundStyle(.tertiary)
-                Text(project.units.rawValue.capitalized)
-                Text("·").foregroundStyle(.tertiary)
-                Text(relativeDate(project.createdAt))
+        HStack(spacing: ForestixSpace.md) {
+            ZStack {
+                RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                 style: .continuous)
+                    .fill(ForestixPalette.primaryMuted)
+                    .frame(width: 40, height: 40)
+                Image(systemName: "folder")
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundStyle(ForestixPalette.primary)
             }
-            .font(.caption)
-            .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(project.name)
+                    .font(ForestixType.bodyBold)
+                    .foregroundStyle(ForestixPalette.textPrimary)
+                Text(metadataLine)
+                    .font(ForestixType.caption)
+                    .foregroundStyle(ForestixPalette.textSecondary)
+            }
+            Spacer(minLength: 0)
         }
         .padding(.vertical, 4)
+    }
+
+    private var metadataLine: String {
+        let owner = project.owner.isEmpty ? "No owner" : project.owner
+        let units = project.units.rawValue.capitalized
+        let when = relativeDate(project.createdAt)
+        return "\(owner) · \(units) · \(when)"
     }
 
     private func relativeDate(_ d: Date) -> String {

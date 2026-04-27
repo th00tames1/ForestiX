@@ -50,6 +50,18 @@ public struct QuickMeasurePlot: Codable, Identifiable, Sendable, Equatable {
     public var baf: Double?
     /// Plot-radius in feet for fixed-radius plots.
     public var radiusFt: Double?
+    /// Optional parent plot id — when present, this plot is a nested
+    /// concentric sub-plot of the parent (typically a smaller radius
+    /// for submerchantable / biomass / regeneration tally). Adopted
+    /// from SilvaCruise's "concentric fixed-radius plots at the same
+    /// plot center". The parent's coordinates are inherited
+    /// implicitly; only the radius (and any tally-class restriction)
+    /// differs.
+    public var parentPlotID: UUID?
+    /// Free-form sub-plot category — e.g. "biomass", "sawtimber",
+    /// "regen". Surfaced in reports so the cruiser can split the
+    /// stand-and-stock by tally class.
+    public var nestedKind: String?
     public let createdAt: Date
     /// True for the auto-created "Quick measurements" plot.
     public let isDefault: Bool
@@ -61,6 +73,8 @@ public struct QuickMeasurePlot: Codable, Identifiable, Sendable, Equatable {
                 typeRaw: String = "fixed",
                 baf: Double? = nil,
                 radiusFt: Double? = nil,
+                parentPlotID: UUID? = nil,
+                nestedKind: String? = nil,
                 createdAt: Date = Date(),
                 isDefault: Bool = false) {
         self.id = id
@@ -70,6 +84,8 @@ public struct QuickMeasurePlot: Codable, Identifiable, Sendable, Equatable {
         self.typeRaw = typeRaw
         self.baf = baf
         self.radiusFt = radiusFt
+        self.parentPlotID = parentPlotID
+        self.nestedKind = nestedKind
         self.createdAt = createdAt
         self.isDefault = isDefault
     }
@@ -83,9 +99,14 @@ public struct QuickMeasurePlot: Codable, Identifiable, Sendable, Equatable {
         self.typeRaw   = (try? c.decode(String.self, forKey: .typeRaw)) ?? "fixed"
         self.baf       = try c.decodeIfPresent(Double.self, forKey: .baf)
         self.radiusFt  = try c.decodeIfPresent(Double.self, forKey: .radiusFt)
+        self.parentPlotID = try c.decodeIfPresent(UUID.self, forKey: .parentPlotID)
+        self.nestedKind   = try c.decodeIfPresent(String.self, forKey: .nestedKind)
         self.createdAt = try c.decode(Date.self,   forKey: .createdAt)
         self.isDefault = (try? c.decode(Bool.self, forKey: .isDefault)) ?? false
     }
+
+    /// True if this plot is a nested sub-plot (has a parent).
+    public var isNested: Bool { parentPlotID != nil }
 }
 
 public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
@@ -317,15 +338,26 @@ public final class QuickMeasureHistory: ObservableObject {
                             acres: Double? = nil,
                             typeRaw: String = "fixed",
                             baf: Double? = nil,
-                            radiusFt: Double? = nil) -> QuickMeasurePlot {
+                            radiusFt: Double? = nil,
+                            parentPlotID: UUID? = nil,
+                            nestedKind: String? = nil) -> QuickMeasurePlot {
         let plot = QuickMeasurePlot(
             name: name, unitName: unitName, acres: acres,
             typeRaw: typeRaw, baf: baf, radiusFt: radiusFt,
+            parentPlotID: parentPlotID, nestedKind: nestedKind,
             createdAt: Date(), isDefault: false)
         plots.insert(plot, at: 0)
         activePlotID = plot.id
         persistPlots()
         return plot
+    }
+
+    /// Plots nested under `id`, sorted by creation time. Empty for
+    /// non-parent plots.
+    public func nestedChildren(of id: UUID) -> [QuickMeasurePlot] {
+        plots
+            .filter { $0.parentPlotID == id }
+            .sorted { $0.createdAt < $1.createdAt }
     }
 
     public func renamePlot(id: UUID, to newName: String) {

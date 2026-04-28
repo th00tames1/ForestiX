@@ -152,14 +152,18 @@ public enum HeightEstimator {
     private static func red(input: HeightMeasureInput,
                             dh: Float,
                             reason: String) -> HeightResult {
-        // No "best-effort H" on red — when geometry is out of spec
-        // (too close, near-vertical aim, etc.) the two-tangent formula
-        // produces grossly misleading values (e.g. 100+ m for a desk
-        // measured at 1.8 m), and surfacing that number alongside the
-        // rejection reason just confuses the cruiser. Callers decide
-        // how to render heightM == 0 (typically as "—").
+        // Best-effort H so the result panel still shows a number on red.
+        // Phase 13 originally set this to 0 (rendered as "—") to hide
+        // the wildly-inflated values produced by extreme angles or a
+        // standing-point fallback to the world origin. With those root
+        // causes now blocked (base-angle red guard + captureTopNow nil
+        // guard), the formula stays in a sensible range even on red,
+        // and showing the number gives the cruiser useful context next
+        // to the rejection reason ("0.8 m — too close, step back" is
+        // more informative than "— too close, step back").
+        let H = dh * (tan(input.alphaTopRad) - tan(input.alphaBaseRad))
         return HeightResult(
-            heightM: 0,
+            heightM: H,
             dHm: dh,
             alphaTopRad: input.alphaTopRad,
             alphaBaseRad: input.alphaBaseRad,

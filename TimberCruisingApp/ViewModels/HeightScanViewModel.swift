@@ -284,27 +284,46 @@ public final class HeightScanViewModel: ObservableObject {
         return pitchBuffer.mostRecentPitch()
     }
 
-    /// Button-handler entry for the Anchor Here tap. The anchor is the
-    /// camera position at the moment of the tap — which matches the
-    /// spec's "touch phone to tree base, tap Anchor Here" interaction:
-    /// the phone is physically at the tree, so the camera position IS
-    /// the tree base.
+    /// Button-handler entry for the Anchor Here tap. The cruiser stands
+    /// 1–3 m from the tree, aims the screen-centre crosshair at the
+    /// trunk's base (where the trunk meets the ground), and taps. The
+    /// LiDAR mesh raycast (`screenCenterHit`) returns the 3D world
+    /// position of that trunk-base point — that becomes the anchor.
+    /// The cruiser then walks back further to do Aim Top / Aim Base.
     ///
-    /// The earlier Phase 8.2 attempt to source the anchor from a screen-
-    /// centre raycast was wrong: when the cruiser presses the phone
-    /// to the bark, the LiDAR mesh raycast sometimes lands on the BACK
-    /// of the trunk (or a noisy nearby triangle) and the anchor jumps
-    /// half a metre INTO the tree. Camera position is the canonical
-    /// answer for the spec'd interaction. The `screenCenterHit`
-    /// parameter is accepted for source compatibility but ignored.
+    /// Why this beats the older "touch phone to bark" interaction:
+    ///   • No bending. Cruiser stays standing for the entire flow.
+    ///   • Works on slope, in vegetation, and around buttresses where
+    ///     physically reaching the trunk-base is awkward.
+    ///   • Uses the LiDAR data we already have. The raycast is robust
+    ///     at 1–3 m distance (the previous concern about the ray
+    ///     hitting the back of the trunk was a point-blank-only issue).
+    ///
+    /// `d_h` math is independent of the anchor's vertical position —
+    /// only the anchor's XZ matters. So even if the cruiser aims
+    /// slightly above the visible base (e.g. mid-trunk), the height
+    /// calculation stays correct as long as the hit lands on the
+    /// trunk's vertical axis.
+    ///
+    /// When the raycast misses (no LiDAR mesh in that direction yet,
+    /// or the cruiser aimed at sky), `anchorFailureReason` is set so
+    /// the UI can show a banner. Refusing the anchor is much better
+    /// than silently substituting the camera position, which would
+    /// leave the trunk-to-cruiser offset baked into d_h as a
+    /// systematic bias.
     public func anchorHereNow(screenCenterHit: SIMD3<Float>? = nil) {
-        _ = screenCenterHit
         guard let cam = currentCameraTranslation() else {
             anchorFailureReason =
                 "AR tracking not ready yet — wait a moment, then try again."
             return
         }
-        anchorHere(anchorPointWorld: cam,
+        guard let anchor = screenCenterHit else {
+            anchorFailureReason =
+                "Couldn't find the trunk surface at the crosshair. "
+                + "Aim at where the trunk meets the ground and try again."
+            return
+        }
+        anchorHere(anchorPointWorld: anchor,
                    standingPointWorld: cam)
     }
 

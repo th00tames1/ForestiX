@@ -47,21 +47,27 @@ public enum IMUHelpers {
     /// `H = d_h · (tan α_top − tan α_base)` which assumes α_top > α_base
     /// for trees taller than eye level.
     ///
-    /// Reference postures (portrait-locked phone, back camera):
-    /// - Upright portrait, back camera at horizon:
-    ///       g = (0, -1,  0) → 0
-    /// - Screen face-down, back camera at zenith (looking straight up):
-    ///       g = (0,  0,  1) → +π/2
-    /// - Screen face-up,   back camera at nadir  (looking straight down):
-    ///       g = (0,  0, -1) → −π/2
+    /// Reference postures, regardless of how the phone is rolled around
+    /// the screen-out (Z) axis:
+    /// - Back camera at horizon:                       0
+    /// - Back camera at zenith (looking straight up):  +π/2
+    /// - Back camera at nadir  (looking straight down): −π/2
     ///
-    /// Why `atan2(g.z, -g.y)` rather than the textbook `atan2(-g.z, -g.y)`:
-    /// the textbook form measures the SCREEN-out direction's elevation
-    /// angle, which is the OPPOSITE of the back camera's. Forestix uses
-    /// the back camera as a clinometer, so the sign is flipped to match.
+    /// Why `atan2(g.z, sqrt(g.x²+g.y²))` rather than `atan2(g.z, -g.y)`:
+    /// the back-camera direction in the device frame is body −Z. Its
+    /// elevation from the horizontal plane is the angle between body −Z
+    /// and the gravity-orthogonal plane, which depends ONLY on g.z
+    /// (= sin(elevation)). Using `-g.y` as the adjacent component made
+    /// the formula collapse to ±π/2 in landscape orientations — gravity
+    /// moves out of the Y axis into X, so `−g.y → 0` and atan2 returns
+    /// ±π/2 independent of the actual aim. Real-device test on
+    /// 2026-04-28 captured α_top = +80°, α_base = −88° on a desk
+    /// (correct values were ≈ −25° and −44°) producing H = 51 m on a
+    /// 0.75 m desk. The roll-invariant form fixes that.
     @inlinable
     public static func pitchFromGravity(_ g: SIMD3<Double>) -> Double {
-        atan2(g.z, -g.y)
+        let horiz = (g.x * g.x + g.y * g.y).squareRoot()
+        return atan2(g.z, horiz)
     }
 
     @inlinable

@@ -52,6 +52,47 @@ final class IMUHelpersTests: XCTestCase {
         XCTAssertEqual(IMUHelpers.pitchFromGravity(g), -.pi / 4, accuracy: 1e-9)
     }
 
+    // MARK: - Roll-invariance (Phase 13.3 regression)
+
+    /// Real-device bug 2026-04-28: a desk measurement reported H = 51 m
+    /// because the cruiser was holding the phone in landscape. The old
+    /// `atan2(g.z, -g.y)` form collapses to ±π/2 in landscape (g.y → 0
+    /// because gravity moves into the X axis), so α_top / α_base saturate
+    /// at ±90° regardless of where the phone is actually pointing.
+    /// `atan2(g.z, sqrt(g.x²+g.y²))` is roll-invariant and recovers the
+    /// correct elevation in any rotation around the screen-out axis.
+    func testPitchIsRollInvariantInLandscape() {
+        let elevation = -25.0 * .pi / 180.0  // back cam aimed 25° below horizon
+        // Portrait: gravity has no x component.
+        let portrait = SIMD3<Double>(0,
+                                     -cos(abs(elevation)),
+                                     sin(elevation))
+        // Landscape (right side down): gravity rotated 90° from Y to X.
+        let landscape = SIMD3<Double>(cos(abs(elevation)),
+                                       0,
+                                       sin(elevation))
+        let pPortrait = IMUHelpers.pitchFromGravity(portrait)
+        let pLandscape = IMUHelpers.pitchFromGravity(landscape)
+        XCTAssertEqual(pPortrait, elevation, accuracy: 1e-9)
+        XCTAssertEqual(pLandscape, elevation, accuracy: 1e-9,
+            "Pitch must be invariant to roll around the screen-out axis. "
+            + "Got \(pLandscape) in landscape vs \(pPortrait) in portrait.")
+    }
+
+    func testPitchIsRollInvariantAt45Roll() {
+        // Phone rolled 45° (somewhere between portrait and landscape) and
+        // aimed back cam 30° above horizon. Gravity in body frame has
+        // both x and y components but z stays = sin(elevation).
+        let elevation = 30.0 * .pi / 180.0
+        let roll = 45.0 * .pi / 180.0
+        let horiz = cos(elevation)
+        let g = SIMD3<Double>(horiz * sin(roll),
+                              -horiz * cos(roll),
+                              sin(elevation))
+        let pitch = IMUHelpers.pitchFromGravity(g)
+        XCTAssertEqual(pitch, elevation, accuracy: 1e-9)
+    }
+
     // MARK: - IMUPitchBuffer median window
 
     func testMedianInWindowReturnsCenterValue() {

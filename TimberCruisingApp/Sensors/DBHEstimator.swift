@@ -27,17 +27,30 @@ public struct ProjectCalibration: Sendable, Equatable {
     public var dbhCorrectionBeta: Float
     /// §7.2 VIO drift fraction — σ_d = vioDriftFraction · d_h. Default 0.02.
     public var vioDriftFraction: Float
+    /// Maximum allowed depth jump between adjacent guide-row pixels
+    /// during stem-strip extraction. Catches the multi-tree case where
+    /// two trunks at slightly different depths visually touch — the
+    /// connectivity walk previously absorbed both into one inflated
+    /// fit. A 4 cm default sits comfortably above any legitimate
+    /// intra-trunk gradient (typically ≤ 25 mm per pixel even at the
+    /// trunk's tangent edge for trees up to 80 cm DBH at 1 m) and
+    /// below the typical inter-trunk gap (≥ 5 cm).
+    /// Tunable per-region — densely-buttressed species or rougher bark
+    /// may warrant a larger threshold to avoid false splits.
+    public var depthDiscontinuityM: Float
 
     public init(
         depthNoiseMm: Float,
         dbhCorrectionAlpha: Float,
         dbhCorrectionBeta: Float,
-        vioDriftFraction: Float = 0.02
+        vioDriftFraction: Float = 0.02,
+        depthDiscontinuityM: Float = 0.04
     ) {
         self.depthNoiseMm = depthNoiseMm
         self.dbhCorrectionAlpha = dbhCorrectionAlpha
         self.dbhCorrectionBeta = dbhCorrectionBeta
         self.vioDriftFraction = vioDriftFraction
+        self.depthDiscontinuityM = depthDiscontinuityM
     }
 
     /// Neutral calibration — pre-calibration projects start here.
@@ -45,7 +58,8 @@ public struct ProjectCalibration: Sendable, Equatable {
         depthNoiseMm: 5.0,
         dbhCorrectionAlpha: 0,
         dbhCorrectionBeta: 1,
-        vioDriftFraction: 0.02)
+        vioDriftFraction: 0.02,
+        depthDiscontinuityM: 0.04)
 }
 
 public struct DBHScanInput: Sendable {
@@ -114,7 +128,8 @@ public enum DBHEstimator {
                 guideRowY: input.guideRowY,
                 tapColumn: Int(input.tapPixel.x.rounded()),
                 dTap: dTap,
-                deltaDepth: 0.15)
+                deltaDepth: 0.15,
+                discontinuityThresholdM: input.projectCalibration.depthDiscontinuityM)
             for x in strip {
                 let xz = BackProjection.worldXZ(
                     x: Double(x), y: Double(input.guideRowY),
@@ -169,7 +184,8 @@ public enum DBHEstimator {
             frames: input.frames,
             guideRowY: input.guideRowY,
             tapColumn: Int(input.tapPixel.x.rounded()),
-            dTap: dTap)
+            dTap: dTap,
+            discontinuityThresholdM: input.projectCalibration.depthDiscontinuityM)
 
         // Optional raw-PLY sidecar (REQ-DBH-007).
         let rawPath = input.rawPointsWriter?(cleaned)
@@ -306,15 +322,28 @@ public enum DBHEstimator {
     // MARK: - Step 3: stem-strip extraction along the guide row
 
     /// Extracts the contiguous run of columns along `guideRowY` that
-    /// (a) have confidence ≥ 1, (b) depth within ±deltaDepth of dTap, and
-    /// (c) are connected to the tap column. Returns the list of column
-    /// indices. Short-circuits if the tap column itself fails.
+    /// (a) have confidence ≥ 1, (b) depth within ±deltaDepth of dTap,
+    /// (c) are connected to the tap column, and
+    /// (d) have an adjacent-pixel depth jump no greater than
+    ///     `discontinuityThresholdM`. Returns the list of column indices.
+    /// Short-circuits if the tap column itself fails.
+    ///
+    /// Adjacent-jump check rationale (Phase 9): when two trunks at
+    /// slightly different depths (e.g., 1.50 m vs 1.55 m) are visually
+    /// adjacent, both fall inside the ±deltaDepth absolute window, so
+    /// the older walk absorbed the second trunk and inflated the fit.
+    /// Comparing each step's depth to the LAST accepted column's depth
+    /// instead detects the inter-trunk boundary as a sudden jump
+    /// (typically ≥ 5 cm) without splitting clean trunks (where the
+    /// per-pixel gradient stays under ~25 mm at the steepest edge for
+    /// trunks up to 80 cm DBH at 1 m). Pass `Float.infinity` to disable.
     static func extractGuideRowStemStrip(
         frame: ARDepthFrame,
         guideRowY: Int,
         tapColumn: Int,
         dTap: Float,
-        deltaDepth: Float
+        deltaDepth: Float,
+        discontinuityThresholdM: Float = .infinity
     ) -> [Int] {
         guard guideRowY >= 0, guideRowY < frame.height else { return [] }
         let width = frame.width
@@ -343,11 +372,34 @@ public enum DBHEstimator {
             seed = found
         }
 
+        let seedDepth = frame.depth(atX: seed, y: guideRowY)
         var cols: [Int] = [seed]
+
+        // Walk left, comparing each new pixel's depth to the previously
+        // accepted neighbour's depth (NOT to dTap). A sudden jump means
+        // we've hit the boundary between two trunks (or a step feature)
+        // and should stop, leaving the strip on the seed's trunk only.
         var x = seed - 1
-        while x >= 0, pixelValid(at: x) { cols.append(x); x -= 1 }
+        var lastDepth = seedDepth
+        while x >= 0, pixelValid(at: x) {
+            let d = frame.depth(atX: x, y: guideRowY)
+            if abs(d - lastDepth) > discontinuityThresholdM { break }
+            cols.append(x)
+            lastDepth = d
+            x -= 1
+        }
+
+        // Walk right with a fresh `lastDepth` anchored at the seed.
         x = seed + 1
-        while x < width, pixelValid(at: x) { cols.append(x); x += 1 }
+        lastDepth = seedDepth
+        while x < width, pixelValid(at: x) {
+            let d = frame.depth(atX: x, y: guideRowY)
+            if abs(d - lastDepth) > discontinuityThresholdM { break }
+            cols.append(x)
+            lastDepth = d
+            x += 1
+        }
+
         cols.sort()
         return cols
     }
@@ -426,7 +478,8 @@ public enum DBHEstimator {
         frames: [ARDepthFrame],
         guideRowY: Int,
         tapColumn: Int,
-        dTap: Float
+        dTap: Float,
+        discontinuityThresholdM: Float = .infinity
     ) -> Double {
         var radii: [Double] = []
         for frame in frames {
@@ -435,7 +488,8 @@ public enum DBHEstimator {
                 guideRowY: guideRowY,
                 tapColumn: tapColumn,
                 dTap: dTap,
-                deltaDepth: 0.15)
+                deltaDepth: 0.15,
+                discontinuityThresholdM: discontinuityThresholdM)
             if cols.count < 5 { continue }
             let pts = cols.map { x -> SIMD2<Double> in
                 BackProjection.worldXZ(
@@ -509,7 +563,8 @@ public enum DBHEstimator {
         frame: ARDepthFrame,
         tapPixel: SIMD2<Double>,
         guideRowY: Int,
-        deltaDepth: Float = 0.15
+        deltaDepth: Float = 0.15,
+        discontinuityThresholdM: Float = 0.04
     ) -> PreviewFit? {
         guard let dTap = medianDepth(around: tapPixel, frame: frame, radius: 2)
         else { return nil }
@@ -520,7 +575,8 @@ public enum DBHEstimator {
             guideRowY: guideRowY,
             tapColumn: Int(tapPixel.x.rounded()),
             dTap: dTap,
-            deltaDepth: deltaDepth)
+            deltaDepth: deltaDepth,
+            discontinuityThresholdM: discontinuityThresholdM)
         guard let leftCol = strip.first, let rightCol = strip.last,
               rightCol > leftCol,
               strip.count >= 6

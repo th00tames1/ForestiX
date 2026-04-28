@@ -175,7 +175,8 @@ public final class DBHScanViewModel: ObservableObject {
         let fit = DBHEstimator.previewFit(
             frame: frame,
             tapPixel: SIMD2(Double(cx), Double(cy)),
-            guideRowY: cy)
+            guideRowY: cy,
+            discontinuityThresholdM: calibration.depthDiscontinuityM)
         previewFit = fit
         previewDbhCm = fit?.diameterCm
 

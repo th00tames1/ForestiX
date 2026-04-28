@@ -326,6 +326,15 @@ public struct HeightScanScreen: View {
             Text(tierHint(r.confidence))
                 .font(ForestixType.caption)
                 .foregroundStyle(.white.opacity(0.9))
+            // Phase 13.2 diagnostic — Bug B persists in real-device tests
+            // (desk reads ~89.6 m). The math in HeightEstimator is correct
+            // when fed sane α / d_h, so we surface the actual captured
+            // values to find which input has gone bad on hardware.
+            // Remove once root-caused.
+            Text(diagnosticLine(r))
+                .font(ForestixType.caption)
+                .foregroundStyle(.white.opacity(0.55))
+                .accessibilityIdentifier("heightScan.diagnosticLine")
             HStack {
                 Spacer()
                 Button {
@@ -355,6 +364,17 @@ public struct HeightScanScreen: View {
         if !metaDamage.isEmpty { bits.append("\(metaDamage.count) tag") }
         if bits.isEmpty { return "Add details" }
         return bits.joined(separator: " · ")
+    }
+
+    /// Phase 13.2 diagnostic — prints the raw captured inputs that fed
+    /// the §7.2 formula so we can see whether a bad pitch, bad d_h, or
+    /// the formula itself is producing the inflated H.
+    private func diagnosticLine(_ r: HeightResult) -> String {
+        let topDeg  = Double(r.alphaTopRad)  * 180.0 / .pi
+        let baseDeg = Double(r.alphaBaseRad) * 180.0 / .pi
+        return String(
+            format: "α_top %+.1f° · α_base %+.1f° · d_h %.2f m",
+            topDeg, baseDeg, Double(r.dHm))
     }
 
     /// Actionable one-liner per tier — same pattern as the Diameter

@@ -474,11 +474,12 @@ public struct HeightScanScreen: View {
 
     // MARK: - Tap handlers with raycast
 
-    /// Anchor tap — the crosshair is on the tree base, so screen-centre
-    /// raycasts the ground plane and that hit becomes the anchor.
-    /// Without a hit we fall back to the camera position (spec flow).
+    /// Anchor tap — per spec §4.4 step (a) the cruiser physically touches
+    /// the phone to the tree base before tapping. The camera position at
+    /// tap time IS the tree base, so we don't bother with a raycast for
+    /// the anchor. The view model uses the camera position directly.
     private func anchorTap() {
-        viewModel.anchorHereNow(screenCenterHit: raycaster.screenCenterHit())
+        viewModel.anchorHereNow()
     }
 
     /// Aim Top — crosshair on treetop. The sky has no plane, so the

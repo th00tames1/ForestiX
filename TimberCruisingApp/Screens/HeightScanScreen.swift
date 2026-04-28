@@ -148,7 +148,7 @@ public struct HeightScanScreen: View {
 
     private var crosshairLabel: String? {
         switch viewModel.state {
-        case .idle, .anchorSet: return "Aim at trunk + ground"
+        case .idle, .anchorSet: return "Aim at trunk (eye level)"
         case .walking:          return "Walk back — aim stays on tree"
         case .aimTopArmed:      return "Aim at treetop"
         case .aimBaseArmed:     return "Aim at trunk + ground"
@@ -244,7 +244,7 @@ public struct HeightScanScreen: View {
 
     private var statusText: String {
         switch viewModel.state {
-        case .idle, .anchorSet:   return "Aim at where the trunk meets the ground, then tap Anchor Here."
+        case .idle, .anchorSet:   return "Aim at the trunk at eye level, then tap Anchor Here."
         case .walking:            return "Walk back. Live walk-back distance shown below."
         case .aimTopArmed:        return "Aim at the treetop, then tap Aim Top."
         case .aimTopCaptured:     return "Top captured."

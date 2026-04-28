@@ -286,24 +286,32 @@ public final class HeightScanViewModel: ObservableObject {
 
     /// Button-handler entry for the Anchor Here tap. The cruiser stands
     /// 1–3 m from the tree, aims the screen-centre crosshair at the
-    /// trunk's base (where the trunk meets the ground), and taps. The
+    /// trunk at EYE LEVEL (≈ chest height on the trunk), and taps. The
     /// LiDAR mesh raycast (`screenCenterHit`) returns the 3D world
-    /// position of that trunk-base point — that becomes the anchor.
-    /// The cruiser then walks back further to do Aim Top / Aim Base.
+    /// position of that trunk point — that becomes the anchor. The
+    /// cruiser then walks back further to do Aim Top / Aim Base.
+    ///
+    /// Why eye level (not the trunk base):
+    ///   • A horizontal ray hits the trunk surface near-perpendicular,
+    ///     giving the LiDAR its highest depth confidence.
+    ///   • No risk of the ray skimming past the trunk and hitting the
+    ///     ground / leaf litter / undergrowth instead.
+    ///   • Mesh density is consistently good on the upright stem;
+    ///     trunk-ground transitions are noisier (vegetation, buttress).
+    ///   • IMU pitch noise (~0.3°) translates to vertical-only error
+    ///     for a level ray, so d_h is unaffected.
+    /// Only the anchor's XZ is used in d_h — the Y is dropped — so
+    /// aiming at any height on the trunk gives the same horizontal
+    /// distance once the cruiser walks back. Eye level is just the
+    /// cleanest LiDAR target.
     ///
     /// Why this beats the older "touch phone to bark" interaction:
     ///   • No bending. Cruiser stays standing for the entire flow.
     ///   • Works on slope, in vegetation, and around buttresses where
-    ///     physically reaching the trunk-base is awkward.
+    ///     physically reaching the trunk is awkward.
     ///   • Uses the LiDAR data we already have. The raycast is robust
     ///     at 1–3 m distance (the previous concern about the ray
     ///     hitting the back of the trunk was a point-blank-only issue).
-    ///
-    /// `d_h` math is independent of the anchor's vertical position —
-    /// only the anchor's XZ matters. So even if the cruiser aims
-    /// slightly above the visible base (e.g. mid-trunk), the height
-    /// calculation stays correct as long as the hit lands on the
-    /// trunk's vertical axis.
     ///
     /// When the raycast misses (no LiDAR mesh in that direction yet,
     /// or the cruiser aimed at sky), `anchorFailureReason` is set so
@@ -320,7 +328,7 @@ public final class HeightScanViewModel: ObservableObject {
         guard let anchor = screenCenterHit else {
             anchorFailureReason =
                 "Couldn't find the trunk surface at the crosshair. "
-                + "Aim at where the trunk meets the ground and try again."
+                + "Aim at the trunk at eye level and try again."
             return
         }
         anchorHere(anchorPointWorld: anchor,

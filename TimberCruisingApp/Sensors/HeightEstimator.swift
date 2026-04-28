@@ -84,6 +84,11 @@ public enum HeightEstimator {
                        dh: dh,
                        reason: "Top angle too steep; step back")
         }
+        if abs(input.alphaBaseRad) > maxAlphaTopRadRed {
+            return red(input: input,
+                       dh: dh,
+                       reason: "Base angle too steep; step back")
+        }
 
         // Step 3. Height — the two-tangent formula.
         let tanTop  = tan(input.alphaTopRad)
@@ -147,11 +152,14 @@ public enum HeightEstimator {
     private static func red(input: HeightMeasureInput,
                             dh: Float,
                             reason: String) -> HeightResult {
-        // Best-effort H/σ_H for the result panel even on red — caller
-        // typically hides the numbers behind the reason anyway.
-        let H = dh * (tan(input.alphaTopRad) - tan(input.alphaBaseRad))
+        // No "best-effort H" on red — when geometry is out of spec
+        // (too close, near-vertical aim, etc.) the two-tangent formula
+        // produces grossly misleading values (e.g. 100+ m for a desk
+        // measured at 1.8 m), and surfacing that number alongside the
+        // rejection reason just confuses the cruiser. Callers decide
+        // how to render heightM == 0 (typically as "—").
         return HeightResult(
-            heightM: H,
+            heightM: 0,
             dHm: dh,
             alphaTopRad: input.alphaTopRad,
             alphaBaseRad: input.alphaBaseRad,

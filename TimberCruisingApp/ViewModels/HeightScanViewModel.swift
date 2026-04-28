@@ -348,8 +348,19 @@ public final class HeightScanViewModel: ObservableObject {
     /// Timestamp MUST match the CMDeviceMotion clock — those samples are
     /// stamped with `ProcessInfo.systemUptime` (seconds since boot), NOT
     /// `Date().timeIntervalSinceReferenceDate` (seconds since 2001).
+    ///
+    /// Bails with a banner if the ARKit camera pose isn't available.
+    /// The previous `?? .zero` fallback would silently set the standing
+    /// point to the world origin — anchor.xz could be tens of metres
+    /// from the origin in any non-fresh session, which inflated d_h by
+    /// 10–100× and produced absurd heights (e.g. a desk at 2 m showing
+    /// up as 100 m+) instead of an honest "tracking not ready" message.
     public func captureTopNow(screenCenterHit: SIMD3<Float>? = nil) {
-        let p = currentCameraTranslation() ?? .zero
+        guard let p = currentCameraTranslation() else {
+            anchorFailureReason =
+                "AR tracking not ready — wait a moment, then try Aim Top again."
+            return
+        }
         captureTop(at: nowForPitchBuffer(),
                    standingPointWorld: p,
                    aimedAtWorld: screenCenterHit)

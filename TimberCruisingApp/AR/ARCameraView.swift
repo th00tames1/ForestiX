@@ -95,6 +95,13 @@ public struct ARCameraView: UIViewRepresentable {
         /// Cached shape per marker so we only rebuild the mesh when the
         /// shape itself changes (not when just the position moved).
         var markerShapes: [UUID: ARSceneMarker.Shape] = [:]
+        /// World position the AnchorEntity was anchored at on creation.
+        /// Needed because `AnchorEntity(world:)` pins the entity to that
+        /// world point — mutating `transform.translation` afterwards
+        /// adds an OFFSET relative to the anchored origin instead of
+        /// repositioning, which doubled the rendered position on every
+        /// rebuild and made previously-placed markers visibly jump.
+        var markerPositions: [UUID: SIMD3<Float>] = [:]
     }
 
     public func makeUIView(context: Context) -> ARView {
@@ -149,15 +156,27 @@ public struct ARCameraView: UIViewRepresentable {
                 view.scene.removeAnchor(anchor)
             }
             coordinator.markerShapes.removeValue(forKey: staleId)
+            coordinator.markerPositions.removeValue(forKey: staleId)
         }
 
-        // Add new or update existing anchors in place.
+        // Add new, re-anchor moved, or refresh shape on existing anchors.
+        // We re-anchor (remove + re-add) when the world position changes
+        // because `AnchorEntity(world:)` pins the entity at the supplied
+        // world point and `transform.translation` is then a *child-space*
+        // offset relative to that anchored origin — assigning the world
+        // position back into translation doubles the rendered location.
         for marker in sceneMarkers {
             if let existing = coordinator.markerAnchors[marker.id] {
-                existing.transform.translation = marker.worldPosition
-                // Rebuild the model only if the shape actually changed —
-                // colour / scale changes share the same mesh template.
-                if coordinator.markerShapes[marker.id] != marker.shape {
+                let storedPosition = coordinator.markerPositions[marker.id]
+                if storedPosition != marker.worldPosition {
+                    view.scene.removeAnchor(existing)
+                    let anchor = AnchorEntity(world: marker.worldPosition)
+                    anchor.addChild(Self.makeEntity(for: marker))
+                    view.scene.addAnchor(anchor)
+                    coordinator.markerAnchors[marker.id] = anchor
+                    coordinator.markerShapes[marker.id] = marker.shape
+                    coordinator.markerPositions[marker.id] = marker.worldPosition
+                } else if coordinator.markerShapes[marker.id] != marker.shape {
                     for child in existing.children {
                         child.removeFromParent()
                     }
@@ -170,6 +189,7 @@ public struct ARCameraView: UIViewRepresentable {
                 view.scene.addAnchor(anchor)
                 coordinator.markerAnchors[marker.id] = anchor
                 coordinator.markerShapes[marker.id] = marker.shape
+                coordinator.markerPositions[marker.id] = marker.worldPosition
             }
         }
     }

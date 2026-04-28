@@ -318,13 +318,6 @@ public struct HeightScanScreen: View {
             Text(tierHint(r.confidence))
                 .font(ForestixType.caption)
                 .foregroundStyle(.white.opacity(0.9))
-            Text(String(
-                format: "Walk-back %.1f m · Top angle %.1f° · Base angle %.1f°",
-                r.dHm,
-                Double(r.alphaTopRad) * 180 / .pi,
-                Double(r.alphaBaseRad) * 180 / .pi))
-                .font(ForestixType.dataSmall)
-                .foregroundStyle(.white.opacity(0.65))
             HStack {
                 Spacer()
                 Button {

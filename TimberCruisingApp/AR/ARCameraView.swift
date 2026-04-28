@@ -69,13 +69,6 @@ public struct ARCameraView: UIViewRepresentable {
 
     public let session: ARSession
     public var debugMeshOverlay: Bool
-    /// Renders ARKit's visual feature points — the sparse 3D tracking
-    /// points VIO uses — as an overlay. Not the LiDAR point cloud (no
-    /// public SDK surface for that), but looks similar: a speckle of
-    /// dots on surfaces the scene understanding has locked onto. A
-    /// useful diagnostic view when the mesh hides what the scan is
-    /// actually seeing.
-    public var debugPointsOverlay: Bool
     public var sceneMarkers: [ARSceneMarker]
     /// Optional raycaster that gets bound to the underlying ARView on
     /// creation so callers can fire screen-centre raycasts (Height
@@ -84,12 +77,10 @@ public struct ARCameraView: UIViewRepresentable {
 
     public init(session: ARSession,
                 debugMeshOverlay: Bool = false,
-                debugPointsOverlay: Bool = false,
                 sceneMarkers: [ARSceneMarker] = [],
                 raycaster: ARCenterRaycaster? = nil) {
         self.session = session
         self.debugMeshOverlay = debugMeshOverlay
-        self.debugPointsOverlay = debugPointsOverlay
         self.sceneMarkers = sceneMarkers
         self.raycaster = raycaster
     }
@@ -140,11 +131,10 @@ public struct ARCameraView: UIViewRepresentable {
         } else {
             view.debugOptions.remove(.showSceneUnderstanding)
         }
-        if debugPointsOverlay {
-            view.debugOptions.insert(.showFeaturePoints)
-        } else {
-            view.debugOptions.remove(.showFeaturePoints)
-        }
+        // Feature points overlay was removed — cruisers found it noisy
+        // and the mesh alone gives the same "is the scene tracked?"
+        // signal. ARView ships with featurePoints off by default, so
+        // explicit clearing is no longer needed.
     }
 
     // MARK: - Marker diffing
@@ -221,7 +211,6 @@ public struct ARCameraView: UIViewRepresentable {
 public struct ARCameraView: View {
     public init(session: Any,
                 debugMeshOverlay: Bool = false,
-                debugPointsOverlay: Bool = false,
                 sceneMarkers: [ARSceneMarker] = [],
                 raycaster: ARCenterRaycaster? = nil) {}
     public var body: some View { Color.black }
@@ -235,12 +224,10 @@ public struct ARCameraView: View {
 extension ARCameraView {
     public init(manager: ARKitSessionManager,
                 debugMeshOverlay: Bool = false,
-                debugPointsOverlay: Bool = false,
                 sceneMarkers: [ARSceneMarker] = [],
                 raycaster: ARCenterRaycaster? = nil) {
         self.init(session: manager.session,
                   debugMeshOverlay: debugMeshOverlay,
-                  debugPointsOverlay: debugPointsOverlay,
                   sceneMarkers: sceneMarkers,
                   raycaster: raycaster)
     }
@@ -249,12 +236,10 @@ extension ARCameraView {
 extension ARCameraView {
     public init(manager: Any,
                 debugMeshOverlay: Bool = false,
-                debugPointsOverlay: Bool = false,
                 sceneMarkers: [ARSceneMarker] = [],
                 raycaster: ARCenterRaycaster? = nil) {
         self.init(session: manager,
                   debugMeshOverlay: debugMeshOverlay,
-                  debugPointsOverlay: debugPointsOverlay,
                   sceneMarkers: sceneMarkers,
                   raycaster: raycaster)
     }

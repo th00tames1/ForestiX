@@ -79,13 +79,13 @@ public struct StandSummaryScreen: View {
                     Text(String(format: "%.2f %@", stat.mean, unit))
                         .font(.title2.bold().monospacedDigit())
                     Spacer()
-                    Text(String(format: "± %.2f (95%% CI)", stat.ci95HalfWidth))
+                    Text(String(format: "± %.2f (95%% confidence)", stat.ci95HalfWidth))
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
                 HStack(spacing: 12) {
-                    Text("SE \(String(format: "%.2f", stat.seMean))")
-                    Text("df \(String(format: "%.1f", stat.dfSatterthwaite))")
+                    Text("Std error \(String(format: "%.2f", stat.seMean))")
+                    Text("eff. plots \(String(format: "%.1f", stat.dfSatterthwaite))")
                     Text("n \(stat.nPlots)")
                 }
                 .font(.caption.monospacedDigit())
@@ -113,7 +113,7 @@ public struct StandSummaryScreen: View {
                                 Text(viewModel.stratumName(forKey: key))
                                     .font(.caption)
                                 Spacer()
-                                Text(String(format: "n=%d  mean=%.2f  sd=%.2f",
+                                Text(String(format: "n=%d  mean=%.2f  std-dev=%.2f",
                                             s.nPlots, s.mean, sqrt(max(s.variance, 0))))
                                     .font(.caption.monospacedDigit())
                                     .foregroundStyle(.secondary)
@@ -133,9 +133,9 @@ public struct StandSummaryScreen: View {
                 HStack {
                     Text("#").frame(width: 28, alignment: .leading)
                     Text("Live").frame(maxWidth: .infinity, alignment: .trailing)
-                    Text("TPA").frame(maxWidth: .infinity, alignment: .trailing)
-                    Text("BA/ac").frame(maxWidth: .infinity, alignment: .trailing)
-                    Text("V/ac").frame(maxWidth: .infinity, alignment: .trailing)
+                    Text("Trees/ac").frame(maxWidth: .infinity, alignment: .trailing)
+                    Text("Basal/ac").frame(maxWidth: .infinity, alignment: .trailing)
+                    Text("Volume/ac").frame(maxWidth: .infinity, alignment: .trailing)
                 }
                 .font(.caption2.bold())
                 .foregroundStyle(.secondary)

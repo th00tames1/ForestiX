@@ -61,51 +61,51 @@ public struct ReferenceLibraryScreen: View {
 
     private var keyFormulas: [FormulaEntry] { [
         FormulaEntry(
-            title: "Basal Area (per tree)",
+            title: "Basal area, per tree",
             formula: "BA = 0.005454 × DBH²",
-            caption: "BA in ft², DBH in inches. Use 0.00007854 × DBH² for cm² → m²."),
+            caption: "Basal area in ft², DBH in inches. Use 0.00007854 × DBH² for cm² → m²."),
         FormulaEntry(
-            title: "Trees Per Acre (Variable-radius)",
+            title: "Trees per acre — variable-radius (prism)",
             formula: "TPA = BAF / (0.005454 × DBH²)",
-            caption: "Per-tree expansion factor for prism / angle-gauge sampling."),
+            caption: "Per-tree expansion factor for prism / angle-gauge sampling. BAF = basal area factor."),
         FormulaEntry(
-            title: "Trees Per Acre (Fixed-radius)",
+            title: "Trees per acre — fixed-radius",
             formula: "TPA = 1 / plot_acres",
             caption: "Every tally tree in a fixed plot shares the same expansion factor."),
         FormulaEntry(
-            title: "Plot Radius",
+            title: "Plot radius",
             formula: "r = √(43,560 × acres / π)",
             caption: "Plot radius in feet for circular fixed-area plots."),
         FormulaEntry(
-            title: "QMD",
+            title: "Quadratic mean diameter",
             formula: "QMD = √(Σ DBH² / n)",
-            caption: "Quadratic mean diameter — the BA-weighted central tendency."),
+            caption: "The basal-area-weighted central tendency of stand diameters."),
         FormulaEntry(
-            title: "Plot Spacing (systematic)",
+            title: "Plot spacing (systematic)",
             formula: "spacing = √(acres_per_plot × 43,560)",
             caption: "Grid spacing in feet for an even-sample design."),
         FormulaEntry(
-            title: "Slope Correction (BA / radius)",
+            title: "Slope correction (basal area + radius)",
             formula: "horizontal = slope × cos(θ)",
             caption: "On a slope, multiply your tape distance by cos(slope) to get horizontal."),
         FormulaEntry(
-            title: "Height-to-Diameter (wind risk)",
-            formula: "HDR = height / DBH (same units)",
-            caption: "HDR > 100 → high windthrow risk; 80–100 marginal; < 80 stable."),
+            title: "Height-to-diameter ratio (wind risk)",
+            formula: "ratio = height / DBH (same units)",
+            caption: "Ratio > 100 → high windthrow risk; 80–100 marginal; < 80 stable."),
     ] }
 
     private var logRules: [FormulaEntry] { [
         FormulaEntry(
             title: "Scribner Decimal C",
-            formula: "BF ≈ ((0.79 × D² − 2 × D − 4) / 16) × L",
+            formula: "board-feet ≈ ((0.79 × D² − 2 × D − 4) / 16) × L",
             caption: "USFS standard for the Western US. Conservative on small logs."),
         FormulaEntry(
             title: "International ¼-Inch",
-            formula: "BF = 0.04976 × D² × L − 1.86 × D × L",
+            formula: "board-feet = 0.04976 × D² × L − 1.86 × D × L",
             caption: "Most accurate of the three; standard for hardwoods + research."),
         FormulaEntry(
             title: "Doyle",
-            formula: "BF = ((D − 4) / 4)² × L",
+            formula: "board-feet = ((D − 4) / 4)² × L",
             caption: "Dominant in the Eastern US. Substantially underestimates small logs."),
     ] }
 
@@ -127,24 +127,24 @@ public struct ReferenceLibraryScreen: View {
             formula: "1 chain = 66 ft = 20.117 m",
             caption: "Surveyor's chain — still the unit of habit on USFS land."),
         FormulaEntry(
-            title: "BAF Imperial ↔ Metric",
-            formula: "BAF₍ft²/ac₎ × 0.2296 = BAF₍m²/ha₎",
+            title: "Basal area factor — Imperial ↔ Metric",
+            formula: "factor₍ft²/ac₎ × 0.2296 = factor₍m²/ha₎",
             caption: "10 ft²/ac ≈ 2.30 m²/ha; 20 ≈ 4.59; 40 ≈ 9.18."),
     ] }
 
     private var fieldChecks: [FormulaEntry] { [
         FormulaEntry(
-            title: "Limiting Distance (variable plot)",
-            formula: "PRF = √(BAF / 10,890) × DBH₍ft₎",
-            caption: "Maximum horizontal distance a borderline tree may stand from plot centre."),
+            title: "Limiting distance (variable-radius plot)",
+            formula: "plot-radius-factor = √(BAF / 10,890) × DBH₍ft₎",
+            caption: "Maximum horizontal distance a borderline tree may stand from plot centre. BAF = basal area factor."),
         FormulaEntry(
-            title: "Sampling Error (one-sided)",
-            formula: "SE% = (t × CV) / √n",
-            caption: "Add plots until SE% drops below your target (e.g. 10 %)."),
+            title: "Sampling error (one-sided)",
+            formula: "standard-error % = (t × variability) / √n",
+            caption: "Add plots until standard error drops below your target (e.g. 10 %)."),
         FormulaEntry(
-            title: "Reineke SDI",
-            formula: "SDI = TPA × (QMD / 10)^1.605",
-            caption: "Stand Density Index — species-independent stocking yardstick."),
+            title: "Reineke stand density index",
+            formula: "index = TPA × (QMD / 10)^1.605",
+            caption: "Species-independent stocking yardstick. TPA = trees per acre, QMD = quadratic mean diameter."),
     ] }
 }
 

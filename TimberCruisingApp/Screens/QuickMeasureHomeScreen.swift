@@ -294,7 +294,7 @@ public struct QuickMeasureHomeScreen: View {
                 } label: {
                     SupportingTile(
                         title: "Recon cruise",
-                        subtitle: "Quick BA tally · sample sizing",
+                        subtitle: "Quick basal area tally · sample sizing",
                         systemImage: "scope",
                         trailingBadge: nil)
                 }

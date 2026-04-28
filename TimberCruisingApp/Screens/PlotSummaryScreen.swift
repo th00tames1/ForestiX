@@ -89,11 +89,11 @@ public struct PlotSummaryScreen: View {
             statRow("Trees / ac", String(format: "%.1f", viewModel.stats.tpa))
             statRow("Basal area / ac",
                     String(format: "%.2f m²/ac", viewModel.stats.baPerAcreM2))
-            statRow("QMD",
+            statRow("Quadratic mean diameter",
                     String(format: "%.1f cm", viewModel.stats.qmdCm))
-            statRow("Gross V / ac",
+            statRow("Gross volume / ac",
                     String(format: "%.1f m³/ac", viewModel.stats.grossVolumePerAcreM3))
-            statRow("Merch V / ac",
+            statRow("Merchantable volume / ac",
                     String(format: "%.1f m³/ac", viewModel.stats.merchVolumePerAcreM3))
         }
     }

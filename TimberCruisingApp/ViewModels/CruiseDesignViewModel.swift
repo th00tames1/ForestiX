@@ -59,7 +59,7 @@ public final class CruiseDesignViewModel: ObservableObject {
             _ = area
         } else {
             guard let baf = Double(bafString), baf > 0 else {
-                return "BAF must be a positive number."
+                return "Basal area factor must be a positive number."
             }
             _ = baf
         }

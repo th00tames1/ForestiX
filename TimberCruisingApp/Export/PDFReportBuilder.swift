@@ -193,9 +193,9 @@ public enum PDFReportBuilder {
         kv("# species",         "\(inputs.species.count)")
         kv("# volume equations","\(Set(inputs.species.map { $0.volumeEquationId }).count)")
 
-        // Dominant species by BA across stand.
+        // Dominant species by basal area across stand.
         y -= 20
-        drawHeading("Dominant species (by BA)",
+        drawHeading("Dominant species (by basal area)",
                     at: CGPoint(x: frame.minX, y: y), width: frame.width, in: ctx)
         y -= 22
         let byCode = Self.speciesBAAcrossStand(plotStats: inputs.plotStatsByPlot)
@@ -228,11 +228,12 @@ public enum PDFReportBuilder {
                     at: CGPoint(x: frame.minX, y: y), width: frame.width, in: ctx)
         y -= 22
         let metricRows: [(String, StandStat, String)] = [
-            ("TPA",           inputs.tpaStand, "trees/ac"),
-            ("BA",            inputs.baStand,  "m²/ac"),
-            ("Gross volume",  inputs.volStand, "m³/ac")
+            ("Trees per acre", inputs.tpaStand, "trees/ac"),
+            ("Basal area",     inputs.baStand,  "m²/ac"),
+            ("Gross volume",   inputs.volStand, "m³/ac")
         ]
-        drawTableRow(cells: ["Metric", "Unit", "Mean", "SE", "CI95 ±", "df", "n"],
+        drawTableRow(cells: ["Metric", "Unit", "Mean", "Std error",
+                              "95% conf ±", "Eff. plots", "n"],
                      bold: true, at: CGPoint(x: frame.minX, y: y),
                      colWidths: [110, 70, 80, 60, 70, 45, 40],
                      in: ctx)
@@ -250,9 +251,9 @@ public enum PDFReportBuilder {
             y -= 16
         }
 
-        // BA by stratum bar chart (manual CG drawing).
+        // Basal area by stratum bar chart (manual CG drawing).
         y -= 30
-        drawHeading("BA by stratum (m²/ac)",
+        drawHeading("Basal area by stratum (m²/ac)",
                     at: CGPoint(x: frame.minX, y: y), width: frame.width, in: ctx)
         y -= 18
         let strataBars = inputs.baStand.byStratum
@@ -266,7 +267,7 @@ public enum PDFReportBuilder {
         y = chartRect.minY - 20
 
         // Species composition.
-        drawHeading("Species composition (top 8 by BA)",
+        drawHeading("Species composition (top 8 by basal area)",
                     at: CGPoint(x: frame.minX, y: y), width: frame.width, in: ctx)
         y -= 18
         let byCode = Self.speciesBAAcrossStand(plotStats: inputs.plotStatsByPlot)
@@ -307,12 +308,12 @@ public enum PDFReportBuilder {
         drawHeading("Live stats", at: CGPoint(x: frame.minX, y: y),
                     width: frame.width, in: ctx); y -= 18
         if let s = inputs.plotStatsByPlot[plot.id] {
-            kv("Live trees",    "\(s.liveTreeCount)")
-            kv("TPA",           String(format: "%.2f trees/ac", s.tpa))
-            kv("BA",            String(format: "%.4f m²/ac", s.baPerAcreM2))
-            kv("QMD",           String(format: "%.2f cm", s.qmdCm))
-            kv("Gross V",       String(format: "%.4f m³/ac", s.grossVolumePerAcreM3))
-            kv("Merch V",       String(format: "%.4f m³/ac", s.merchVolumePerAcreM3))
+            kv("Live trees",          "\(s.liveTreeCount)")
+            kv("Trees per acre",      String(format: "%.2f trees/ac", s.tpa))
+            kv("Basal area",          String(format: "%.4f m²/ac", s.baPerAcreM2))
+            kv("Quadratic mean DBH",  String(format: "%.2f cm", s.qmdCm))
+            kv("Gross volume",        String(format: "%.4f m³/ac", s.grossVolumePerAcreM3))
+            kv("Merchantable volume", String(format: "%.4f m³/ac", s.merchVolumePerAcreM3))
         } else {
             drawBody("(no stats available)",
                      at: CGPoint(x: frame.minX, y: y),
@@ -324,7 +325,8 @@ public enum PDFReportBuilder {
         drawHeading("Per-species breakdown",
                     at: CGPoint(x: frame.minX, y: y),
                     width: frame.width, in: ctx); y -= 18
-        drawTableRow(cells: ["Species", "n", "TPA", "BA m²/ac", "V m³/ac"],
+        drawTableRow(cells: ["Species", "n", "Trees/ac",
+                              "Basal m²/ac", "Volume m³/ac"],
                      bold: true, at: CGPoint(x: frame.minX, y: y),
                      colWidths: [80, 50, 90, 110, 110], in: ctx); y -= 16
         if let s = inputs.plotStatsByPlot[plot.id] {
@@ -355,7 +357,7 @@ public enum PDFReportBuilder {
         }
         kv("Plot type",         String(describing: inputs.design.plotType))
         kv("Plot area",         inputs.design.plotAreaAcres.map { "\($0) ac" } ?? "—")
-        kv("BAF",               inputs.design.baf.map { "\($0)" } ?? "—")
+        kv("Basal area factor", inputs.design.baf.map { "\($0)" } ?? "—")
         kv("Sampling scheme",   String(describing: inputs.design.samplingScheme))
         kv("Grid spacing",      inputs.design.gridSpacingMeters.map { "\($0) m" } ?? "—")
         kv("Height subsample",  describeSubsample(inputs.design.heightSubsampleRule))

@@ -55,10 +55,10 @@ public struct ReconCruiseScreen: View {
 
     private var topStrip: some View {
         HStack(spacing: ForestixSpace.sm) {
-            // BAF picker — 3 most common values.
-            Picker("BAF", selection: $session.baf) {
+            // Basal-area-factor picker — 3 most common values.
+            Picker("Basal area factor", selection: $session.baf) {
                 ForEach([10.0, 20.0, 40.0], id: \.self) { v in
-                    Text("\(Int(v)) BAF").tag(v)
+                    Text("\(Int(v)) ft²/ac").tag(v)
                 }
             }
             .pickerStyle(.segmented)
@@ -130,7 +130,7 @@ public struct ReconCruiseScreen: View {
                 .disabled(session.currentCount == 0)
                 .accessibilityIdentifier("recon.savePlot")
             }
-            Text("BA = \(session.currentCount) × \(Int(session.baf)) = \(Int(Double(session.currentCount) * session.baf)) ft²/ac")
+            Text("Basal area = \(session.currentCount) × \(Int(session.baf)) = \(Int(Double(session.currentCount) * session.baf)) ft²/ac")
                 .font(ForestixType.dataSmall)
                 .foregroundStyle(ForestixPalette.textTertiary)
         }
@@ -262,9 +262,9 @@ private struct ReconSummarySheet: View {
                 .foregroundStyle(ForestixPalette.textTertiary)
             HStack(spacing: 0) {
                 stat("PLOTS", "\(session.completedPlots.count)")
-                stat("MEAN BA", String(format: "%.0f ft²/ac", SamplingStats.mean(bas)))
-                stat("CV", String(format: "%.0f%%", SamplingStats.cv(bas)))
-                stat("SE", String(format: "%.1f%%", SamplingStats.sePct(bas)))
+                stat("MEAN BASAL", String(format: "%.0f ft²/ac", SamplingStats.mean(bas)))
+                stat("VARIABILITY", String(format: "%.0f%%", SamplingStats.cv(bas)))
+                stat("STD ERROR", String(format: "%.1f%%", SamplingStats.sePct(bas)))
             }
             .padding(ForestixSpace.md)
             .background(
@@ -299,8 +299,8 @@ private struct ReconSummarySheet: View {
                 .tracking(1.5)
                 .foregroundStyle(ForestixPalette.textTertiary)
             VStack(alignment: .leading, spacing: 6) {
-                row("Target ±10 % SE", "\(n10) plots")
-                row("Target ±5 % SE",  "\(n5) plots")
+                row("Target ±10 % standard error", "\(n10) plots")
+                row("Target ±5 % standard error",  "\(n5) plots")
             }
             .padding(ForestixSpace.md)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -308,7 +308,7 @@ private struct ReconSummarySheet: View {
                 RoundedRectangle(cornerRadius: ForestixRadius.card,
                                  style: .continuous)
                     .fill(ForestixPalette.surface))
-            Text("Based on the variability seen in your recon plots. Higher CV → more plots needed for the same precision.")
+            Text("Based on the variability seen in your recon plots. Higher variability → more plots needed for the same precision.")
                 .font(ForestixType.caption.italic())
                 .foregroundStyle(ForestixPalette.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)

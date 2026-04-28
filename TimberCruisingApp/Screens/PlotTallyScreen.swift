@@ -94,13 +94,13 @@ public struct PlotTallyScreen: View {
         HStack(spacing: 16) {
             statCell(label: "Live",
                      value: "\(viewModel.stats.liveTreeCount)")
-            statCell(label: "TPA",
+            statCell(label: "Trees/ac",
                      value: String(format: "%.1f", viewModel.stats.tpa))
-            statCell(label: "BA/ac m²",
+            statCell(label: "Basal m²/ac",
                      value: String(format: "%.2f", viewModel.stats.baPerAcreM2))
-            statCell(label: "QMD cm",
+            statCell(label: "Mean DBH cm",
                      value: String(format: "%.1f", viewModel.stats.qmdCm))
-            statCell(label: "V/ac m³",
+            statCell(label: "Volume m³/ac",
                      value: String(format: "%.1f", viewModel.stats.grossVolumePerAcreM3))
         }
     }

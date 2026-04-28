@@ -145,7 +145,7 @@ public struct PlotDetailScreen: View {
                     plot.acres.map { String(format: "%.2f", $0) } ?? "—")
             infoRow("TYPE", plot.typeRaw.capitalized)
             if let baf = plot.baf {
-                infoRow("BAF", String(format: "%.0f ft²/ac", baf))
+                infoRow("BASAL FACTOR", String(format: "%.0f ft²/ac", baf))
             }
             if let r = plot.radiusFt {
                 infoRow("RADIUS", String(format: "%.1f ft", r))

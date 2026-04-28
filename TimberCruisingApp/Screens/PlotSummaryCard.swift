@@ -92,11 +92,11 @@ public struct PlotSummaryCard: View {
         return HStack(spacing: 0) {
             statsCell("TREES", s?.distinctTrees.description ?? "—")
             divider
-            statsCell("BA/ac", s.map { String(format: "%.0f", $0.baPerAcre) } ?? "—")
+            statsCell("BASAL/AC", s.map { String(format: "%.0f", $0.baPerAcre) } ?? "—")
             divider
-            statsCell("TPA",   s.map { String(format: "%.0f", $0.tpa) } ?? "—")
+            statsCell("TREES/AC",   s.map { String(format: "%.0f", $0.tpa) } ?? "—")
             divider
-            statsCell("QMD",
+            statsCell("MEAN DBH",
                       s.flatMap { $0.qmd.map { qmd in
                           MeasurementFormatter.diameter(cm: qmd, in: unitSystem)
                       } } ?? "—")

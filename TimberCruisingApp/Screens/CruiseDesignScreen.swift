@@ -18,7 +18,7 @@ public struct CruiseDesignScreen: View {
             Section("Plot Type") {
                 Picker("Plot type", selection: $viewModel.plotType) {
                     Text("Fixed-area").tag(PlotType.fixedArea)
-                    Text("Variable-radius (BAF)").tag(PlotType.variableRadius)
+                    Text("Variable-radius (prism)").tag(PlotType.variableRadius)
                 }
                 .pickerStyle(.segmented)
 
@@ -27,7 +27,7 @@ public struct CruiseDesignScreen: View {
                                  text: $viewModel.plotAreaAcresString,
                                  id: "design.plotArea")
                 } else {
-                    LabeledField(title: "BAF (ft²/ac)",
+                    LabeledField(title: "Basal area factor (ft²/ac)",
                                  text: $viewModel.bafString,
                                  id: "design.baf")
                 }

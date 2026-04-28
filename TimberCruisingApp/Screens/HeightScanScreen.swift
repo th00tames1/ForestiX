@@ -304,14 +304,25 @@ public struct HeightScanScreen: View {
     private func resultPanel(_ r: HeightResult) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
-                Text(MeasurementFormatter.height(
-                    m: Double(r.heightM), in: settings.unitSystem))
-                    .font(ForestixType.dataLarge)
-                    .foregroundStyle(.white)
-                Text(MeasurementFormatter.heightSigma(
-                    m: Double(r.sigmaHm), in: settings.unitSystem))
-                    .font(ForestixType.dataSmall)
-                    .foregroundStyle(.white.opacity(0.75))
+                // Rejected results carry heightM = 0 from HeightEstimator
+                // because the two-tangent formula goes wild outside its
+                // operating envelope (close range, near-vertical aim).
+                // Show a dash instead of the misleading number — the
+                // rejection reason in the status banner explains why.
+                if r.confidence == .red {
+                    Text("—")
+                        .font(ForestixType.dataLarge)
+                        .foregroundStyle(.white)
+                } else {
+                    Text(MeasurementFormatter.height(
+                        m: Double(r.heightM), in: settings.unitSystem))
+                        .font(ForestixType.dataLarge)
+                        .foregroundStyle(.white)
+                    Text(MeasurementFormatter.heightSigma(
+                        m: Double(r.sigmaHm), in: settings.unitSystem))
+                        .font(ForestixType.dataSmall)
+                        .foregroundStyle(.white.opacity(0.75))
+                }
                 Spacer()
                 tierChip(r.confidence)
             }

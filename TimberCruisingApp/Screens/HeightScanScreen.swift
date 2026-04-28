@@ -304,20 +304,17 @@ public struct HeightScanScreen: View {
     private func resultPanel(_ r: HeightResult) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
-                // Rejected results carry heightM = 0 from HeightEstimator
-                // because the two-tangent formula goes wild outside its
-                // operating envelope (close range, near-vertical aim).
-                // Show a dash instead of the misleading number — the
-                // rejection reason in the status banner explains why.
-                if r.confidence == .red {
-                    Text("—")
-                        .font(ForestixType.dataLarge)
-                        .foregroundStyle(.white)
-                } else {
-                    Text(MeasurementFormatter.height(
-                        m: Double(r.heightM), in: settings.unitSystem))
-                        .font(ForestixType.dataLarge)
-                        .foregroundStyle(.white)
+                // Always show the computed H — the red tier chip and the
+                // status-banner rejection reason carry the warning. The
+                // root-cause fixes (base-angle guard + nil-pose guard)
+                // keep H in a sensible range even on red, so showing
+                // "0.8 m — Too close, step back" is more useful than
+                // hiding the number.
+                Text(MeasurementFormatter.height(
+                    m: Double(r.heightM), in: settings.unitSystem))
+                    .font(ForestixType.dataLarge)
+                    .foregroundStyle(.white)
+                if r.confidence != .red {
                     Text(MeasurementFormatter.heightSigma(
                         m: Double(r.sigmaHm), in: settings.unitSystem))
                         .font(ForestixType.dataSmall)

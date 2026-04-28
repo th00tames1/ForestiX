@@ -52,12 +52,6 @@ public struct DBHScanScreen: View {
     @State private var metaNote: String = ""
     @State private var presentingMetadata = false
 
-    // Two independent diagnostic overlays — cruisers asked to see the
-    // mesh and the VIO feature points at the same time, so they're no
-    // longer mutually exclusive. Either, both, or neither can be on.
-    @State private var meshOn: Bool
-    @State private var pointsOn: Bool
-
     public init(viewModel: @autoclosure @escaping () -> DBHScanViewModel,
                 onResult: @escaping (DBHResult) -> Void = { _ in },
                 onAccept: @escaping (DBHResult, ScanMetadata) -> Void = { _, _ in },
@@ -65,13 +59,7 @@ public struct DBHScanScreen: View {
         _viewModel = StateObject(wrappedValue: viewModel())
         self.onResult = onResult
         self.onAccept = onAccept
-        // Both diagnostic overlays default ON — the cruiser asked to
-        // see the mesh AND the feature points at the same time as soon
-        // as the scan opens, instead of having to flip both toggles by
-        // hand on every entry. The chips on the top-right still let
-        // them turn either off if the overlay obscures the trunk.
-        _meshOn   = State(initialValue: true)
-        _pointsOn = State(initialValue: true)
+        _ = showMeshOverlay
     }
 
     public var body: some View {
@@ -84,8 +72,7 @@ public struct DBHScanScreen: View {
             // at the trunk's world position — world-anchored, so it
             // stays locked to the tree as the phone moves.
             ARCameraView(manager: viewModel.session,
-                         debugMeshOverlay: meshOn,
-                         debugPointsOverlay: pointsOn,
+                         debugMeshOverlay: true,
                          sceneMarkers: cylinderMarkers)
                 .ignoresSafeArea()
 
@@ -96,10 +83,15 @@ public struct DBHScanScreen: View {
                     // Crosshair ring is now positioned by GeometryReader
                     // at exactly (centerX, midY) so the guide line
                     // passes through the centre of the ring, not above
-                    // or below it. The live preview pills sit
-                    // independently below — they're no longer in a
-                    // VStack with the ring (which was pushing the ring
-                    // off-centre).
+                    // or below it. The live preview pills sit below;
+                    // the TiltBadge sits above so the cruiser sees
+                    // device level at the same focal point as the
+                    // trunk circle they're aiming at.
+                    TiltBadge()
+                        .position(x: geo.size.width / 2,
+                                  y: geo.size.height / 2
+                                       - Self.crosshairOuterRadius
+                                       - 22)
                     crosshairRing
                         .position(x: geo.size.width / 2,
                                   y: geo.size.height / 2)
@@ -120,7 +112,6 @@ public struct DBHScanScreen: View {
 
             VStack(spacing: 0) {
                 topStrip
-                overlayPicker
                 Spacer()
                 bottomPanel
             }
@@ -177,71 +168,16 @@ public struct DBHScanScreen: View {
     // MARK: - Top status strip
 
     /// Thin row pinned just under the nav bar. GPS accuracy on the
-    /// left, device tilt on the right — both are critical preconditions
-    /// for an accurate scan and the cruiser can sanity-check both at
-    /// a glance without leaving the flow.
+    /// left — TiltBadge moved to float right above the crosshair so
+    /// the cruiser sees device level at the same focal point as the
+    /// trunk circle they're aiming at.
     private var topStrip: some View {
         HStack(spacing: ForestixSpace.xs) {
             GPSAccuracyBadge()
             Spacer()
-            TiltBadge()
         }
         .padding(.horizontal, ForestixSpace.sm)
         .padding(.top, ForestixSpace.xs)
-    }
-
-    // MARK: - Diagnostic overlay toggles
-
-    /// Two independent capsule toggles pinned to the top-right corner.
-    /// Mesh and Points can be on at the same time — useful when the
-    /// cruiser wants to judge both surface reconstruction AND tracking
-    /// coverage at a single glance.
-    private var overlayPicker: some View {
-        HStack(spacing: ForestixSpace.xs) {
-            Spacer()
-            overlayChip(label: "Mesh",
-                        systemImage: "square.grid.3x3",
-                        isOn: $meshOn,
-                        accessibilityId: "dbhScan.overlay.mesh")
-            overlayChip(label: "Points",
-                        systemImage: "circle.grid.3x3.fill",
-                        isOn: $pointsOn,
-                        accessibilityId: "dbhScan.overlay.points")
-        }
-        .padding(.trailing, ForestixSpace.sm)
-        .padding(.top, ForestixSpace.xs)
-    }
-
-    private func overlayChip(label: String,
-                             systemImage: String,
-                             isOn: Binding<Bool>,
-                             accessibilityId: String) -> some View {
-        Button {
-            isOn.wrappedValue.toggle()
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 11, weight: .semibold))
-                Text(label)
-                    .font(.system(size: 12, weight: .semibold))
-            }
-            .padding(.horizontal, ForestixSpace.sm)
-            .padding(.vertical, 6)
-            .foregroundStyle(isOn.wrappedValue
-                             ? Color.white
-                             : Color.white.opacity(0.75))
-            .background(
-                Capsule()
-                    .fill(isOn.wrappedValue
-                          ? ForestixPalette.primary.opacity(0.85)
-                          : Color.black.opacity(0.35))
-            )
-            .overlay(
-                Capsule().stroke(Color.white.opacity(0.20), lineWidth: 0.5)
-            )
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier(accessibilityId)
     }
 
     // MARK: - Tap capture
@@ -369,16 +305,13 @@ public struct DBHScanScreen: View {
     }
 
     /// Two pills floating below the crosshair:
-    ///   • "Ø ~ 34.5 cm"  — the diameter estimate (bold, primary)
-    ///   • "1.25 m to center" — camera-to-stem-axis distance (dimmer)
-    /// The diameter pill uses the ⌀ symbol (U+2300) rather than "DBH"
-    /// because cruisers don't always measure at breast height —
-    /// "diameter" is the generic term.
+    ///   • "DBH: 34.5 cm"  — diameter estimate (bold, primary)
+    ///   • "Distance: 1.25 m" — camera-to-stem-axis distance (dimmer)
     @ViewBuilder
     private var livePreviewBadge: some View {
         if let cm = viewModel.previewDbhCm {
             VStack(spacing: 3) {
-                Text("⌀ ~ " + MeasurementFormatter.diameter(
+                Text("DBH: " + MeasurementFormatter.diameter(
                     cm: cm, in: settings.unitSystem))
                     .font(ForestixType.data)
                     .foregroundStyle(.white)
@@ -387,8 +320,8 @@ public struct DBHScanScreen: View {
                     .clipShape(Capsule())
                     .accessibilityIdentifier("dbhScan.livePreview")
                 if let d = viewModel.distanceToStemCenterM {
-                    Text(MeasurementFormatter.distance(
-                        m: Double(d), in: settings.unitSystem) + " to center")
+                    Text("Distance: " + MeasurementFormatter.distance(
+                        m: Double(d), in: settings.unitSystem))
                         .font(ForestixType.dataSmall)
                         .foregroundStyle(.white.opacity(0.85))
                         .padding(.horizontal, 6).padding(.vertical, 2)
@@ -497,11 +430,6 @@ public struct DBHScanScreen: View {
             Text(tierHint(r.confidence))
                 .font(ForestixType.caption)
                 .foregroundStyle(.white.opacity(0.9))
-            Text(String(
-                format: "Arc %.0f° · Fit error %.1f mm · Radius precision ±%.1f mm · %d points",
-                r.arcCoverageDeg, r.rmseMm, r.sigmaRmm, r.nInliers))
-                .font(ForestixType.dataSmall)
-                .foregroundStyle(.white.opacity(0.65))
             HStack {
                 Spacer()
                 Button {

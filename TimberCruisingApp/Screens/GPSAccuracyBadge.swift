@@ -35,11 +35,6 @@ public struct GPSAccuracyBadge: View {
             Text(tier.label)
                 .font(ForestixType.dataSmall)
                 .foregroundStyle(.white)
-            if let acc = location.latestSnapshot?.horizontalAccuracyM, acc > 0 {
-                Text(String(format: "±%.0f m", acc))
-                    .font(ForestixType.dataSmall)
-                    .foregroundStyle(.white.opacity(0.75))
-            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
@@ -49,11 +44,6 @@ public struct GPSAccuracyBadge: View {
         .clipShape(Capsule())
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("GPS \(tier.label.lowercased())")
-        .accessibilityValue(
-            location.latestSnapshot.map {
-                String(format: "%.0f metres horizontal accuracy",
-                       $0.horizontalAccuracyM)
-            } ?? "no fix")
         .onAppear {
             location.requestAuthorization()
             location.start()

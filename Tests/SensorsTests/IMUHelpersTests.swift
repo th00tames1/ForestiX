@@ -12,27 +12,44 @@ final class IMUHelpersTests: XCTestCase {
     // MARK: - pitchFromGravity
 
     func testPitchUprightIsZero() {
+        // Phone upright in portrait, back camera at horizon.
         let g = SIMD3<Double>(0, -1, 0)
         XCTAssertEqual(IMUHelpers.pitchFromGravity(g), 0, accuracy: 1e-9)
     }
 
-    func testPitchFaceUpIsPlusHalfPi() {
-        let g = SIMD3<Double>(0, 0, -1)
+    func testPitchScreenFaceDownIsPlusHalfPi() {
+        // Screen face-down → back camera at zenith (looking straight up).
+        // Sign convention: aiming back camera UP → POSITIVE pitch.
+        let g = SIMD3<Double>(0, 0, 1)
         XCTAssertEqual(IMUHelpers.pitchFromGravity(g), .pi / 2, accuracy: 1e-9)
     }
 
-    func testPitchFaceDownIsMinusHalfPi() {
-        let g = SIMD3<Double>(0, 0, 1)
+    func testPitchScreenFaceUpIsMinusHalfPi() {
+        // Screen face-up → back camera at nadir (looking straight down).
+        // Sign convention: aiming back camera DOWN → NEGATIVE pitch.
+        let g = SIMD3<Double>(0, 0, -1)
         XCTAssertEqual(IMUHelpers.pitchFromGravity(g), -.pi / 2, accuracy: 1e-9)
     }
 
-    func testPitchTilted45DegUp() {
-        // Tilting the top of the phone back 45° from portrait rotates
-        // gravity from (0,-1,0) to (0, -cos45, -sin45).
+    func testPitchBackCameraAimed45DegUp() {
+        // Top of phone tilts forward (away from cruiser) by 45° so the
+        // back camera elevates from horizon to 45° above horizontal.
+        // In the device frame, gravity rotates from (0,-1,0) to
+        // (0, -cos45, +sin45). Expected pitch: +π/4.
+        let c = cos(Double.pi / 4)
+        let s = sin(Double.pi / 4)
+        let g = SIMD3<Double>(0, -c, s)
+        XCTAssertEqual(IMUHelpers.pitchFromGravity(g), .pi / 4, accuracy: 1e-9)
+    }
+
+    func testPitchBackCameraAimed45DegDown() {
+        // Top of phone tilts backward (toward cruiser) by 45° so the
+        // back camera depresses from horizon to 45° below horizontal.
+        // Gravity rotates to (0, -cos45, -sin45). Expected pitch: −π/4.
         let c = cos(Double.pi / 4)
         let s = sin(Double.pi / 4)
         let g = SIMD3<Double>(0, -c, -s)
-        XCTAssertEqual(IMUHelpers.pitchFromGravity(g), .pi / 4, accuracy: 1e-9)
+        XCTAssertEqual(IMUHelpers.pitchFromGravity(g), -.pi / 4, accuracy: 1e-9)
     }
 
     // MARK: - IMUPitchBuffer median window
@@ -89,6 +106,44 @@ final class IMUHelpersTests: XCTestCase {
         XCTAssertEqual(b.count, 2)
         b.append(timestamp: 2.0, pitchRad: 0.0) // evicts t=0.5
         XCTAssertEqual(b.count, 2)
+    }
+
+    // MARK: - End-to-end sign sanity (regression: negative height bug)
+
+    /// Regression for the inverted-pitch bug that produced negative
+    /// heights on every real measurement: passing the gravity vectors
+    /// the IMU would actually report for "back camera looking up at
+    /// treetop" and "back camera looking down at base" through
+    /// `pitchFromGravity` must yield α_top > α_base, so the §7.2
+    /// formula `H = d_h × (tan α_top − tan α_base)` comes out POSITIVE.
+    func testHeightFormulaIsPositiveWithRealisticGravityVectors() {
+        // Cruiser stands 25 m back from a 30 m tree, eyes at 1.6 m.
+        // To aim back camera at treetop: it elevates ≈ +48.7° above
+        // horizontal. Gravity in device frame: top of phone tilts
+        // forward 48.7° → g = (0, -cos48.7°, +sin48.7°).
+        // To aim back camera at tree base: it depresses ≈ −3.4°.
+        // Top of phone tilts backward 3.4° → g = (0, -cos3.4°, -sin3.4°).
+        let topAngleRad = 48.7 * .pi / 180.0
+        let baseAngleRad = -3.4 * .pi / 180.0
+
+        let gTop = SIMD3<Double>(0,
+                                  -cos(topAngleRad),
+                                   sin(topAngleRad))
+        let gBase = SIMD3<Double>(0,
+                                   -cos(abs(baseAngleRad)),
+                                  -sin(abs(baseAngleRad)))
+
+        let alphaTop = IMUHelpers.pitchFromGravity(gTop)
+        let alphaBase = IMUHelpers.pitchFromGravity(gBase)
+
+        XCTAssertGreaterThan(alphaTop, alphaBase,
+            "α_top must exceed α_base for a positive height. "
+            + "α_top=\(alphaTop), α_base=\(alphaBase)")
+        let H = 25.0 * (tan(alphaTop) - tan(alphaBase))
+        XCTAssertGreaterThan(H, 0,
+            "Height must be positive for a tree taller than eye level. H=\(H)")
+        XCTAssertEqual(H, 30.0, accuracy: 0.5,
+            "Formula recovers the 30 m tree to within 0.5 m. H=\(H)")
     }
 
     func testSampleCountInsideWindowMatchesFeed() {

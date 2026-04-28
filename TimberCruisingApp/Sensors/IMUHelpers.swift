@@ -37,20 +37,31 @@ public struct IMUPitchSample: Equatable, Sendable {
 
 public enum IMUHelpers {
 
-    /// Portrait-orientation pitch derived from a gravity vector in the
-    /// device's own frame (Apple convention: +X right, +Y up, +Z out of
-    /// the screen toward the user).
+    /// Back-camera elevation angle from horizontal, derived from a
+    /// gravity vector in the device's own frame (Apple convention:
+    /// +X right, +Y top of device, +Z out of the screen toward the user).
+    ///
+    /// Sign convention — POSITIVE when the back camera is aimed ABOVE
+    /// horizontal (toward sky), NEGATIVE when aimed BELOW (toward
+    /// ground). This matches the §7.2 height formula
+    /// `H = d_h · (tan α_top − tan α_base)` which assumes α_top > α_base
+    /// for trees taller than eye level.
     ///
     /// Reference postures (portrait-locked phone, back camera):
-    /// - Upright portrait, camera at horizon: g ≈ (0, -1,  0) → pitch =   0
-    /// - Flat face-up, camera at zenith:     g ≈ (0,  0, -1) → pitch = +π/2
-    /// - Flat face-down, camera at ground:   g ≈ (0,  0, +1) → pitch = -π/2
+    /// - Upright portrait, back camera at horizon:
+    ///       g = (0, -1,  0) → 0
+    /// - Screen face-down, back camera at zenith (looking straight up):
+    ///       g = (0,  0,  1) → +π/2
+    /// - Screen face-up,   back camera at nadir  (looking straight down):
+    ///       g = (0,  0, -1) → −π/2
+    ///
+    /// Why `atan2(g.z, -g.y)` rather than the textbook `atan2(-g.z, -g.y)`:
+    /// the textbook form measures the SCREEN-out direction's elevation
+    /// angle, which is the OPPOSITE of the back camera's. Forestix uses
+    /// the back camera as a clinometer, so the sign is flipped to match.
     @inlinable
     public static func pitchFromGravity(_ g: SIMD3<Double>) -> Double {
-        // atan2(y, x): use (-g.z, -g.y) so tilting the top of the phone
-        // backwards (sky) gives a positive angle and forwards (ground) a
-        // negative one.
-        atan2(-g.z, -g.y)
+        atan2(g.z, -g.y)
     }
 
     @inlinable

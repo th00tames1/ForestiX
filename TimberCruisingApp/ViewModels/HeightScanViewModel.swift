@@ -284,27 +284,27 @@ public final class HeightScanViewModel: ObservableObject {
         return pitchBuffer.mostRecentPitch()
     }
 
-    /// Button-handler entry for the Anchor Here tap. `screenCenterHit`
-    /// MUST be a real world hit from the host's raycast (LiDAR mesh →
-    /// plane fallback). When nil, the anchor is REFUSED — silently
-    /// substituting the camera position used to bias d_h by the
-    /// cruiser-to-tree offset (typically 0.5–1.5 m), which on a 30 m
-    /// walk-off feeds straight into a 2–5 % systematic height error.
-    /// Surfaces `anchorFailureReason` so the UI can show a banner.
+    /// Button-handler entry for the Anchor Here tap. The anchor is the
+    /// camera position at the moment of the tap — which matches the
+    /// spec's "touch phone to tree base, tap Anchor Here" interaction:
+    /// the phone is physically at the tree, so the camera position IS
+    /// the tree base.
+    ///
+    /// The earlier Phase 8.2 attempt to source the anchor from a screen-
+    /// centre raycast was wrong: when the cruiser presses the phone
+    /// to the bark, the LiDAR mesh raycast sometimes lands on the BACK
+    /// of the trunk (or a noisy nearby triangle) and the anchor jumps
+    /// half a metre INTO the tree. Camera position is the canonical
+    /// answer for the spec'd interaction. The `screenCenterHit`
+    /// parameter is accepted for source compatibility but ignored.
     public func anchorHereNow(screenCenterHit: SIMD3<Float>? = nil) {
+        _ = screenCenterHit
         guard let cam = currentCameraTranslation() else {
             anchorFailureReason =
                 "AR tracking not ready yet — wait a moment, then try again."
             return
         }
-        guard let anchor = screenCenterHit else {
-            anchorFailureReason =
-                "Couldn't find a surface at the crosshair. Move the phone "
-                + "until the LiDAR mesh covers the tree base, then tap "
-                + "Anchor Here again."
-            return
-        }
-        anchorHere(anchorPointWorld: anchor,
+        anchorHere(anchorPointWorld: cam,
                    standingPointWorld: cam)
     }
 

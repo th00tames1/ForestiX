@@ -148,10 +148,10 @@ public struct HeightScanScreen: View {
 
     private var crosshairLabel: String? {
         switch viewModel.state {
-        case .idle, .anchorSet: return "Aim at tree base"
+        case .idle, .anchorSet: return "Aim at trunk + ground"
         case .walking:          return "Walk back — aim stays on tree"
         case .aimTopArmed:      return "Aim at treetop"
-        case .aimBaseArmed:     return "Aim at tree base"
+        case .aimBaseArmed:     return "Aim at trunk + ground"
         case .aimTopCaptured,
              .computed,
              .rejected,
@@ -244,11 +244,11 @@ public struct HeightScanScreen: View {
 
     private var statusText: String {
         switch viewModel.state {
-        case .idle, .anchorSet:   return "Touch phone to tree base."
+        case .idle, .anchorSet:   return "Aim at where the trunk meets the ground, then tap Anchor Here."
         case .walking:            return "Walk back. Live walk-back distance shown below."
-        case .aimTopArmed:        return "Aim at treetop, then tap Aim Top."
+        case .aimTopArmed:        return "Aim at the treetop, then tap Aim Top."
         case .aimTopCaptured:     return "Top captured."
-        case .aimBaseArmed:       return "Aim at tree base, then tap Aim Base."
+        case .aimBaseArmed:       return "Aim at where the trunk meets the ground, then tap Aim Base."
         case .computed:           return "Height computed."
         case .accepted:           return "Saved."
         case .rejected:           return viewModel.result?.rejectionReason
@@ -467,12 +467,15 @@ public struct HeightScanScreen: View {
 
     // MARK: - Tap handlers with raycast
 
-    /// Anchor tap — per spec §4.4 step (a) the cruiser physically touches
-    /// the phone to the tree base before tapping. The camera position at
-    /// tap time IS the tree base, so we don't bother with a raycast for
-    /// the anchor. The view model uses the camera position directly.
+    /// Anchor tap — cruiser stands 1–3 m from the tree, aims the
+    /// crosshair at the trunk's base, and taps. The screen-centre
+    /// raycast (LiDAR mesh first, plane fallback) returns the 3D
+    /// world point of that trunk-base; the view model stores it as
+    /// the anchor. If the raycast misses, the view model surfaces
+    /// `anchorFailureReason` and the screen banner explains how to
+    /// reframe.
     private func anchorTap() {
-        viewModel.anchorHereNow()
+        viewModel.anchorHereNow(screenCenterHit: raycaster.screenCenterHit())
     }
 
     /// Aim Top — crosshair on treetop. The sky has no plane, so the

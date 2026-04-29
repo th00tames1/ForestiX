@@ -681,39 +681,87 @@ public enum DBHEstimator {
         let dz = rightWorld.y - leftWorld.y
         let chordM = (dx * dx + dz * dz).squareRoot()
 
-        // Direct Taubin fit on the single frame. For real tangent-limited
-        // observations the arc is wide enough (typically 90–150°) that
-        // Taubin recovers the diameter to within a couple of percent.
-        guard let circle = TaubinFit.fit(points: stripPoints) else {
-            return nil
-        }
-        var radiusM = circle.radius
-        var diameterCm = 2.0 * radiusM * 100.0
+        // Phase 14.2: drop Taubin for the live preview. Taubin's algebraic
+        // fit on the ~67-pixel tangent-limited LiDAR arc was bouncing the
+        // displayed DBH between 8 cm and 50 cm even while the cruiser
+        // held still — the chord (driven by the same back-projected
+        // endpoints) sat steady on the trunk's edges, but Taubin's
+        // radius estimate is hyper-sensitive to per-pixel depth noise on
+        // moderate arcs. Three stable points uniquely determine a circle
+        // with no fitting jitter, so build the preview from:
+        //   • leftWorld / rightWorld — already stable per cruiser report
+        //   • apexWorld — back-project the tap pixel at dTap (the 5×5
+        //     median around the tap, ~25 samples → very low variance)
+        // Circumradius / circumcentre come from the standard
+        // perpendicular-bisector closed form. Falls back to chord when
+        // the three points are nearly collinear (sagitta ≈ 0).
+        let apexWorld = BackProjection.worldXZ(
+            x: tapPixel.x, y: tapPixel.y,
+            depth: Double(dTap),
+            intrinsics: frame.intrinsics,
+            cameraPoseWorld: frame.cameraPoseWorld)
+        let lax = apexWorld.x - leftWorld.x
+        let laz = apexWorld.y - leftWorld.y
+        let rax = apexWorld.x - rightWorld.x
+        let raz = apexWorld.y - rightWorld.y
+        let LA = (lax * lax + laz * laz).squareRoot()
+        let RA = (rax * rax + raz * raz).squareRoot()
+        let areaTwice = abs(dx * laz - dz * lax)
 
-        // Fall back to the chord if Taubin produced anything absurd:
-        // either outside the sanity range, inflated relative to the
-        // chord (same small-arc trap as RANSAC), or DEFLATED below the
-        // chord (Phase 14.1 — geometrically chord ≤ diameter, so a
-        // ratio under ≈ 1 means Taubin found a circle smaller than the
-        // silhouette can hold; cruisers were seeing a 30 cm chord on
-        // screen with a 12 cm DBH readout). 0.85 leaves Taubin a 15 %
-        // underread budget on legitimate wide-arc fits.
         let chordTooShort = chordM < 0.03
-        let diameterOutOfRange = !(5.0...200.0).contains(diameterCm)
-        let inflatedVsChord = chordM > 0.025 && (diameterCm / 100.0) / chordM > 3.0
-        let deflatedVsChord = chordM > 0.025 && (diameterCm / 100.0) / chordM < 0.85
-        if diameterOutOfRange || inflatedVsChord || deflatedVsChord {
+        var radiusM: Double
+        var diameterCm: Double
+        var usedCircumcentre = false
+        var circumcentre = SIMD2<Double>(0, 0)
+        if areaTwice > 1e-6 && LA > 1e-3 && RA > 1e-3 && chordM > 0.025 {
+            radiusM = chordM * LA * RA / (2.0 * areaTwice)
+            diameterCm = 2.0 * radiusM * 100.0
+            // Circumcentre via the perpendicular-bisector formula.
+            let ax = leftWorld.x, az = leftWorld.y
+            let bx = apexWorld.x, bz = apexWorld.y
+            let cx = rightWorld.x, cz = rightWorld.y
+            let denom = 2 * (ax * (bz - cz) + bx * (cz - az) + cx * (az - bz))
+            if abs(denom) > 1e-9 {
+                let ux = ((ax*ax + az*az) * (bz - cz)
+                        + (bx*bx + bz*bz) * (cz - az)
+                        + (cx*cx + cz*cz) * (az - bz)) / denom
+                let uz = ((ax*ax + az*az) * (cx - bx)
+                        + (bx*bx + bz*bz) * (ax - cx)
+                        + (cx*cx + cz*cz) * (bx - ax)) / denom
+                circumcentre = SIMD2(ux, uz)
+                usedCircumcentre = true
+            } else {
+                radiusM = chordM / 2.0
+                diameterCm = chordM * 100.0
+            }
+        } else {
+            // Degenerate triangle — apex collinear with chord. Fall back
+            // to the chord (gives the cruiser the silhouette diameter
+            // rather than a divergent radius).
             guard !chordTooShort else { return nil }
             radiusM = chordM / 2.0
             diameterCm = chordM * 100.0
         }
+
+        // Sanity range still applies — a divergent circumradius (very
+        // flat triangle, sagitta tiny relative to chord) would inflate
+        // diameter past the realistic trunk band.
+        let diameterOutOfRange = !(5.0...200.0).contains(diameterCm)
+        let inflatedVsChord = chordM > 0.025 && (diameterCm / 100.0) / chordM > 3.0
+        if diameterOutOfRange || inflatedVsChord {
+            guard !chordTooShort else { return nil }
+            radiusM = chordM / 2.0
+            diameterCm = chordM * 100.0
+            usedCircumcentre = false
+        }
         guard (5.0...200.0).contains(diameterCm) else { return nil }
 
-        // Fit centre. Taubin gives one directly; use it if available,
-        // otherwise derive from the chord midpoint + radius shift.
+        // Centre: prefer the circumcentre; otherwise project a chord-mid
+        // point a radius further from the camera (the "behind the chord"
+        // centre of a circle whose front arc is what we just measured).
         let center: SIMD2<Double>
-        if !diameterOutOfRange && !inflatedVsChord && !deflatedVsChord {
-            center = SIMD2(circle.cx, circle.cy)
+        if usedCircumcentre {
+            center = circumcentre
         } else {
             let nearMid = SIMD2<Double>((leftWorld.x + rightWorld.x) / 2.0,
                                          (leftWorld.y + rightWorld.y) / 2.0)

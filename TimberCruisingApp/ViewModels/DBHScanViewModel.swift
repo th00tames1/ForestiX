@@ -79,6 +79,15 @@ public final class DBHScanViewModel: ObservableObject {
     /// below human reaction time for reading the number, and it cut
     /// the scan-screen lag dramatically on device.
     private let previewMinIntervalSec: TimeInterval = 0.1
+    /// EMA smoothing for the published `previewDbhCm`. The geometric
+    /// circumradius preview (Phase 14.2) is already stable, but a light
+    /// EMA over consecutive valid readings absorbs any residual chord
+    /// jitter so the HUD digit doesn't flicker. α = 0.3 at the 10 Hz
+    /// preview rate gives ≈ 0.5 s effective smoothing window. Reset
+    /// whenever the fit drops out so a re-acquisition starts fresh
+    /// instead of dragging in the previous trunk's value.
+    private var smoothedPreviewDbhCm: Double?
+    private let previewEMAAlpha: Double = 0.3
 
     // MARK: - Construction
 
@@ -169,6 +178,7 @@ public final class DBHScanViewModel: ObservableObject {
                 previewDbhCm = nil
                 distanceToStemCenterM = nil
             }
+            smoothedPreviewDbhCm = nil
             return
         }
 
@@ -183,7 +193,17 @@ public final class DBHScanViewModel: ObservableObject {
             guideAxis: axis,
             discontinuityThresholdM: calibration.depthDiscontinuityM)
         previewFit = fit
-        previewDbhCm = fit?.diameterCm
+        if let newCm = fit?.diameterCm {
+            if let prev = smoothedPreviewDbhCm {
+                smoothedPreviewDbhCm = previewEMAAlpha * newCm
+                                     + (1 - previewEMAAlpha) * prev
+            } else {
+                smoothedPreviewDbhCm = newCm
+            }
+        } else {
+            smoothedPreviewDbhCm = nil
+        }
+        previewDbhCm = smoothedPreviewDbhCm
 
         // Distance readout — camera position XZ vs stem axis XZ.
         // Uses the frame's own camera pose to stay consistent with the

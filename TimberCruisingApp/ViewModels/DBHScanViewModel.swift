@@ -55,6 +55,14 @@ public final class DBHScanViewModel: ObservableObject {
     /// World-space Y (metres) of the guide row, used by the 3D cylinder
     /// so it's rendered at DBH height instead of floating in mid-air.
     @Published public private(set) var guideRowWorldY: Float?
+    /// Confidence tier of the published preview value. nil whenever
+    /// `previewDbhCm` is nil (red fits suppress the value too).
+    @Published public private(set) var previewTier: ConfidenceTier?
+    /// HUD status string when `previewDbhCm` can't be trusted —
+    /// either "Stabilizing…" while the value is still settling or the
+    /// fit's rejection reason on red. nil while a green/yellow value
+    /// is being shown.
+    @Published public private(set) var previewStatusText: String?
 
     // MARK: - Dependencies
 
@@ -88,6 +96,17 @@ public final class DBHScanViewModel: ObservableObject {
     /// instead of dragging in the previous trunk's value.
     private var smoothedPreviewDbhCm: Double?
     private let previewEMAAlpha: Double = 0.3
+    /// Last few raw preview diameters (cm) — used by the stability
+    /// gate. The published value stays hidden until consecutive frames
+    /// agree to within `previewStableCoVThreshold`, so the cruiser
+    /// never reads a number while the fit is still settling.
+    private var recentRawDiameters: [Double] = []
+    private let recentRawDiameterCapacity: Int = 5
+    /// Max relative spread (max-min / mean) we'll accept as "stable".
+    /// 8 % matches the burst pipeline's per-frame radius CoV warn band
+    /// (5–10 %): below this the fit is at least as consistent as a
+    /// burst's per-frame readings.
+    private let previewStableCoVThreshold: Double = 0.08
 
     // MARK: - Construction
 
@@ -179,6 +198,9 @@ public final class DBHScanViewModel: ObservableObject {
                 distanceToStemCenterM = nil
             }
             smoothedPreviewDbhCm = nil
+            recentRawDiameters.removeAll()
+            previewTier = nil
+            previewStatusText = nil
             return
         }
 
@@ -193,17 +215,61 @@ public final class DBHScanViewModel: ObservableObject {
             guideAxis: axis,
             discontinuityThresholdM: calibration.depthDiscontinuityM)
         previewFit = fit
-        if let newCm = fit?.diameterCm {
-            if let prev = smoothedPreviewDbhCm {
-                smoothedPreviewDbhCm = previewEMAAlpha * newCm
-                                     + (1 - previewEMAAlpha) * prev
+
+        // Stability + tier gate. The cruiser will trust the on-screen
+        // value as the actual measurement, so we only publish once:
+        //   • RANSAC found a §7.1-passable fit (tier == .green / .yellow)
+        //   • the last few raw diameters agree (CoV ≤ threshold)
+        // Everything else surfaces a status string ("Stabilizing…" or
+        // the rejection reason) and keeps the numeric slot empty.
+        let publishable: Bool
+        let stabilityNote: String?
+        if let f = fit, f.tier != .red {
+            recentRawDiameters.append(f.diameterCm)
+            if recentRawDiameters.count > recentRawDiameterCapacity {
+                recentRawDiameters.removeFirst()
+            }
+            if recentRawDiameters.count >= 3 {
+                let mean = recentRawDiameters.reduce(0, +)
+                          / Double(recentRawDiameters.count)
+                let lo = recentRawDiameters.min() ?? mean
+                let hi = recentRawDiameters.max() ?? mean
+                let cov = mean > 0 ? (hi - lo) / mean : 1
+                if cov <= previewStableCoVThreshold {
+                    publishable = true
+                    stabilityNote = nil
+                } else {
+                    publishable = false
+                    stabilityNote = "Stabilizing…"
+                }
             } else {
-                smoothedPreviewDbhCm = newCm
+                publishable = false
+                stabilityNote = "Stabilizing…"
+            }
+            if publishable {
+                if let prev = smoothedPreviewDbhCm {
+                    smoothedPreviewDbhCm = previewEMAAlpha * f.diameterCm
+                                         + (1 - previewEMAAlpha) * prev
+                } else {
+                    smoothedPreviewDbhCm = f.diameterCm
+                }
+            } else {
+                smoothedPreviewDbhCm = nil
             }
         } else {
+            // Red or no fit — drop history so a new acquisition
+            // starts fresh and clear the smoothed value.
+            recentRawDiameters.removeAll()
             smoothedPreviewDbhCm = nil
+            publishable = false
+            stabilityNote = nil
         }
-        previewDbhCm = smoothedPreviewDbhCm
+
+        previewDbhCm = publishable ? smoothedPreviewDbhCm : nil
+        previewTier = publishable ? fit?.tier : nil
+        previewStatusText = publishable
+            ? nil
+            : (stabilityNote ?? fit?.rejectionReason)
 
         // Distance readout — camera position XZ vs stem axis XZ.
         // Uses the frame's own camera pose to stay consistent with the
@@ -227,6 +293,14 @@ public final class DBHScanViewModel: ObservableObject {
     /// coords via the ARKit displayTransform).
     public func tap(at tapPixel: SIMD2<Double>) {
         guard state == .armed else { return }
+        // Phase 14.4: only let the burst start when the live preview
+        // is publishable (not red, not still stabilising). Otherwise
+        // the cruiser would tap "Capture" on a fit that the burst's
+        // §7.1 sanity tree is going to reject anyway, eroding trust
+        // in the on-screen number. The status badge already explains
+        // why the tap didn't take ("Stabilizing…" or the rejection
+        // reason), so the cruiser knows what to do next.
+        guard previewDbhCm != nil else { return }
         burstBuffer.removeAll(keepingCapacity: true)
         burstTap = tapPixel
         state = .capturing

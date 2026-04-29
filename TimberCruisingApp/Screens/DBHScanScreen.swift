@@ -306,20 +306,30 @@ public struct DBHScanScreen: View {
     }
 
     /// Two pills floating below the crosshair:
-    ///   • "DBH: 34.5 cm"  — diameter estimate (bold, primary)
+    ///   • "DBH: 34.5 cm" + tier chip — diameter estimate (bold, primary)
     ///   • "Distance: 1.25 m" — camera-to-stem-axis distance (dimmer)
+    /// When the fit fails the §7.1 sanity tree (red) or hasn't settled
+    /// yet, the numeric pill is replaced with a status string so the
+    /// cruiser never reads a value the burst would later reject. Phase
+    /// 14.4 made the published preview match the burst's quality bar —
+    /// the value on screen is the value you can record.
     @ViewBuilder
     private var livePreviewBadge: some View {
         if let cm = viewModel.previewDbhCm {
             VStack(spacing: 3) {
-                Text("DBH: " + MeasurementFormatter.diameter(
-                    cm: cm, in: settings.unitSystem))
-                    .font(ForestixType.data)
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 8).padding(.vertical, 4)
-                    .background(Color.black.opacity(0.65))
-                    .clipShape(Capsule())
-                    .accessibilityIdentifier("dbhScan.livePreview")
+                HStack(spacing: 6) {
+                    Text("DBH: " + MeasurementFormatter.diameter(
+                        cm: cm, in: settings.unitSystem))
+                        .font(ForestixType.data)
+                        .foregroundStyle(.white)
+                    if let tier = viewModel.previewTier {
+                        previewTierChip(tier)
+                    }
+                }
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(Color.black.opacity(0.65))
+                .clipShape(Capsule())
+                .accessibilityIdentifier("dbhScan.livePreview")
                 if let d = viewModel.distanceToStemCenterM {
                     Text("Distance: " + MeasurementFormatter.distance(
                         m: Double(d), in: settings.unitSystem))
@@ -331,9 +341,39 @@ public struct DBHScanScreen: View {
                         .accessibilityIdentifier("dbhScan.distanceBadge")
                 }
             }
+        } else if let status = viewModel.previewStatusText {
+            // No publishable value — surface the reason (e.g.,
+            // "Stabilizing…" or the §7.1 rejection text) so the
+            // cruiser knows why and what to do, instead of staring
+            // at an empty slot.
+            Text(status)
+                .font(ForestixType.dataSmall)
+                .foregroundStyle(.white)
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(Color.black.opacity(0.65))
+                .clipShape(Capsule())
+                .accessibilityIdentifier("dbhScan.previewStatus")
         } else {
             Color.clear.frame(height: 40)
         }
+    }
+
+    /// Compact tier chip rendered next to the live DBH digit. Uses the
+    /// same palette the result panel uses post-capture so the cruiser
+    /// reads the same colour language pre- and post-tap.
+    @ViewBuilder
+    private func previewTierChip(_ tier: ConfidenceTier) -> some View {
+        let d = ConfidenceStyle.descriptor(for: tier.rawValue)
+        Text(d.label.uppercased())
+            .font(.system(size: 9, weight: .semibold))
+            .tracking(0.6)
+            .foregroundStyle(d.color)
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .overlay(
+                RoundedRectangle(cornerRadius: ForestixRadius.chip,
+                                 style: .continuous)
+                    .stroke(d.color, lineWidth: 0.75)
+            )
     }
 
     // MARK: - AR markers

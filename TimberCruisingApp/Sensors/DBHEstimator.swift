@@ -589,6 +589,12 @@ public enum DBHEstimator {
     /// Result of the cheap single-frame preview fit. Used by the scan
     /// HUD to render a live DBH estimate, a 3D cylinder marker placed
     /// in the AR scene, and a distance-to-center readout.
+    ///
+    /// Phase 14.4 added the §7.1-style quality fields (`tier`,
+    /// `inlierCount`, `arcDeg`, `rmseMm`, `rejectionReason`) so the HUD
+    /// can refuse to publish a value the cruiser shouldn't trust. The
+    /// view model treats `.red` as "do not display" and surfaces the
+    /// reason in the status banner instead of a numeric estimate.
     public struct PreviewFit: Equatable, Sendable {
         /// Estimated trunk diameter in centimetres.
         public let diameterCm: Double
@@ -602,17 +608,43 @@ public enum DBHEstimator {
         public let stripLeftFraction: Double
         /// Rightmost stem strip pixel, same normalisation.
         public let stripRightFraction: Double
+        /// Confidence tier from the §7.1 sanity tree applied to this fit.
+        /// `.red` means the HUD should hide the value; `.yellow` means
+        /// show it with a caution badge; `.green` is fully trustworthy.
+        public let tier: ConfidenceTier
+        /// Number of points inside the inlier-tolerance band of the
+        /// chosen circle. Drives the inlier-count check.
+        public let inlierCount: Int
+        /// Angular span (degrees) the inliers cover around the fitted
+        /// centre. Drives the arc-coverage check.
+        public let arcDeg: Double
+        /// RMS radial residual of the inliers (millimetres). Drives the
+        /// rmse / r quality check.
+        public let rmseMm: Double
+        /// Human-readable rejection reason when `tier == .red`, nil
+        /// otherwise.
+        public let rejectionReason: String?
 
         public init(diameterCm: Double,
                     centerWorldXZ: SIMD2<Double>,
                     radiusM: Double,
                     stripLeftFraction: Double,
-                    stripRightFraction: Double) {
+                    stripRightFraction: Double,
+                    tier: ConfidenceTier,
+                    inlierCount: Int,
+                    arcDeg: Double,
+                    rmseMm: Double,
+                    rejectionReason: String?) {
             self.diameterCm = diameterCm
             self.centerWorldXZ = centerWorldXZ
             self.radiusM = radiusM
             self.stripLeftFraction = stripLeftFraction
             self.stripRightFraction = stripRightFraction
+            self.tier = tier
+            self.inlierCount = inlierCount
+            self.arcDeg = arcDeg
+            self.rmseMm = rmseMm
+            self.rejectionReason = rejectionReason
         }
     }
 
@@ -703,6 +735,10 @@ public enum DBHEstimator {
         var radiusM: Double
         var diameterCm: Double
         var fittedCenter: SIMD2<Double>?
+        var inlierCount: Int = 0
+        var arcDeg: Double = 0
+        var rmseMm: Double = 0
+        var ransacFailed = false
 
         if let robust = RANSACCircle.fit(
             points: stripPoints,
@@ -713,14 +749,23 @@ public enum DBHEstimator {
             radiusM = robust.circle.radius
             diameterCm = 2.0 * radiusM * 100.0
             fittedCenter = SIMD2(robust.circle.cx, robust.circle.cy)
+            inlierCount = robust.inliers.count
+            let rmse = rootMeanSquaredResidual(
+                inliers: robust.inliers, circle: robust.circle)
+            rmseMm = rmse * 1000
+            arcDeg = arcCoverageDeg(
+                inliers: robust.inliers,
+                center: (robust.circle.cx, robust.circle.cy))
         } else {
             // Not enough trunk-like points for a robust fit. Fall back
             // to the silhouette chord — at least the cruiser sees a
             // value tied to what's on screen rather than a stale or
-            // missing readout.
+            // missing readout, but flag it red so the HUD doesn't
+            // present it as authoritative.
             guard !chordTooShort else { return nil }
             radiusM = chordM / 2.0
             diameterCm = chordM * 100.0
+            ransacFailed = true
         }
 
         // Sanity range still applies — and so does the chord override
@@ -729,11 +774,13 @@ public enum DBHEstimator {
         let diameterOutOfRange = !(5.0...200.0).contains(diameterCm)
         let inflatedVsChord = chordM > 0.025 && (diameterCm / 100.0) / chordM > 3.0
         let deflatedVsChord = chordM > 0.025 && (diameterCm / 100.0) / chordM < 0.85
+        var chordOverride = false
         if diameterOutOfRange || inflatedVsChord || deflatedVsChord {
             guard !chordTooShort else { return nil }
             radiusM = chordM / 2.0
             diameterCm = chordM * 100.0
             fittedCenter = nil
+            chordOverride = true
         }
         guard (5.0...200.0).contains(diameterCm) else { return nil }
 
@@ -768,12 +815,50 @@ public enum DBHEstimator {
         }
         let leftFrac = extent > 0 ? Double(leftIdx) / extent : 0
         let rightFrac = extent > 0 ? Double(rightIdx) / extent : 1
+
+        // §7.1-style sanity tree applied to the single-frame preview.
+        // sigmaR / radiusCoV are skipped — the former needs the burst's
+        // multi-frame noise model and the latter is multi-frame by
+        // definition. RANSAC failure or chord override forces .red so
+        // the HUD knows not to publish the value as authoritative.
+        let radiusM_ = radiusM     // keep a copy for capture-by-Bool checks
+        let rmseRatio = radiusM_ > 0 ? rmseMm / 1000.0 / radiusM_ : Double.infinity
+        let checks: [Check] = [
+            check(!ransacFailed, sev: .reject,
+                  reason: "Couldn't fit a trunk circle — move closer or steadier"),
+            check(inlierCount >= 20, sev: .reject,
+                  reason: "Fewer than 20 trunk surface points"),
+            check(inlierCount >= 35, sev: .warn,
+                  reason: "Only 20–35 trunk surface points"),
+            check(arcDeg >= 45, sev: .reject,
+                  reason: "Trunk arc coverage below 45°"),
+            check(arcDeg >= 60, sev: .warn,
+                  reason: "Trunk arc coverage 45°–60°"),
+            check(radiusM_ >= 0.025 && radiusM_ <= 1.0, sev: .reject,
+                  reason: "Fitted radius outside 2.5–100 cm"),
+            check(rmseRatio <= 0.05, sev: .reject,
+                  reason: "Fit error worse than 5% of radius"),
+            check(rmseRatio <= 0.03, sev: .warn,
+                  reason: "Fit error 3–5% of radius"),
+            check(!chordOverride, sev: .warn,
+                  reason: "Fit disagreed with silhouette; using chord")
+        ]
+        let tier = combineChecks(checks)
+        let rejectionReason: String? = (tier == .red)
+            ? (firstFailingRejectReason(checks) ?? "Quality below threshold")
+            : nil
+
         return PreviewFit(
             diameterCm: diameterCm,
             centerWorldXZ: center,
             radiusM: radiusM,
             stripLeftFraction: leftFrac,
-            stripRightFraction: rightFrac)
+            stripRightFraction: rightFrac,
+            tier: tier,
+            inlierCount: inlierCount,
+            arcDeg: arcDeg,
+            rmseMm: rmseMm,
+            rejectionReason: rejectionReason)
     }
 
     /// Back-compat helper — returns just the diameter when only the

@@ -93,6 +93,21 @@ public enum HeightEstimator {
         // Step 3. Height — the two-tangent formula.
         let tanTop  = tan(input.alphaTopRad)
         let tanBase = tan(input.alphaBaseRad)
+
+        // Phase 15.1: explicit inversion guard. The H-range check below
+        // mathematically rejects negative or near-zero heights too, but
+        // its generic "Computed height -2.3 m out of range" message
+        // hides the actual cause (the cruiser captured the top aim at
+        // or below the base aim — geometrically impossible). Mirrors
+        // DBH 14.1's chord/diameter deflation guard: silent wrong
+        // answers are the worst kind of trust failure, so surface a
+        // specific actionable reason for this case.
+        if tanTop <= tanBase {
+            return red(input: input,
+                       dh: dh,
+                       reason: "Top aim was at or below the base — re-capture the top higher")
+        }
+
         let H = dh * (tanTop - tanBase)
 
         if !(H >= minHMeters && H <= maxHMeters) {

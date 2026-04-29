@@ -64,6 +64,20 @@ final class HeightEstimatorTests: XCTestCase {
                       "reason = \(r.rejectionReason ?? "nil")")
     }
 
+    /// Phase 15.1: when `α_top ≤ α_base` the formula gives a non-positive
+    /// (or zero) height — geometrically impossible. The H-range check
+    /// also catches it, but the inversion guard fires first with a
+    /// cruiser-actionable reason instead of "out of range".
+    func testInvertedAlphaPairReturnsRed() {
+        // α_top = 30°, α_base = 35° → tanTop − tanBase < 0
+        let r = HeightEstimator.estimate(input: input(
+            dh: 15, alphaTopDeg: 30, alphaBaseDeg: 35))
+        XCTAssertEqual(r.confidence, .red)
+        XCTAssertNotNil(r.rejectionReason)
+        XCTAssertTrue(r.rejectionReason!.contains("Top aim"),
+                      "reason should call out the inversion specifically — got \(r.rejectionReason!)")
+    }
+
     func testTrackingLostAtAnyPointReturnsRed() {
         // Otherwise-green geometry; only the tracking flag trips the red.
         let r = HeightEstimator.estimate(input: input(

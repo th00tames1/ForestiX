@@ -7,9 +7,23 @@
 // an optional sidecar writer).
 //
 // The ARDepthFrame comes from Sensors/ARKitSessionManager; depth arrays
-// are row-major landscape-native per §7.1 invariant "guideRowY equals
-// depth.height / 2 for the capture device". The caller is responsible
-// for passing tapPixel in the same coordinate system as depth pixels.
+// are row-major landscape-native (sensor coords don't rotate with the
+// device). To produce a horizontal-on-screen slice across the trunk the
+// caller picks a `GuideAxis` matching the current UI orientation:
+//
+//   • Landscape on screen — depth-width axis is horizontal-on-screen, so
+//     walk columns at a fixed row → `.row(y: depth.height / 2)`.
+//   • Portrait on screen — depth-width axis is VERTICAL-on-screen, so
+//     walking columns yields a vertical strip ALONG the trunk (all
+//     points cluster at one world XZ). Walk rows at a fixed column
+//     instead → `.col(x: depth.width / 2)`.
+//
+// Phase 14 added the `.col` path. Before it, the algorithm assumed
+// `.row` semantics implicitly and produced degenerate fits on portrait
+// iPhones (the only orientation iPhone now supports).
+//
+// `tapPixel` stays in depth-map pixel coordinates regardless of axis;
+// only the strip-walk direction depends on orientation.
 
 import Foundation
 import simd
@@ -62,12 +76,24 @@ public struct ProjectCalibration: Sendable, Equatable {
         depthDiscontinuityM: 0.04)
 }
 
+/// Axis the strip walks along + the fixed coordinate on the orthogonal
+/// axis. See file header for the orientation mapping.
+public enum GuideAxis: Sendable, Equatable {
+    /// Walk columns (x) at fixed row y. Produces a horizontal slice when
+    /// the device's long edge is horizontal on screen (landscape iPad).
+    case row(y: Int)
+    /// Walk rows (y) at fixed column x. Produces a horizontal-on-screen
+    /// slice when the device's long edge is vertical on screen (portrait
+    /// iPhone, portrait iPad).
+    case col(x: Int)
+}
+
 public struct DBHScanInput: Sendable {
     public let frames: [ARDepthFrame]
     /// Image-space (x, y) in the depth map's own coordinate system.
     public let tapPixel: SIMD2<Double>
-    /// Fixed horizontal guide row (depth_height / 2 per §7.1 invariant).
-    public let guideRowY: Int
+    /// Strip-walk axis chosen by the caller per current UI orientation.
+    public let guideAxis: GuideAxis
     public let projectCalibration: ProjectCalibration
     /// Optional sidecar that persists the cleaned point set to PLY when
     /// the caller opts in (REQ-DBH-007). Returns the file path or nil.
@@ -76,13 +102,13 @@ public struct DBHScanInput: Sendable {
     public init(
         frames: [ARDepthFrame],
         tapPixel: SIMD2<Double>,
-        guideRowY: Int,
+        guideAxis: GuideAxis,
         projectCalibration: ProjectCalibration,
         rawPointsWriter: (@Sendable ([SIMD2<Double>]) -> String?)? = nil
     ) {
         self.frames = frames
         self.tapPixel = tapPixel
-        self.guideRowY = guideRowY
+        self.guideAxis = guideAxis
         self.projectCalibration = projectCalibration
         self.rawPointsWriter = rawPointsWriter
     }
@@ -120,20 +146,22 @@ public enum DBHEstimator {
         }
 
         // Steps 3 + 4: extract stem strip per frame, back-project to world XZ.
+        let tapAlongAxis = tapAlongAxis(input.tapPixel, axis: input.guideAxis)
         var combinedXZ: [SIMD2<Double>] = []
         combinedXZ.reserveCapacity(input.frames.count * 64)
         for frame in input.frames {
-            let strip = extractGuideRowStemStrip(
+            let strip = extractGuideStemStrip(
                 frame: frame,
-                guideRowY: input.guideRowY,
-                tapColumn: Int(input.tapPixel.x.rounded()),
+                axis: input.guideAxis,
+                tapAlongAxis: tapAlongAxis,
                 dTap: dTap,
                 deltaDepth: 0.15,
                 discontinuityThresholdM: input.projectCalibration.depthDiscontinuityM)
-            for x in strip {
+            for idx in strip {
+                let (px, py) = pixelCoords(axis: input.guideAxis, idx: idx)
                 let xz = BackProjection.worldXZ(
-                    x: Double(x), y: Double(input.guideRowY),
-                    depth: Double(frame.depth(atX: x, y: input.guideRowY)),
+                    x: Double(px), y: Double(py),
+                    depth: Double(frame.depth(atX: px, y: py)),
                     intrinsics: frame.intrinsics,
                     cameraPoseWorld: frame.cameraPoseWorld)
                 combinedXZ.append(xz)
@@ -182,8 +210,8 @@ public enum DBHEstimator {
             arcCoverageDeg: arcDeg)
         let radiusCoV = perFrameRadiusCoV(
             frames: input.frames,
-            guideRowY: input.guideRowY,
-            tapColumn: Int(input.tapPixel.x.rounded()),
+            axis: input.guideAxis,
+            tapAlongAxis: tapAlongAxis,
             dTap: dTap,
             discontinuityThresholdM: input.projectCalibration.depthDiscontinuityM)
 
@@ -319,46 +347,83 @@ public enum DBHEstimator {
         return frame.confidence(atX: cx, y: cy)
     }
 
-    // MARK: - Step 3: stem-strip extraction along the guide row
+    // MARK: - Step 3: stem-strip extraction along the guide axis
 
-    /// Extracts the contiguous run of columns along `guideRowY` that
+    /// Maps a strip index back to the (x, y) pixel coordinate using the
+    /// fixed coord on the orthogonal axis.
+    @inlinable
+    static func pixelCoords(axis: GuideAxis, idx: Int) -> (x: Int, y: Int) {
+        switch axis {
+        case .row(let y): return (idx, y)
+        case .col(let x): return (x, idx)
+        }
+    }
+
+    /// Tap coordinate along the walked axis (column for `.row`, row for
+    /// `.col`). The other coordinate's tap value is unused by the strip
+    /// walk — only the orthogonal-axis fixed coord and the along-axis
+    /// seed matter.
+    @inlinable
+    static func tapAlongAxis(_ tapPixel: SIMD2<Double>, axis: GuideAxis) -> Int {
+        switch axis {
+        case .row: return Int(tapPixel.x.rounded())
+        case .col: return Int(tapPixel.y.rounded())
+        }
+    }
+
+    /// Extracts the contiguous run of pixels along the walked axis that
     /// (a) have confidence ≥ 1, (b) depth within ±deltaDepth of dTap,
-    /// (c) are connected to the tap column, and
+    /// (c) are connected to the tap seed, and
     /// (d) have an adjacent-pixel depth jump no greater than
-    ///     `discontinuityThresholdM`. Returns the list of column indices.
-    /// Short-circuits if the tap column itself fails.
+    ///     `discontinuityThresholdM`. Returns indices on the walked axis
+    /// (column indices for `.row`, row indices for `.col`).
+    /// Short-circuits if the seed pixel itself fails.
     ///
     /// Adjacent-jump check rationale (Phase 9): when two trunks at
     /// slightly different depths (e.g., 1.50 m vs 1.55 m) are visually
     /// adjacent, both fall inside the ±deltaDepth absolute window, so
     /// the older walk absorbed the second trunk and inflated the fit.
-    /// Comparing each step's depth to the LAST accepted column's depth
-    /// instead detects the inter-trunk boundary as a sudden jump
+    /// Comparing each step's depth to the LAST accepted neighbour's
+    /// depth instead detects the inter-trunk boundary as a sudden jump
     /// (typically ≥ 5 cm) without splitting clean trunks (where the
     /// per-pixel gradient stays under ~25 mm at the steepest edge for
     /// trunks up to 80 cm DBH at 1 m). Pass `Float.infinity` to disable.
-    static func extractGuideRowStemStrip(
+    static func extractGuideStemStrip(
         frame: ARDepthFrame,
-        guideRowY: Int,
-        tapColumn: Int,
+        axis: GuideAxis,
+        tapAlongAxis: Int,
         dTap: Float,
         deltaDepth: Float,
         discontinuityThresholdM: Float = .infinity
     ) -> [Int] {
-        guard guideRowY >= 0, guideRowY < frame.height else { return [] }
-        let width = frame.width
-        let clampedTap = max(0, min(width - 1, tapColumn))
+        let walkLength: Int
+        switch axis {
+        case .row(let y):
+            guard y >= 0, y < frame.height else { return [] }
+            walkLength = frame.width
+        case .col(let x):
+            guard x >= 0, x < frame.width else { return [] }
+            walkLength = frame.height
+        }
+        let clampedTap = max(0, min(walkLength - 1, tapAlongAxis))
 
-        func pixelValid(at x: Int) -> Bool {
-            let c = frame.confidence(atX: x, y: guideRowY)
-            if c < 1 { return false }
-            let d = frame.depth(atX: x, y: guideRowY)
+        func depthAt(_ idx: Int) -> Float {
+            let (x, y) = pixelCoords(axis: axis, idx: idx)
+            return frame.depth(atX: x, y: y)
+        }
+        func confAt(_ idx: Int) -> UInt8 {
+            let (x, y) = pixelCoords(axis: axis, idx: idx)
+            return frame.confidence(atX: x, y: y)
+        }
+        func pixelValid(at idx: Int) -> Bool {
+            if confAt(idx) < 1 { return false }
+            let d = depthAt(idx)
             if d <= 0 { return false }
             return abs(d - dTap) < deltaDepth
         }
 
-        // Walk from the tap column outward. If the tap column itself is
-        // invalid, search the closest valid seed within a small window.
+        // Walk from the tap seed outward. If the seed itself is invalid,
+        // search the closest valid replacement within a small window.
         var seed = clampedTap
         if !pixelValid(at: seed) {
             var found = -1
@@ -366,42 +431,43 @@ public enum DBHEstimator {
                 let l = clampedTap - off
                 if l >= 0, pixelValid(at: l) { found = l; break }
                 let r = clampedTap + off
-                if r < width, pixelValid(at: r) { found = r; break }
+                if r < walkLength, pixelValid(at: r) { found = r; break }
             }
             if found < 0 { return [] }
             seed = found
         }
 
-        let seedDepth = frame.depth(atX: seed, y: guideRowY)
-        var cols: [Int] = [seed]
+        let seedDepth = depthAt(seed)
+        var indices: [Int] = [seed]
 
-        // Walk left, comparing each new pixel's depth to the previously
-        // accepted neighbour's depth (NOT to dTap). A sudden jump means
-        // we've hit the boundary between two trunks (or a step feature)
-        // and should stop, leaving the strip on the seed's trunk only.
-        var x = seed - 1
+        // Walk one direction, comparing each new pixel's depth to the
+        // previously accepted neighbour's depth (NOT to dTap). A sudden
+        // jump means we've hit the boundary between two trunks (or a
+        // step feature) and should stop, leaving the strip on the
+        // seed's trunk only.
+        var i = seed - 1
         var lastDepth = seedDepth
-        while x >= 0, pixelValid(at: x) {
-            let d = frame.depth(atX: x, y: guideRowY)
+        while i >= 0, pixelValid(at: i) {
+            let d = depthAt(i)
             if abs(d - lastDepth) > discontinuityThresholdM { break }
-            cols.append(x)
+            indices.append(i)
             lastDepth = d
-            x -= 1
+            i -= 1
         }
 
-        // Walk right with a fresh `lastDepth` anchored at the seed.
-        x = seed + 1
+        // Walk the other direction with a fresh `lastDepth` anchored at the seed.
+        i = seed + 1
         lastDepth = seedDepth
-        while x < width, pixelValid(at: x) {
-            let d = frame.depth(atX: x, y: guideRowY)
+        while i < walkLength, pixelValid(at: i) {
+            let d = depthAt(i)
             if abs(d - lastDepth) > discontinuityThresholdM { break }
-            cols.append(x)
+            indices.append(i)
             lastDepth = d
-            x += 1
+            i += 1
         }
 
-        cols.sort()
-        return cols
+        indices.sort()
+        return indices
     }
 
     // MARK: - Step 8: metrics
@@ -476,25 +542,26 @@ public enum DBHEstimator {
     /// fit are skipped. Returns 0 when fewer than two frames contribute.
     static func perFrameRadiusCoV(
         frames: [ARDepthFrame],
-        guideRowY: Int,
-        tapColumn: Int,
+        axis: GuideAxis,
+        tapAlongAxis: Int,
         dTap: Float,
         discontinuityThresholdM: Float = .infinity
     ) -> Double {
         var radii: [Double] = []
         for frame in frames {
-            let cols = extractGuideRowStemStrip(
+            let strip = extractGuideStemStrip(
                 frame: frame,
-                guideRowY: guideRowY,
-                tapColumn: tapColumn,
+                axis: axis,
+                tapAlongAxis: tapAlongAxis,
                 dTap: dTap,
                 deltaDepth: 0.15,
                 discontinuityThresholdM: discontinuityThresholdM)
-            if cols.count < 5 { continue }
-            let pts = cols.map { x -> SIMD2<Double> in
-                BackProjection.worldXZ(
-                    x: Double(x), y: Double(guideRowY),
-                    depth: Double(frame.depth(atX: x, y: guideRowY)),
+            if strip.count < 5 { continue }
+            let pts = strip.map { idx -> SIMD2<Double> in
+                let (px, py) = pixelCoords(axis: axis, idx: idx)
+                return BackProjection.worldXZ(
+                    x: Double(px), y: Double(py),
+                    depth: Double(frame.depth(atX: px, y: py)),
                     intrinsics: frame.intrinsics,
                     cameraPoseWorld: frame.cameraPoseWorld)
             }
@@ -562,7 +629,7 @@ public enum DBHEstimator {
     public static func previewFit(
         frame: ARDepthFrame,
         tapPixel: SIMD2<Double>,
-        guideRowY: Int,
+        guideAxis: GuideAxis,
         deltaDepth: Float = 0.15,
         discontinuityThresholdM: Float = 0.04
     ) -> PreviewFit? {
@@ -570,15 +637,15 @@ public enum DBHEstimator {
         else { return nil }
         guard (0.5...3.0).contains(dTap) else { return nil }
 
-        let strip = extractGuideRowStemStrip(
+        let strip = extractGuideStemStrip(
             frame: frame,
-            guideRowY: guideRowY,
-            tapColumn: Int(tapPixel.x.rounded()),
+            axis: guideAxis,
+            tapAlongAxis: tapAlongAxis(tapPixel, axis: guideAxis),
             dTap: dTap,
             deltaDepth: deltaDepth,
             discontinuityThresholdM: discontinuityThresholdM)
-        guard let leftCol = strip.first, let rightCol = strip.last,
-              rightCol > leftCol,
+        guard let leftIdx = strip.first, let rightIdx = strip.last,
+              rightIdx > leftIdx,
               strip.count >= 6
         else { return nil }
 
@@ -586,11 +653,12 @@ public enum DBHEstimator {
         // is what the single-frame Taubin fit wants.
         var stripPoints: [SIMD2<Double>] = []
         stripPoints.reserveCapacity(strip.count)
-        for col in strip {
-            let depth = frame.depth(atX: col, y: guideRowY)
+        for idx in strip {
+            let (px, py) = pixelCoords(axis: guideAxis, idx: idx)
+            let depth = frame.depth(atX: px, y: py)
             guard depth > 0 else { continue }
             let p = BackProjection.worldXZ(
-                x: Double(col), y: Double(guideRowY),
+                x: Double(px), y: Double(py),
                 depth: Double(depth),
                 intrinsics: frame.intrinsics,
                 cameraPoseWorld: frame.cameraPoseWorld)
@@ -645,9 +713,17 @@ public enum DBHEstimator {
             center = nearMid + SIMD2(unit.x * radiusM, unit.y * radiusM)
         }
 
-        let widthDbl = Double(frame.width)
-        let leftFrac = widthDbl > 0 ? Double(leftCol) / widthDbl : 0
-        let rightFrac = widthDbl > 0 ? Double(rightCol) / widthDbl : 1
+        // Strip endpoints normalised against the walked axis's extent —
+        // width for `.row`, height for `.col`. The HUD overlay maps these
+        // to its on-screen along-axis pixel range so the chord lines up
+        // with the trunk in either orientation.
+        let extent: Double
+        switch guideAxis {
+        case .row: extent = Double(frame.width)
+        case .col: extent = Double(frame.height)
+        }
+        let leftFrac = extent > 0 ? Double(leftIdx) / extent : 0
+        let rightFrac = extent > 0 ? Double(rightIdx) / extent : 1
         return PreviewFit(
             diameterCm: diameterCm,
             centerWorldXZ: center,
@@ -661,11 +737,11 @@ public enum DBHEstimator {
     public static func previewDiameterCm(
         frame: ARDepthFrame,
         tapPixel: SIMD2<Double>,
-        guideRowY: Int,
+        guideAxis: GuideAxis,
         deltaDepth: Float = 0.15
     ) -> Double? {
         previewFit(frame: frame, tapPixel: tapPixel,
-                   guideRowY: guideRowY,
+                   guideAxis: guideAxis,
                    deltaDepth: deltaDepth)?.diameterCm
     }
 

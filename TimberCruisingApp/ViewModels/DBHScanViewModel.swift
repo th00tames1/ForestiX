@@ -13,6 +13,10 @@ import Models
 import Common
 import Sensors
 
+#if canImport(UIKit) && os(iOS)
+import UIKit
+#endif
+
 @MainActor
 public final class DBHScanViewModel: ObservableObject {
 
@@ -172,10 +176,11 @@ public final class DBHScanViewModel: ObservableObject {
         guard now - lastPreviewUpdate >= previewMinIntervalSec else { return }
         lastPreviewUpdate = now
 
+        let axis = Self.currentGuideAxis(width: frame.width, height: frame.height)
         let fit = DBHEstimator.previewFit(
             frame: frame,
             tapPixel: SIMD2(Double(cx), Double(cy)),
-            guideRowY: cy,
+            guideAxis: axis,
             discontinuityThresholdM: calibration.depthDiscontinuityM)
         previewFit = fit
         previewDbhCm = fit?.diameterCm
@@ -238,6 +243,31 @@ public final class DBHScanViewModel: ObservableObject {
         state = .accepted
     }
 
+    /// Pick the strip-walk axis from the current UI orientation. Phase
+    /// 14: iPhone is locked to portrait so the iPhone path always
+    /// returns `.col`; iPad still supports landscape and falls through
+    /// to `.row` whenever the active scene reports a landscape
+    /// interface orientation. macOS / non-UIKit hosts default to
+    /// portrait (`.col`) — they only run via tests / previews where
+    /// the synthetic frames decide the axis explicitly.
+    static func currentGuideAxis(width: Int, height: Int) -> GuideAxis {
+        #if canImport(UIKit) && os(iOS)
+        let landscape: Bool = {
+            for scene in UIApplication.shared.connectedScenes {
+                if let ws = scene as? UIWindowScene,
+                   ws.activationState == .foregroundActive {
+                    return ws.interfaceOrientation.isLandscape
+                }
+            }
+            return false
+        }()
+        if landscape { return .row(y: height / 2) }
+        return .col(x: width / 2)
+        #else
+        return .col(x: width / 2)
+        #endif
+    }
+
     private func finishCapture() {
         let frames = burstBuffer
         burstBuffer.removeAll()
@@ -245,11 +275,12 @@ public final class DBHScanViewModel: ObservableObject {
             state = .rejected
             return
         }
-        let guideRow = firstFrame.height / 2
+        let axis = Self.currentGuideAxis(width: firstFrame.width,
+                                         height: firstFrame.height)
         let input = DBHScanInput(
             frames: frames,
             tapPixel: burstTap,
-            guideRowY: guideRow,
+            guideAxis: axis,
             projectCalibration: calibration,
             rawPointsWriter: rawPointsWriter)
         let outcome = DBHEstimator.estimate(input: input)

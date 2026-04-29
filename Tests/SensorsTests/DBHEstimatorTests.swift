@@ -244,7 +244,7 @@ final class DBHEstimatorTests: XCTestCase {
         return DBHScanInput(
             frames: out,
             tapPixel: tap,
-            guideRowY: guideRowY,
+            guideAxis: .row(y: guideRowY),
             projectCalibration: calibration,
             rawPointsWriter: nil)
     }

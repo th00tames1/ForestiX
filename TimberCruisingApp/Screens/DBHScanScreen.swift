@@ -192,9 +192,10 @@ public struct DBHScanScreen: View {
             .accessibilityIdentifier("dbhScan.tapCatcher")
             .onTapGesture {
                 // The crosshair sits at screen centre and the ViewModel
-                // uses `guideRow = depth.height / 2` for the fit, so a
-                // tap pixel at the depth-map centre aligns the fit with
-                // the crosshair the cruiser just lined up on the trunk.
+                // picks a `GuideAxis` (`.col(x: width/2)` in portrait,
+                // `.row(y: height/2)` in landscape iPad) so a tap pixel
+                // at the depth-map centre always aligns the fit with
+                // the crosshair the cruiser lined up on the trunk.
                 let frame = viewModel.session.latestDepthFrame
                 let width  = Double(frame?.width  ?? 256)
                 let height = Double(frame?.height ?? 192)

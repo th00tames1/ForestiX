@@ -681,87 +681,69 @@ public enum DBHEstimator {
         let dz = rightWorld.y - leftWorld.y
         let chordM = (dx * dx + dz * dz).squareRoot()
 
-        // Phase 14.2: drop Taubin for the live preview. Taubin's algebraic
-        // fit on the ~67-pixel tangent-limited LiDAR arc was bouncing the
-        // displayed DBH between 8 cm and 50 cm even while the cruiser
-        // held still — the chord (driven by the same back-projected
-        // endpoints) sat steady on the trunk's edges, but Taubin's
-        // radius estimate is hyper-sensitive to per-pixel depth noise on
-        // moderate arcs. Three stable points uniquely determine a circle
-        // with no fitting jitter, so build the preview from:
-        //   • leftWorld / rightWorld — already stable per cruiser report
-        //   • apexWorld — back-project the tap pixel at dTap (the 5×5
-        //     median around the tap, ~25 samples → very low variance)
-        // Circumradius / circumcentre come from the standard
-        // perpendicular-bisector closed form. Falls back to chord when
-        // the three points are nearly collinear (sagitta ≈ 0).
-        let apexWorld = BackProjection.worldXZ(
-            x: tapPixel.x, y: tapPixel.y,
-            depth: Double(dTap),
-            intrinsics: frame.intrinsics,
-            cameraPoseWorld: frame.cameraPoseWorld)
-        let lax = apexWorld.x - leftWorld.x
-        let laz = apexWorld.y - leftWorld.y
-        let rax = apexWorld.x - rightWorld.x
-        let raz = apexWorld.y - rightWorld.y
-        let LA = (lax * lax + laz * laz).squareRoot()
-        let RA = (rax * rax + raz * raz).squareRoot()
-        let areaTwice = abs(dx * laz - dz * lax)
-
+        // Phase 14.3: outlier-aware fit. The earlier circumradius preview
+        // (Phase 14.2) used the strip's two endpoints plus an apex from
+        // the 5×5-median tap depth — only three points. If any of those
+        // landed on a bark crack or a noise spike, the radius diverged
+        // anyway. Solve the right problem instead: run the same RANSAC
+        // we already trust in the burst pipeline, just with a smaller
+        // iteration budget so the cost stays well inside the 10 Hz
+        // preview tick. Stratified 3-point sampling votes by inlier
+        // count over ALL ~67 strip points, then Taubin refits only the
+        // surviving inliers — outliers can never enter the final fit.
+        //
+        // Tolerance mirrors burst: max(3 mm, 2·sensor σ). Default σ is
+        // 5 mm → 10 mm tolerance — tight enough to reject thin branch
+        // pixels but loose enough to absorb bark roughness.
+        let depthNoiseM: Double = 0.005   // matches ProjectCalibration default
+        let inlierTol = max(0.003, 2.0 * depthNoiseM)
+        let minInliers = max(15, stripPoints.count / 3)
         let chordTooShort = chordM < 0.03
+
         var radiusM: Double
         var diameterCm: Double
-        var usedCircumcentre = false
-        var circumcentre = SIMD2<Double>(0, 0)
-        if areaTwice > 1e-6 && LA > 1e-3 && RA > 1e-3 && chordM > 0.025 {
-            radiusM = chordM * LA * RA / (2.0 * areaTwice)
+        var fittedCenter: SIMD2<Double>?
+
+        if let robust = RANSACCircle.fit(
+            points: stripPoints,
+            inlierTol: inlierTol,
+            iterations: 80,
+            minInliers: minInliers
+        ) {
+            radiusM = robust.circle.radius
             diameterCm = 2.0 * radiusM * 100.0
-            // Circumcentre via the perpendicular-bisector formula.
-            let ax = leftWorld.x, az = leftWorld.y
-            let bx = apexWorld.x, bz = apexWorld.y
-            let cx = rightWorld.x, cz = rightWorld.y
-            let denom = 2 * (ax * (bz - cz) + bx * (cz - az) + cx * (az - bz))
-            if abs(denom) > 1e-9 {
-                let ux = ((ax*ax + az*az) * (bz - cz)
-                        + (bx*bx + bz*bz) * (cz - az)
-                        + (cx*cx + cz*cz) * (az - bz)) / denom
-                let uz = ((ax*ax + az*az) * (cx - bx)
-                        + (bx*bx + bz*bz) * (ax - cx)
-                        + (cx*cx + cz*cz) * (bx - ax)) / denom
-                circumcentre = SIMD2(ux, uz)
-                usedCircumcentre = true
-            } else {
-                radiusM = chordM / 2.0
-                diameterCm = chordM * 100.0
-            }
+            fittedCenter = SIMD2(robust.circle.cx, robust.circle.cy)
         } else {
-            // Degenerate triangle — apex collinear with chord. Fall back
-            // to the chord (gives the cruiser the silhouette diameter
-            // rather than a divergent radius).
+            // Not enough trunk-like points for a robust fit. Fall back
+            // to the silhouette chord — at least the cruiser sees a
+            // value tied to what's on screen rather than a stale or
+            // missing readout.
             guard !chordTooShort else { return nil }
             radiusM = chordM / 2.0
             diameterCm = chordM * 100.0
         }
 
-        // Sanity range still applies — a divergent circumradius (very
-        // flat triangle, sagitta tiny relative to chord) would inflate
-        // diameter past the realistic trunk band.
+        // Sanity range still applies — and so does the chord override
+        // for inflated / deflated fits, just in case RANSAC's inlier
+        // set was thin enough that Taubin's refit drifted off.
         let diameterOutOfRange = !(5.0...200.0).contains(diameterCm)
         let inflatedVsChord = chordM > 0.025 && (diameterCm / 100.0) / chordM > 3.0
-        if diameterOutOfRange || inflatedVsChord {
+        let deflatedVsChord = chordM > 0.025 && (diameterCm / 100.0) / chordM < 0.85
+        if diameterOutOfRange || inflatedVsChord || deflatedVsChord {
             guard !chordTooShort else { return nil }
             radiusM = chordM / 2.0
             diameterCm = chordM * 100.0
-            usedCircumcentre = false
+            fittedCenter = nil
         }
         guard (5.0...200.0).contains(diameterCm) else { return nil }
 
-        // Centre: prefer the circumcentre; otherwise project a chord-mid
-        // point a radius further from the camera (the "behind the chord"
-        // centre of a circle whose front arc is what we just measured).
+        // Centre: prefer the fitted centre; otherwise project the chord
+        // midpoint one radius further from the camera (the "behind the
+        // chord" centre of a circle whose front arc is what we just
+        // measured).
         let center: SIMD2<Double>
-        if usedCircumcentre {
-            center = circumcentre
+        if let c = fittedCenter {
+            center = c
         } else {
             let nearMid = SIMD2<Double>((leftWorld.x + rightWorld.x) / 2.0,
                                          (leftWorld.y + rightWorld.y) / 2.0)

@@ -238,13 +238,21 @@ public enum DBHEstimator {
         // the chord is half the diameter (ratio ≈ 2.0–2.6), and we
         // don't want to override those correct fits. Only egregious
         // inflations trigger.
+        //
+        // Deflation lower bound: the bbox diagonal across multi-frame
+        // bursts can legitimately exceed the diameter (D · √(1.25) at
+        // 180° arc, D · √2 at full 360°), so the smallest legitimate
+        // ratio is ≈ 0.707. A ratio below 0.65 means RANSAC chose a
+        // circle smaller than the silhouette can possibly contain —
+        // that's the Phase 14.1 deflation case (cruiser saw a 30 cm
+        // chord on screen but the burst returned 12 cm DBH).
         let chordDiameterM = chordDiameterFromCloud(cleaned)
         var r = fit.circle.radius
         var chordOverride = false
         if chordDiameterM > 0.025 {
             let fittedDiameterM = 2.0 * r
             let ratio = fittedDiameterM / chordDiameterM
-            if ratio > 3.0 || ratio < 0.33 {
+            if ratio > 3.0 || ratio < 0.65 {
                 r = chordDiameterM / 2.0
                 chordOverride = true
             }
@@ -683,12 +691,18 @@ public enum DBHEstimator {
         var diameterCm = 2.0 * radiusM * 100.0
 
         // Fall back to the chord if Taubin produced anything absurd:
-        // either outside the sanity range, or inflated relative to the
-        // chord (same small-arc trap as RANSAC).
+        // either outside the sanity range, inflated relative to the
+        // chord (same small-arc trap as RANSAC), or DEFLATED below the
+        // chord (Phase 14.1 — geometrically chord ≤ diameter, so a
+        // ratio under ≈ 1 means Taubin found a circle smaller than the
+        // silhouette can hold; cruisers were seeing a 30 cm chord on
+        // screen with a 12 cm DBH readout). 0.85 leaves Taubin a 15 %
+        // underread budget on legitimate wide-arc fits.
         let chordTooShort = chordM < 0.03
         let diameterOutOfRange = !(5.0...200.0).contains(diameterCm)
         let inflatedVsChord = chordM > 0.025 && (diameterCm / 100.0) / chordM > 3.0
-        if diameterOutOfRange || inflatedVsChord {
+        let deflatedVsChord = chordM > 0.025 && (diameterCm / 100.0) / chordM < 0.85
+        if diameterOutOfRange || inflatedVsChord || deflatedVsChord {
             guard !chordTooShort else { return nil }
             radiusM = chordM / 2.0
             diameterCm = chordM * 100.0
@@ -698,7 +712,7 @@ public enum DBHEstimator {
         // Fit centre. Taubin gives one directly; use it if available,
         // otherwise derive from the chord midpoint + radius shift.
         let center: SIMD2<Double>
-        if !diameterOutOfRange && !inflatedVsChord {
+        if !diameterOutOfRange && !inflatedVsChord && !deflatedVsChord {
             center = SIMD2(circle.cx, circle.cy)
         } else {
             let nearMid = SIMD2<Double>((leftWorld.x + rightWorld.x) / 2.0,

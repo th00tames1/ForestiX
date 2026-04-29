@@ -1,8 +1,9 @@
 // Phase 9 Option B — depth-discontinuity split inside the stem-strip
-// extractor. These tests directly exercise `extractGuideRowStemStrip`
-// with hand-crafted depth profiles so the split logic is verified in
-// isolation, separate from the synthetic-cylinder pipeline tests in
-// DBHEstimatorTests.swift.
+// extractor. These tests directly exercise `extractGuideStemStrip`
+// (the Phase 14 axis-aware variant, exercised here on `.row` semantics
+// matching the original landscape-only code path) with hand-crafted
+// depth profiles so the split logic is verified in isolation, separate
+// from the synthetic-cylinder pipeline tests in DBHEstimatorTests.swift.
 //
 // Each test builds a one-row depth map with:
 //   • Several "trunk" pixels at known depths
@@ -25,7 +26,7 @@ final class StemStripDiscontinuityTests: XCTestCase {
     // MARK: - Fixtures
 
     /// Minimal one-row depth map. The width is 64 columns, height 1
-    /// (we only set guideRowY = 0). Confidence is 2 (high) for every
+    /// (we only set axis = .row(y: 0)). Confidence is 2 (high) for every
     /// pixel that has a positive depth, 0 elsewhere — matches Apple's
     /// LiDAR convention where invalid pixels carry confidence 0.
     private func makeFrame(depths: [Float]) -> ARDepthFrame {
@@ -61,10 +62,10 @@ final class StemStripDiscontinuityTests: XCTestCase {
         }
         let frame = makeFrame(depths: depths)
 
-        let strip = DBHEstimator.extractGuideRowStemStrip(
+        let strip = DBHEstimator.extractGuideStemStrip(
             frame: frame,
-            guideRowY: 0,
-            tapColumn: centre,
+            axis: .row(y: 0),
+            tapAlongAxis: centre,
             dTap: 1.5,
             deltaDepth: 0.15,
             discontinuityThresholdM: 0.04)
@@ -98,10 +99,10 @@ final class StemStripDiscontinuityTests: XCTestCase {
         }
         let frame = makeFrame(depths: depths)
 
-        let strip = DBHEstimator.extractGuideRowStemStrip(
+        let strip = DBHEstimator.extractGuideStemStrip(
             frame: frame,
-            guideRowY: 0,
-            tapColumn: 27,             // tap on Trunk A
+            axis: .row(y: 0),
+            tapAlongAxis: 27,             // tap on Trunk A
             dTap: 1.50,
             deltaDepth: 0.15,
             discontinuityThresholdM: 0.04)
@@ -131,10 +132,10 @@ final class StemStripDiscontinuityTests: XCTestCase {
         }
         let frame = makeFrame(depths: depths)
 
-        let strip = DBHEstimator.extractGuideRowStemStrip(
+        let strip = DBHEstimator.extractGuideStemStrip(
             frame: frame,
-            guideRowY: 0,
-            tapColumn: 27,
+            axis: .row(y: 0),
+            tapAlongAxis: 27,
             dTap: 1.50,
             deltaDepth: 0.15,
             discontinuityThresholdM: .infinity)
@@ -162,10 +163,10 @@ final class StemStripDiscontinuityTests: XCTestCase {
         depths[centre + 5] = depths[centre + 5] - 0.06
         let frame = makeFrame(depths: depths)
 
-        let strip = DBHEstimator.extractGuideRowStemStrip(
+        let strip = DBHEstimator.extractGuideStemStrip(
             frame: frame,
-            guideRowY: 0,
-            tapColumn: centre,
+            axis: .row(y: 0),
+            tapAlongAxis: centre,
             dTap: 1.5,
             deltaDepth: 0.15,
             discontinuityThresholdM: 0.04)
@@ -200,10 +201,10 @@ final class StemStripDiscontinuityTests: XCTestCase {
         }
         let frame = makeFrame(depths: depths)
 
-        let strip = DBHEstimator.extractGuideRowStemStrip(
+        let strip = DBHEstimator.extractGuideStemStrip(
             frame: frame,
-            guideRowY: 0,
-            tapColumn: centre,
+            axis: .row(y: 0),
+            tapAlongAxis: centre,
             dTap: 1.5,
             deltaDepth: 0.15,
             discontinuityThresholdM: 0.04)
@@ -212,6 +213,93 @@ final class StemStripDiscontinuityTests: XCTestCase {
             "Walk must stop at the buttress step. Strip: \(strip)")
         XCTAssertEqual(strip.first, centre - 10)
         XCTAssertEqual(strip.last, centre + 5)
+    }
+
+    // MARK: - Phase 14 — col-walk portrait orientation parity
+
+    /// Build a 1-column-wide depth map and exercise the `.col` axis.
+    /// Real-device bug 2026-04-29: iPhone supports portrait, so the
+    /// strip must walk along the depth-map's height axis (rows) at a
+    /// fixed column. Before Phase 14 the algorithm was hard-coded to
+    /// row-walk, which on portrait UI produced a vertical-on-trunk
+    /// strip whose back-projected points clustered at one world XZ
+    /// and the circle fit failed. This test pins the symmetry between
+    /// row-walk and col-walk so a future regression that drops the
+    /// `.col` path is caught at unit-test time.
+    func testColWalkExtractsCleanTrunkLikeRowWalk() {
+        // Same profile as the row-walk clean-trunk test, just written
+        // into a 1-wide × 64-tall depth map so col-walk has a strip to
+        // find at fixed x = 0.
+        let centre = 32
+        var depths = [Float](repeating: 0, count: 64)
+        for row in (centre - 10)...(centre + 10) {
+            let dy = Float(row - centre)
+            depths[row] = 1.5 + 0.0001 * dy * dy
+        }
+        let conf: [UInt8] = depths.map { $0 > 0 ? 2 : 0 }
+        let K = simd_float3x3(
+            SIMD3<Float>(200, 0, 0),
+            SIMD3<Float>(0, 200, 0),
+            SIMD3<Float>(0, 32, 1))
+        let frame = ARDepthFrame(
+            width: 1, height: 64,
+            depth: depths, confidence: conf,
+            intrinsics: K,
+            cameraPoseWorld: matrix_identity_float4x4,
+            timestamp: 0)
+
+        let strip = DBHEstimator.extractGuideStemStrip(
+            frame: frame,
+            axis: .col(x: 0),
+            tapAlongAxis: centre,
+            dTap: 1.5,
+            deltaDepth: 0.15,
+            discontinuityThresholdM: 0.04)
+
+        XCTAssertEqual(strip.count, 21,
+            "Col-walk on a clean column trunk must extract all 21 rows. " +
+            "Strip: \(strip)")
+        XCTAssertEqual(strip.first, centre - 10)
+        XCTAssertEqual(strip.last, centre + 10)
+    }
+
+    /// Discontinuity check applies to col-walk too: two trunks at
+    /// 1.50 m and 1.55 m stacked vertically in the depth map must
+    /// split at the boundary just like the row-walk case.
+    func testColWalkDiscontinuitySplitsAdjacentTrunks() {
+        var depths = [Float](repeating: 0, count: 64)
+        for row in 22...32 {
+            let dy = Float(row - 27)
+            depths[row] = 1.50 + 0.0001 * dy * dy
+        }
+        for row in 33...43 {
+            let dy = Float(row - 38)
+            depths[row] = 1.55 + 0.0001 * dy * dy
+        }
+        let conf: [UInt8] = depths.map { $0 > 0 ? 2 : 0 }
+        let K = simd_float3x3(
+            SIMD3<Float>(200, 0, 0),
+            SIMD3<Float>(0, 200, 0),
+            SIMD3<Float>(0, 32, 1))
+        let frame = ARDepthFrame(
+            width: 1, height: 64,
+            depth: depths, confidence: conf,
+            intrinsics: K,
+            cameraPoseWorld: matrix_identity_float4x4,
+            timestamp: 0)
+
+        let strip = DBHEstimator.extractGuideStemStrip(
+            frame: frame,
+            axis: .col(x: 0),
+            tapAlongAxis: 27,
+            dTap: 1.50,
+            deltaDepth: 0.15,
+            discontinuityThresholdM: 0.04)
+
+        XCTAssertFalse(strip.contains(where: { $0 >= 33 }),
+            "Col-walk leaked into Trunk B rows: \(strip)")
+        XCTAssertEqual(strip.first, 22)
+        XCTAssertEqual(strip.last, 32)
     }
 
     // MARK: - Test 5 — gap (background pixel) still stops the walk
@@ -240,10 +328,10 @@ final class StemStripDiscontinuityTests: XCTestCase {
         }
         let frame = makeFrame(depths: depths)
 
-        let strip = DBHEstimator.extractGuideRowStemStrip(
+        let strip = DBHEstimator.extractGuideStemStrip(
             frame: frame,
-            guideRowY: 0,
-            tapColumn: centre,
+            axis: .row(y: 0),
+            tapAlongAxis: centre,
             dTap: 1.5,
             deltaDepth: 0.15,
             discontinuityThresholdM: 0.04)

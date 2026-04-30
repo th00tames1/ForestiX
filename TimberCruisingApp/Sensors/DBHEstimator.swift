@@ -727,9 +727,18 @@ public enum DBHEstimator {
         // Tolerance mirrors burst: max(3 mm, 2·sensor σ). Default σ is
         // 5 mm → 10 mm tolerance — tight enough to reject thin branch
         // pixels but loose enough to absorb bark roughness.
+        // Phase 17.1: thresholds calibrated for thin-trunk reach. A
+        // 10 cm DBH stem at 1 m only spans ≈ 22 sensor pixels, leaves
+        // ≈ 15 inliers after RANSAC, and after the 16.1 trim ≈ 12. The
+        // earlier 15-floor on minInliers (and 20-floor on the §7.1
+        // tier check below) rejected those thin-stem fits outright,
+        // even though forestry cruise routinely measures saplings down
+        // to 4–10 cm. Lower the floors to admit those legitimate
+        // small-tree fits while the arc, rmse, and radius checks still
+        // catch a non-trunk lock.
         let depthNoiseM: Double = 0.005   // matches ProjectCalibration default
         let inlierTol = max(0.003, 2.0 * depthNoiseM)
-        let minInliers = max(15, stripPoints.count / 3)
+        let minInliers = max(10, stripPoints.count / 4)
         let chordTooShort = chordM < 0.03
 
         var radiusM: Double
@@ -758,7 +767,7 @@ public enum DBHEstimator {
             // too-tight rmse gate.
             var refinedInliers = robust.inliers
             var refinedCircle = robust.circle
-            if refinedInliers.count >= 25 {
+            if refinedInliers.count >= 18 {
                 let pairs = refinedInliers.map { p -> (Double, SIMD2<Double>) in
                     let dx = p.x - refinedCircle.cx
                     let dy = p.y - refinedCircle.cy
@@ -766,7 +775,7 @@ public enum DBHEstimator {
                     return (abs(r - refinedCircle.radius), p)
                 }
                 let sorted = pairs.sorted { $0.0 < $1.0 }
-                let keep = max(20, Int(Double(sorted.count) * 0.80))
+                let keep = max(12, Int(Double(sorted.count) * 0.80))
                 refinedInliers = sorted.prefix(keep).map { $0.1 }
                 if let refit = TaubinFit.fit(points: refinedInliers) {
                     refinedCircle = refit
@@ -852,10 +861,10 @@ public enum DBHEstimator {
         let checks: [Check] = [
             check(!ransacFailed, sev: .reject,
                   reason: "Couldn't fit a trunk circle — move closer or steadier"),
-            check(inlierCount >= 20, sev: .reject,
-                  reason: "Fewer than 20 trunk surface points"),
-            check(inlierCount >= 35, sev: .warn,
-                  reason: "Only 20–35 trunk surface points"),
+            check(inlierCount >= 12, sev: .reject,
+                  reason: "Fewer than 12 trunk surface points"),
+            check(inlierCount >= 20, sev: .warn,
+                  reason: "Only 12–20 trunk surface points"),
             check(arcDeg >= 45, sev: .reject,
                   reason: "Trunk arc coverage below 45°"),
             check(arcDeg >= 60, sev: .warn,

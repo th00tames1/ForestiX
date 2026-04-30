@@ -98,15 +98,23 @@ public final class DBHScanViewModel: ObservableObject {
     private let previewEMAAlpha: Double = 0.3
     /// Last few raw preview diameters (cm) — used by the stability
     /// gate. The published value stays hidden until consecutive frames
-    /// agree to within `previewStableCoVThreshold`, so the cruiser
-    /// never reads a number while the fit is still settling.
+    /// agree to within the stability thresholds, so the cruiser never
+    /// reads a number while the fit is still settling.
     private var recentRawDiameters: [Double] = []
     private let recentRawDiameterCapacity: Int = 5
-    /// Max relative spread (max-min / mean) we'll accept as "stable".
-    /// 8 % matches the burst pipeline's per-frame radius CoV warn band
-    /// (5–10 %): below this the fit is at least as consistent as a
-    /// burst's per-frame readings.
-    private let previewStableCoVThreshold: Double = 0.08
+    /// Phase 16.2 hysteresis. The earlier 8 % gate flickered on real
+    /// device tests because typical LiDAR + RANSAC variance is 5–12 %
+    /// even when the cruiser stands still, and a single red frame
+    /// cleared the history and reset the gate. New scheme:
+    ///   • Enter stable when CoV ≤ 0.10 over 3+ frames
+    ///   • Stay stable until CoV exceeds 0.18 (deadband ⇒ no flicker)
+    ///   • Tolerate 1–2 transient red frames without resetting; only
+    ///     `redResetCount` consecutive reds wipes the history.
+    private var isStable: Bool = false
+    private let stabilityEnterCoV: Double = 0.10
+    private let stabilityExitCoV: Double = 0.18
+    private var consecutiveRedFrames: Int = 0
+    private let redResetCount: Int = 3
 
     // MARK: - Construction
 
@@ -201,6 +209,8 @@ public final class DBHScanViewModel: ObservableObject {
             recentRawDiameters.removeAll()
             previewTier = nil
             previewStatusText = nil
+            isStable = false
+            consecutiveRedFrames = 0
             return
         }
 
@@ -216,15 +226,14 @@ public final class DBHScanViewModel: ObservableObject {
             discontinuityThresholdM: calibration.depthDiscontinuityM)
         previewFit = fit
 
-        // Stability + tier gate. The cruiser will trust the on-screen
-        // value as the actual measurement, so we only publish once:
-        //   • RANSAC found a §7.1-passable fit (tier == .green / .yellow)
-        //   • the last few raw diameters agree (CoV ≤ threshold)
-        // Everything else surfaces a status string ("Stabilizing…" or
-        // the rejection reason) and keeps the numeric slot empty.
+        // Stability + tier gate (Phase 16.2). Hysteresis on the CoV
+        // window so a borderline frame doesn't flip the gate, and a
+        // single red frame no longer clears the history — only
+        // `redResetCount` consecutive reds force a reset.
         let publishable: Bool
         let stabilityNote: String?
         if let f = fit, f.tier != .red {
+            consecutiveRedFrames = 0
             recentRawDiameters.append(f.diameterCm)
             if recentRawDiameters.count > recentRawDiameterCapacity {
                 recentRawDiameters.removeFirst()
@@ -235,17 +244,13 @@ public final class DBHScanViewModel: ObservableObject {
                 let lo = recentRawDiameters.min() ?? mean
                 let hi = recentRawDiameters.max() ?? mean
                 let cov = mean > 0 ? (hi - lo) / mean : 1
-                if cov <= previewStableCoVThreshold {
-                    publishable = true
-                    stabilityNote = nil
-                } else {
-                    publishable = false
-                    stabilityNote = "Stabilizing…"
-                }
+                let threshold = isStable ? stabilityExitCoV : stabilityEnterCoV
+                isStable = cov <= threshold
             } else {
-                publishable = false
-                stabilityNote = "Stabilizing…"
+                isStable = false
             }
+            publishable = isStable
+            stabilityNote = publishable ? nil : "Stabilizing…"
             if publishable {
                 if let prev = smoothedPreviewDbhCm {
                     smoothedPreviewDbhCm = previewEMAAlpha * f.diameterCm
@@ -257,10 +262,15 @@ public final class DBHScanViewModel: ObservableObject {
                 smoothedPreviewDbhCm = nil
             }
         } else {
-            // Red or no fit — drop history so a new acquisition
-            // starts fresh and clear the smoothed value.
-            recentRawDiameters.removeAll()
-            smoothedPreviewDbhCm = nil
+            // Tolerate transient reds — keep the history and the
+            // smoothed value alive so a one-off bad frame doesn't
+            // restart the whole stabilisation.
+            consecutiveRedFrames += 1
+            if consecutiveRedFrames >= redResetCount {
+                recentRawDiameters.removeAll()
+                smoothedPreviewDbhCm = nil
+                isStable = false
+            }
             publishable = false
             stabilityNote = nil
         }
@@ -270,6 +280,19 @@ public final class DBHScanViewModel: ObservableObject {
         previewStatusText = publishable
             ? nil
             : (stabilityNote ?? fit?.rejectionReason)
+
+        // Phase 16.3 auto-capture. Tap-to-capture was impractical on
+        // device — both hands hold the phone, so a finger tap on the
+        // screen breaks the aim. The stability gate already requires
+        // 3+ consistent frames before flipping `publishable`, so when
+        // it does we trust that long enough to start the burst on its
+        // own. Manual `tap()` stays as an override; if the cruiser
+        // wants to commit early they still can.
+        if state == .armed && publishable {
+            burstBuffer.removeAll(keepingCapacity: true)
+            burstTap = SIMD2(Double(cx), Double(cy))
+            state = .capturing
+        }
 
         // Distance readout — camera position XZ vs stem axis XZ.
         // Uses the frame's own camera pose to stay consistent with the

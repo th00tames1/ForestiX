@@ -781,16 +781,25 @@ public enum DBHEstimator {
                     refinedCircle = refit
                 }
             }
+            // Phase 17.2: split where each metric reads from.
+            //   • radius / rmse — post-trim (refined fit quality)
+            //   • inlier count / arc — pre-trim (what the camera saw)
+            // Trimming the top quintile by residual systematically drops
+            // tangent-edge points (their grazing-angle LiDAR noise is
+            // 1/cos(angle) larger), and those edge points are precisely
+            // the ones that anchor the widest arc. Computing arc on the
+            // trimmed set was making the §7.1 ≥ 45° gate fire on real
+            // trees that the camera plainly observed past 90°.
             radiusM = refinedCircle.radius
             diameterCm = 2.0 * radiusM * 100.0
             fittedCenter = SIMD2(refinedCircle.cx, refinedCircle.cy)
-            inlierCount = refinedInliers.count
             let rmse = rootMeanSquaredResidual(
                 inliers: refinedInliers, circle: refinedCircle)
             rmseMm = rmse * 1000
+            inlierCount = robust.inliers.count
             arcDeg = arcCoverageDeg(
-                inliers: refinedInliers,
-                center: (refinedCircle.cx, refinedCircle.cy))
+                inliers: robust.inliers,
+                center: (robust.circle.cx, robust.circle.cy))
         } else {
             // Not enough trunk-like points for a robust fit. Fall back
             // to the silhouette chord — at least the cruiser sees a

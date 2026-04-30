@@ -746,16 +746,42 @@ public enum DBHEstimator {
             iterations: 80,
             minInliers: minInliers
         ) {
-            radiusM = robust.circle.radius
+            // Phase 16.1: trimmed least-squares refinement. RANSAC's
+            // tolerance band is wide enough to absorb LiDAR noise, but
+            // the worst residuals inside that band (bark cracks,
+            // tangent-edge points) still skew Taubin's algebraic refit
+            // and inflate the rmse. Drop the top quintile by residual
+            // and refit once more — the cleanest 80 % of points pull
+            // the radius onto a tighter, more honest fit. Answers the
+            // cruiser's ask to "exclude the outliers and keep
+            // computing" rather than rejecting whole fits on a
+            // too-tight rmse gate.
+            var refinedInliers = robust.inliers
+            var refinedCircle = robust.circle
+            if refinedInliers.count >= 25 {
+                let pairs = refinedInliers.map { p -> (Double, SIMD2<Double>) in
+                    let dx = p.x - refinedCircle.cx
+                    let dy = p.y - refinedCircle.cy
+                    let r = (dx * dx + dy * dy).squareRoot()
+                    return (abs(r - refinedCircle.radius), p)
+                }
+                let sorted = pairs.sorted { $0.0 < $1.0 }
+                let keep = max(20, Int(Double(sorted.count) * 0.80))
+                refinedInliers = sorted.prefix(keep).map { $0.1 }
+                if let refit = TaubinFit.fit(points: refinedInliers) {
+                    refinedCircle = refit
+                }
+            }
+            radiusM = refinedCircle.radius
             diameterCm = 2.0 * radiusM * 100.0
-            fittedCenter = SIMD2(robust.circle.cx, robust.circle.cy)
-            inlierCount = robust.inliers.count
+            fittedCenter = SIMD2(refinedCircle.cx, refinedCircle.cy)
+            inlierCount = refinedInliers.count
             let rmse = rootMeanSquaredResidual(
-                inliers: robust.inliers, circle: robust.circle)
+                inliers: refinedInliers, circle: refinedCircle)
             rmseMm = rmse * 1000
             arcDeg = arcCoverageDeg(
-                inliers: robust.inliers,
-                center: (robust.circle.cx, robust.circle.cy))
+                inliers: refinedInliers,
+                center: (refinedCircle.cx, refinedCircle.cy))
         } else {
             // Not enough trunk-like points for a robust fit. Fall back
             // to the silhouette chord — at least the cruiser sees a

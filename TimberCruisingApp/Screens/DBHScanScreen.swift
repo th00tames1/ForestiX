@@ -443,8 +443,8 @@ public struct DBHScanScreen: View {
     private var statusText: String {
         switch viewModel.state {
         case .idle:         return "Starting camera…"
-        case .aligning:     return "Align guide to the trunk, uphill side. Tap the stem centre."
-        case .armed:        return "Depth stable. Tap the trunk centre."
+        case .aligning:     return "Align the guide to the trunk's uphill side; hold steady."
+        case .armed:        return "Hold steady — capturing automatically."
         case .capturing:    return "Capturing… hold steady."
         case .fitted:       return "Scan complete. Accept, retake, or add a second view."
         case .accepted:     return "Saved."

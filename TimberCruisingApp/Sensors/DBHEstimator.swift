@@ -928,8 +928,19 @@ public enum DBHEstimator {
             check(!chordOverride, sev: .warn,
                   reason: "Fit disagreed with silhouette; using chord")
         ]
-        let tier = combineChecks(checks)
-        let rejectionReason: String? = (tier == .red)
+        // Phase 18.2 — preview-specific tier rule. The §7.9 default
+        // promotes "≥2 warns" to red, which made the live HUD flap
+        // between "Stabilizing…" (yellow) and "Quality below
+        // threshold" (red) whenever two warns happened to fire on the
+        // same frame (e.g. narrow arc + chord override). Yellow is
+        // already publishable and visually silent for the cruiser, so
+        // we suppress that promotion here — only an actual reject
+        // failure paints the preview red.
+        let hasReject = checks.contains { !$0.passed && $0.severity == .reject }
+        let hasWarn = checks.contains { !$0.passed && $0.severity == .warn }
+        let tier: ConfidenceTier = hasReject
+            ? .red : (hasWarn ? .yellow : .green)
+        let rejectionReason: String? = hasReject
             ? (firstFailingRejectReason(checks) ?? "Quality below threshold")
             : nil
 

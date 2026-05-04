@@ -116,6 +116,24 @@ public final class DBHScanViewModel: ObservableObject {
     private var consecutiveRedFrames: Int = 0
     private let redResetCount: Int = 3
 
+    /// Phase 18.1 — fit-geometry smoothing. The published diameter has
+    /// always been EMA-smoothed (see `smoothedPreviewDbhCm`), but the
+    /// stem-axis XZ centre that drives the on-screen distance readout
+    /// and the 3D cylinder overlay was being read raw from each frame's
+    /// fit. Without smoothing it jittered ± a few cm per tick even when
+    /// the diameter had stabilised, and the cruiser saw the distance
+    /// number flicker. EMA over the centre XZ gives a stable trunk
+    /// position for both the distance HUD and the cylinder transform.
+    /// α matches `previewEMAAlpha` so the two values move together.
+    private var smoothedCenterWorldXZ: SIMD2<Double>?
+    /// Last frame's effective tap-depth (metres) — fed back into
+    /// `DBHEstimator.previewFit` as the next call's `tapDepthHint`.
+    /// Anchoring the depth window stops it sliding under hand tremor,
+    /// which is the upstream cause of frame-to-frame DBH variance.
+    /// Reset to nil whenever the preview drops out so a re-acquisition
+    /// or a new tree starts with the raw 5×5 median.
+    private var lastTapDepthHint: Double?
+
     // MARK: - Construction
 
     public init(
@@ -206,6 +224,8 @@ public final class DBHScanViewModel: ObservableObject {
                 distanceToStemCenterM = nil
             }
             smoothedPreviewDbhCm = nil
+            smoothedCenterWorldXZ = nil
+            lastTapDepthHint = nil
             recentRawDiameters.removeAll()
             previewTier = nil
             previewStatusText = nil
@@ -223,8 +243,14 @@ public final class DBHScanViewModel: ObservableObject {
             frame: frame,
             tapPixel: SIMD2(Double(cx), Double(cy)),
             guideAxis: axis,
-            discontinuityThresholdM: calibration.depthDiscontinuityM)
-        previewFit = fit
+            discontinuityThresholdM: calibration.depthDiscontinuityM,
+            tapDepthHint: lastTapDepthHint)
+        // Phase 18.1: feed the just-used effective tap depth back as the
+        // next frame's hint. When the strip extraction failed entirely
+        // we drop the hint so the next attempt can re-acquire from raw
+        // depth rather than dragging in a stale anchor from a vanished
+        // trunk.
+        lastTapDepthHint = fit?.effectiveTapDepth
 
         // Stability + tier gate (Phase 16.2). Hysteresis on the CoV
         // window so a borderline frame doesn't flip the gate, and a
@@ -258,8 +284,19 @@ public final class DBHScanViewModel: ObservableObject {
                 } else {
                     smoothedPreviewDbhCm = f.diameterCm
                 }
+                // Phase 18.1: same EMA over the fit centre's XZ so the
+                // distance readout and cylinder overlay don't flicker
+                // even when the diameter digit has stabilised.
+                if let prev = smoothedCenterWorldXZ {
+                    smoothedCenterWorldXZ = SIMD2(
+                        previewEMAAlpha * f.centerWorldXZ.x + (1 - previewEMAAlpha) * prev.x,
+                        previewEMAAlpha * f.centerWorldXZ.y + (1 - previewEMAAlpha) * prev.y)
+                } else {
+                    smoothedCenterWorldXZ = f.centerWorldXZ
+                }
             } else {
                 smoothedPreviewDbhCm = nil
+                smoothedCenterWorldXZ = nil
             }
         } else {
             // Tolerate transient reds — keep the history and the
@@ -269,10 +306,38 @@ public final class DBHScanViewModel: ObservableObject {
             if consecutiveRedFrames >= redResetCount {
                 recentRawDiameters.removeAll()
                 smoothedPreviewDbhCm = nil
+                smoothedCenterWorldXZ = nil
                 isStable = false
             }
             publishable = false
             stabilityNote = nil
+        }
+
+        // Phase 18.1: publish a fit whose centre is the smoothed XZ so
+        // any consumer that reads `previewFit.centerWorldXZ` (e.g. the
+        // 3D cylinder overlay in DBHScanScreen) gets the same stable
+        // trunk position the distance HUD is reading. Diameter on the
+        // published fit also tracks the EMA-smoothed scalar so HUD
+        // pieces that haven't been re-pointed at `previewDbhCm` stay
+        // consistent. Before stability we publish the raw fit unchanged
+        // so the cruiser still sees the cylinder while aiming.
+        if let f = fit, publishable,
+           let stem = smoothedCenterWorldXZ,
+           let dia = smoothedPreviewDbhCm {
+            previewFit = DBHEstimator.PreviewFit(
+                diameterCm: dia,
+                centerWorldXZ: stem,
+                radiusM: dia / 200.0,    // cm → m, ÷ 2
+                stripLeftFraction: f.stripLeftFraction,
+                stripRightFraction: f.stripRightFraction,
+                tier: f.tier,
+                inlierCount: f.inlierCount,
+                arcDeg: f.arcDeg,
+                rmseMm: f.rmseMm,
+                rejectionReason: f.rejectionReason,
+                effectiveTapDepth: f.effectiveTapDepth)
+        } else {
+            previewFit = fit
         }
 
         previewDbhCm = publishable ? smoothedPreviewDbhCm : nil
@@ -296,13 +361,20 @@ public final class DBHScanViewModel: ObservableObject {
 
         // Distance readout — camera position XZ vs stem axis XZ.
         // Uses the frame's own camera pose to stay consistent with the
-        // fit's reference frame.
+        // fit's reference frame. Phase 18.1: prefer the EMA-smoothed
+        // centre once the fit is publishable, so the distance number
+        // and the cylinder overlay don't jitter against the stable
+        // diameter digit. Before stability is reached we still surface
+        // the raw centre so the cruiser can see *something* while
+        // aiming — the stability gate already hides any number that
+        // would mislead.
         let pose = frame.cameraPoseWorld
         guideRowWorldY = pose.columns.3.y
-        if let f = fit {
+        let stemXZ = smoothedCenterWorldXZ ?? fit?.centerWorldXZ
+        if let stem = stemXZ {
             let camXZ = SIMD2<Double>(Double(pose.columns.3.x),
                                        Double(pose.columns.3.z))
-            let d = f.centerWorldXZ - camXZ
+            let d = stem - camXZ
             distanceToStemCenterM = Float((d.x * d.x + d.y * d.y).squareRoot())
         } else {
             distanceToStemCenterM = nil

@@ -348,18 +348,12 @@ public final class DBHScanViewModel: ObservableObject {
             ? nil
             : (stabilityNote ?? fit?.rejectionReason)
 
-        // Phase 16.3 auto-capture. Tap-to-capture was impractical on
-        // device — both hands hold the phone, so a finger tap on the
-        // screen breaks the aim. The stability gate already requires
-        // 3+ consistent frames before flipping `publishable`, so when
-        // it does we trust that long enough to start the burst on its
-        // own. Manual `tap()` stays as an override; if the cruiser
-        // wants to commit early they still can.
-        if state == .armed && publishable {
-            burstBuffer.removeAll(keepingCapacity: true)
-            burstTap = SIMD2(Double(cx), Double(cy))
-            state = .capturing
-        }
+        // Phase 18.4 — auto-capture removed. Field testing showed the
+        // hands-free trigger fired before the cruiser was committed to
+        // the trunk they were aiming at, locking in stray fits during
+        // panning. We now require an explicit screen tap (handled in
+        // `tap(at:)`) so the burst only starts when the cruiser is
+        // actually ready to record.
 
         // Distance readout — camera position XZ vs stem axis XZ.
         // Uses the frame's own camera pose to stay consistent with the
@@ -390,14 +384,14 @@ public final class DBHScanViewModel: ObservableObject {
     /// coords via the ARKit displayTransform).
     public func tap(at tapPixel: SIMD2<Double>) {
         guard state == .armed else { return }
-        // Phase 14.4: only let the burst start when the live preview
-        // is publishable (not red, not still stabilising). Otherwise
-        // the cruiser would tap "Capture" on a fit that the burst's
-        // §7.1 sanity tree is going to reject anyway, eroding trust
-        // in the on-screen number. The status badge already explains
-        // why the tap didn't take ("Stabilizing…" or the rejection
-        // reason), so the cruiser knows what to do next.
-        guard previewDbhCm != nil else { return }
+        // Phase 18.4 — the tap is now the *only* way to start the
+        // burst, so we keep the gate loose: any fit visible on screen
+        // (red rejections excluded) is enough. Waiting for the
+        // stability gate to latch before allowing a tap is what made
+        // the previous auto-capture flow feel sluggish; if the cruiser
+        // is committed enough to tap, the burst's own §7.1 tree will
+        // catch a fit that's too noisy to record.
+        guard let fit = previewFit, fit.tier != .red else { return }
         burstBuffer.removeAll(keepingCapacity: true)
         burstTap = tapPixel
         state = .capturing

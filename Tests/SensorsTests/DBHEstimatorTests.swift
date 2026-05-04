@@ -71,16 +71,19 @@ final class DBHEstimatorTests: XCTestCase {
         XCTAssertFalse(result.rejectionReason!.isEmpty)
     }
 
-    func testPipelineRedWhenArcBelow45Degrees() {
+    func testPipelineRedWhenArcBelow30Degrees() {
+        // Phase 18.2 relaxed the arc reject threshold from 45° to 30°
+        // so the previous 30° fixture would now pass. Drop to 20° to
+        // stay clearly under the new gate.
         let input = makeInput(
-            rTrue: 0.30, arcDeg: 30,
+            rTrue: 0.30, arcDeg: 20,
             frames: 10, samplesPerFrame: 200,
             noise: 0.005, seed: 11)
         guard let result = DBHEstimator.estimate(input: input) else {
             return XCTFail("Expected red-tier result, got nil")
         }
         XCTAssertEqual(result.confidence, .red,
-            "30° arc must reject (< 45°)")
+            "20° arc must reject (< 30°)")
         XCTAssertNotNil(result.rejectionReason)
     }
 
@@ -100,24 +103,28 @@ final class DBHEstimatorTests: XCTestCase {
             "reason should mention tap depth — got \(result.rejectionReason!)")
     }
 
-    // MARK: - Done Criterion 3 (yellow tier on 45–60° arcs)
+    // MARK: - Done Criterion 3 (yellow tier on 30–45° arcs)
 
-    func testPipelineReturnsYellowOnCleanFortyFiveDegArc() {
+    func testPipelineReturnsYellowOnCleanFortyFourDegArc() {
+        // Phase 18.2 — the warn band shifted from 45–60° to 30–45°.
         // Noise-free synthetic arc so per-frame Taubin radii match
-        // exactly (radiusCoV = 0) and rmse ≈ 0 — only the 45–60° warn
+        // exactly (radiusCoV = 0) and rmse ≈ 0 — only the 30–45° warn
         // check should fire → yellow (exactly one warn failure).
+        // 44° (near the top of the new band) keeps curvature obvious
+        // for RANSAC; 40° on a 30cm trunk projects almost flat from
+        // 1.5 m and RANSAC converges on a degenerate inner circle.
         let input = makeInput(
-            rTrue: 0.20, arcDeg: 50,
+            rTrue: 0.20, arcDeg: 44,
             frames: 10, samplesPerFrame: 200,
             noise: 0, seed: 8)
         guard let result = DBHEstimator.estimate(input: input) else {
             return XCTFail("Expected a result, got nil")
         }
         XCTAssertEqual(result.confidence, .yellow,
-            "Clean 50° arc should be yellow: " +
+            "Clean 44° arc should be yellow: " +
             "reason=\(result.rejectionReason ?? "-")")
-        XCTAssertEqual(result.arcCoverageDeg, 50, accuracy: 10,
-            "Reported arc should be close to synthetic 50°")
+        XCTAssertEqual(result.arcCoverageDeg, 44, accuracy: 10,
+            "Reported arc should be close to synthetic 44°")
     }
 
     // MARK: - Done Criterion 4 (cylinder calibration)

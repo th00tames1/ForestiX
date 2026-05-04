@@ -102,17 +102,19 @@ public final class DBHScanViewModel: ObservableObject {
     /// reads a number while the fit is still settling.
     private var recentRawDiameters: [Double] = []
     private let recentRawDiameterCapacity: Int = 5
-    /// Phase 16.2 hysteresis. The earlier 8 % gate flickered on real
-    /// device tests because typical LiDAR + RANSAC variance is 5–12 %
-    /// even when the cruiser stands still, and a single red frame
-    /// cleared the history and reset the gate. New scheme:
-    ///   • Enter stable when CoV ≤ 0.10 over 3+ frames
-    ///   • Stay stable until CoV exceeds 0.18 (deadband ⇒ no flicker)
+    /// Phase 16.2 hysteresis, retuned in Phase 18.2. The earlier
+    /// 10 %/3-frame gate left the cruiser staring at "Stabilizing…"
+    /// far longer than peer apps (ForestScanner / Single-Shot SAM
+    /// publish on a single fit). Loosened to 12 %/2-frames — still
+    /// rejects obvious chatter but unlocks the published value almost
+    /// as soon as the cruiser steadies the phone.
+    ///   • Enter stable when CoV ≤ 0.12 over 2+ frames
+    ///   • Stay stable until CoV exceeds 0.20 (deadband ⇒ no flicker)
     ///   • Tolerate 1–2 transient red frames without resetting; only
     ///     `redResetCount` consecutive reds wipes the history.
     private var isStable: Bool = false
-    private let stabilityEnterCoV: Double = 0.10
-    private let stabilityExitCoV: Double = 0.18
+    private let stabilityEnterCoV: Double = 0.12
+    private let stabilityExitCoV: Double = 0.20
     private var consecutiveRedFrames: Int = 0
     private let redResetCount: Int = 3
 
@@ -264,7 +266,7 @@ public final class DBHScanViewModel: ObservableObject {
             if recentRawDiameters.count > recentRawDiameterCapacity {
                 recentRawDiameters.removeFirst()
             }
-            if recentRawDiameters.count >= 3 {
+            if recentRawDiameters.count >= 2 {
                 let mean = recentRawDiameters.reduce(0, +)
                           / Double(recentRawDiameters.count)
                 let lo = recentRawDiameters.min() ?? mean

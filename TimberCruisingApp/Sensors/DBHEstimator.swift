@@ -624,6 +624,13 @@ public enum DBHEstimator {
         /// Human-readable rejection reason when `tier == .red`, nil
         /// otherwise.
         public let rejectionReason: String?
+        /// Effective tap depth (metres) actually used to anchor the
+        /// stem-strip's ±deltaDepth window for *this* frame. The caller
+        /// is expected to feed this back as the next frame's
+        /// `tapDepthHint` — that's what stops the depth window from
+        /// sliding under hand tremor and prevents a fresh inlier set
+        /// being chosen every preview tick.
+        public let effectiveTapDepth: Double
 
         public init(diameterCm: Double,
                     centerWorldXZ: SIMD2<Double>,
@@ -634,7 +641,8 @@ public enum DBHEstimator {
                     inlierCount: Int,
                     arcDeg: Double,
                     rmseMm: Double,
-                    rejectionReason: String?) {
+                    rejectionReason: String?,
+                    effectiveTapDepth: Double) {
             self.diameterCm = diameterCm
             self.centerWorldXZ = centerWorldXZ
             self.radiusM = radiusM
@@ -645,6 +653,7 @@ public enum DBHEstimator {
             self.arcDeg = arcDeg
             self.rmseMm = rmseMm
             self.rejectionReason = rejectionReason
+            self.effectiveTapDepth = effectiveTapDepth
         }
     }
 
@@ -671,11 +680,37 @@ public enum DBHEstimator {
         tapPixel: SIMD2<Double>,
         guideAxis: GuideAxis,
         deltaDepth: Float = 0.15,
-        discontinuityThresholdM: Float = 0.04
+        discontinuityThresholdM: Float = 0.04,
+        tapDepthHint: Double? = nil
     ) -> PreviewFit? {
-        guard let dTap = medianDepth(around: tapPixel, frame: frame, radius: 2)
+        guard let rawTapDepth = medianDepth(around: tapPixel, frame: frame, radius: 2)
         else { return nil }
-        guard (0.5...3.0).contains(dTap) else { return nil }
+        guard (0.5...3.0).contains(rawTapDepth) else { return nil }
+
+        // Phase 18.1 — depth-window anchoring. The 5×5 median is stable
+        // *within* a frame but fluctuates 5–10 cm frame-to-frame because
+        // hand tremor moves the screen-centre pixel across different
+        // parts of the trunk surface (and bark roughness alone is a few
+        // cm). Without anchoring, the ±deltaDepth window slides every
+        // tick, swaps in a different set of edge pixels, and forces
+        // RANSAC to vote on a brand-new point set — which is the root
+        // cause behind the "DBH and distance jitter even when standing
+        // still" complaint. Blend the raw depth with the previous tick's
+        // effective depth so the window only drifts slowly. A 25 cm gate
+        // keeps the anchor honest: if the cruiser actually retargets a
+        // different tree (or steps closer/farther by more than half a
+        // depth window), drop the hint and let the raw depth take over.
+        let dTap: Float
+        if let hintDouble = tapDepthHint {
+            let hint = Float(hintDouble)
+            if abs(rawTapDepth - hint) <= 0.25 {
+                dTap = 0.35 * rawTapDepth + 0.65 * hint
+            } else {
+                dTap = rawTapDepth
+            }
+        } else {
+            dTap = rawTapDepth
+        }
 
         let strip = extractGuideStemStrip(
             frame: frame,
@@ -902,7 +937,8 @@ public enum DBHEstimator {
             inlierCount: inlierCount,
             arcDeg: arcDeg,
             rmseMm: rmseMm,
-            rejectionReason: rejectionReason)
+            rejectionReason: rejectionReason,
+            effectiveTapDepth: Double(dTap))
     }
 
     /// Back-compat helper — returns just the diameter when only the

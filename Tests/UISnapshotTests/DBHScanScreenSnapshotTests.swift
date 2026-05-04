@@ -60,10 +60,10 @@ final class DBHScanScreenSnapshotTests: XCTestCase {
         DBHResult(
             diameterCm: 0,
             centerXZ: SIMD2<Float>(0, 2),
-            arcCoverageDeg: 30,
+            arcCoverageDeg: 20,
             rmseMm: 12,
             sigmaRmm: 9,
-            nInliers: 20,
+            nInliers: 8,
             confidence: .red,
             method: .lidarPartialArcSingleView,
             rawPointsPath: nil,
@@ -100,7 +100,7 @@ final class DBHScanScreenSnapshotTests: XCTestCase {
     func testRejected() {
         let vm = DBHScanViewModel.preview(
             state: .rejected,
-            result: redResult(reason: "Trunk arc coverage below 45°"))
+            result: redResult(reason: "Trunk arc coverage below 30°"))
         assertSnapshot(of: host(vm), as: .image(on: .iPhone13))
     }
 

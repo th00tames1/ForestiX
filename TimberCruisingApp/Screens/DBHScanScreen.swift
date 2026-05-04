@@ -322,7 +322,11 @@ public struct DBHScanScreen: View {
                         cm: cm, in: settings.unitSystem))
                         .font(ForestixType.data)
                         .foregroundStyle(.white)
-                    if let tier = viewModel.previewTier {
+                    // Phase 18.2: yellow now publishes the same as
+                    // green, so we only surface a chip when the fit
+                    // is unambiguously good. Yellow stays silent —
+                    // the cruiser sees a bare DBH digit.
+                    if let tier = viewModel.previewTier, tier == .green {
                         previewTierChip(tier)
                     }
                 }
@@ -466,11 +470,18 @@ public struct DBHScanScreen: View {
                     .font(ForestixType.dataLarge)
                     .foregroundStyle(.white)
                 Spacer()
-                tierChip(r.confidence)
+                // Phase 18.2: yellow is treated as a normal record-able
+                // fit, so we don't flag it. Only show the chip + hint
+                // for green (good) or red (must retake / manual).
+                if r.confidence != .yellow {
+                    tierChip(r.confidence)
+                }
             }
-            Text(tierHint(r.confidence))
-                .font(ForestixType.caption)
-                .foregroundStyle(.white.opacity(0.9))
+            if r.confidence != .yellow {
+                Text(tierHint(r.confidence))
+                    .font(ForestixType.caption)
+                    .foregroundStyle(.white.opacity(0.9))
+            }
             HStack {
                 Spacer()
                 Button {

@@ -259,21 +259,27 @@ public enum DBHEstimator {
         }
 
         // Step 9: sanity tree.
+        // Phase 18.2 — gate relaxation. The earlier thresholds were
+        // borrowed from §7.1 verbatim and rejected most field captures
+        // taken handheld at 1.5–3 m. ForestScanner / Single-Shot SAM
+        // papers report usable fits at 30°+ arc / 10+ inliers / 7%
+        // RMSE — we now match that and demote borderline fits to warn
+        // (yellow) instead of red.
         let checks: [Check] = [
-            check(fit.inliers.count >= 20, sev: .reject,
-                  reason: "Fewer than 20 trunk surface points"),
-            check(fit.inliers.count >= 30, sev: .warn,
-                  reason: "Only 20–30 trunk surface points"),
-            check(arcDeg >= 45, sev: .reject,
-                  reason: "Trunk arc coverage below 45°"),
-            check(arcDeg >= 60, sev: .warn,
-                  reason: "Trunk arc coverage 45°–60°"),
+            check(fit.inliers.count >= 10, sev: .reject,
+                  reason: "Fewer than 10 trunk surface points"),
+            check(fit.inliers.count >= 20, sev: .warn,
+                  reason: "Only 10–20 trunk surface points"),
+            check(arcDeg >= 30, sev: .reject,
+                  reason: "Trunk arc coverage below 30°"),
+            check(arcDeg >= 45, sev: .warn,
+                  reason: "Trunk arc coverage 30°–45°"),
             check(r >= 0.025 && r <= 1.0, sev: .reject,
                   reason: "Fitted radius outside 2.5–100 cm"),
-            check(rmse / r <= 0.05, sev: .reject,
-                  reason: "Fit error worse than 5% of radius"),
-            check(rmse / r <= 0.03, sev: .warn,
-                  reason: "Fit error 3–5% of radius"),
+            check(rmse / r <= 0.07, sev: .reject,
+                  reason: "Fit error worse than 7% of radius"),
+            check(rmse / r <= 0.05, sev: .warn,
+                  reason: "Fit error 5–7% of radius"),
             check(sigmaR / r <= 0.05, sev: .reject,
                   reason: "Radius precision worse than ±5%"),
             check(sigmaR / r <= 0.02, sev: .warn,
@@ -905,20 +911,20 @@ public enum DBHEstimator {
         let checks: [Check] = [
             check(!ransacFailed, sev: .reject,
                   reason: "Couldn't fit a trunk circle — move closer or steadier"),
-            check(inlierCount >= 12, sev: .reject,
-                  reason: "Fewer than 12 trunk surface points"),
-            check(inlierCount >= 20, sev: .warn,
-                  reason: "Only 12–20 trunk surface points"),
-            check(arcDeg >= 45, sev: .reject,
-                  reason: "Trunk arc coverage below 45°"),
-            check(arcDeg >= 60, sev: .warn,
-                  reason: "Trunk arc coverage 45°–60°"),
+            check(inlierCount >= 10, sev: .reject,
+                  reason: "Fewer than 10 trunk surface points"),
+            check(inlierCount >= 18, sev: .warn,
+                  reason: "Only 10–18 trunk surface points"),
+            check(arcDeg >= 30, sev: .reject,
+                  reason: "Trunk arc coverage below 30°"),
+            check(arcDeg >= 45, sev: .warn,
+                  reason: "Trunk arc coverage 30°–45°"),
             check(radiusM_ >= 0.025 && radiusM_ <= 1.0, sev: .reject,
                   reason: "Fitted radius outside 2.5–100 cm"),
-            check(rmseRatio <= 0.05, sev: .reject,
-                  reason: "Fit error worse than 5% of radius"),
-            check(rmseRatio <= 0.03, sev: .warn,
-                  reason: "Fit error 3–5% of radius"),
+            check(rmseRatio <= 0.07, sev: .reject,
+                  reason: "Fit error worse than 7% of radius"),
+            check(rmseRatio <= 0.05, sev: .warn,
+                  reason: "Fit error 5–7% of radius"),
             check(!chordOverride, sev: .warn,
                   reason: "Fit disagreed with silhouette; using chord")
         ]

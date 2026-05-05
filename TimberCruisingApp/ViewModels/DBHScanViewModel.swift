@@ -258,8 +258,17 @@ public final class DBHScanViewModel: ObservableObject {
         // window so a borderline frame doesn't flip the gate, and a
         // single red frame no longer clears the history — only
         // `redResetCount` consecutive reds force a reset.
-        let publishable: Bool
-        let stabilityNote: String?
+        // Phase 18.5 — separate "publish" from "stable smoothing".
+        //
+        // Pre-18.4 the stability gate served two jobs at once: gate
+        // auto-capture, and gate the on-screen number. Auto-capture is
+        // gone (cruiser taps to capture), so the only remaining job is
+        // smoothing the displayed digit so it doesn't jitter. The
+        // displayed value is now always the latest non-red fit — raw
+        // when the gate hasn't latched, EMA-smoothed once it has —
+        // instead of being hidden until stability is reached.
+        let publishable: Bool   // any non-red fit available
+        let smoothingActive: Bool   // EMA smoothing engaged
         if let f = fit, f.tier != .red {
             consecutiveRedFrames = 0
             recentRawDiameters.append(f.diameterCm)
@@ -277,9 +286,9 @@ public final class DBHScanViewModel: ObservableObject {
             } else {
                 isStable = false
             }
-            publishable = isStable
-            stabilityNote = publishable ? nil : "Stabilizing…"
-            if publishable {
+            publishable = true
+            smoothingActive = isStable
+            if smoothingActive {
                 if let prev = smoothedPreviewDbhCm {
                     smoothedPreviewDbhCm = previewEMAAlpha * f.diameterCm
                                          + (1 - previewEMAAlpha) * prev
@@ -297,8 +306,12 @@ public final class DBHScanViewModel: ObservableObject {
                     smoothedCenterWorldXZ = f.centerWorldXZ
                 }
             } else {
-                smoothedPreviewDbhCm = nil
-                smoothedCenterWorldXZ = nil
+                // No smoothing yet — track the raw fit so the published
+                // value moves with the cruiser's aim instead of being
+                // pinned to a stale smoothed value from a different
+                // trunk.
+                smoothedPreviewDbhCm = f.diameterCm
+                smoothedCenterWorldXZ = f.centerWorldXZ
             }
         } else {
             // Tolerate transient reds — keep the history and the
@@ -312,7 +325,7 @@ public final class DBHScanViewModel: ObservableObject {
                 isStable = false
             }
             publishable = false
-            stabilityNote = nil
+            smoothingActive = false
         }
 
         // Phase 18.1: publish a fit whose centre is the smoothed XZ so
@@ -321,9 +334,9 @@ public final class DBHScanViewModel: ObservableObject {
         // trunk position the distance HUD is reading. Diameter on the
         // published fit also tracks the EMA-smoothed scalar so HUD
         // pieces that haven't been re-pointed at `previewDbhCm` stay
-        // consistent. Before stability we publish the raw fit unchanged
-        // so the cruiser still sees the cylinder while aiming.
-        if let f = fit, publishable,
+        // consistent. When smoothing isn't yet engaged we publish the
+        // raw fit so the cruiser still sees the cylinder while aiming.
+        if let f = fit, smoothingActive,
            let stem = smoothedCenterWorldXZ,
            let dia = smoothedPreviewDbhCm {
             previewFit = DBHEstimator.PreviewFit(
@@ -344,9 +357,11 @@ public final class DBHScanViewModel: ObservableObject {
 
         previewDbhCm = publishable ? smoothedPreviewDbhCm : nil
         previewTier = publishable ? fit?.tier : nil
-        previewStatusText = publishable
-            ? nil
-            : (stabilityNote ?? fit?.rejectionReason)
+        // The status banner is now reserved for hard rejections only.
+        // Cruiser sees the live digit in the badge whenever a fit
+        // exists, so "Stabilizing…" is no longer useful — the digit
+        // itself shows whether things are settling.
+        previewStatusText = publishable ? nil : fit?.rejectionReason
 
         // Phase 18.4 — auto-capture removed. Field testing showed the
         // hands-free trigger fired before the cruiser was committed to

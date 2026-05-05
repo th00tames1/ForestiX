@@ -120,8 +120,18 @@ public struct DBHScanScreen: View {
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
-        .onAppear { viewModel.onAppear() }
+        .onAppear {
+            // Phase 19 — pull the cruiser's chosen DBH method off
+            // AppSettings every time the screen comes back into view
+            // so flipping the picker in Settings takes effect on the
+            // next return without leaving the scan screen.
+            viewModel.dbhMeasurementMethod = settings.dbhMeasurementMethod
+            viewModel.onAppear()
+        }
         .onDisappear { viewModel.onDisappear() }
+        .onChange(of: settings.dbhMeasurementMethod) { _, m in
+            viewModel.dbhMeasurementMethod = m
+        }
         .onChange(of: viewModel.result?.diameterCm) { _, newValue in
             // Fire the host callback as soon as the VM publishes a result.
             // The host (e.g. AddTreeFlowScreen) decides whether to dismiss
@@ -346,10 +356,12 @@ public struct DBHScanScreen: View {
                 }
             }
         } else if let status = viewModel.previewStatusText {
-            // No publishable value — surface the reason (e.g.,
-            // "Stabilizing…" or the §7.1 rejection text) so the
-            // cruiser knows why and what to do, instead of staring
-            // at an empty slot.
+            // Phase 19 — only the legacy partial-arc method ever sets
+            // `previewStatusText` (the chord method returns nil for
+            // unmeasurable frames instead of producing a red fit). On
+            // the chord path the badge area stays empty until the
+            // chord actually locks, which is exactly what the cruiser
+            // expects from an Arboreal-style HUD.
             Text(status)
                 .font(ForestixType.dataSmall)
                 .foregroundStyle(.white)

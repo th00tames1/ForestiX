@@ -45,6 +45,7 @@ public struct SettingsScreen: View {
             regionSection
             unitsSection
             logRuleSection
+            dbhMethodSection
             calibrationSection
             basemapSection
             backupSection
@@ -159,6 +160,24 @@ public struct SettingsScreen: View {
                 Label("Advanced mode", systemImage: "gear.badge")
             }
             .accessibilityIdentifier("settings.advancedMode")
+        }
+    }
+
+    private var dbhMethodSection: some View {
+        Section(
+            header: Text("DBH measurement"),
+            footer: Text("Chord uses the trunk's projected pixel width × depth ÷ focal length — the same method ForestScanner / Arboreal use, stable on the narrow arcs a hand-held LiDAR phone actually sees. Switch to Partial-arc circle fit for irregular trunks where the silhouette under-reads the diameter.")
+        ) {
+            Picker("Method",
+                   selection: Binding(
+                    get: { settings.dbhMeasurementMethod },
+                    set: { settings.dbhMeasurementMethod = $0 })
+            ) {
+                ForEach(DBHMeasurementMethod.allCases, id: \.self) { m in
+                    Text(m.displayName).tag(m)
+                }
+            }
+            .accessibilityIdentifier("settings.dbhMethod")
         }
     }
 

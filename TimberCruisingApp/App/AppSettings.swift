@@ -11,6 +11,7 @@
 //                             has ticked the usage-policy checkbox.
 
 import Foundation
+import Common
 import Models
 import Sensors
 
@@ -26,6 +27,7 @@ public final class AppSettings: ObservableObject {
         public static let region                  = "tc.region"
         public static let regionPickerSeen        = "tc.regionPickerSeen"
         public static let logRule                 = "tc.logRule"
+        public static let dbhMeasurementMethod    = "tc.dbhMeasurementMethod"
     }
 
     private let defaults: UserDefaults
@@ -122,6 +124,22 @@ public final class AppSettings: ObservableObject {
         }
         set {
             defaults.set(newValue.rawValue, forKey: Keys.logRule)
+            objectWillChange.send()
+        }
+    }
+
+    /// Phase 19 — which DBH algorithm the live preview + burst should
+    /// use. Defaults to `.chord` (the silhouette / pixel-width method
+    /// every peer LiDAR forestry app uses). Cruisers who want the older
+    /// partial-arc circle fit can switch from Settings.
+    public var dbhMeasurementMethod: DBHMeasurementMethod {
+        get {
+            let raw = defaults.string(forKey: Keys.dbhMeasurementMethod)
+                ?? DBHMeasurementMethod.chord.rawValue
+            return DBHMeasurementMethod(rawValue: raw) ?? .chord
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: Keys.dbhMeasurementMethod)
             objectWillChange.send()
         }
     }

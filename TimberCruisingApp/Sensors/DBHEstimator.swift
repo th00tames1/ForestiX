@@ -971,6 +971,333 @@ public enum DBHEstimator {
                    deltaDepth: deltaDepth)?.diameterCm
     }
 
+    // MARK: - Chord / silhouette method (Phase 19 default)
+
+    /// Chord-specific strip walk. Unlike `extractGuideStemStrip`, this
+    /// one is meant to find the *silhouette edges* of the trunk — the
+    /// last LiDAR-valid pixel before the depth either drops to 0
+    /// (no return) or jumps to a far background. The legacy extractor's
+    /// ±deltaDepth window was tuned for circle-fit point selection
+    /// (it deliberately discards the tangent-edge pixels because their
+    /// grazing-angle noise corrupts the Taubin fit). For chord we want
+    /// the opposite: we *need* the tangent edges because that's the
+    /// silhouette width the formula reads.
+    ///
+    /// Walks outward from the seed, stops when the next pixel:
+    ///   • has confidence 0 or depth ≤ 0 (no return / sky / occluder)
+    ///   • is more than `silhouetteJumpM` further/closer than the last
+    ///     accepted neighbour (catches trunk-to-background transitions
+    ///     and split-stem situations).
+    /// The default jump (0.30 m) is large enough to absorb the
+    /// geometric gradient near the tangent of trunks up to 80 cm DBH at
+    /// 1 m, and small enough to catch the typical 0.5 m+ trunk-to-tree
+    /// or trunk-to-foliage step.
+    static func extractChordSilhouetteStrip(
+        frame: ARDepthFrame,
+        axis: GuideAxis,
+        tapAlongAxis: Int,
+        silhouetteJumpM: Float = 0.30
+    ) -> [Int] {
+        let walkLength: Int
+        switch axis {
+        case .row(let y):
+            guard y >= 0, y < frame.height else { return [] }
+            walkLength = frame.width
+        case .col(let x):
+            guard x >= 0, x < frame.width else { return [] }
+            walkLength = frame.height
+        }
+        let clampedTap = max(0, min(walkLength - 1, tapAlongAxis))
+
+        func depthAt(_ idx: Int) -> Float {
+            let (x, y) = pixelCoords(axis: axis, idx: idx)
+            return frame.depth(atX: x, y: y)
+        }
+        func confAt(_ idx: Int) -> UInt8 {
+            let (x, y) = pixelCoords(axis: axis, idx: idx)
+            return frame.confidence(atX: x, y: y)
+        }
+        func valid(_ idx: Int) -> Bool {
+            confAt(idx) >= 1 && depthAt(idx) > 0
+        }
+
+        // Find the seed — closest valid pixel to the tap along the axis.
+        var seed = clampedTap
+        if !valid(seed) {
+            var found = -1
+            for off in 1...10 {
+                let l = clampedTap - off
+                if l >= 0, valid(l) { found = l; break }
+                let r = clampedTap + off
+                if r < walkLength, valid(r) { found = r; break }
+            }
+            if found < 0 { return [] }
+            seed = found
+        }
+
+        var indices: [Int] = [seed]
+        var lastDepth = depthAt(seed)
+
+        // Walk left.
+        var i = seed - 1
+        while i >= 0, valid(i) {
+            let d = depthAt(i)
+            if abs(d - lastDepth) > silhouetteJumpM { break }
+            indices.append(i)
+            lastDepth = d
+            i -= 1
+        }
+
+        // Walk right (reset the running anchor at the seed).
+        lastDepth = depthAt(seed)
+        i = seed + 1
+        while i < walkLength, valid(i) {
+            let d = depthAt(i)
+            if abs(d - lastDepth) > silhouetteJumpM { break }
+            indices.append(i)
+            lastDepth = d
+            i += 1
+        }
+
+        indices.sort()
+        return indices
+    }
+
+    /// Single-frame DBH preview using the chord / silhouette identity:
+    ///
+    ///     diameter_m ≈ pixel_width × tap_depth_m / fx
+    ///
+    /// where `pixel_width` is the count of contiguous trunk pixels along
+    /// the guide axis at the cruiser's chosen row. We extract that strip
+    /// at the guide row plus a stack of neighbouring rows (± 10 by
+    /// default) and take the **median** width across rows — branches /
+    /// leaves / bark cracks contaminate at most one or two rows, never
+    /// the median of 21. The result is a single scalar that no circle
+    /// fit can amplify; the only failure modes are "no trunk pixels at
+    /// all" and "out-of-range diameter", both of which we detect with a
+    /// straightforward sanity gate.
+    ///
+    /// Why this replaces the partial-arc Taubin fit as the default:
+    /// every peer LiDAR forestry app (Arboreal, ForestScanner /
+    /// YOLACT++, Single-Shot SAM) uses essentially this method.
+    /// Geometrically the chord is what LiDAR can actually see — the
+    /// Taubin radius depends on observing curvature across an arc, but
+    /// a hand-held phone at 1.5 m only ever sees ≈ 60–90° of a small
+    /// trunk, which is geometrically too narrow to constrain the radius
+    /// (the centre is well-fit, the radius isn't). That's why the
+    /// previous DBH digit jittered ± 5 cm even when the cruiser stood
+    /// still, while the distance-to-trunk number stayed stable.
+    public static func chordPreviewFit(
+        frame: ARDepthFrame,
+        tapPixel: SIMD2<Double>,
+        guideAxis: GuideAxis,
+        rowSpan: Int = 10,
+        silhouetteJumpM: Float = 0.30,
+        discontinuityThresholdM: Float = 0.30
+    ) -> PreviewFit? {
+        _ = discontinuityThresholdM  // chord uses silhouetteJumpM, kept for sig parity
+        // Guard 1 — tap depth must be in the LiDAR-usable range. Phase
+        // 19 widened this from 0.5–3.0 m to 0.3–5.0 m to match the
+        // sensor's actual envelope; chord widths stay reliable across
+        // that whole band because a wider field-of-view gives more
+        // pixels to median over.
+        guard let dTap = medianDepth(around: tapPixel, frame: frame, radius: 2)
+        else { return nil }
+        guard (0.3...5.0).contains(dTap) else { return nil }
+
+        let fx = Double(frame.intrinsics[0, 0])
+        guard fx > 0 else { return nil }
+
+        let centerAlong = tapAlongAxis(tapPixel, axis: guideAxis)
+
+        // Walk the guide row plus a stack of neighbour rows. Keep the
+        // ones that produced a usable strip (≥ 5 pixels wide).
+        var widths: [Int] = []
+        var firstUsableExtent: (left: Int, right: Int)?
+        for offset in -rowSpan...rowSpan {
+            let neighbourAxis: GuideAxis
+            switch guideAxis {
+            case .row(let y): neighbourAxis = .row(y: y + offset)
+            case .col(let x): neighbourAxis = .col(x: x + offset)
+            }
+            // Silhouette walk — captures tangent-edge pixels the legacy
+            // extractor would discard, because the chord identity reads
+            // off the *full projected width* not the inner stem-strip.
+            let strip = extractChordSilhouetteStrip(
+                frame: frame,
+                axis: neighbourAxis,
+                tapAlongAxis: centerAlong,
+                silhouetteJumpM: silhouetteJumpM)
+            guard let l = strip.first, let r = strip.last, r > l else { continue }
+            let w = r - l + 1
+            if w < 5 { continue }
+            widths.append(w)
+            if firstUsableExtent == nil, offset == 0 {
+                firstUsableExtent = (l, r)
+            } else if firstUsableExtent == nil {
+                firstUsableExtent = (l, r)
+            }
+        }
+
+        // Need at least a handful of rows agreeing on the width — one
+        // row alone could be a branch crossing the guide line.
+        guard widths.count >= 5 else { return nil }
+        guard let extent = firstUsableExtent else { return nil }
+
+        // Sort + median. Take the middle row's width.
+        let sortedWidths = widths.sorted()
+        let medianWidth = sortedWidths[sortedWidths.count / 2]
+
+        // Chord diameter formula. The naive d = w·z/fx underestimates
+        // because the surface depth `dTap` is closer than the cylinder
+        // axis (by one radius). The exact pinhole formula:
+        //
+        //   diameter = pixel_width · (axis_distance) / fx
+        //
+        // and axis_distance = surface_depth + radius = dTap + d/2, so
+        //
+        //   d · (fx − w/2) = w · dTap   →   d = w·dTap / (fx − w/2)
+        //
+        // For typical trunks (w ≪ fx) the correction is small (≤ 5 %),
+        // but it's free precision and lines the synthetic-cylinder
+        // tests up with the true diameter to within a percent.
+        let halfWidth = Double(medianWidth) / 2.0
+        guard fx - halfWidth > 1.0 else { return nil }
+        let diameterM = Double(medianWidth) * Double(dTap) / (fx - halfWidth)
+        let diameterCm = diameterM * 100.0
+        guard (2.5...100.0).contains(diameterCm) else { return nil }
+
+        // Confidence: width consistency. Tight CoV ⇒ green; otherwise
+        // yellow (renders as a silent / "gray" chip in the HUD per
+        // Phase 19's "green or quiet" rule).
+        let mean = Double(widths.reduce(0, +)) / Double(widths.count)
+        var sumSq = 0.0
+        for w in widths {
+            let d = Double(w) - mean
+            sumSq += d * d
+        }
+        let std = (sumSq / Double(widths.count)).squareRoot()
+        let cov = mean > 0 ? std / mean : 1.0
+        let tier: ConfidenceTier = cov <= 0.10 ? .green : .yellow
+
+        // Centre for the cylinder overlay + distance HUD: back-project
+        // the guide-row strip's midpoint to world XZ, then push one
+        // radius further along the surface ray (the cylinder's axis
+        // sits one radius behind the visible front arc).
+        let midIdx = (extent.left + extent.right) / 2
+        let (mpx, mpy) = pixelCoords(axis: guideAxis, idx: midIdx)
+        let pixDepth = Double(frame.depth(atX: mpx, y: mpy))
+        let depthForBackProject = pixDepth > 0 ? pixDepth : Double(dTap)
+        let surfaceXZ = BackProjection.worldXZ(
+            x: Double(mpx), y: Double(mpy),
+            depth: depthForBackProject,
+            intrinsics: frame.intrinsics,
+            cameraPoseWorld: frame.cameraPoseWorld)
+        let cam = frame.cameraPoseWorld.columns.3
+        let camXZ = SIMD2<Double>(Double(cam.x), Double(cam.z))
+        let toSurface = surfaceXZ - camXZ
+        let dist = (toSurface.x * toSurface.x + toSurface.y * toSurface.y).squareRoot()
+        let unit: SIMD2<Double> = dist > 1e-6
+            ? SIMD2(toSurface.x / dist, toSurface.y / dist)
+            : SIMD2(0, 1)
+        let radiusM = diameterM / 2.0
+        let center = surfaceXZ + SIMD2(unit.x * radiusM, unit.y * radiusM)
+
+        // Strip-edge fractions for the on-screen chord overlay.
+        let frameExtent: Double
+        switch guideAxis {
+        case .row: frameExtent = Double(frame.width)
+        case .col: frameExtent = Double(frame.height)
+        }
+        let leftFrac = frameExtent > 0 ? Double(extent.left) / frameExtent : 0
+        let rightFrac = frameExtent > 0 ? Double(extent.right) / frameExtent : 1
+
+        return PreviewFit(
+            diameterCm: diameterCm,
+            centerWorldXZ: center,
+            radiusM: radiusM,
+            stripLeftFraction: leftFrac,
+            stripRightFraction: rightFrac,
+            tier: tier,
+            inlierCount: medianWidth,
+            arcDeg: 0,
+            rmseMm: 0,
+            rejectionReason: nil,
+            effectiveTapDepth: Double(dTap))
+    }
+
+    /// Burst-mode chord measurement. Runs `chordPreviewFit` against
+    /// every frame in the burst, takes the median diameter (so a single
+    /// foreshortened or motion-blurred frame can't drag the result),
+    /// and applies the project's cylinder calibration on the way out.
+    /// Confidence is `.green` when the per-frame chord widths are tight,
+    /// `.yellow` when they spread, `.red` only when too few frames
+    /// produced a chord at all.
+    public static func chordEstimate(input: DBHScanInput) -> DBHResult? {
+        guard input.frames.count >= 5 else { return nil }
+
+        var diameters: [Double] = []
+        var centersX: [Double] = []
+        var centersZ: [Double] = []
+        var widths: [Int] = []
+        for frame in input.frames {
+            guard let fit = chordPreviewFit(
+                frame: frame,
+                tapPixel: input.tapPixel,
+                guideAxis: input.guideAxis,
+                discontinuityThresholdM: input.projectCalibration.depthDiscontinuityM)
+            else { continue }
+            diameters.append(fit.diameterCm)
+            centersX.append(fit.centerWorldXZ.x)
+            centersZ.append(fit.centerWorldXZ.y)
+            widths.append(fit.inlierCount)
+        }
+
+        guard diameters.count >= 3 else {
+            return redResult(
+                reason: "Not enough usable frames; hold steadier or move closer",
+                method: .lidarChordSilhouette,
+                nInliers: diameters.count)
+        }
+
+        // Median diameter — the chord version of the burst's "consensus"
+        // value. CoV across frames maps to the confidence tier.
+        let sortedDia = diameters.sorted()
+        let medianRawCm = sortedDia[sortedDia.count / 2]
+        let mean = sortedDia.reduce(0, +) / Double(sortedDia.count)
+        let lo = sortedDia.first ?? mean
+        let hi = sortedDia.last ?? mean
+        let cov = mean > 0 ? (hi - lo) / mean : 1
+        let tier: ConfidenceTier = cov <= 0.15 ? .green : .yellow
+
+        // Apply cylinder calibration last so the published cm value
+        // ends up identical to what a trained Cylinder calibration on
+        // a chord-method burst would expect.
+        let cal = input.projectCalibration
+        let dbhCm = Double(cal.dbhCorrectionAlpha)
+            + Double(cal.dbhCorrectionBeta) * medianRawCm
+
+        // Median centre across frames for the persisted XZ — robust to
+        // a frame or two with bad depth.
+        let sortedCx = centersX.sorted()
+        let sortedCz = centersZ.sorted()
+        let medCenter = SIMD2<Float>(
+            Float(sortedCx[sortedCx.count / 2]),
+            Float(sortedCz[sortedCz.count / 2]))
+
+        return DBHResult(
+            diameterCm: Float(dbhCm),
+            centerXZ: medCenter,
+            arcCoverageDeg: 0,
+            rmseMm: 0,
+            sigmaRmm: 0,
+            nInliers: widths.reduce(0, +),
+            confidence: tier,
+            method: .lidarChordSilhouette,
+            rawPointsPath: nil,
+            rejectionReason: nil)
+    }
+
     // MARK: - Rejection formatting
 
     private static func firstFailingRejectReason(_ checks: [Check]) -> String? {

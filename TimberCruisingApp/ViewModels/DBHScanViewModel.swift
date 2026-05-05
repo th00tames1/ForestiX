@@ -71,6 +71,13 @@ public final class DBHScanViewModel: ObservableObject {
     public let isLiDARSupported: Bool
     public let rawPointsWriter: (@Sendable ([SIMD2<Double>]) -> String?)?
 
+    /// Phase 19 — which DBH algorithm the live preview + burst should
+    /// run. Mutated from the screen on every appear / settings change
+    /// so a cruiser flipping methods in Settings sees the new mode
+    /// without leaving the scan screen. Defaults to `.chord` (the new
+    /// silhouette / pixel-width method).
+    @Published public var dbhMeasurementMethod: DBHMeasurementMethod = .chord
+
     // MARK: - Burst state
 
     private let burstSize: Int = 12
@@ -141,11 +148,13 @@ public final class DBHScanViewModel: ObservableObject {
     public init(
         calibration: ProjectCalibration,
         session: ARKitSessionManager? = nil,
-        rawPointsWriter: (@Sendable ([SIMD2<Double>]) -> String?)? = nil
+        rawPointsWriter: (@Sendable ([SIMD2<Double>]) -> String?)? = nil,
+        method: DBHMeasurementMethod = .chord
     ) {
         self.session = session ?? ARKitSessionManager()
         self.calibration = calibration
         self.rawPointsWriter = rawPointsWriter
+        self.dbhMeasurementMethod = method
         self.isLiDARSupported = ARKitSessionManager.supportsLiDAR
         if !isLiDARSupported {
             unsupportedBanner = "LiDAR not supported on this device. " +
@@ -241,18 +250,31 @@ public final class DBHScanViewModel: ObservableObject {
         lastPreviewUpdate = now
 
         let axis = Self.currentGuideAxis(width: frame.width, height: frame.height)
-        let fit = DBHEstimator.previewFit(
-            frame: frame,
-            tapPixel: SIMD2(Double(cx), Double(cy)),
-            guideAxis: axis,
-            discontinuityThresholdM: calibration.depthDiscontinuityM,
-            tapDepthHint: lastTapDepthHint)
-        // Phase 18.1: feed the just-used effective tap depth back as the
-        // next frame's hint. When the strip extraction failed entirely
-        // we drop the hint so the next attempt can re-acquire from raw
-        // depth rather than dragging in a stale anchor from a vanished
-        // trunk.
-        lastTapDepthHint = fit?.effectiveTapDepth
+        // Phase 19 — dispatch on the user's chosen DBH method. The chord
+        // method is stateless frame-to-frame (no depth-window anchoring
+        // needed: median over ± 10 rows already absorbs intra-frame
+        // jitter and the multi-frame median in the burst handles the
+        // rest). The legacy partial-arc path keeps its tap-depth hint.
+        let fit: DBHEstimator.PreviewFit?
+        switch dbhMeasurementMethod {
+        case .chord:
+            fit = DBHEstimator.chordPreviewFit(
+                frame: frame,
+                tapPixel: SIMD2(Double(cx), Double(cy)),
+                guideAxis: axis,
+                discontinuityThresholdM: calibration.depthDiscontinuityM)
+            lastTapDepthHint = nil
+        case .partialArcCircleFit:
+            fit = DBHEstimator.previewFit(
+                frame: frame,
+                tapPixel: SIMD2(Double(cx), Double(cy)),
+                guideAxis: axis,
+                discontinuityThresholdM: calibration.depthDiscontinuityM,
+                tapDepthHint: lastTapDepthHint)
+            // Phase 18.1: feed the just-used effective tap depth back
+            // as the next frame's hint.
+            lastTapDepthHint = fit?.effectiveTapDepth
+        }
 
         // Stability + tier gate (Phase 16.2). Hysteresis on the CoV
         // window so a borderline frame doesn't flip the gate, and a
@@ -483,7 +505,13 @@ public final class DBHScanViewModel: ObservableObject {
             guideAxis: axis,
             projectCalibration: calibration,
             rawPointsWriter: rawPointsWriter)
-        let outcome = DBHEstimator.estimate(input: input)
+        // Phase 19 dispatch — chord method on the chord burst path,
+        // partial-arc method on the original §7.1 pipeline.
+        let outcome: DBHResult?
+        switch dbhMeasurementMethod {
+        case .chord:               outcome = DBHEstimator.chordEstimate(input: input)
+        case .partialArcCircleFit: outcome = DBHEstimator.estimate(input: input)
+        }
         result = outcome
         if let r = outcome {
             state = r.confidence == .red ? .rejected : .fitted

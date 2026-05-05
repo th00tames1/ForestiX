@@ -17,6 +17,10 @@ public enum DBHMethod: String, Codable, Sendable {
     case lidarPartialArcSingleView
     case lidarPartialArcDualView
     case lidarIrregular
+    /// Phase 19 — pixel-width chord / silhouette method. Default LiDAR
+    /// path. Records that the diameter came from the projected trunk
+    /// width × depth / fx identity rather than a circle fit.
+    case lidarChordSilhouette
     case manualCaliper
     case manualVisual
 }

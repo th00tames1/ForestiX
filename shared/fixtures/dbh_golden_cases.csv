@@ -1,0 +1,9 @@
+# ForestiX shared DBH golden cases v1
+# id,radius_m,axis_distance_m,focal_px,width,height,expected_dbh_cm,tolerance_cm
+id,radius_m,axis_distance_m,focal_px,width,height,expected_dbh_cm,tolerance_cm
+sapling_10cm_1m,0.05,1.0,260,320,240,10.0,0.8
+small_20cm_1_5m,0.10,1.5,260,320,240,20.0,1.2
+medium_40cm_1_5m,0.20,1.5,260,320,240,40.0,2.4
+large_60cm_2m,0.30,2.0,260,320,240,60.0,3.6
+large_80cm_2_5m,0.40,2.5,260,320,240,80.0,4.8
+close_large_60cm_1_5m,0.30,1.5,260,320,240,60.0,4.2

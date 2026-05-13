@@ -79,6 +79,32 @@ public enum TrackingStatus: Sendable, Equatable {
     case normal
 }
 
+// MARK: - Depth-map intrinsics
+
+internal enum DepthIntrinsicsScaler {
+    /// ARKit camera intrinsics are reported in captured-image pixels, while
+    /// sceneDepth is a lower-resolution map. DBH reads pixel width directly
+    /// from sceneDepth, so the focal length and principal point must live in
+    /// the same pixel coordinate system or diameters under-read by the image
+    /// downsample factor.
+    static func scaled(
+        cameraIntrinsics: simd_float3x3,
+        cameraWidth: Int,
+        cameraHeight: Int,
+        depthWidth: Int,
+        depthHeight: Int
+    ) -> simd_float3x3 {
+        let sx = cameraWidth > 0 ? Float(depthWidth) / Float(cameraWidth) : 1
+        let sy = cameraHeight > 0 ? Float(depthHeight) / Float(cameraHeight) : 1
+        var out = cameraIntrinsics
+        out[0, 0] *= sx
+        out[1, 1] *= sy
+        out[2, 0] *= sx
+        out[2, 1] *= sy
+        return out
+    }
+}
+
 // MARK: - Session manager
 
 #if canImport(ARKit) && os(iOS)
@@ -206,7 +232,13 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
             height: height,
             depth: depth,
             confidence: confidence,
-            intrinsics: frame.camera.intrinsics,
+            intrinsics: DepthIntrinsicsScaler.scaled(
+                cameraIntrinsics: frame.camera.intrinsics,
+                cameraWidth: Int(frame.camera.imageResolution.width.rounded()),
+                cameraHeight: Int(frame.camera.imageResolution.height.rounded()),
+                depthWidth: width,
+                depthHeight: height),
+
             cameraPoseWorld: frame.camera.transform,
             timestamp: frame.timestamp
         )

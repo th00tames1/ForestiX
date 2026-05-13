@@ -1,18 +1,20 @@
-# Swift Package Manager
-.build/
-.swiftpm/
-Package.resolved
-
-# Xcode user state
-**/xcuserdata/
-**/*.xcuserstate
-**/*.xcuserdatad/
-
-# macOS
+# macOS / Xcode
 .DS_Store
+ios/.build/
+ios/DerivedData/
+ios/**/*.xcuserstate
+ios/**/xcuserdata/
+ios/.swiftpm/
 
-# Test artifacts
-*.xcresult
+# Android / Gradle
+android/.gradle/
+android/.gradle-user/
+android/.android-user/
+android/.idea/
+android/.kotlin/
+android/**/build/
+android/local.properties
 
-# Claude Code worktrees + config
-.claude/
+# Local tooling
+.env
+*_local.*

@@ -1063,11 +1063,29 @@ public enum DBHEstimator {
         return indices
     }
 
-    /// Single-frame DBH preview using the chord / silhouette identity:
+    static func focalLength(for axis: GuideAxis, intrinsics: simd_float3x3) -> Double {
+        switch axis {
+        case .row: return Double(intrinsics[0, 0])
+        case .col: return Double(intrinsics[1, 1])
+        }
+    }
+
+    static func cylinderDiameterFromChord(
+        pixelWidth: Double,
+        surfaceDepthM: Double,
+        focalPx: Double
+    ) -> Double? {
+        guard pixelWidth > 0, surfaceDepthM > 0, focalPx > 0 else { return nil }
+        let halfWidth = pixelWidth / 2.0
+        let tangentRoot = (focalPx * focalPx + halfWidth * halfWidth).squareRoot()
+        return 2.0 * surfaceDepthM * halfWidth * (halfWidth + tangentRoot) / (focalPx * focalPx)
+    }
+
+    /// Single-frame DBH preview using the chord / silhouette identity.
+    /// It solves the pinhole tangent geometry from pixel width, focal
+    /// length, and the visible front-surface depth.
     ///
-    ///     diameter_m ≈ pixel_width × tap_depth_m / fx
-    ///
-    /// where `pixel_width` is the count of contiguous trunk pixels along
+    /// Here `pixel_width` is the count of contiguous trunk pixels along
     /// the guide axis at the cruiser's chosen row. We extract that strip
     /// at the guide row plus a stack of neighbouring rows (± 10 by
     /// default) and take the **median** width across rows — branches /
@@ -1105,8 +1123,8 @@ public enum DBHEstimator {
         else { return nil }
         guard (0.3...5.0).contains(dTap) else { return nil }
 
-        let fx = Double(frame.intrinsics[0, 0])
-        guard fx > 0 else { return nil }
+        let focal = focalLength(for: guideAxis, intrinsics: frame.intrinsics)
+        guard focal > 0 else { return nil }
 
         let centerAlong = tapAlongAxis(tapPixel, axis: guideAxis)
 
@@ -1148,24 +1166,22 @@ public enum DBHEstimator {
         let sortedWidths = widths.sorted()
         let medianWidth = sortedWidths[sortedWidths.count / 2]
 
-        // Chord diameter formula. The naive d = w·z/fx underestimates
-        // because the surface depth `dTap` is closer than the cylinder
-        // axis (by one radius). The exact pinhole formula:
+        // Chord diameter formula. The naive d = w*z/f underestimates
+        // because the tap depth is the visible front surface, not the
+        // cylinder axis. Solve the pinhole tangent geometry directly:
+        // h = w/2, S = front-surface depth, f = focal length.
         //
-        //   diameter = pixel_width · (axis_distance) / fx
+        //   D = 2*S*h*(h + sqrt(f*f + h*h)) / (f*f)
         //
-        // and axis_distance = surface_depth + radius = dTap + d/2, so
-        //
-        //   d · (fx − w/2) = w · dTap   →   d = w·dTap / (fx − w/2)
-        //
-        // For typical trunks (w ≪ fx) the correction is small (≤ 5 %),
-        // but it's free precision and lines the synthetic-cylinder
-        // tests up with the true diameter to within a percent.
-        let halfWidth = Double(medianWidth) / 2.0
-        guard fx - halfWidth > 1.0 else { return nil }
-        let diameterM = Double(medianWidth) * Double(dTap) / (fx - halfWidth)
+        // This stays accurate for large, close stems where the older
+        // small-angle rearrangement picked up measurable bias.
+        guard let diameterM = cylinderDiameterFromChord(
+            pixelWidth: Double(medianWidth),
+            surfaceDepthM: Double(dTap),
+            focalPx: focal)
+        else { return nil }
         let diameterCm = diameterM * 100.0
-        guard (2.5...100.0).contains(diameterCm) else { return nil }
+        guard (2.5...200.0).contains(diameterCm) else { return nil }
 
         // Confidence: width consistency. Tight CoV ⇒ green; otherwise
         // yellow (renders as a silent / "gray" chip in the HUD per

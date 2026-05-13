@@ -12,6 +12,7 @@
 // few-percent envelope.
 
 import XCTest
+import Foundation
 import simd
 import Common
 import Models
@@ -55,6 +56,93 @@ final class DBHChordEstimatorTests: XCTestCase {
         }
     }
 
+    func testDepthIntrinsicsScalerMapsCameraPixelsToDepthPixels() {
+        let cameraK = simd_float3x3(
+            SIMD3<Float>(2400, 0, 0),
+            SIMD3<Float>(0, 2400, 0),
+            SIMD3<Float>(960, 720, 1))
+        let scaled = DepthIntrinsicsScaler.scaled(
+            cameraIntrinsics: cameraK,
+            cameraWidth: 1920,
+            cameraHeight: 1440,
+            depthWidth: 160,
+            depthHeight: 120)
+
+        XCTAssertEqual(scaled[0, 0], 200, accuracy: 0.001)
+        XCTAssertEqual(scaled[1, 1], 200, accuracy: 0.001)
+        XCTAssertEqual(scaled[2, 0], 80, accuracy: 0.001)
+        XCTAssertEqual(scaled[2, 1], 60, accuracy: 0.001)
+    }
+
+    func testChordPreviewUsesAxisSpecificFocalLength() {
+        let width = 160
+        let height = 120
+        let centerX = width / 2
+        let centerY = height / 2
+        let depthM = 2.0
+        let diameterM = 0.50
+        let fx = 400.0
+        let fy = 200.0
+        let pixelWidth = Int((diameterM * fy / (depthM + diameterM / 2.0)).rounded())
+        let top = centerY - pixelWidth / 2
+        let bottom = centerY + pixelWidth / 2
+
+        let K = simd_float3x3(
+            SIMD3<Float>(Float(fx), 0, 0),
+            SIMD3<Float>(0, Float(fy), 0),
+            SIMD3<Float>(Float(centerX), Float(centerY), 1))
+        var depth = [Float](repeating: 0, count: width * height)
+        var conf = [UInt8](repeating: 0, count: width * height)
+        for y in max(0, top)...min(height - 1, bottom) {
+            for x in (centerX - 12)...(centerX + 12) {
+                depth[y * width + x] = Float(depthM)
+                conf[y * width + x] = 2
+            }
+        }
+        let frame = ARDepthFrame(
+            width: width,
+            height: height,
+            depth: depth,
+            confidence: conf,
+            intrinsics: K,
+            cameraPoseWorld: matrix_identity_float4x4,
+            timestamp: 0)
+
+        let fit = DBHEstimator.chordPreviewFit(
+            frame: frame,
+            tapPixel: SIMD2(Double(centerX), Double(centerY)),
+            guideAxis: .col(x: centerX))
+
+        XCTAssertNotNil(fit)
+        XCTAssertEqual(fit?.diameterCm ?? 0, 50.0, accuracy: 3.0)
+    }
+
+    func testSharedGoldenDbhCasesMatchChordEstimator() throws {
+        let cases = try loadSharedDbhCases()
+        XCTAssertFalse(cases.isEmpty, "Shared DBH fixture must contain cases")
+
+        for c in cases {
+            let frame = makeCylinderFrame(
+                rTrue: c.radiusM,
+                cameraDistance: c.axisDistanceM,
+                noise: 0,
+                seed: 42,
+                width: c.width,
+                height: c.height,
+                fx: c.focalPx)
+            let fit = DBHEstimator.chordPreviewFit(
+                frame: frame,
+                tapPixel: SIMD2(Double(frame.width) / 2,
+                                Double(frame.height) / 2),
+                guideAxis: .row(y: frame.height / 2))
+
+            XCTAssertNotNil(fit, "Shared DBH case \(c.id) did not fit")
+            XCTAssertEqual(fit?.diameterCm ?? 0,
+                           c.expectedDbhCm,
+                           accuracy: c.toleranceCm,
+                           "Shared DBH case \(c.id) diverged")
+        }
+    }
     // MARK: - Done Criterion 2 — burst returns a record-able result
 
     func testChordBurstMedianIsStable() {
@@ -143,6 +231,79 @@ final class DBHChordEstimatorTests: XCTestCase {
             "Calibrated chord DBH must equal alpha + beta · raw DBH")
     }
 
+    private struct SharedDbhCase {
+        let id: String
+        let radiusM: Double
+        let axisDistanceM: Double
+        let focalPx: Double
+        let width: Int
+        let height: Int
+        let expectedDbhCm: Double
+        let toleranceCm: Double
+    }
+
+    private func loadSharedDbhCases() throws -> [SharedDbhCase] {
+        let url = try sharedDbhFixtureURL()
+        let text = try String(contentsOf: url, encoding: .utf8)
+        return try text.split(whereSeparator: { $0.isNewline }).compactMap { rawLine in
+            let line = String(rawLine).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty, !line.hasPrefix("#"), !line.hasPrefix("id,") else {
+                return nil
+            }
+            let parts = line.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+            guard parts.count == 8 else {
+                throw NSError(domain: "ForestiXSharedFixture", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "Invalid DBH fixture row: \(line)"])
+            }
+            guard let radius = Double(parts[1]),
+                  let distance = Double(parts[2]),
+                  let focal = Double(parts[3]),
+                  let width = Int(parts[4]),
+                  let height = Int(parts[5]),
+                  let expected = Double(parts[6]),
+                  let tolerance = Double(parts[7])
+            else {
+                throw NSError(domain: "ForestiXSharedFixture", code: 2,
+                              userInfo: [NSLocalizedDescriptionKey: "Invalid DBH fixture number: \(line)"])
+            }
+            return SharedDbhCase(id: parts[0], radiusM: radius,
+                                 axisDistanceM: distance, focalPx: focal,
+                                 width: width, height: height,
+                                 expectedDbhCm: expected, toleranceCm: tolerance)
+        }
+    }
+
+    private func sharedDbhFixtureURL() throws -> URL {
+        let relative = ["fixtures", "dbh_golden_cases.csv"]
+        var candidates: [URL] = []
+        if let env = ProcessInfo.processInfo.environment["FORESTIX_SHARED_DIR"], !env.isEmpty {
+            candidates.append(relative.reduce(URL(fileURLWithPath: env)) { $0.appendingPathComponent($1) })
+        }
+        let testFile = URL(fileURLWithPath: #filePath)
+        let iosRepo = testFile
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        candidates.append(iosRepo.deletingLastPathComponent()
+            .appendingPathComponent("shared")
+            .appendingPathComponent(relative[0])
+            .appendingPathComponent(relative[1]))
+        candidates.append(URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("../shared")
+            .appendingPathComponent(relative[0])
+            .appendingPathComponent(relative[1]))
+        candidates.append(URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("shared")
+            .appendingPathComponent(relative[0])
+            .appendingPathComponent(relative[1]))
+
+        for url in candidates where FileManager.default.fileExists(atPath: url.path) {
+            return url
+        }
+        throw NSError(domain: "ForestiXSharedFixture", code: 3,
+                      userInfo: [NSLocalizedDescriptionKey: "Shared DBH fixture not found. Set FORESTIX_SHARED_DIR or keep shared/ in the monorepo root."])
+    }
+
     // MARK: - Synthetic multi-row cylinder fixture
 
     /// Renders a vertical cylinder centered on the camera's +Z axis at
@@ -154,11 +315,11 @@ final class DBHChordEstimatorTests: XCTestCase {
         rTrue: Double,
         cameraDistance: Double,
         noise: Double,
-        seed: UInt64
+        seed: UInt64,
+        width: Int = 256,
+        height: Int = 192,
+        fx: Double = 210
     ) -> ARDepthFrame {
-        let width = 256
-        let height = 192
-        let fx: Double = 210
         let cxK: Double = Double(width) / 2
         let cyK: Double = Double(height) / 2
         let K = simd_float3x3(

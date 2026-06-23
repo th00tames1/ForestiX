@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Compose owns all styling; this is just the launch/Activity shell.
+         Edge-to-edge so the AR camera fills the screen like the iOS
+         `.ignoresSafeArea()` camera views. -->
+    <style name="Theme.Forestix" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>

@@ -1,0 +1,223 @@
+// Distance measurement — Android mirror of the iOS redesign. Two modes
+// (Live, Two-point) toggled by a pill under the "+" capture button. The "+"
+// captures against the centre crosshair: in Live it logs the device→target
+// distance, in Two-point it drops point A then B. Points + line are a crisp
+// 2D overlay (no oversized 3D spheres). LiDAR/AR is a bottom-right button;
+// the readout is a centred half-width panel.
+
+package com.hcjeong.forestix.ui.screens
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.navigation.NavController
+import com.hcjeong.forestix.LocalAppEnvironment
+import com.hcjeong.forestix.ar.ArController
+import com.hcjeong.forestix.ar.ArCameraView
+import com.hcjeong.forestix.ar.Vec3
+import com.hcjeong.forestix.ar.distance
+import com.hcjeong.forestix.data.MeasureKind
+import com.hcjeong.forestix.data.QuickMeasureEntry
+import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixSpace
+import java.util.Locale
+import java.util.UUID
+
+private enum class DistMode { LIVE, TWO_POINT }
+
+@Composable
+fun DistanceMeasureScreen(nav: NavController) {
+    val env = LocalAppEnvironment.current
+    val controller = remember { ArController() }
+    val density = LocalDensity.current
+
+    var mode by remember { mutableStateOf(DistMode.LIVE) }
+    var liveDistance by remember { mutableStateOf<Double?>(null) }
+    var pointA by remember { mutableStateOf<Vec3?>(null) }
+    var pointB by remember { mutableStateOf<Vec3?>(null) }
+    var screenA by remember { mutableStateOf<Offset?>(null) }
+    var screenB by remember { mutableStateOf<Offset?>(null) }
+    var failure by remember { mutableStateOf<String?>(null) }
+    var viewSize by remember { mutableStateOf(IntSize.Zero) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(50)
+            controller.preferDepth = true
+            liveDistance = controller.cameraToCenterDistance()
+        }
+    }
+
+    val twoPointDistance: Double? = run {
+        val a = pointA; val b = pointB
+        if (a != null && b != null) distance(a, b).toDouble() else null
+    }
+
+    fun hitForSource(): Vec3? {
+        controller.preferDepth = true
+        return controller.screenCenterHit() ?: controller.forwardPointAtHorizontalDistance(3f)
+    }
+
+    fun resetTwoPoint() { pointA = null; pointB = null; screenA = null; screenB = null; failure = null }
+
+    fun placeAtCenter() {
+        val hit = hitForSource()
+        if (hit == null) {
+            failure = "No surface in view. Move slightly so the camera picks up texture, then tap again."
+            return
+        }
+        failure = null
+        val centre = Offset(viewSize.width / 2f, viewSize.height / 2f)
+        when {
+            pointA == null -> { pointA = hit; screenA = centre }
+            pointB == null -> { pointB = hit; screenB = centre }
+            else -> { pointA = hit; screenA = centre; pointB = null; screenB = null }
+        }
+    }
+
+    fun save(d: Double, kind: String) {
+        val src = if (controller.supportsDepth) "depth" else "ar"
+        env.history.append(distanceEntry(d, "$kind.$src", env.history.activePlotID.value))
+    }
+
+    fun capture() {
+        when (mode) {
+            DistMode.LIVE -> { val d = liveDistance ?: return; save(d, "live") }
+            DistMode.TWO_POINT -> placeAtCenter()
+        }
+    }
+
+    fun screenPoint(world: Vec3?, fallback: Offset?): Offset? {
+        if (world == null) return fallback
+        val p = controller.projectToScreen(world) ?: return fallback
+        return Offset(p.first, p.second)
+    }
+
+    Box(Modifier.fillMaxSize().onSizeChanged { viewSize = it }) {
+        // No 3D markers — the points + line are a 2D overlay below.
+        ArCameraView(controller, emptyList(), preferDepth = true, modifier = Modifier.fillMaxSize())
+
+        MeasureBackButton { nav.popBackStack() }
+
+        CenterCrosshair(Modifier.align(Alignment.Center))
+
+        if (mode == DistMode.TWO_POINT) {
+            val a = screenPoint(pointA, screenA)
+            val b = screenPoint(pointB, screenB)
+            if (a != null && b != null) {
+                Box(Modifier.fillMaxSize().drawBehind {
+                    drawLine(Color.White, a, b, strokeWidth = with(density) { 7.dp.toPx() }, cap = StrokeCap.Round)
+                    drawLine(Color.Yellow, a, b, strokeWidth = with(density) { 3.5.dp.toPx() }, cap = StrokeCap.Round)
+                })
+            }
+            a?.let { PointDot(it, density) }
+            b?.let { PointDot(it, density) }
+            if (a != null && b != null && twoPointDistance != null) {
+                DistancePill(formatDistance(twoPointDistance), Offset((a.x + b.x) / 2f, (a.y + b.y) / 2f), density)
+            }
+        }
+
+        // Right-centre + button with Live/Two-point pill beneath.
+        MeasureControlColumn(
+            onCapture = { capture() },
+            extra = {
+                MeasurePill(if (mode == DistMode.LIVE) "Live" else "2-Point") {
+                    mode = if (mode == DistMode.LIVE) DistMode.TWO_POINT else DistMode.LIVE
+                    resetTwoPoint()
+                }
+            },
+        )
+
+        // Bottom-centre readout.
+        MeasureStatusPanel {
+            failure?.let { CenteredText(it, dim = true) }
+            CenteredText(if (mode == DistMode.LIVE) "DEVICE \u2192 TARGET" else "POINT A \u2192 POINT B", dim = true)
+            val value = if (mode == DistMode.LIVE) liveDistance else twoPointDistance
+            CenteredText(value?.let { formatDistance(it) } ?: "\u2014", large = true)
+            if (mode == DistMode.TWO_POINT) {
+                CenteredText(twoPointHint(pointA, pointB), dim = true)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(ForestixSpace.sm)) {
+                    OutlinedButton(onClick = { resetTwoPoint() }, modifier = Modifier.weight(1f)) { Text("Reset") }
+                    Button(modifier = Modifier.weight(1f), onClick = {
+                        val d = twoPointDistance ?: return@Button
+                        save(d, "two-point"); resetTwoPoint()
+                    }, enabled = twoPointDistance != null) { Text("Save") }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PointDot(at: Offset, density: Density) {
+    val xDp = with(density) { at.x.toDp() }
+    val yDp = with(density) { at.y.toDp() }
+    Box(
+        Modifier.padding(start = (xDp - 9.dp).coerceAtLeast(0.dp), top = (yDp - 9.dp).coerceAtLeast(0.dp))
+            .size(18.dp).clip(CircleShape).background(Color.White),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(Modifier.size(12.dp).clip(CircleShape).background(Color.Yellow))
+    }
+}
+
+@Composable
+private fun DistancePill(text: String, center: Offset, density: Density) {
+    val xDp = with(density) { center.x.toDp() }
+    val yDp = with(density) { center.y.toDp() }
+    Box(Modifier.padding(start = (xDp - 40.dp).coerceAtLeast(0.dp), top = (yDp - 14.dp).coerceAtLeast(0.dp))) {
+        Text(
+            text, color = Color.Black,
+            style = Forestix.type.data.copy(fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 16.sp),
+            modifier = Modifier.clip(RoundedCornerShape(12.dp)).background(Color.White)
+                .border(1.dp, Color.Black.copy(alpha = 0.25f), RoundedCornerShape(12.dp))
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+        )
+    }
+}
+
+private fun twoPointHint(a: Vec3?, b: Vec3?) = when {
+    a == null -> "Aim, tap + to place point A"
+    b == null -> "Aim, tap + to place point B"
+    else -> "Tap Save to log this reading"
+}
+
+private fun formatDistance(m: Double): String =
+    if (m < 1) String.format(Locale.US, "%.0f cm", m * 100) else String.format(Locale.US, "%.2f m", m)
+
+private fun distanceEntry(d: Double, method: String, plotID: UUID?) = QuickMeasureEntry(
+    kind = MeasureKind.DISTANCE, value = d, sigma = null,
+    confidenceRaw = "green", method = method, plotID = plotID,
+)

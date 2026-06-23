@@ -296,15 +296,33 @@ private struct FieldLogRow: View {
 
     private var typeLabel: String {
         switch entry.kind {
-        case .dbh:    return "DBH"
-        case .height: return "Height"
+        case .dbh:          return "DBH"
+        case .height:       return "Height"
+        case .crown:        return "Crown"
+        case .distance:     return "Dist"
+        case .samplingPlot: return "Plot"
         }
     }
 
     private var valueText: String {
         switch entry.kind {
-        case .dbh:    return MeasurementFormatter.diameter(cm: entry.value, in: unitSystem)
-        case .height: return MeasurementFormatter.height(m:  entry.value, in: unitSystem)
+        case .dbh:
+            return MeasurementFormatter.diameter(cm: entry.value, in: unitSystem)
+        case .height:
+            return MeasurementFormatter.height(m:  entry.value, in: unitSystem)
+        case .crown:
+            // Show width × height in metres for compactness.
+            let h = entry.secondaryValue ?? 0
+            return String(format: "%.1f × %.1f m", entry.value, h)
+        case .distance:
+            if entry.value < 1 {
+                return String(format: "%.0f cm", entry.value * 100)
+            }
+            return String(format: "%.2f m", entry.value)
+        case .samplingPlot:
+            let area = entry.secondaryValue
+                ?? (.pi * entry.value * entry.value)
+            return String(format: "r %.1f m · %.1f m²", entry.value, area)
         }
     }
 
@@ -313,6 +331,8 @@ private struct FieldLogRow: View {
         switch entry.kind {
         case .dbh:    return MeasurementFormatter.diameterSigma(mm: s, in: unitSystem)
         case .height: return MeasurementFormatter.heightSigma(m:  s, in: unitSystem)
+        case .crown, .distance, .samplingPlot:
+            return String(format: "±%.2f m", s)
         }
     }
 

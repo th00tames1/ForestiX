@@ -1,0 +1,163 @@
+// Room persistence backing QuickMeasureHistory. The iOS app uses a
+// UserDefaults cache + append-only JSONL sidecar; Room gives us the same
+// durability guarantee (survives process death, queryable) with less
+// hand-rolled file plumbing. Entries are stored newest-first at the query
+// layer via `ORDER BY createdAt DESC`.
+
+package com.hcjeong.forestix.data
+
+import androidx.room.Dao
+import androidx.room.Database
+import androidx.room.Entity
+import androidx.room.Insert
+import androidx.room.OnConflictStrategy
+import androidx.room.PrimaryKey
+import androidx.room.Query
+import androidx.room.RoomDatabase
+import androidx.room.TypeConverter
+import androidx.room.TypeConverters
+import kotlinx.coroutines.flow.Flow
+import java.util.UUID
+
+@Entity(tableName = "entries")
+data class EntryRow(
+    @PrimaryKey val id: String,
+    val kind: String,
+    val value: Double,
+    val secondaryValue: Double?,
+    val sigma: Double?,
+    val confidenceRaw: String,
+    val method: String,
+    val createdAt: Long,
+    val treeNumber: Int?,
+    val plotID: String?,
+    val speciesCode: String?,
+    val position: String?,
+    val damageCodes: String,   // pipe-joined
+    val note: String?,
+) {
+    fun toDomain() = QuickMeasureEntry(
+        id = UUID.fromString(id),
+        kind = MeasureKind.fromRaw(kind),
+        value = value,
+        secondaryValue = secondaryValue,
+        sigma = sigma,
+        confidenceRaw = confidenceRaw,
+        method = method,
+        createdAt = createdAt,
+        treeNumber = treeNumber,
+        plotID = plotID?.let { UUID.fromString(it) },
+        speciesCode = speciesCode,
+        position = StemPosition.fromRaw(position),
+        damageCodes = if (damageCodes.isEmpty()) emptyList() else damageCodes.split("|"),
+        note = note,
+    )
+
+    companion object {
+        fun from(e: QuickMeasureEntry) = EntryRow(
+            id = e.id.toString(),
+            kind = e.kind.raw,
+            value = e.value,
+            secondaryValue = e.secondaryValue,
+            sigma = e.sigma,
+            confidenceRaw = e.confidenceRaw,
+            method = e.method,
+            createdAt = e.createdAt,
+            treeNumber = e.treeNumber,
+            plotID = e.plotID?.toString(),
+            speciesCode = e.speciesCode,
+            position = e.position?.raw,
+            damageCodes = e.damageCodes.joinToString("|"),
+            note = e.note,
+        )
+    }
+}
+
+@Entity(tableName = "plots")
+data class PlotRow(
+    @PrimaryKey val id: String,
+    val name: String,
+    val unitName: String,
+    val acres: Double?,
+    val typeRaw: String,
+    val baf: Double?,
+    val radiusFt: Double?,
+    val parentPlotID: String?,
+    val nestedKind: String?,
+    val createdAt: Long,
+    val isDefault: Boolean,
+) {
+    fun toDomain() = QuickMeasurePlot(
+        id = UUID.fromString(id),
+        name = name,
+        unitName = unitName,
+        acres = acres,
+        typeRaw = typeRaw,
+        baf = baf,
+        radiusFt = radiusFt,
+        parentPlotID = parentPlotID?.let { UUID.fromString(it) },
+        nestedKind = nestedKind,
+        createdAt = createdAt,
+        isDefault = isDefault,
+    )
+
+    companion object {
+        fun from(p: QuickMeasurePlot) = PlotRow(
+            id = p.id.toString(),
+            name = p.name,
+            unitName = p.unitName,
+            acres = p.acres,
+            typeRaw = p.typeRaw,
+            baf = p.baf,
+            radiusFt = p.radiusFt,
+            parentPlotID = p.parentPlotID?.toString(),
+            nestedKind = p.nestedKind,
+            createdAt = p.createdAt,
+            isDefault = p.isDefault,
+        )
+    }
+}
+
+@Dao
+interface QuickMeasureDao {
+    @Query("SELECT * FROM entries ORDER BY createdAt DESC")
+    fun observeEntries(): Flow<List<EntryRow>>
+
+    @Query("SELECT * FROM entries ORDER BY createdAt DESC")
+    suspend fun allEntries(): List<EntryRow>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertEntry(row: EntryRow)
+
+    @Query("DELETE FROM entries WHERE id = :id")
+    suspend fun deleteEntry(id: String)
+
+    @Query("DELETE FROM entries")
+    suspend fun clearEntries()
+
+    @Query("UPDATE entries SET plotID = :newPlot WHERE plotID = :oldPlot")
+    suspend fun rehomeEntries(oldPlot: String, newPlot: String?)
+
+    @Query("SELECT * FROM plots ORDER BY createdAt DESC")
+    fun observePlots(): Flow<List<PlotRow>>
+
+    @Query("SELECT * FROM plots")
+    suspend fun allPlots(): List<PlotRow>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertPlot(row: PlotRow)
+
+    @Query("DELETE FROM plots WHERE id = :id")
+    suspend fun deletePlot(id: String)
+}
+
+class Converters {
+    @TypeConverter fun boolToInt(b: Boolean) = if (b) 1 else 0
+    @TypeConverter fun intToBool(i: Int) = i != 0
+}
+
+@Database(entities = [EntryRow::class, PlotRow::class], version = 1, exportSchema = false)
+@TypeConverters(Converters::class)
+abstract class ForestixDatabase : RoomDatabase() {
+    abstract fun dao(): QuickMeasureDao
+}

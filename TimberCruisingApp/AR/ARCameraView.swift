@@ -38,6 +38,13 @@ public struct ARSceneMarker: Identifiable, Equatable {
         /// `heightM` is the total visual height; the cylinder is centred
         /// on `worldPosition`.
         case cylinder(radiusM: Float, heightM: Float)
+        /// Flat horizontal ring outline (annulus in the XZ plane, Y-up
+        /// normal). Used for the sampling-plot boundary so we draw just
+        /// the rim — a filled translucent disk that wide (up to 30 m
+        /// radius) created huge transparent overdraw and tanked the frame
+        /// rate. `radiusM` is the centre-line radius; `thicknessM` is the
+        /// rim band width.
+        case ring(radiusM: Float, thicknessM: Float)
     }
 
     public let id: UUID
@@ -195,12 +202,27 @@ public struct ARCameraView: UIViewRepresentable {
     }
 
     private static func makeEntity(for marker: ARSceneMarker) -> ModelEntity {
+        // Rings render as flat unlit geometry (no normals needed, visible
+        // from both sides). Spheres / cylinders keep the lit-vs-unlit
+        // choice based on opacity.
+        if case .ring(let r, let thickness) = marker.shape {
+            let uiColor = UIColor(
+                red:   CGFloat(marker.colorRGBA.x),
+                green: CGFloat(marker.colorRGBA.y),
+                blue:  CGFloat(marker.colorRGBA.z),
+                alpha: CGFloat(marker.colorRGBA.w))
+            let mesh = generateRing(radius: r, thickness: thickness, segments: 96)
+            return ModelEntity(mesh: mesh, materials: [UnlitMaterial(color: uiColor)])
+        }
+
         let mesh: MeshResource = {
             switch marker.shape {
             case .sphere(let r):
                 return .generateSphere(radius: r)
             case .cylinder(let r, let h):
                 return .generateCylinder(height: h, radius: r)
+            case .ring:
+                return .generateSphere(radius: 0.01) // unreachable (handled above)
             }
         }()
         let uiColor = UIColor(
@@ -221,6 +243,42 @@ public struct ARCameraView: UIViewRepresentable {
                               isMetallic: false)]
             : [UnlitMaterial(color: uiColor)]
         return ModelEntity(mesh: mesh, materials: materials)
+    }
+
+    /// Builds a flat, double-sided annulus (ring) mesh in the XZ plane,
+    /// centred at the entity origin. Cheap (≈ 4·segments triangles) so a
+    /// 30 m boundary costs nothing versus a filled translucent disk.
+    private static func generateRing(radius: Float,
+                                     thickness: Float,
+                                     segments: Int) -> MeshResource {
+        let half = max(0.01, thickness / 2)
+        let inner = max(0.001, radius - half)
+        let outer = radius + half
+        var positions: [SIMD3<Float>] = []
+        positions.reserveCapacity(segments * 2)
+        for i in 0..<segments {
+            let a = Float(i) / Float(segments) * 2 * .pi
+            let ca = cos(a), sa = sin(a)
+            positions.append(SIMD3<Float>(inner * ca, 0, inner * sa))
+            positions.append(SIMD3<Float>(outer * ca, 0, outer * sa))
+        }
+        var indices: [UInt32] = []
+        indices.reserveCapacity(segments * 12)
+        for i in 0..<segments {
+            let i0 = UInt32(i * 2)
+            let i1 = UInt32(i * 2 + 1)
+            let next = (i + 1) % segments
+            let i2 = UInt32(next * 2)
+            let i3 = UInt32(next * 2 + 1)
+            // Front-facing pair…
+            indices.append(contentsOf: [i0, i1, i2, i2, i1, i3])
+            // …plus reversed winding so the rim is visible from below too.
+            indices.append(contentsOf: [i0, i2, i1, i2, i3, i1])
+        }
+        var desc = MeshDescriptor(name: "ring")
+        desc.positions = MeshBuffers.Positions(positions)
+        desc.primitives = .triangles(indices)
+        return (try? MeshResource.generate(from: [desc])) ?? .generateSphere(radius: 0.01)
     }
 }
 

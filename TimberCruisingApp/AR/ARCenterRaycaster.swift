@@ -33,6 +33,13 @@ public final class ARCenterRaycaster: ObservableObject {
     /// view alive past its lifecycle.
     public weak var arview: ARView?
 
+    /// When `true` (default), `screenCenterHit()` tries the LiDAR scene-
+    /// mesh raycast first. Set `false` to force the AR (estimated-plane)
+    /// path — the measurement screens flip this from the LiDAR/AR toggle
+    /// so the cruiser can compare paths, and it's pinned to `false` on
+    /// devices without LiDAR (where the mesh never exists anyway).
+    public var preferLiDARMesh: Bool = true
+
     public init() {}
 
     /// Raycasts from the centre of the current view bounds. Tries paths
@@ -51,7 +58,10 @@ public final class ARCenterRaycaster: ObservableObject {
         guard bounds.width > 1, bounds.height > 1 else { return nil }
         let center = CGPoint(x: bounds.midX, y: bounds.midY)
 
-        if let mesh = meshRaycastHit(at: center, in: view) {
+        // LiDAR mesh path first — but only when the cruiser hasn't forced
+        // AR mode via the toggle. In AR mode we skip straight to the
+        // estimated-plane raycast below.
+        if preferLiDARMesh, let mesh = meshRaycastHit(at: center, in: view) {
             return mesh
         }
 
@@ -278,6 +288,7 @@ public final class ARCenterRaycaster: ObservableObject {
 /// macOS stub — callers treat every raycast as a miss.
 @MainActor
 public final class ARCenterRaycaster: ObservableObject {
+    public var preferLiDARMesh: Bool = true
     public init() {}
     public func screenCenterHit() -> SIMD3<Float>? { nil }
     public func forwardPointAtHorizontalDistance(_ d: Float) -> SIMD3<Float>? { nil }

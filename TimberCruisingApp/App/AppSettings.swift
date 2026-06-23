@@ -15,6 +15,17 @@ import Common
 import Models
 import Sensors
 
+/// Which world-sensing path the AR measurement screens raycast against.
+///   • lidar — the scene-reconstruction mesh / sceneDepth path. Most
+///     accurate, but only available on LiDAR-equipped devices.
+///   • ar    — estimated-plane raycast. Works on every ARKit device, so
+///     it's the only option on phones without the LiDAR scanner.
+public enum MeasurementSource: String, CaseIterable, Sendable {
+    case lidar
+    case ar
+    public var displayName: String { self == .lidar ? "LiDAR" : "AR" }
+}
+
 @MainActor
 public final class AppSettings: ObservableObject {
 
@@ -28,6 +39,7 @@ public final class AppSettings: ObservableObject {
         public static let regionPickerSeen        = "tc.regionPickerSeen"
         public static let logRule                 = "tc.logRule"
         public static let dbhMeasurementMethod    = "tc.dbhMeasurementMethod"
+        public static let measurementSource       = "tc.measurementSource"
     }
 
     private let defaults: UserDefaults
@@ -124,6 +136,28 @@ public final class AppSettings: ObservableObject {
         }
         set {
             defaults.set(newValue.rawValue, forKey: Keys.logRule)
+            objectWillChange.send()
+        }
+    }
+
+    /// Whether this device has the LiDAR scanner the mesh raycast path
+    /// relies on. Checked once at launch (and any time the UI asks) so
+    /// the measurement screens can disable the LiDAR toggle and fall the
+    /// cruiser back to the AR (estimated-plane) path automatically.
+    public var deviceSupportsLiDAR: Bool { ARKitSessionManager.supportsLiDAR }
+
+    /// Preferred world-sensing source for the AR measurement screens.
+    /// Defaults to `.lidar` on LiDAR devices and is hard-clamped to `.ar`
+    /// on devices without the scanner — so a value persisted on one
+    /// device never strands a non-LiDAR device on an unusable setting.
+    public var measurementSource: MeasurementSource {
+        get {
+            guard ARKitSessionManager.supportsLiDAR else { return .ar }
+            let raw = defaults.string(forKey: Keys.measurementSource)
+            return raw.flatMap(MeasurementSource.init(rawValue:)) ?? .lidar
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: Keys.measurementSource)
             objectWillChange.send()
         }
     }

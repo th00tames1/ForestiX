@@ -31,6 +31,11 @@ public struct HeightScanScreen: View {
     /// `metadata` carries optional species / damage / note attached
     /// via `ScanMetadataSheet`.
     public var onAccept: (HeightResult, ScanMetadata) -> Void = { _, _ in }
+    /// Fires when the cruiser measures the crown inside this Height
+    /// session and accepts. `widthM` / `heightM` are at real scale because
+    /// the canopy points are forward-projected to the tree's walk-off
+    /// distance d_h. No-op for hosts that don't want crown.
+    public var onCrown: (Double, Double) -> Void = { _, _ in }
 
     public struct ScanMetadata {
         public var speciesCode: String?
@@ -57,12 +62,26 @@ public struct HeightScanScreen: View {
     public init(viewModel: @autoclosure @escaping () -> HeightScanViewModel,
                 onResult: @escaping (HeightResult) -> Void = { _ in },
                 onAccept: @escaping (HeightResult, ScanMetadata) -> Void = { _, _ in },
+                onCrown: @escaping (Double, Double) -> Void = { _, _ in },
                 showMeshOverlay: Bool = false) {
         _viewModel = StateObject(wrappedValue: viewModel())
         self.onResult = onResult
         self.onAccept = onAccept
+        self.onCrown = onCrown
         self.showMeshOverlay = showMeshOverlay
     }
+
+    // MARK: - Crown sub-flow state
+
+    enum CrownStep { case none, left, right, top, bottom, done }
+
+    @State private var crownStep: CrownStep = .none
+    @State private var crownLeft: SIMD3<Float>?
+    @State private var crownRight: SIMD3<Float>?
+    @State private var crownTop: SIMD3<Float>?
+    @State private var crownBottom: SIMD3<Float>?
+    @State private var crownWidthM: Double?
+    @State private var crownHeightM: Double?
 
     public var body: some View {
         ZStack {
@@ -75,7 +94,7 @@ public struct HeightScanScreen: View {
             // turn "cruiser tapped while aiming here" into a world hit.
             ARCameraView(manager: viewModel.session,
                          debugMeshOverlay: showMeshOverlay,
-                         sceneMarkers: viewModel.sceneMarkers,
+                         sceneMarkers: viewModel.sceneMarkers + crownMarkers,
                          raycaster: raycaster)
                 .ignoresSafeArea()
             overlayChrome
@@ -89,6 +108,29 @@ public struct HeightScanScreen: View {
                 }
                 .padding(.horizontal, ForestixSpace.sm)
                 .padding(.top, ForestixSpace.xs)
+                Spacer()
+            }
+
+            // Right-centre "+" capture button — replaces the centre
+            // Anchor Here / Aim Top / Aim Base buttons. It fires the
+            // current stage's capture action.
+            if hasPrimaryCapture {
+                MeasureControlColumn(capture: primaryCapture)
+            }
+
+            // Bottom-right LiDAR/AR toggle.
+            VStack {
+                Spacer()
+                HStack {
+                    Spacer()
+                    MeasureSourceToggleButton()
+                        .padding(.trailing, 18)
+                        .padding(.bottom, 96)
+                }
+            }
+
+            // Bottom-centre status / value panel.
+            VStack {
                 Spacer()
                 bottomPanel
             }
@@ -147,6 +189,15 @@ public struct HeightScanScreen: View {
     }
 
     private var crosshairLabel: String? {
+        // Crown capture takes over the crosshair prompt once started.
+        switch crownStep {
+        case .left:   return "Aim at crown's LEFT edge"
+        case .right:  return "Aim at crown's RIGHT edge"
+        case .top:    return "Aim at HIGHEST branch"
+        case .bottom: return "Aim at LOWEST branch"
+        case .done:   return nil
+        case .none:   break
+        }
         switch viewModel.state {
         case .idle, .anchorSet: return "Aim at trunk (eye level)"
         case .walking:          return "Walk back — aim stays on tree"
@@ -211,7 +262,7 @@ public struct HeightScanScreen: View {
 
     @ViewBuilder
     private var bottomPanel: some View {
-        VStack(spacing: 12) {
+        MeasureStatusPanel {
             if viewModel.trackingDroppedDuringMeasurement {
                 bannerView(
                     "AR tracking dropped during measurement.",
@@ -227,28 +278,22 @@ public struct HeightScanScreen: View {
             stagePanel
             actionRow
         }
-        .padding()
-        .background(.ultraThinMaterial)
-        .cornerRadius(12)
-        .padding(.horizontal)
-        .padding(.bottom, 24)
     }
 
     private var statusBanner: some View {
         Text(statusText)
             .font(.callout)
             .foregroundStyle(.white)
-            .frame(maxWidth: .infinity, alignment: .leading)
             .accessibilityIdentifier("heightScan.statusBanner")
     }
 
     private var statusText: String {
         switch viewModel.state {
-        case .idle, .anchorSet:   return "Aim at the trunk at eye level, then tap Anchor Here."
-        case .walking:            return "Walk back. Live walk-back distance shown below."
-        case .aimTopArmed:        return "Aim at the treetop, then tap Aim Top."
+        case .idle, .anchorSet:   return "Aim at the trunk at eye level, then tap +."
+        case .walking:            return "Walk back, then tap + to continue."
+        case .aimTopArmed:        return "Aim at the treetop, then tap +."
         case .aimTopCaptured:     return "Top captured."
-        case .aimBaseArmed:       return "Aim at where the trunk meets the ground, then tap Aim Base."
+        case .aimBaseArmed:       return "Aim at where the trunk meets the ground, then tap +."
         case .computed:           return "Height computed."
         case .accepted:           return "Saved."
         case .rejected:           return viewModel.result?.rejectionReason
@@ -264,12 +309,45 @@ public struct HeightScanScreen: View {
         switch viewModel.state {
         case .walking:
             walkingReadout
-        case .computed, .rejected:
+        case .computed:
+            if let r = viewModel.result { resultPanel(r) }
+            crownSection
+        case .rejected:
             if let r = viewModel.result { resultPanel(r) }
         case .manualEntry:
             manualEntryPanel
         default:
             EmptyView()
+        }
+    }
+
+    /// Crown extension shown once the height is computed. Reuses the
+    /// walk-off distance d_h so canopy taps land at real scale.
+    @ViewBuilder
+    private var crownSection: some View {
+        switch crownStep {
+        case .none:
+            EmptyView()
+        case .left, .right, .top, .bottom:
+            Text(crownPrompt)
+                .font(ForestixType.caption)
+                .foregroundStyle(ForestixPalette.confidenceWarn)
+        case .done:
+            if let w = crownWidthM, let h = crownHeightM {
+                Text(String(format: "Crown  %.2f m wide · %.2f m tall", w, h))
+                    .font(ForestixType.data)
+                    .foregroundStyle(.white)
+            }
+        }
+    }
+
+    private var crownPrompt: String {
+        switch crownStep {
+        case .left:   return "Crown: aim at the LEFT edge, tap +"
+        case .right:  return "Crown: aim at the RIGHT edge, tap +"
+        case .top:    return "Crown: aim at the HIGHEST branch, tap +"
+        case .bottom: return "Crown: aim at the LOWEST branch, tap +"
+        default:      return ""
         }
     }
 
@@ -419,52 +497,136 @@ public struct HeightScanScreen: View {
 
     // MARK: - Actions
 
+    /// True when the current stage has a "capture" action the right-edge
+    /// "+" button should fire — either a height stage or an active crown
+    /// capture step.
+    private var hasPrimaryCapture: Bool {
+        if crownStep != .none && crownStep != .done { return true }
+        switch viewModel.state {
+        case .idle, .anchorSet, .walking,
+             .aimTopArmed, .aimTopCaptured, .aimBaseArmed:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Dispatch the "+" capture button. While a crown step is active it
+    /// captures crown points; otherwise it drives the height stages.
+    private func primaryCapture() {
+        if crownStep != .none && crownStep != .done {
+            crownCapture()
+            return
+        }
+        switch viewModel.state {
+        case .idle, .anchorSet:              anchorTap()
+        case .walking:                       viewModel.continueToAimTop()
+        case .aimTopArmed, .aimTopCaptured:  aimTopTap()
+        case .aimBaseArmed:                  aimBaseTap()
+        default:                             break
+        }
+    }
+
+    // MARK: - Crown capture (real-scale via walk-off distance d_h)
+
+    /// Crown reference markers (yellow L/R, cyan top/bottom) merged into
+    /// the height scene so the cruiser sees what they've tagged.
+    private var crownMarkers: [ARSceneMarker] {
+        var out: [ARSceneMarker] = []
+        if let p = crownLeft {
+            out.append(ARSceneMarker(worldPosition: p, shape: .sphere(radiusM: 0.05),
+                                     colorRGBA: SIMD4<Float>(1, 0.85, 0, 1)))
+        }
+        if let p = crownRight {
+            out.append(ARSceneMarker(worldPosition: p, shape: .sphere(radiusM: 0.05),
+                                     colorRGBA: SIMD4<Float>(1, 0.85, 0, 1)))
+        }
+        if let p = crownTop {
+            out.append(ARSceneMarker(worldPosition: p, shape: .sphere(radiusM: 0.05),
+                                     colorRGBA: SIMD4<Float>(0.2, 0.7, 1, 1)))
+        }
+        if let p = crownBottom {
+            out.append(ARSceneMarker(worldPosition: p, shape: .sphere(radiusM: 0.05),
+                                     colorRGBA: SIMD4<Float>(0.2, 0.7, 1, 1)))
+        }
+        return out
+    }
+
+    /// Horizontal distance used to forward-project canopy taps that miss
+    /// the raycast (sky / foliage). This is the height session's measured
+    /// walk-off distance d_h — that's what makes the crown real-scale
+    /// rather than a guessed fixed distance.
+    private var crownProjectionDistance: Float {
+        viewModel.dhMeters > 0.5 ? viewModel.dhMeters : 8.0
+    }
+
+    private func crownCapture() {
+        raycaster.preferLiDARMesh = settings.measurementSource == .lidar
+        guard let hit = raycaster.screenCenterHit()
+                ?? raycaster.forwardPointAtHorizontalDistance(crownProjectionDistance)
+        else { return }
+        switch crownStep {
+        case .left:   crownLeft = hit;   crownStep = .right
+        case .right:  crownRight = hit;  crownStep = .top
+        case .top:    crownTop = hit;    crownStep = .bottom
+        case .bottom: crownBottom = hit; computeCrown()
+        case .none, .done: break
+        }
+    }
+
+    private func computeCrown() {
+        if let l = crownLeft, let r = crownRight {
+            let dx = l.x - r.x
+            let dz = l.z - r.z
+            crownWidthM = Double((dx * dx + dz * dz).squareRoot())
+        }
+        if let t = crownTop, let b = crownBottom {
+            crownHeightM = Double(abs(t.y - b.y))
+        }
+        crownStep = .done
+    }
+
+    private func resetCrown() {
+        crownStep = .none
+        crownLeft = nil; crownRight = nil; crownTop = nil; crownBottom = nil
+        crownWidthM = nil; crownHeightM = nil
+    }
+
+    /// Secondary actions only — the primary capture moved to the "+"
+    /// button on the trailing edge.
     @ViewBuilder
     private var actionRow: some View {
         switch viewModel.state {
         case .idle, .anchorSet:
-            HStack(spacing: 12) {
-                Button("Anchor Here") { anchorTap() }
-                    .buttonStyle(.borderedProminent)
-                    .accessibilityIdentifier("heightScan.anchorButton")
-                Button("Manual") { viewModel.enterManualEntry() }
-                    .buttonStyle(.bordered)
-            }
-        case .walking:
-            HStack(spacing: 12) {
-                Button("Continue") { viewModel.continueToAimTop() }
-                    .buttonStyle(.borderedProminent)
-                    .accessibilityIdentifier("heightScan.continueButton")
-                Button("Retake") { viewModel.retake() }
-                    .buttonStyle(.bordered)
-            }
-        case .aimTopArmed, .aimTopCaptured:
-            HStack(spacing: 12) {
-                Button("Aim Top") { aimTopTap() }
-                    .buttonStyle(.borderedProminent)
-                    .accessibilityIdentifier("heightScan.aimTopButton")
-                Button("Retake") { viewModel.retake() }
-                    .buttonStyle(.bordered)
-            }
-        case .aimBaseArmed:
-            HStack(spacing: 12) {
-                Button("Aim Base") { aimBaseTap() }
-                    .buttonStyle(.borderedProminent)
-                    .accessibilityIdentifier("heightScan.aimBaseButton")
-                Button("Retake") { viewModel.retake() }
-                    .buttonStyle(.bordered)
-            }
+            Button("Manual") { viewModel.enterManualEntry() }
+                .buttonStyle(.bordered)
+        case .walking, .aimTopArmed, .aimTopCaptured, .aimBaseArmed:
+            Button("Retake") { viewModel.retake() }
+                .buttonStyle(.bordered)
         case .computed:
-            HStack(spacing: 12) {
-                Button("Retake") { viewModel.retake() }
-                    .buttonStyle(.bordered)
-                Button("Manual") { viewModel.enterManualEntry() }
-                    .buttonStyle(.bordered)
-                Spacer()
-                Button("Accept") { viewModel.accept() }
+            VStack(spacing: 8) {
+                // Crown control: start it, or restart it once done.
+                if crownStep == .none {
+                    Button("Measure crown") { crownStep = .left }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("heightScan.measureCrown")
+                } else if crownStep == .done {
+                    Button("Redo crown") { resetCrown() }
+                        .buttonStyle(.bordered)
+                }
+                HStack(spacing: 12) {
+                    Button("Retake") { viewModel.retake(); resetCrown() }
+                        .buttonStyle(.bordered)
+                    Button("Accept") {
+                        if crownStep == .done, let w = crownWidthM, let h = crownHeightM {
+                            onCrown(w, h)
+                        }
+                        viewModel.accept()
+                    }
                     .buttonStyle(.borderedProminent)
                     .disabled(viewModel.result?.confidence == .red)
                     .accessibilityIdentifier("heightScan.acceptButton")
+                }
             }
         case .rejected:
             HStack(spacing: 12) {
@@ -474,10 +636,8 @@ public struct HeightScanScreen: View {
                     .buttonStyle(.bordered)
             }
         case .manualEntry:
-            HStack(spacing: 12) {
-                Button("Cancel") { viewModel.retake() }
-                    .buttonStyle(.bordered)
-            }
+            Button("Cancel") { viewModel.retake() }
+                .buttonStyle(.bordered)
         case .accepted:
             EmptyView()
         }
@@ -503,6 +663,7 @@ public struct HeightScanScreen: View {
     /// `anchorFailureReason` and the screen banner explains how to
     /// reframe.
     private func anchorTap() {
+        raycaster.preferLiDARMesh = settings.measurementSource == .lidar
         viewModel.anchorHereNow(screenCenterHit: raycaster.screenCenterHit())
     }
 
@@ -511,6 +672,7 @@ public struct HeightScanScreen: View {
     /// forward ray out to the known horizontal distance `d_h` so the
     /// yellow marker lands roughly at the treetop the cruiser aimed at.
     private func aimTopTap() {
+        raycaster.preferLiDARMesh = settings.measurementSource == .lidar
         let hit = raycaster.screenCenterHit()
             ?? raycaster.forwardPointAtHorizontalDistance(viewModel.dhMeters)
         viewModel.captureTopNow(screenCenterHit: hit)
@@ -520,6 +682,7 @@ public struct HeightScanScreen: View {
     /// raycast should nearly always hit. Fall back to the same forward-
     /// projection as Aim Top on the rare miss.
     private func aimBaseTap() {
+        raycaster.preferLiDARMesh = settings.measurementSource == .lidar
         let hit = raycaster.screenCenterHit()
             ?? raycaster.forwardPointAtHorizontalDistance(viewModel.dhMeters)
         viewModel.captureBaseNow(screenCenterHit: hit)

@@ -105,13 +105,37 @@ public struct DBHScanScreen: View {
             }
             .accessibilityElement(children: .ignore)
 
-            // Screen-wide tap catcher — the spec's "tap trunk center"
-            // gesture was missing from the view. Sits between the AR
-            // feed and the bottom action panel so buttons still win.
+            // Screen-wide tap catcher — kept as a convenience, but the
+            // primary capture is now the right-centre "+" button below
+            // (consistent with the other measurement screens).
             tapCatcher
 
             VStack(spacing: 0) {
                 topStrip
+                Spacer()
+            }
+
+            // Right-centre "+" capture button — active while aligning /
+            // armed so the cruiser taps a fixed control instead of the
+            // whole screen.
+            if dbhCanCapture {
+                MeasureControlColumn(capture: captureTap)
+            }
+
+            // Bottom-right LiDAR/AR toggle — DBH is a depth pipeline too,
+            // so it surfaces the same source control as the other screens.
+            VStack {
+                Spacer()
+                HStack {
+                    Spacer()
+                    MeasureSourceToggleButton()
+                        .padding(.trailing, 18)
+                        .padding(.bottom, 96)
+                }
+            }
+
+            // Bottom-centre status / result panel.
+            VStack {
                 Spacer()
                 bottomPanel
             }
@@ -200,17 +224,25 @@ public struct DBHScanScreen: View {
         Color.clear
             .contentShape(Rectangle())
             .accessibilityIdentifier("dbhScan.tapCatcher")
-            .onTapGesture {
-                // The crosshair sits at screen centre and the ViewModel
-                // picks a `GuideAxis` (`.col(x: width/2)` in portrait,
-                // `.row(y: height/2)` in landscape iPad) so a tap pixel
-                // at the depth-map centre always aligns the fit with
-                // the crosshair the cruiser lined up on the trunk.
-                let frame = viewModel.session.latestDepthFrame
-                let width  = Double(frame?.width  ?? 256)
-                let height = Double(frame?.height ?? 192)
-                viewModel.tap(at: SIMD2(width / 2.0, height / 2.0))
-            }
+            .onTapGesture { captureTap() }
+    }
+
+    /// Whether the current state accepts a capture (so we show the "+").
+    private var dbhCanCapture: Bool {
+        switch viewModel.state {
+        case .aligning, .armed: return true
+        default:                return false
+        }
+    }
+
+    /// Capture the trunk at the depth-map centre — the crosshair the
+    /// cruiser lined up on the trunk. Fired by both the "+" button and a
+    /// stray screen tap.
+    private func captureTap() {
+        let frame = viewModel.session.latestDepthFrame
+        let width  = Double(frame?.width  ?? 256)
+        let height = Double(frame?.height ?? 192)
+        viewModel.tap(at: SIMD2(width / 2.0, height / 2.0))
     }
 
     // MARK: - Chrome
@@ -428,7 +460,7 @@ public struct DBHScanScreen: View {
 
     @ViewBuilder
     private var bottomPanel: some View {
-        VStack(spacing: 12) {
+        MeasureStatusPanel {
             if let banner = viewModel.unsupportedBanner {
                 bannerView(banner, tint: .orange)
             }
@@ -441,18 +473,12 @@ public struct DBHScanScreen: View {
             }
             actionRow
         }
-        .padding()
-        .background(.ultraThinMaterial)
-        .cornerRadius(12)
-        .padding(.horizontal)
-        .padding(.bottom, 24)
     }
 
     private var statusBanner: some View {
         Text(statusText)
             .font(.callout)
             .foregroundStyle(.white)
-            .frame(maxWidth: .infinity, alignment: .leading)
             .accessibilityIdentifier("dbhScan.statusBanner")
     }
 
@@ -460,7 +486,7 @@ public struct DBHScanScreen: View {
         switch viewModel.state {
         case .idle:         return "Starting camera…"
         case .aligning:     return "Align the guide to the trunk's uphill side; hold steady."
-        case .armed:        return "Hold steady, then tap the screen to capture."
+        case .armed:        return "Hold steady, then tap + to capture."
         case .capturing:    return "Capturing… hold steady."
         case .fitted:       return "Scan complete. Accept, retake, or add a second view."
         case .accepted:     return "Saved."

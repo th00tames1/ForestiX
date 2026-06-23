@@ -114,6 +114,17 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
     public enum Kind: String, Codable, Sendable {
         case dbh
         case height
+        /// Tree crown — `value` is crown width (m), `secondaryValue` is
+        /// crown height (m). Captured via 4-tap AR flow (L, R, bottom, top).
+        case crown
+        /// Single distance reading — `value` is distance (m). When the
+        /// reading is a two-point measurement, `method` carries
+        /// "two-point.lidar" / "two-point.ar"; the camera-to-target
+        /// variant uses "live.lidar" / "live.ar".
+        case distance
+        /// Sampling plot record — `value` is plot radius (m).
+        /// `secondaryValue` carries the plot area in m².
+        case samplingPlot
     }
 
     /// Where on the stem the reading was taken — DBH (1.3 m), butt,
@@ -138,6 +149,10 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
     public let id: UUID
     public let kind: Kind
     public let value: Double
+    /// Paired second metric for compound readings. Crown stores height
+    /// here (m) alongside width in `value`; sampling plot stores area
+    /// (m²). nil for legacy entries and single-value kinds.
+    public let secondaryValue: Double?
     public let sigma: Double?
     public let confidenceRaw: String
     public let method: String
@@ -163,6 +178,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         id: UUID = UUID(),
         kind: Kind,
         value: Double,
+        secondaryValue: Double? = nil,
         sigma: Double?,
         confidenceRaw: String,
         method: String,
@@ -177,6 +193,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         self.id = id
         self.kind = kind
         self.value = value
+        self.secondaryValue = secondaryValue
         self.sigma = sigma
         self.confidenceRaw = confidenceRaw
         self.method = method
@@ -197,6 +214,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         self.id            = try c.decode(UUID.self,   forKey: .id)
         self.kind          = try c.decode(Kind.self,   forKey: .kind)
         self.value         = try c.decode(Double.self, forKey: .value)
+        self.secondaryValue = try c.decodeIfPresent(Double.self, forKey: .secondaryValue)
         self.sigma         = try c.decodeIfPresent(Double.self, forKey: .sigma)
         self.confidenceRaw = try c.decode(String.self, forKey: .confidenceRaw)
         self.method        = try c.decode(String.self, forKey: .method)
@@ -209,21 +227,31 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         self.note          = try c.decodeIfPresent(String.self, forKey: .note)
     }
 
-    /// Unit string for `value`. `cm` for diameter, `m` for height.
+    /// Unit string for `value`. cm for diameter, m elsewhere.
     public var valueUnit: String {
         switch kind {
         case .dbh:    return "cm"
-        case .height: return "m"
+        case .height, .crown, .distance, .samplingPlot: return "m"
         }
     }
 
     /// Unit string for `sigma`. `mm` for diameter (millimetre-scale
     /// RANSAC RMSE) and `m` for height (metres of combined geometric
-    /// uncertainty).
+    /// uncertainty). Other kinds use `m`.
     public var sigmaUnit: String {
         switch kind {
         case .dbh:    return "mm"
-        case .height: return "m"
+        case .height, .crown, .distance, .samplingPlot: return "m"
+        }
+    }
+
+    /// Unit for `secondaryValue` when present. Crown stores height in
+    /// metres; sampling plot stores area in m².
+    public var secondaryValueUnit: String {
+        switch kind {
+        case .crown:        return "m"
+        case .samplingPlot: return "m²"
+        case .dbh, .height, .distance: return ""
         }
     }
 }
@@ -378,6 +406,7 @@ public final class QuickMeasureHistory: ObservableObject {
             guard entry.plotID == id else { return entry }
             return QuickMeasureEntry(
                 id: entry.id, kind: entry.kind, value: entry.value,
+                secondaryValue: entry.secondaryValue,
                 sigma: entry.sigma, confidenceRaw: entry.confidenceRaw,
                 method: entry.method, createdAt: entry.createdAt,
                 treeNumber: entry.treeNumber,
@@ -437,6 +466,7 @@ public final class QuickMeasureHistory: ObservableObject {
                 migrated = true
                 return QuickMeasureEntry(
                     id: entry.id, kind: entry.kind, value: entry.value,
+                    secondaryValue: entry.secondaryValue,
                     sigma: entry.sigma, confidenceRaw: entry.confidenceRaw,
                     method: entry.method, createdAt: entry.createdAt,
                     treeNumber: entry.treeNumber,
@@ -543,7 +573,9 @@ public final class QuickMeasureHistory: ObservableObject {
         let url = dir.appendingPathComponent("quick-measure-\(stamp).csv")
 
         let headers = ["id", "timestamp", "plot", "tree", "kind",
-                       "value", "value_unit", "sigma", "sigma_unit",
+                       "value", "value_unit",
+                       "secondary_value", "secondary_unit",
+                       "sigma", "sigma_unit",
                        "species", "position", "damage", "note",
                        "confidence", "method"]
         var out = headers.map(Self.csvField).joined(separator: ",")
@@ -554,6 +586,7 @@ public final class QuickMeasureHistory: ObservableObject {
             let plotName = e.plotID
                 .flatMap { id in plots.first { $0.id == id } }
                 .map(\.name) ?? ""
+            let secVal = e.secondaryValue.map { String(format: "%.3f", $0) } ?? ""
             let row = [
                 e.id.uuidString,
                 iso.string(from: e.createdAt),
@@ -562,6 +595,8 @@ public final class QuickMeasureHistory: ObservableObject {
                 e.kind.rawValue,
                 String(format: "%.3f", e.value),
                 e.valueUnit,
+                secVal,
+                e.secondaryValue == nil ? "" : e.secondaryValueUnit,
                 sigma,
                 e.sigma == nil ? "" : e.sigmaUnit,
                 e.speciesCode ?? "",

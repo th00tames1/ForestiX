@@ -121,7 +121,8 @@ later via the Calibrate button.
 ## Remaining friction (not blockers)
 
 - **DBH scan needs explicit user "tap to capture"**. The `DBHScanViewModel`
-  exposes a `tap()` method that begins a 12-frame burst. The crosshair
+  exposes a `tap()` method that begins a hold-steady multi-sample burst
+  (5 sub-samples over ~2.5 s, trimmed mean). The crosshair
   turns green when depth-stable, signalling the right moment, but
   there's no on-screen instruction explaining what to do. UX writer
   task — add the instruction string overlay.

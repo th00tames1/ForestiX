@@ -57,6 +57,10 @@ public struct DistanceMeasureScreen: View {
     @State private var captureFailureReason: String?
     @State private var liveTimer: Timer?
 
+    /// Hampel-style robust moving average for the AR (estimated-plane)
+    /// path — the raw raycast distance flickers there. LiDAR stays raw.
+    @State private var arSmoother = DistanceSmoother()
+
     public init() {}
 
     public var body: some View {
@@ -291,14 +295,17 @@ public struct DistanceMeasureScreen: View {
         case .live:
             Button("Save") { saveLiveReading() }
                 .buttonStyle(.borderedProminent)
+                .frame(maxWidth: .infinity)
                 .disabled(liveDistanceM == nil)
                 .accessibilityIdentifier("distance.saveLive")
         case .twoPoint:
             HStack(spacing: 12) {
                 Button("Reset") { resetTwoPoint() }
                     .buttonStyle(.bordered)
+                    .frame(maxWidth: .infinity)
                 Button("Save") { saveTwoPointReading() }
                     .buttonStyle(.borderedProminent)
+                    .frame(maxWidth: .infinity)
                     .disabled(twoPointDistanceM == nil)
                     .accessibilityIdentifier("distance.saveTwoPoint")
             }
@@ -382,7 +389,17 @@ public struct DistanceMeasureScreen: View {
         liveTimer = Timer.scheduledTimer(withTimeInterval: 0.05,
                                           repeats: true) { _ in
             Task { @MainActor in
-                liveDistanceM = currentDeviceToCenterDistance()
+                let raw = currentDeviceToCenterDistance()
+                if settings.measurementSource == .ar {
+                    // AR estimated-plane distances flicker — publish the
+                    // spike-rejecting moving average instead of the raw
+                    // sample (real movement still tracks via the median).
+                    if let raw { arSmoother.add(raw) }
+                    liveDistanceM = arSmoother.value()
+                } else {
+                    arSmoother.reset()
+                    liveDistanceM = raw
+                }
             }
         }
     }

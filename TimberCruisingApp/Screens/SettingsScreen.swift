@@ -46,6 +46,7 @@ public struct SettingsScreen: View {
             unitsSection
             logRuleSection
             dbhMethodSection
+            developerSection
             calibrationSection
             basemapSection
             backupSection
@@ -145,6 +146,25 @@ public struct SettingsScreen: View {
                 }
             }
             .accessibilityIdentifier("settings.region")
+        }
+    }
+
+    private var developerSection: some View {
+        Section {
+            Toggle(isOn: Binding(
+                get: { settings.developerMode },
+                set: { settings.developerMode = $0 })
+            ) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Developer / research mode")
+                    Text("Show live measurement internals (depth source, intrinsics, points, raw Ø, pitch, distance, σ) on the AR screens for the validation study.")
+                        .font(ForestixType.caption)
+                        .foregroundStyle(ForestixPalette.textSecondary)
+                }
+            }
+            .accessibilityIdentifier("settings.developerMode")
+        } header: {
+            Text("Developer")
         }
     }
 

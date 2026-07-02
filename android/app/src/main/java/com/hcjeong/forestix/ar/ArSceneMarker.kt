@@ -10,6 +10,15 @@ data class Vec3(val x: Float, val y: Float, val z: Float) {
     operator fun times(s: Float) = Vec3(x * s, y * s, z * s)
     fun dot(o: Vec3) = x * o.x + y * o.y + z * o.z
     fun length() = kotlin.math.sqrt(dot(this))
+
+    /// Unit vector in the same direction; returns zero when degenerate so
+    /// callers must guard length before use (the AR-caliper does).
+    fun normalize(): Vec3 {
+        val len = length()
+        if (len < 1e-9f) return Vec3(0f, 0f, 0f)
+        val inv = 1f / len
+        return Vec3(x * inv, y * inv, z * inv)
+    }
 }
 
 fun distance(a: Vec3, b: Vec3) = (a - b).length()
@@ -30,12 +39,20 @@ data class ArSceneMarker(
     val worldPosition: Vec3,
     val shape: MarkerShape,
     val colorRGBA: FloatArray,   // [r,g,b,a] 0..1
+    /// When true the marker grows with camera distance so its APPARENT
+    /// (on-screen) size stays readable — an 8 cm sphere is fine at 3 m but
+    /// nearly invisible from 15 m across a height walk-off. Natural size
+    /// within the reference distance; linear growth beyond it, capped.
+    /// (Mirror of the iOS ARSceneMarker.scalesWithDistance.)
+    val scalesWithDistance: Boolean = false,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is ArSceneMarker) return false
-        return worldPosition == other.worldPosition && shape == other.shape && colorRGBA.contentEquals(other.colorRGBA)
+        return worldPosition == other.worldPosition && shape == other.shape &&
+            colorRGBA.contentEquals(other.colorRGBA) && scalesWithDistance == other.scalesWithDistance
     }
     override fun hashCode(): Int =
-        31 * (31 * worldPosition.hashCode() + shape.hashCode()) + colorRGBA.contentHashCode()
+        31 * (31 * (31 * worldPosition.hashCode() + shape.hashCode()) + colorRGBA.contentHashCode()) +
+            scalesWithDistance.hashCode()
 }

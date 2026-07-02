@@ -54,21 +54,29 @@ public struct ARSceneMarker: Identifiable, Equatable {
     /// material so the camera feed shows through (useful for the DBH
     /// cylinder). Keep saturated for visibility against foliage.
     public var colorRGBA: SIMD4<Float>
+    /// When true the marker grows with camera distance so its APPARENT
+    /// (on-screen) size stays readable — a 8 cm sphere is fine at 3 m but
+    /// nearly invisible from 15 m across a height walk-off. Natural size
+    /// within the reference distance; linear growth beyond it, capped.
+    public var scalesWithDistance: Bool
 
     public init(id: UUID = UUID(),
                 worldPosition: SIMD3<Float>,
                 shape: Shape,
-                colorRGBA: SIMD4<Float>) {
+                colorRGBA: SIMD4<Float>,
+                scalesWithDistance: Bool = false) {
         self.id = id
         self.worldPosition = worldPosition
         self.shape = shape
         self.colorRGBA = colorRGBA
+        self.scalesWithDistance = scalesWithDistance
     }
 }
 
 #if canImport(ARKit) && os(iOS)
 
 import ARKit
+import Combine
 import RealityKit
 import Sensors
 
@@ -109,7 +117,18 @@ public struct ARCameraView: UIViewRepresentable {
         /// repositioning, which doubled the rendered position on every
         /// rebuild and made previously-placed markers visibly jump.
         var markerPositions: [UUID: SIMD3<Float>] = [:]
+        /// Ids of markers that keep a constant APPARENT size — their child
+        /// entity is rescaled every frame from the camera distance.
+        var scalingIds: Set<UUID> = []
+        /// Per-frame scene-update subscription driving the distance scaling.
+        var updateSub: (any Cancellable)?
     }
+
+    /// Distance-compensated marker scaling: natural size out to this range…
+    private static let scaleReferenceM: Float = 3.0
+    /// …then linear growth with distance, capped so a marker seen from
+    /// across a stand doesn't balloon absurdly.
+    private static let scaleMax: Float = 6.0
 
     public func makeUIView(context: Context) -> ARView {
         let view = ARView(frame: .zero,
@@ -123,6 +142,23 @@ public struct ARCameraView: UIViewRepresentable {
         // Camera background fills behind any SwiftUI overlay we put
         // above this view — no need to set background colour.
         raycaster?.arview = view
+        // Per-frame distance scaling for markers flagged
+        // `scalesWithDistance` — keeps their apparent size readable when
+        // the cruiser walks away (height walk-off can be 15–20 m out).
+        let coordinator = context.coordinator
+        coordinator.updateSub = view.scene.subscribe(to: SceneEvents.Update.self) { [weak view, weak coordinator] _ in
+            guard let view, let coordinator, !coordinator.scalingIds.isEmpty else { return }
+            let cam = view.cameraTransform.translation
+            for id in coordinator.scalingIds {
+                guard let anchor = coordinator.markerAnchors[id],
+                      let pos = coordinator.markerPositions[id] else { continue }
+                let d = simd_distance(cam, pos)
+                let factor = min(Self.scaleMax, max(1, d / Self.scaleReferenceM))
+                for child in anchor.children {
+                    child.scale = SIMD3<Float>(repeating: factor)
+                }
+            }
+        }
         return view
     }
 
@@ -156,6 +192,16 @@ public struct ARCameraView: UIViewRepresentable {
     private func applyMarkers(to view: ARView, coordinator: Coordinator) {
         let newIds = Set(sceneMarkers.map(\.id))
         let oldIds = Set(coordinator.markerAnchors.keys)
+        let newScalingIds = Set(
+            sceneMarkers.filter(\.scalesWithDistance).map(\.id))
+        // A marker that stops scaling (scalesWithDistance true → false while
+        // keeping its id/position/shape) would otherwise stay frozen at the
+        // last distance factor, since the per-frame updater only writes scale
+        // for ids in `scalingIds`. Reset those entities back to natural size.
+        for id in coordinator.scalingIds.subtracting(newScalingIds) {
+            coordinator.markerAnchors[id]?.children.forEach { $0.scale = .one }
+        }
+        coordinator.scalingIds = newScalingIds
 
         // Remove anchors that have vanished from the list.
         for staleId in oldIds.subtracting(newIds) {
@@ -175,15 +221,36 @@ public struct ARCameraView: UIViewRepresentable {
         for marker in sceneMarkers {
             if let existing = coordinator.markerAnchors[marker.id] {
                 let storedPosition = coordinator.markerPositions[marker.id]
-                if storedPosition != marker.worldPosition {
+                // Dead-band: ignore sub-centimetre jitter so the live DBH
+                // preview cylinder (whose centre wobbles a few mm at ~10 Hz)
+                // doesn't tear down its anchor and regenerate its mesh every
+                // frame — a real per-frame cost that showed up as scan-screen
+                // churn. Only a ≥1 cm move re-anchors.
+                let moved = storedPosition.map {
+                    simd_distance($0, marker.worldPosition) >= 0.01
+                } ?? true
+                let shapeChanged = coordinator.markerShapes[marker.id] != marker.shape
+                if moved {
+                    // Reuse the existing child entity when the shape is
+                    // unchanged so we move the mesh to the new anchor instead
+                    // of rebuilding it (generateCylinder/Sphere is the costly
+                    // part). AnchorEntity(world:) pins the entity, so the only
+                    // way to reposition is to re-anchor.
+                    let child: Entity
+                    if !shapeChanged, let existingChild = existing.children.first {
+                        existingChild.removeFromParent()
+                        child = existingChild
+                    } else {
+                        child = Self.makeEntity(for: marker)
+                    }
                     view.scene.removeAnchor(existing)
                     let anchor = AnchorEntity(world: marker.worldPosition)
-                    anchor.addChild(Self.makeEntity(for: marker))
+                    anchor.addChild(child)
                     view.scene.addAnchor(anchor)
                     coordinator.markerAnchors[marker.id] = anchor
                     coordinator.markerShapes[marker.id] = marker.shape
                     coordinator.markerPositions[marker.id] = marker.worldPosition
-                } else if coordinator.markerShapes[marker.id] != marker.shape {
+                } else if shapeChanged {
                     for child in existing.children {
                         child.removeFromParent()
                     }

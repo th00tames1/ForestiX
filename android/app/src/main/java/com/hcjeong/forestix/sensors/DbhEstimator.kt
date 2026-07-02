@@ -36,6 +36,12 @@ enum class DBHMethod(val raw: String) {
     LIDAR_PARTIAL_ARC_SINGLE_VIEW("lidarPartialArcSingleView"),
     LIDAR_CHORD_SILHOUETTE("lidarChordSilhouette"),
     MANUAL_CALIPER("manualCaliper"),
+    // Two-tap trunk-edge caliper (no depth) — raw string MUST match iOS
+    // `arCaliper` so cross-platform exports join.
+    AR_CALIPER("arCaliper"),
+    // AR-motion — circle fit to VIO feature points from a short sweep.
+    // Raw MUST match iOS `arVioCircleFit`.
+    AR_VIO_CIRCLE_FIT("arVioCircleFit"),
 }
 
 data class DBHResult(
@@ -68,6 +74,14 @@ class ArDepthFrame(
 sealed class GuideAxis {
     data class Row(val y: Int) : GuideAxis()
     data class Col(val x: Int) : GuideAxis()
+}
+
+/// Per-frame chord DBH algorithm, user-selectable in Settings.
+/// SILHOUETTE = iOS-identical pixel-width identity (d = w·z/(fx−w/2));
+/// DEPTH_BAND = the original Android world-space point-cloud diagonal.
+enum class ChordAlgorithm(val raw: String) {
+    SILHOUETTE("silhouette"), DEPTH_BAND("band");
+    companion object { fun fromRaw(s: String?) = entries.firstOrNull { it.raw == s } ?: SILHOUETTE }
 }
 
 data class DbhScanInput(
@@ -178,6 +192,32 @@ object DBHEstimator {
         )
     }
 
+    // MARK: - Guide-axis auto-selection
+
+    /// The depth image arrives in the camera's sensor orientation, which
+    /// differs by device/rotation — so a fixed guide axis can end up walking
+    /// the strip ALONG the trunk (length) instead of ACROSS it (width). That
+    /// collapses the back-projected points to a single world XZ spot and the
+    /// diameter reads a few cm. We pick whichever axis yields the wider XZ
+    /// chord at the centre, which is the across-the-trunk direction.
+    fun pickGuideAxis(frame: ArDepthFrame, tapX: Double, tapY: Double, cal: ProjectCalibration): GuideAxis {
+        val dTap = medianDepth(tapX, tapY, frame, 2) ?: return GuideAxis.Col(Math.round(tapX).toInt())
+        fun chordFor(axis: GuideAxis): Double {
+            val along = tapAlongAxis(tapX, tapY, axis)
+            val strip = extractGuideStemStrip(frame, axis, along, dTap, 0.15f, cal.depthDiscontinuityM)
+            if (strip.size < 4) return 0.0
+            val pts = strip.map { idx ->
+                val (px, py) = pixelCoords(axis, idx)
+                BackProjection.worldXZ(px.toDouble(), py.toDouble(), frame.depthAt(px, py).toDouble(),
+                    frame.fx, frame.fy, frame.cx, frame.cy, frame.pose)
+            }
+            return chordDiameterFromCloud(pts)
+        }
+        val row = GuideAxis.Row(Math.round(tapY).toInt())
+        val col = GuideAxis.Col(Math.round(tapX).toInt())
+        return if (chordFor(row) >= chordFor(col)) row else col
+    }
+
     // MARK: - Live single-frame preview (cheap, no RANSAC)
 
     /// Lightweight per-frame estimate used by the scan HUD to show a live
@@ -186,21 +226,223 @@ object DBHEstimator {
     /// depth map. `locked` = a plausible trunk fit this frame.
     data class DbhPreview(val diameterCm: Float, val distanceM: Float, val locked: Boolean, val nPoints: Int)
 
-    fun livePreview(frame: ArDepthFrame, tapX: Double, tapY: Double, axis: GuideAxis, cal: ProjectCalibration): DbhPreview? {
+    /// Single-frame chord diameter in metres, or null if the trunk strip
+    /// can't be read this frame. This is the SAME quantity the committed
+    /// burst (estimateChord) medians, so the live number and the recorded
+    /// number agree from the user's point of view. Two algorithms, user-
+    /// selectable: SILHOUETTE (iOS-identical pixel-width) and DEPTH_BAND
+    /// (the original Android world-space point-cloud diagonal).
+    private fun frameChordDiameterM(
+        frame: ArDepthFrame, tapX: Double, tapY: Double, axis: GuideAxis, dTap: Float,
+        cal: ProjectCalibration, algorithm: ChordAlgorithm,
+    ): Double? = when (algorithm) {
+        ChordAlgorithm.SILHOUETTE -> frameSilhouetteDiameterM(frame, tapX, tapY, axis, dTap)
+        ChordAlgorithm.DEPTH_BAND -> {
+            val tapAlong = tapAlongAxis(tapX, tapY, axis)
+            val strip = extractGuideStemStrip(frame, axis, tapAlong, dTap, 0.15f, cal.depthDiscontinuityM)
+            if (strip.size < 6) null else {
+                val pts = strip.map { idx ->
+                    val (px, py) = pixelCoords(axis, idx)
+                    BackProjection.worldXZ(px.toDouble(), py.toDouble(), frame.depthAt(px, py).toDouble(),
+                        frame.fx, frame.fy, frame.cx, frame.cy, frame.pose)
+                }
+                val chord = chordDiameterFromCloud(pts)
+                if (chord > 0.0) chord else null
+            }
+        }
+    }
+
+    /// Silhouette strip walk — 1:1 port of iOS extractChordSilhouetteStrip.
+    /// Walks outward from the tap seed along the axis, stopping at an invalid
+    /// pixel (conf 0 / depth ≤ 0) or a depth jump > silhouetteJumpM. Returns
+    /// the contiguous trunk pixel indices (the projected silhouette edges).
+    private fun extractChordSilhouetteStrip(
+        frame: ArDepthFrame, axis: GuideAxis, tapAlong: Int, silhouetteJumpM: Float = 0.30f,
+    ): List<Int> {
+        val walkLength = when (axis) {
+            is GuideAxis.Row -> { if (axis.y < 0 || axis.y >= frame.height) return emptyList(); frame.width }
+            is GuideAxis.Col -> { if (axis.x < 0 || axis.x >= frame.width) return emptyList(); frame.height }
+        }
+        val clampedTap = tapAlong.coerceIn(0, walkLength - 1)
+        fun depthAt(idx: Int): Float { val (x, y) = pixelCoords(axis, idx); return frame.depthAt(x, y) }
+        fun valid(idx: Int): Boolean {
+            val (x, y) = pixelCoords(axis, idx); return frame.confidenceAt(x, y) >= 1 && frame.depthAt(x, y) > 0f
+        }
+        var seed = clampedTap
+        if (!valid(seed)) {
+            var found = -1
+            for (off in 1..10) {
+                val l = clampedTap - off; if (l >= 0 && valid(l)) { found = l; break }
+                val r = clampedTap + off; if (r < walkLength && valid(r)) { found = r; break }
+            }
+            if (found < 0) return emptyList()
+            seed = found
+        }
+        val indices = ArrayList<Int>(); indices.add(seed)
+        var lastDepth = depthAt(seed)
+        var i = seed - 1
+        while (i >= 0 && valid(i)) {
+            val d = depthAt(i); if (abs(d - lastDepth) > silhouetteJumpM) break
+            indices.add(i); lastDepth = d; i--
+        }
+        lastDepth = depthAt(seed); i = seed + 1
+        while (i < walkLength && valid(i)) {
+            val d = depthAt(i); if (abs(d - lastDepth) > silhouetteJumpM) break
+            indices.add(i); lastDepth = d; i++
+        }
+        indices.sort()
+        return indices
+    }
+
+    /// Per-frame silhouette diameter (m) — 1:1 port of iOS chordPreviewFit's
+    /// core: median silhouette width across ±rowSpan rows, then the pinhole
+    /// chord identity d = w·dTap/(fx − w/2). Null if too few usable rows.
+    private fun frameSilhouetteDiameterM(
+        frame: ArDepthFrame, tapX: Double, tapY: Double, axis: GuideAxis, dTap: Float,
+        rowSpan: Int = 10, silhouetteJumpM: Float = 0.30f,
+    ): Double? {
+        val fx = frame.fx
+        if (fx <= 0) return null
+        val centerAlong = tapAlongAxis(tapX, tapY, axis)
+        val widths = ArrayList<Int>()
+        for (offset in -rowSpan..rowSpan) {
+            val neighbour = when (axis) {
+                is GuideAxis.Row -> GuideAxis.Row(axis.y + offset)
+                is GuideAxis.Col -> GuideAxis.Col(axis.x + offset)
+            }
+            val strip = extractChordSilhouetteStrip(frame, neighbour, centerAlong, silhouetteJumpM)
+            val l = strip.firstOrNull() ?: continue
+            val r = strip.lastOrNull() ?: continue
+            if (r <= l) continue
+            val w = r - l + 1
+            if (w < 5) continue
+            widths.add(w)
+        }
+        if (widths.size < 5) return null
+        widths.sort()
+        val medianWidth = widths[widths.size / 2]
+        val halfWidth = medianWidth / 2.0
+        if (fx - halfWidth <= 1.0) return null
+        val diameterM = medianWidth * dTap.toDouble() / (fx - halfWidth)
+        return if (diameterM > 0.0) diameterM else null
+    }
+
+    fun livePreview(
+        frame: ArDepthFrame, tapX: Double, tapY: Double, axis: GuideAxis, cal: ProjectCalibration,
+        algorithm: ChordAlgorithm = ChordAlgorithm.SILHOUETTE,
+    ): DbhPreview? {
         val dTap = medianDepth(tapX, tapY, frame, 2) ?: return null
         if (dTap !in 0.4f..3.5f) return DbhPreview(0f, dTap, false, 0)
-        val tapAlong = tapAlongAxis(tapX, tapY, axis)
-        val strip = extractGuideStemStrip(frame, axis, tapAlong, dTap, 0.15f, cal.depthDiscontinuityM)
-        if (strip.size < 8) return DbhPreview(0f, dTap, false, strip.size)
-        val pts = strip.map { idx ->
-            val (px, py) = pixelCoords(axis, idx)
-            BackProjection.worldXZ(px.toDouble(), py.toDouble(), frame.depthAt(px, py).toDouble(),
-                frame.fx, frame.fy, frame.cx, frame.cy, frame.pose)
+        val chordM = frameChordDiameterM(frame, tapX, tapY, axis, dTap, cal, algorithm)
+            ?: return DbhPreview(0f, dTap, false, 0)
+        val locked = chordM in 0.025..2.0
+        val dia = (cal.dbhCorrectionAlpha + cal.dbhCorrectionBeta * (chordM * 100)).toFloat()
+        return DbhPreview(dia, dTap, locked, 1)
+    }
+
+    /// Committed DBH = MEDIAN of the per-frame chord diameters over the
+    /// burst (the iOS Phase-19 default "chord / silhouette" method). Uses the
+    /// exact same per-frame chord the live preview shows, so what the cruiser
+    /// sees is what gets recorded; the median + a per-frame spread check give
+    /// the robustness the single-frame preview can't.
+    fun estimateChord(
+        frames: List<ArDepthFrame>, tapX: Double, tapY: Double, axis: GuideAxis, cal: ProjectCalibration,
+        algorithm: ChordAlgorithm = ChordAlgorithm.SILHOUETTE,
+    ): DBHResult? {
+        // Min 5 frames to match the iOS chord burst (was 3 — the capture flow
+        // already gates at ≥5, so this only aligns the estimator's own floor).
+        if (frames.size < 5) return null
+        val last = frames.last()
+        val dTap = medianDepth(tapX, tapY, last, 2)
+            ?: return redChord("Trunk surface not seen at the crosshair", 0)
+        if (dTap !in 0.4f..3.5f)
+            return redChord("Move to 0.4–3.5 m; tap depth ${fmt2(dTap)} m out of range", 0)
+
+        val diameters = ArrayList<Double>(frames.size)
+        for (f in frames) {
+            frameChordDiameterM(f, tapX, tapY, axis, dTap, cal, algorithm)?.let { diameters.add(it) }
         }
-        val r = TaubinFit.fit(pts)?.radius ?: (chordDiameterFromCloud(pts) / 2.0)
-        val locked = r in 0.02..1.0
-        val dia = (cal.dbhCorrectionAlpha + cal.dbhCorrectionBeta * (2 * r * 100)).toFloat()
-        return DbhPreview(dia, dTap, locked, pts.size)
+        if (diameters.size < 3) return redChord("Not enough trunk surface; hold steadier / move closer", diameters.size)
+
+        diameters.sort()
+        val medianM = diameters[diameters.size / 2]
+        val mean = diameters.average()
+        val sd = sqrt(diameters.sumOf { (it - mean) * (it - mean) } / diameters.size)
+        val cov = if (mean > 0) sd / mean else 1.0
+        val diaCm = (cal.dbhCorrectionAlpha + cal.dbhCorrectionBeta * (medianM * 100)).toFloat()
+
+        val checks = listOf(
+            check(medianM in 0.025..2.0, Severity.REJECT, "Diameter outside 2.5–200 cm"),
+            check(cov <= 0.15, Severity.REJECT, "Per-frame spread above 15%"),
+            check(cov <= 0.08, Severity.WARN, "Per-frame spread 8–15%"),
+            check(diameters.size >= maxOf(3, frames.size / 2), Severity.WARN, "Few usable frames"),
+        )
+        val tier = combineChecks(checks)
+        val reason = if (tier == ConfidenceTier.RED)
+            (checks.firstOrNull { !it.passed && it.severity == Severity.REJECT }?.reason ?: "Quality below threshold") else null
+
+        return DBHResult(
+            diameterCm = diaCm, centerX = 0f, centerZ = 0f, arcCoverageDeg = 0f,
+            // Per-sub-sample σ is 0 (matches iOS chordEstimate) — the published
+            // ± comes from aggregateSamples' cross-sample standard error. The
+            // old `sd*1000` stored a DIAMETER sigma in the RADIUS-sigma field
+            // (2× too large) and double-counted spread with the aggregate SE.
+            rmseMm = 0f, sigmaRmm = 0f, nInliers = diameters.size,
+            confidence = tier, method = DBHMethod.LIDAR_CHORD_SILHOUETTE, rejectionReason = reason,
+        )
+    }
+
+    private fun redChord(reason: String, n: Int) = DBHResult(
+        0f, 0f, 0f, 0f, 0f, 0f, n, ConfidenceTier.RED, DBHMethod.LIDAR_CHORD_SILHOUETTE, reason,
+    )
+
+    // MARK: - Multi-sample aggregation (trimmed mean)
+
+    /// Combine the hold-steady capture's repeated sub-measurements into one
+    /// result: keep the 3 samples closest to the median diameter (with 5
+    /// samples that trims the 2 largest deviations) and average them. Red
+    /// sub-samples are excluded up front — they represent "couldn't
+    /// measure", not a value. Mirror of iOS DBHEstimator.aggregateSamples
+    /// so the two platforms record identical statistics.
+    fun aggregateSamples(samples: List<DBHResult>): DBHResult? {
+        val valid = samples.filter { it.confidence != ConfidenceTier.RED }
+        if (valid.size < 3) return null
+
+        val sorted = valid.map { it.diameterCm.toDouble() }.sorted()
+        val median = sorted[sorted.size / 2]
+        val kept = valid
+            .sortedBy { abs(it.diameterCm.toDouble() - median) }
+            .take(3)
+
+        val dias = kept.map { it.diameterCm.toDouble() }
+        val meanDia = dias.average()
+        // Scatter of the kept samples → standard error of the mean, folded
+        // into σ_R (radius, mm) on top of the per-sample σ so repeat-to-
+        // repeat disagreement is visible in the published ±.
+        val variance = dias.sumOf { (it - meanDia) * (it - meanDia) } / dias.size
+        val seDiaCm = sqrt(variance) / sqrt(dias.size.toDouble())
+        val seRadiusMm = seDiaCm * 10.0 / 2.0
+        val meanSigma = kept.sumOf { it.sigmaRmm.toDouble() } / kept.size
+        val sigmaRmm = sqrt(meanSigma * meanSigma + seRadiusMm * seRadiusMm)
+
+        // Majority (median) tier across the kept samples — one noisy yellow
+        // among greens doesn't demote the capture, two do.
+        val tiers = kept.map { it.confidence }.sortedBy { it.ordinal }
+        val tier = tiers[tiers.size / 2]
+
+        fun medianF(xs: List<Float>): Float = xs.sorted()[xs.size / 2]
+        return DBHResult(
+            diameterCm = meanDia.toFloat(),
+            centerX = medianF(kept.map { it.centerX }),
+            centerZ = medianF(kept.map { it.centerZ }),
+            arcCoverageDeg = medianF(kept.map { it.arcCoverageDeg }),
+            rmseMm = medianF(kept.map { it.rmseMm }),
+            sigmaRmm = sigmaRmm.toFloat(),
+            nInliers = kept.sumOf { it.nInliers },
+            confidence = tier,
+            method = kept.first().method,
+            rejectionReason = null,
+        )
     }
 
     // MARK: - Sub-functions (verbatim ports)

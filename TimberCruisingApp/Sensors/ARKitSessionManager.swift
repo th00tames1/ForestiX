@@ -93,6 +93,11 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
     /// camera transform). Used by Offset-from-Opening / VIOChain to
     /// snapshot where the user is standing at each confirmation.
     @Published public private(set) var currentCameraWorldPosition: SIMD3<Float>?
+    /// Latest ARKit sparse VIO feature points in world space (metric).
+    /// Published every frame; the AR-motion DBH method accumulates these
+    /// over a short capture window and circle-fits them. Available on every
+    /// device (no LiDAR required) — these come from visual-inertial odometry.
+    @Published public private(set) var latestRawFeaturePoints: [SIMD3<Float>]?
 
     public static var supportsLiDAR: Bool {
         ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
@@ -104,6 +109,10 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
     /// and the cruiser can't see what they're aiming at.
     public let session: ARSession
     private var trackedStateWasAlwaysNormal = true
+    /// Per-window tracking latch — reset by `beginTrackingWatch()` at the
+    /// start of a bounded capture (e.g. a VIO sweep) so a tracking dropout
+    /// earlier in the session doesn't permanently veto the green tier.
+    private var trackedNormalSinceWatch = true
 
     public override init() {
         self.session = ARSession()
@@ -135,6 +144,15 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
     /// `.normal` tracking — used by §7.2 height measurement guard.
     public var trackingStayedNormal: Bool { trackedStateWasAlwaysNormal }
 
+    /// Begin a fresh per-window tracking watch. Call at the start of a
+    /// bounded capture; `trackingStayedNormalSinceWatch` then reflects only
+    /// frames observed since this call.
+    public func beginTrackingWatch() { trackedNormalSinceWatch = (trackingStatus == .normal) }
+
+    /// True if every frame since the last `beginTrackingWatch()` reported
+    /// `.normal` tracking — the per-sweep counterpart of `trackingStayedNormal`.
+    public var trackingStayedNormalSinceWatch: Bool { trackedNormalSinceWatch }
+
     // MARK: ARSessionDelegate
 
     public nonisolated func session(_ session: ARSession, didUpdate frame: ARFrame) {
@@ -142,11 +160,16 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
         let status = Self.mapTrackingState(frame.camera.trackingState)
         let t = frame.camera.transform
         let camPos = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
+        let features = frame.rawFeaturePoints?.points
         Task { @MainActor [weak self] in
             guard let self else { return }
-            if status != .normal { self.trackedStateWasAlwaysNormal = false }
+            if status != .normal {
+                self.trackedStateWasAlwaysNormal = false
+                self.trackedNormalSinceWatch = false
+            }
             self.trackingStatus = status
             self.currentCameraWorldPosition = camPos
+            self.latestRawFeaturePoints = features
             if let converted { self.latestDepthFrame = converted }
         }
     }
@@ -201,12 +224,30 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
             }
         }
 
+        // Scale the camera intrinsics from the full-resolution captured
+        // image down to the (downsampled) depth-map resolution.
+        // `frame.camera.intrinsics` is calibrated for `imageResolution`
+        // (~1920 wide), but the depth map is only `width`×`height` (~256
+        // wide). Every depth consumer (BackProjection.worldXZ, the DBH
+        // chord/silhouette diameter `width·depth/fx`, calibration) reads
+        // these as depth-map-space values — so passing the full-res fx/cx
+        // unscaled made DBH read ≈ 256/1920 ≈ 1/7.5 of the true diameter
+        // (a 30 cm trunk showed up as ~4–5 cm, regardless of guide axis).
+        let imgRes = frame.camera.imageResolution
+        let sx = imgRes.width  > 0 ? Float(width)  / Float(imgRes.width)  : 1
+        let sy = imgRes.height > 0 ? Float(height) / Float(imgRes.height) : 1
+        var K = frame.camera.intrinsics
+        K.columns.0.x *= sx   // fx
+        K.columns.1.y *= sy   // fy
+        K.columns.2.x *= sx   // cx
+        K.columns.2.y *= sy   // cy
+
         return ARDepthFrame(
             width: width,
             height: height,
             depth: depth,
             confidence: confidence,
-            intrinsics: frame.camera.intrinsics,
+            intrinsics: K,
             cameraPoseWorld: frame.camera.transform,
             timestamp: frame.timestamp
         )
@@ -225,6 +266,7 @@ public final class ARKitSessionManager: ObservableObject {
     @Published public private(set) var latestDepthFrame: ARDepthFrame?
     @Published public private(set) var isRunning = false
     @Published public private(set) var currentCameraWorldPosition: SIMD3<Float>?
+    @Published public private(set) var latestRawFeaturePoints: [SIMD3<Float>]?
 
     public static var supportsLiDAR: Bool { false }
 
@@ -232,6 +274,8 @@ public final class ARKitSessionManager: ObservableObject {
     public func run() {}
     public func pause() {}
     public var trackingStayedNormal: Bool { false }
+    public func beginTrackingWatch() {}
+    public var trackingStayedNormalSinceWatch: Bool { false }
 }
 
 #endif

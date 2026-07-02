@@ -387,8 +387,7 @@ public struct QuickMeasureHomeScreen: View {
                         continuationTreeNumber = n
                         continuationOrigin = .afterDiameter
                     }
-                },
-                showMeshOverlay: true)
+                })
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Close") { presentingDBHScan = false }
@@ -424,8 +423,7 @@ public struct QuickMeasureHomeScreen: View {
                         continuationTreeNumber = n
                         continuationOrigin = .afterHeight
                     }
-                },
-                showMeshOverlay: true)
+                })
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Close") { presentingHeightScan = false }

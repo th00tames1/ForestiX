@@ -3,8 +3,8 @@
 // Five stages render distinct chrome over a black AR placeholder:
 //   1. anchorSet        — "Touch phone to tree base" + [Anchor Here]
 //   2. walking          — live d_h + "Move back X m" hint + [Continue]
-//   3. aimTopArmed      — crosshair on sky + [Aim Top]
-//   4. aimBaseArmed     — crosshair on ground + [Aim Base]
+//   3. aimBaseArmed     — crosshair on the base + [Aim Base]   (base-first)
+//   4. aimTopArmed      — crosshair on the top  + [Aim Top]
 //   5. computed         — H ± σ_H panel + [Retake] / [Accept]
 //
 // Per Phase 2 Decision #5 (carried over) the AR view is a deterministic
@@ -54,21 +54,18 @@ public struct HeightScanScreen: View {
     @State private var metaDamage: [String] = []
     @State private var metaNote: String = ""
     @State private var presentingMetadata = false
-    /// When true, overlays the ARKit scene-reconstruction mesh on top of
-    /// the camera feed — useful visual confirmation that LiDAR is
-    /// sampling the scene while the cruiser walks off and aims.
-    public var showMeshOverlay: Bool = false
+    /// (mesh overlay removed — the Height scan uses the plane/tangent walk-off
+    /// and the LiDAR reconstruction wireframe was just visual noise.)
+    /// PLACEHOLDER-COMMENT
 
     public init(viewModel: @autoclosure @escaping () -> HeightScanViewModel,
                 onResult: @escaping (HeightResult) -> Void = { _ in },
                 onAccept: @escaping (HeightResult, ScanMetadata) -> Void = { _, _ in },
-                onCrown: @escaping (Double, Double) -> Void = { _, _ in },
-                showMeshOverlay: Bool = false) {
+                onCrown: @escaping (Double, Double) -> Void = { _, _ in }) {
         _viewModel = StateObject(wrappedValue: viewModel())
         self.onResult = onResult
         self.onAccept = onAccept
         self.onCrown = onCrown
-        self.showMeshOverlay = showMeshOverlay
     }
 
     // MARK: - Crown sub-flow state
@@ -93,7 +90,7 @@ public struct HeightScanScreen: View {
             // captures a weak ref to the ARView so button handlers can
             // turn "cruiser tapped while aiming here" into a world hit.
             ARCameraView(manager: viewModel.session,
-                         debugMeshOverlay: showMeshOverlay,
+                         debugMeshOverlay: false,
                          sceneMarkers: viewModel.sceneMarkers + crownMarkers,
                          raycaster: raycaster)
                 .ignoresSafeArea()
@@ -135,6 +132,7 @@ public struct HeightScanScreen: View {
                 bottomPanel
             }
         }
+        .devHUDOverlay(settings.developerMode, title: "HEIGHT", lines: devHUDLines)
         .navigationTitle("Height")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
@@ -256,6 +254,21 @@ public struct HeightScanScreen: View {
                 .background(Color.black.opacity(0.65))
                 .cornerRadius(4)
         }
+    }
+
+    private var devHUDLines: [(String, String)] {
+        var out: [(String, String)] = [
+            ("source", settings.measurementSource.displayName),
+            ("d_h live", String(format: "%.1f m", Double(viewModel.dhMeters))),
+        ]
+        if let r = viewModel.result {
+            out.append(("H", String(format: "%.1f ±%.1f m", Double(r.heightM), Double(r.sigmaHm))))
+            out.append(("α_top", String(format: "%+.1f°", Double(r.alphaTopRad) * 180 / .pi)))
+            out.append(("α_base", String(format: "%+.1f°", Double(r.alphaBaseRad) * 180 / .pi)))
+            out.append(("d_h", String(format: "%.1f m", Double(r.dHm))))
+            out.append(("tier", r.confidence.rawValue))
+        }
+        return out
     }
 
     // MARK: - Bottom panel
@@ -531,23 +544,33 @@ public struct HeightScanScreen: View {
 
     /// Crown reference markers (yellow L/R, cyan top/bottom) merged into
     /// the height scene so the cruiser sees what they've tagged.
+    private static let crownLeftId   = UUID(uuidString: "00000000-C0C0-0000-0000-000000000001") ?? UUID()
+    private static let crownRightId  = UUID(uuidString: "00000000-C0C0-0000-0000-000000000002") ?? UUID()
+    private static let crownTopId    = UUID(uuidString: "00000000-C0C0-0000-0000-000000000003") ?? UUID()
+    private static let crownBottomId = UUID(uuidString: "00000000-C0C0-0000-0000-000000000004") ?? UUID()
+
     private var crownMarkers: [ARSceneMarker] {
+        // Stable ids so these aren't torn down + rebuilt on every frame.
         var out: [ARSceneMarker] = []
         if let p = crownLeft {
-            out.append(ARSceneMarker(worldPosition: p, shape: .sphere(radiusM: 0.05),
-                                     colorRGBA: SIMD4<Float>(1, 0.85, 0, 1)))
+            out.append(ARSceneMarker(id: Self.crownLeftId, worldPosition: p, shape: .sphere(radiusM: 0.05),
+                                     colorRGBA: SIMD4<Float>(1, 0.85, 0, 1),
+                                     scalesWithDistance: true))
         }
         if let p = crownRight {
-            out.append(ARSceneMarker(worldPosition: p, shape: .sphere(radiusM: 0.05),
-                                     colorRGBA: SIMD4<Float>(1, 0.85, 0, 1)))
+            out.append(ARSceneMarker(id: Self.crownRightId, worldPosition: p, shape: .sphere(radiusM: 0.05),
+                                     colorRGBA: SIMD4<Float>(1, 0.85, 0, 1),
+                                     scalesWithDistance: true))
         }
         if let p = crownTop {
-            out.append(ARSceneMarker(worldPosition: p, shape: .sphere(radiusM: 0.05),
-                                     colorRGBA: SIMD4<Float>(0.2, 0.7, 1, 1)))
+            out.append(ARSceneMarker(id: Self.crownTopId, worldPosition: p, shape: .sphere(radiusM: 0.05),
+                                     colorRGBA: SIMD4<Float>(0.2, 0.7, 1, 1),
+                                     scalesWithDistance: true))
         }
         if let p = crownBottom {
-            out.append(ARSceneMarker(worldPosition: p, shape: .sphere(radiusM: 0.05),
-                                     colorRGBA: SIMD4<Float>(0.2, 0.7, 1, 1)))
+            out.append(ARSceneMarker(id: Self.crownBottomId, worldPosition: p, shape: .sphere(radiusM: 0.05),
+                                     colorRGBA: SIMD4<Float>(0.2, 0.7, 1, 1),
+                                     scalesWithDistance: true))
         }
         return out
     }
@@ -609,14 +632,17 @@ public struct HeightScanScreen: View {
                 if crownStep == .none {
                     Button("Measure crown") { crownStep = .left }
                         .buttonStyle(.bordered)
+                        .frame(maxWidth: .infinity)
                         .accessibilityIdentifier("heightScan.measureCrown")
                 } else if crownStep == .done {
                     Button("Redo crown") { resetCrown() }
                         .buttonStyle(.bordered)
+                        .frame(maxWidth: .infinity)
                 }
                 HStack(spacing: 12) {
                     Button("Retake") { viewModel.retake(); resetCrown() }
                         .buttonStyle(.bordered)
+                        .frame(maxWidth: .infinity)
                     Button("Accept") {
                         if crownStep == .done, let w = crownWidthM, let h = crownHeightM {
                             onCrown(w, h)
@@ -624,6 +650,7 @@ public struct HeightScanScreen: View {
                         viewModel.accept()
                     }
                     .buttonStyle(.borderedProminent)
+                    .frame(maxWidth: .infinity)
                     .disabled(viewModel.result?.confidence == .red)
                     .accessibilityIdentifier("heightScan.acceptButton")
                 }

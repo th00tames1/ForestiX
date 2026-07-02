@@ -39,6 +39,9 @@ public final class HeightScanViewModel: ObservableObject {
 
     @Published public private(set) var state: State = .idle
     @Published public private(set) var result: HeightResult?
+    /// Bumped once per height computation so the screen can fire research
+    /// logging exactly when a new measurement is committed.
+    @Published public private(set) var resultGeneration: Int = 0
 
     /// Live horizontal distance from the anchor to the current standing
     /// pose (REQ-HGT-003). Updates at the ARKit frame rate.
@@ -233,41 +236,41 @@ public final class HeightScanViewModel: ObservableObject {
     }
 
     /// User decides they've walked far enough and tapped Continue.
+    /// Base-first: from eye level you tilt DOWN to the base, then sweep UP
+    /// to the top in one continuous motion — less device rotation than
+    /// top-then-base, so we arm the BASE aim first.
     public func continueToAimTop() {
         guard state == .walking, anchorPointWorld != nil else { return }
-        state = .aimTopArmed
-    }
-
-    /// Step (c) — Aim Top tap. α_top = median pitch over ±200 ms.
-    /// `aimedAtWorld` is an optional hint from a screen-centre raycast
-    /// used purely for the top-marker position. If nil, the marker
-    /// falls back to (anchor.xz, standing.y + d_h · tan(α_top)).
-    public func captureTop(at tapTime: TimeInterval,
-                           standingPointWorld: SIMD3<Float>,
-                           aimedAtWorld: SIMD3<Float>? = nil) {
-        guard state == .aimTopArmed, anchorPointWorld != nil else { return }
-        guard let median = resilientMedianPitch(tapTime: tapTime) else { return }
-        alphaTopRad = Float(median)
-        alphaTopSampleCount = pitchBuffer.sampleCount(centeredOn: tapTime)
-        standingPointWorldAtAimTop = standingPointWorld
-        topAimedWorld = aimedAtWorld
-        state = .aimTopCaptured
         state = .aimBaseArmed
-        rebuildSceneMarkers()
     }
 
-    /// Step (d) — Aim Base tap. α_base = median pitch over ±200 ms.
-    /// Triggers estimation. `aimedAtWorld` is the same optional raycast
-    /// hint used for the base marker.
+    /// Step (c) — Aim BASE tap (FIRST). α_base = median pitch over ±200 ms.
+    /// Locks the standing pose here (both angles must be measured from the
+    /// same spot — see §7.2). `aimedAtWorld` seeds the base marker.
     public func captureBase(at tapTime: TimeInterval,
+                            standingPointWorld: SIMD3<Float>,
                             aimedAtWorld: SIMD3<Float>? = nil) {
-        guard state == .aimBaseArmed, anchorPointWorld != nil,
-              alphaTopRad != nil, standingPointWorldAtAimTop != nil
-        else { return }
+        guard state == .aimBaseArmed, anchorPointWorld != nil else { return }
         guard let median = resilientMedianPitch(tapTime: tapTime) else { return }
         alphaBaseRad = Float(median)
         alphaBaseSampleCount = pitchBuffer.sampleCount(centeredOn: tapTime)
+        standingPointWorldAtAimTop = standingPointWorld
         baseAimedWorld = aimedAtWorld
+        state = .aimTopArmed
+        rebuildSceneMarkers()
+    }
+
+    /// Step (d) — Aim TOP tap (SECOND). α_top = median pitch over ±200 ms.
+    /// Triggers estimation. `aimedAtWorld` seeds the top marker.
+    public func captureTop(at tapTime: TimeInterval,
+                           aimedAtWorld: SIMD3<Float>? = nil) {
+        guard state == .aimTopArmed, anchorPointWorld != nil,
+              alphaBaseRad != nil, standingPointWorldAtAimTop != nil
+        else { return }
+        guard let median = resilientMedianPitch(tapTime: tapTime) else { return }
+        alphaTopRad = Float(median)
+        alphaTopSampleCount = pitchBuffer.sampleCount(centeredOn: tapTime)
+        topAimedWorld = aimedAtWorld
         compute()
         rebuildSceneMarkers()
     }
@@ -356,20 +359,21 @@ public final class HeightScanViewModel: ObservableObject {
     /// 10–100× and produced absurd heights (e.g. a desk at 2 m showing
     /// up as 100 m+) instead of an honest "tracking not ready" message.
     public func captureTopNow(screenCenterHit: SIMD3<Float>? = nil) {
-        guard let p = currentCameraTranslation() else {
-            anchorFailureReason =
-                "AR tracking not ready — wait a moment, then try Aim Top again."
-            return
-        }
         captureTop(at: nowForPitchBuffer(),
-                   standingPointWorld: p,
                    aimedAtWorld: screenCenterHit)
     }
 
-    /// Button-handler entry for Aim Base. Same clock convention as
-    /// `captureTopNow()` — see the Aim Top docstring.
+    /// Button-handler entry for Aim Base (the FIRST aim). Captures the
+    /// standing pose used for both angles. Same clock convention as
+    /// `captureTopNow()`.
     public func captureBaseNow(screenCenterHit: SIMD3<Float>? = nil) {
+        guard let p = currentCameraTranslation() else {
+            anchorFailureReason =
+                "AR tracking not ready — wait a moment, then try Aim Base again."
+            return
+        }
         captureBase(at: nowForPitchBuffer(),
+                    standingPointWorld: p,
                     aimedAtWorld: screenCenterHit)
     }
 
@@ -379,23 +383,22 @@ public final class HeightScanViewModel: ObservableObject {
         ProcessInfo.processInfo.systemUptime
     }
 
-    /// Test/preview hook: push α_top directly, skipping the IMU buffer.
-    public func captureTopDirect(alphaTopRad: Float,
-                                 standingPointWorld: SIMD3<Float>) {
-        guard state == .aimTopArmed, anchorPointWorld != nil else { return }
-        self.alphaTopRad = alphaTopRad
+    /// Test/preview hook: push α_base directly (FIRST), skipping the IMU.
+    public func captureBaseDirect(alphaBaseRad: Float,
+                                  standingPointWorld: SIMD3<Float>) {
+        guard state == .aimBaseArmed, anchorPointWorld != nil else { return }
+        self.alphaBaseRad = alphaBaseRad
         standingPointWorldAtAimTop = standingPointWorld
-        state = .aimTopCaptured
-        state = .aimBaseArmed
+        state = .aimTopArmed
         rebuildSceneMarkers()
     }
 
-    /// Test/preview hook: push α_base directly, skipping the IMU buffer.
-    public func captureBaseDirect(alphaBaseRad: Float) {
-        guard state == .aimBaseArmed, anchorPointWorld != nil,
-              alphaTopRad != nil, standingPointWorldAtAimTop != nil
+    /// Test/preview hook: push α_top directly (SECOND), skipping the IMU.
+    public func captureTopDirect(alphaTopRad: Float) {
+        guard state == .aimTopArmed, anchorPointWorld != nil,
+              alphaBaseRad != nil, standingPointWorldAtAimTop != nil
         else { return }
-        self.alphaBaseRad = alphaBaseRad
+        self.alphaTopRad = alphaTopRad
         compute()
         rebuildSceneMarkers()
     }
@@ -484,7 +487,8 @@ public final class HeightScanViewModel: ObservableObject {
                 id: Self.anchorMarkerId,
                 worldPosition: anchor,
                 shape: .sphere(radiusM: 0.08),
-                colorRGBA: SIMD4(1.00, 0.30, 0.30, 1.00)))  // red
+                colorRGBA: SIMD4(1.00, 0.30, 0.30, 1.00),
+                scalesWithDistance: true))  // red
         }
 
         // Prefer the raycast hit if the host supplied one — that's the
@@ -507,7 +511,8 @@ public final class HeightScanViewModel: ObservableObject {
                     id: Self.topMarkerId,
                     worldPosition: p,
                     shape: .sphere(radiusM: 0.08),
-                    colorRGBA: SIMD4(1.00, 0.85, 0.15, 1.00)))  // yellow
+                    colorRGBA: SIMD4(1.00, 0.85, 0.15, 1.00),
+                    scalesWithDistance: true))  // yellow
             }
         }
 
@@ -527,7 +532,8 @@ public final class HeightScanViewModel: ObservableObject {
                     id: Self.baseMarkerId,
                     worldPosition: p,
                     shape: .sphere(radiusM: 0.08),
-                    colorRGBA: SIMD4(0.25, 0.85, 0.35, 1.00)))  // green
+                    colorRGBA: SIMD4(0.25, 0.85, 0.35, 1.00),
+                    scalesWithDistance: true))  // green
             }
         }
 

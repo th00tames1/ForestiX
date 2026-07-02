@@ -145,10 +145,19 @@ private fun ArSceneHost(
     val childNodes = rememberNodes()
     val androidView = LocalView.current
 
+    // Nodes whose apparent size should stay constant — rescaled every frame
+    // from the camera distance (see onSessionUpdated below).
+    val scalingNodes = remember { mutableListOf<Pair<Node, Vec3>>() }
+
     // Rebuild marker nodes whenever the marker set changes. Done in a
     // side-effect (not inline during composition) so we don't mutate the
     // snapshot node list mid-composition.
     androidx.compose.runtime.LaunchedEffect(markers) {
+        // Destroy the previous nodes' native (Filament) resources before
+        // dropping them — clearing the list alone leaks geometry/material
+        // every rebuild, which piles up into progressively worse lag.
+        scalingNodes.clear()
+        childNodes.forEach { runCatching { it.destroy() } }
         childNodes.clear()
         markers.forEach { marker ->
             val color = marker.colorRGBA
@@ -163,6 +172,7 @@ private fun ArSceneHost(
             }
             node.worldPosition = Float3(marker.worldPosition.x, marker.worldPosition.y, marker.worldPosition.z)
             childNodes.add(node)
+            if (marker.scalesWithDistance) scalingNodes.add(node to marker.worldPosition)
         }
     }
 
@@ -191,9 +201,30 @@ private fun ArSceneHost(
             controller.viewWidthPx = androidView.width
             controller.viewHeightPx = androidView.height
             controller.onUpdate(session, frame)
+            // Distance-compensated marker scaling — keeps flagged markers'
+            // apparent size readable when the cruiser walks away (height
+            // walk-off can be 15–20 m out). Natural size inside the
+            // reference distance, linear growth beyond it, capped.
+            if (scalingNodes.isNotEmpty()) {
+                val cam = frame.camera.pose
+                val camPos = Vec3(cam.tx(), cam.ty(), cam.tz())
+                scalingNodes.forEach { (node, worldPos) ->
+                    val d = distance(camPos, worldPos)
+                    val factor = (d / MARKER_SCALE_REFERENCE_M)
+                        .coerceIn(1f, MARKER_SCALE_MAX)
+                    node.scale = Float3(factor, factor, factor)
+                }
+            }
         },
     )
 }
+
+/// Distance-compensated marker scaling: natural size out to this range…
+private const val MARKER_SCALE_REFERENCE_M = 3f
+
+/// …then linear growth with distance, capped so a marker seen from across
+/// a stand doesn't balloon absurdly. (Mirror of iOS ARCameraView.)
+private const val MARKER_SCALE_MAX = 6f
 
 /// Builds a flat annulus (ring) node — the rim only — mirroring the iOS
 /// generateRing(). Cheap vs a filled translucent disk, so a 30 m boundary

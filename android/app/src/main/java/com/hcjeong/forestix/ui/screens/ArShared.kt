@@ -1,7 +1,6 @@
-// Shared AR-screen overlay chrome: centre crosshair, capture-failure
-// banner, and the translucent bottom panel — the common pieces every AR
-// measurement screen layers over the camera feed (mirrors the repeated
-// SwiftUI overlay code on iOS).
+// Shared AR-screen overlay chrome: the centre crosshair every AR
+// measurement screen layers over the camera feed (mirrors the SwiftUI
+// overlay code on iOS).
 
 package com.hcjeong.forestix.ui.screens
 
@@ -36,30 +35,3 @@ fun CenterCrosshair(modifier: Modifier = Modifier) {
     }
 }
 
-@Composable
-fun CaptureFailureBanner(text: String) {
-    val type = Forestix.type
-    Text(
-        text,
-        style = type.caption,
-        color = Color.White,
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
-            .background(Color(0xD9FF9800))
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-    )
-}
-
-@Composable
-fun ArBottomPanel(content: @Composable () -> Unit) {
-    Box(
-        Modifier
-            .fillMaxWidth()
-            .padding(horizontal = ForestixSpace.md)
-            .padding(bottom = ForestixSpace.lg)
-            .clip(RoundedCornerShape(ForestixSpace.sm))
-            .background(Color.Black.copy(alpha = 0.55f))
-            .padding(ForestixSpace.md),
-    ) { Column { content() } }
-}

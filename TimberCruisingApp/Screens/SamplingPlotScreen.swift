@@ -37,6 +37,15 @@ public struct SamplingPlotScreen: View {
     @State private var feedbackGen: UINotificationFeedbackGenerator?
     #endif
 
+    // Stable marker ids so ARCameraView diffs (instead of tearing down and
+    // rebuilding every marker on every body re-eval — the 0.2 s flash timer
+    // re-evaluates `markers`, and fresh random UUIDs there made it rebuild
+    // the 96-segment ring continuously, which tanked the frame rate).
+    private static let baseSphereId = UUID(uuidString: "00000000-5A11-0000-0000-000000000001") ?? UUID()
+    private static let poleId       = UUID(uuidString: "00000000-5A11-0000-0000-000000000002") ?? UUID()
+    private static let topSphereId  = UUID(uuidString: "00000000-5A11-0000-0000-000000000003") ?? UUID()
+    private static let ringId       = UUID(uuidString: "00000000-5A11-0000-0000-000000000004") ?? UUID()
+
     public init() {}
 
     public var body: some View {
@@ -154,9 +163,11 @@ public struct SamplingPlotScreen: View {
             HStack(spacing: 12) {
                 Button("Reset") { reset() }
                     .buttonStyle(.bordered)
+                    .frame(maxWidth: .infinity)
                     .disabled(center == nil)
                 Button("Save") { savePlot() }
                     .buttonStyle(.borderedProminent)
+                    .frame(maxWidth: .infinity)
                     .disabled(center == nil)
                     .accessibilityIdentifier("samplingPlot.save")
             }
@@ -281,22 +292,31 @@ public struct SamplingPlotScreen: View {
 
     private var markers: [ARSceneMarker] {
         guard let c = center else { return [] }
-        var out: [ARSceneMarker] = []
-        // Short white stake whose base sits exactly at the tapped point,
-        // so it reads as a pin at the crosshair rather than floating above.
-        out.append(ARSceneMarker(
-            worldPosition: SIMD3<Float>(c.x, c.y + 0.3, c.z),
-            shape: .cylinder(radiusM: 0.06, heightM: 0.6),
-            colorRGBA: SIMD4<Float>(1, 1, 1, 1)))
-        // Boundary as a thin ring outline (cyan inside / red outside) —
-        // no filled disk, so no large translucent overdraw / frame drop.
-        let ringColor: SIMD4<Float> = isOutside
-            ? SIMD4<Float>(1, 0.25, 0.25, 0.95)
-            : SIMD4<Float>(0.2, 0.85, 1, 0.95)
-        out.append(ARSceneMarker(
-            worldPosition: SIMD3<Float>(c.x, c.y + 0.02, c.z),
-            shape: .ring(radiusM: Float(radiusM), thicknessM: 0.12),
-            colorRGBA: ringColor))
-        return out
+        // Stable ids → ARCameraView only rebuilds a marker when its position
+        // or shape changes (e.g. radius), never on the flash timer. The ring
+        // colour is kept constant (in/out is shown by the red border flash +
+        // the panel) so an in/out flip doesn't churn the geometry either.
+        return [
+            // Exact-centre red sphere so the tapped point is unmistakable.
+            ARSceneMarker(id: Self.baseSphereId,
+                          worldPosition: c,
+                          shape: .sphere(radiusM: 0.07),
+                          colorRGBA: SIMD4<Float>(1, 0.25, 0.25, 1)),
+            // Tall white pole rising from the tapped point.
+            ARSceneMarker(id: Self.poleId,
+                          worldPosition: SIMD3<Float>(c.x, c.y + 0.6, c.z),
+                          shape: .cylinder(radiusM: 0.05, heightM: 1.2),
+                          colorRGBA: SIMD4<Float>(1, 1, 1, 1)),
+            // Bright top sphere — visible from across the plot.
+            ARSceneMarker(id: Self.topSphereId,
+                          worldPosition: SIMD3<Float>(c.x, c.y + 1.2, c.z),
+                          shape: .sphere(radiusM: 0.12),
+                          colorRGBA: SIMD4<Float>(1, 0.85, 0.15, 1)),
+            // Thick boundary ring (constant cyan).
+            ARSceneMarker(id: Self.ringId,
+                          worldPosition: SIMD3<Float>(c.x, c.y + 0.02, c.z),
+                          shape: .ring(radiusM: Float(radiusM), thicknessM: 0.4),
+                          colorRGBA: SIMD4<Float>(0.2, 0.85, 1, 1)),
+        ]
     }
 }

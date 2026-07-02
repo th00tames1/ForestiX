@@ -321,6 +321,43 @@ public enum DBHEstimator {
             rejectionReason: rejectionReason)
     }
 
+    /// The depth map arrives in the camera's sensor orientation, which
+    /// varies by device/rotation — so a fixed guide axis can walk the strip
+    /// ALONG the trunk (its length) instead of ACROSS it (its width). That
+    /// collapses the back-projected points to one world-XZ spot and the
+    /// diameter reads a few centimetres. We try both axes at the tap and pick
+    /// whichever yields the wider XZ chord — the across-the-trunk direction.
+    public static func pickGuideAxis(
+        frame: ARDepthFrame,
+        tapPixel: SIMD2<Double>,
+        calibration cal: ProjectCalibration
+    ) -> GuideAxis {
+        guard let dTap = medianDepth(around: tapPixel, frame: frame, radius: 2)
+        else { return .col(x: Int(tapPixel.x.rounded())) }
+
+        func chordFor(_ axis: GuideAxis) -> Double {
+            let along = tapAlongAxis(tapPixel, axis: axis)
+            let strip = extractGuideStemStrip(
+                frame: frame, axis: axis, tapAlongAxis: along, dTap: dTap,
+                deltaDepth: 0.15,
+                discontinuityThresholdM: cal.depthDiscontinuityM)
+            if strip.count < 4 { return 0 }
+            let pts = strip.map { idx -> SIMD2<Double> in
+                let (px, py) = pixelCoords(axis: axis, idx: idx)
+                return BackProjection.worldXZ(
+                    x: Double(px), y: Double(py),
+                    depth: Double(frame.depth(atX: px, y: py)),
+                    intrinsics: frame.intrinsics,
+                    cameraPoseWorld: frame.cameraPoseWorld)
+            }
+            return chordDiameterFromCloud(pts)
+        }
+
+        let row = GuideAxis.row(y: Int(tapPixel.y.rounded()))
+        let col = GuideAxis.col(x: Int(tapPixel.x.rounded()))
+        return chordFor(row) >= chordFor(col) ? row : col
+    }
+
     // MARK: - Step 2: depth + confidence at tap
 
     /// 5×5 median depth (radius = 2) around the tap pixel. Returns nil
@@ -1294,6 +1331,58 @@ public enum DBHEstimator {
             nInliers: widths.reduce(0, +),
             confidence: tier,
             method: .lidarChordSilhouette,
+            rawPointsPath: nil,
+            rejectionReason: nil)
+    }
+
+    // MARK: - Multi-sample aggregation (trimmed mean)
+
+    /// Combine the hold-steady capture's repeated sub-measurements into one
+    /// result: keep the 3 samples closest to the median diameter (with 5
+    /// samples that trims the 2 largest deviations) and average them. Red
+    /// sub-samples are excluded up front — they represent "couldn't
+    /// measure", not a value. Mirrors Android DbhEstimator.aggregateSamples
+    /// so the two platforms record identical statistics.
+    public static func aggregateSamples(_ samples: [DBHResult]) -> DBHResult? {
+        let valid = samples.filter { $0.confidence != .red }
+        guard valid.count >= 3 else { return nil }
+
+        let sorted = valid.map { Double($0.diameterCm) }.sorted()
+        let median = sorted[sorted.count / 2]
+        let kept = Array(valid
+            .sorted { abs(Double($0.diameterCm) - median) < abs(Double($1.diameterCm) - median) }
+            .prefix(3))
+
+        let dias = kept.map { Double($0.diameterCm) }
+        let meanDia = dias.reduce(0, +) / Double(dias.count)
+        // Scatter of the kept samples → standard error of the mean, folded
+        // into σ_R (radius, mm) on top of the per-sample σ so repeat-to-
+        // repeat disagreement is visible in the published ±.
+        let variance = dias.reduce(0.0) { $0 + ($1 - meanDia) * ($1 - meanDia) } / Double(dias.count)
+        let seDiaCm = variance.squareRoot() / Double(dias.count).squareRoot()
+        let seRadiusMm = seDiaCm * 10.0 / 2.0
+        let meanSigma = kept.reduce(0.0) { $0 + Double($1.sigmaRmm) } / Double(kept.count)
+        let sigmaRmm = (meanSigma * meanSigma + seRadiusMm * seRadiusMm).squareRoot()
+
+        // Majority (median) tier across the kept samples — one noisy yellow
+        // among greens doesn't demote the capture, two do.
+        let rank: (ConfidenceTier) -> Int = { $0 == .green ? 0 : $0 == .yellow ? 1 : 2 }
+        let tiers = kept.map(\.confidence).sorted { rank($0) < rank($1) }
+        let tier = tiers[tiers.count / 2]
+
+        func medianF(_ xs: [Float]) -> Float {
+            let s = xs.sorted(); return s[s.count / 2]
+        }
+        return DBHResult(
+            diameterCm: Float(meanDia),
+            centerXZ: SIMD2<Float>(medianF(kept.map(\.centerXZ.x)),
+                                   medianF(kept.map(\.centerXZ.y))),
+            arcCoverageDeg: medianF(kept.map(\.arcCoverageDeg)),
+            rmseMm: medianF(kept.map(\.rmseMm)),
+            sigmaRmm: Float(sigmaRmm),
+            nInliers: kept.reduce(0) { $0 + $1.nInliers },
+            confidence: tier,
+            method: kept[0].method,
             rawPointsPath: nil,
             rejectionReason: nil)
     }

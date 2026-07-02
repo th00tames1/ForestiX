@@ -10,6 +10,9 @@
 
 package com.hcjeong.forestix.ar
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import com.google.ar.core.Frame
 import com.google.ar.core.Plane
 import com.google.ar.core.Session
@@ -32,8 +35,11 @@ class ArController {
 
     /// True when the running session supports the Depth API — the closest
     /// Android equivalent of "device has LiDAR". Drives the LiDAR/AR toggle
-    /// default in DistanceMeasureScreen.
-    var supportsDepth: Boolean = false
+    /// default in DistanceMeasureScreen and the DBH method selector's Depth
+    /// segment. Backed by Compose snapshot state so a Composable reading it
+    /// recomposes when the session reports depth support (otherwise the
+    /// Depth segment stayed disabled after entering in caliper mode).
+    var supportsDepth: Boolean by mutableStateOf(false)
         internal set
 
     /// When true (LiDAR mode), screenCenterHit takes the nearest hit of any
@@ -45,6 +51,44 @@ class ArController {
     fun onUpdate(session: Session, frame: Frame) {
         this.session = session
         this.frame = frame
+        if (frame.camera.trackingState != TrackingState.TRACKING) trackedNormalSinceWatch = false
+    }
+
+    // Per-window tracking latch — the Android counterpart of iOS
+    // ARKitSessionManager.beginTrackingWatch. Reset at the start of a VIO
+    // sweep so an earlier dropout doesn't permanently veto the green tier.
+    @Volatile private var trackedNormalSinceWatch = true
+
+    /// Begin a fresh per-window tracking watch (call at sweep start).
+    fun beginTrackingWatch() {
+        trackedNormalSinceWatch = frame?.camera?.trackingState == TrackingState.TRACKING
+    }
+
+    /// True if every frame since the last beginTrackingWatch() was TRACKING.
+    fun trackingStayedNormalSinceWatch(): Boolean = trackedNormalSinceWatch
+
+    /// Snapshot the current ARCore point cloud as world-space feature points
+    /// keyed by their stable point id (so a sweep can accumulate a de-duped
+    /// union). Empty when nothing is tracked. Mirrors the iOS VIO feature
+    /// stream (which the AR-motion DBH method circle-fits).
+    fun acquireFeaturePointsWorld(): List<Pair<Int, Vec3>> {
+        val f = frame ?: return emptyList()
+        val pc = try { f.acquirePointCloud() } catch (_: Throwable) { return emptyList() }
+        return try {
+            val pts = pc.points          // 4 floats per point: x,y,z,confidence (world)
+            val ids = pc.ids             // one int id per point
+            val n = ids.limit()
+            val out = ArrayList<Pair<Int, Vec3>>(n)
+            for (m in 0 until n) {
+                val base = m * 4
+                out.add(ids.get(m) to Vec3(pts.get(base), pts.get(base + 1), pts.get(base + 2)))
+            }
+            out
+        } catch (_: Throwable) {
+            emptyList()
+        } finally {
+            pc.release()
+        }
     }
 
     private fun ready(): Boolean {
@@ -128,8 +172,13 @@ class ArController {
 
     /// Full-resolution camera focal length (x) + image width, used to
     /// project a real-world width (m) to on-screen pixels for the live HUD.
-    fun textureFocalX(): Float? = frame?.camera?.textureIntrinsics?.focalLength?.get(0)
-    fun textureWidth(): Int? = frame?.camera?.textureIntrinsics?.imageDimensions?.get(0)
+
+    /// True when the latest frame is tracking — for the dev HUD.
+    fun trackingOk(): Boolean = frame?.camera?.trackingState == TrackingState.TRACKING
+
+    /// Camera-forward elevation in degrees (the dev-HUD readout of the
+    /// pitch the height tangent uses).
+    fun cameraPitchDeg(): Float? = cameraForwardElevationRad()?.let { it * 180f / Math.PI.toFloat() }
 
     /// Acquire the ARCore Depth-API frame as the platform-independent
     /// ArDepthFrame the DBH estimator consumes — the Android analogue of
@@ -184,6 +233,44 @@ class ArController {
         }
     }
 
+    /// Unproject a screen tap (pixels) to a WORLD-space ray direction. Only
+    /// the angle between two such rays matters for the AR-caliper, and that
+    /// angle is invariant under any consistent frame, so we always use the
+    /// world frame here. NDC = (2·sx/W − 1, 1 − 2·sy/H); unproject both clip
+    /// depths (near z=−1, far z=+1) through inverse(proj·view); direction =
+    /// normalize(worldFar − worldNear). Validate: the screen centre must map
+    /// to roughly the camera forward (−zAxis).
+    fun screenToWorldRayDirection(sx: Float, sy: Float, viewW: Int, viewH: Int): Vec3? {
+        val f = frame ?: return null
+        if (viewW <= 0 || viewH <= 0) return null
+        val view = FloatArray(16)
+        val proj = FloatArray(16)
+        f.camera.getViewMatrix(view, 0)
+        f.camera.getProjectionMatrix(proj, 0, 0.01f, 100f)
+        val vp = FloatArray(16)
+        multiplyMM(vp, proj, view)
+        val invVp = invertM(vp) ?: return null
+
+        val ndcX = 2f * sx / viewW - 1f
+        val ndcY = 1f - 2f * sy / viewH
+        val near = unprojectNdc(invVp, ndcX, ndcY, -1f) ?: return null
+        val far = unprojectNdc(invVp, ndcX, ndcY, 1f) ?: return null
+        val dir = (far - near).normalize()
+        if (dir.length() < 1e-6f || !dir.x.isFinite()) return null
+        return dir
+    }
+
+    /// Unproject a clip-space NDC point at depth `z` to a world point via the
+    /// supplied inverse(proj·view); null if the result is at infinity (w≈0).
+    private fun unprojectNdc(invVp: FloatArray, ndcX: Float, ndcY: Float, z: Float): Vec3? {
+        val out = FloatArray(4)
+        multiplyMV(out, invVp, floatArrayOf(ndcX, ndcY, z, 1f))
+        val w = out[3]
+        if (kotlin.math.abs(w) < 1e-9f) return null
+        val inv = 1f / w
+        return Vec3(out[0] * inv, out[1] * inv, out[2] * inv)
+    }
+
     /// World -> screen-pixel projection so two-point markers track the
     /// scene as the camera moves. Uses ARCore's view * projection matrices
     /// (the platform analogue of ARView.project on iOS). Returns null when
@@ -223,5 +310,50 @@ class ArController {
             for (k in 0 until 4) s += m[k * 4 + r] * v[k]
             out[r] = s
         }
+    }
+
+    /// Inverse of a column-major 4x4 (cofactor method, matching the layout
+    /// android.opengl.Matrix / ARCore use). Returns null when singular.
+    /// Self-contained so the ray unprojection needs no kotlin-math dep.
+    private fun invertM(m: FloatArray): FloatArray? {
+        val inv = FloatArray(16)
+        inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] +
+            m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10]
+        inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] -
+            m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10]
+        inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] +
+            m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9]
+        inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] -
+            m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9]
+        inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] -
+            m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10]
+        inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] +
+            m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10]
+        inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] -
+            m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9]
+        inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] +
+            m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9]
+        inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] +
+            m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6]
+        inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] -
+            m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6]
+        inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] +
+            m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5]
+        inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] -
+            m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5]
+        inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] -
+            m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6]
+        inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] +
+            m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6]
+        inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] -
+            m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5]
+        inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] +
+            m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5]
+
+        var det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12]
+        if (det == 0f || !det.isFinite()) return null
+        det = 1f / det
+        for (i in 0 until 16) inv[i] *= det
+        return inv
     }
 }

@@ -86,7 +86,7 @@ let package = Package(
         ),
         .target(
             name: "Export",
-            dependencies: ["Common", "Models", "Geo"],
+            dependencies: ["Common", "Models", "Geo", "InventoryEngine"],
             path: "TimberCruisingApp/Export"
         ),
         // MARK: - Phase 2

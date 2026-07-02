@@ -48,8 +48,11 @@ import com.hcjeong.forestix.ar.ArController
 import com.hcjeong.forestix.ar.ArCameraView
 import com.hcjeong.forestix.ar.Vec3
 import com.hcjeong.forestix.ar.distance
+import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
+import com.hcjeong.forestix.sensors.DistanceSmoother
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import java.util.Locale
@@ -60,8 +63,10 @@ private enum class DistMode { LIVE, TWO_POINT }
 @Composable
 fun DistanceMeasureScreen(nav: NavController) {
     val env = LocalAppEnvironment.current
+    val settings by env.settings.state.collectAsStateWithLifecycle()
     val controller = remember { ArController() }
     val density = LocalDensity.current
+    fun formatDistance(m: Double) = MeasurementFormatter.distance(m, settings.unitSystem)
 
     var mode by remember { mutableStateOf(DistMode.LIVE) }
     var liveDistance by remember { mutableStateOf<Double?>(null) }
@@ -72,11 +77,21 @@ fun DistanceMeasureScreen(nav: NavController) {
     var failure by remember { mutableStateOf<String?>(null) }
     var viewSize by remember { mutableStateOf(IntSize.Zero) }
 
+    // Hampel-style robust moving average for the non-depth (plane hit-test)
+    // path — the raw AR distance flickers there. Depth-API values stay raw.
+    val arSmoother = remember { DistanceSmoother() }
     LaunchedEffect(Unit) {
         while (true) {
             kotlinx.coroutines.delay(50)
             controller.preferDepth = true
-            liveDistance = controller.cameraToCenterDistance()
+            val raw = controller.cameraToCenterDistance()
+            liveDistance = if (controller.supportsDepth) {
+                arSmoother.reset()
+                raw
+            } else {
+                raw?.let { arSmoother.add(it) }
+                arSmoother.value()
+            }
         }
     }
 
@@ -214,8 +229,6 @@ private fun twoPointHint(a: Vec3?, b: Vec3?) = when {
     else -> "Tap Save to log this reading"
 }
 
-private fun formatDistance(m: Double): String =
-    if (m < 1) String.format(Locale.US, "%.0f cm", m * 100) else String.format(Locale.US, "%.2f m", m)
 
 private fun distanceEntry(d: Double, method: String, plotID: UUID?) = QuickMeasureEntry(
     kind = MeasureKind.DISTANCE, value = d, sigma = null,

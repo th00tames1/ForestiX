@@ -40,6 +40,11 @@ public final class AppSettings: ObservableObject {
         public static let logRule                 = "tc.logRule"
         public static let dbhMeasurementMethod    = "tc.dbhMeasurementMethod"
         public static let measurementSource       = "tc.measurementSource"
+        public static let developerMode           = "tc.developerMode"
+        public static let dbhMethodSource         = "tc.dbhMethodSource"
+        public static let researchTreeId          = "tc.researchTreeId"
+        public static let researchTrueValue       = "tc.researchTrueValue"
+        public static let researchSpecies         = "tc.researchSpecies"
     }
 
     private let defaults: UserDefaults
@@ -146,6 +151,32 @@ public final class AppSettings: ObservableObject {
     /// cruiser back to the AR (estimated-plane) path automatically.
     public var deviceSupportsLiDAR: Bool { ARKitSessionManager.supportsLiDAR }
 
+    /// Developer / research mode — surfaces the live measurement internals
+    /// (depth source, intrinsics, point counts, raw chord, pitch, distance,
+    /// σ) on the AR screens and unlocks the validation-experiment tooling.
+    public var developerMode: Bool {
+        get { defaults.bool(forKey: Keys.developerMode) }
+        set { defaults.set(newValue, forKey: Keys.developerMode); objectWillChange.send() }
+    }
+
+    /// Operator-set tags written into every research-log row while
+    /// Developer mode is on. `researchTreeId` labels the physical tree (so
+    /// repeats group + join to ground truth); `researchTrueValue` is the
+    /// reference measurement for the controlled cylinder / known-distance
+    /// experiments (blank for real-tree runs, joined later by tree id).
+    public var researchTreeId: String {
+        get { defaults.string(forKey: Keys.researchTreeId) ?? "" }
+        set { defaults.set(newValue, forKey: Keys.researchTreeId); objectWillChange.send() }
+    }
+    public var researchTrueValue: String {
+        get { defaults.string(forKey: Keys.researchTrueValue) ?? "" }
+        set { defaults.set(newValue, forKey: Keys.researchTrueValue); objectWillChange.send() }
+    }
+    public var researchSpecies: String {
+        get { defaults.string(forKey: Keys.researchSpecies) ?? "" }
+        set { defaults.set(newValue, forKey: Keys.researchSpecies); objectWillChange.send() }
+    }
+
     /// Preferred world-sensing source for the AR measurement screens.
     /// Defaults to `.lidar` on LiDAR devices and is hard-clamped to `.ar`
     /// on devices without the scanner — so a value persisted on one
@@ -174,6 +205,31 @@ public final class AppSettings: ObservableObject {
         }
         set {
             defaults.set(newValue.rawValue, forKey: Keys.dbhMeasurementMethod)
+            objectWillChange.send()
+        }
+    }
+
+    /// User-facing 3-way DBH sensing path (LiDAR depth / AR motion / AR
+    /// caliper) — the within-device comparison picker. On non-LiDAR devices
+    /// the depth path is unavailable, so a persisted `.lidarDepth` is
+    /// reported as `.arCaliper` (the most robust depth-free method).
+    public var dbhMethodSource: DBHMethodSource {
+        get {
+            let stored = defaults.string(forKey: Keys.dbhMethodSource)
+                .flatMap(DBHMethodSource.init(rawValue:)) ?? .lidarDepth
+            if !ARKitSessionManager.supportsLiDAR && stored == .lidarDepth {
+                return .arCaliper
+            }
+            return stored
+        }
+        set {
+            // Clamp on write too so a non-LiDAR device never persists
+            // `.lidarDepth` — keeps the stored value in sync with the getter,
+            // which already reports `.arCaliper` on those devices.
+            let clamped: DBHMethodSource =
+                (!ARKitSessionManager.supportsLiDAR && newValue == .lidarDepth)
+                ? .arCaliper : newValue
+            defaults.set(clamped.rawValue, forKey: Keys.dbhMethodSource)
             objectWillChange.send()
         }
     }

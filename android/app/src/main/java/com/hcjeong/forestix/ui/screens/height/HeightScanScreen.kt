@@ -37,8 +37,10 @@ import com.hcjeong.forestix.data.QuickMeasureEntry
 import com.hcjeong.forestix.sensors.ConfidenceTier
 import com.hcjeong.forestix.sensors.HeightEstimator
 import com.hcjeong.forestix.sensors.HeightResult
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hcjeong.forestix.ui.screens.CenterCrosshair
 import com.hcjeong.forestix.ui.screens.CenteredText
+import com.hcjeong.forestix.ui.screens.DevHud
 import com.hcjeong.forestix.ui.screens.MeasureBackButton
 import com.hcjeong.forestix.ui.screens.MeasureControlColumn
 import com.hcjeong.forestix.ui.screens.MeasureStatusPanel
@@ -56,6 +58,7 @@ fun HeightScanScreen(nav: NavController) {
     val env = LocalAppEnvironment.current
     val controller = remember { ArController() }
     val pendingTree = remember { env.history.suggestedNextTreeNumber }
+    val settings by env.settings.state.collectAsStateWithLifecycle()
 
     var stage by remember { mutableStateOf(Stage.ANCHOR) }
     var anchorPt by remember { mutableStateOf<Vec3?>(null) }
@@ -85,17 +88,20 @@ fun HeightScanScreen(nav: NavController) {
     }
 
     fun markers(): List<ArSceneMarker> {
+        // scalesWithDistance keeps every sphere readable from across the
+        // walk-off — natural size up close, grows with camera distance.
         val out = mutableListOf<ArSceneMarker>()
-        anchorPt?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.08f), floatArrayOf(1f, 0.30f, 0.30f, 1f))) }
+        anchorPt?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.08f), floatArrayOf(1f, 0.30f, 0.30f, 1f), scalesWithDistance = true)) }
         // Tree top (yellow) + base (green) spheres on the anchor's vertical
         // axis at the alpha-derived height — same as iOS rebuildSceneMarkers.
-        topMarker?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.08f), floatArrayOf(1f, 0.85f, 0.15f, 1f))) }
-        baseMarker?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.08f), floatArrayOf(0.25f, 0.85f, 0.35f, 1f))) }
-        val yellow = floatArrayOf(1f, 0.85f, 0.15f, 1f); val cyan = floatArrayOf(0.2f, 0.7f, 1f, 1f)
-        cL?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.05f), yellow)) }
-        cR?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.05f), yellow)) }
-        cT?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.05f), cyan)) }
-        cB?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.05f), cyan)) }
+        topMarker?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.08f), floatArrayOf(1f, 0.85f, 0.15f, 1f), scalesWithDistance = true)) }
+        baseMarker?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.08f), floatArrayOf(0.25f, 0.85f, 0.35f, 1f), scalesWithDistance = true)) }
+        // Crown L/R yellow matches iOS exactly (1, 0.85, 0, 1); crown T/B cyan.
+        val yellow = floatArrayOf(1f, 0.85f, 0f, 1f); val cyan = floatArrayOf(0.2f, 0.7f, 1f, 1f)
+        cL?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.05f), yellow, scalesWithDistance = true)) }
+        cR?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.05f), yellow, scalesWithDistance = true)) }
+        cT?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.05f), cyan, scalesWithDistance = true)) }
+        cB?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.05f), cyan, scalesWithDistance = true)) }
         return out
     }
 
@@ -181,6 +187,22 @@ fun HeightScanScreen(nav: NavController) {
         ArCameraView(controller, markers(), modifier = Modifier.fillMaxSize())
         if (showCapture) CenterCrosshair(Modifier.align(Alignment.Center))
         MeasureBackButton { nav.popBackStack() }
+
+        if (settings.developerMode) {
+            DevHud(
+                "HEIGHT",
+                listOfNotNull(
+                    "depth" to (if (controller.supportsDepth) "ARCore✓" else "plane"),
+                    "track" to (if (controller.trackingOk()) "OK" else "…"),
+                    "stage" to stage.name,
+                    "pitch" to (controller.cameraPitchDeg()?.let { String.format(Locale.US, "%+.1f°", it) } ?: "—"),
+                    "d_h live" to String.format(Locale.US, "%.1f m", dhLive),
+                    alphaBase?.let { "α_base" to String.format(Locale.US, "%+.1f°", Math.toDegrees(it.toDouble())) },
+                    alphaTop?.let { "α_top" to String.format(Locale.US, "%+.1f°", Math.toDegrees(it.toDouble())) },
+                    result?.let { "H" to String.format(Locale.US, "%.1f ±%.1f m · %s", it.heightM, it.sigmaHm, it.confidence.raw) },
+                ),
+            )
+        }
         if (showCapture) MeasureControlColumn(onCapture = { if (crownActive) captureCrown() else captureHeight() })
 
         MeasureStatusPanel {

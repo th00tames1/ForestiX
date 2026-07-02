@@ -1,15 +1,26 @@
 // Sampling plot — aim the crosshair at the plot centre and tap + to drop a
-// tall, clearly-visible centre pole (base sphere + pole + top sphere) plus a
-// thick boundary ring. The radius slider sits top; a consistent bottom panel
-// shows a big INSIDE / OUTSIDE status + distance/area. Leaving the ring
-// flashes the screen border red and vibrates.
+// clearly-visible centre marker (base sphere + pole + top sphere) and a thick
+// boundary ring. Radius slider sits top; a consistent bottom panel shows a
+// big INSIDE / OUTSIDE status + distance/area. Leaving the ring pulses a red
+// border and vibrates.
+//
+// Performance: the marker list is hoisted into `remember(center, radius)` so
+// the AR nodes are NOT rebuilt on every frame, and the out-of-bounds flash is
+// an isolated animation (not a 5 Hz full-screen recomposition) — both were
+// causing severe lag.
 
 package com.hcjeong.forestix.ui.screens
 
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -60,13 +71,14 @@ fun SamplingPlotScreen(nav: NavController) {
     var radiusM by remember { mutableStateOf(8.0) }
     var isOutside by remember { mutableStateOf(false) }
     var distanceFromCenter by remember { mutableStateOf<Double?>(null) }
-    var flashOn by remember { mutableStateOf(false) }
     var failure by remember { mutableStateOf<String?>(null) }
 
+    // 4 Hz boundary check + haptics. Does NOT drive any animation/flash, so
+    // it doesn't recompose the AR view — only the small readouts that read it.
     LaunchedEffect(Unit) {
+        var tick = 0
         while (true) {
-            delay(200)
-            flashOn = !flashOn
+            delay(250)
             val c = center
             val cam = controller.currentCameraPosition()
             if (c == null || cam == null) {
@@ -75,33 +87,25 @@ fun SamplingPlotScreen(nav: NavController) {
                 val dx = cam.x - c.x; val dz = cam.z - c.z
                 val d = sqrt((dx * dx + dz * dz).toDouble())
                 distanceFromCenter = d
-                val nowOutside = d > radiusM
-                if (nowOutside != isOutside) {
-                    isOutside = nowOutside
-                    if (nowOutside) haptics.warn()
-                } else if (isOutside && flashOn) {
-                    haptics.warn()
-                }
+                val now = d > radiusM
+                if (now && !isOutside) haptics.warn()           // crossed out
+                else if (now && tick % 4 == 0) haptics.warn()   // ~every 1 s while out
+                isOutside = now
             }
+            tick++
         }
     }
 
-    fun markers(): List<ArSceneMarker> {
-        val c = center ?: return emptyList()
-        val out = mutableListOf<ArSceneMarker>()
-        val white = floatArrayOf(1f, 1f, 1f, 1f)
-        val red = floatArrayOf(1f, 0.25f, 0.25f, 1f)
-        val yellow = floatArrayOf(1f, 0.85f, 0.15f, 1f)
-        // Exact-centre base sphere so the tapped point is unmistakable.
-        out.add(ArSceneMarker(c, MarkerShape.Sphere(0.07f), red))
-        // Tall white pole rising from the centre (base at the tapped point).
-        out.add(ArSceneMarker(Vec3(c.x, c.y + 0.6f, c.z), MarkerShape.Cylinder(0.05f, 1.2f), white))
-        // Bright top sphere — visible from far so the cruiser can find it.
-        out.add(ArSceneMarker(Vec3(c.x, c.y + 1.2f, c.z), MarkerShape.Sphere(0.12f), yellow))
-        // Thick boundary ring, cyan inside / red outside.
-        val ringColor = if (isOutside) floatArrayOf(1f, 0.2f, 0.2f, 1f) else floatArrayOf(0.2f, 0.85f, 1f, 1f)
-        out.add(ArSceneMarker(Vec3(c.x, c.y + 0.02f, c.z), MarkerShape.Ring(radiusM.toFloat(), 0.18f), ringColor))
-        return out
+    // Markers rebuilt ONLY when the centre or radius changes (stable instance
+    // otherwise) so the ring geometry isn't recreated every frame.
+    val markerList = remember(center, radiusM) {
+        val c = center ?: return@remember emptyList<ArSceneMarker>()
+        listOf(
+            ArSceneMarker(c, MarkerShape.Sphere(0.07f), floatArrayOf(1f, 0.25f, 0.25f, 1f)),
+            ArSceneMarker(Vec3(c.x, c.y + 0.6f, c.z), MarkerShape.Cylinder(0.05f, 1.2f), floatArrayOf(1f, 1f, 1f, 1f)),
+            ArSceneMarker(Vec3(c.x, c.y + 1.2f, c.z), MarkerShape.Sphere(0.12f), floatArrayOf(1f, 0.85f, 0.15f, 1f)),
+            ArSceneMarker(Vec3(c.x, c.y + 0.02f, c.z), MarkerShape.Ring(radiusM.toFloat(), 0.4f), floatArrayOf(0.2f, 0.85f, 1f, 1f)),
+        )
     }
 
     fun place() {
@@ -115,11 +119,9 @@ fun SamplingPlotScreen(nav: NavController) {
     }
 
     Box(Modifier.fillMaxSize()) {
-        ArCameraView(controller, markers(), modifier = Modifier.fillMaxSize())
+        ArCameraView(controller, markerList, modifier = Modifier.fillMaxSize())
 
-        if (isOutside) {
-            Box(Modifier.fillMaxSize().border(14.dp, Color.Red.copy(alpha = if (flashOn) 0.95f else 0.35f)))
-        }
+        OutsideFlashOverlay(isOutside)
         if (center == null) CenterCrosshair(Modifier.align(Alignment.Center))
 
         MeasureBackButton { nav.popBackStack() }
@@ -137,13 +139,12 @@ fun SamplingPlotScreen(nav: NavController) {
             Slider(value = radiusM.toFloat(), onValueChange = { radiusM = it.toDouble() }, valueRange = 1f..30f, steps = 57)
         }
 
-        // Capture button only before the centre is placed.
         if (center == null) MeasureControlColumn(onCapture = { place() })
 
         MeasureStatusPanel {
             failure?.let { CenteredText(it, dim = true) }
             if (center == null) {
-                CenteredText("Aim at the plot centre, tap + to drop it")
+                CenteredText("Set the radius, aim at the plot centre, tap +")
             } else {
                 CenteredText(
                     if (isOutside) "OUTSIDE \u2014 walk back inside" else "INSIDE sampling area",
@@ -176,4 +177,17 @@ fun SamplingPlotScreen(nav: NavController) {
             }
         }
     }
+}
+
+/// Pulsing red border shown while the device is outside the plot. The pulse
+/// is an isolated animation so it doesn't recompose the camera view.
+@Composable
+private fun BoxScope.OutsideFlashOverlay(active: Boolean) {
+    if (!active) return
+    val transition = rememberInfiniteTransition(label = "flash")
+    val alpha by transition.animateFloat(
+        initialValue = 0.35f, targetValue = 0.95f,
+        animationSpec = infiniteRepeatable(tween(350), RepeatMode.Reverse), label = "alpha",
+    )
+    Box(Modifier.fillMaxSize().border(14.dp, Color.Red.copy(alpha = alpha)))
 }

@@ -1,0 +1,131 @@
+// Research log — the data-capture spine planned for the ForestiX validation
+// study. Each row is intended to capture not just a committed DBH/height
+// value but the full diagnostic context the paper's tier/σ validation needs:
+// σ, confidence tier, distance, point/inlier counts, arc coverage, RMSE,
+// angles, camera intrinsics, depth-map size, depth source, device model,
+// plus the operator-set tree id / ground-truth true value.
+//
+// Storage is a single append-only CSV in the app's Documents directory.
+//
+// SCAFFOLD — not yet wired: `record(...)` has no callers yet, and Settings'
+// Export/Clear still target `ForestixLogger`. The column order below is the
+// INTENDED cross-platform schema; there is no Android ResearchLog yet, so the
+// "identical schema" join is a goal, not a current guarantee. See the paused
+// research-logging note in project memory before resuming.
+
+import Foundation
+#if canImport(UIKit)
+import UIKit
+#endif
+
+public final class ResearchLog {
+
+    public static let shared = ResearchLog()
+    private init() {}
+
+    /// Intended cross-platform column order. No Android ResearchLog exists
+    /// yet — this is the schema to match when it lands so the exports join.
+    public static let columns: [String] = [
+        "timestamp_iso", "platform", "os_version", "device_model",
+        "measure_type", "method", "depth_source",
+        "tree_id", "repeat", "true_value", "measured_value", "unit", "error",
+        "sigma", "confidence_tier", "distance_m", "n_points", "arc_deg", "rmse_mm",
+        "pitch_deg", "alpha_top_deg", "alpha_base_deg",
+        "fx", "depth_w", "depth_h", "depth_noise_mm",
+        "raw_points_path", "species", "note",
+    ]
+
+    private let queue = DispatchQueue(label: "forestix.researchlog")
+    private var repeatByTree: [String: Int] = [:]
+
+    public var fileURL: URL {
+        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return dir.appendingPathComponent("forestix_research_log.csv")
+    }
+
+    public var hasData: Bool { FileManager.default.fileExists(atPath: fileURL.path) }
+
+    public func rowCount() -> Int {
+        guard let text = try? String(contentsOf: fileURL, encoding: .utf8) else { return 0 }
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
+        return max(0, lines.count - 1) // minus header
+    }
+
+    /// Next 1-based repeat index for a given tree id (resets per distinct id).
+    public func nextRepeat(for treeId: String) -> Int {
+        queue.sync {
+            let n = (repeatByTree[treeId] ?? 0) + 1
+            repeatByTree[treeId] = n
+            return n
+        }
+    }
+
+    /// Append one measurement. The caller supplies the measurement-specific
+    /// fields; this fills timestamp / platform / os / device.
+    public func record(_ fields: [String: String]) {
+        var f = fields
+        f["timestamp_iso"] = Self.timestamp()
+        f["platform"] = "iOS"
+        f["os_version"] = Self.osVersion()
+        f["device_model"] = Self.deviceModel()
+        let row = Self.columns.map { Self.csvEscape(f[$0] ?? "") }.joined(separator: ",")
+        queue.async {
+            let url = self.fileURL
+            let exists = FileManager.default.fileExists(atPath: url.path)
+            var out = ""
+            if !exists { out += Self.columns.joined(separator: ",") + "\n" }
+            out += row + "\n"
+            guard let data = out.data(using: .utf8) else { return }
+            if !exists {
+                // Fresh file — `out` already carries the header + first row.
+                try? data.write(to: url)
+            } else if let handle = try? FileHandle(forWritingTo: url) {
+                handle.seekToEndOfFile()
+                handle.write(data)
+                try? handle.close()
+            }
+            // File exists but couldn't be opened for append: skip this row
+            // rather than `write(to:)`, which would truncate the whole log to
+            // just this header-less row.
+        }
+    }
+
+    public func clear() {
+        queue.async {
+            try? FileManager.default.removeItem(at: self.fileURL)
+            self.repeatByTree.removeAll()
+        }
+    }
+
+    // MARK: - Helpers
+
+    private static func timestamp() -> String {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f.string(from: Date())
+    }
+
+    private static func osVersion() -> String {
+        #if canImport(UIKit)
+        return "iOS " + UIDevice.current.systemVersion
+        #else
+        return "iOS"
+        #endif
+    }
+
+    private static func deviceModel() -> String {
+        var sysinfo = utsname()
+        uname(&sysinfo)
+        let machine = withUnsafePointer(to: &sysinfo.machine) {
+            $0.withMemoryRebound(to: CChar.self, capacity: 1) { String(cString: $0) }
+        }
+        return machine.isEmpty ? "Apple" : machine
+    }
+
+    static func csvEscape(_ s: String) -> String {
+        if s.contains(",") || s.contains("\"") || s.contains("\n") {
+            return "\"" + s.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+        }
+        return s
+    }
+}

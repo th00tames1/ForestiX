@@ -12,6 +12,7 @@ import com.hcjeong.forestix.ui.screens.DistanceMeasureScreen
 import com.hcjeong.forestix.ui.screens.FieldLogScreen
 import com.hcjeong.forestix.ui.screens.ModeSelectionScreen
 import com.hcjeong.forestix.ui.screens.SamplingPlotScreen
+import com.hcjeong.forestix.ui.screens.SettingsScreen
 import com.hcjeong.forestix.ui.screens.TimberCruisingHubScreen
 import com.hcjeong.forestix.ui.screens.TreeMeasurementHubScreen
 import com.hcjeong.forestix.ui.screens.dbh.DBHScanScreen
@@ -26,6 +27,7 @@ object Routes {
     const val HEIGHT = "height"
     const val DISTANCE = "distance"
     const val SAMPLING = "sampling"
+    const val SETTINGS = "settings"
 }
 
 @Composable
@@ -40,5 +42,6 @@ fun ForestixRoot() {
         composable(Routes.HEIGHT) { HeightScanScreen(nav) }
         composable(Routes.DISTANCE) { DistanceMeasureScreen(nav) }
         composable(Routes.SAMPLING) { SamplingPlotScreen(nav) }
+        composable(Routes.SETTINGS) { SettingsScreen(nav) }
     }
 }

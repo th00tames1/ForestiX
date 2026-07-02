@@ -15,6 +15,7 @@ import Common
 import Models
 import Sensors
 import AR
+import simd
 
 public struct DBHScanScreen: View {
 
@@ -52,14 +53,38 @@ public struct DBHScanScreen: View {
     @State private var metaNote: String = ""
     @State private var presentingMetadata = false
 
+    /// Bridge that turns SwiftUI screen taps into world-space rays / hits
+    /// against the live ARView — used by the AR-caliper two-tap flow.
+    @StateObject private var raycaster = ARCenterRaycaster()
+    /// Screen location of the first (LEFT) AR-caliper edge tap, kept so we
+    /// can raycast the midpoint for distance and draw a marker.
+    @State private var arLeftScreenPoint: CGPoint?
+
+    /// Hampel-style robust moving average over the screen-centre AR
+    /// distance while the caliper is aiming — the estimated-plane raycast
+    /// flickers frame-to-frame, and the caliper multiplies that distance
+    /// straight into the diameter. Fed by the sampling task below.
+    @State private var caliperSmoother = DistanceSmoother()
+
+    /// Selected DBH sensing path (LiDAR depth / AR motion / AR caliper).
+    private var methodSource: DBHMethodSource { settings.dbhMethodSource }
+    /// Either AR (depth-free) path — depth chrome is hidden for both.
+    private var isARMode: Bool { methodSource.isAR }
+    private var isCaliperMode: Bool { methodSource == .arCaliper }
+    private var isVIOMode: Bool { methodSource == .arMotion }
+    /// Methods offered by the picker on this device (no LiDAR ⇒ AR only).
+    private var availableMethods: [DBHMethodSource] {
+        settings.deviceSupportsLiDAR
+            ? [.lidarDepth, .arMotion, .arCaliper]
+            : [.arMotion, .arCaliper]
+    }
+
     public init(viewModel: @autoclosure @escaping () -> DBHScanViewModel,
                 onResult: @escaping (DBHResult) -> Void = { _ in },
-                onAccept: @escaping (DBHResult, ScanMetadata) -> Void = { _, _ in },
-                showMeshOverlay: Bool = false) {
+                onAccept: @escaping (DBHResult, ScanMetadata) -> Void = { _, _ in }) {
         _viewModel = StateObject(wrappedValue: viewModel())
         self.onResult = onResult
         self.onAccept = onAccept
-        _ = showMeshOverlay
     }
 
     public var body: some View {
@@ -71,43 +96,56 @@ public struct DBHScanScreen: View {
             // the live single-frame fit as a translucent blue cylinder
             // at the trunk's world position — world-anchored, so it
             // stays locked to the tree as the phone moves.
+            // Mesh debug overlay OFF — the rainbow scene-reconstruction
+            // wireframe added visual noise without helping the cruiser aim
+            // (the live Ø readout + guide line already signal lock).
             ARCameraView(manager: viewModel.session,
-                         debugMeshOverlay: true,
-                         sceneMarkers: cylinderMarkers)
+                         debugMeshOverlay: false,
+                         sceneMarkers: cylinderMarkers,
+                         raycaster: raycaster)
                 .ignoresSafeArea()
 
             GeometryReader { geo in
                 ZStack {
-                    guideLine(height: geo.size.height)
-                    fitChord(in: geo.size)
-                    // Crosshair ring is now positioned by GeometryReader
-                    // at exactly (centerX, midY) so the guide line
-                    // passes through the centre of the ring, not above
-                    // or below it. The live preview pills sit below;
-                    // the TiltBadge sits above so the cruiser sees
-                    // device level at the same focal point as the
-                    // trunk circle they're aiming at.
-                    TiltBadge()
-                        .position(x: geo.size.width / 2,
-                                  y: geo.size.height / 2
-                                       - Self.crosshairOuterRadius
-                                       - 22)
-                    crosshairRing
-                        .position(x: geo.size.width / 2,
-                                  y: geo.size.height / 2)
-                    livePreviewBadge
-                        .position(x: geo.size.width / 2,
-                                  y: geo.size.height / 2
-                                       + Self.crosshairOuterRadius
-                                       + 28)
+                    if isCaliperMode {
+                        // AR caliper: depth chrome (guide line, stability
+                        // ring, fit chord, live ø badge) is depth-derived
+                        // and meaningless here — show a minimal two-tap aid.
+                        arOverlay(in: geo.size)
+                    } else if isVIOMode {
+                        vioOverlay(in: geo.size)
+                    } else {
+                        guideLine(height: geo.size.height)
+                        fitChord(in: geo.size)
+                        // Crosshair ring is now positioned by GeometryReader
+                        // at exactly (centerX, midY) so the guide line
+                        // passes through the centre of the ring, not above
+                        // or below it. The live preview pills sit below;
+                        // the TiltBadge sits above so the cruiser sees
+                        // device level at the same focal point as the
+                        // trunk circle they're aiming at.
+                        TiltBadge()
+                            .position(x: geo.size.width / 2,
+                                      y: geo.size.height / 2
+                                           - Self.crosshairOuterRadius
+                                           - 22)
+                        crosshairRing
+                            .position(x: geo.size.width / 2,
+                                      y: geo.size.height / 2)
+                        livePreviewBadge
+                            .position(x: geo.size.width / 2,
+                                      y: geo.size.height / 2
+                                           + Self.crosshairOuterRadius
+                                           + 28)
+                    }
                 }
                 .frame(width: geo.size.width, height: geo.size.height)
             }
             .accessibilityElement(children: .ignore)
 
-            // Screen-wide tap catcher — kept as a convenience, but the
-            // primary capture is now the right-centre "+" button below
-            // (consistent with the other measurement screens).
+            // Screen-wide tap catcher — the primary input for the two AR
+            // methods (caliper edge taps, VIO sweep start); the depth method
+            // also captures via the right-centre "+" button below.
             tapCatcher
 
             VStack(spacing: 0) {
@@ -115,20 +153,20 @@ public struct DBHScanScreen: View {
                 Spacer()
             }
 
-            // Right-centre "+" capture button — active while aligning /
-            // armed so the cruiser taps a fixed control instead of the
-            // whole screen.
+            // Right-centre "+" capture button — active once armed (green
+            // crosshair) or while VIO-aiming, so the cruiser taps a fixed
+            // control instead of the whole screen.
             if dbhCanCapture {
-                MeasureControlColumn(capture: captureTap)
+                MeasureControlColumn(capture: onCaptureButton)
             }
 
-            // Bottom-right LiDAR/AR toggle — DBH is a depth pipeline too,
-            // so it surfaces the same source control as the other screens.
+            // Bottom-right DBH method picker — cycles LiDAR depth / AR motion
+            // / AR caliper (the within-device comparison control).
             VStack {
                 Spacer()
                 HStack {
                     Spacer()
-                    MeasureSourceToggleButton()
+                    dbhMethodPickerButton
                         .padding(.trailing, 18)
                         .padding(.bottom, 96)
                 }
@@ -138,6 +176,23 @@ public struct DBHScanScreen: View {
             VStack {
                 Spacer()
                 bottomPanel
+            }
+        }
+        .devHUDOverlay(settings.developerMode, title: "DBH", lines: devHUDLines)
+        // While the caliper is aiming, sample the screen-centre AR distance
+        // at ~10 Hz into the robust smoother; the edge taps then read the
+        // spike-free average instead of a single flickery raycast. The task
+        // is keyed on the state so it starts/stops with the caliper stages.
+        .task(id: caliperAiming) {
+            guard caliperAiming else { return }
+            caliperSmoother.reset()
+            while !Task.isCancelled {
+                raycaster.preferLiDARMesh = false
+                if let cam = raycaster.cameraWorldPosition,
+                   let hit = raycaster.screenCenterHit() {
+                    caliperSmoother.add(Double(simd_distance(cam, hit)))
+                }
+                try? await Task.sleep(nanoseconds: 100_000_000)
             }
         }
         .navigationTitle("Diameter")
@@ -150,17 +205,25 @@ public struct DBHScanScreen: View {
             // so flipping the picker in Settings takes effect on the
             // next return without leaving the scan screen.
             viewModel.dbhMeasurementMethod = settings.dbhMeasurementMethod
+            viewModel.dbhMethodSource = settings.dbhMethodSource
             viewModel.onAppear()
         }
         .onDisappear { viewModel.onDisappear() }
         .onChange(of: settings.dbhMeasurementMethod) { _, m in
             viewModel.dbhMeasurementMethod = m
         }
+        .onChange(of: settings.dbhMethodSource) { _, s in
+            // Switching method (LiDAR / AR motion / AR caliper) re-enters
+            // the correct DBH flow.
+            viewModel.dbhMethodSource = s
+            viewModel.retake()
+        }
         .onChange(of: viewModel.result?.diameterCm) { _, newValue in
-            // Fire the host callback as soon as the VM publishes a result.
-            // The host (e.g. AddTreeFlowScreen) decides whether to dismiss
-            // the cover or stay on screen for retake.
-            if newValue != nil, let r = viewModel.result {
+            // Fire the host callback when the VM publishes a NON-red result.
+            // The host (e.g. AddTreeFlowScreen) records it and dismisses the
+            // cover, so a red/rejected fit (diameter 0 cm) must NOT be
+            // forwarded — the cruiser stays on screen to retake instead.
+            if newValue != nil, let r = viewModel.result, r.confidence != .red {
                 onResult(r)
             }
         }
@@ -224,15 +287,51 @@ public struct DBHScanScreen: View {
         Color.clear
             .contentShape(Rectangle())
             .accessibilityIdentifier("dbhScan.tapCatcher")
-            .onTapGesture { captureTap() }
+            // SpatialTapGesture carries the tap location, which the AR
+            // caliper needs (the other paths ignore it).
+            .gesture(SpatialTapGesture().onEnded { ev in
+                if isCaliperMode { captureAREdge(at: ev.location) }
+                else if isVIOMode { startVIOSweep() }
+                else { captureTap() }
+            })
     }
 
-    /// Whether the current state accepts a capture (so we show the "+").
+    /// Whether the current state shows the floating "+" capture button.
+    /// LiDAR aim/armed → capture; AR-motion aiming → start the sweep. The
+    /// AR caliper taps the trunk edges directly, so no "+".
+    /// True while the AR caliper is waiting for either edge tap — the
+    /// window during which the centre-distance smoother samples.
+    private var caliperAiming: Bool {
+        viewModel.state == .arAwaitingLeft || viewModel.state == .arAwaitingRight
+    }
+
     private var dbhCanCapture: Bool {
         switch viewModel.state {
-        case .aligning, .armed: return true
-        default:                return false
+        // `.aligning` is intentionally excluded: `viewModel.tap` requires
+        // `.armed` (a stable green crosshair), so enabling "+" in `.aligning`
+        // gave a live-but-dead button. VIO has no depth gate, so `.vioAiming`
+        // stays enabled.
+        case .armed, .vioAiming: return true
+        default:                 return false
         }
+    }
+
+    /// The "+" button — starts a VIO sweep in AR-motion mode, otherwise
+    /// captures the depth burst at centre.
+    private func onCaptureButton() {
+        if isVIOMode { startVIOSweep() } else { captureTap() }
+    }
+
+    /// Begin an AR-motion sweep. The aim anchor is the centre AR hit (or a
+    /// rough forward point if no surface is found) used to centre the
+    /// trunk-band ROI. Pure AR — no LiDAR mesh.
+    private func startVIOSweep() {
+        guard viewModel.state == .vioAiming else { return }
+        raycaster.preferLiDARMesh = false
+        guard let anchor = raycaster.screenCenterHit()
+                ?? raycaster.forwardPointAtHorizontalDistance(1.5)
+        else { return }
+        viewModel.startVIOCapture(anchor: anchor)
     }
 
     /// Capture the trunk at the depth-map centre — the crosshair the
@@ -245,7 +344,139 @@ public struct DBHScanScreen: View {
         viewModel.tap(at: SIMD2(width / 2.0, height / 2.0))
     }
 
+    /// AR-caliper edge tap. First tap caches the LEFT trunk-edge ray; the
+    /// second supplies the RIGHT ray + an AR-estimated distance and triggers
+    /// the diameter computation. Screen points flow straight to the
+    /// raycaster — ARKit handles screen→world internally.
+    private func captureAREdge(at point: CGPoint) {
+        raycaster.preferLiDARMesh = false   // caliper is the AR (depth-free) arm
+        guard let dir = raycaster.rayDirection(at: point) else { return }
+        switch viewModel.state {
+        case .arAwaitingLeft:
+            arLeftScreenPoint = point
+            viewModel.captureAREdgeLeft(dir: dir)
+        case .arAwaitingRight:
+            guard let d = arEstimatedDistance(rightPoint: point) else {
+                // No plane/mesh hit yet — stay put; the cruiser repositions
+                // so a surface is visible and taps the right edge again.
+                return
+            }
+            viewModel.captureAREdgeRight(dir: dir, distanceM: d)
+            arLeftScreenPoint = nil
+        default:
+            break
+        }
+    }
+
+    /// AR distance to the trunk: prefers the smoothed screen-centre distance
+    /// accumulated while aiming (matching the Android caliper), falling back
+    /// to a spot centre raycast, then the tap midpoint / edge-hit average.
+    /// Returns nil when no surface is found — never substitutes the camera
+    /// position (the Phase 8 anchor-bias rule).
+    private func arEstimatedDistance(rightPoint: CGPoint) -> Float? {
+        guard let cam = raycaster.cameraWorldPosition else { return nil }
+        // Distance is sampled at the screen-centre crosshair (the trunk the
+        // cruiser lined up on), matching the Android caliper — the two edge
+        // taps supply only the subtended angle, not the distance. Prefer the
+        // robust moving average accumulated while aiming (AR raycasts
+        // flicker); fall back to a spot centre sample, then the tap
+        // midpoint / edge average if the centre ray misses.
+        if let smoothed = caliperSmoother.value() { return Float(smoothed) }
+        if let c = raycaster.screenCenterHit() { return simd_distance(cam, c) }
+        guard let left = arLeftScreenPoint else {
+            return raycaster.hit(at: rightPoint).map { simd_distance(cam, $0) }
+        }
+        let mid = CGPoint(x: (left.x + rightPoint.x) / 2,
+                          y: (left.y + rightPoint.y) / 2)
+        if let h = raycaster.hit(at: mid) { return simd_distance(cam, h) }
+        if let lh = raycaster.hit(at: left), let rh = raycaster.hit(at: rightPoint) {
+            return (simd_distance(cam, lh) + simd_distance(cam, rh)) / 2
+        }
+        return nil
+    }
+
+    /// Minimal on-screen aid for the AR two-tap flow: a centre aiming mark
+    /// plus a dot on the captured left edge while awaiting the right.
+    @ViewBuilder
+    private func arOverlay(in size: CGSize) -> some View {
+        Image(systemName: "plus")
+            .font(.system(size: 22, weight: .light))
+            .foregroundStyle(.white.opacity(0.85))
+            .position(x: size.width / 2, y: size.height / 2)
+        if let lp = arLeftScreenPoint, viewModel.state == .arAwaitingRight {
+            Circle()
+                .fill(ForestixPalette.confidenceOk)
+                .frame(width: 12, height: 12)
+                .overlay(Circle().stroke(.white, lineWidth: 1.5))
+                .position(lp)
+        }
+    }
+
+    /// Minimal aid for the AR-motion sweep: a centre aiming mark; the ring
+    /// pulses while accumulating to cue the cruiser to sweep the phone.
+    @ViewBuilder
+    private func vioOverlay(in size: CGSize) -> some View {
+        let sweeping = viewModel.state == .vioCapturing
+        Circle()
+            .stroke(sweeping ? ForestixPalette.confidenceOk : .white.opacity(0.85),
+                    lineWidth: 2)
+            .frame(width: 46, height: 46)
+            .position(x: size.width / 2, y: size.height / 2)
+        Image(systemName: "plus")
+            .font(.system(size: 16, weight: .regular))
+            .foregroundStyle(.white.opacity(0.9))
+            .position(x: size.width / 2, y: size.height / 2)
+    }
+
+    /// Corner button cycling the DBH method (LiDAR / AR motion / AR caliper).
+    private var dbhMethodPickerButton: some View {
+        Button(action: cycleDBHMethod) {
+            HStack(spacing: 5) {
+                Image(systemName: "camera.metering.matrix")
+                    .font(.system(size: 12, weight: .semibold))
+                Text(methodSource.displayName)
+                    .font(.system(size: 13, weight: .semibold))
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .background(.black.opacity(0.55), in: Capsule())
+            .overlay(Capsule().stroke(.white.opacity(0.3), lineWidth: 0.5))
+        }
+        .accessibilityIdentifier("dbhScan.methodPicker")
+    }
+
+    private func cycleDBHMethod() {
+        let methods = availableMethods
+        let next: DBHMethodSource
+        if let i = methods.firstIndex(of: methodSource) {
+            next = methods[(i + 1) % methods.count]
+        } else {
+            next = methods.first ?? .arCaliper
+        }
+        settings.dbhMethodSource = next
+    }
+
     // MARK: - Chrome
+
+    private var devHUDLines: [(String, String)] {
+        var out: [(String, String)] = [
+            ("method", methodSource.shortTag),
+            ("fit", isARMode ? "—" : viewModel.dbhMeasurementMethod.rawValue),
+        ]
+        if let f = viewModel.session.latestDepthFrame {
+            out.append(("depthMap", "\(f.width)×\(f.height)"))
+            out.append(("fx/fy", String(format: "%.0f/%.0f", f.intrinsics[0, 0], f.intrinsics[1, 1])))
+            out.append(("cx/cy", String(format: "%.0f/%.0f", f.intrinsics[2, 0], f.intrinsics[2, 1])))
+        }
+        out.append(("Ø live", viewModel.previewDbhCm.map { String(format: "%.1f cm", $0) } ?? "—"))
+        out.append(("dist", viewModel.distanceToStemCenterM.map { String(format: "%.2f m", Double($0)) } ?? "—"))
+        if let r = viewModel.result {
+            out.append(("Ø saved", String(format: "%.1f ±%.0fmm", r.diameterCm, r.sigmaRmm)))
+            out.append(("arc/n", String(format: "%.0f°/%d", r.arcCoverageDeg, r.nInliers)))
+            out.append(("tier", r.confidence.rawValue))
+        }
+        return out
+    }
 
     private func guideLine(height: CGFloat) -> some View {
         // Dual-stroke line for sun-glare readability: a thin dark halo
@@ -487,12 +718,21 @@ public struct DBHScanScreen: View {
         case .idle:         return "Starting camera…"
         case .aligning:     return "Align the guide to the trunk's uphill side; hold steady."
         case .armed:        return "Hold steady, then tap + to capture."
-        case .capturing:    return "Capturing… hold steady."
+        case .capturing:
+            return "Capturing \(max(1, viewModel.captureSampleIndex))/\(viewModel.captureSampleTotal) — hold steady."
         case .fitted:       return "Scan complete. Accept, retake, or add a second view."
         case .accepted:     return "Saved."
         case .rejected:     return viewModel.result?.rejectionReason
                                  ?? "Scan rejected. Try again."
         case .manualEntry:  return "Enter diameter manually in cm."
+        case .arAwaitingLeft:
+            return "AR caliper — aim at breast height, tap the LEFT trunk edge."
+        case .arAwaitingRight:
+            return "Now tap the RIGHT trunk edge."
+        case .vioAiming:
+            return "AR motion — aim at the trunk, tap + then sweep the phone slowly across it."
+        case .vioCapturing:
+            return "Sweeping… keep the trunk centred and move side-to-side."
         }
     }
 
@@ -607,28 +847,32 @@ public struct DBHScanScreen: View {
             HStack(spacing: 12) {
                 Button("Retake") { viewModel.retake() }
                     .buttonStyle(.bordered)
+                    .frame(maxWidth: .infinity)
                 Button("Manual") { viewModel.enterManualEntry() }
                     .buttonStyle(.bordered)
-                Button("Dual-view") { /* v0.3+ */ }
-                    .buttonStyle(.bordered).disabled(true)
-                Spacer()
+                    .frame(maxWidth: .infinity)
                 Button("Accept") { viewModel.accept() }
                     .buttonStyle(.borderedProminent)
+                    .frame(maxWidth: .infinity)
                     .disabled(viewModel.result?.confidence == .red)
             }
         case .rejected:
             HStack(spacing: 12) {
                 Button("Retake") { viewModel.retake() }
                     .buttonStyle(.borderedProminent)
+                    .frame(maxWidth: .infinity)
                 Button("Manual") { viewModel.enterManualEntry() }
                     .buttonStyle(.bordered)
+                    .frame(maxWidth: .infinity)
             }
         case .manualEntry:
             HStack(spacing: 12) {
                 Button("Cancel") { viewModel.retake() }
                     .buttonStyle(.bordered)
+                    .frame(maxWidth: .infinity)
             }
-        case .idle, .aligning, .armed, .capturing, .accepted:
+        case .idle, .aligning, .armed, .capturing, .accepted,
+             .arAwaitingLeft, .arAwaitingRight, .vioAiming, .vioCapturing:
             EmptyView()
         }
     }

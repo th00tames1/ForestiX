@@ -31,27 +31,30 @@ enum class DBHMeasurementMethod(val raw: String) {
     companion object { fun fromRaw(s: String?) = entries.firstOrNull { it.raw == s } ?: CHORD }
 }
 
-/// Which world-sensing path the AR measurement screens raycast against —
-/// mirror of the iOS MeasurementSource. LIDAR uses ARCore depth-point
-/// hits (the Depth API, the LiDAR-equivalent); AR filters to plane hits so
-/// it works on every device. Clamped to AR at runtime on devices whose
-/// Depth API isn't supported.
-enum class MeasurementSource(val raw: String, val displayName: String) {
-    LIDAR("lidar", "LiDAR"), AR("ar", "AR");
-    companion object { fun fromRaw(s: String?) = entries.firstOrNull { it.raw == s } ?: LIDAR }
-}
 
 data class SettingsSnapshot(
     val unitSystem: UnitSystem = UnitSystem.IMPERIAL,
     val logRule: LogRule = LogRule.SCRIBNER,
     val dbhMeasurementMethod: DBHMeasurementMethod = DBHMeasurementMethod.CHORD,
-    val measurementSource: MeasurementSource = MeasurementSource.LIDAR,
+    /// DBH scan capture flow — "depth" (depth-API chord fit) or "caliper"
+    /// (two-tap trunk edges). Stored raw to keep the data layer free of a
+    /// UI-package enum dependency; the scan screen maps it to DbhCaptureMethod.
+    val dbhCaptureMethod: String = "depth",
+    /// Per-frame chord algorithm for the depth method — "silhouette"
+    /// (iOS-identical pixel-width) or "band" (Android point-cloud diagonal).
+    /// Maps to sensors.ChordAlgorithm. Default silhouette so Android matches
+    /// iOS out of the box.
+    val dbhChordAlgorithm: String = "silhouette",
     val tileURLTemplate: String? = null,
     val tileProviderLabel: String? = null,
     val providerUsageAcknowledged: Boolean = false,
     val advancedMode: Boolean = false,
     val region: String? = null,
     val regionPickerSeen: Boolean = false,
+    /// Developer / research mode — surfaces the live measurement internals
+    /// (depth source, intrinsics, point counts, raw chord, pitch, σ) on the
+    /// AR screens and unlocks the validation-experiment tooling.
+    val developerMode: Boolean = false,
 )
 
 private val Context.settingsStore by preferencesDataStore(name = "forestix_settings")
@@ -70,7 +73,9 @@ class AppSettings(private val context: Context) {
         val regionPickerSeen = booleanPreferencesKey("tc.regionPickerSeen")
         val logRule = stringPreferencesKey("tc.logRule")
         val dbhMethod = stringPreferencesKey("tc.dbhMeasurementMethod")
-        val measurementSource = stringPreferencesKey("tc.measurementSource")
+        val dbhCaptureMethod = stringPreferencesKey("tc.dbhCaptureMethod")
+        val dbhChordAlgorithm = stringPreferencesKey("tc.dbhChordAlgorithm")
+        val developerMode = booleanPreferencesKey("tc.developerMode")
     }
 
     private val _state = MutableStateFlow(loadSnapshot())
@@ -86,14 +91,21 @@ class AppSettings(private val context: Context) {
             },
             logRule = LogRule.fromRaw(p[Keys.logRule] ?: "scribner"),
             dbhMeasurementMethod = DBHMeasurementMethod.fromRaw(p[Keys.dbhMethod]),
-            measurementSource = MeasurementSource.fromRaw(p[Keys.measurementSource]),
+            dbhCaptureMethod = p[Keys.dbhCaptureMethod] ?: "depth",
+            dbhChordAlgorithm = p[Keys.dbhChordAlgorithm] ?: "silhouette",
             tileURLTemplate = p[Keys.tileURLTemplate]?.takeIf { it.isNotBlank() },
             tileProviderLabel = p[Keys.tileProviderLabel],
             providerUsageAcknowledged = p[Keys.providerUsageAck] ?: false,
             advancedMode = p[Keys.advancedMode] ?: false,
             region = p[Keys.region],
             regionPickerSeen = p[Keys.regionPickerSeen] ?: false,
+            developerMode = p[Keys.developerMode] ?: false,
         )
+    }
+
+    fun setDeveloperMode(value: Boolean) = update {
+        _state.value = _state.value.copy(developerMode = value)
+        it[Keys.developerMode] = value
     }
 
     fun setUnitSystem(value: UnitSystem) = update {
@@ -111,9 +123,14 @@ class AppSettings(private val context: Context) {
         it[Keys.dbhMethod] = value.raw
     }
 
-    fun setMeasurementSource(value: MeasurementSource) = update {
-        _state.value = _state.value.copy(measurementSource = value)
-        it[Keys.measurementSource] = value.raw
+    fun setDbhCaptureMethod(raw: String) = update {
+        _state.value = _state.value.copy(dbhCaptureMethod = raw)
+        it[Keys.dbhCaptureMethod] = raw
+    }
+
+    fun setDbhChordAlgorithm(raw: String) = update {
+        _state.value = _state.value.copy(dbhChordAlgorithm = raw)
+        it[Keys.dbhChordAlgorithm] = raw
     }
 
     fun setTileURLTemplate(value: String?) = update {

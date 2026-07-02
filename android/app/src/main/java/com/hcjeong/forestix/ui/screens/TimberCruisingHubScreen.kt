@@ -72,7 +72,7 @@ fun TimberCruisingHubScreen(nav: NavController) {
             }
             TileLink("Field log", logSubtitle, Icons.AutoMirrored.Filled.List) { nav.navigate(Routes.FIELD_LOG) }
             TileLink("Reference", "Formulas \u00B7 log rules \u00B7 conversions", Icons.Filled.Book) { /* staged */ }
-            TileLink("Settings", "Region \u00B7 units \u00B7 calibration \u00B7 backup", Icons.Filled.Settings) { /* staged */ }
+            TileLink("Settings", "Developer mode \u00B7 units \u00B7 log rule", Icons.Filled.Settings) { nav.navigate(Routes.SETTINGS) }
         }
     }
 }

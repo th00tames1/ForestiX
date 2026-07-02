@@ -24,6 +24,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.CenterFocusWeak
 import androidx.compose.material.icons.filled.Height
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Straighten
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.WbSunny
@@ -62,7 +63,16 @@ fun TreeMeasurementHubScreen(nav: NavController) {
         Tool("Distance Measurement", "Device-to-object + 2-point", Icons.Filled.SwapHoriz, Routes.DISTANCE),
     )
 
-    ForestixScaffold(nav, title = "Tree Measurement") { padding ->
+    ForestixScaffold(
+        nav, title = "Tree Measurement",
+        actions = {
+            androidx.compose.material3.IconButton(onClick = { nav.navigate(Routes.SETTINGS) }) {
+                androidx.compose.material3.Icon(
+                    Icons.Filled.Settings, contentDescription = "Settings", tint = colors.primary,
+                )
+            }
+        },
+    ) { padding ->
         LazyVerticalGrid(
             columns = GridCells.Fixed(2),
             contentPadding = padding,

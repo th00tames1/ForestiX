@@ -217,8 +217,7 @@ public struct TreeMeasurementHubScreen: View {
                         damageCodes: meta.damageCodes,
                         note: meta.note.isEmpty ? nil : meta.note))
                     presentingDBHScan = false
-                },
-                showMeshOverlay: true)
+                })
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Close") { presentingDBHScan = false }
@@ -258,8 +257,7 @@ public struct TreeMeasurementHubScreen: View {
                         method: "ar.crown.dh",
                         treeNumber: pendingTreeNumber,
                         plotID: history.activePlotID))
-                },
-                showMeshOverlay: true)
+                })
             .environmentObject(history)
             .environmentObject(settings)
             .toolbar {

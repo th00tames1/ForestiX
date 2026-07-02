@@ -108,6 +108,45 @@ public final class ARCenterRaycaster: ObservableObject {
         return origin + forward * scale
     }
 
+    /// Raycast at an ARBITRARY screen point (generalises screenCenterHit).
+    /// Used by the AR-caliper DBH path to get the distance to the trunk at
+    /// the midpoint of the two edge taps. Tries vertical estimated plane
+    /// (the trunk surface) first, then horizontal, then any.
+    public func hit(at screenPoint: CGPoint) -> SIMD3<Float>? {
+        guard let view = arview else { return nil }
+        if preferLiDARMesh, let mesh = meshRaycastHit(at: screenPoint, in: view) {
+            return mesh
+        }
+        for alignment in [ARRaycastQuery.TargetAlignment.vertical, .horizontal, .any] {
+            if let hit = view.raycast(from: screenPoint,
+                                      allowing: .estimatedPlane,
+                                      alignment: alignment).first {
+                return worldTranslation(from: hit)
+            }
+        }
+        return nil
+    }
+
+    /// Unit world-space ray direction through a screen point, via the exact
+    /// camera intrinsics ARKit would use (no manual unprojection). The two
+    /// edge-tap directions' subtended angle drives the AR-caliper diameter.
+    public func rayDirection(at screenPoint: CGPoint) -> SIMD3<Float>? {
+        guard let view = arview,
+              let q = view.makeRaycastQuery(from: screenPoint,
+                                            allowing: .estimatedPlane,
+                                            alignment: .any)
+        else { return nil }
+        return simd_length(q.direction) > 1e-6 ? simd_normalize(q.direction) : nil
+    }
+
+    /// Current camera world position (for the AR-caliper distance = |camera
+    /// − trunk-hit|).
+    public var cameraWorldPosition: SIMD3<Float>? {
+        guard let frame = arview?.session.currentFrame else { return nil }
+        let c = frame.camera.transform.columns.3
+        return SIMD3<Float>(c.x, c.y, c.z)
+    }
+
     private func worldTranslation(from hit: ARRaycastResult) -> SIMD3<Float> {
         let c = hit.worldTransform.columns.3
         return SIMD3<Float>(c.x, c.y, c.z)
@@ -292,6 +331,9 @@ public final class ARCenterRaycaster: ObservableObject {
     public init() {}
     public func screenCenterHit() -> SIMD3<Float>? { nil }
     public func forwardPointAtHorizontalDistance(_ d: Float) -> SIMD3<Float>? { nil }
+    public func hit(at screenPoint: CGPoint) -> SIMD3<Float>? { nil }
+    public func rayDirection(at screenPoint: CGPoint) -> SIMD3<Float>? { nil }
+    public var cameraWorldPosition: SIMD3<Float>? { nil }
 }
 
 #endif

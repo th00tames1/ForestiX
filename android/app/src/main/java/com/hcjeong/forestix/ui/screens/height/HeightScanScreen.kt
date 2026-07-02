@@ -38,7 +38,11 @@ import com.hcjeong.forestix.sensors.ConfidenceTier
 import com.hcjeong.forestix.sensors.HeightEstimator
 import com.hcjeong.forestix.sensors.HeightResult
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.hcjeong.forestix.ui.Routes
 import com.hcjeong.forestix.ui.screens.CenterCrosshair
+import com.hcjeong.forestix.ui.screens.ContinuationAction
+import com.hcjeong.forestix.ui.screens.ContinuationOrigin
+import com.hcjeong.forestix.ui.screens.MeasurementContinuationDialog
 import com.hcjeong.forestix.ui.screens.CenteredText
 import com.hcjeong.forestix.ui.screens.DevHud
 import com.hcjeong.forestix.ui.screens.MeasureBackButton
@@ -54,10 +58,13 @@ private enum class Stage { ANCHOR, WALKING, AIM_BASE, AIM_TOP, COMPUTED, REJECTE
 private enum class CrownStep { NONE, LEFT, RIGHT, TOP, BOTTOM, DONE }
 
 @Composable
-fun HeightScanScreen(nav: NavController) {
+fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     val env = LocalAppEnvironment.current
     val controller = remember { ArController() }
-    val pendingTree = remember { env.history.suggestedNextTreeNumber }
+    // Continuation from a just-saved DBH passes the SAME tree number so the
+    // height lands on that tree; otherwise the next free number is used.
+    var pendingTree by remember { mutableStateOf(treeOverride ?: env.history.suggestedNextTreeNumber) }
+    var continuationTree by remember { mutableStateOf<Int?>(null) }
     val settings by env.settings.state.collectAsStateWithLifecycle()
 
     var stage by remember { mutableStateOf(Stage.ANCHOR) }
@@ -250,12 +257,31 @@ fun HeightScanScreen(nav: NavController) {
                                         )
                                     }
                                 }
-                                nav.popBackStack()
+                                continuationTree = pendingTree
                             }, modifier = Modifier.weight(1f)) { Text("Accept") }
                         }
                     }
                 }
             }
+        }
+
+        // Post-save continuation — next tree's diameter or done.
+        continuationTree?.let { savedTree ->
+            MeasurementContinuationDialog(
+                origin = ContinuationOrigin.AFTER_HEIGHT,
+                treeNumber = savedTree,
+                treeSummary = env.history.summary(savedTree),
+                onAction = { action ->
+                    continuationTree = null
+                    when (action) {
+                        ContinuationAction.START_NEW_TREE_DIAMETER,
+                        ContinuationAction.MEASURE_HEIGHT_SAME_TREE -> {
+                            nav.navigate(Routes.DBH) { popUpTo(Routes.TREE_HUB) }
+                        }
+                        ContinuationAction.DONE -> nav.popBackStack()
+                    }
+                },
+            )
         }
     }
 }

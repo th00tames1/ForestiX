@@ -5,9 +5,11 @@
 package com.hcjeong.forestix.ui
 
 import androidx.compose.runtime.Composable
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
 import com.hcjeong.forestix.ui.screens.DistanceMeasureScreen
 import com.hcjeong.forestix.ui.screens.FieldLogScreen
 import com.hcjeong.forestix.ui.screens.ModeSelectionScreen
@@ -39,7 +41,13 @@ fun ForestixRoot() {
         composable(Routes.TIMBER_HUB) { TimberCruisingHubScreen(nav) }
         composable(Routes.FIELD_LOG) { FieldLogScreen(nav) }
         composable(Routes.DBH) { DBHScanScreen(nav) }
-        composable(Routes.HEIGHT) { HeightScanScreen(nav) }
+        composable(
+            "height?tree={tree}",
+            arguments = listOf(navArgument("tree") { type = NavType.IntType; defaultValue = -1 }),
+        ) { back ->
+            val tree = back.arguments?.getInt("tree").takeIf { it != null && it >= 0 }
+            HeightScanScreen(nav, treeOverride = tree)
+        }
         composable(Routes.DISTANCE) { DistanceMeasureScreen(nav) }
         composable(Routes.SAMPLING) { SamplingPlotScreen(nav) }
         composable(Routes.SETTINGS) { SettingsScreen(nav) }

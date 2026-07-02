@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -24,6 +25,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -41,6 +44,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
@@ -60,9 +64,15 @@ import com.hcjeong.forestix.sensors.ConfidenceTier
 import com.hcjeong.forestix.sensors.DBHEstimator
 import com.hcjeong.forestix.sensors.DBHResult
 import com.hcjeong.forestix.sensors.DistanceSmoother
+import com.hcjeong.forestix.sensors.DBHMethod
 import com.hcjeong.forestix.sensors.GuideAxis
 import com.hcjeong.forestix.sensors.ProjectCalibration
 import com.hcjeong.forestix.sensors.VioMotionDbh
+import com.hcjeong.forestix.ui.Routes
+import com.hcjeong.forestix.ui.screens.ContinuationAction
+import com.hcjeong.forestix.ui.screens.ContinuationOrigin
+import com.hcjeong.forestix.ui.screens.MeasurementContinuationDialog
+import com.hcjeong.forestix.ui.screens.ScanMetadataDialog
 import com.hcjeong.forestix.ui.screens.CenteredText
 import com.hcjeong.forestix.ui.screens.DevHud
 import com.hcjeong.forestix.ui.screens.MeasureBackButton
@@ -84,7 +94,18 @@ fun DBHScanScreen(nav: NavController) {
     val env = LocalAppEnvironment.current
     val controller = remember { ArController() }
     val scope = rememberCoroutineScope()
-    val pendingTree = remember { env.history.suggestedNextTreeNumber }
+    var pendingTree by remember { mutableStateOf(env.history.suggestedNextTreeNumber) }
+    // Manual DBH entry (typed cm) — mirror of the iOS .manualEntry state.
+    var manualOpen by remember { mutableStateOf(false) }
+    var manualText by remember { mutableStateOf("") }
+    // Scan metadata (species / position / damage / note) attached on Accept.
+    var metaSpecies by remember { mutableStateOf<String?>(null) }
+    var metaPosition by remember { mutableStateOf<StemPosition?>(StemPosition.DBH) }
+    var metaDamage by remember { mutableStateOf<List<String>>(emptyList()) }
+    var metaNote by remember { mutableStateOf("") }
+    var showMetadata by remember { mutableStateOf(false) }
+    // Post-save continuation (height same tree / next tree / done).
+    var continuationTree by remember { mutableStateOf<Int?>(null) }
     val colors = Forestix.colors
 
     val settings by env.settings.state.collectAsStateWithLifecycle()
@@ -468,6 +489,48 @@ fun DBHScanScreen(nav: NavController) {
                 )
                 Stage.RESULT -> {}
             }
+            // Manual entry — typed diameter for trees the sensors can't read
+            // (mirrors the iOS .manualEntry state, method "manualVisual").
+            if (stage == Stage.AIMING) {
+                if (manualOpen) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = manualText,
+                            onValueChange = { manualText = it.filter { c -> c.isDigit() || c == '.' } },
+                            placeholder = { Text("DBH cm") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.weight(1.4f),
+                        )
+                        Button(
+                            onClick = {
+                                val cm = manualText.toFloatOrNull()
+                                if (cm != null && cm > 0f) {
+                                    result = DBHResult(
+                                        diameterCm = cm, centerX = 0f, centerZ = 0f,
+                                        arcCoverageDeg = 0f, rmseMm = 0f, sigmaRmm = 0f,
+                                        nInliers = 0, confidence = ConfidenceTier.YELLOW,
+                                        method = DBHMethod.MANUAL_VISUAL, rejectionReason = null,
+                                    )
+                                    failure = null
+                                    manualOpen = false
+                                    stage = Stage.RESULT
+                                }
+                            },
+                            enabled = (manualText.toFloatOrNull() ?: 0f) > 0f,
+                            modifier = Modifier.weight(1f).align(Alignment.CenterVertically),
+                        ) { Text("Save") }
+                        OutlinedButton(
+                            onClick = { manualOpen = false },
+                            modifier = Modifier.weight(1f).align(Alignment.CenterVertically),
+                        ) { Text("Cancel") }
+                    }
+                } else {
+                    TextButton(onClick = { manualOpen = true; manualText = "" }, modifier = Modifier.fillMaxWidth()) {
+                        Text("Enter manually")
+                    }
+                }
+            }
             result?.let { r ->
                 if (r.confidence == ConfidenceTier.RED) {
                     CenteredText("DBH \u2014 check", large = true)
@@ -478,6 +541,7 @@ fun DBHScanScreen(nav: NavController) {
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = { result = null; failure = null; stage = Stage.AIMING }, modifier = Modifier.weight(1f)) { Text("Retake") }
+                    OutlinedButton(onClick = { showMetadata = true }, modifier = Modifier.weight(1f)) { Text("Details") }
                     Button(
                         onClick = {
                             env.history.append(
@@ -485,16 +549,59 @@ fun DBHScanScreen(nav: NavController) {
                                     kind = MeasureKind.DBH, value = r.diameterCm.toDouble(),
                                     sigma = r.sigmaRmm.toDouble(), confidenceRaw = r.confidence.raw,
                                     method = r.method.raw, treeNumber = pendingTree,
-                                    plotID = env.history.activePlotID.value, position = StemPosition.DBH,
+                                    plotID = env.history.activePlotID.value,
+                                    speciesCode = metaSpecies,
+                                    position = metaPosition ?: StemPosition.DBH,
+                                    damageCodes = metaDamage,
+                                    note = metaNote.ifBlank { null },
                                 )
                             )
-                            nav.popBackStack()
+                            continuationTree = pendingTree
                         },
                         enabled = r.confidence != ConfidenceTier.RED,
                         modifier = Modifier.weight(1f),
                     ) { Text("Accept") }
                 }
             }
+        }
+
+        // Metadata editor (species / position / damage / note).
+        if (showMetadata) {
+            ScanMetadataDialog(
+                speciesCode = metaSpecies, onSpeciesCode = { metaSpecies = it },
+                position = metaPosition, onPosition = { metaPosition = it },
+                damageCodes = metaDamage, onDamageCodes = { metaDamage = it },
+                note = metaNote, onNote = { metaNote = it },
+                onDismiss = { showMetadata = false },
+            )
+        }
+
+        // Post-save continuation — height same tree / next tree / done.
+        continuationTree?.let { savedTree ->
+            MeasurementContinuationDialog(
+                origin = ContinuationOrigin.AFTER_DIAMETER,
+                treeNumber = savedTree,
+                treeSummary = env.history.summary(savedTree),
+                onAction = { action ->
+                    continuationTree = null
+                    when (action) {
+                        ContinuationAction.MEASURE_HEIGHT_SAME_TREE -> {
+                            nav.navigate("height?tree=$savedTree") {
+                                popUpTo(Routes.TREE_HUB)
+                            }
+                        }
+                        ContinuationAction.START_NEW_TREE_DIAMETER -> {
+                            // Reset in place for the next tree.
+                            result = null; failure = null
+                            metaSpecies = null; metaPosition = StemPosition.DBH
+                            metaDamage = emptyList(); metaNote = ""
+                            pendingTree = env.history.suggestedNextTreeNumber
+                            stage = Stage.AIMING
+                        }
+                        ContinuationAction.DONE -> nav.popBackStack()
+                    }
+                },
+            )
         }
     }
 }

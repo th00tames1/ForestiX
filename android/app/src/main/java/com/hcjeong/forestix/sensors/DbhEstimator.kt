@@ -42,6 +42,8 @@ enum class DBHMethod(val raw: String) {
     // AR-motion — circle fit to VIO feature points from a short sweep.
     // Raw MUST match iOS `arVioCircleFit`.
     AR_VIO_CIRCLE_FIT("arVioCircleFit"),
+    // Typed manual entry — raw MUST match iOS `manualVisual`.
+    MANUAL_VISUAL("manualVisual"),
 }
 
 data class DBHResult(

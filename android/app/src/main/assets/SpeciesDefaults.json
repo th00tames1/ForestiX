@@ -1,0 +1,53 @@
+{
+  "_comment": "Spec §6.2 SpeciesConfig defaults for the PNW starter set. Merch top DIB and stump heights follow common USFS/BLM cruising conventions (10 cm / 30 cm). expectedDbh/Height bounds come from typical mature PNW stand ranges and are used by §7.9 sanity checks only.",
+  "species": [
+    {
+      "code": "DF",
+      "commonName": "Douglas-fir",
+      "scientificName": "Pseudotsuga menziesii",
+      "volumeEquationId": "bruce-df-pnw",
+      "merchTopDibCm": 10.0,
+      "stumpHeightCm": 30.0,
+      "expectedDbhMinCm": 5.0,
+      "expectedDbhMaxCm": 200.0,
+      "expectedHeightMinM": 2.0,
+      "expectedHeightMaxM": 80.0
+    },
+    {
+      "code": "WH",
+      "commonName": "Western hemlock",
+      "scientificName": "Tsuga heterophylla",
+      "volumeEquationId": "chambers-foltz-wh-pnw",
+      "merchTopDibCm": 10.0,
+      "stumpHeightCm": 30.0,
+      "expectedDbhMinCm": 5.0,
+      "expectedDbhMaxCm": 180.0,
+      "expectedHeightMinM": 2.0,
+      "expectedHeightMaxM": 70.0
+    },
+    {
+      "code": "RC",
+      "commonName": "Western redcedar",
+      "scientificName": "Thuja plicata",
+      "volumeEquationId": "schumacher-hall-rc-placeholder",
+      "merchTopDibCm": 10.0,
+      "stumpHeightCm": 30.0,
+      "expectedDbhMinCm": 5.0,
+      "expectedDbhMaxCm": 300.0,
+      "expectedHeightMinM": 2.0,
+      "expectedHeightMaxM": 70.0
+    },
+    {
+      "code": "RA",
+      "commonName": "Red alder",
+      "scientificName": "Alnus rubra",
+      "volumeEquationId": "schumacher-hall-ra-placeholder",
+      "merchTopDibCm": 10.0,
+      "stumpHeightCm": 30.0,
+      "expectedDbhMinCm": 5.0,
+      "expectedDbhMaxCm": 100.0,
+      "expectedHeightMinM": 2.0,
+      "expectedHeightMaxM": 35.0
+    }
+  ]
+}

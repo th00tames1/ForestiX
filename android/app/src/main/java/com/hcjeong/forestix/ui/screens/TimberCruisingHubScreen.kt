@@ -1,7 +1,5 @@
 // Timber Cruising hub — port of iOS TimberCruisingHubScreen. Standard
 // cruising workflow tiles. Tree Measurement is reachable from here too.
-// The deeper project/stratum/cruise-design screens are part of the staged
-// follow-up port; tiles that aren't wired yet route to a stub.
 
 package com.hcjeong.forestix.ui.screens
 
@@ -65,13 +63,19 @@ fun TimberCruisingHubScreen(nav: NavController) {
                 style = type.caption, color = colors.textSecondary,
                 modifier = Modifier.padding(top = ForestixSpace.sm),
             )
-            TileLink("Projects", "Stratum \u00B7 cruise design \u00B7 field tally", Icons.Filled.Folder) { /* staged */ }
-            TileLink("Recon cruise", "Quick basal area tally \u00B7 sample sizing", Icons.Filled.CenterFocusWeak) { /* staged */ }
+            TileLink("Projects", "Stratum \u00B7 cruise design \u00B7 field tally", Icons.Filled.Folder) {
+                nav.navigate(Routes.PROJECTS)
+            }
+            TileLink("Recon cruise", "Quick basal area tally \u00B7 sample sizing", Icons.Filled.CenterFocusWeak) {
+                nav.navigate(Routes.RECON_CRUISE)
+            }
             TileLink("Tree Measurement", "Direct DBH \u00B7 height \u00B7 crown \u00B7 distance \u00B7 sampling", Icons.Filled.Straighten) {
                 nav.navigate(Routes.TREE_HUB)
             }
             TileLink("Field log", logSubtitle, Icons.AutoMirrored.Filled.List) { nav.navigate(Routes.FIELD_LOG) }
-            TileLink("Reference", "Formulas \u00B7 log rules \u00B7 conversions", Icons.Filled.Book) { /* staged */ }
+            TileLink("Reference", "Formulas \u00B7 log rules \u00B7 conversions", Icons.Filled.Book) {
+                nav.navigate(Routes.REFERENCE_LIBRARY)
+            }
             TileLink("Settings", "Developer mode \u00B7 units \u00B7 log rule", Icons.Filled.Settings) { nav.navigate(Routes.SETTINGS) }
         }
     }

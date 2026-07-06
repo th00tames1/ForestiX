@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.AddCircle
 import androidx.compose.material.icons.filled.CallSplit
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -70,7 +71,10 @@ import kotlinx.coroutines.launch
 /// Suggested route: PlotFlowRoutes.PLOT_TALLY ("plotTally/{plotId}").
 /// The optional callbacks mirror the iOS `onAddTree` / `onOpenTree` /
 /// `onClosePlot` closures; defaults navigate via PlotFlowRoutes so a
-/// bare route wiring still produces the full flow.
+/// bare route wiring still produces the full flow. `onArBoundary` mirrors
+/// the iOS "AR Boundary" toolbar button that CruiseFlowScreen attaches to
+/// the tally step (CruiseFlowScreen.swift:228-236) — only the cruise TALLY
+/// registration supplies it, so the standalone flow matches iOS (no button).
 @Composable
 fun PlotTallyScreen(
     nav: NavController,
@@ -80,6 +84,7 @@ fun PlotTallyScreen(
         nav.navigate(PlotFlowRoutes.treeDetail(tree.id.toString()))
     },
     onClosePlot: () -> Unit = { nav.navigate(PlotFlowRoutes.plotSummary(plotId)) },
+    onArBoundary: (() -> Unit)? = null,
 ) {
     val env = LocalAppEnvironment.current
     val scope = rememberCoroutineScope()
@@ -142,6 +147,16 @@ fun PlotTallyScreen(
         nav,
         title = "Plot ${vm.plot.plotNumber}",
         actions = {
+            // iOS CruiseFlowScreen toolbar: "AR Boundary" (circle.dashed)
+            // pushes the AR plot-boundary walk for the current plot.
+            if (onArBoundary != null) {
+                IconButton(onClick = onArBoundary) {
+                    Icon(
+                        Icons.Filled.RadioButtonUnchecked,
+                        contentDescription = "AR Boundary",
+                        tint = colors.primary)
+                }
+            }
             // Close Plot is consequential (stamps closedAt, runs HD rollup,
             // ends the plot) — kept in the top bar per the iOS toolbar.
             IconButton(onClick = { closingPlot = true }) {

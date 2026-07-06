@@ -21,6 +21,7 @@ import com.google.ar.core.ArCoreApk
 import com.hcjeong.forestix.AppEnvironment
 import com.hcjeong.forestix.data.cruise.Project
 import java.io.File
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -56,8 +57,19 @@ class PreFieldChecklistViewModel(val project: Project) {
 
         // 1. AR self-test. iOS checks DeviceCapabilities.hasLiDAR; the
         // Android analogue is ARCore availability on this device.
+        // checkAvailability may transiently return UNKNOWN_CHECKING while
+        // its background query runs — poll (bounded) before classifying so
+        // a cold cache doesn't produce a spurious WARN (same retry loop as
+        // ArCameraView's capability gate).
         val availability = try {
-            ArCoreApk.getInstance().checkAvailability(context)
+            var avail = ArCoreApk.getInstance().checkAvailability(context)
+            var guard = 0
+            while (avail == ArCoreApk.Availability.UNKNOWN_CHECKING && guard < 50) {
+                delay(200)
+                avail = ArCoreApk.getInstance().checkAvailability(context)
+                guard++
+            }
+            avail
         } catch (_: Exception) {
             null
         }

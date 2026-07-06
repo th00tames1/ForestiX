@@ -230,8 +230,11 @@ private fun NavigationContent(
     // runtime permission through a result launcher (GPSAccuracyBadge
     // pattern).
     val launcher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        // FINE + COARSE requested together (Android 12+ requirement);
+        // either grant is enough to run, coarse just degrades the tier.
+        val granted = results.values.any { it }
         location.onPermissionResult(granted)
         if (granted) viewModel.start()
     }
@@ -239,7 +242,7 @@ private fun NavigationContent(
         if (LocationService.hasLocationPermission(context)) {
             viewModel.start()
         } else {
-            launcher.launch(LocationService.PERMISSION)
+            launcher.launch(LocationService.PERMISSIONS)
         }
     }
     DisposableEffect(Unit) {

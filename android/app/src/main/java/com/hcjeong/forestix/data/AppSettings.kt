@@ -138,6 +138,11 @@ class AppSettings(private val context: Context) {
         if (value == null) it.remove(Keys.tileURLTemplate) else it[Keys.tileURLTemplate] = value
     }
 
+    fun setTileProviderLabel(value: String?) = update {
+        _state.value = _state.value.copy(tileProviderLabel = value?.takeIf { v -> v.isNotBlank() })
+        if (value == null) it.remove(Keys.tileProviderLabel) else it[Keys.tileProviderLabel] = value
+    }
+
     fun setProviderUsageAcknowledged(value: Boolean) = update {
         _state.value = _state.value.copy(providerUsageAcknowledged = value)
         it[Keys.providerUsageAck] = value

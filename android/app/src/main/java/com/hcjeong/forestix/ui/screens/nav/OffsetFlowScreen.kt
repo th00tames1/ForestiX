@@ -18,6 +18,12 @@
 
 package com.hcjeong.forestix.ui.screens.nav
 
+import android.content.Context
+import android.hardware.GeomagneticField
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -65,6 +71,8 @@ import com.hcjeong.forestix.ui.screens.MeasureBackButton
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import java.util.Locale
+import kotlin.math.cos
+import kotlin.math.sin
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -73,6 +81,70 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+
+// MARK: - Anchor compass
+
+/// Rotation-vector compass sampled while the offset flow is on screen —
+/// supplies the true-north azimuth of the CAMERA-FORWARD direction that,
+/// paired with the same-instant ARCore camera yaw, aligns the arbitrary-yaw
+/// ARCore world frame with north (iOS gets this for free from ARKit's
+/// `.gravityAndHeading` world alignment; ARCore has no equivalent).
+///
+/// Sensor assumptions: the phone is held upright in the AR posture (portrait,
+/// back camera aimed forward), so the rotation matrix is remapped with
+/// (AXIS_X, AXIS_Z) to make azimuth track the camera-forward direction; the
+/// magnetometer must be reasonably calibrated. Declination is added when a
+/// GPS fix is available (same prefer-true rule as LocationService's heading).
+private class AnchorCompass(
+    context: Context,
+    private val location: LocationService,
+) : SensorEventListener {
+
+    private val sensorManager: SensorManager? =
+        context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
+
+    /// Latest camera-forward azimuth in degrees true north (0…360);
+    /// null before the first sensor sample.
+    @Volatile
+    var azimuthTrueDeg: Double? = null
+        private set
+
+    private val rotationMatrix = FloatArray(9)
+    private val remapped = FloatArray(9)
+    private val orientation = FloatArray(3)
+
+    fun start() {
+        sensorManager?.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)?.let { sensor ->
+            sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_UI)
+        }
+    }
+
+    fun stop() {
+        sensorManager?.unregisterListener(this)
+    }
+
+    override fun onSensorChanged(event: SensorEvent) {
+        if (event.sensor.type != Sensor.TYPE_ROTATION_VECTOR) return
+        SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
+        // Upright AR posture: remap so azimuth follows the back camera's
+        // forward ray instead of the (near-vertical) device Y axis.
+        SensorManager.remapCoordinateSystem(
+            rotationMatrix, SensorManager.AXIS_X, SensorManager.AXIS_Z, remapped)
+        SensorManager.getOrientation(remapped, orientation)
+        var deg = Math.toDegrees(orientation[0].toDouble())
+        location.latestSnapshot.value?.let { snap ->
+            deg += GeomagneticField(
+                snap.latitude.toFloat(),
+                snap.longitude.toFloat(),
+                0f,
+                System.currentTimeMillis(),
+            ).declination
+        }
+        azimuthTrueDeg = (deg + 360.0) % 360.0
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+}
 
 // MARK: - View model (port of iOS OffsetFlowViewModel)
 
@@ -83,6 +155,9 @@ class OffsetFlowViewModel(
     val session: ArController,
     private val scope: CoroutineScope,
     val openingAveragingDurationS: Int = 30,
+    /// Latest camera-forward compass azimuth in degrees true (null when no
+    /// sample yet) — sampled at anchor time to heading-align the AR frame.
+    private val compassAzimuthTrueDeg: () -> Double? = { null },
 ) {
 
     sealed class Step {
@@ -104,6 +179,16 @@ class OffsetFlowViewModel(
     var openingFix: PlotCenterResult? = null
         private set
 
+    /// Yaw (degrees) added to ARCore-world pseudo-headings to obtain true
+    /// compass headings, sampled at anchor time: compass azimuth of the
+    /// camera forward minus that forward's yaw in the ARCore world frame.
+    /// ARCore's world yaw is arbitrary (session-start camera direction),
+    /// unlike iOS `.gravityAndHeading`; this angle re-aligns the walk
+    /// displacement to the X≈E / −Z≈N convention OffsetFromOpening assumes
+    /// (see the "Compass note" in OffsetFromOpening.kt).
+    var worldYawToNorthDeg: Double? = null
+        private set
+
     private var tickJob: Job? = null
     private var averagingStartedAt: Long? = null
 
@@ -115,6 +200,16 @@ class OffsetFlowViewModel(
             _step.value = Step.Failed("AR pose unavailable — tracking not started")
             return
         }
+        // Heading alignment: pair a compass azimuth with the same-instant
+        // AR camera yaw so device heading and world yaw correspond.
+        val azimuth = compassAzimuthTrueDeg()
+        val camYaw = session.cameraWorldYawDeg()
+        if (azimuth == null || camYaw == null) {
+            _step.value = Step.Failed(
+                "Compass unavailable — hold the phone upright, aim level, and re-anchor.")
+            return
+        }
+        worldYawToNorthDeg = azimuth - camYaw
         plotPoseWorld = p
         // Begin the tracking-normal latch that must hold through the walk
         // to the opening and back (iOS `trackingStayedNormal`).
@@ -181,14 +276,30 @@ class OffsetFlowViewModel(
         val plotPose = plotPoseWorld
         val openingPose = openingPoseWorld
         val fix = openingFix
-        if (plotPose == null || openingPose == null || fix == null) {
+        val yawDeg = worldYawToNorthDeg
+        if (plotPose == null || openingPose == null || fix == null || yawDeg == null) {
             _step.value = Step.Failed("Missing opening fix or pose snapshots.")
             return
         }
+        // Rotate the AR displacement from the arbitrary-yaw ARCore world
+        // frame into the heading-aligned ENU frame OffsetFromOpening
+        // assumes (iOS skips this because ARKit runs `.gravityAndHeading`).
+        // Rotating the plot snapshot about the opening snapshot keeps the
+        // shared math's X≈E / −Z≈N decomposition valid; Y and the walk
+        // distance are rotation-invariant.
+        val theta = Math.toRadians(yawDeg)
+        val east0 = (plotPose.x - openingPose.x).toDouble()
+        val north0 = (-(plotPose.z - openingPose.z)).toDouble()
+        val east = east0 * cos(theta) + north0 * sin(theta)
+        val north = north0 * cos(theta) - east0 * sin(theta)
+        val alignedPlotPose = Vec3(
+            openingPose.x + east.toFloat(),
+            plotPose.y,
+            openingPose.z - north.toFloat())
         val input = OffsetFromOpening.Input(
             openingFix = fix,
             openingPointWorld = openingPose,
-            plotPointWorld = plotPose,
+            plotPointWorld = alignedPlotPose,
             trackingStateWasNormalThroughout = session.trackingStayedNormalSinceWatch())
         val result = OffsetFromOpening.compute(input)
         if (result == null) {
@@ -206,6 +317,7 @@ class OffsetFlowViewModel(
         plotPoseWorld = null
         openingPoseWorld = null
         openingFix = null
+        worldYawToNorthDeg = null
     }
 }
 
@@ -223,22 +335,35 @@ fun OffsetFlowScreen(
 
     val controller = remember { ArController() }
     val location = remember { LocationService(context) }
+    // Live compass so anchorPlotCenter can heading-align the ARCore world
+    // frame (see AnchorCompass docs for the sensor assumptions).
+    val compass = remember { AnchorCompass(context, location) }
     val viewModel = remember {
-        OffsetFlowViewModel(location = location, session = controller, scope = scope)
+        OffsetFlowViewModel(
+            location = location,
+            session = controller,
+            scope = scope,
+            compassAzimuthTrueDeg = { compass.azimuthTrueDeg })
     }
 
     // Runtime location permission up front so step C can start averaging
     // without a mid-flow prompt.
     val launcher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted -> location.onPermissionResult(granted) }
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        // FINE + COARSE requested together (Android 12+ requirement);
+        // either grant is enough to run, coarse just degrades the tier.
+        location.onPermissionResult(results.values.any { it })
+    }
     LaunchedEffect(Unit) {
         if (!LocationService.hasLocationPermission(context)) {
-            launcher.launch(LocationService.PERMISSION)
+            launcher.launch(LocationService.PERMISSIONS)
         }
     }
     DisposableEffect(Unit) {
+        compass.start()
         onDispose {
+            compass.stop()
             viewModel.cancel()
         }
     }

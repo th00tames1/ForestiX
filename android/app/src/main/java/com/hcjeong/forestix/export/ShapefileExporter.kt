@@ -422,8 +422,10 @@ private fun encodeDBFCell(value: DBFValue, width: Int): ByteArray = when (value)
     is DBFValue.IntValue ->
         rightAlignedAscii(value.n.toString(), width = width)
     is DBFValue.DoubleValue ->
+        // printf-semantics (half-even) via the shared helper so DBF numeric
+        // cells match the iOS `String(format:)` bytes exactly.
         rightAlignedAscii(
-            String.format(Locale.US, "%.${value.decimals}f", value.x), width = width)
+            CSVExporter.printfF(value.x, value.decimals), width = width)
     is DBFValue.StringValue -> {
         // dBase III character fields are left-aligned, space-padded,
         // fixed-width. Truncate long strings so we never exceed width.

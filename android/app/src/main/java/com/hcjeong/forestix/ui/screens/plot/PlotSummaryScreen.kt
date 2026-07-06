@@ -55,13 +55,16 @@ import java.util.UUID
 import kotlinx.coroutines.launch
 
 /// Suggested route: PlotFlowRoutes.PLOT_SUMMARY ("plotSummary/{plotId}").
-/// `onClosed` mirrors the iOS closure — fires after a successful close,
-/// right before the screen pops itself.
+/// `onClosed` mirrors the iOS closure — it fully owns the post-close
+/// transition (iOS onClosed() + dismiss(), where dismiss is a no-op once
+/// the host coordinator has already rewritten the path). The default pops
+/// this screen; callers that navigate elsewhere (e.g. the cruise SUMMARIZE
+/// registration pushing StandSummary) replace it entirely.
 @Composable
 fun PlotSummaryScreen(
     nav: NavController,
     plotId: String,
-    onClosed: () -> Unit = {},
+    onClosed: () -> Unit = { nav.popBackStack() },
 ) {
     val env = LocalAppEnvironment.current
     val scope = rememberCoroutineScope()
@@ -229,8 +232,10 @@ fun PlotSummaryScreen(
                         scope.launch {
                             vm.close()
                             if (vm.errorMessage.value == null && vm.closedAt.value != null) {
+                                // Navigation is the caller's job (iOS parity):
+                                // popping here would undo an onClosed() that
+                                // just pushed the stand summary.
                                 onClosed()
-                                nav.popBackStack()
                             }
                         }
                     },

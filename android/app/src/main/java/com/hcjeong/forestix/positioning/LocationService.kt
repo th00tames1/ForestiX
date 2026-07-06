@@ -119,8 +119,15 @@ class LocationService(
         if (running) return
         try {
             // 1 Hz matches the CoreLocation cadence the 120-sample
-            // buffer was sized for.
-            for (provider in listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)) {
+            // buffer was sized for. GPS_PROVIDER needs the FINE grant;
+            // with a coarse-only ("Approximate location") grant we still
+            // run on NETWORK_PROVIDER at degraded accuracy.
+            val providers = if (hasFineLocationPermission(context)) {
+                listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
+            } else {
+                listOf(LocationManager.NETWORK_PROVIDER)
+            }
+            for (provider in providers) {
                 if (lm.allProviders.contains(provider)) {
                     lm.requestLocationUpdates(
                         provider,
@@ -222,11 +229,28 @@ class LocationService(
 
     companion object {
 
-        /// The single runtime permission the positioning stack needs.
-        const val PERMISSION: String = Manifest.permission.ACCESS_FINE_LOCATION
+        /// The runtime permissions the positioning stack requests. On
+        /// Android 12+ FINE must be requested together with COARSE (a
+        /// FINE-only request is ignored by the system), and the user may
+        /// answer "Approximate location", granting only COARSE. Either
+        /// grant lets the service run — coarse-only fixes simply classify
+        /// to a worse tier downstream, matching iOS reduced-accuracy
+        /// behaviour (LocationService.swift never gates on
+        /// accuracyAuthorization).
+        val PERMISSIONS: Array<String> = arrayOf(
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION,
+        )
 
         fun hasLocationPermission(context: Context): Boolean =
-            context.checkSelfPermission(PERMISSION) == PackageManager.PERMISSION_GRANTED
+            PERMISSIONS.any {
+                context.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED
+            }
+
+        /// Precise-location grant — required for GPS_PROVIDER updates.
+        fun hasFineLocationPermission(context: Context): Boolean =
+            context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) ==
+                PackageManager.PERMISSION_GRANTED
 
         // MARK: - Live tier classification (REQ-NAV-003)
 

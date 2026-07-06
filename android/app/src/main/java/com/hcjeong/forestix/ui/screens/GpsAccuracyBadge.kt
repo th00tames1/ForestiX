@@ -53,8 +53,11 @@ fun GPSAccuracyBadge(modifier: Modifier = Modifier) {
     val location = remember { LocationService(context) }
 
     val launcher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        // FINE + COARSE requested together (Android 12+ requirement);
+        // either grant is enough to run, coarse just degrades the tier.
+        val granted = results.values.any { it }
         location.onPermissionResult(granted)
         if (granted) location.start()
     }
@@ -62,7 +65,7 @@ fun GPSAccuracyBadge(modifier: Modifier = Modifier) {
         if (LocationService.hasLocationPermission(context)) {
             location.start()
         } else {
-            launcher.launch(LocationService.PERMISSION)
+            launcher.launch(LocationService.PERMISSIONS)
         }
     }
     DisposableEffect(Unit) {

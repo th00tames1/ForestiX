@@ -348,11 +348,19 @@ private fun ExportContent(nav: NavController, project: Project) {
     // zipped (stored, no compression) and the archive is shared instead.
     LaunchedEffect(shareURL) {
         val target = shareURL ?: return@LaunchedEffect
-        viewModel.shareURL.value = null
-        val file = withContext(Dispatchers.IO) {
-            if (target.isDirectory) zipFolderForShare(target) else target
-        } ?: return@LaunchedEffect
-        shareFile(context, FullCruiseExporter.shareUri(context, file), mimeFor(file))
+        try {
+            val file = withContext(Dispatchers.IO) {
+                if (target.isDirectory) zipFolderForShare(target) else target
+            }
+            if (file != null) {
+                shareFile(context, FullCruiseExporter.shareUri(context, file), mimeFor(file))
+            }
+        } finally {
+            // Clear the trigger only AFTER the chooser has fired: nulling
+            // the key first restarts this keyed effect and cancels the
+            // in-flight zip, so the share sheet never appears.
+            viewModel.shareURL.value = null
+        }
     }
 
     ForestixScaffold(nav, title = "Export") { padding ->

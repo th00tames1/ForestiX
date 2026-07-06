@@ -33,6 +33,10 @@ import com.hcjeong.forestix.data.cruise.SpeciesConfigRepository
 import com.hcjeong.forestix.data.cruise.StratumRepository
 import com.hcjeong.forestix.data.cruise.TreeRepository
 import com.hcjeong.forestix.data.cruise.VolumeEquationRepository
+import com.hcjeong.forestix.sensors.ProjectCalibration
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 class AppEnvironment private constructor(
     val settings: AppSettings,
@@ -49,11 +53,35 @@ class AppEnvironment private constructor(
     val volumeEquationRepository: VolumeEquationRepository,
     val heightDiameterFitRepository: HeightDiameterFitRepository,
 ) {
+    /// Calibration the shared quick-measure scan screens apply. iOS injects
+    /// the project's ProjectCalibration into the scan view models when they
+    /// are launched from the Add-Tree flow (AddTreeFlowScreen.swift
+    /// `calibration(from:)`); Android's DBH/Height scan screens are shared
+    /// nav routes, so the flow publishes the active project's calibration
+    /// here on entry and restores identity when it leaves. Outside the flow
+    /// this stays identity — matching the iOS quick-measure screens, which
+    /// always pass `.identity`.
+    val activeScanCalibration = MutableStateFlow(ProjectCalibration.identity)
+
     companion object {
         private const val TAG = "AppEnvironment"
 
+        @Volatile private var INSTANCE: AppEnvironment? = null
+        private val createLock = Mutex()
+
+        /// Process-wide singleton, memoized like QuickMeasureHistory.get —
+        /// MainActivity's produceState re-runs create() on every Activity
+        /// recreation, and both Room databases must be built exactly once
+        /// per process (iOS AppEnvironment.live() runs once, guarded in
+        /// ContentView's .task).
         suspend fun create(context: Context): AppEnvironment {
-            val app = context.applicationContext
+            INSTANCE?.let { return it }
+            return createLock.withLock {
+                INSTANCE ?: build(context.applicationContext).also { INSTANCE = it }
+            }
+        }
+
+        private suspend fun build(app: Context): AppEnvironment {
             val db = Room.databaseBuilder(app, ForestixDatabase::class.java, "forestix.db").build()
             val history = QuickMeasureHistory.get(app, db.dao())
 

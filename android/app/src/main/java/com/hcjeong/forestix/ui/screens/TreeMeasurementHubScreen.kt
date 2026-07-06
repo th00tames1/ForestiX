@@ -28,7 +28,9 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Straighten
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.WbSunny
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -49,12 +51,28 @@ import com.hcjeong.forestix.ui.theme.ForestixSpace
 
 private data class Tool(val title: String, val subtitle: String, val icon: ImageVector, val route: String?)
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TreeMeasurementHubScreen(nav: NavController) {
     val colors = Forestix.colors
     val type = Forestix.type
     val env = LocalAppEnvironment.current
     val entries by env.history.entries.collectAsStateWithLifecycle()
+    val settings by env.settings.state.collectAsStateWithLifecycle()
+
+    // First-launch UX (iOS QuickMeasureHomeScreen .task): auto-present the
+    // region picker once. Picking or skipping stamps regionPickerSeen, which
+    // removes the sheet; it stays reachable later via Settings → Region.
+    if (settings.region == null && !settings.regionPickerSeen) {
+        ModalBottomSheet(
+            onDismissRequest = { env.settings.setRegionPickerSeen(true) },
+        ) {
+            RegionPickerSheet(onDismiss = {
+                // Selection/Skip already stamped regionPickerSeen — the
+                // state change hides the sheet.
+            })
+        }
+    }
 
     val tools = listOf(
         Tool("Tree Diameter", "DBH via LiDAR scan", Icons.Filled.Straighten, Routes.DBH),

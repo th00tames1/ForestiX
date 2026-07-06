@@ -251,8 +251,18 @@ fun VoiceSpeciesPicker(
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
-        errorMessage = if (granted) null
-        else "Speech permission was denied. Enable the microphone permission for Forestix, then try again."
+        if (granted) {
+            // iOS beginRecognitionIfIdle() starts listening as soon as the
+            // authorization request resolves, so the hold that popped the
+            // prompt isn't silently consumed. The system dialog cancels the
+            // Android press, so start the recognizer here — it self-stops
+            // on silence, so there's no stuck-listening risk.
+            errorMessage = null
+            lastMatchCode = null
+            recognizer.start()
+        } else {
+            errorMessage = "Speech permission was denied. Enable the microphone permission for Forestix, then try again."
+        }
     }
 
     // Resolve the transcript when a listening session ends (iOS

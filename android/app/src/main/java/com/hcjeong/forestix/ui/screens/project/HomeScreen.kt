@@ -48,6 +48,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -95,7 +97,16 @@ fun HomeScreen(nav: NavController) {
 
     var projects by remember { mutableStateOf<List<Project>>(emptyList()) }
     var resumeCandidates by remember { mutableStateOf<List<ResumeCandidate>>(emptyList()) }
-    var dismissedResumeIds by remember { mutableStateOf<Set<UUID>>(emptySet()) }
+    // iOS keeps dismissedResumeIds in the HomeViewModel @StateObject, so a
+    // dismissal survives pushing into a project and popping back. Plain
+    // remember{} is discarded when the Home destination leaves composition,
+    // resurrecting dismissed banners — save it across the nav back stack.
+    var dismissedResumeIds by rememberSaveable(
+        stateSaver = listSaver<Set<UUID>, String>(
+            save = { it.map(UUID::toString) },
+            restore = { restored -> restored.map(UUID::fromString).toSet() },
+        ),
+    ) { mutableStateOf<Set<UUID>>(emptySet()) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var isPresentingNewProject by remember { mutableStateOf(false) }
     var refreshKey by remember { mutableStateOf(0) }
@@ -110,21 +121,30 @@ fun HomeScreen(nav: NavController) {
         // swallow errors; a failed recovery scan shouldn't hide the list.
         resumeCandidates = try {
             val cutoff = System.currentTimeMillis() - 24L * 3600L * 1000L
-            val all = mutableListOf<ResumeCandidate>()
+            val all = mutableListOf<Pair<Long, ResumeCandidate>>()
             for (project in projects) {
                 for (plot in env.plotRepository.listByProject(project.id)) {
-                    if (plot.closedAt == null && plot.startedAt >= cutoff) {
-                        val treeCount = env.treeRepository.listByPlot(plot.id).size
-                        val started = DateUtils.getRelativeTimeSpanString(plot.startedAt)
-                        all += ResumeCandidate(
-                            id = plot.id,
-                            plot = plot,
-                            summary = "Plot ${plot.plotNumber} · " +
-                                "$treeCount trees · started $started")
-                    }
+                    if (plot.closedAt != null) continue
+                    // iOS: last activity = max of the plot's startedAt and
+                    // every live tree's updatedAt, so a long session tallied
+                    // minutes before a crash still surfaces even when the
+                    // plot was opened more than 24 h ago.
+                    val trees = env.treeRepository.listByPlot(plot.id)
+                    val last = (trees.map { it.updatedAt } + plot.startedAt)
+                        .maxOrNull() ?: plot.startedAt
+                    if (last < cutoff) continue
+                    val edited = DateUtils.getRelativeTimeSpanString(last)
+                    all += last to ResumeCandidate(
+                        id = plot.id,
+                        plot = plot,
+                        summary = "Plot ${plot.plotNumber} • " +
+                            "${trees.size} trees • $edited")
                 }
             }
-            all.filter { it.id !in dismissedResumeIds }
+            // Most-recent-first, like CrashRecoveryService's sort.
+            all.sortedByDescending { it.first }
+                .map { it.second }
+                .filter { it.id !in dismissedResumeIds }
         } catch (_: Exception) {
             emptyList()
         }
@@ -245,10 +265,40 @@ fun HomeScreen(nav: NavController) {
 
 // MARK: - Device health banners
 
-/// iOS surfaces a LiDAR-absent banner + a low-battery banner. Android
-/// always measures through ARCore, so only the battery banner applies.
+/// iOS surfaces a LiDAR-absent "manual-only mode" banner + a low-battery
+/// banner (HomeScreen.swift DeviceHealthBanners). The Android analogue of
+/// "no LiDAR" is no ARCore support on this device (the same mapping the
+/// pre-field checklist uses).
 @Composable
 private fun DeviceHealthBanners(context: Context) {
+    // ARCore availability can transiently report UNKNOWN_CHECKING, so poll
+    // it from state (bounded retry, same pattern as ArCameraView) instead
+    // of a one-shot remember{}; the banner appears only on a definitive
+    // "not supported".
+    var arUnsupported by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        try {
+            var avail = com.google.ar.core.ArCoreApk.getInstance().checkAvailability(context)
+            var guard = 0
+            while (avail == com.google.ar.core.ArCoreApk.Availability.UNKNOWN_CHECKING && guard < 50) {
+                kotlinx.coroutines.delay(200)
+                avail = com.google.ar.core.ArCoreApk.getInstance().checkAvailability(context)
+                guard++
+            }
+            arUnsupported = !avail.isSupported &&
+                avail != com.google.ar.core.ArCoreApk.Availability.UNKNOWN_CHECKING
+        } catch (_: Exception) {
+            // Leave the banner hidden when the check itself fails.
+        }
+    }
+    if (arUnsupported) {
+        HealthBanner(
+            tint = Color(0xFFFF9500),   // iOS .orange
+            title = "Manual-only mode",
+            body = "This device has no ARCore support. DBH will need a caliper, " +
+                "height will need a tape. All project and export features " +
+                "remain available.")
+    }
     val bm = remember { context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager }
     val level = remember {
         (bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: 100) / 100f

@@ -16,10 +16,11 @@
 // ≈ East and world-−Z ≈ North to within a degree, and the spec says
 // NOT to apply an additional compass rotation. ARCore's world frame is
 // gravity-aligned but NOT heading-aligned — the capture layer must
-// rotate its poses into an east-north-up frame (e.g. from the
-// rotation-vector azimuth at anchor time) before calling in here so
-// the same X≈E / −Z≈N convention holds. TODO(capture layer): apply
-// that yaw alignment when wiring the offset flow to ARCore.
+// rotate its poses into an east-north-up frame before calling in here
+// so the same X≈E / −Z≈N convention holds. The offset flow does this:
+// OffsetFlowViewModel samples the rotation-vector compass azimuth at
+// anchor time (AnchorCompass in OffsetFlowScreen.kt) and rotates the
+// plot pose about the opening pose in confirmPlotCenter().
 
 package com.hcjeong.forestix.positioning
 

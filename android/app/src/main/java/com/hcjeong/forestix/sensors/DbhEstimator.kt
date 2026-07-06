@@ -34,6 +34,11 @@ data class ProjectCalibration(
 
 enum class DBHMethod(val raw: String) {
     LIDAR_PARTIAL_ARC_SINGLE_VIEW("lidarPartialArcSingleView"),
+    // Dual-view partial-arc fit — raw MUST match iOS `lidarPartialArcDualView`
+    // (Models/Tree.swift) so cross-platform exports join.
+    LIDAR_PARTIAL_ARC_DUAL_VIEW("lidarPartialArcDualView"),
+    // Irregular cross-section capture — raw MUST match iOS `lidarIrregular`.
+    LIDAR_IRREGULAR("lidarIrregular"),
     LIDAR_CHORD_SILHOUETTE("lidarChordSilhouette"),
     MANUAL_CALIPER("manualCaliper"),
     // Two-tap trunk-edge caliper (no depth) — raw string MUST match iOS

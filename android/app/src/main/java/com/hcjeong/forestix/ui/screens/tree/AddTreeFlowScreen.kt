@@ -83,7 +83,9 @@ import com.hcjeong.forestix.data.cruise.Tree
 import com.hcjeong.forestix.data.cruise.TreeStatus
 import com.hcjeong.forestix.sensors.ConfidenceTier
 import com.hcjeong.forestix.sensors.DBHMethod
+import com.hcjeong.forestix.AppEnvironment
 import com.hcjeong.forestix.sensors.HeightMethod
+import com.hcjeong.forestix.sensors.ProjectCalibration
 import com.hcjeong.forestix.ui.Routes
 import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.screens.ForestixScaffold
@@ -106,6 +108,17 @@ class AddTreeFlowRetained : androidx.lifecycle.ViewModel() {
     var flow: AddTreeFlowViewModel? = null
     val awaitingScanKind = mutableStateOf<MeasureKind?>(null)
     var scanLaunchedAt: Long = 0L
+
+    /// Environment whose `activeScanCalibration` this flow published the
+    /// project calibration into (iOS injects ProjectCalibration into the
+    /// scan view models — AddTreeFlowScreen.swift `calibration(from:)`).
+    /// Restored to identity when the flow's back-stack entry is cleared,
+    /// so the reset survives the push to the shared scan screens.
+    var scanCalibrationEnv: AppEnvironment? = null
+
+    override fun onCleared() {
+        scanCalibrationEnv?.activeScanCalibration?.value = ProjectCalibration.identity
+    }
 }
 
 // MARK: - Loader
@@ -159,6 +172,18 @@ fun AddTreeFlowScreen(
             }
         }
         flowViewModel = retained.flow
+        // Publish the project's calibration for the shared scan screens
+        // (iOS: ProjectCalibration built from viewModel.project and injected
+        // into DBHScanViewModel / HeightScanViewModel). Identity is restored
+        // by AddTreeFlowRetained.onCleared when the flow is popped.
+        retained.flow?.let { f ->
+            retained.scanCalibrationEnv = env
+            env.activeScanCalibration.value = ProjectCalibration(
+                depthNoiseMm = f.project.depthNoiseMm,
+                dbhCorrectionAlpha = f.project.dbhCorrectionAlpha,
+                dbhCorrectionBeta = f.project.dbhCorrectionBeta,
+                vioDriftFraction = f.project.vioDriftFraction)
+        }
     }
 
     val vm = flowViewModel
@@ -512,14 +537,16 @@ private fun DbhStep(viewModel: AddTreeFlowViewModel, onScan: () -> Unit) {
     }
 }
 
-/// DBH method picker choices. iOS additionally offers "LiDAR — dual" /
-/// "LiDAR — irregular"; those DBHMethod raw values don't exist on Android
-/// yet (see TODO in the port report), so the Android-available methods are
-/// listed instead.
+/// DBH method picker choices. The first five rows mirror the iOS picker
+/// (AddTreeFlowScreen.swift Caliper / Visual / LiDAR — single / dual /
+/// irregular); the remaining rows are the Android-available capture
+/// methods, whose raw values also exist in the iOS enum.
 private val DbhMethodOptions = listOf(
     "Caliper" to DBHMethod.MANUAL_CALIPER,
     "Visual" to DBHMethod.MANUAL_VISUAL,
     "LiDAR — single" to DBHMethod.LIDAR_PARTIAL_ARC_SINGLE_VIEW,
+    "LiDAR — dual" to DBHMethod.LIDAR_PARTIAL_ARC_DUAL_VIEW,
+    "LiDAR — irregular" to DBHMethod.LIDAR_IRREGULAR,
     "LiDAR — chord" to DBHMethod.LIDAR_CHORD_SILHOUETTE,
     "AR caliper" to DBHMethod.AR_CALIPER,
     "AR motion" to DBHMethod.AR_VIO_CIRCLE_FIT,

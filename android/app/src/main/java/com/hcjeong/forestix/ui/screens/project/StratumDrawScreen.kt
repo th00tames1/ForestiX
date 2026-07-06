@@ -40,6 +40,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -143,8 +144,11 @@ private fun StratumDrawContent(nav: NavController, project: Project) {
     var centeredOnFix by remember { mutableStateOf(false) }
     val location = remember { LocationService(context) }
     val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted ->
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { results ->
+        // FINE + COARSE requested together (Android 12+ requirement);
+        // either grant is enough to run, coarse just degrades the tier.
+        val granted = results.values.any { it }
         location.onPermissionResult(granted)
         if (granted) location.start()
     }
@@ -152,8 +156,14 @@ private fun StratumDrawContent(nav: NavController, project: Project) {
         if (LocationService.hasLocationPermission(context)) {
             location.start()
         } else {
-            permissionLauncher.launch(LocationService.PERMISSION)
+            permissionLauncher.launch(LocationService.PERMISSIONS)
         }
+    }
+    // Release GPS on every exit path — the early stop() after the first
+    // auto-centre fix never runs when the user pans first or leaves before
+    // a fix arrives (same pattern as NavigationScreen/PlotCenterScreen).
+    DisposableEffect(Unit) {
+        onDispose { location.stop() }
     }
     val latestSnapshot by location.latestSnapshot.collectAsStateWithLifecycle()
     LaunchedEffect(latestSnapshot) {

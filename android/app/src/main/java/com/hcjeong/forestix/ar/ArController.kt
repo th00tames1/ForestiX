@@ -161,6 +161,24 @@ class ArController {
         return kotlin.math.atan2(fwd.y, horiz)
     }
 
+    /// Yaw (degrees, 0…360, clockwise from world −Z toward world +X) of the
+    /// camera's forward direction projected onto the horizontal plane — the
+    /// ARCore-world "pseudo-heading". Paired with a same-instant compass
+    /// azimuth it yields the yaw between the (arbitrary-yaw) ARCore world
+    /// frame and true north, which the offset flow needs because ARCore has
+    /// no `.gravityAndHeading` world alignment like ARKit. Null while not
+    /// tracking or when the forward ray is near-vertical (no stable yaw).
+    fun cameraWorldYawDeg(): Double? {
+        val f = frame ?: return null
+        if (f.camera.trackingState != TrackingState.TRACKING) return null
+        val z = f.camera.pose.zAxis
+        val fwd = Vec3(-z[0], -z[1], -z[2])
+        val horiz = sqrt(fwd.x * fwd.x + fwd.z * fwd.z)
+        if (horiz < 1e-3f) return null
+        val yaw = Math.toDegrees(kotlin.math.atan2(fwd.x, -fwd.z).toDouble())
+        return (yaw + 360.0) % 360.0
+    }
+
     /// Horizontal (XZ) distance from the current camera to a world point —
     /// the live walk-off distance d_h from a trunk anchor.
     fun horizontalDistanceTo(p: Vec3): Float? {

@@ -5,7 +5,7 @@
 // CruiseDesign / PreFieldChecklist / PlotMap / Export / Calibration ->
 // CruiseFlow (navigate -> record centre / offset -> tally -> add tree /
 // tree detail / AR boundary -> plot summary -> stand summary), and the
-// standalone Recon cruise / Reference library / quick-measure plot detail.
+// standalone Recon cruise / Reference library.
 
 package com.hcjeong.forestix.ui
 
@@ -30,8 +30,6 @@ import com.hcjeong.forestix.ui.screens.boundary.ARBoundaryScreen
 import com.hcjeong.forestix.ui.screens.dbh.DBHScanScreen
 import com.hcjeong.forestix.ui.screens.height.HeightScanScreen
 import com.hcjeong.forestix.ui.screens.nav.NavigationScreen
-import com.hcjeong.forestix.ui.screens.plot.PlotCenterScreen
-import com.hcjeong.forestix.ui.screens.plot.PlotDetailScreen
 import com.hcjeong.forestix.ui.screens.plot.PlotFlowRoutes
 import com.hcjeong.forestix.ui.screens.plot.PlotMapScreen
 import com.hcjeong.forestix.ui.screens.plot.PlotSummaryScreen
@@ -47,7 +45,6 @@ import com.hcjeong.forestix.ui.screens.project.ProjectDashboardScreen
 import com.hcjeong.forestix.ui.screens.project.ProjectFlowRoutes
 import com.hcjeong.forestix.ui.screens.project.StratumDrawScreen
 import com.hcjeong.forestix.ui.screens.stand.ReconCruiseScreen
-import com.hcjeong.forestix.ui.screens.stand.StandStockReportScreen
 import com.hcjeong.forestix.ui.screens.stand.StandSummaryScreen
 import com.hcjeong.forestix.ui.screens.tree.AddTreeFlowScreen
 import com.hcjeong.forestix.ui.screens.tree.TreeDetailScreen
@@ -64,11 +61,13 @@ object Routes {
     const val DISTANCE = "distance"
     const val SAMPLING = "sampling"
     const val SETTINGS = "settings"
+    /// Project-less calibration entry from Settings — iOS Settings
+    /// calibrationSection NavigationLink { CalibrationScreen() }.
+    const val CALIBRATION = "calibration"
     // Timber-cruising stack (iOS TimberCruisingHubScreen tiles).
     const val PROJECTS = "projects"
     const val RECON_CRUISE = "reconCruise"
     const val REFERENCE_LIBRARY = "referenceLibrary"
-    const val STAND_STOCK = "standStock?plot={plot}"
 }
 
 /// Required-string route argument; screens behind these routes are only
@@ -95,6 +94,7 @@ fun ForestixRoot() {
         composable(Routes.DISTANCE) { DistanceMeasureScreen(nav) }
         composable(Routes.SAMPLING) { SamplingPlotScreen(nav) }
         composable(Routes.SETTINGS) { SettingsScreen(nav) }
+        composable(Routes.CALIBRATION) { CalibrationScreen(nav) }
 
         // MARK: - Timber-cruising hub tiles
 
@@ -159,7 +159,10 @@ fun ForestixRoot() {
                 onOpenTree = { tree ->
                     nav.navigate(CruiseStepRoutes.treeDetail(tree.id.toString()))
                 },
-                onClosePlot = { nav.navigate(CruiseStepRoutes.summarize(projectId, plotId)) })
+                onClosePlot = { nav.navigate(CruiseStepRoutes.summarize(projectId, plotId)) },
+                // iOS CruiseFlowScreen tally toolbar: "AR Boundary" button
+                // pushes the AR plot-boundary walk (circle.dashed).
+                onArBoundary = { nav.navigate(CruiseStepRoutes.arBoundary(plotId)) })
         }
         composable(CruiseStepRoutes.ADD_TREE) { back ->
             AddTreeFlowScreen(nav, back.arg("plotId"))
@@ -185,36 +188,24 @@ fun ForestixRoot() {
         }
 
         // MARK: - Quick-measure plot flow (standalone, no project)
+        //
+        // The standalone plotCenter / plotDetail / standStock destinations
+        // were removed: their iOS counterparts (PlotCenterScreen outside the
+        // cruise flow, PlotDetailScreen, StandStockReport) are unreachable
+        // dead code in the live iOS navigation tree, so registering them
+        // here only exposed no-op wiring. Re-add alongside iOS entry points.
 
-        composable(PlotFlowRoutes.PLOT_CENTER) { PlotCenterScreen(nav) }
         composable(PlotFlowRoutes.PLOT_TALLY) { back ->
             PlotTallyScreen(nav, back.arg("plotId"))
         }
         composable(PlotFlowRoutes.PLOT_SUMMARY) { back ->
             PlotSummaryScreen(nav, back.arg("plotId"))
         }
-        composable(PlotFlowRoutes.PLOT_DETAIL) { back ->
-            PlotDetailScreen(nav, back.arg("plotID"))
-        }
         composable(PlotFlowRoutes.ADD_TREE_FLOW) { back ->
             AddTreeFlowScreen(nav, back.arg("plotId"))
         }
         composable(TreeFlowRoutes.ADD_TREE) { back ->
             AddTreeFlowScreen(nav, back.arg("plotId"))
-        }
-
-        // MARK: - Reports
-
-        composable(
-            Routes.STAND_STOCK,
-            arguments = listOf(navArgument("plot") {
-                type = NavType.StringType
-                nullable = true
-                defaultValue = null
-            }),
-        ) { back ->
-            val plot = back.arguments?.getString("plot")?.let(UUID::fromString)
-            StandStockReportScreen(nav, plot)
         }
     }
 }

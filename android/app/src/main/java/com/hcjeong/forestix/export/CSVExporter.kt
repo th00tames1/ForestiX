@@ -276,8 +276,28 @@ object CSVExporter {
         return s
     }
 
-    internal fun format(v: Double, places: Int): String =
-        String.format(Locale.US, "%.${places}f", v)
+    internal fun format(v: Double, places: Int): String = printfF(v, places)
+
+    /// Fixed-decimal formatting with C-printf semantics. Swift's
+    /// `String(format: "%.Nf", v)` delegates to printf, which rounds the
+    /// EXACT binary value half-to-even; Java's `String.format("%.Nf")`
+    /// rounds the shortest decimal representation HALF_UP, so the two
+    /// diverge on ties (12.125 → "12.13" vs "12.12"). The exporters
+    /// promise byte-identical cross-platform output, so every numeric
+    /// cell (CSV, GPX, DBF) routes through BigDecimal(v) HALF_EVEN.
+    internal fun printfF(v: Double, places: Int): String {
+        // BigDecimal(double) throws on non-finite values; match Swift/C
+        // printf's lowercase spellings.
+        if (v.isNaN()) return "nan"
+        if (v.isInfinite()) return if (v > 0) "inf" else "-inf"
+        val s = java.math.BigDecimal(v)
+            .setScale(places, java.math.RoundingMode.HALF_EVEN)
+            .toPlainString()
+        // BigDecimal drops the sign when a negative value (or -0.0) rounds
+        // to zero; printf keeps it ("-0.00").
+        val negative = v < 0.0 || (v == 0.0 && 1.0 / v < 0.0)
+        return if (negative && !s.startsWith("-")) "-$s" else s
+    }
 
     internal fun optional(v: Float?, places: Int): String =
         v?.let { format(it.toDouble(), places) } ?: ""

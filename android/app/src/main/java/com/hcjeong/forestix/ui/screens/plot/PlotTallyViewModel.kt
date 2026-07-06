@@ -24,6 +24,7 @@ import com.hcjeong.forestix.inventory.PlotStats
 import com.hcjeong.forestix.inventory.PlotStatsCalculator
 import com.hcjeong.forestix.inventory.VolumeEquation
 import com.hcjeong.forestix.inventory.VolumeEquationFactory
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -87,6 +88,9 @@ class PlotTallyViewModel(
             recomputeStats()
             _errorMessage.value = null
         } catch (e: Exception) {
+            // Cancellation is not an error — rethrow so a disposed screen
+            // doesn't fabricate a "Could not load" message.
+            if (e is CancellationException) throw e
             _errorMessage.value =
                 "Could not load plot data: ${e.message ?: e.javaClass.simpleName}"
         } finally {
@@ -123,6 +127,7 @@ class PlotTallyViewModel(
             treeRepo.delete(treeId)
             refresh()
         } catch (e: Exception) {
+            if (e is CancellationException) throw e
             _errorMessage.value = "Delete failed: ${e.message ?: e.javaClass.simpleName}"
         }
     }
@@ -137,6 +142,7 @@ class PlotTallyViewModel(
                 refresh()
             }
         } catch (e: Exception) {
+            if (e is CancellationException) throw e
             _errorMessage.value = "Undelete failed: ${e.message ?: e.javaClass.simpleName}"
         }
     }

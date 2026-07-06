@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -45,6 +46,7 @@ import com.hcjeong.forestix.ui.screens.ContinuationOrigin
 import com.hcjeong.forestix.ui.screens.MeasurementContinuationDialog
 import com.hcjeong.forestix.ui.screens.CenteredText
 import com.hcjeong.forestix.ui.screens.DevHud
+import com.hcjeong.forestix.ui.screens.GPSAccuracyBadge
 import com.hcjeong.forestix.ui.screens.MeasureBackButton
 import com.hcjeong.forestix.ui.screens.MeasureControlColumn
 import com.hcjeong.forestix.ui.screens.MeasureStatusPanel
@@ -66,6 +68,10 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     var pendingTree by remember { mutableStateOf(treeOverride ?: env.history.suggestedNextTreeNumber) }
     var continuationTree by remember { mutableStateOf<Int?>(null) }
     val settings by env.settings.state.collectAsStateWithLifecycle()
+    // Project calibration — identity for plain quick-measure (iOS parity),
+    // the active project's VIO drift fraction when launched from the
+    // Add-Tree flow (iOS injects it into HeightScanViewModel).
+    val calibration by env.activeScanCalibration.collectAsStateWithLifecycle()
 
     var stage by remember { mutableStateOf(Stage.ANCHOR) }
     var anchorPt by remember { mutableStateOf<Vec3?>(null) }
@@ -172,6 +178,7 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                     standingX = standing.x, standingZ = standing.z,
                     alphaTopRad = aTop, alphaBaseRad = aBase,
                     trackingStateWasNormalThroughout = true,
+                    vioDriftFraction = calibration.vioDriftFraction,
                 )
                 result = r
                 stage = if (r.confidence == ConfidenceTier.RED) Stage.REJECTED else Stage.COMPUTED
@@ -194,6 +201,13 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
         ArCameraView(controller, markers(), modifier = Modifier.fillMaxSize())
         if (showCapture) CenterCrosshair(Modifier.align(Alignment.Center))
         MeasureBackButton { nav.popBackStack() }
+
+        // Same GPS-accuracy strip as the Diameter scan — iOS
+        // HeightScanScreen top-left HStack { GPSAccuracyBadge() }.
+        GPSAccuracyBadge(
+            Modifier
+                .align(Alignment.TopStart)
+                .padding(start = 72.dp, top = 23.dp))
 
         if (settings.developerMode) {
             DevHud(

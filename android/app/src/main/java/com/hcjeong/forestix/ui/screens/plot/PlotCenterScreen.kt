@@ -177,16 +177,18 @@ fun PlotCenterScreen(
     // iOS onAppear → viewModel.start(); Android additionally routes the
     // runtime permission through a result launcher (see GPSAccuracyBadge).
     val launcher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        location.onPermissionResult(granted)
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        // FINE + COARSE requested together (Android 12+ requirement);
+        // either grant is enough to run, coarse just degrades the tier.
+        location.onPermissionResult(results.values.any { it })
         viewModel.start()
     }
     LaunchedEffect(Unit) {
         if (LocationService.hasLocationPermission(context)) {
             viewModel.start()
         } else {
-            launcher.launch(LocationService.PERMISSION)
+            launcher.launch(LocationService.PERMISSIONS)
         }
     }
     DisposableEffect(Unit) {

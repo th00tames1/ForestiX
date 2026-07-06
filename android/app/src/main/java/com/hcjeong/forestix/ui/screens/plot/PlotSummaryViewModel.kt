@@ -29,9 +29,12 @@ import com.hcjeong.forestix.inventory.PlotValidation
 import com.hcjeong.forestix.inventory.ValidationResult
 import com.hcjeong.forestix.inventory.VolumeEquation
 import com.hcjeong.forestix.inventory.VolumeEquationFactory
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.withContext
 
 class PlotSummaryViewModel(
     // Input
@@ -95,6 +98,9 @@ class PlotSummaryViewModel(
             loadProjectHDFits()
             _errorMessage.value = null
         } catch (e: Exception) {
+            // Cancellation is not an error — rethrow so a disposed screen
+            // doesn't fabricate a "Load failed" message.
+            if (e is CancellationException) throw e
             _errorMessage.value = "Load failed: ${e.message ?: e.javaClass.simpleName}"
         } finally {
             _isLoading.value = false
@@ -112,7 +118,8 @@ class PlotSummaryViewModel(
             for ((code, sp) in _speciesByCode.value) {
                 byId[sp.volumeEquationId]?.let { volEquations[code] = it }
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
             // Non-fatal: fall back to an empty map; live trees still aggregate
             // TPA/BA/QMD, just not volume.
         }
@@ -134,7 +141,8 @@ class PlotSummaryViewModel(
                 )?.let { fits[fit.speciesCode] = it }
             }
             _hdFitsByProject.value = fits
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
             // Non-fatal for display.
         }
     }
@@ -155,33 +163,42 @@ class PlotSummaryViewModel(
         if (_isClosing.value) return
         _isClosing.value = true
         try {
-            val startWall = System.currentTimeMillis()
-            val originalPlot = plot.copy()
-            val now = System.currentTimeMillis()
-            val p = plot.copy(closedAt = now, closedBy = closedBy)
+            // iOS close() is synchronous on the MainActor and cannot be
+            // interrupted between stamping closedAt and running the H–D
+            // rollup (or its rollback). Compose launches this from a
+            // disposable rememberCoroutineScope, so shield the persistence
+            // section from cancellation — a back-press mid-close must not
+            // strand a half-closed plot with stale H–D fits.
+            withContext(NonCancellable) {
+                val startWall = System.currentTimeMillis()
+                val originalPlot = plot.copy()
+                val now = System.currentTimeMillis()
+                val p = plot.copy(closedAt = now, closedBy = closedBy)
 
-            try {
-                plot = plotRepo.update(p)
-                _closedAt.value = plot.closedAt
                 try {
-                    updateProjectHDFits(now = now)
-                } catch (e: Exception) {
-                    // Rollback the closedAt stamp — the HD rollup is a
-                    // required side-effect of closing, so a failure leaves
-                    // the plot logically open.
-                    plot = try {
-                        plotRepo.update(originalPlot)
-                    } catch (_: Exception) {
-                        originalPlot
-                    }
+                    plot = plotRepo.update(p)
                     _closedAt.value = plot.closedAt
-                    throw e
+                    try {
+                        updateProjectHDFits(now = now)
+                    } catch (e: Exception) {
+                        // Rollback the closedAt stamp — the HD rollup is a
+                        // required side-effect of closing, so a failure leaves
+                        // the plot logically open.
+                        plot = try {
+                            plotRepo.update(originalPlot)
+                        } catch (_: Exception) {
+                            originalPlot
+                        }
+                        _closedAt.value = plot.closedAt
+                        throw e
+                    }
+                    _hdFitDurationMs.value = (System.currentTimeMillis() - startWall).toDouble()
+                    _errorMessage.value = null
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    _errorMessage.value = "Close failed: ${e.message ?: e.javaClass.simpleName}. " +
+                        "Your trees are saved; try again when you have signal."
                 }
-                _hdFitDurationMs.value = (System.currentTimeMillis() - startWall).toDouble()
-                _errorMessage.value = null
-            } catch (e: Exception) {
-                _errorMessage.value = "Close failed: ${e.message ?: e.javaClass.simpleName}. " +
-                    "Your trees are saved; try again when you have signal."
             }
         } finally {
             _isClosing.value = false

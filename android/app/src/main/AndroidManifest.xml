@@ -9,6 +9,10 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Basemap XYZ tile downloads (basemap/TileFetcher + OfflineBasemap
+         prefetch). Declared explicitly so tile fetching doesn't depend on
+         the sceneview AAR's merged-manifest INTERNET entry. -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <!-- ARCore samples the IMU above 200 Hz; on Android 12+ (API 31+) the
          high-rate sensor registration FAILS without this permission, which

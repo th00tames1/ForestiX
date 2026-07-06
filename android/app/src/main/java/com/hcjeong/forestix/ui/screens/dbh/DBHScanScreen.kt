@@ -66,7 +66,6 @@ import com.hcjeong.forestix.sensors.DBHResult
 import com.hcjeong.forestix.sensors.DistanceSmoother
 import com.hcjeong.forestix.sensors.DBHMethod
 import com.hcjeong.forestix.sensors.GuideAxis
-import com.hcjeong.forestix.sensors.ProjectCalibration
 import com.hcjeong.forestix.sensors.VioMotionDbh
 import com.hcjeong.forestix.ui.Routes
 import com.hcjeong.forestix.ui.screens.ContinuationAction
@@ -75,6 +74,7 @@ import com.hcjeong.forestix.ui.screens.MeasurementContinuationDialog
 import com.hcjeong.forestix.ui.screens.ScanMetadataDialog
 import com.hcjeong.forestix.ui.screens.CenteredText
 import com.hcjeong.forestix.ui.screens.DevHud
+import com.hcjeong.forestix.ui.screens.GPSAccuracyBadge
 import com.hcjeong.forestix.ui.screens.MeasureBackButton
 import com.hcjeong.forestix.ui.screens.MeasureControlColumn
 import com.hcjeong.forestix.ui.screens.MeasureStatusPanel
@@ -109,6 +109,10 @@ fun DBHScanScreen(nav: NavController) {
     val colors = Forestix.colors
 
     val settings by env.settings.state.collectAsStateWithLifecycle()
+    // Project calibration — identity for plain quick-measure (iOS parity),
+    // the active project's wall/cylinder fits when launched from the
+    // Add-Tree flow (iOS injects it into DBHScanViewModel).
+    val calibration by env.activeScanCalibration.collectAsStateWithLifecycle()
     var stage by remember { mutableStateOf(Stage.AIMING) }
     var result by remember { mutableStateOf<DBHResult?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
@@ -159,9 +163,9 @@ fun DBHScanScreen(nav: NavController) {
     LaunchedEffect(stage, captureMethod) {
         while (stage == Stage.AIMING && captureMethod == DbhCaptureMethod.DEPTH) {
             controller.acquireDepthFrame()?.let { f ->
-                val axis = DBHEstimator.pickGuideAxis(f, f.width / 2.0, f.height / 2.0, ProjectCalibration.identity)
+                val axis = DBHEstimator.pickGuideAxis(f, f.width / 2.0, f.height / 2.0, calibration)
                 val raw = DBHEstimator.livePreview(
-                    f, f.width / 2.0, f.height / 2.0, axis, ProjectCalibration.identity, chordAlgorithm,
+                    f, f.width / 2.0, f.height / 2.0, axis, calibration, chordAlgorithm,
                 )
                 if (raw != null && raw.locked) {
                     val prev = smoothedDiaCm
@@ -244,10 +248,10 @@ fun DBHScanScreen(nav: NavController) {
                 val h = frames.first().height
                 // Auto-pick the across-the-trunk axis (fixes severe under-read
                 // when the sensor orientation made the strip run along the trunk).
-                val axis = DBHEstimator.pickGuideAxis(frames.first(), w / 2.0, h / 2.0, ProjectCalibration.identity)
+                val axis = DBHEstimator.pickGuideAxis(frames.first(), w / 2.0, h / 2.0, calibration)
                 // Chord (silhouette-width) method = median of the SAME per-frame
                 // chord the live preview shows, so preview ≈ recorded value.
-                val sub = DBHEstimator.estimateChord(frames, w / 2.0, h / 2.0, axis, ProjectCalibration.identity, chordAlgorithm)
+                val sub = DBHEstimator.estimateChord(frames, w / 2.0, h / 2.0, axis, calibration, chordAlgorithm)
                     ?: continue
                 if (sub.confidence == ConfidenceTier.RED) {
                     if (firstRed == null) firstRed = sub
@@ -360,6 +364,14 @@ fun DBHScanScreen(nav: NavController) {
         }
 
         MeasureBackButton { nav.popBackStack() }
+
+        // GPS-accuracy pill on the top strip — iOS DBHScanScreen `topStrip`
+        // (GPSAccuracyBadge leading, under the nav bar). Sits right of the
+        // back button, which owns Android's top-left corner.
+        GPSAccuracyBadge(
+            Modifier
+                .align(Alignment.TopStart)
+                .padding(start = 72.dp, top = 23.dp))
 
         if (settings.developerMode) {
             val p = preview

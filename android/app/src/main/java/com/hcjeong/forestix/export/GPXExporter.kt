@@ -77,7 +77,9 @@ object GPXExporter {
 
     // MARK: - Helpers
 
-    private fun fmt(x: Double): String = String.format(Locale.US, "%.7f", x)
+    /// printf-semantics (half-even) formatting via the shared helper so the
+    /// GPX bytes match the iOS `String(format: "%.7f", _)` output exactly.
+    private fun fmt(x: Double): String = CSVExporter.printfF(x, 7)
 
     /// ISO-8601 with fractional seconds and trailing "Z" — matches iOS
     /// ISO8601DateFormatter(.withInternetDateTime, .withFractionalSeconds).

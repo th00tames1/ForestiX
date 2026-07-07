@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -137,7 +138,10 @@ fun BoxScope.MeasureStatusPanel(content: @Composable () -> Unit) {
     Column(
         modifier = Modifier
             .align(Alignment.BottomCenter)
-            .padding(bottom = 28.dp)
+            // Keep clear of the system navigation bar (edge-to-edge is on):
+            // inset first, then a 16dp visual gap above it.
+            .navigationBarsPadding()
+            .padding(bottom = 16.dp)
             .widthIn(max = 340.dp)
             .shadow(3.dp, RoundedCornerShape(16.dp), clip = false)
             .clip(RoundedCornerShape(16.dp))

@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -454,7 +455,7 @@ fun DBHScanScreen(nav: NavController) {
 
             // DBH method picker (Depth vs Caliper) floating above the panel.
             if (stage == Stage.AIMING) {
-                Box(Modifier.align(Alignment.BottomCenter).padding(bottom = 152.dp)) {
+                Box(Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 140.dp)) {
                     DbhMethodSelector(
                         method = captureMethod,
                         onSelect = { m ->

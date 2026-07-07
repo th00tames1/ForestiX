@@ -60,6 +60,11 @@ public struct DBHScanScreen: View {
     /// can raycast the midpoint for distance and draw a marker.
     @State private var arLeftScreenPoint: CGPoint?
 
+    /// Developer-mode research capture: tape-measured true diameter (cm)
+    /// typed before Accept; logged with the scan context to the research
+    /// CSV so error can be analysed against distance / aim angle.
+    @State private var researchTrueCm: String = ""
+
     /// Hampel-style robust moving average over the screen-centre AR
     /// distance while the caliper is aiming — the estimated-plane raycast
     /// flickers frame-to-frame, and the caliper multiplies that distance
@@ -238,6 +243,7 @@ public struct DBHScanScreen: View {
                     damageCodes: metaDamage,
                     note: metaNote)
                 onAccept(r, meta)
+                recordResearchRow(r)
             }
         }
         .sheet(isPresented: $presentingMetadata) {
@@ -736,6 +742,43 @@ public struct DBHScanScreen: View {
         }
     }
 
+    /// Developer-mode research CSV row — the diagnostic context the
+    /// accuracy study needs (distance, aim pitch, n, σ, tier, true value).
+    private func recordResearchRow(_ r: DBHResult) {
+        guard settings.developerMode else { return }
+        var f: [String: String] = [
+            "measure_type": "dbh",
+            "method": r.method.rawValue,
+            "depth_source": settings.dbhMethodSource.rawValue,
+            "measured_value": String(format: "%.2f", r.diameterCm),
+            "unit": "cm",
+            "sigma": String(format: "%.1f", r.sigmaRmm),
+            "confidence_tier": r.confidence.rawValue,
+            "n_points": "\(r.nInliers)",
+            "arc_deg": String(format: "%.1f", r.arcCoverageDeg),
+            "rmse_mm": String(format: "%.1f", r.rmseMm),
+            "species": metaSpecies ?? "",
+            "note": metaNote,
+        ]
+        if let d = viewModel.distanceToStemCenterM {
+            f["distance_m"] = String(format: "%.2f", d)
+        }
+        if let p = raycaster.cameraPitchDeg {
+            f["pitch_deg"] = String(format: "%.1f", p)
+        }
+        if let frame = viewModel.session.latestDepthFrame {
+            f["fx"] = String(format: "%.1f", frame.intrinsics.columns.0.x)
+            f["depth_w"] = "\(frame.width)"
+            f["depth_h"] = "\(frame.height)"
+        }
+        if let t = Double(researchTrueCm), t > 0 {
+            f["true_value"] = String(format: "%.2f", t)
+            f["error"] = String(format: "%.2f", Double(r.diameterCm) - t)
+        }
+        ResearchLog.shared.record(f)
+        researchTrueCm = ""
+    }
+
     @ViewBuilder
     private func resultPanel(_ r: DBHResult) -> some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -778,6 +821,18 @@ public struct DBHScanScreen: View {
                 .accessibilityIdentifier("dbhScan.editMetadata")
             }
             .padding(.top, 2)
+            if settings.developerMode {
+                HStack(spacing: 6) {
+                    Text("True Ø (cm)")
+                        .font(ForestixType.caption)
+                        .foregroundStyle(.white.opacity(0.8))
+                    TextField("tape", text: $researchTrueCm)
+                        .keyboardType(.decimalPad)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 90)
+                        .accessibilityIdentifier("dbhScan.researchTrue")
+                }
+            }
         }
         .foregroundStyle(.white)
         .accessibilityIdentifier("dbhScan.resultPanel")

@@ -36,20 +36,24 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.common.Region
+import com.hcjeong.forestix.data.ResearchLog
 import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.sensors.ChordAlgorithm
 import com.hcjeong.forestix.sensors.LogRule
 import com.hcjeong.forestix.ui.Routes
+import com.hcjeong.forestix.ui.shareFile
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 
 @Composable
 fun SettingsScreen(nav: NavController) {
     val env = LocalAppEnvironment.current
+    val context = LocalContext.current
     val settings by env.settings.state.collectAsStateWithLifecycle()
     val colors = Forestix.colors
     val type = Forestix.type
@@ -86,6 +90,30 @@ fun SettingsScreen(nav: NavController) {
                     checked = settings.developerMode,
                     onCheckedChange = { env.settings.setDeveloperMode(it) },
                 )
+            }
+
+            if (settings.developerMode) {
+                // Research CSV — per-measurement diagnostic rows (value, true
+                // value, error, distance, pitch/α, n, σ, tier) appended by the
+                // scan/distance screens while developer mode is on. Identical
+                // schema to the iOS ResearchLog so the exports concatenate.
+                Column(verticalArrangement = Arrangement.spacedBy(ForestixSpace.sm)) {
+                    Text("Research CSV", style = type.bodyBold, color = colors.textPrimary)
+                    Text(
+                        "${ResearchLog.rowCount(context)} rows recorded on this device.",
+                        style = type.caption, color = colors.textSecondary,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(ForestixSpace.sm)) {
+                        OutlinedButton(
+                            onClick = { ResearchLog.exportUri(context)?.let { shareFile(context, it, "text/csv") } },
+                            enabled = ResearchLog.hasData(context),
+                        ) { Text("Export") }
+                        OutlinedButton(
+                            onClick = { ResearchLog.clear(context) },
+                            enabled = ResearchLog.hasData(context),
+                        ) { Text("Clear") }
+                    }
+                }
             }
 
             HorizontalDivider(color = colors.textSecondary.copy(alpha = 0.15f))

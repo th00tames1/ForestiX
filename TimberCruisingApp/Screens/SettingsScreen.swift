@@ -163,6 +163,31 @@ public struct SettingsScreen: View {
                 }
             }
             .accessibilityIdentifier("settings.developerMode")
+            if settings.developerMode {
+                // Research CSV — the per-measurement diagnostic rows
+                // (value, true value, error, distance, pitch/α, n, σ, tier)
+                // the accuracy study analyses. Rows are appended by the
+                // scan/distance screens whenever developer mode is on.
+                HStack {
+                    Label("Research CSV", systemImage: "tablecells")
+                    Spacer()
+                    Text("\(ResearchLog.shared.rowCount()) rows")
+                        .foregroundStyle(ForestixPalette.textSecondary)
+                }
+                Button {
+                    backup.shareURL = ResearchLog.shared.fileURL
+                } label: {
+                    Label("Export research CSV", systemImage: "square.and.arrow.up")
+                }
+                .disabled(!ResearchLog.shared.hasData)
+                .accessibilityIdentifier("settings.exportResearch")
+                Button(role: .destructive) {
+                    ResearchLog.shared.clear()
+                } label: {
+                    Label("Clear research CSV", systemImage: "trash")
+                }
+                .disabled(!ResearchLog.shared.hasData)
+            }
         } header: {
             Text("Developer")
         }

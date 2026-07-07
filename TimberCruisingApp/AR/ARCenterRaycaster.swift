@@ -147,6 +147,18 @@ public final class ARCenterRaycaster: ObservableObject {
         return SIMD3<Float>(c.x, c.y, c.z)
     }
 
+    /// Elevation (deg) of the camera's forward aim above the horizon —
+    /// positive = aiming up. Logged by the developer-mode research CSV so
+    /// distance/DBH accuracy can be analysed against aim angle.
+    public var cameraPitchDeg: Double? {
+        guard let frame = arview?.session.currentFrame else { return nil }
+        let t = frame.camera.transform
+        // ARKit camera looks down -Z of its transform.
+        let fwd = SIMD3<Float>(-t.columns.2.x, -t.columns.2.y, -t.columns.2.z)
+        let horiz = (fwd.x * fwd.x + fwd.z * fwd.z).squareRoot()
+        return Double(atan2(fwd.y, horiz)) * 180.0 / .pi
+    }
+
     private func worldTranslation(from hit: ARRaycastResult) -> SIMD3<Float> {
         let c = hit.worldTransform.columns.3
         return SIMD3<Float>(c.x, c.y, c.z)
@@ -334,6 +346,7 @@ public final class ARCenterRaycaster: ObservableObject {
     public func hit(at screenPoint: CGPoint) -> SIMD3<Float>? { nil }
     public func rayDirection(at screenPoint: CGPoint) -> SIMD3<Float>? { nil }
     public var cameraWorldPosition: SIMD3<Float>? { nil }
+    public var cameraPitchDeg: Double? { nil }
 }
 
 #endif

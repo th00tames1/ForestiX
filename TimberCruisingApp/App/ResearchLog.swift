@@ -7,11 +7,11 @@
 //
 // Storage is a single append-only CSV in the app's Documents directory.
 //
-// SCAFFOLD — not yet wired: `record(...)` has no callers yet, and Settings'
-// Export/Clear still target `ForestixLogger`. The column order below is the
-// INTENDED cross-platform schema; there is no Android ResearchLog yet, so the
-// "identical schema" join is a goal, not a current guarantee. See the paused
-// research-logging note in project memory before resuming.
+// WIRED (developer mode only): the DBH / Height / Distance screens append a
+// row on every accepted reading, with an optional user-entered true value →
+// error column. Settings › Developer exports/clears this CSV. The Android
+// data/ResearchLog.kt mirrors the same column order so the two platforms'
+// exports concatenate for the cross-platform accuracy analysis.
 
 import Foundation
 #if canImport(UIKit)

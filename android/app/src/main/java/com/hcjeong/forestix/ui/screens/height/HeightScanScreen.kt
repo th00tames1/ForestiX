@@ -25,6 +25,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
@@ -35,6 +36,7 @@ import com.hcjeong.forestix.ar.MarkerShape
 import com.hcjeong.forestix.ar.Vec3
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
+import com.hcjeong.forestix.data.ResearchLog
 import com.hcjeong.forestix.sensors.ConfidenceTier
 import com.hcjeong.forestix.sensors.HeightEstimator
 import com.hcjeong.forestix.sensors.HeightResult
@@ -62,11 +64,14 @@ private enum class CrownStep { NONE, LEFT, RIGHT, TOP, BOTTOM, DONE }
 @Composable
 fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     val env = LocalAppEnvironment.current
+    val context = LocalContext.current
     val controller = remember { ArController() }
     // Continuation from a just-saved DBH passes the SAME tree number so the
     // height lands on that tree; otherwise the next free number is used.
     var pendingTree by remember { mutableStateOf(treeOverride ?: env.history.suggestedNextTreeNumber) }
     var continuationTree by remember { mutableStateOf<Int?>(null) }
+    // Developer-mode research capture: true height (m) from a clinometer.
+    var researchTrueM by remember { mutableStateOf("") }
     val settings by env.settings.state.collectAsStateWithLifecycle()
     // Project calibration — identity for plain quick-measure (iOS parity),
     // the active project's VIO drift fraction when launched from the
@@ -246,6 +251,19 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                             OutlinedButton(onClick = { resetCrown() }, modifier = Modifier.fillMaxWidth()) { Text("Redo crown") }
                         }
                     }
+                    if (settings.developerMode && stage == Stage.COMPUTED) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("True H (m)", style = com.hcjeong.forestix.ui.theme.Forestix.type.caption, color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.8f))
+                            androidx.compose.material3.OutlinedTextField(
+                                value = researchTrueM,
+                                onValueChange = { researchTrueM = it.filter { c -> c.isDigit() || c == '.' } },
+                                placeholder = { Text("clinometer") },
+                                singleLine = true,
+                                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(onClick = { resetAll() }, modifier = Modifier.weight(1f)) { Text("Retake") }
                         if (stage == Stage.COMPUTED) {
@@ -272,6 +290,26 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                                     }
                                 }
                                 continuationTree = pendingTree
+                                if (settings.developerMode) {
+                                    val fields = mutableMapOf(
+                                        "measure_type" to "height",
+                                        "method" to r.method.raw,
+                                        "depth_source" to "ar",
+                                        "measured_value" to String.format(Locale.US, "%.2f", r.heightM),
+                                        "unit" to "m",
+                                        "sigma" to String.format(Locale.US, "%.2f", r.sigmaHm),
+                                        "confidence_tier" to r.confidence.raw,
+                                        "distance_m" to String.format(Locale.US, "%.2f", r.dHm),
+                                        "alpha_top_deg" to String.format(Locale.US, "%.2f", (alphaTop ?: 0f) * 180f / Math.PI.toFloat()),
+                                        "alpha_base_deg" to String.format(Locale.US, "%.2f", (alphaBase ?: 0f) * 180f / Math.PI.toFloat()),
+                                    )
+                                    researchTrueM.toDoubleOrNull()?.takeIf { it > 0 }?.let { t ->
+                                        fields["true_value"] = String.format(Locale.US, "%.2f", t)
+                                        fields["error"] = String.format(Locale.US, "%.2f", r.heightM - t)
+                                    }
+                                    ResearchLog.record(context, fields)
+                                    researchTrueM = ""
+                                }
                             }, modifier = Modifier.weight(1f)) { Text("Accept") }
                         }
                     }

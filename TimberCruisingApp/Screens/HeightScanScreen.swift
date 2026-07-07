@@ -54,6 +54,9 @@ public struct HeightScanScreen: View {
     @State private var metaDamage: [String] = []
     @State private var metaNote: String = ""
     @State private var presentingMetadata = false
+    /// Developer-mode research capture: true height (m) from a clinometer /
+    /// Vertex, typed before Accept; logged to the research CSV.
+    @State private var researchTrueM: String = ""
     /// (mesh overlay removed — the Height scan uses the plane/tangent walk-off
     /// and the LiDAR reconstruction wireframe was just visual noise.)
     /// PLACEHOLDER-COMMENT
@@ -151,6 +154,7 @@ public struct HeightScanScreen: View {
                     damageCodes: metaDamage,
                     note: metaNote)
                 onAccept(r, meta)
+                recordResearchRow(r)
             }
         }
         .sheet(isPresented: $presentingMetadata) {
@@ -392,6 +396,33 @@ public struct HeightScanScreen: View {
     }
 
     @ViewBuilder
+    /// Developer-mode research CSV row — walk-off distance + both aim
+    /// angles alongside the value so σ_H and the angle terms can be
+    /// validated against ground truth.
+    private func recordResearchRow(_ r: HeightResult) {
+        guard settings.developerMode else { return }
+        var f: [String: String] = [
+            "measure_type": "height",
+            "method": r.method.rawValue,
+            "depth_source": settings.measurementSource.rawValue,
+            "measured_value": String(format: "%.2f", r.heightM),
+            "unit": "m",
+            "sigma": String(format: "%.2f", r.sigmaHm),
+            "confidence_tier": r.confidence.rawValue,
+            "distance_m": String(format: "%.2f", r.dHm),
+            "alpha_top_deg": String(format: "%.2f", r.alphaTopRad * 180 / .pi),
+            "alpha_base_deg": String(format: "%.2f", r.alphaBaseRad * 180 / .pi),
+            "species": metaSpecies ?? "",
+            "note": metaNote,
+        ]
+        if let t = Double(researchTrueM), t > 0 {
+            f["true_value"] = String(format: "%.2f", t)
+            f["error"] = String(format: "%.2f", Double(r.heightM) - t)
+        }
+        ResearchLog.shared.record(f)
+        researchTrueM = ""
+    }
+
     private func resultPanel(_ r: HeightResult) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
@@ -444,6 +475,18 @@ public struct HeightScanScreen: View {
                 .accessibilityIdentifier("heightScan.editMetadata")
             }
             .padding(.top, 2)
+            if settings.developerMode {
+                HStack(spacing: 6) {
+                    Text("True H (m)")
+                        .font(ForestixType.caption)
+                        .foregroundStyle(.white.opacity(0.8))
+                    TextField("clinometer", text: $researchTrueM)
+                        .keyboardType(.decimalPad)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 90)
+                        .accessibilityIdentifier("heightScan.researchTrue")
+                }
+            }
         }
         .foregroundStyle(.white)
         .accessibilityIdentifier("heightScan.resultPanel")

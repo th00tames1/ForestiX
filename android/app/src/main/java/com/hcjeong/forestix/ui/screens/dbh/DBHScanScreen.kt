@@ -37,6 +37,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -57,6 +58,7 @@ import com.hcjeong.forestix.ar.Vec3
 import com.hcjeong.forestix.sensors.ArCaliperDbh
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
+import com.hcjeong.forestix.data.ResearchLog
 import com.hcjeong.forestix.data.StemPosition
 import com.hcjeong.forestix.sensors.ArDepthFrame
 import com.hcjeong.forestix.sensors.ChordAlgorithm
@@ -92,6 +94,7 @@ private const val SAMPLE_COUNT = 5
 @Composable
 fun DBHScanScreen(nav: NavController) {
     val env = LocalAppEnvironment.current
+    val context = LocalContext.current
     val controller = remember { ArController() }
     val scope = rememberCoroutineScope()
     var pendingTree by remember { mutableStateOf(env.history.suggestedNextTreeNumber) }
@@ -106,6 +109,8 @@ fun DBHScanScreen(nav: NavController) {
     var showMetadata by remember { mutableStateOf(false) }
     // Post-save continuation (height same tree / next tree / done).
     var continuationTree by remember { mutableStateOf<Int?>(null) }
+    // Developer-mode research capture: tape-measured true diameter (cm).
+    var researchTrueCm by remember { mutableStateOf("") }
     val colors = Forestix.colors
 
     val settings by env.settings.state.collectAsStateWithLifecycle()
@@ -551,6 +556,19 @@ fun DBHScanScreen(nav: NavController) {
                     CenteredText(String.format(Locale.US, "DBH %.1f cm  \u00B1%.0f mm", r.diameterCm, r.sigmaRmm), large = true)
                     CenteredText(String.format(Locale.US, "%d frames \u00B7 %s", r.nInliers, r.confidence.raw.uppercase()), dim = true)
                 }
+                if (settings.developerMode) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("True Ø (cm)", style = Forestix.type.caption, color = Color.White.copy(alpha = 0.8f))
+                        OutlinedTextField(
+                            value = researchTrueCm,
+                            onValueChange = { researchTrueCm = it.filter { c -> c.isDigit() || c == '.' } },
+                            placeholder = { Text("tape") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = { result = null; failure = null; stage = Stage.AIMING }, modifier = Modifier.weight(1f)) { Text("Retake") }
                     OutlinedButton(onClick = { showMetadata = true }, modifier = Modifier.weight(1f)) { Text("Details") }
@@ -569,6 +587,32 @@ fun DBHScanScreen(nav: NavController) {
                                 )
                             )
                             continuationTree = pendingTree
+                            if (settings.developerMode) {
+                                val fields = mutableMapOf(
+                                    "measure_type" to "dbh",
+                                    "method" to r.method.raw,
+                                    "depth_source" to captureMethod.name.lowercase(),
+                                    "measured_value" to String.format(Locale.US, "%.2f", r.diameterCm),
+                                    "unit" to "cm",
+                                    "sigma" to String.format(Locale.US, "%.1f", r.sigmaRmm),
+                                    "confidence_tier" to r.confidence.raw,
+                                    "n_points" to "${r.nInliers}",
+                                    "arc_deg" to String.format(Locale.US, "%.1f", r.arcCoverageDeg),
+                                    "rmse_mm" to String.format(Locale.US, "%.1f", r.rmseMm),
+                                    "species" to (metaSpecies ?: ""),
+                                    "note" to metaNote,
+                                )
+                                preview?.let { fields["distance_m"] = String.format(Locale.US, "%.2f", it.distanceM) }
+                                controller.cameraForwardElevationRad()?.let {
+                                    fields["pitch_deg"] = String.format(Locale.US, "%.1f", it * 180f / Math.PI.toFloat())
+                                }
+                                researchTrueCm.toDoubleOrNull()?.takeIf { it > 0 }?.let { t ->
+                                    fields["true_value"] = String.format(Locale.US, "%.2f", t)
+                                    fields["error"] = String.format(Locale.US, "%.2f", r.diameterCm - t)
+                                }
+                                ResearchLog.record(context, fields)
+                                researchTrueCm = ""
+                            }
                         },
                         enabled = r.confidence != ConfidenceTier.RED,
                         modifier = Modifier.weight(1f),

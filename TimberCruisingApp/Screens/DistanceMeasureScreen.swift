@@ -61,6 +61,11 @@ public struct DistanceMeasureScreen: View {
     /// path — the raw raycast distance flickers there. LiDAR stays raw.
     @State private var arSmoother = DistanceSmoother()
 
+    /// Developer-mode research capture: tape-measured true distance (m).
+    /// Logged with source + aim pitch so distance accuracy can be analysed
+    /// by range / angle / sensing path.
+    @State private var researchTrueM: String = ""
+
     public init() {}
 
     public var body: some View {
@@ -271,6 +276,18 @@ public struct DistanceMeasureScreen: View {
                     .font(ForestixType.caption)
                     .foregroundStyle(.white.opacity(0.85))
             }
+            if settings.developerMode {
+                HStack(spacing: 6) {
+                    Text("True (m)")
+                        .font(ForestixType.caption)
+                        .foregroundStyle(.white.opacity(0.8))
+                    TextField("tape", text: $researchTrueM)
+                        .keyboardType(.decimalPad)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 90)
+                        .accessibilityIdentifier("distance.researchTrue")
+                }
+            }
             actionRow
                 .padding(.top, 2)
         }
@@ -350,6 +367,29 @@ public struct DistanceMeasureScreen: View {
             confidenceRaw: "green",
             method: "live.\(settings.measurementSource.displayName.lowercased())",
             plotID: history.activePlotID))
+        recordResearchRow(measured: d, method: "live")
+    }
+
+    /// Developer-mode research CSV row for the distance-accuracy study:
+    /// measured vs tape distance, sensing source, and aim pitch.
+    private func recordResearchRow(measured: Double, method: String) {
+        guard settings.developerMode else { return }
+        var f: [String: String] = [
+            "measure_type": "distance",
+            "method": method,
+            "depth_source": settings.measurementSource.rawValue,
+            "measured_value": String(format: "%.3f", measured),
+            "unit": "m",
+            "distance_m": String(format: "%.3f", measured),
+        ]
+        if let p = raycaster.cameraPitchDeg {
+            f["pitch_deg"] = String(format: "%.1f", p)
+        }
+        if let t = Double(researchTrueM), t > 0 {
+            f["true_value"] = String(format: "%.3f", t)
+            f["error"] = String(format: "%.3f", measured - t)
+        }
+        ResearchLog.shared.record(f)
     }
 
     private func saveTwoPointReading() {
@@ -361,6 +401,7 @@ public struct DistanceMeasureScreen: View {
             confidenceRaw: "green",
             method: "two-point.\(settings.measurementSource.displayName.lowercased())",
             plotID: history.activePlotID))
+        recordResearchRow(measured: d, method: "two-point")
         resetTwoPoint()
     }
 

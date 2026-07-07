@@ -35,6 +35,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -51,6 +52,7 @@ import com.hcjeong.forestix.ar.distance
 import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
+import com.hcjeong.forestix.data.ResearchLog
 import com.hcjeong.forestix.sensors.DistanceSmoother
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hcjeong.forestix.ui.theme.Forestix
@@ -63,6 +65,7 @@ private enum class DistMode { LIVE, TWO_POINT }
 @Composable
 fun DistanceMeasureScreen(nav: NavController) {
     val env = LocalAppEnvironment.current
+    val context = LocalContext.current
     val settings by env.settings.state.collectAsStateWithLifecycle()
     val controller = remember { ArController() }
     val density = LocalDensity.current
@@ -80,6 +83,8 @@ fun DistanceMeasureScreen(nav: NavController) {
     // Hampel-style robust moving average for the non-depth (plane hit-test)
     // path — the raw AR distance flickers there. Depth-API values stay raw.
     val arSmoother = remember { DistanceSmoother() }
+    // Developer-mode research capture: tape-measured true distance (m).
+    var researchTrueM by remember { mutableStateOf("") }
     LaunchedEffect(Unit) {
         while (true) {
             kotlinx.coroutines.delay(50)
@@ -125,6 +130,26 @@ fun DistanceMeasureScreen(nav: NavController) {
     fun save(d: Double, kind: String) {
         val src = if (controller.supportsDepth) "depth" else "ar"
         env.history.append(distanceEntry(d, "$kind.$src", env.history.activePlotID.value))
+        // Developer-mode research CSV row — measured vs tape distance,
+        // sensing source, and aim pitch (distance-accuracy study).
+        if (settings.developerMode) {
+            val fields = mutableMapOf(
+                "measure_type" to "distance",
+                "method" to kind,
+                "depth_source" to src,
+                "measured_value" to String.format(Locale.US, "%.3f", d),
+                "unit" to "m",
+                "distance_m" to String.format(Locale.US, "%.3f", d),
+            )
+            controller.cameraForwardElevationRad()?.let {
+                fields["pitch_deg"] = String.format(Locale.US, "%.1f", it * 180f / Math.PI.toFloat())
+            }
+            researchTrueM.toDoubleOrNull()?.takeIf { it > 0 }?.let { t ->
+                fields["true_value"] = String.format(Locale.US, "%.3f", t)
+                fields["error"] = String.format(Locale.US, "%.3f", d - t)
+            }
+            ResearchLog.record(context, fields)
+        }
     }
 
     fun capture() {
@@ -181,6 +206,19 @@ fun DistanceMeasureScreen(nav: NavController) {
             CenteredText(if (mode == DistMode.LIVE) "DEVICE \u2192 TARGET" else "POINT A \u2192 POINT B", dim = true)
             val value = if (mode == DistMode.LIVE) liveDistance else twoPointDistance
             CenteredText(value?.let { formatDistance(it) } ?: "\u2014", large = true)
+            if (settings.developerMode) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(ForestixSpace.sm)) {
+                    Text("True (m)", style = Forestix.type.caption, color = Color.White.copy(alpha = 0.8f))
+                    androidx.compose.material3.OutlinedTextField(
+                        value = researchTrueM,
+                        onValueChange = { researchTrueM = it.filter { c -> c.isDigit() || c == '.' } },
+                        placeholder = { Text("tape") },
+                        singleLine = true,
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
             if (mode == DistMode.TWO_POINT) {
                 CenteredText(twoPointHint(pointA, pointB), dim = true)
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(ForestixSpace.sm)) {

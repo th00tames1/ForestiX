@@ -376,7 +376,10 @@ public struct QuickMeasureHomeScreen: View {
                         speciesCode: meta.speciesCode,
                         position: meta.position ?? .dbh,
                         damageCodes: meta.damageCodes,
-                        note: meta.note.isEmpty ? nil : meta.note))
+                        note: meta.note.isEmpty ? nil : meta.note,
+                        latitude: meta.latitude,
+                        longitude: meta.longitude,
+                        photoPath: meta.photoPath))
                     let n = pendingTreeNumber
                     presentingDBHScan = false
                     // Queue the continuation prompt so the next
@@ -416,7 +419,10 @@ public struct QuickMeasureHomeScreen: View {
                         plotID: history.activePlotID,
                         speciesCode: meta.speciesCode,
                         damageCodes: meta.damageCodes,
-                        note: meta.note.isEmpty ? nil : meta.note))
+                        note: meta.note.isEmpty ? nil : meta.note,
+                        latitude: meta.latitude,
+                        longitude: meta.longitude,
+                        photoPath: meta.photoPath))
                     let n = pendingTreeNumber
                     presentingHeightScan = false
                     if let n {

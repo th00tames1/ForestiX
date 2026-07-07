@@ -37,6 +37,10 @@ public final class LocationService: NSObject, ObservableObject {
     /// PlotCenter averager pulls the last 60 when the user accepts.
     @Published public private(set) var buffer: [CLLocationSnapshot] = []
     @Published public private(set) var latestSnapshot: CLLocationSnapshot?
+    /// Most recent fix from ANY running instance (the GPS badge on the
+    /// scan screens keeps one alive) — lets Accept-time capture read a
+    /// position without spinning up a second CLLocationManager.
+    public private(set) static var lastGlobalFix: CLLocationSnapshot?
     @Published public private(set) var authStatus: AuthStatus = .notDetermined
 
     /// Compass heading in degrees true north (0…360). nil until the
@@ -127,6 +131,7 @@ public final class LocationService: NSObject, ObservableObject {
             buffer.removeFirst(buffer.count - bufferCapacity)
         }
         latestSnapshot = s
+        Self.lastGlobalFix = s
     }
 
     #if canImport(CoreLocation)

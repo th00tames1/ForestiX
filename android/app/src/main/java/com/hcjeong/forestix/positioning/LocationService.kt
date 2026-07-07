@@ -171,6 +171,7 @@ class LocationService(
         _buffer.value =
             if (next.size > bufferCapacity) next.takeLast(bufferCapacity) else next
         _latestSnapshot.value = s
+        lastGlobalFix = s
     }
 
     private fun refreshAuthStatus() {
@@ -228,6 +229,12 @@ class LocationService(
     }
 
     companion object {
+        /// Most recent fix from ANY running instance (the GPS badge on the
+        /// scan screens keeps one alive) — lets Accept-time capture read a
+        /// position without a second location client. Mirror of iOS.
+        @Volatile
+        var lastGlobalFix: CLLocationSnapshot? = null
+
 
         /// The runtime permissions the positioning stack requests. On
         /// Android 12+ FINE must be requested together with COARSE (a

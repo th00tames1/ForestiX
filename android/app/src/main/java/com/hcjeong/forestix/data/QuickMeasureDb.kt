@@ -35,6 +35,9 @@ data class EntryRow(
     val position: String?,
     val damageCodes: String,   // pipe-joined
     val note: String?,
+    val latitude: Double?,
+    val longitude: Double?,
+    val photoPath: String?,
 ) {
     fun toDomain() = QuickMeasureEntry(
         id = UUID.fromString(id),
@@ -51,6 +54,9 @@ data class EntryRow(
         position = StemPosition.fromRaw(position),
         damageCodes = if (damageCodes.isEmpty()) emptyList() else damageCodes.split("|"),
         note = note,
+        latitude = latitude,
+        longitude = longitude,
+        photoPath = photoPath,
     )
 
     companion object {
@@ -69,6 +75,9 @@ data class EntryRow(
             position = e.position?.raw,
             damageCodes = e.damageCodes.joinToString("|"),
             note = e.note,
+            latitude = e.latitude,
+            longitude = e.longitude,
+            photoPath = e.photoPath,
         )
     }
 }
@@ -156,7 +165,17 @@ class Converters {
     @TypeConverter fun intToBool(i: Int) = i != 0
 }
 
-@Database(entities = [EntryRow::class, PlotRow::class], version = 1, exportSchema = false)
+/// v2: capture context columns (latitude/longitude/photoPath) for the
+/// map-home feature — additive, migrated in place so field data survives.
+val QUICK_MEASURE_MIGRATION_1_2 = object : androidx.room.migration.Migration(1, 2) {
+    override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE entries ADD COLUMN latitude REAL")
+        db.execSQL("ALTER TABLE entries ADD COLUMN longitude REAL")
+        db.execSQL("ALTER TABLE entries ADD COLUMN photoPath TEXT")
+    }
+}
+
+@Database(entities = [EntryRow::class, PlotRow::class], version = 2, exportSchema = false)
 @TypeConverters(Converters::class)
 abstract class ForestixDatabase : RoomDatabase() {
     abstract fun dao(): QuickMeasureDao

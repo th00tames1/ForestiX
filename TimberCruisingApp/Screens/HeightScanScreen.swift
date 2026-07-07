@@ -15,6 +15,7 @@ import SwiftUI
 import Common
 import Models
 import Sensors
+import Positioning
 import AR
 import simd
 
@@ -41,12 +42,22 @@ public struct HeightScanScreen: View {
         public var speciesCode: String?
         public var damageCodes: [String]
         public var note: String
+        /// Auto-capture at Accept (map home): window snapshot + GPS fix.
+        public var photoPath: String?
+        public var latitude: Double?
+        public var longitude: Double?
         public init(speciesCode: String? = nil,
                     damageCodes: [String] = [],
-                    note: String = "") {
+                    note: String = "",
+                    photoPath: String? = nil,
+                    latitude: Double? = nil,
+                    longitude: Double? = nil) {
             self.speciesCode = speciesCode
             self.damageCodes = damageCodes
             self.note = note
+            self.photoPath = photoPath
+            self.latitude = latitude
+            self.longitude = longitude
         }
     }
 
@@ -149,10 +160,15 @@ public struct HeightScanScreen: View {
         }
         .onChange(of: viewModel.state) { _, newState in
             if newState == .accepted, let r = viewModel.result {
+                let photo = MeasurePhotoStore.captureWindow()
+                let fix = LocationService.lastGlobalFix
                 let meta = ScanMetadata(
                     speciesCode: metaSpecies,
                     damageCodes: metaDamage,
-                    note: metaNote)
+                    note: metaNote,
+                    photoPath: photo,
+                    latitude: fix?.latitude,
+                    longitude: fix?.longitude)
                 onAccept(r, meta)
                 recordResearchRow(r)
             }

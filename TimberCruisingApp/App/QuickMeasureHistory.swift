@@ -173,6 +173,14 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
     public let damageCodes: [String]
     /// Free-text cruiser note. nil = no note.
     public let note: String?
+    /// Capture context (map home): GPS fix + AR-view snapshot taken at the
+    /// moment the cruiser hit Accept. Optional — entries recorded before
+    /// this feature (or without a fix) simply have none.
+    public let latitude: Double?
+    public let longitude: Double?
+    /// Filename inside MeasurePhotoStore.directory (not a full path, so
+    /// container moves between installs don't break it).
+    public let photoPath: String?
 
     public init(
         id: UUID = UUID(),
@@ -188,7 +196,10 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         speciesCode: String? = nil,
         position: StemPosition? = nil,
         damageCodes: [String] = [],
-        note: String? = nil
+        note: String? = nil,
+        latitude: Double? = nil,
+        longitude: Double? = nil,
+        photoPath: String? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -204,6 +215,9 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         self.position = position
         self.damageCodes = damageCodes
         self.note = note
+        self.latitude = latitude
+        self.longitude = longitude
+        self.photoPath = photoPath
     }
 
     // Custom decoding so entries written before any new field existed
@@ -225,6 +239,9 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         self.position      = try c.decodeIfPresent(StemPosition.self, forKey: .position)
         self.damageCodes   = (try? c.decode([String].self, forKey: .damageCodes)) ?? []
         self.note          = try c.decodeIfPresent(String.self, forKey: .note)
+        self.latitude      = try c.decodeIfPresent(Double.self, forKey: .latitude)
+        self.longitude     = try c.decodeIfPresent(Double.self, forKey: .longitude)
+        self.photoPath     = try c.decodeIfPresent(String.self, forKey: .photoPath)
     }
 
     /// Unit string for `value`. cm for diameter, m elsewhere.
@@ -343,6 +360,9 @@ public final class QuickMeasureHistory: ObservableObject {
     }
 
     public func delete(id: UUID) {
+        if let photo = entries.first(where: { $0.id == id })?.photoPath {
+            MeasurePhotoStore.delete(photo)
+        }
         entries.removeAll { $0.id == id }
         rewriteSidecar()
         persistCache()
@@ -577,35 +597,48 @@ public final class QuickMeasureHistory: ObservableObject {
                        "secondary_value", "secondary_unit",
                        "sigma", "sigma_unit",
                        "species", "position", "damage", "note",
-                       "confidence", "method"]
+                       "confidence", "method",
+                       "latitude", "longitude", "photo"]
         var out = headers.map(Self.csvField).joined(separator: ",")
         out += "\r\n"
 
         for e in entries {
             let sigma = e.sigma.map { String(format: "%.3f", $0) } ?? ""
+            let lat = e.latitude.map { String(format: "%.6f", $0) } ?? ""
+            let lon = e.longitude.map { String(format: "%.6f", $0) } ?? ""
             let plotName = e.plotID
                 .flatMap { id in plots.first { $0.id == id } }
                 .map(\.name) ?? ""
             let secVal = e.secondaryValue.map { String(format: "%.3f", $0) } ?? ""
-            let row = [
+            // Split into typed sub-arrays — a single 20-element literal of
+            // mixed optional-map expressions blows up Swift's type-checker.
+            var cols: [String] = [
                 e.id.uuidString,
                 iso.string(from: e.createdAt),
                 plotName,
                 e.treeNumber.map(String.init) ?? "",
                 e.kind.rawValue,
                 String(format: "%.3f", e.value),
-                e.valueUnit,
+                e.valueUnit
+            ]
+            cols += [
                 secVal,
                 e.secondaryValue == nil ? "" : e.secondaryValueUnit,
                 sigma,
                 e.sigma == nil ? "" : e.sigmaUnit,
                 e.speciesCode ?? "",
                 e.position?.rawValue ?? "",
-                e.damageCodes.joined(separator: "|"),
+                e.damageCodes.joined(separator: "|")
+            ]
+            cols += [
                 e.note ?? "",
                 e.confidenceRaw,
-                e.method
-            ].map(Self.csvField).joined(separator: ",")
+                e.method,
+                lat,
+                lon,
+                e.photoPath ?? ""
+            ]
+            let row = cols.map(Self.csvField).joined(separator: ",")
             out += row + "\r\n"
         }
 

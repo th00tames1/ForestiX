@@ -70,6 +70,7 @@ import com.hcjeong.forestix.sensors.DistanceSmoother
 import com.hcjeong.forestix.sensors.DBHMethod
 import com.hcjeong.forestix.sensors.GuideAxis
 import com.hcjeong.forestix.sensors.VioMotionDbh
+import com.hcjeong.forestix.ui.MeasurePhotoStore
 import com.hcjeong.forestix.ui.Routes
 import com.hcjeong.forestix.ui.screens.ContinuationAction
 import com.hcjeong.forestix.ui.screens.ContinuationOrigin
@@ -583,18 +584,29 @@ fun DBHScanScreen(nav: NavController) {
                     OutlinedButton(onClick = { showMetadata = true }, modifier = Modifier.weight(1f)) { Text("Details") }
                     Button(
                         onClick = {
-                            env.history.append(
-                                QuickMeasureEntry(
-                                    kind = MeasureKind.DBH, value = r.diameterCm.toDouble(),
-                                    sigma = r.sigmaRmm.toDouble(), confidenceRaw = r.confidence.raw,
-                                    method = r.method.raw, treeNumber = pendingTree,
-                                    plotID = env.history.activePlotID.value,
-                                    speciesCode = metaSpecies,
-                                    position = metaPosition ?: StemPosition.DBH,
-                                    damageCodes = metaDamage,
-                                    note = metaNote.ifBlank { null },
+                            // Auto-capture (map home): window snapshot as
+                            // evidence of what was measured + the latest GPS
+                            // fix from the badge's running location service.
+                            val activity = context as? android.app.Activity
+                            scope.launch {
+                                val photo = activity?.let { MeasurePhotoStore.captureWindow(it) }
+                                val fix = com.hcjeong.forestix.positioning.LocationService.lastGlobalFix
+                                env.history.append(
+                                    QuickMeasureEntry(
+                                        kind = MeasureKind.DBH, value = r.diameterCm.toDouble(),
+                                        sigma = r.sigmaRmm.toDouble(), confidenceRaw = r.confidence.raw,
+                                        method = r.method.raw, treeNumber = pendingTree,
+                                        plotID = env.history.activePlotID.value,
+                                        speciesCode = metaSpecies,
+                                        position = metaPosition ?: StemPosition.DBH,
+                                        damageCodes = metaDamage,
+                                        note = metaNote.ifBlank { null },
+                                        latitude = fix?.latitude,
+                                        longitude = fix?.longitude,
+                                        photoPath = photo,
+                                    )
                                 )
-                            )
+                            }
                             continuationTree = pendingTree
                             if (settings.developerMode) {
                                 val fields = mutableMapOf(

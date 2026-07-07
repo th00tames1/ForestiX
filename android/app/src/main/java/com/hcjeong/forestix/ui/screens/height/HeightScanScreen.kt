@@ -27,6 +27,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.runtime.rememberCoroutineScope
+import com.hcjeong.forestix.ui.MeasurePhotoStore
+import kotlinx.coroutines.launch
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.ar.ArController
@@ -65,6 +68,7 @@ private enum class CrownStep { NONE, LEFT, RIGHT, TOP, BOTTOM, DONE }
 fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     val env = LocalAppEnvironment.current
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val controller = remember { ArController() }
     // Continuation from a just-saved DBH passes the SAME tree number so the
     // height lands on that tree; otherwise the next free number is used.
@@ -277,14 +281,22 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                         if (stage == Stage.COMPUTED) {
                             Button(onClick = {
                                 val r = result ?: return@Button
-                                env.history.append(
-                                    QuickMeasureEntry(
-                                        kind = MeasureKind.HEIGHT, value = r.heightM.toDouble(),
-                                        sigma = r.sigmaHm.toDouble(), confidenceRaw = r.confidence.raw,
-                                        method = r.method.raw, treeNumber = pendingTree,
-                                        plotID = env.history.activePlotID.value,
+                                val activity = context as? android.app.Activity
+                                scope.launch {
+                                    val photo = activity?.let { MeasurePhotoStore.captureWindow(it) }
+                                    val fix = com.hcjeong.forestix.positioning.LocationService.lastGlobalFix
+                                    env.history.append(
+                                        QuickMeasureEntry(
+                                            kind = MeasureKind.HEIGHT, value = r.heightM.toDouble(),
+                                            sigma = r.sigmaHm.toDouble(), confidenceRaw = r.confidence.raw,
+                                            method = r.method.raw, treeNumber = pendingTree,
+                                            plotID = env.history.activePlotID.value,
+                                            latitude = fix?.latitude,
+                                            longitude = fix?.longitude,
+                                            photoPath = photo,
+                                        )
                                     )
-                                )
+                                }
                                 if (crownStep == CrownStep.DONE) {
                                     val w = crownW; val ch = crownH
                                     if (w != null && ch != null) {

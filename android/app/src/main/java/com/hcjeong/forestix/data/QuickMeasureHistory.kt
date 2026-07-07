@@ -87,6 +87,10 @@ class QuickMeasureHistory private constructor(
 
     fun delete(id: UUID) {
         scope.launch {
+            // Remove the entry's auto-captured photo alongside the row.
+            _entries.value.firstOrNull { it.id == id }?.photoPath?.let { name ->
+                java.io.File(java.io.File(appContext.filesDir, "measure-photos"), name).delete()
+            }
             dao.deleteEntry(id.toString())
             _entries.value = dao.allEntries().map { it.toDomain() }
             recomputeCapacity()

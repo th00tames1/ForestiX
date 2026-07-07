@@ -64,6 +64,12 @@ data class QuickMeasureEntry(
     val position: StemPosition? = null,
     val damageCodes: List<String> = emptyList(),
     val note: String? = null,
+    /// Capture context (map home): GPS fix + AR-view snapshot taken at the
+    /// moment the cruiser hit Accept. Optional — older entries have none.
+    val latitude: Double? = null,
+    val longitude: Double? = null,
+    /// Filename inside MeasurePhotoStore's directory (not a full path).
+    val photoPath: String? = null,
 ) {
     /// cm for diameter, m elsewhere.
     val valueUnit: String

@@ -39,6 +39,7 @@ object QuickMeasureExport {
             "sigma", "sigma_unit",
             "species", "position", "damage", "note",
             "confidence", "method",
+            "latitude", "longitude", "photo",
         )
         val sb = StringBuilder()
         sb.append(headers.joinToString(",") { csv(it) }).append("\r\n")
@@ -65,6 +66,9 @@ object QuickMeasureExport {
                 e.note ?: "",
                 e.confidenceRaw,
                 e.method,
+                e.latitude?.let { String.format(java.util.Locale.US, "%.6f", it) } ?: "",
+                e.longitude?.let { String.format(java.util.Locale.US, "%.6f", it) } ?: "",
+                e.photoPath ?: "",
             ).joinToString(",") { csv(it) }
             sb.append(row).append("\r\n")
         }

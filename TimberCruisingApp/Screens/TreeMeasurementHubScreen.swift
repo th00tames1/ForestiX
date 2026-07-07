@@ -215,7 +215,10 @@ public struct TreeMeasurementHubScreen: View {
                         speciesCode: meta.speciesCode,
                         position: meta.position ?? .dbh,
                         damageCodes: meta.damageCodes,
-                        note: meta.note.isEmpty ? nil : meta.note))
+                        note: meta.note.isEmpty ? nil : meta.note,
+                        latitude: meta.latitude,
+                        longitude: meta.longitude,
+                        photoPath: meta.photoPath))
                     presentingDBHScan = false
                 })
             .toolbar {
@@ -241,7 +244,10 @@ public struct TreeMeasurementHubScreen: View {
                         plotID: history.activePlotID,
                         speciesCode: meta.speciesCode,
                         damageCodes: meta.damageCodes,
-                        note: meta.note.isEmpty ? nil : meta.note))
+                        note: meta.note.isEmpty ? nil : meta.note,
+                        latitude: meta.latitude,
+                        longitude: meta.longitude,
+                        photoPath: meta.photoPath))
                     presentingHeightScan = false
                 },
                 onCrown: { widthM, heightM in

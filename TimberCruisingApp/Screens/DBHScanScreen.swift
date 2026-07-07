@@ -14,6 +14,7 @@ import SwiftUI
 import Common
 import Models
 import Sensors
+import Positioning
 import AR
 import simd
 
@@ -36,14 +37,24 @@ public struct DBHScanScreen: View {
         public var position: QuickMeasureEntry.StemPosition?
         public var damageCodes: [String]
         public var note: String
+        /// Auto-capture at Accept (map home): window snapshot + GPS fix.
+        public var photoPath: String?
+        public var latitude: Double?
+        public var longitude: Double?
         public init(speciesCode: String? = nil,
                     position: QuickMeasureEntry.StemPosition? = nil,
                     damageCodes: [String] = [],
-                    note: String = "") {
+                    note: String = "",
+                    photoPath: String? = nil,
+                    latitude: Double? = nil,
+                    longitude: Double? = nil) {
             self.speciesCode = speciesCode
             self.position = position
             self.damageCodes = damageCodes
             self.note = note
+            self.photoPath = photoPath
+            self.latitude = latitude
+            self.longitude = longitude
         }
     }
 
@@ -237,11 +248,19 @@ public struct DBHScanScreen: View {
             // only on an explicit user confirmation (Quick Measure) can
             // distinguish a fitted preview from a committed reading.
             if newState == .accepted, let r = viewModel.result {
+                // Auto-capture (map home): snapshot the AR view + overlay
+                // as evidence of what was measured, plus the latest GPS
+                // fix from the badge's running location service.
+                let photo = MeasurePhotoStore.captureWindow()
+                let fix = LocationService.lastGlobalFix
                 let meta = ScanMetadata(
                     speciesCode: metaSpecies,
                     position: metaPosition,
                     damageCodes: metaDamage,
-                    note: metaNote)
+                    note: metaNote,
+                    photoPath: photo,
+                    latitude: fix?.latitude,
+                    longitude: fix?.longitude)
                 onAccept(r, meta)
                 recordResearchRow(r)
             }

@@ -225,14 +225,6 @@ fun MapHomeScreen(nav: NavController) {
                     contentDescription = if (dark) "Switch to light appearance" else "Switch to dark appearance",
                 ) { env.settings.setAppearance(if (dark) "light" else "dark") }
             }
-            // Coordinate readout directly under the GPS chip (mirror of the
-            // identical iOS chip) — last fix, live age once stale.
-            CoordChip(
-                fix,
-                modifier = Modifier
-                    .align(Alignment.Start)
-                    .padding(start = 14.dp, top = 6.dp),
-            )
             // The satellite base is built-in, so this hint only concerns the
             // optional overlay (offline/no-network lives in the sheet).
             if (settings.tileURLTemplate == null) {
@@ -385,17 +377,41 @@ private fun buildTreePins(entries: List<QuickMeasureEntry>): List<TreePin> {
 
 // MARK: - Top chrome pieces ---------------------------------------------------
 
-/// Mock `.gpschip` — surface pill, tier-coloured dot, mono accuracy.
+/// Unified GPS chip (field fix — was a ±m accuracy chip plus a separate
+/// coordinate chip). One surface pill: freshness dot + the last known fix
+/// at five decimals (mono), with a live-ticking age suffix once stale
+/// ("· 12 s ago", minutes past 60 s). Dot follows fix AGE: green under
+/// 5 s, yellow 5–60 s, red past 60 s or when no fix ever arrived (then
+/// the text is just "no fix").
 @Composable
 private fun GpsChip(fix: CLLocationSnapshot?) {
     val colors = Forestix.colors
     val type = Forestix.type
-    val acc = fix?.horizontalAccuracyM
-    val (label, dotColor) = when {
-        acc == null || acc <= 0 -> "GPS —" to colors.confidenceBad
-        acc <= 5 -> String.format(Locale.US, "GPS ±%.0f m", acc) to colors.confidenceOk
-        acc <= 15 -> String.format(Locale.US, "GPS ±%.0f m", acc) to colors.confidenceWarn
-        else -> String.format(Locale.US, "GPS ±%.0f m", acc) to colors.confidenceBad
+    // This screen's live service, else the newest fix any screen captured.
+    val snap = fix ?: LocationService.lastGlobalFix
+    // 1 s clock so the age suffix + dot tier tick while the chip is on screen.
+    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            nowMs = System.currentTimeMillis()
+            delay(1_000)
+        }
+    }
+    val ageSec = snap?.let { ((nowMs - it.timestamp) / 1_000).coerceAtLeast(0) }
+    val dotColor = when {
+        ageSec == null -> colors.confidenceBad // no fix ever
+        ageSec < 5 -> colors.confidenceOk
+        ageSec <= 60 -> colors.confidenceWarn
+        else -> colors.confidenceBad
+    }
+    val stale = ageSec != null && ageSec > 5
+    val label = when {
+        snap == null -> "no fix"
+        !stale -> String.format(Locale.US, "%.5f, %.5f", snap.latitude, snap.longitude)
+        else -> {
+            val age = if (ageSec!! < 60) "$ageSec s ago" else "${ageSec / 60} min ago"
+            String.format(Locale.US, "%.5f, %.5f · %s", snap.latitude, snap.longitude, age)
+        }
     }
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -407,58 +423,10 @@ private fun GpsChip(fix: CLLocationSnapshot?) {
             .padding(horizontal = 11.dp, vertical = 8.dp),
     ) {
         Box(Modifier.size(7.dp).clip(CircleShape).background(dotColor))
-        Text(label, style = type.dataSmall, color = colors.textPrimary)
-    }
-}
-
-/// Coordinate readout under the GPS chip — the last known fix at five
-/// decimals (mono). Younger than ~5 s: coords only. Older (GPS lost under
-/// canopy): a live-ticking age suffix ("· 12 s ago", minutes past 60 s)
-/// and a warn-tinted dot. Never had a fix: "no fix yet". Mirror of the
-/// identical iOS chip.
-@Composable
-private fun CoordChip(fix: CLLocationSnapshot?, modifier: Modifier = Modifier) {
-    val colors = Forestix.colors
-    val type = Forestix.type
-    // This screen's live service, else the newest fix any screen captured.
-    val snap = fix ?: LocationService.lastGlobalFix
-    // 1 s clock so the age suffix ticks while the chip is on screen.
-    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            nowMs = System.currentTimeMillis()
-            delay(1_000)
-        }
-    }
-    val ageSec = snap?.let { ((nowMs - it.timestamp) / 1_000).coerceAtLeast(0) }
-    val stale = ageSec != null && ageSec > 5
-    val dotColor = when {
-        snap == null -> colors.confidenceBad
-        stale -> colors.confidenceWarn
-        else -> colors.confidenceOk
-    }
-    val label = when {
-        snap == null -> "no fix yet"
-        !stale -> String.format(Locale.US, "%.5f, %.5f", snap.latitude, snap.longitude)
-        else -> {
-            val age = if (ageSec!! < 60) "$ageSec s ago" else "${ageSec / 60} min ago"
-            String.format(Locale.US, "%.5f, %.5f · %s", snap.latitude, snap.longitude, age)
-        }
-    }
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        modifier = modifier
-            .clip(ForestixRadius.control)
-            .background(colors.surface)
-            .border(1.dp, colors.divider, ForestixRadius.control)
-            .padding(horizontal = 11.dp, vertical = 5.dp),
-    ) {
-        Box(Modifier.size(7.dp).clip(CircleShape).background(dotColor))
         Text(
             label,
             style = type.dataSmall.copy(fontSize = 11.sp),
-            color = if (snap == null) colors.textTertiary else colors.textSecondary,
+            color = if (snap == null) colors.textTertiary else colors.textPrimary,
         )
     }
 }
@@ -544,14 +512,21 @@ private fun SideCircleButton(label: String, icon: ImageVector, onClick: () -> Un
     }
 }
 
+/// Field fix: plain theme-tinted text vanished over satellite imagery, so
+/// each label sits in a small dark-glass pill. Deliberately hardcoded —
+/// the backdrop is a satellite photo in BOTH themes.
 @Composable
 private fun ClusterLabel(label: String) {
     Text(
         label.uppercase(),
-        style = Forestix.type.caption.copy(
-            fontSize = 10.5.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.6.sp),
-        color = Forestix.colors.textSecondary,
-        modifier = Modifier.padding(top = 5.dp),
+        style = Forestix.type.dataSmall.copy(
+            fontSize = 10.5.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.6.sp),
+        color = Color(0xFFF2F5F3),
+        modifier = Modifier
+            .padding(top = 5.dp)
+            .clip(RoundedCornerShape(5.dp))
+            .background(Color(0xA606090A))
+            .padding(horizontal = 8.dp, vertical = 3.dp),
     )
 }
 

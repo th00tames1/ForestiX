@@ -325,10 +325,7 @@ public struct MapHomeScreen: View {
 
     private var topChrome: some View {
         HStack(alignment: .top, spacing: ForestixSpace.xs) {
-            VStack(alignment: .leading, spacing: ForestixSpace.xxs) {
-                gpsChip
-                coordinateChip
-            }
+            gpsChip
             Spacer()
             Button {
                 presentingLayers = true
@@ -364,86 +361,58 @@ public struct MapHomeScreen: View {
         .padding(.top, ForestixSpace.xs)
     }
 
-    /// Same tier thresholds as GPSAccuracyBadge (≤5 good, ≤15 fair,
-    /// else / no fix check) so the colour vocabulary stays unified.
-    private var gpsTier: (label: String, color: Color) {
-        guard let snap = location.latestSnapshot,
-              snap.horizontalAccuracyM > 0 else {
-            return ("GPS —", ForestixPalette.confidenceBad)
-        }
-        let acc = snap.horizontalAccuracyM
-        let label = String(format: "GPS ±%.0f m", acc)
-        if acc <= 5 { return (label, ForestixPalette.confidenceOk) }
-        if acc <= 15 { return (label, ForestixPalette.confidenceWarn) }
-        return (label, ForestixPalette.confidenceBad)
-    }
-
-    private var gpsChip: some View {
-        let tier = gpsTier
-        return HStack(spacing: 6) {
-            Circle().fill(tier.color).frame(width: 7, height: 7)
-            Text(tier.label)
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                .foregroundStyle(ForestixPalette.textPrimary)
-        }
-        .padding(.horizontal, 11)
-        .padding(.vertical, 7)
-        .background(
-            RoundedRectangle(cornerRadius: ForestixRadius.control, style: .continuous)
-                .fill(ForestixPalette.surface))
-        .overlay(
-            RoundedRectangle(cornerRadius: ForestixRadius.control, style: .continuous)
-                .stroke(ForestixPalette.divider, lineWidth: 1))
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(tier.label)
-    }
-
-    /// A fix older than this reads as "GPS lost" (dense canopy, canyon
-    /// bottom) — the coordinate chip starts counting the age and its
-    /// status dot flips to the warn colour.
+    /// A fix older than this reads as stale (dense canopy, canyon
+    /// bottom) — the chip starts counting the age and its status dot
+    /// flips to the warn colour.
     private static let staleFixAge: TimeInterval = 5
 
-    /// Coordinates of the last known fix, directly under the GPS chip.
-    /// Fresh (< ~5 s) shows bare coordinates; once the fix goes stale
-    /// the age counts up live (1 s tick, minutes past 60 s). "no fix
-    /// yet" before the first fix ever lands.
-    private var coordinateChip: some View {
+    /// Older than this the fix is effectively lost — the dot goes red.
+    private static let lostFixAge: TimeInterval = 60
+
+    /// THE GPS chip — one chip, coordinates of the last known fix with
+    /// a freshness dot: green < 5 s, yellow 5–60 s, red past 60 s or
+    /// before the first fix ever lands ("no fix", no coords). Once the
+    /// fix goes stale the age counts up live (1 s tick, minutes past
+    /// 60 s).
+    private var gpsChip: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             let snap = location.latestSnapshot
             let age = snap.map { max(0, context.date.timeIntervalSince($0.timestamp)) }
             let stale = (age ?? 0) > Self.staleFixAge
+            let dot: Color = {
+                guard snap != nil, let age else { return ForestixPalette.confidenceBad }
+                if age > Self.lostFixAge { return ForestixPalette.confidenceBad }
+                if age > Self.staleFixAge { return ForestixPalette.confidenceWarn }
+                return ForestixPalette.confidenceOk
+            }()
             let a11y: String = {
-                guard let snap else { return "No GPS fix yet" }
-                var out = String(format: "Last fix %.5f, %.5f",
+                guard let snap else { return "No GPS fix" }
+                var out = String(format: "GPS fix %.5f, %.5f",
                                  snap.latitude, snap.longitude)
                 if stale, let age { out += ", " + Self.fixAgeText(age) }
                 return out
             }()
             HStack(spacing: 6) {
-                Circle()
-                    .fill(snap == nil ? ForestixPalette.confidenceBad
-                          : stale ? ForestixPalette.confidenceWarn
-                                  : ForestixPalette.confidenceOk)
-                    .frame(width: 7, height: 7)
+                Circle().fill(dot).frame(width: 7, height: 7)
                 if let snap {
                     Text(String(format: "%.5f, %.5f",
                                 snap.latitude, snap.longitude))
-                        .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                        .foregroundStyle(ForestixPalette.textSecondary)
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(ForestixPalette.textPrimary)
                     if stale, let age {
                         Text("· \(Self.fixAgeText(age))")
-                            .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
                             .foregroundStyle(ForestixPalette.textTertiary)
                     }
                 } else {
-                    Text("no fix yet")
-                        .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                    Text("no fix")
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
                         .foregroundStyle(ForestixPalette.textTertiary)
                 }
             }
             .lineLimit(1)
             .padding(.horizontal, 11)
-            .padding(.vertical, 5)
+            .padding(.vertical, 7)
             .background(
                 RoundedRectangle(cornerRadius: ForestixRadius.control, style: .continuous)
                     .fill(ForestixPalette.surface))
@@ -452,7 +421,7 @@ public struct MapHomeScreen: View {
                     .stroke(ForestixPalette.divider, lineWidth: 1))
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(a11y)
-            .accessibilityIdentifier("mapHome.coords")
+            .accessibilityIdentifier("mapHome.gps")
         }
     }
 
@@ -546,12 +515,21 @@ public struct MapHomeScreen: View {
         }
     }
 
+    /// Dark-glass pill so the label stays legible over satellite
+    /// imagery. Fixed colours on purpose — the backdrop is photography
+    /// regardless of the app theme (same rationale as the attribution
+    /// badge and the photo viewer's chrome).
     private func clusterLabel(_ text: String) -> some View {
         Text(text.uppercased())
-            .font(.system(size: 10.5, weight: .bold))
+            .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
             .tracking(0.6)
-            .foregroundStyle(ForestixPalette.textSecondary)
-            .shadow(color: ForestixPalette.canvas.opacity(0.8), radius: 2)
+            .foregroundStyle(Color(red: 0.949, green: 0.961, blue: 0.953)) // #F2F5F3
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(Color(red: 6 / 255, green: 9 / 255, blue: 10 / 255)
+                        .opacity(0.65)))
     }
 
     // MARK: Peek card (mock ②)
@@ -1259,7 +1237,9 @@ private struct BasemapLayersSheet: View {
                 }
             }
         }
-        .presentationDetents([.medium, .large])
+        // Fully expanded from the start — field report: opening at
+        // .medium hid half the sheet and needed a scroll-up.
+        .presentationDetents([.large])
         .presentationDragIndicator(.visible)
         .onAppear { refreshStats() }
         .onChange(of: downloader.phase) { _, phase in

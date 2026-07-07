@@ -25,29 +25,37 @@ struct ContentView: View {
             // Yield once so the splash actually paints before we do the
             // (main-actor-bound) Core Data + seed work.
             await Task.yield()
+            // The splash stays up for a MINIMUM of 3 s — long enough to
+            // cover the map home's first tile load, so the logo hands off
+            // to imagery instead of a canvas-coloured flash of grid.
+            let start = ContinuousClock.now
+            let built: AppEnvironment
             do {
-                environment = try AppEnvironment.live()
+                built = try AppEnvironment.live()
             } catch {
                 assertionFailure("Failed to initialise live AppEnvironment: \(error)")
-                environment = AppEnvironment.preview()
+                built = AppEnvironment.preview()
             }
+            let remaining: Duration = .seconds(3) - start.duration(to: .now)
+            if remaining > .zero {
+                try? await Task.sleep(for: remaining)
+            }
+            environment = built
         }
     }
 }
 
-/// Minimal launch placeholder shown while the environment is being built.
-/// Uses the same canvas colour as the app so there's no white flash.
+/// Launch placeholder shown while the environment is being built (and
+/// for the 3 s minimum above). Uses the same canvas colour as the app
+/// so there's no white flash, with the lab logo centered.
 private struct LaunchSplash: View {
     var body: some View {
         ZStack {
             ForestixPalette.canvas.ignoresSafeArea()
-            VStack(spacing: ForestixSpace.md) {
-                Text("FORESTIX")
-                    .font(.system(size: 16, weight: .semibold))
-                    .tracking(3)
-                    .foregroundStyle(ForestixPalette.primary)
-                ProgressView()
-            }
+            Image("LabLogo")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 180, height: 180)
         }
     }
 }

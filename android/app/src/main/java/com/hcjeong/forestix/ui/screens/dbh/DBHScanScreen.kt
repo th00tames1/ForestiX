@@ -591,7 +591,14 @@ fun DBHScanScreen(nav: NavController) {
                                 val fields = mutableMapOf(
                                     "measure_type" to "dbh",
                                     "method" to r.method.raw,
-                                    "depth_source" to captureMethod.name.lowercase(),
+                                    // Same raw vocabulary as iOS dbhMethodSource so the two
+                                    // platforms' CSVs filter identically; the platform column
+                                    // says whether "lidarDepth" means LiDAR or ARCore depth.
+                                    "depth_source" to when (captureMethod) {
+                                        DbhCaptureMethod.DEPTH -> "lidarDepth"
+                                        DbhCaptureMethod.MOTION -> "arMotion"
+                                        DbhCaptureMethod.CALIPER -> "arCaliper"
+                                    },
                                     "measured_value" to String.format(Locale.US, "%.2f", r.diameterCm),
                                     "unit" to "cm",
                                     "sigma" to String.format(Locale.US, "%.1f", r.sigmaRmm),

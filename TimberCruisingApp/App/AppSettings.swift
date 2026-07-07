@@ -41,6 +41,7 @@ public final class AppSettings: ObservableObject {
         public static let dbhMeasurementMethod    = "tc.dbhMeasurementMethod"
         public static let measurementSource       = "tc.measurementSource"
         public static let developerMode           = "tc.developerMode"
+        public static let appearance              = "tc.appearance"
         public static let dbhMethodSource         = "tc.dbhMethodSource"
         public static let researchTreeId          = "tc.researchTreeId"
         public static let researchTrueValue       = "tc.researchTrueValue"
@@ -157,6 +158,14 @@ public final class AppSettings: ObservableObject {
     public var developerMode: Bool {
         get { defaults.bool(forKey: Keys.developerMode) }
         set { defaults.set(newValue, forKey: Keys.developerMode); objectWillChange.send() }
+    }
+
+    /// App appearance — "light" (default) or "dark". Both are the same
+    /// Field High-Contrast identity; the root maps this to the SwiftUI
+    /// colour scheme so trait-dynamic tokens + system sheets flip together.
+    public var appearance: String {
+        get { defaults.string(forKey: Keys.appearance) ?? "light" }
+        set { defaults.set(newValue, forKey: Keys.appearance); objectWillChange.send() }
     }
 
     /// Operator-set tags written into every research-log row while

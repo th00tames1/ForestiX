@@ -14,6 +14,7 @@ package com.hcjeong.forestix.ui.theme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.ProvidableCompositionLocal
@@ -47,23 +48,20 @@ data class ForestixColors(
     val textTertiary: Color,
 )
 
-// Direction B — "Field High-Contrast". Dark-only outdoor instrument:
-// deep slate canvas, big mono numerals, high-chroma signal colours.
-// ForestixTheme forces dark below; mirror of iOS DesignSystem.swift.
-private val PrimaryGreen = Color(0xFF55D07A)   // signal green
-private val PrimaryInk = Color(0xFF06130A)     // dark ink ON primary
-private val AccentAmber = Color(0xFFFFB454)
-private val OkGreen = Color(0xFF55D07A)
-private val WarnAmber = Color(0xFFFFB454)
-private val BadRed = Color(0xFFFF7A6B)
+// Direction B — "Field High-Contrast" in TWO appearances sharing one
+// identity (signal colours, big mono numerals, squarer shapes): a light
+// "paper" set (the default) and the dark slate set. Signal hues deepen
+// in light mode ON PURPOSE — the bright pair reads on slate but fails
+// contrast on paper. Mirror of iOS DesignSystem.swift.
+private val PrimaryInk = Color(0xFF06130A)     // dark ink ON primary (both modes)
 
 private val FieldDark = ForestixColors(
-    primary = PrimaryGreen,
-    primaryMuted = PrimaryGreen.copy(alpha = 0.16f),
-    accent = AccentAmber,
-    confidenceOk = OkGreen,
-    confidenceWarn = WarnAmber,
-    confidenceBad = BadRed,
+    primary = Color(0xFF55D07A),
+    primaryMuted = Color(0xFF55D07A).copy(alpha = 0.16f),
+    accent = Color(0xFFFFB454),
+    confidenceOk = Color(0xFF55D07A),
+    confidenceWarn = Color(0xFFFFB454),
+    confidenceBad = Color(0xFFFF7A6B),
     canvas = Color(0xFF0C0F10),
     surface = Color(0xFF171B1D),
     surfaceRaised = Color(0xFF21272A),
@@ -73,11 +71,24 @@ private val FieldDark = ForestixColors(
     textTertiary = Color(0xFF79837D),
 )
 
-private val LightColors = FieldDark
-private val DarkColors = FieldDark
+private val FieldLight = ForestixColors(
+    primary = Color(0xFF2FA45B),
+    primaryMuted = Color(0xFF2FA45B).copy(alpha = 0.14f),
+    accent = Color(0xFFB57614),
+    confidenceOk = Color(0xFF1D7A43),
+    confidenceWarn = Color(0xFF9A6414),
+    confidenceBad = Color(0xFFB03A2E),
+    canvas = Color(0xFFF4F6F4),
+    surface = Color(0xFFFFFFFF),
+    surfaceRaised = Color(0xFFE9EDE9),
+    divider = Color(0xFFD3D9D3),
+    textPrimary = Color(0xFF171C19),
+    textSecondary = Color(0xFF4E5852),
+    textTertiary = Color(0xFF7E8781),
+)
 
 val LocalForestixColors: ProvidableCompositionLocal<ForestixColors> =
-    staticCompositionLocalOf { LightColors }
+    staticCompositionLocalOf { FieldLight }
 
 // MARK: - Typography ------------------------------------------------------
 
@@ -159,21 +170,21 @@ object Forestix {
 
 @Composable
 fun ForestixTheme(
-    // Direction B is dark-only — the parameter is kept for API stability
-    // but ignored; the outdoor instrument always renders on the dark canvas.
-    darkTheme: Boolean = true,
+    // "light" is the app default; MainActivity passes the persisted
+    // AppSettings.appearance so the whole tree flips together.
+    darkTheme: Boolean = false,
     content: @Composable () -> Unit,
 ) {
-    val colors = FieldDark
+    val colors = if (darkTheme) FieldDark else FieldLight
     CompositionLocalProvider(
         LocalForestixColors provides colors,
         LocalForestixTypography provides Typography,
     ) {
-        // darkColorScheme base so Material components (dialogs, menus,
-        // text fields) render dark; onPrimary is the dark ink because
-        // white on the bright signal green fails 4.5:1.
+        // Matching Material scheme so dialogs/menus/text fields follow;
+        // onPrimary is the dark ink in BOTH modes (≥5.9:1 on either green).
+        val base = if (darkTheme) darkColorScheme() else lightColorScheme()
         MaterialTheme(
-            colorScheme = darkColorScheme(
+            colorScheme = base.copy(
                 primary = colors.primary,
                 onPrimary = PrimaryInk,
                 secondary = colors.accent,

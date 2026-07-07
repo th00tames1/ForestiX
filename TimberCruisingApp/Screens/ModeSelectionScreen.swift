@@ -17,6 +17,30 @@ public struct ModeSelectionScreen: View {
     public var body: some View {
         NavigationStack {
             VStack(spacing: ForestixSpace.xl) {
+                // Top strip — appearance toggle, tucked into the corner so
+                // the two workflow buttons stay the screen's clear focus.
+                HStack {
+                    Spacer()
+                    Button {
+                        settings.appearance = settings.appearance == "dark" ? "light" : "dark"
+                    } label: {
+                        Image(systemName: settings.appearance == "dark" ? "sun.max.fill" : "moon.fill")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(ForestixPalette.textSecondary)
+                            .frame(width: 44, height: 44)
+                            .background(
+                                Circle().fill(ForestixPalette.surfaceRaised)
+                            )
+                            .overlay(Circle().stroke(ForestixPalette.divider, lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(settings.appearance == "dark"
+                        ? "Switch to light appearance" : "Switch to dark appearance")
+                    .accessibilityIdentifier("mode.appearanceToggle")
+                }
+                .padding(.horizontal, ForestixSpace.md)
+                .padding(.top, ForestixSpace.xs)
+
                 Spacer()
 
                 VStack(alignment: .center, spacing: ForestixSpace.xxs) {

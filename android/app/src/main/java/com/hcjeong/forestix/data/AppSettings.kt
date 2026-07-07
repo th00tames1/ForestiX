@@ -60,6 +60,10 @@ data class SettingsSnapshot(
     /// across the scan screens and persisted so a field session survives
     /// app restarts (mirror of iOS tc.researchTreeId).
     val researchTreeId: String = "",
+    /// App appearance — "light" (default) or "dark". Same Field
+    /// High-Contrast identity in both; ForestixTheme maps this to the
+    /// light or dark token set (mirror of iOS tc.appearance).
+    val appearance: String = "light",
 )
 
 private val Context.settingsStore by preferencesDataStore(name = "forestix_settings")
@@ -82,6 +86,7 @@ class AppSettings(private val context: Context) {
         val dbhChordAlgorithm = stringPreferencesKey("tc.dbhChordAlgorithm")
         val developerMode = booleanPreferencesKey("tc.developerMode")
         val researchTreeId = stringPreferencesKey("tc.researchTreeId")
+        val appearance = stringPreferencesKey("tc.appearance")
     }
 
     private val _state = MutableStateFlow(loadSnapshot())
@@ -107,7 +112,13 @@ class AppSettings(private val context: Context) {
             regionPickerSeen = p[Keys.regionPickerSeen] ?: false,
             developerMode = p[Keys.developerMode] ?: false,
             researchTreeId = p[Keys.researchTreeId] ?: "",
+            appearance = p[Keys.appearance] ?: "light",
         )
+    }
+
+    fun setAppearance(value: String) = update {
+        _state.value = _state.value.copy(appearance = value)
+        it[Keys.appearance] = value
     }
 
     fun setResearchTreeId(value: String) = update {

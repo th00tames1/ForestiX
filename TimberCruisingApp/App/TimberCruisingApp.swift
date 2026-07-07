@@ -23,6 +23,11 @@ public struct RootView: View {
             .environmentObject(environment)
             .environmentObject(environment.settings)
             .environmentObject(environment.quickMeasureHistory)
+            // Field High-Contrast ships two appearances sharing one
+            // identity; "light" is the default. Driving the scheme here
+            // (where AppSettings is observed) flips the trait-dynamic
+            // palette AND system sheets/alerts together.
+            .preferredColorScheme(environment.settings.appearance == "dark" ? .dark : .light)
             .onOpenURL { url in
                 guard let link = URLRouter.parse(url) else { return }
                 let history = environment.quickMeasureHistory

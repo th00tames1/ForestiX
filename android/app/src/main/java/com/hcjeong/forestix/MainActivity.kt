@@ -13,6 +13,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hcjeong.forestix.ui.ForestixRoot
 import com.hcjeong.forestix.ui.theme.ForestixTheme
 
@@ -21,20 +22,25 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            ForestixTheme {
-                val context = LocalContext.current
-                val env by produceState<AppEnvironment?>(initialValue = null) {
-                    value = AppEnvironment.create(context)
-                }
-                val environment = env
-                if (environment != null) {
+            val context = LocalContext.current
+            val env by produceState<AppEnvironment?>(initialValue = null) {
+                value = AppEnvironment.create(context)
+            }
+            val environment = env
+            if (environment != null) {
+                // Appearance is user-selected (default light); collecting it
+                // here flips tokens + Material scheme app-wide together.
+                val settings by environment.settings.state.collectAsStateWithLifecycle()
+                ForestixTheme(darkTheme = settings.appearance == "dark") {
                     CompositionLocalProvider(LocalAppEnvironment provides environment) {
                         ForestixRoot()
                     }
-                } else {
-                    // Branded splash while Room + bootstrap run, so the
-                    // first frame isn't a blank window (mirrors the iOS
-                    // LaunchSplash fix for the white-screen-on-launch bug).
+                }
+            } else {
+                // Branded splash while Room + bootstrap run, so the
+                // first frame isn't a blank window (mirrors the iOS
+                // LaunchSplash fix). Splash takes the light default.
+                ForestixTheme(darkTheme = false) {
                     com.hcjeong.forestix.ui.LaunchSplash()
                 }
             }

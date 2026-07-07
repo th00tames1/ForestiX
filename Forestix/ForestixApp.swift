@@ -13,9 +13,9 @@ struct ForestixApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
-                // Direction B is a dark-only outdoor instrument — force
-                // dark so system sheets/alerts/pickers match the canvas.
-                .preferredColorScheme(.dark)
+                // Appearance is user-selected (AppSettings.appearance,
+                // default light) and applied in RootView; the splash just
+                // takes the light default via the dynamic tokens.
                 .tint(ForestixPalette.primary)
         }
     }

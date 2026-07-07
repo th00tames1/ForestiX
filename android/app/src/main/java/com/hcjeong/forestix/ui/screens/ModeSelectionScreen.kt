@@ -8,6 +8,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -34,6 +35,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.WbSunny
+import androidx.compose.material3.IconButton
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.hcjeong.forestix.LocalAppEnvironment
 import androidx.navigation.NavController
 import com.hcjeong.forestix.ui.Routes
 import com.hcjeong.forestix.ui.clickableNoRipple
@@ -45,12 +53,36 @@ import com.hcjeong.forestix.ui.theme.ForestixSpace
 fun ModeSelectionScreen(nav: NavController) {
     val colors = Forestix.colors
     val type = Forestix.type
+    val env = LocalAppEnvironment.current
+    val settings by env.settings.state.collectAsStateWithLifecycle()
     Box(
         Modifier
             .fillMaxSize()
             .background(colors.canvas),
         contentAlignment = Alignment.Center,
     ) {
+        // Appearance toggle — tucked top-right so the two workflow buttons
+        // stay the screen's clear focus. Light is the default; both modes
+        // are the same Field High-Contrast identity.
+        val dark = settings.appearance == "dark"
+        IconButton(
+            onClick = { env.settings.setAppearance(if (dark) "light" else "dark") },
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .statusBarsPadding()
+                .padding(top = ForestixSpace.xs, end = ForestixSpace.md)
+                .size(44.dp)
+                .clip(CircleShape)
+                .background(colors.surfaceRaised)
+                .border(1.dp, colors.divider, CircleShape),
+        ) {
+            Icon(
+                if (dark) Icons.Filled.WbSunny else Icons.Filled.DarkMode,
+                contentDescription = if (dark) "Switch to light appearance" else "Switch to dark appearance",
+                tint = colors.textSecondary,
+                modifier = Modifier.size(20.dp),
+            )
+        }
         Column(
             Modifier.fillMaxSize(),
             verticalArrangement = Arrangement.Center,

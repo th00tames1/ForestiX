@@ -14,44 +14,85 @@
 // semantic token like `.confidenceOk` or `.surfaceRaised`.
 
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 // MARK: - Palette
 
 public enum ForestixPalette {
 
-    /// Direction B — "Field High-Contrast". Dark-only outdoor instrument:
-    /// deep slate canvas, big mono numerals, high-chroma signal colours.
-    /// Chosen over the previous adaptive light/dark forest palette because
-    /// the app lives outdoors — sunlight glare + gloves. The app forces
-    /// dark appearance at the root (ForestixApp), so these are fixed values.
+    /// Direction B — "Field High-Contrast", now in TWO appearances that
+    /// share one identity (signal colours, big mono numerals, squarer
+    /// shapes): a light "paper" variant (the default) and the dark slate
+    /// variant for night / low-glare work. Tokens are trait-dynamic; the
+    /// root drives the trait from AppSettings.appearance, so the whole
+    /// app + system sheets flip together.
+    ///
+    /// Signal colours differ per appearance ON PURPOSE: the bright
+    /// #55D07A/#FFB454 pair reads perfectly on dark slate but fails
+    /// contrast on paper, so light mode deepens each hue to ≥4.5:1 for
+    /// text-sized uses while keeping the same visual family.
 
-    /// Signal green — primary accents, readouts, focus. High chroma is
-    /// deliberate on the dark canvas; buttons pair it with `primaryInk`.
-    public static let primary        = Color(red: 0.333, green: 0.816, blue: 0.478) // #55D07A
-    /// Near-black ink used ON primary surfaces (buttons) — white on the
-    /// bright signal green fails 4.5:1, dark ink passes at ~9:1.
+    #if canImport(UIKit)
+    private static func dyn(_ l: UIColor, _ d: UIColor) -> Color {
+        Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? d : l })
+    }
+    private static func rgb(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat, _ a: CGFloat = 1) -> UIColor {
+        UIColor(red: r, green: g, blue: b, alpha: a)
+    }
+
+    /// Signal green — primary accents, readouts, buttons.
+    public static let primary        = dyn(rgb(0.184, 0.643, 0.357),   // #2FA45B
+                                           rgb(0.333, 0.816, 0.478))   // #55D07A
+    /// Ink ON primary surfaces — dark in both modes (≥5.9:1 on either green).
     public static let primaryInk     = Color(red: 0.024, green: 0.075, blue: 0.039) // #06130A
-    public static let primaryMuted   = Color(red: 0.333, green: 0.816, blue: 0.478).opacity(0.16)
+    public static let primaryMuted   = dyn(rgb(0.184, 0.643, 0.357, 0.14),
+                                           rgb(0.333, 0.816, 0.478, 0.16))
 
-    /// Amber signal — secondary accent + warnings.
-    public static let accent         = Color(red: 1.000, green: 0.706, blue: 0.329) // #FFB454
+    public static let accent         = dyn(rgb(0.710, 0.463, 0.078),   // #B57614
+                                           rgb(1.000, 0.706, 0.329))   // #FFB454
 
-    /// Confidence tiers — same hues as the signal set so the instrument
-    /// reads as one system (always paired with a text label).
-    public static let confidenceOk   = Color(red: 0.333, green: 0.816, blue: 0.478) // #55D07A
-    public static let confidenceWarn = Color(red: 1.000, green: 0.706, blue: 0.329) // #FFB454
-    public static let confidenceBad  = Color(red: 1.000, green: 0.478, blue: 0.420) // #FF7A6B
+    public static let confidenceOk   = dyn(rgb(0.114, 0.478, 0.263),   // #1D7A43
+                                           rgb(0.333, 0.816, 0.478))   // #55D07A
+    public static let confidenceWarn = dyn(rgb(0.604, 0.392, 0.078),   // #9A6414
+                                           rgb(1.000, 0.706, 0.329))   // #FFB454
+    public static let confidenceBad  = dyn(rgb(0.690, 0.227, 0.180),   // #B03A2E
+                                           rgb(1.000, 0.478, 0.420))   // #FF7A6B
 
-    /// Fixed dark surfaces (slate, slightly green-cast).
-    public static let canvas         = Color(red: 0.047, green: 0.059, blue: 0.063) // #0C0F10
-    public static let surface        = Color(red: 0.090, green: 0.106, blue: 0.114) // #171B1D
-    public static let surfaceRaised  = Color(red: 0.129, green: 0.153, blue: 0.165) // #21272A
-    public static let divider        = Color(red: 0.200, green: 0.231, blue: 0.247) // #333B3F
+    /// Surfaces — green-cast paper / green-cast slate.
+    public static let canvas         = dyn(rgb(0.957, 0.965, 0.957),   // #F4F6F4
+                                           rgb(0.047, 0.059, 0.063))   // #0C0F10
+    public static let surface        = dyn(rgb(1.000, 1.000, 1.000),
+                                           rgb(0.090, 0.106, 0.114))   // #171B1D
+    public static let surfaceRaised  = dyn(rgb(0.914, 0.929, 0.914),   // #E9EDE9
+                                           rgb(0.129, 0.153, 0.165))   // #21272A
+    public static let divider        = dyn(rgb(0.827, 0.851, 0.827),   // #D3D9D3
+                                           rgb(0.200, 0.231, 0.247))   // #333B3F
 
-    /// Text ramp on the dark canvas (≥4.5:1 down to textSecondary).
-    public static let textPrimary    = Color(red: 0.949, green: 0.961, blue: 0.953) // #F2F5F3
-    public static let textSecondary  = Color(red: 0.718, green: 0.753, blue: 0.729) // #B7C0BA
-    public static let textTertiary   = Color(red: 0.475, green: 0.514, blue: 0.490) // #79837D
+    public static let textPrimary    = dyn(rgb(0.090, 0.110, 0.098),   // #171C19
+                                           rgb(0.949, 0.961, 0.953))   // #F2F5F3
+    public static let textSecondary  = dyn(rgb(0.306, 0.345, 0.322),   // #4E5852
+                                           rgb(0.718, 0.753, 0.729))   // #B7C0BA
+    public static let textTertiary   = dyn(rgb(0.494, 0.529, 0.506),   // #7E8781
+                                           rgb(0.475, 0.514, 0.490))   // #79837D
+    #else
+    // Non-UIKit test host — fixed light values.
+    public static let primary        = Color(red: 0.184, green: 0.643, blue: 0.357)
+    public static let primaryInk     = Color(red: 0.024, green: 0.075, blue: 0.039)
+    public static let primaryMuted   = Color(red: 0.184, green: 0.643, blue: 0.357).opacity(0.14)
+    public static let accent         = Color(red: 0.710, green: 0.463, blue: 0.078)
+    public static let confidenceOk   = Color(red: 0.114, green: 0.478, blue: 0.263)
+    public static let confidenceWarn = Color(red: 0.604, green: 0.392, blue: 0.078)
+    public static let confidenceBad  = Color(red: 0.690, green: 0.227, blue: 0.180)
+    public static let canvas         = Color(red: 0.957, green: 0.965, blue: 0.957)
+    public static let surface        = Color.white
+    public static let surfaceRaised  = Color(red: 0.914, green: 0.929, blue: 0.914)
+    public static let divider        = Color(red: 0.827, green: 0.851, blue: 0.827)
+    public static let textPrimary    = Color(red: 0.090, green: 0.110, blue: 0.098)
+    public static let textSecondary  = Color(red: 0.306, green: 0.345, blue: 0.322)
+    public static let textTertiary   = Color(red: 0.494, green: 0.529, blue: 0.506)
+    #endif
 }
 
 // MARK: - Typography

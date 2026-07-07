@@ -1,14 +1,19 @@
 // App-level user preferences backed by UserDefaults. Only keys a Phase 1
 // cruiser can configure are exposed:
 //   • unitSystem            — imperial vs metric display preference
-//   • tileURLTemplate       — XYZ slippy-map template ({z}/{x}/{y}). When
-//                             nil, the Map view shows no basemap tiles. The
-//                             spec explicitly does not ship a default
-//                             provider; cruisers must paste their own and
-//                             acknowledge the provider's usage policy.
+//   • tileURLTemplate       — XYZ slippy-map template ({z}/{x}/{y}) drawn
+//                             as an OVERLAY on top of the built-in
+//                             satellite base layer (contour / forest-
+//                             service tiles). When nil, the Map view
+//                             shows the satellite base alone. Cruisers
+//                             must acknowledge the overlay provider's
+//                             usage policy before it draws.
 //   • tileProviderLabel     — display name for the above (optional)
-//   • providerUsageAcknowledged — gates basemap rendering until the cruiser
+//   • providerUsageAcknowledged — gates overlay rendering until the cruiser
 //                             has ticked the usage-policy checkbox.
+//   • overlayEnabled        — draw the overlay layer over the satellite
+//                             base (default true; toggled from the map's
+//                             layers sheet).
 
 import Foundation
 import Common
@@ -34,6 +39,7 @@ public final class AppSettings: ObservableObject {
         public static let tileURLTemplate         = "tc.tileURLTemplate"
         public static let tileProviderLabel       = "tc.tileProviderLabel"
         public static let providerUsageAck        = "tc.providerUsageAcknowledged"
+        public static let overlayEnabled          = "tc.overlayEnabled"
         public static let advancedMode            = "tc.advancedMode"
         public static let region                  = "tc.region"
         public static let regionPickerSeen        = "tc.regionPickerSeen"
@@ -94,6 +100,14 @@ public final class AppSettings: ObservableObject {
     public var providerUsageAcknowledged: Bool {
         get { defaults.bool(forKey: Keys.providerUsageAck) }
         set { defaults.set(newValue, forKey: Keys.providerUsageAck); objectWillChange.send() }
+    }
+
+    /// Draw the user overlay on top of the satellite base. Defaults to
+    /// TRUE (unlike `defaults.bool`'s false) — a cruiser who pastes an
+    /// overlay template expects to see it without hunting for a switch.
+    public var overlayEnabled: Bool {
+        get { defaults.object(forKey: Keys.overlayEnabled) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: Keys.overlayEnabled); objectWillChange.send() }
     }
 
     /// When `true`, the full project/plot/cruise workflow is shown at

@@ -1,12 +1,14 @@
 // Offline basemap sheet — target of the map home's layers button (mock
 // design/forestix-redesign-v2-maphome.html ① `.roundbtn` layers).
 //
-// With a provider configured: shows its status, plans OfflineBasemap.planJob
-// over the camera's visibleBounds() and drains the queue sequentially
-// through TileFetcher.prefetch with x/total progress + cancel, and offers
-// TileCache stats / clear. Without one: the no-tile state is first-class —
-// it explains the no-default-provider policy and points at Settings'
-// basemap section. Dismissing the sheet cancels an in-flight download.
+// Two layers: the built-in Esri World Imagery satellite base (always on,
+// zero setup) and the user's optional XYZ overlay template from Settings,
+// whose visibility toggle persists as tc.overlayEnabled. "Download visible
+// area" plans OfflineBasemap.planJob for BOTH layers over the camera's
+// visibleBounds() and drains the combined queue sequentially through
+// TileFetcher.prefetch with x/total progress + cancel (4 000-tile guard on
+// the combined count), and offers combined TileCache stats / clear.
+// Dismissing the sheet cancels an in-flight download.
 
 package com.hcjeong.forestix.ui.screens
 
@@ -25,6 +27,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -60,6 +63,7 @@ import kotlinx.coroutines.withContext
 
 /// Refuse plans bigger than this — a zoomed-out viewport at zoom 12–17
 /// explodes into millions of tiles; field areas stay well under the cap.
+/// Applied to the COMBINED base + overlay count.
 private const val MaxPlannedTiles = 4_000
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -73,7 +77,6 @@ fun OfflineMapSheet(
     val type = Forestix.type
     val env = LocalAppEnvironment.current
     val settings by env.settings.state.collectAsStateWithLifecycle()
-    val template = settings.tileURLTemplate
 
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = colors.surface) {
         Column(
@@ -87,56 +90,47 @@ fun OfflineMapSheet(
                 style = type.sectionHead.copy(letterSpacing = 1.2.sp),
                 color = colors.textTertiary,
             )
-            if (template == null) {
-                NoProviderContent(onOpenSettings)
-            } else {
-                ProviderContent(
-                    template = template,
-                    label = settings.tileProviderLabel,
-                    camera = camera,
-                )
-            }
+            LayersContent(
+                template = settings.tileURLTemplate,
+                label = settings.tileProviderLabel,
+                overlayEnabled = settings.overlayEnabled,
+                onOverlayEnabled = { env.settings.setOverlayEnabled(it) },
+                camera = camera,
+                onOpenSettings = onOpenSettings,
+            )
         }
     }
 }
 
-// MARK: - No provider (policy explainer)
+// MARK: - Layers (base = built-in satellite, overlay = user template)
 
 @Composable
-private fun NoProviderContent(onOpenSettings: () -> Unit) {
-    val colors = Forestix.colors
-    val type = Forestix.type
-    Text("No tile provider configured", style = type.bodyBold, color = colors.textPrimary)
-    Text(
-        "ForestiX ships no default basemap — tile providers set their own " +
-            "usage policies. Pins and measurements work fine on the plain " +
-            "canvas; to see and download real tiles, paste an XYZ template " +
-            "under Settings → Basemap tiles.",
-        style = type.caption,
-        color = colors.textSecondary,
-    )
-    SheetButton(
-        "Open Settings",
-        primary = true,
-        modifier = Modifier.fillMaxWidth(),
-        onClick = onOpenSettings,
-    )
-}
-
-// MARK: - Provider configured (status + download + cache)
-
-@Composable
-private fun ProviderContent(template: String, label: String?, camera: MapCameraState) {
+private fun LayersContent(
+    template: String?,
+    label: String?,
+    overlayEnabled: Boolean,
+    onOverlayEnabled: (Boolean) -> Unit,
+    camera: MapCameraState,
+    onOpenSettings: () -> Unit,
+) {
     val colors = Forestix.colors
     val type = Forestix.type
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val fetcher = remember(template) { TileFetcher(context, template) }
+    val baseFetcher = remember { TileFetcher.esriWorldImagery(context) }
+    val overlayFetcher = remember(template) { template?.let { TileFetcher(context, it) } }
 
     var stats by remember { mutableStateOf<TileCache.Stats?>(null) }
     var statsTick by remember { mutableIntStateOf(0) }
-    LaunchedEffect(fetcher, statsTick) {
-        stats = withContext(Dispatchers.IO) { fetcher.cache.stats() }
+    LaunchedEffect(overlayFetcher, statsTick) {
+        stats = withContext(Dispatchers.IO) {
+            val base = baseFetcher.cache.stats()
+            val overlay = overlayFetcher?.cache?.stats()
+            TileCache.Stats(
+                fileCount = base.fileCount + (overlay?.fileCount ?: 0),
+                byteCount = base.byteCount + (overlay?.byteCount ?: 0),
+            )
+        }
     }
 
     var running by remember { mutableStateOf(false) }
@@ -145,15 +139,49 @@ private fun ProviderContent(template: String, label: String?, camera: MapCameraS
     var note by remember { mutableStateOf<String?>(null) }
     var downloadJob by remember { mutableStateOf<Job?>(null) }
 
-    // Provider status (template/label straight from settings).
-    Text(label ?: "Custom provider", style = type.bodyBold, color = colors.textPrimary)
+    // Base layer status — built-in satellite, nothing to configure.
+    Text("Satellite base · built-in", style = type.bodyBold, color = colors.textPrimary)
     Text(
-        template,
-        style = type.dataSmall,
-        color = colors.textTertiary,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
+        "Esri World Imagery — shows whenever the device is online; " +
+            "downloaded tiles keep working offline.",
+        style = type.caption,
+        color = colors.textSecondary,
     )
+    HorizontalDivider(color = colors.divider)
+
+    // Overlay layer status — the user's XYZ template drawn on top.
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("Overlay · your template", style = type.bodyBold, color = colors.textPrimary)
+            if (template == null) {
+                Text(
+                    "None configured — paste an XYZ template (contour or " +
+                        "forest tiles) under Settings → Basemap tiles.",
+                    style = type.caption,
+                    color = colors.textSecondary,
+                )
+            } else {
+                Text(
+                    label ?: template,
+                    style = type.dataSmall,
+                    color = colors.textTertiary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        if (template != null) {
+            Switch(checked = overlayEnabled, onCheckedChange = onOverlayEnabled)
+        }
+    }
+    if (template == null) {
+        SheetButton(
+            "Open Settings",
+            primary = false,
+            modifier = Modifier.fillMaxWidth(),
+            onClick = onOpenSettings,
+        )
+    }
     HorizontalDivider(color = colors.divider)
 
     if (running) {
@@ -196,26 +224,35 @@ private fun ProviderContent(template: String, label: String?, camera: MapCameraS
                     var saved = 0
                     var failed = 0
                     try {
-                        val job = withContext(Dispatchers.IO) {
-                            OfflineBasemap.planJob(aoiRings = listOf(bounds), cache = fetcher.cache)
+                        // Plan BOTH layers so one tap covers the whole map.
+                        val plans = withContext(Dispatchers.IO) {
+                            listOfNotNull(baseFetcher, overlayFetcher).map { fetcher ->
+                                fetcher to OfflineBasemap.planJob(
+                                    aoiRings = listOf(bounds), cache = fetcher.cache)
+                            }
                         }
+                        val remaining = plans.sumOf { it.second.remaining }
+                        val totalTiles = plans.sumOf { it.second.totalTiles }
+                        val alreadyCached = plans.sumOf { it.second.alreadyCached }
                         when {
-                            job.isEmpty -> note =
-                                "All ${job.totalTiles} tiles for this area are already cached."
+                            remaining == 0 -> note =
+                                "All $totalTiles tiles for this area are already cached."
 
-                            job.remaining > MaxPlannedTiles -> note =
-                                "Area too large (${job.remaining} tiles) — zoom in and try again."
+                            remaining > MaxPlannedTiles -> note =
+                                "Area too large ($remaining tiles) — zoom in and try again."
 
                             else -> {
-                                queued = job.remaining
+                                queued = remaining
                                 done = 0
-                                for (key in job.tiles) {
-                                    if (fetcher.prefetch(key)) saved++ else failed++
-                                    done++
+                                for ((fetcher, plan) in plans) {
+                                    for (key in plan.tiles) {
+                                        if (fetcher.prefetch(key)) saved++ else failed++
+                                        done++
+                                    }
                                 }
                                 note = buildString {
-                                    append("Saved $saved of ${job.remaining} tiles")
-                                    if (job.alreadyCached > 0) append(" · ${job.alreadyCached} already cached")
+                                    append("Saved $saved of $remaining tiles")
+                                    if (alreadyCached > 0) append(" · $alreadyCached already cached")
                                     if (failed > 0) append(" · $failed failed")
                                 }
                             }
@@ -231,9 +268,9 @@ private fun ProviderContent(template: String, label: String?, camera: MapCameraS
             }
         }
         Text(
-            "Covers the visible map at zoom " +
-                "${OfflineBasemap.defaultZoomRange.first}–${OfflineBasemap.defaultZoomRange.last} " +
-                "plus a 1 km buffer.",
+            "Covers the visible map — satellite base plus overlay when set — " +
+                "at zoom ${OfflineBasemap.defaultZoomRange.first}–" +
+                "${OfflineBasemap.defaultZoomRange.last} plus a 1 km buffer.",
             style = type.caption,
             color = colors.textSecondary,
         )
@@ -245,7 +282,7 @@ private fun ProviderContent(template: String, label: String?, camera: MapCameraS
         Column(Modifier.weight(1f)) {
             Text("Tile cache", style = type.bodyBold, color = colors.textPrimary)
             Text(
-                stats?.let { "${it.fileCount} tiles · ${formatBytes(it.byteCount)}" } ?: "…",
+                stats?.let { "${it.fileCount} tiles · ${formatBytes(it.byteCount)} · both layers" } ?: "…",
                 style = type.caption,
                 color = colors.textSecondary,
             )
@@ -253,7 +290,10 @@ private fun ProviderContent(template: String, label: String?, camera: MapCameraS
         if (!running) {
             SheetButton("Clear", primary = false) {
                 scope.launch {
-                    withContext(Dispatchers.IO) { fetcher.cache.clear() }
+                    withContext(Dispatchers.IO) {
+                        baseFetcher.cache.clear()
+                        overlayFetcher?.cache?.clear()
+                    }
                     statsTick++
                     note = null
                 }

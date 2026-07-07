@@ -65,6 +65,18 @@ final class TileCacheTests: XCTestCase {
         XCTAssertEqual(url?.absoluteString, "https://tile.example.com/14/1/2.png")
     }
 
+    func testEsriWorldImageryResolvesRowBeforeColumn() throws {
+        // Esri's scheme is {z}/{y}/{x} — substitution is by token name,
+        // so y (row) must land BEFORE x (column) in the resolved URL.
+        let cache = try TileCache(rootURL: tmp, provider: .esriWorldImagery)
+        let url = cache.resolvedURL(for: .init(z: 12, x: 3300, y: 1230))
+        XCTAssertEqual(
+            url?.absoluteString,
+            "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/12/1230/3300")
+        XCTAssertEqual(cache.provider.providerId, "esri-world-imagery")
+        XCTAssertEqual(cache.provider.fileExtension, "jpg")
+    }
+
     // MARK: - Tile math
 
     func testTileForKnownLocation() {

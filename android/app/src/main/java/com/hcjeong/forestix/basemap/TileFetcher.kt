@@ -1,6 +1,8 @@
 // Tile fetcher — Android network/bitmap glue over TileCache, the
 // counterpart of the iOS MKTileOverlay subclass (TileCache+MapKit) that
-// MapKit drives on iOS. Honours the user's AppSettings.tileURLTemplate.
+// MapKit drives on iOS. Serves the built-in Esri World Imagery satellite
+// base (`esriWorldImagery`) and the user's AppSettings.tileURLTemplate
+// overlay alike — one fetcher per layer, caches namespaced by providerId.
 //
 // Layering: in-memory LruCache (decoded Bitmaps, byte-budgeted) over the
 // flat-file TileCache on disk over HttpURLConnection to the provider.
@@ -27,12 +29,17 @@ class TileFetcher(
     context: Context,
     val urlTemplate: String,
     memoryBudgetBytes: Int = 32 * 1024 * 1024,
+    /// Built-in providers pass these explicitly (the Esri template carries
+    /// no ".jpg" suffix to infer from); user templates leave them null and
+    /// get the inferred extension + hashed provider id.
+    fileExtension: String? = null,
+    providerId: String? = null,
 ) {
 
     val provider: TileCache.ProviderConfig = TileCache.ProviderConfig(
         urlTemplate = urlTemplate,
-        fileExtension = fileExtension(urlTemplate),
-        providerId = TileCache.ProviderConfig.providerId(forURLTemplate = urlTemplate),
+        fileExtension = fileExtension ?: fileExtension(urlTemplate),
+        providerId = providerId ?: TileCache.ProviderConfig.providerId(forURLTemplate = urlTemplate),
     )
 
     /// Same directory scheme as the iOS Application Support cache: one
@@ -136,6 +143,25 @@ class TileFetcher(
     }
 
     companion object {
+        /// Built-in satellite base layer — Esri World Imagery, shown by
+        /// default so the map has real imagery with zero setup (mirror of
+        /// the iOS built-in provider; note the {z}/{y}/{x} path order).
+        const val ESRI_WORLD_IMAGERY_TEMPLATE =
+            "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+        const val ESRI_WORLD_IMAGERY_PROVIDER_ID = "esri-world-imagery"
+        /// Required by the imagery terms — always visible on the map.
+        const val ESRI_WORLD_IMAGERY_ATTRIBUTION = "Esri · Maxar · Earthstar Geographics"
+
+        /// Fetcher for the built-in satellite base. Same filesDir disk
+        /// cache as user templates, so browsed tiles persist for offline
+        /// use and TileCache stats/clear see them too.
+        fun esriWorldImagery(context: Context): TileFetcher = TileFetcher(
+            context = context,
+            urlTemplate = ESRI_WORLD_IMAGERY_TEMPLATE,
+            fileExtension = "jpg",
+            providerId = ESRI_WORLD_IMAGERY_PROVIDER_ID,
+        )
+
         /// Infer the tile file extension from the template ("…/{y}.png"
         /// -> "png"). Defaults to png when the template has none.
         fun fileExtension(urlTemplate: String): String {

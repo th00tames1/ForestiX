@@ -47,6 +47,10 @@ data class SettingsSnapshot(
     val dbhChordAlgorithm: String = "silhouette",
     val tileURLTemplate: String? = null,
     val tileProviderLabel: String? = null,
+    /// Draw the user overlay template on top of the built-in satellite
+    /// base layer (mirror of iOS tc.overlayEnabled). The template itself
+    /// stays in tileURLTemplate; this only toggles its visibility.
+    val overlayEnabled: Boolean = true,
     val providerUsageAcknowledged: Boolean = false,
     val advancedMode: Boolean = false,
     val region: String? = null,
@@ -76,6 +80,7 @@ class AppSettings(private val context: Context) {
         val unitSystem = stringPreferencesKey("tc.unitSystem")
         val tileURLTemplate = stringPreferencesKey("tc.tileURLTemplate")
         val tileProviderLabel = stringPreferencesKey("tc.tileProviderLabel")
+        val overlayEnabled = booleanPreferencesKey("tc.overlayEnabled")
         val providerUsageAck = booleanPreferencesKey("tc.providerUsageAcknowledged")
         val advancedMode = booleanPreferencesKey("tc.advancedMode")
         val region = stringPreferencesKey("tc.region")
@@ -106,6 +111,7 @@ class AppSettings(private val context: Context) {
             dbhChordAlgorithm = p[Keys.dbhChordAlgorithm] ?: "silhouette",
             tileURLTemplate = p[Keys.tileURLTemplate]?.takeIf { it.isNotBlank() },
             tileProviderLabel = p[Keys.tileProviderLabel],
+            overlayEnabled = p[Keys.overlayEnabled] ?: true,
             providerUsageAcknowledged = p[Keys.providerUsageAck] ?: false,
             advancedMode = p[Keys.advancedMode] ?: false,
             region = p[Keys.region],
@@ -164,6 +170,11 @@ class AppSettings(private val context: Context) {
     fun setTileProviderLabel(value: String?) = update {
         _state.value = _state.value.copy(tileProviderLabel = value?.takeIf { v -> v.isNotBlank() })
         if (value == null) it.remove(Keys.tileProviderLabel) else it[Keys.tileProviderLabel] = value
+    }
+
+    fun setOverlayEnabled(value: Boolean) = update {
+        _state.value = _state.value.copy(overlayEnabled = value)
+        it[Keys.overlayEnabled] = value
     }
 
     fun setProviderUsageAcknowledged(value: Boolean) = update {

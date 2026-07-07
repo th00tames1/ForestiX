@@ -1,9 +1,12 @@
 // Interactive slippy-map canvas for the MAP-FIRST HOME
 // (design/forestix-redesign-v2-maphome.html — screens ① map home and
 // ② pin selected). Pure SwiftUI + web-mercator maths over TileCache —
-// no MapKit — so user-configured XYZ providers and the honest
-// "no provider configured" state (canvas-coloured background + faint
-// tile grid, nothing else) render identically on- and offline.
+// no MapKit — rendering TWO layers: the built-in satellite base
+// (Esri World Imagery — imagery out of the box, zero setup) and, drawn
+// on top of it, an optional user-configured XYZ overlay (contour /
+// forest-service tiles, often transparent PNGs). The canvas-coloured
+// background + faint tile grid only show through where a base tile is
+// neither cached nor fetchable.
 //
 // Lives in the Basemap library target (deps: Common + Geo only), so it
 // cannot import the app design system: every colour arrives via
@@ -135,6 +138,19 @@ public struct BasemapStyle {
 // MARK: - Provider convenience
 
 public extension TileCache.ProviderConfig {
+    /// Built-in satellite base layer — ships with the app so the map
+    /// shows imagery whenever online, zero setup. NOTE Esri's tile
+    /// scheme is {z}/{y}/{x} (row before column); `resolvedURL(for:)`
+    /// substitutes tokens by NAME, so the swapped order is honoured.
+    static let esriWorldImagery = TileCache.ProviderConfig(
+        urlTemplate: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        fileExtension: "jpg",
+        providerId: "esri-world-imagery")
+
+    /// Attribution the imagery terms require on screen whenever the
+    /// built-in base layer can draw.
+    static let esriWorldImageryAttribution = "Esri · Maxar · Earthstar Geographics"
+
     /// Build a config from a user-pasted XYZ template (Settings). The
     /// file extension is sniffed from the template tail; unknown
     /// endings fall back to png (the raster default).
@@ -294,7 +310,11 @@ public struct BasemapMapView: View {
     public static let zoomRange: ClosedRange<Double> = 3...19
 
     @Binding private var camera: BasemapCamera
-    private let tileCache: TileCache?
+    /// Built-in satellite base — drawn first, under everything.
+    private let baseTileCache: TileCache?
+    /// Optional user overlay (contour / forest-service tiles) — drawn
+    /// on top of the base; transparent pixels let the imagery through.
+    private let overlayTileCache: TileCache?
     private let markers: [BasemapMarker]
     private let selectedMarkerID: String?
     private let youLocation: CoordinateConversions.LatLon?
@@ -303,7 +323,8 @@ public struct BasemapMapView: View {
     private let onMapTap: () -> Void
     private let onCameraChange: (BasemapCamera, BasemapRegion) -> Void
 
-    @StateObject private var loader = BasemapTileLoader()
+    @StateObject private var baseLoader = BasemapTileLoader()
+    @StateObject private var overlayLoader = BasemapTileLoader()
     /// Camera captured at pan-gesture start (translation is absolute).
     @State private var dragStart: BasemapCamera?
     /// Zoom captured at pinch-gesture start.
@@ -315,7 +336,8 @@ public struct BasemapMapView: View {
     private let youBlue = Color(red: 0.231, green: 0.510, blue: 0.769)
 
     public init(camera: Binding<BasemapCamera>,
-                tileCache: TileCache?,
+                baseTileCache: TileCache?,
+                overlayTileCache: TileCache? = nil,
                 markers: [BasemapMarker] = [],
                 selectedMarkerID: String? = nil,
                 youLocation: CoordinateConversions.LatLon? = nil,
@@ -324,7 +346,8 @@ public struct BasemapMapView: View {
                 onMapTap: @escaping () -> Void = {},
                 onCameraChange: @escaping (BasemapCamera, BasemapRegion) -> Void = { _, _ in }) {
         self._camera = camera
-        self.tileCache = tileCache
+        self.baseTileCache = baseTileCache
+        self.overlayTileCache = overlayTileCache
         self.markers = markers
         self.selectedMarkerID = selectedMarkerID
         self.youLocation = youLocation
@@ -337,16 +360,25 @@ public struct BasemapMapView: View {
     public var body: some View {
         GeometryReader { geo in
             let size = geo.size
-            let tiles = tileDrawList(size: size)
+            let baseTiles = tileDrawList(size: size, cache: baseTileCache,
+                                         loader: baseLoader)
+            let overlayTiles = tileDrawList(size: size, cache: overlayTileCache,
+                                            loader: overlayLoader)
             ZStack {
                 Canvas { context, canvasSize in
                     context.fill(Path(CGRect(origin: .zero, size: canvasSize)),
                                  with: .color(style.canvas))
-                    // Faint tile grid — the honest no-provider state, and
+                    // Faint tile grid — shows through only where a base
+                    // tile is neither cached nor fetchable, and gives
                     // pan feedback wherever tiles haven't arrived yet.
                     context.stroke(Self.gridPath(camera: camera, size: canvasSize),
                                    with: .color(style.grid), lineWidth: 0.5)
-                    for tile in tiles {
+                    for tile in baseTiles {
+                        context.draw(tile.image, in: tile.rect)
+                    }
+                    // Overlay above the base — transparent PNG overlays
+                    // (contours etc.) composite over the imagery.
+                    for tile in overlayTiles {
                         context.draw(tile.image, in: tile.rect)
                     }
                 }
@@ -377,11 +409,15 @@ public struct BasemapMapView: View {
                 }
             }
             .onAppear {
-                loader.attach(cache: tileCache)
+                baseLoader.attach(cache: baseTileCache)
+                overlayLoader.attach(cache: overlayTileCache)
                 emitCamera(size: size)
             }
-            .onChange(of: tileCache?.provider.providerId) { _, _ in
-                loader.attach(cache: tileCache)
+            .onChange(of: baseTileCache?.provider.providerId) { _, _ in
+                baseLoader.attach(cache: baseTileCache)
+            }
+            .onChange(of: overlayTileCache?.provider.providerId) { _, _ in
+                overlayLoader.attach(cache: overlayTileCache)
             }
             .onChange(of: geo.size) { _, newSize in
                 emitCamera(size: newSize)
@@ -422,11 +458,12 @@ public struct BasemapMapView: View {
     }
 
     /// Compute the visible tile rects and resolve their images (memory /
-    /// disk / kick off a fetch). Runs in `body` — on the main actor — so
-    /// the Canvas closure only consumes plain values.
-    private func tileDrawList(size: CGSize) -> [TileDraw] {
+    /// disk / kick off a fetch) for one layer. Runs in `body` — on the
+    /// main actor — so the Canvas closure only consumes plain values.
+    private func tileDrawList(size: CGSize, cache: TileCache?,
+                              loader: BasemapTileLoader) -> [TileDraw] {
         _ = loader.revision   // re-render whenever a fetched tile lands
-        guard tileCache != nil, size.width > 0, size.height > 0 else { return [] }
+        guard cache != nil, size.width > 0, size.height > 0 else { return [] }
         let tz = Int(min(max(camera.zoom.rounded(), Self.zoomRange.lowerBound),
                          Self.zoomRange.upperBound))
         let n = 1 << tz
@@ -545,7 +582,8 @@ public struct BasemapMapView: View {
     }
 
     private func emitCamera(size: CGSize) {
-        loader.retryFailed()
+        baseLoader.retryFailed()
+        overlayLoader.retryFailed()
         onCameraChange(camera, Self.visibleRegion(camera: camera,
                                                   viewportSize: size))
     }

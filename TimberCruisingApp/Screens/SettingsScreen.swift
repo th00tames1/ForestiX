@@ -270,7 +270,7 @@ public struct SettingsScreen: View {
     private var basemapSection: some View {
         Section(
             header: Text("Basemap tiles"),
-            footer: Text("No tile provider ships by default. Paste an XYZ template that substitutes {z}/{x}/{y}. Confirm you've reviewed the provider's usage policy before downloading.")
+            footer: Text("The map ships with a built-in satellite base layer (Esri World Imagery) — nothing to set up. A template pasted here draws as an OVERLAY on top of that imagery (contour or forest-service tiles, for example). Use an XYZ template that substitutes {z}/{x}/{y}, and confirm you've reviewed the provider's usage policy before the overlay will draw.")
         ) {
             TextField("https://tile.example.com/{z}/{x}/{y}.png", text: $tileTemplate)
                 #if os(iOS)

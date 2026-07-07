@@ -2,11 +2,13 @@
 // MapKit `Map { MapPolygon / Marker }` content (spec §3.1 REQ-PRJ-004)
 // plus the offline tile overlay MapKit gets from TileCache+MapKit.
 //
-// A plain Canvas renderer: Web-Mercator tiles from TileFetcher (which
-// honours AppSettings.tileURLTemplate) drawn under stratum polygon +
-// plot marker overlays, with drag-to-pan and pinch-to-zoom. When no
-// tile template is configured the overlays render on a bare background
-// (iOS shows Apple's basemap there; Android has no bundled provider).
+// A plain Canvas renderer: Web-Mercator tiles from two TileFetcher layers
+// — the built-in Esri World Imagery satellite base (or a caller-supplied
+// base template) with the user's AppSettings.tileURLTemplate drawn on top
+// as an optional overlay (contour/forest tiles, often transparent PNG) —
+// under stratum polygon + plot marker overlays, with drag-to-pan and
+// pinch-to-zoom. The Esri credit bottom-left is required by the imagery
+// terms and stays on whenever the built-in base is in use.
 //
 // Map-home extensions (design/forestix-redesign-v2-maphome.html): teardrop
 // PIN markers with the title inside and D/H/C badge chips beneath, marker
@@ -24,6 +26,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Box
@@ -41,6 +44,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -60,9 +64,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hcjeong.forestix.geo.CoordinateConversions
 import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import kotlin.math.PI
 import kotlin.math.atan
@@ -157,7 +163,13 @@ fun MapView(
     center: CoordinateConversions.LatLon,
     modifier: Modifier = Modifier,
     initialZoom: Double = 14.0,
+    /// BASE layer override. Null/blank → the built-in Esri World Imagery
+    /// satellite base (zero-setup imagery whenever online). Callers that
+    /// pass the user template here keep their old single-layer behaviour.
     tileURLTemplate: String? = null,
+    /// Optional OVERLAY drawn on top of the base — the map home passes
+    /// AppSettings.tileURLTemplate here (often transparent PNG tiles).
+    overlayURLTemplate: String? = null,
     polygons: List<MapPolygonOverlay> = emptyList(),
     markers: List<MapMarker> = emptyList(),
     attribution: String? = null,
@@ -200,11 +212,19 @@ fun MapView(
         ).value
     } else 0f
 
-    val fetcher = remember(tileURLTemplate) {
+    // Base layer: caller override, else the built-in satellite provider.
+    val baseIsBuiltin = tileURLTemplate.isNullOrBlank()
+    val baseFetcher = remember(tileURLTemplate) {
         tileURLTemplate?.takeIf { it.isNotBlank() }?.let { TileFetcher(context, it) }
+            ?: TileFetcher.esriWorldImagery(context)
+    }
+    val overlayFetcher = remember(overlayURLTemplate) {
+        overlayURLTemplate?.takeIf { it.isNotBlank() }?.let { TileFetcher(context, it) }
     }
     // Recompose (and therefore redraw) whenever a new tile bitmap lands.
-    val tileTick = if (fetcher != null) fetcher.tilesVersion.collectAsStateWithLifecycle().value else 0
+    val baseTick = baseFetcher.tilesVersion.collectAsStateWithLifecycle().value
+    val overlayTick =
+        if (overlayFetcher != null) overlayFetcher.tilesVersion.collectAsStateWithLifecycle().value else 0
 
     val labelFill = remember {
         Paint().apply {
@@ -294,8 +314,9 @@ fun MapView(
                     }
                 },
         ) {
-            // tileTick is read so a freshly-downloaded tile invalidates us.
-            @Suppress("UNUSED_EXPRESSION") tileTick
+            // Ticks are read so freshly-downloaded tiles invalidate us.
+            @Suppress("UNUSED_EXPRESSION") baseTick
+            @Suppress("UNUSED_EXPRESSION") overlayTick
 
             drawRect(color = colors.surface)
 
@@ -306,17 +327,17 @@ fun MapView(
             val originX = lonToXNorm(camCenter.longitude) * worldPx - size.width / 2.0
             val originY = latToYNorm(camCenter.latitude) * worldPx - size.height / 2.0
 
-            // MARK: Tiles
-            if (fetcher != null) {
-                val tx0 = floor(originX / tilePx).toInt()
-                val tx1 = floor((originX + size.width) / tilePx).toInt()
-                val ty0 = floor(originY / tilePx).toInt().coerceAtLeast(0)
-                val ty1 = floor((originY + size.height) / tilePx).toInt().coerceAtMost(n - 1)
+            // MARK: Tiles — base layer first, then the optional overlay.
+            val tx0 = floor(originX / tilePx).toInt()
+            val tx1 = floor((originX + size.width) / tilePx).toInt()
+            val ty0 = floor(originY / tilePx).toInt().coerceAtLeast(0)
+            val ty1 = floor((originY + size.height) / tilePx).toInt().coerceAtMost(n - 1)
+            for (layer in listOfNotNull(baseFetcher, overlayFetcher)) {
                 for (ty in ty0..ty1) {
                     for (tx in tx0..tx1) {
                         val wrappedX = ((tx % n) + n) % n
                         val key = TileCache.Key(z = tileZoom, x = wrappedX, y = ty)
-                        val bitmap = fetcher.bitmapFor(key, scope) ?: continue
+                        val bitmap = layer.bitmapFor(key, scope) ?: continue
                         val dstX = (tx * tilePx - originX).roundToInt()
                         val dstY = (ty * tilePx - originY).roundToInt()
                         // +1 px overlap hides seams from fractional scaling.
@@ -487,6 +508,22 @@ fun MapView(
                     }
                 }
             }
+        }
+
+        // Imagery credit for the built-in satellite base — required by the
+        // Esri terms, so it stays on whenever that base is in use.
+        if (baseIsBuiltin) {
+            Text(
+                TileFetcher.ESRI_WORLD_IMAGERY_ATTRIBUTION,
+                style = Forestix.type.dataSmall.copy(fontSize = 9.5.sp),
+                color = colors.textSecondary,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(ForestixSpace.xs)
+                    .clip(ForestixRadius.chip)
+                    .background(colors.surface.copy(alpha = 0.65f))
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+            )
         }
 
         if (attribution != null) {

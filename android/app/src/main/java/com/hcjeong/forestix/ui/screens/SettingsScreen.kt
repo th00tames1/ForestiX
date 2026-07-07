@@ -217,9 +217,10 @@ private fun BasemapSetting() {
     Column(verticalArrangement = Arrangement.spacedBy(ForestixSpace.sm)) {
         Text("Basemap tiles", style = type.bodyBold, color = colors.textPrimary)
         Text(
-            "No tile provider ships by default. Paste an XYZ template that " +
-                "substitutes {z}/{x}/{y}. Confirm you've reviewed the provider's " +
-                "usage policy before downloading.",
+            "Satellite imagery is built in (Esri World Imagery). Paste an XYZ " +
+                "template that substitutes {z}/{x}/{y} to draw an OVERLAY on top " +
+                "of it — contour or forest tiles, often transparent PNG. Confirm " +
+                "you've reviewed the provider's usage policy before downloading.",
             style = type.caption, color = colors.textSecondary,
         )
         OutlinedTextField(

@@ -6,8 +6,9 @@
 // The map is the home because a cruiser's data IS spatial: every accepted
 // reading with a GPS fix becomes a tree pin (one tree = one pin, D/H/C
 // badges), pin tap opens a bottom peek card so the map never disappears,
-// and the single primary action is the centre (+) capture button. Works
-// tile-less by design — pins and cards are fully usable on the bare canvas.
+// and the single primary action is the centre (+) capture button. The
+// built-in Esri satellite base gives imagery out of the box; the user's
+// XYZ template renders as an overlay on top (toggle in the layers sheet).
 
 package com.hcjeong.forestix.ui.screens
 
@@ -60,6 +61,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -106,6 +108,7 @@ import java.util.Date
 import java.util.Locale
 import kotlin.math.PI
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 /// Fallback camera when there's no fix and no located reading yet — the
@@ -175,7 +178,9 @@ fun MapHomeScreen(nav: NavController) {
             center = initialCamera.first,
             modifier = Modifier.fillMaxSize(),
             initialZoom = initialCamera.second,
-            tileURLTemplate = settings.tileURLTemplate,
+            // Base stays the built-in satellite; the user template is an
+            // overlay on top, honouring the layers sheet's toggle.
+            overlayURLTemplate = if (settings.overlayEnabled) settings.tileURLTemplate else null,
             markers = pins.map { pin ->
                 MapMarker(
                     coordinate = pin.coordinate,
@@ -220,12 +225,20 @@ fun MapHomeScreen(nav: NavController) {
                     contentDescription = if (dark) "Switch to light appearance" else "Switch to dark appearance",
                 ) { env.settings.setAppearance(if (dark) "light" else "dark") }
             }
-            // No-tile state is first-class (mock `.tilelabel`): pins + canvas
-            // stay usable; this chip routes to the offline sheet's explainer.
+            // Coordinate readout directly under the GPS chip (mirror of the
+            // identical iOS chip) — last fix, live age once stale.
+            CoordChip(
+                fix,
+                modifier = Modifier
+                    .align(Alignment.Start)
+                    .padding(start = 14.dp, top = 6.dp),
+            )
+            // The satellite base is built-in, so this hint only concerns the
+            // optional overlay (offline/no-network lives in the sheet).
             if (settings.tileURLTemplate == null) {
                 Spacer(Modifier.size(ForestixSpace.xs))
                 Text(
-                    "BASEMAP TILES · ADD A PROVIDER IN SETTINGS",
+                    "OVERLAY TILES · ADD A TEMPLATE IN SETTINGS",
                     style = type.dataSmall.copy(fontSize = 10.sp, letterSpacing = 0.8.sp),
                     color = colors.textTertiary,
                     modifier = Modifier
@@ -395,6 +408,58 @@ private fun GpsChip(fix: CLLocationSnapshot?) {
     ) {
         Box(Modifier.size(7.dp).clip(CircleShape).background(dotColor))
         Text(label, style = type.dataSmall, color = colors.textPrimary)
+    }
+}
+
+/// Coordinate readout under the GPS chip — the last known fix at five
+/// decimals (mono). Younger than ~5 s: coords only. Older (GPS lost under
+/// canopy): a live-ticking age suffix ("· 12 s ago", minutes past 60 s)
+/// and a warn-tinted dot. Never had a fix: "no fix yet". Mirror of the
+/// identical iOS chip.
+@Composable
+private fun CoordChip(fix: CLLocationSnapshot?, modifier: Modifier = Modifier) {
+    val colors = Forestix.colors
+    val type = Forestix.type
+    // This screen's live service, else the newest fix any screen captured.
+    val snap = fix ?: LocationService.lastGlobalFix
+    // 1 s clock so the age suffix ticks while the chip is on screen.
+    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            nowMs = System.currentTimeMillis()
+            delay(1_000)
+        }
+    }
+    val ageSec = snap?.let { ((nowMs - it.timestamp) / 1_000).coerceAtLeast(0) }
+    val stale = ageSec != null && ageSec > 5
+    val dotColor = when {
+        snap == null -> colors.confidenceBad
+        stale -> colors.confidenceWarn
+        else -> colors.confidenceOk
+    }
+    val label = when {
+        snap == null -> "no fix yet"
+        !stale -> String.format(Locale.US, "%.5f, %.5f", snap.latitude, snap.longitude)
+        else -> {
+            val age = if (ageSec!! < 60) "$ageSec s ago" else "${ageSec / 60} min ago"
+            String.format(Locale.US, "%.5f, %.5f · %s", snap.latitude, snap.longitude, age)
+        }
+    }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        modifier = modifier
+            .clip(ForestixRadius.control)
+            .background(colors.surface)
+            .border(1.dp, colors.divider, ForestixRadius.control)
+            .padding(horizontal = 11.dp, vertical = 5.dp),
+    ) {
+        Box(Modifier.size(7.dp).clip(CircleShape).background(dotColor))
+        Text(
+            label,
+            style = type.dataSmall.copy(fontSize = 11.sp),
+            color = if (snap == null) colors.textTertiary else colors.textSecondary,
+        )
     }
 }
 

@@ -209,7 +209,7 @@ public struct TreeDetailScreen: View {
             } label: {
                 Text("Save changes").frame(maxWidth: .infinity)
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.forestixProminent)
             .controlSize(.large)
             .disabled(!viewModel.dirty || viewModel.isSaving)
 

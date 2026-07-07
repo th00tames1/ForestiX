@@ -6,12 +6,17 @@
 //
 
 import SwiftUI
+import UI
 
 @main
 struct ForestixApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                // Direction B is a dark-only outdoor instrument — force
+                // dark so system sheets/alerts/pickers match the canvas.
+                .preferredColorScheme(.dark)
+                .tint(ForestixPalette.primary)
         }
     }
 }

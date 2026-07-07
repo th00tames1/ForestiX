@@ -320,7 +320,7 @@ public struct DistanceMeasureScreen: View {
         switch mode {
         case .live:
             Button("Save") { saveLiveReading() }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.forestixProminent)
                 .frame(maxWidth: .infinity)
                 .disabled(liveDistanceM == nil)
                 .accessibilityIdentifier("distance.saveLive")
@@ -330,7 +330,7 @@ public struct DistanceMeasureScreen: View {
                     .buttonStyle(.bordered)
                     .frame(maxWidth: .infinity)
                 Button("Save") { saveTwoPointReading() }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.forestixProminent)
                     .frame(maxWidth: .infinity)
                     .disabled(twoPointDistanceM == nil)
                     .accessibilityIdentifier("distance.saveTwoPoint")

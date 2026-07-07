@@ -166,7 +166,7 @@ public struct SamplingPlotScreen: View {
                     .frame(maxWidth: .infinity)
                     .disabled(center == nil)
                 Button("Save") { savePlot() }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.forestixProminent)
                     .frame(maxWidth: .infinity)
                     .disabled(center == nil)
                     .accessibilityIdentifier("samplingPlot.save")

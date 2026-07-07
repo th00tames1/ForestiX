@@ -164,7 +164,7 @@ public struct ProjectDashboardScreen: View {
                         Label("Draw stratum on map", systemImage: "pencil.and.outline")
                             .frame(maxWidth: .infinity, minHeight: 44)
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.forestixProminent)
                     .accessibilityIdentifier("dashboard.drawStratum")
 
                     Menu {

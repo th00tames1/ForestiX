@@ -559,7 +559,7 @@ public struct HeightScanScreen: View {
                 #endif
                 .accessibilityIdentifier("heightScan.manualInput")
             Button("Save") { viewModel.submitManualEntry() }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.forestixProminent)
         }
     }
 
@@ -704,7 +704,7 @@ public struct HeightScanScreen: View {
                         }
                         viewModel.accept()
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.forestixProminent)
                     .frame(maxWidth: .infinity)
                     .disabled(viewModel.result?.confidence == .red)
                     .accessibilityIdentifier("heightScan.acceptButton")
@@ -713,7 +713,7 @@ public struct HeightScanScreen: View {
         case .rejected:
             HStack(spacing: 12) {
                 Button("Retake") { viewModel.retake() }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.forestixProminent)
                 Button("Manual") { viewModel.enterManualEntry() }
                     .buttonStyle(.bordered)
             }

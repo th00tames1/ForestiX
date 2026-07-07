@@ -220,7 +220,7 @@ public struct PlotTallyScreen: View {
                 Label("Add Tree", systemImage: "plus.circle.fill")
                     .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.forestixProminent)
             .controlSize(.large)
             .accessibilityIdentifier("plotTally.addTree")
         }

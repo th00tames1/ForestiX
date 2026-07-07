@@ -147,12 +147,12 @@ public struct PlotCenterScreen: View {
         switch viewModel.phase {
         case .good(let r):
             Button("Save plot center") { onAccept(r) }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.forestixProminent)
 
         case .poor(let r):
             HStack(spacing: 12) {
                 Button("Try Offset") { onTryOffset(r) }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.forestixProminent)
                 Button("Save anyway") {
                     viewModel.acceptAnyway()
                     onAccept(r)
@@ -165,7 +165,7 @@ public struct PlotCenterScreen: View {
                 viewModel.cancel()
                 viewModel.start()
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.forestixProminent)
 
         case .idle, .averaging:
             Button("Cancel", role: .cancel) { viewModel.cancel() }

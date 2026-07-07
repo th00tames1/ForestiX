@@ -70,7 +70,7 @@ public struct CruiseDesignScreen: View {
                         .frame(minHeight: 44)
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.forestixProminent)
                 .disabled(!viewModel.isValid)
                 .accessibilityIdentifier("design.generate")
             }

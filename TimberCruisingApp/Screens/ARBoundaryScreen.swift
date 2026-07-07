@@ -141,7 +141,7 @@ public struct ARBoundaryScreen: View {
         if viewModel.centerWorld == nil {
             HStack {
                 Button("Set Center") { setCenterAction() }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.forestixProminent)
                     .accessibilityIdentifier("arBoundary.setCenterButton")
             }
         } else {

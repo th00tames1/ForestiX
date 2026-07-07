@@ -19,46 +19,39 @@ import SwiftUI
 
 public enum ForestixPalette {
 
-    /// Primary brand — deep forest green. Used sparingly: app wordmark,
-    /// key accents, focused action states. Desaturated on purpose so
-    /// the UI doesn't read as "Saint Patrick's Day".
-    public static let primary        = Color(red: 0.176, green: 0.373, blue: 0.290)
-    public static let primaryMuted   = Color(red: 0.176, green: 0.373, blue: 0.290).opacity(0.15)
+    /// Direction B — "Field High-Contrast". Dark-only outdoor instrument:
+    /// deep slate canvas, big mono numerals, high-chroma signal colours.
+    /// Chosen over the previous adaptive light/dark forest palette because
+    /// the app lives outdoors — sunlight glare + gloves. The app forces
+    /// dark appearance at the root (ForestixApp), so these are fixed values.
 
-    /// Neutral earth accent — birch-bark beige. Used for secondary
-    /// highlights and tier-neutral elements.
-    public static let accent         = Color(red: 0.788, green: 0.655, blue: 0.420)
+    /// Signal green — primary accents, readouts, focus. High chroma is
+    /// deliberate on the dark canvas; buttons pair it with `primaryInk`.
+    public static let primary        = Color(red: 0.333, green: 0.816, blue: 0.478) // #55D07A
+    /// Near-black ink used ON primary surfaces (buttons) — white on the
+    /// bright signal green fails 4.5:1, dark ink passes at ~9:1.
+    public static let primaryInk     = Color(red: 0.024, green: 0.075, blue: 0.039) // #06130A
+    public static let primaryMuted   = Color(red: 0.333, green: 0.816, blue: 0.478).opacity(0.16)
 
-    /// Confidence tier colours (spec §7.9 green/yellow/red). Muted so
-    /// they read as status indicators, not urgency alarms.
-    public static let confidenceOk   = Color(red: 0.290, green: 0.541, blue: 0.361)
-    public static let confidenceWarn = Color(red: 0.722, green: 0.537, blue: 0.290)
-    public static let confidenceBad  = Color(red: 0.690, green: 0.337, blue: 0.337)
+    /// Amber signal — secondary accent + warnings.
+    public static let accent         = Color(red: 1.000, green: 0.706, blue: 0.329) // #FFB454
 
-    /// Background / surface layers. Tied to system semantic colours
-    /// so dark mode just works.
-    #if os(iOS)
-    public static let canvas         = Color(uiColor: .systemBackground)
-    public static let surface        = Color(uiColor: .secondarySystemBackground)
-    public static let surfaceRaised  = Color(uiColor: .tertiarySystemBackground)
-    public static let divider        = Color(uiColor: .separator)
-    #else
-    public static let canvas         = Color(nsColor: .windowBackgroundColor)
-    public static let surface        = Color.gray.opacity(0.10)
-    public static let surfaceRaised  = Color.gray.opacity(0.15)
-    public static let divider        = Color.gray.opacity(0.25)
-    #endif
+    /// Confidence tiers — same hues as the signal set so the instrument
+    /// reads as one system (always paired with a text label).
+    public static let confidenceOk   = Color(red: 0.333, green: 0.816, blue: 0.478) // #55D07A
+    public static let confidenceWarn = Color(red: 1.000, green: 0.706, blue: 0.329) // #FFB454
+    public static let confidenceBad  = Color(red: 1.000, green: 0.478, blue: 0.420) // #FF7A6B
 
-    /// Text hierarchy — primary / secondary / tertiary labels.
-    #if os(iOS)
-    public static let textPrimary    = Color(uiColor: .label)
-    public static let textSecondary  = Color(uiColor: .secondaryLabel)
-    public static let textTertiary   = Color(uiColor: .tertiaryLabel)
-    #else
-    public static let textPrimary    = Color(nsColor: .labelColor)
-    public static let textSecondary  = Color(nsColor: .secondaryLabelColor)
-    public static let textTertiary   = Color(nsColor: .tertiaryLabelColor)
-    #endif
+    /// Fixed dark surfaces (slate, slightly green-cast).
+    public static let canvas         = Color(red: 0.047, green: 0.059, blue: 0.063) // #0C0F10
+    public static let surface        = Color(red: 0.090, green: 0.106, blue: 0.114) // #171B1D
+    public static let surfaceRaised  = Color(red: 0.129, green: 0.153, blue: 0.165) // #21272A
+    public static let divider        = Color(red: 0.200, green: 0.231, blue: 0.247) // #333B3F
+
+    /// Text ramp on the dark canvas (≥4.5:1 down to textSecondary).
+    public static let textPrimary    = Color(red: 0.949, green: 0.961, blue: 0.953) // #F2F5F3
+    public static let textSecondary  = Color(red: 0.718, green: 0.753, blue: 0.729) // #B7C0BA
+    public static let textTertiary   = Color(red: 0.475, green: 0.514, blue: 0.490) // #79837D
 }
 
 // MARK: - Typography
@@ -78,9 +71,9 @@ public enum ForestixType {
     public static let caption     = Font.system(size: 12, weight: .regular, design: .default)
     /// Tabular numeric readouts (DBH, Height, dates). Monospaced so
     /// columns line up like a measurement log.
-    public static let dataLarge   = Font.system(size: 22, weight: .semibold, design: .monospaced)
-    public static let data        = Font.system(size: 15, weight: .medium, design: .monospaced)
-    public static let dataSmall   = Font.system(size: 12, weight: .medium, design: .monospaced)
+    public static let dataLarge   = Font.system(size: 26, weight: .bold, design: .monospaced)
+    public static let data        = Font.system(size: 17, weight: .medium, design: .monospaced)
+    public static let dataSmall   = Font.system(size: 13, weight: .medium, design: .monospaced)
 }
 
 // MARK: - Spacing
@@ -103,9 +96,9 @@ public enum ForestixSpace {
 // MARK: - Shape
 
 public enum ForestixRadius {
-    public static let chip: CGFloat    = 6
-    public static let control: CGFloat = 10
-    public static let card: CGFloat    = 12
+    public static let chip: CGFloat    = 5
+    public static let control: CGFloat = 8
+    public static let card: CGFloat    = 10
 }
 
 // MARK: - View helpers
@@ -130,6 +123,33 @@ public extension View {
                 .frame(height: 0.5)
         }
     }
+}
+
+// MARK: - Primary button style (Direction B)
+
+/// Replaces `.borderedProminent` app-wide: the bright signal green needs
+/// DARK ink for contrast (white fails 4.5:1), which the built-in style
+/// can't do globally. Full-width label so rows of buttons share width
+/// exactly like the old prominent buttons did.
+public struct ForestixProminentButtonStyle: ButtonStyle {
+    public init() {}
+    public func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(ForestixType.bodyBold)
+            .foregroundStyle(ForestixPalette.primaryInk)
+            .frame(maxWidth: .infinity, minHeight: 30)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: ForestixRadius.control, style: .continuous)
+                    .fill(ForestixPalette.primary.opacity(configuration.isPressed ? 0.78 : 1))
+            )
+            .animation(.easeOut(duration: 0.15), value: configuration.isPressed)
+    }
+}
+
+public extension ButtonStyle where Self == ForestixProminentButtonStyle {
+    static var forestixProminent: ForestixProminentButtonStyle { ForestixProminentButtonStyle() }
 }
 
 // MARK: - Confidence tier helpers

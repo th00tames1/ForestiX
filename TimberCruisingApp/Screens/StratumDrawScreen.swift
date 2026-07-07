@@ -164,7 +164,7 @@ public struct StratumDrawScreen: View {
                 }
                 .frame(maxWidth: .infinity, minHeight: 56)
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.forestixProminent)
             .disabled(!viewModel.canSave)
             .accessibilityIdentifier("stratumDraw.save")
         }

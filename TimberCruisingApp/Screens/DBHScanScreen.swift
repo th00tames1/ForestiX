@@ -900,7 +900,7 @@ public struct DBHScanScreen: View {
                 #endif
                 .accessibilityIdentifier("dbhScan.manualInput")
             Button("Save") { viewModel.submitManualEntry() }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.forestixProminent)
                 .accessibilityIdentifier("dbhScan.manualSave")
         }
     }
@@ -919,14 +919,14 @@ public struct DBHScanScreen: View {
                     .buttonStyle(.bordered)
                     .frame(maxWidth: .infinity)
                 Button("Accept") { viewModel.accept() }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.forestixProminent)
                     .frame(maxWidth: .infinity)
                     .disabled(viewModel.result?.confidence == .red)
             }
         case .rejected:
             HStack(spacing: 12) {
                 Button("Retake") { viewModel.retake() }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.forestixProminent)
                     .frame(maxWidth: .infinity)
                 Button("Manual") { viewModel.enterManualEntry() }
                     .buttonStyle(.bordered)

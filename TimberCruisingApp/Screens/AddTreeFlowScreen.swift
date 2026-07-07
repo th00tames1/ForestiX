@@ -212,7 +212,7 @@ public struct AddTreeFlowScreen: View {
             }
             .frame(maxWidth: .infinity, minHeight: 56)
         }
-        .buttonStyle(.borderedProminent)
+        .buttonStyle(.forestixProminent)
         .tint(viewModel.speciesCode == code ? ForestixPalette.primary : ForestixPalette.surface)
         .foregroundStyle(viewModel.speciesCode == code ? .white : .primary)
     }
@@ -234,7 +234,7 @@ public struct AddTreeFlowScreen: View {
                         .frame(maxWidth: .infinity, minHeight: 56)
                         .font(.headline)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.forestixProminent)
                 .accessibilityIdentifier("addTree.dbhScanButton")
                 .disabled(!DeviceCapabilities.hasLiDAR)
                 if !DeviceCapabilities.hasLiDAR {
@@ -294,7 +294,7 @@ public struct AddTreeFlowScreen: View {
                         .frame(maxWidth: .infinity, minHeight: 56)
                         .font(.headline)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.forestixProminent)
                 .accessibilityIdentifier("addTree.heightScanButton")
             }
             Section("Height (m)") {
@@ -502,12 +502,12 @@ public struct AddTreeFlowScreen: View {
                         .padding(.horizontal, 4)
                 }
                 .menuStyle(.button)
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.forestixProminent)
                 .controlSize(.large)
                 .disabled(viewModel.isSaving)
             } else {
                 Button("Next") { viewModel.advance() }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.forestixProminent)
                     .controlSize(.large)
                     .disabled(!viewModel.canAdvance())
             }

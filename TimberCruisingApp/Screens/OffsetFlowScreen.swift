@@ -118,18 +118,18 @@ public struct OffsetFlowScreen: View {
         switch viewModel.step {
         case .anchorPlot:
             Button("Anchor here") { viewModel.anchorPlotCenter() }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.forestixProminent)
         case .walkToOpening:
             Button("Capture fix here") { viewModel.beginOpeningAveraging() }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.forestixProminent)
         case .averagingAtOpening:
             Button("Cancel", role: .cancel) { viewModel.cancel() }
         case .walkBack:
             Button("Confirm plot center") { viewModel.confirmPlotCenter() }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.forestixProminent)
         case .computed(let r):
             Button("Save") { onDone(r) }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.forestixProminent)
         case .failed:
             Button("Restart") { viewModel.cancel() }
         }

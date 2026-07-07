@@ -129,7 +129,7 @@ public struct HomeScreen: View {
                         .frame(minHeight: 56)
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.forestixProminent)
                 .padding(.horizontal, 20)
 
                 Text("All data stays on this device — nothing is sent to any server.")

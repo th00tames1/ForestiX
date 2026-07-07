@@ -174,7 +174,7 @@ public struct CalibrationScreen: View {
                           systemImage: "scanner.fill")
                         .frame(maxWidth: .infinity, minHeight: 56)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.forestixProminent)
                 .accessibilityIdentifier("calibration.wall.start")
             case .scanning(let p):
                 ProgressView(value: p)
@@ -224,7 +224,7 @@ public struct CalibrationScreen: View {
                     #endif
                     .accessibilityIdentifier("calibration.cylinder.true")
                 Button("Add") { viewModel.addCylinderSample() }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.forestixProminent)
             }
 
             switch viewModel.cylinder {

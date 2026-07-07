@@ -184,7 +184,7 @@ public struct PlotSummaryScreen: View {
                     Label("Close plot", systemImage: "lock.fill")
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.forestixProminent)
                 .controlSize(.large)
                 .disabled(!viewModel.validation.canClose || viewModel.isClosing)
             } else {
@@ -193,7 +193,7 @@ public struct PlotSummaryScreen: View {
                 } label: {
                     Text("Done").frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.forestixProminent)
                 .controlSize(.large)
             }
         }

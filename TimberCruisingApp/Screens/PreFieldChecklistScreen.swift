@@ -36,7 +36,7 @@ public struct PreFieldChecklistScreen: View {
                     Label("Re-run checks", systemImage: "arrow.clockwise")
                         .frame(maxWidth: .infinity, minHeight: 44)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.forestixProminent)
                 .accessibilityIdentifier("prefield.rerun")
             }
         }

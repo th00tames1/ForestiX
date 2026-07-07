@@ -11,9 +11,9 @@
 
 package com.hcjeong.forestix.ui.theme
 
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.ProvidableCompositionLocal
@@ -47,43 +47,34 @@ data class ForestixColors(
     val textTertiary: Color,
 )
 
-private val PrimaryGreen = Color(0.176f, 0.373f, 0.290f)
-private val AccentBeige = Color(0.788f, 0.655f, 0.420f)
-private val OkGreen = Color(0.290f, 0.541f, 0.361f)
-private val WarnAmber = Color(0.722f, 0.537f, 0.290f)
-private val BadRed = Color(0.690f, 0.337f, 0.337f)
+// Direction B — "Field High-Contrast". Dark-only outdoor instrument:
+// deep slate canvas, big mono numerals, high-chroma signal colours.
+// ForestixTheme forces dark below; mirror of iOS DesignSystem.swift.
+private val PrimaryGreen = Color(0xFF55D07A)   // signal green
+private val PrimaryInk = Color(0xFF06130A)     // dark ink ON primary
+private val AccentAmber = Color(0xFFFFB454)
+private val OkGreen = Color(0xFF55D07A)
+private val WarnAmber = Color(0xFFFFB454)
+private val BadRed = Color(0xFFFF7A6B)
 
-private val LightColors = ForestixColors(
+private val FieldDark = ForestixColors(
     primary = PrimaryGreen,
-    primaryMuted = PrimaryGreen.copy(alpha = 0.15f),
-    accent = AccentBeige,
+    primaryMuted = PrimaryGreen.copy(alpha = 0.16f),
+    accent = AccentAmber,
     confidenceOk = OkGreen,
     confidenceWarn = WarnAmber,
     confidenceBad = BadRed,
-    canvas = Color(0xFFFFFFFF),
-    surface = Color(0xFFF2F2F7),        // iOS secondarySystemBackground
-    surfaceRaised = Color(0xFFFFFFFF),  // iOS tertiarySystemBackground (light)
-    divider = Color(0x333C3C43),        // iOS separator
-    textPrimary = Color(0xFF000000),
-    textSecondary = Color(0x993C3C43),
-    textTertiary = Color(0x4D3C3C43),
+    canvas = Color(0xFF0C0F10),
+    surface = Color(0xFF171B1D),
+    surfaceRaised = Color(0xFF21272A),
+    divider = Color(0xFF333B3F),
+    textPrimary = Color(0xFFF2F5F3),
+    textSecondary = Color(0xFFB7C0BA),
+    textTertiary = Color(0xFF79837D),
 )
 
-private val DarkColors = ForestixColors(
-    primary = PrimaryGreen,
-    primaryMuted = PrimaryGreen.copy(alpha = 0.22f),
-    accent = AccentBeige,
-    confidenceOk = OkGreen,
-    confidenceWarn = WarnAmber,
-    confidenceBad = BadRed,
-    canvas = Color(0xFF000000),
-    surface = Color(0xFF1C1C1E),
-    surfaceRaised = Color(0xFF2C2C2E),
-    divider = Color(0x5C545458),
-    textPrimary = Color(0xFFFFFFFF),
-    textSecondary = Color(0x99EBEBF5),
-    textTertiary = Color(0x4DEBEBF5),
-)
+private val LightColors = FieldDark
+private val DarkColors = FieldDark
 
 val LocalForestixColors: ProvidableCompositionLocal<ForestixColors> =
     staticCompositionLocalOf { LightColors }
@@ -109,9 +100,9 @@ private val Typography = ForestixTypography(
     body = TextStyle(fontSize = 15.sp, fontWeight = FontWeight.Normal),
     bodyBold = TextStyle(fontSize = 15.sp, fontWeight = FontWeight.SemiBold),
     caption = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.Normal),
-    dataLarge = TextStyle(fontSize = 22.sp, fontWeight = FontWeight.SemiBold, fontFamily = FontFamily.Monospace),
-    data = TextStyle(fontSize = 15.sp, fontWeight = FontWeight.Medium, fontFamily = FontFamily.Monospace),
-    dataSmall = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.Medium, fontFamily = FontFamily.Monospace),
+    dataLarge = TextStyle(fontSize = 26.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace),
+    data = TextStyle(fontSize = 17.sp, fontWeight = FontWeight.Medium, fontFamily = FontFamily.Monospace),
+    dataSmall = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Medium, fontFamily = FontFamily.Monospace),
 )
 
 val LocalForestixTypography: ProvidableCompositionLocal<ForestixTypography> =
@@ -131,12 +122,12 @@ object ForestixSpace {
 // MARK: - Shape -----------------------------------------------------------
 
 object ForestixRadius {
-    val chip = RoundedCornerShape(6.dp)
-    val control = RoundedCornerShape(10.dp)
-    val card = RoundedCornerShape(12.dp)
-    val chipDp: Dp = 6.dp
-    val controlDp: Dp = 10.dp
-    val cardDp: Dp = 12.dp
+    val chip = RoundedCornerShape(5.dp)
+    val control = RoundedCornerShape(8.dp)
+    val card = RoundedCornerShape(10.dp)
+    val chipDp: Dp = 5.dp
+    val controlDp: Dp = 8.dp
+    val cardDp: Dp = 10.dp
 }
 
 // MARK: - Confidence tier helper -----------------------------------------
@@ -168,21 +159,33 @@ object Forestix {
 
 @Composable
 fun ForestixTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
+    // Direction B is dark-only — the parameter is kept for API stability
+    // but ignored; the outdoor instrument always renders on the dark canvas.
+    darkTheme: Boolean = true,
     content: @Composable () -> Unit,
 ) {
-    val colors = if (darkTheme) DarkColors else LightColors
+    val colors = FieldDark
     CompositionLocalProvider(
         LocalForestixColors provides colors,
         LocalForestixTypography provides Typography,
     ) {
-        // Wrap in Material3 so material components (sliders, etc.) inherit
-        // a matching scheme; our own tokens override visible surfaces.
+        // darkColorScheme base so Material components (dialogs, menus,
+        // text fields) render dark; onPrimary is the dark ink because
+        // white on the bright signal green fails 4.5:1.
         MaterialTheme(
-            colorScheme = MaterialTheme.colorScheme.copy(
+            colorScheme = darkColorScheme(
                 primary = colors.primary,
+                onPrimary = PrimaryInk,
+                secondary = colors.accent,
+                onSecondary = PrimaryInk,
                 background = colors.canvas,
+                onBackground = colors.textPrimary,
                 surface = colors.surface,
+                onSurface = colors.textPrimary,
+                surfaceVariant = colors.surfaceRaised,
+                onSurfaceVariant = colors.textSecondary,
+                outline = colors.divider,
+                error = colors.confidenceBad,
             ),
             content = content,
         )

@@ -2,11 +2,10 @@
 // (Forestix.xcodeproj). `ForestixApp.swift` keeps the `@main` attribute; this
 // view is what its `ContentView` should host.
 //
-// Mode-selection landing: two large stacked buttons.
-//   • Tree Measurement — direct measurement tools (DBH, Height, Crown,
-//     Sampling Plots, Distance). No project / cruise design overhead.
-//   • Timber Cruising  — full standard cruising workflow that also
-//     contains Tree Measurement as a sub-tool.
+// Map-first home (design/forestix-redesign-v2-maphome.html): the root is
+// MapHomeScreen — pins over the basemap, big (+) capture action, Cruise/
+// Log side circles. ModeSelectionScreen remains in the tree for direct
+// use but is no longer the landing surface.
 
 import SwiftUI
 
@@ -19,7 +18,7 @@ public struct RootView: View {
     }
 
     public var body: some View {
-        ModeSelectionScreen()
+        MapHomeScreen()
             .environmentObject(environment)
             .environmentObject(environment.settings)
             .environmentObject(environment.quickMeasureHistory)

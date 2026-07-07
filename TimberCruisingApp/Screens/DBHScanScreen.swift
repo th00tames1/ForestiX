@@ -104,6 +104,45 @@ public struct DBHScanScreen: View {
     }
 
     public var body: some View {
+        // Field mode is LiDAR-only for DBH: without the scanner the depth
+        // pipeline can't run, and the AR-motion / AR-caliper alternatives
+        // are Developer-mode research tools — so block the scan UI
+        // outright instead of starting an AR session the flow can't use.
+        if settings.deviceSupportsLiDAR || settings.developerMode {
+            scanBody
+        } else {
+            lidarRequiredPanel
+        }
+    }
+
+    /// Centred blocker for non-LiDAR devices with Developer mode off —
+    /// shown in place of the whole scan UI so the AR session never
+    /// spins up.
+    private var lidarRequiredPanel: some View {
+        VStack(spacing: ForestixSpace.sm) {
+            Image(systemName: "cube.transparent")
+                .font(.system(size: 44, weight: .light))
+                .foregroundStyle(ForestixPalette.textTertiary)
+            Text("DBH scanning requires a LiDAR-equipped iPhone")
+                .font(ForestixType.bodyBold)
+                .foregroundStyle(ForestixPalette.textPrimary)
+                .multilineTextAlignment(.center)
+            Text("Alternative AR methods (motion sweep, two-tap caliper) are available in Developer mode.")
+                .font(ForestixType.caption)
+                .foregroundStyle(ForestixPalette.textSecondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding(ForestixSpace.lg)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(ForestixPalette.canvas.ignoresSafeArea())
+        .navigationTitle("Diameter")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .accessibilityIdentifier("dbhScan.lidarRequired")
+    }
+
+    private var scanBody: some View {
         ZStack {
             // Live AR camera feed wired to the same ARSession the
             // DBHScanViewModel is consuming depth frames from. Snapshot
@@ -176,15 +215,19 @@ public struct DBHScanScreen: View {
                 MeasureControlColumn(capture: onCaptureButton)
             }
 
-            // Bottom-right DBH method picker — cycles LiDAR depth / AR motion
-            // / AR caliper (the within-device comparison control).
-            VStack {
-                Spacer()
-                HStack {
+            // Bottom-right DBH method picker — Developer-mode research
+            // control cycling LiDAR depth / AR motion / AR caliper (the
+            // within-device comparison). Field mode always scans with the
+            // LiDAR depth path, so the picker is hidden there.
+            if settings.developerMode {
+                VStack {
                     Spacer()
-                    dbhMethodPickerButton
-                        .padding(.trailing, 18)
-                        .padding(.bottom, 96)
+                    HStack {
+                        Spacer()
+                        dbhMethodPickerButton
+                            .padding(.trailing, 18)
+                            .padding(.bottom, 96)
+                    }
                 }
             }
 

@@ -39,6 +39,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.automirrored.filled.PlaylistAddCheck
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CenterFocusWeak
 import androidx.compose.material.icons.filled.Close
@@ -773,6 +774,17 @@ private fun MeasureChooserSheet(
                 color = colors.textTertiary,
                 modifier = Modifier.padding(bottom = ForestixSpace.xs),
             )
+            // Field fix: the chained DBH → Height capture is the common
+            // whole-tree workflow, so it leads the sheet (emphasised row).
+            // "dbh?chain=true" tells DBH Accept to jump straight to Height
+            // on the same tree instead of showing the continuation dialog.
+            ChoiceRow(
+                Icons.AutoMirrored.Filled.PlaylistAddCheck,
+                "Full measurement",
+                "DBH → Height, one tree",
+                emphasized = true,
+            ) { onChoose("${Routes.DBH}?chain=true") }
+            Spacer(Modifier.size(ForestixSpace.xs))
             ChoiceRow(Icons.Filled.Straighten, "Diameter (DBH)", "Depth · AR motion · AR caliper") {
                 onChoose(Routes.DBH)
             }
@@ -792,16 +804,36 @@ private fun MeasureChooserSheet(
     }
 }
 
+/// One chooser row. `emphasized` (the Full measurement row) fills the row
+/// with the muted primary tint and inverts the icon tile — "slightly
+/// emphasised", still clearly a sibling of the single-measure rows.
 @Composable
-private fun ChoiceRow(icon: ImageVector, title: String, subtitle: String, onClick: () -> Unit) {
+private fun ChoiceRow(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    emphasized: Boolean = false,
+    onClick: () -> Unit,
+) {
     val colors = Forestix.colors
     val type = Forestix.type
     Row(
         Modifier
             .fillMaxWidth()
             .heightIn(min = 56.dp)
-            .clickableNoRipple(onClick)
-            .padding(vertical = 6.dp),
+            .then(
+                if (emphasized) {
+                    Modifier
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(colors.primaryMuted)
+                        .clickableNoRipple(onClick)
+                        .padding(vertical = 6.dp, horizontal = 8.dp)
+                } else {
+                    Modifier
+                        .clickableNoRipple(onClick)
+                        .padding(vertical = 6.dp)
+                }
+            ),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(ForestixSpace.sm),
     ) {
@@ -809,10 +841,15 @@ private fun ChoiceRow(icon: ImageVector, title: String, subtitle: String, onClic
             Modifier
                 .size(44.dp)
                 .clip(RoundedCornerShape(9.dp))
-                .background(colors.primaryMuted),
+                .background(if (emphasized) colors.primary else colors.primaryMuted),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(icon, contentDescription = null, tint = colors.primary, modifier = Modifier.size(22.dp))
+            Icon(
+                icon,
+                contentDescription = null,
+                tint = if (emphasized) MaterialTheme.colorScheme.onPrimary else colors.primary,
+                modifier = Modifier.size(22.dp),
+            )
         }
         Column(Modifier.weight(1f)) {
             Text(title, style = type.bodyBold.copy(fontSize = 15.5.sp), color = colors.textPrimary)

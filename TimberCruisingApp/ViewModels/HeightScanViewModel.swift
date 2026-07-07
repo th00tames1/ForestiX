@@ -51,10 +51,6 @@ public final class HeightScanViewModel: ObservableObject {
     /// negative → walk forward; zero → inside the sweet-spot band.
     @Published public private(set) var walkHintMeters: Float = 0
 
-    /// Set once if any ARKit frame reports `.limited` during the flow
-    /// (REQ-HGT-005). Latched until retake().
-    @Published public private(set) var trackingDroppedDuringMeasurement: Bool = false
-
     /// Set when the cruiser tapped Anchor Here but neither the LiDAR
     /// mesh nor the plane raycast returned a world hit — happens when
     /// the device is still building scene mesh, the cruiser is too
@@ -119,7 +115,6 @@ public final class HeightScanViewModel: ObservableObject {
     private static let baseMarkerId =
         UUID(uuidString: "00000000-A0A0-0000-0000-000000000003") ?? UUID()
 
-    private var trackingCancellable: AnyCancellable?
     private var depthCancellable: AnyCancellable?
 
     // MARK: - Construction
@@ -143,24 +138,14 @@ public final class HeightScanViewModel: ObservableObject {
         if state == .idle { /* waiting for anchor tap */ }
         session.run()
         motion.start()
-        subscribeToTracking()
         subscribeToDepth()
     }
 
     public func onDisappear() {
         motion.stop()
         session.pause()
-        trackingCancellable?.cancel()
-        trackingCancellable = nil
         depthCancellable?.cancel()
         depthCancellable = nil
-    }
-
-    private func subscribeToTracking() {
-        trackingCancellable = session.$trackingStatus
-            .sink { [weak self] status in
-                if status == .limited { self?.trackingDroppedDuringMeasurement = true }
-            }
     }
 
     private func subscribeToDepth() {
@@ -216,7 +201,6 @@ public final class HeightScanViewModel: ObservableObject {
         standingPointWorldAtAimTop = nil
         topAimedWorld = nil
         baseAimedWorld = nil
-        trackingDroppedDuringMeasurement = false
         anchorFailureReason = nil
         state = .anchorSet
         state = .walking
@@ -415,7 +399,6 @@ public final class HeightScanViewModel: ObservableObject {
         walkHintMeters = 0
         alphaTopSampleCount = 0
         alphaBaseSampleCount = 0
-        trackingDroppedDuringMeasurement = false
         anchorFailureReason = nil
         state = .idle
         rebuildSceneMarkers()
@@ -457,7 +440,13 @@ public final class HeightScanViewModel: ObservableObject {
             standingPointWorld: standing,
             alphaTopRad: at,
             alphaBaseRad: ab,
-            trackingStateWasNormalThroughout: !trackingDroppedDuringMeasurement,
+            // Field fix: the `.limited`-tracking latch that used to feed
+            // this flag fired on nearly every real walk-off (canopy +
+            // walking flap ARKit tracking constantly) and red-rejected
+            // good measurements. The Height flow now always reports
+            // normal tracking; the remaining guards (d_h, aim angles,
+            // H range, σ ratio) still gate quality.
+            trackingStateWasNormalThroughout: true,
             projectCalibration: calibration)
         let r = HeightEstimator.estimate(input: input)
         result = r

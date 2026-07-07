@@ -193,6 +193,7 @@ private fun ArSceneHost(
             // hit-tests resolve against depth points, not just planes.
             val depthSupported = session.isDepthModeSupported(Config.DepthMode.AUTOMATIC)
             controller.supportsDepth = depthSupported
+            controller.depthSupportKnown = true
             config.depthMode = if (depthSupported && preferDepth) Config.DepthMode.AUTOMATIC else Config.DepthMode.DISABLED
             config.instantPlacementMode = Config.InstantPlacementMode.DISABLED
             config.lightEstimationMode = Config.LightEstimationMode.DISABLED
@@ -203,15 +204,16 @@ private fun ArSceneHost(
             controller.onUpdate(session, frame)
             // Distance-compensated marker scaling — keeps flagged markers'
             // apparent size readable when the cruiser walks away (height
-            // walk-off can be 15–20 m out). Natural size inside the
-            // reference distance, linear growth beyond it, capped.
+            // walk-off can be 15–35 m out). Pure linear factor around the
+            // reference distance: sub-natural size up close (floored),
+            // linear growth beyond it, capped.
             if (scalingNodes.isNotEmpty()) {
                 val cam = frame.camera.pose
                 val camPos = Vec3(cam.tx(), cam.ty(), cam.tz())
                 scalingNodes.forEach { (node, worldPos) ->
                     val d = distance(camPos, worldPos)
                     val factor = (d / MARKER_SCALE_REFERENCE_M)
-                        .coerceIn(1f, MARKER_SCALE_MAX)
+                        .coerceIn(MARKER_SCALE_MIN, MARKER_SCALE_MAX)
                     node.scale = Float3(factor, factor, factor)
                 }
             }
@@ -219,12 +221,16 @@ private fun ArSceneHost(
     )
 }
 
-/// Distance-compensated marker scaling: natural size out to this range…
-private const val MARKER_SCALE_REFERENCE_M = 3f
+/// Distance-compensated marker scaling: natural (1×) size AT this range,
+/// factor = distance / reference — 1 m → 0.4×, 2.5 m → 1×, 20 m → 8×,
+/// 35 m → 14×. Field fix: the old 3 m reference with a 1× floor and 6×
+/// cap read ~2× too big up close and ~2× too small across a walk-off.
+private const val MARKER_SCALE_REFERENCE_M = 2.5f
 
-/// …then linear growth with distance, capped so a marker seen from across
-/// a stand doesn't balloon absurdly. (Mirror of iOS ARCameraView.)
-private const val MARKER_SCALE_MAX = 6f
+/// Floor/cap of the linear factor: never vanishes at arm's length, never
+/// balloons absurdly across a stand. (Mirror of iOS ARCameraView.)
+private const val MARKER_SCALE_MIN = 0.4f
+private const val MARKER_SCALE_MAX = 14f
 
 /// Builds a flat annulus (ring) node — the rim only — mirroring the iOS
 /// generateRing(). Cheap vs a filled translucent disk, so a 30 m boundary

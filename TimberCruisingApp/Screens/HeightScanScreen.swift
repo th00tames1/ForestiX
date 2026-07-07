@@ -129,14 +129,18 @@ public struct HeightScanScreen: View {
                 MeasureControlColumn(capture: primaryCapture)
             }
 
-            // Bottom-right LiDAR/AR toggle.
-            VStack {
-                Spacer()
-                HStack {
+            // Bottom-right LiDAR/AR toggle — Developer-mode research
+            // control only; field mode pins LiDAR devices to the mesh
+            // path (AppSettings.measurementSource).
+            if settings.developerMode {
+                VStack {
                     Spacer()
-                    MeasureSourceToggleButton()
-                        .padding(.trailing, 18)
-                        .padding(.bottom, 96)
+                    HStack {
+                        Spacer()
+                        MeasureSourceToggleButton()
+                            .padding(.trailing, 18)
+                            .padding(.bottom, 96)
+                    }
                 }
             }
 
@@ -296,12 +300,6 @@ public struct HeightScanScreen: View {
     @ViewBuilder
     private var bottomPanel: some View {
         MeasureStatusPanel {
-            if viewModel.trackingDroppedDuringMeasurement {
-                bannerView(
-                    "AR tracking dropped during measurement.",
-                    tint: .orange)
-                    .accessibilityIdentifier("heightScan.trackingBanner")
-            }
             if let reason = viewModel.anchorFailureReason {
                 bannerView(reason, tint: .orange)
                     .accessibilityIdentifier("heightScan.anchorFailureBanner")

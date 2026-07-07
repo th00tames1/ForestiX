@@ -2,6 +2,10 @@
 // on the DBH scan screen: the depth-API chord/circle fit ("Depth") vs the
 // two-tap trunk-edge AR caliper ("Caliper"). Mirrors the SlashScan floating
 // control look used by the Distance Live/Two-point pill.
+//
+// Developer mode ONLY (field fix, both platforms): normal mode is
+// depth-only, so this pill never renders there — DBHScanScreen gates it
+// behind settings.developerMode.
 
 package com.hcjeong.forestix.ui.screens.dbh
 

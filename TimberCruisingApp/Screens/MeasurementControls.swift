@@ -141,7 +141,9 @@ public struct MeasureControlColumn<Extra: View>: View {
 
 /// Circular icon button that flips `AppSettings.measurementSource`. The
 /// icon + caption show the active path; disabled (and shown as AR) on
-/// devices without LiDAR.
+/// devices without LiDAR. Developer-mode chrome only — field mode pins
+/// LiDAR devices to the mesh path with no user-facing switch, so the
+/// measurement screens render this solely when `settings.developerMode`.
 public struct MeasureSourceToggleButton: View {
     @EnvironmentObject private var settings: AppSettings
 

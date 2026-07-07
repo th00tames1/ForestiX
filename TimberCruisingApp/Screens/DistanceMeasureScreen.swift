@@ -6,11 +6,10 @@
 //     overlay draws a thick white-bordered line with a yellow point at
 //     each end and a centred distance label in a rounded white pill.
 //
-// Source toggle (LiDAR / AR):
-//   • LiDAR (default when supported) — scene-mesh raycast.
-//   • AR — estimated-plane raycast (works on non-LiDAR devices). When the
-//     device has no LiDAR the toggle starts on AR and the LiDAR button is
-//     disabled.
+// Source (LiDAR / AR):
+//   • LiDAR — scene-mesh raycast; always used on LiDAR devices.
+//   • AR — estimated-plane raycast; the only path on non-LiDAR devices.
+//   The on-screen toggle is Developer-mode research chrome only.
 //
 // The screen logs every accepted reading to `QuickMeasureHistory` as a
 // `.distance` kind so it appears in Field Log and CSV / bundle exports.
@@ -96,14 +95,18 @@ public struct DistanceMeasureScreen: View {
                     }
                 }
 
-                // Bottom-right LiDAR/AR toggle.
-                VStack {
-                    Spacer()
-                    HStack {
+                // Bottom-right LiDAR/AR toggle — Developer-mode research
+                // control only; field mode pins LiDAR devices to the mesh
+                // path (AppSettings.measurementSource).
+                if settings.developerMode {
+                    VStack {
                         Spacer()
-                        MeasureSourceToggleButton()
-                            .padding(.trailing, 18)
-                            .padding(.bottom, 96)
+                        HStack {
+                            Spacer()
+                            MeasureSourceToggleButton()
+                                .padding(.trailing, 18)
+                                .padding(.bottom, 96)
+                        }
                     }
                 }
 

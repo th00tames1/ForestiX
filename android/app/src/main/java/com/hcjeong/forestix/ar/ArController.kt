@@ -34,12 +34,19 @@ class ArController {
     @Volatile var viewHeightPx: Int = 0
 
     /// True when the running session supports the Depth API — the closest
-    /// Android equivalent of "device has LiDAR". Drives the LiDAR/AR toggle
-    /// default in DistanceMeasureScreen and the DBH method selector's Depth
-    /// segment. Backed by Compose snapshot state so a Composable reading it
-    /// recomposes when the session reports depth support (otherwise the
-    /// Depth segment stayed disabled after entering in caliper mode).
+    /// Android equivalent of "device has LiDAR". Picks Distance's raw-vs-
+    /// smoothed path, gates normal-mode DBH scanning, and enables the
+    /// dev-only DBH method selector's Depth segment. Backed by Compose
+    /// snapshot state so a Composable reading it recomposes when the
+    /// session reports depth support.
     var supportsDepth: Boolean by mutableStateOf(false)
+        internal set
+
+    /// True once the running session has actually REPORTED depth capability
+    /// — supportsDepth defaults to false before the session configures, so
+    /// UI that blocks on missing depth (normal-mode DBH) must wait for this
+    /// or it would flash the blocker on capable devices during AR startup.
+    var depthSupportKnown: Boolean by mutableStateOf(false)
         internal set
 
     /// When true (LiDAR mode), screenCenterHit takes the nearest hit of any

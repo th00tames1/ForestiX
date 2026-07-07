@@ -56,7 +56,6 @@ object HeightEstimator {
         anchorX: Float, anchorZ: Float,
         standingX: Float, standingZ: Float,
         alphaTopRad: Float, alphaBaseRad: Float,
-        trackingStateWasNormalThroughout: Boolean,
         vioDriftFraction: Float = DEFAULT_VIO_DRIFT_FRACTION,
     ): HeightResult {
         // Step 1 — horizontal distance (drop Y onto the ground plane).
@@ -64,9 +63,10 @@ object HeightEstimator {
         val dz = standingZ - anchorZ
         val dh = sqrt(dx * dx + dz * dz)
 
-        // Step 2 — guard rails -> red.
-        if (!trackingStateWasNormalThroughout)
-            return red(dh, alphaTopRad, alphaBaseRad, "AR tracking lost mid-measurement")
+        // Step 2 — guard rails -> red. (The old "AR tracking lost
+        // mid-measurement" hard reject was removed — field fix, both
+        // platforms: transient tracking dips flagged good captures; the
+        // walk-off drift risk is already covered by the d_h WARN checks.)
         if (dh < MIN_DH_M)
             return red(dh, alphaTopRad, alphaBaseRad,
                 "Too close; step back (walked back ${fmt(dh)} m so far)")

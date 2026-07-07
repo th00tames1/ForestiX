@@ -93,8 +93,11 @@ private enum class Stage { AIMING, CAPTURING, RESULT }
 /// are kept (2 largest deviations trimmed) and averaged.
 private const val SAMPLE_COUNT = 5
 
+/// `chainToHeight` = launched from the map-home "Full measurement" row
+/// ("dbh?chain=true"): Accept saves the diameter, skips the continuation
+/// dialog, and goes straight to Height on the same tree.
 @Composable
-fun DBHScanScreen(nav: NavController) {
+fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     val env = LocalAppEnvironment.current
     val context = LocalContext.current
     val controller = remember { ArController() }
@@ -120,6 +123,12 @@ fun DBHScanScreen(nav: NavController) {
     // the active project's wall/cylinder fits when launched from the
     // Add-Tree flow (iOS injects it into DBHScanViewModel).
     val calibration by env.activeScanCalibration.collectAsStateWithLifecycle()
+    // Field mode (developer mode OFF) requires the ARCore Depth API — the
+    // depth-free AR motion / AR caliper arms are developer tools. Only
+    // block once the session has actually REPORTED capability, so capable
+    // devices don't flash the blocker while AR is still starting up.
+    val depthBlocked = !settings.developerMode &&
+        controller.depthSupportKnown && !controller.supportsDepth
     var stage by remember { mutableStateOf(Stage.AIMING) }
     var result by remember { mutableStateOf<DBHResult?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
@@ -138,7 +147,11 @@ fun DBHScanScreen(nav: NavController) {
     val caliperSmoother = remember { DistanceSmoother() }
     var captureMethod by remember {
         mutableStateOf(
-            when (settings.dbhCaptureMethod) {
+            // The Depth/Motion/Caliper picker is developer-only: normal mode
+            // always scans with the depth method, even if a dev-mode session
+            // persisted another choice earlier.
+            if (!settings.developerMode) DbhCaptureMethod.DEPTH
+            else when (settings.dbhCaptureMethod) {
                 "caliper" -> DbhCaptureMethod.CALIPER
                 "motion" -> DbhCaptureMethod.MOTION
                 else -> DbhCaptureMethod.DEPTH
@@ -167,8 +180,8 @@ fun DBHScanScreen(nav: NavController) {
     var cylinderMarker by remember { mutableStateOf<ArSceneMarker?>(null) }
 
     // Live single-frame preview loop while aiming (depth method only).
-    LaunchedEffect(stage, captureMethod) {
-        while (stage == Stage.AIMING && captureMethod == DbhCaptureMethod.DEPTH) {
+    LaunchedEffect(stage, captureMethod, depthBlocked) {
+        while (stage == Stage.AIMING && captureMethod == DbhCaptureMethod.DEPTH && !depthBlocked) {
             controller.acquireDepthFrame()?.let { f ->
                 val axis = DBHEstimator.pickGuideAxis(f, f.width / 2.0, f.height / 2.0, calibration)
                 val raw = DBHEstimator.livePreview(
@@ -400,7 +413,8 @@ fun DBHScanScreen(nav: NavController) {
         }
 
         // Guide line + live fit chord (drawn relative to screen centre).
-        if (stage != Stage.RESULT) {
+        // All scanning chrome is suppressed while the depth blocker is up.
+        if (stage != Stage.RESULT && !depthBlocked) {
             Canvas(Modifier.fillMaxSize()) {
                 val cy = size.height / 2f
                 // Depth chrome (guide line + live fit chord) is meaningful only
@@ -454,8 +468,9 @@ fun DBHScanScreen(nav: NavController) {
                 }
             }
 
-            // DBH method picker (Depth vs Caliper) floating above the panel.
-            if (stage == Stage.AIMING) {
+            // DBH method picker (Depth / Motion / Caliper) floating above the
+            // panel — developer mode only; normal mode is depth-only.
+            if (stage == Stage.AIMING && settings.developerMode) {
                 Box(Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 140.dp)) {
                     DbhMethodSelector(
                         method = captureMethod,
@@ -479,7 +494,7 @@ fun DBHScanScreen(nav: NavController) {
             }
         }
 
-        if (stage == Stage.AIMING &&
+        if (stage == Stage.AIMING && !depthBlocked &&
             (captureMethod == DbhCaptureMethod.DEPTH || captureMethod == DbhCaptureMethod.MOTION)
         ) {
             MeasureControlColumn(onCapture = {
@@ -487,7 +502,13 @@ fun DBHScanScreen(nav: NavController) {
             })
         }
 
-        MeasureStatusPanel {
+        // No Depth API + developer mode off → the scan can't run: replace
+        // the whole scanning UI with a centred blocker.
+        if (depthBlocked) {
+            DepthRequiredPanel(Modifier.align(Alignment.Center))
+        }
+
+        if (!depthBlocked) MeasureStatusPanel {
             failure?.let { CenteredText(it, dim = true) }
             when (stage) {
                 Stage.AIMING -> CenteredText(
@@ -606,8 +627,18 @@ fun DBHScanScreen(nav: NavController) {
                                         photoPath = photo,
                                     )
                                 )
+                                // Full-measurement chain: skip the continuation
+                                // dialog, go straight to Height on this tree.
+                                // Navigate AFTER the append (this scope dies
+                                // with the screen) and pop DBH so Height's
+                                // continuation DONE returns to the map.
+                                if (chainToHeight) {
+                                    nav.navigate("height?tree=$pendingTree") {
+                                        popUpTo(Routes.DBH_PATTERN) { inclusive = true }
+                                    }
+                                }
                             }
-                            continuationTree = pendingTree
+                            if (!chainToHeight) continuationTree = pendingTree
                             if (settings.developerMode) {
                                 val fields = mutableMapOf(
                                     "measure_type" to "dbh",
@@ -690,6 +721,28 @@ fun DBHScanScreen(nav: NavController) {
                 },
             )
         }
+    }
+}
+
+/// Centred blocker for normal (non-developer) mode on devices whose ARCore
+/// session lacks the Depth API — the DBH scan cannot run there. Styled
+/// like the status panel so it reads as part of the AR chrome.
+@Composable
+private fun DepthRequiredPanel(modifier: Modifier = Modifier) {
+    Column(
+        modifier
+            .padding(horizontal = 32.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color.Black.copy(alpha = 0.65f))
+            .padding(horizontal = 20.dp, vertical = 18.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        CenteredText("DBH scanning requires the ARCore Depth API on this device")
+        CenteredText(
+            "Alternative AR methods (motion sweep, caliper) are available in Developer mode.",
+            dim = true,
+        )
     }
 }
 

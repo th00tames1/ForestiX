@@ -2,8 +2,9 @@
 // (Live, Two-point) toggled by a pill under the "+" capture button. The "+"
 // captures against the centre crosshair: in Live it logs the device→target
 // distance, in Two-point it drops point A then B. Points + line are a crisp
-// 2D overlay (no oversized 3D spheres). LiDAR/AR is a bottom-right button;
-// the readout is a centred half-width panel.
+// 2D overlay (no oversized 3D spheres); the readout is a centred half-width
+// panel. There is NO sensor-source toggle (field fix, both platforms) — the
+// Depth API is used automatically when the device supports it.
 
 package com.hcjeong.forestix.ui.screens
 

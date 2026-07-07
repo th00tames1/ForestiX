@@ -201,12 +201,16 @@ public final class AppSettings: ObservableObject {
     }
 
     /// Preferred world-sensing source for the AR measurement screens.
-    /// Defaults to `.lidar` on LiDAR devices and is hard-clamped to `.ar`
-    /// on devices without the scanner — so a value persisted on one
-    /// device never strands a non-LiDAR device on an unusable setting.
+    /// Field mode is opinionated: LiDAR devices ALWAYS raycast against
+    /// the scene-reconstruction mesh (`.lidar`) and devices without the
+    /// scanner use the estimated-plane path (`.ar`) — there's no
+    /// user-facing switch any more. Only Developer mode honours the
+    /// persisted value, so the research toggle
+    /// (`MeasureSourceToggleButton`) keeps working there.
     public var measurementSource: MeasurementSource {
         get {
             guard ARKitSessionManager.supportsLiDAR else { return .ar }
+            guard developerMode else { return .lidar }
             let raw = defaults.string(forKey: Keys.measurementSource)
             return raw.flatMap(MeasurementSource.init(rawValue:)) ?? .lidar
         }
@@ -232,12 +236,19 @@ public final class AppSettings: ObservableObject {
         }
     }
 
-    /// User-facing 3-way DBH sensing path (LiDAR depth / AR motion / AR
-    /// caliper) — the within-device comparison picker. On non-LiDAR devices
-    /// the depth path is unavailable, so a persisted `.lidarDepth` is
-    /// reported as `.arCaliper` (the most robust depth-free method).
+    /// 3-way DBH sensing path (LiDAR depth / AR motion / AR caliper) —
+    /// the within-device comparison picker, now a Developer-mode research
+    /// control. Field mode always uses the LiDAR depth path (the DBH
+    /// screen blocks scanning outright on non-LiDAR devices). In
+    /// Developer mode the persisted choice is honoured; a persisted
+    /// `.lidarDepth` on a non-LiDAR device is reported as `.arCaliper`
+    /// (the most robust depth-free method).
     public var dbhMethodSource: DBHMethodSource {
         get {
+            guard developerMode else {
+                return ARKitSessionManager.supportsLiDAR ? .lidarDepth
+                                                         : .arCaliper
+            }
             let stored = defaults.string(forKey: Keys.dbhMethodSource)
                 .flatMap(DBHMethodSource.init(rawValue:)) ?? .lidarDepth
             if !ARKitSessionManager.supportsLiDAR && stored == .lidarDepth {

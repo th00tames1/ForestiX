@@ -95,11 +95,19 @@ public struct MapHomeScreen: View {
     @State private var presentingDistance = false
     @State private var presentingSampling = false
     @State private var pendingTreeNumber: Int?
+    /// Full-measurement chain (the chooser's first row): ONE tree number,
+    /// DBH first, then the Height cover auto-opens on DBH Accept. No
+    /// continuation prompt in this mode — the chain IS the answer.
+    @State private var fullMeasurementChain = false
+    /// Set when a chained DBH is accepted; the DBH cover's onDismiss
+    /// consumes it to present the Height cover after the dismissal has
+    /// settled (same two-step pattern as `pendingChoice`).
+    @State private var chainHeightPending = false
 
     public init() {}
 
     private enum MeasureChoice {
-        case dbh, height, distance, sampling
+        case fullMeasurement, dbh, height, distance, sampling
     }
 
     public var body: some View {
@@ -128,8 +136,10 @@ public struct MapHomeScreen: View {
             }
             #if os(iOS)
             .navigationBarHidden(true)
-            .fullScreenCover(isPresented: $presentingDBHScan) { dbhCover }
-            .fullScreenCover(isPresented: $presentingHeightScan) { heightCover }
+            .fullScreenCover(isPresented: $presentingDBHScan,
+                             onDismiss: continueChainAfterDBH) { dbhCover }
+            .fullScreenCover(isPresented: $presentingHeightScan,
+                             onDismiss: { fullMeasurementChain = false }) { heightCover }
             .fullScreenCover(isPresented: $presentingDistance) {
                 NavigationStack {
                     DistanceMeasureScreen()
@@ -792,6 +802,7 @@ public struct MapHomeScreen: View {
     /// tree number via the same pendingTreeNumber pattern the hub uses.
     private func measureAgain(_ pin: MapPin) {
         pendingTreeNumber = pin.treeNumber ?? history.suggestedNextTreeNumber
+        fullMeasurementChain = false
         presentingDBHScan = true
     }
 
@@ -806,6 +817,13 @@ public struct MapHomeScreen: View {
                 .padding(.top, ForestixSpace.md)
                 .padding(.bottom, ForestixSpace.xs)
 
+            chooserRow("Full measurement", "DBH → Height, one tree",
+                       icon: "tree", accessibilityID: "mapHome.choose.full",
+                       divided: true, emphasized: true) {
+                pendingTreeNumber = history.suggestedNextTreeNumber
+                pendingChoice = .fullMeasurement
+                presentingChooser = false
+            }
             chooserRow("Diameter (DBH)", "Depth · AR motion · AR caliper",
                        icon: "ruler", accessibilityID: "mapHome.choose.dbh",
                        divided: true) {
@@ -835,7 +853,7 @@ public struct MapHomeScreen: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, ForestixSpace.md)
-        .presentationDetents([.height(400)])
+        .presentationDetents([.height(470)])
         .presentationDragIndicator(.visible)
         .presentationBackground(ForestixPalette.surface)
     }
@@ -845,16 +863,22 @@ public struct MapHomeScreen: View {
                             icon: String,
                             accessibilityID: String,
                             divided: Bool,
+                            emphasized: Bool = false,
                             action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 14) {
                 ZStack {
+                    // Emphasized (the Full-measurement hero row): solid
+                    // primary tile + ink glyph, same treatment as the big
+                    // (+) capture button — reads as "the" workflow.
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .fill(ForestixPalette.primaryMuted)
+                        .fill(emphasized ? ForestixPalette.primary
+                                         : ForestixPalette.primaryMuted)
                         .frame(width: 44, height: 44)
                     Image(systemName: icon)
                         .font(.system(size: 20, weight: .medium))
-                        .foregroundStyle(ForestixPalette.primary)
+                        .foregroundStyle(emphasized ? ForestixPalette.primaryInk
+                                                    : ForestixPalette.primary)
                 }
                 VStack(alignment: .leading, spacing: 1) {
                     Text(title)
@@ -888,11 +912,27 @@ public struct MapHomeScreen: View {
     private func launchPendingChoice() {
         guard let choice = pendingChoice else { return }
         pendingChoice = nil
+        fullMeasurementChain = (choice == .fullMeasurement)
         switch choice {
-        case .dbh:      presentingDBHScan = true
+        case .fullMeasurement,
+             .dbh:      presentingDBHScan = true
         case .height:   presentingHeightScan = true
         case .distance: presentingDistance = true
         case .sampling: presentingSampling = true
+        }
+    }
+
+    /// DBH cover dismissed. In the full-measurement chain an accepted
+    /// DBH hands straight off to the Height cover locked to the SAME
+    /// tree number (`pendingTreeNumber` is left untouched) — no
+    /// continuation dialog in this mode. Closing the DBH cover without
+    /// accepting cancels the chain.
+    private func continueChainAfterDBH() {
+        if chainHeightPending {
+            chainHeightPending = false
+            presentingHeightScan = true
+        } else {
+            fullMeasurementChain = false
         }
     }
 
@@ -919,6 +959,10 @@ public struct MapHomeScreen: View {
                         latitude: meta.latitude,
                         longitude: meta.longitude,
                         photoPath: meta.photoPath))
+                    // Full-measurement chain: an accepted DBH arms the
+                    // Height cover; onDismiss presents it for the same
+                    // tree number.
+                    if fullMeasurementChain { chainHeightPending = true }
                     presentingDBHScan = false
                 })
             .toolbar {

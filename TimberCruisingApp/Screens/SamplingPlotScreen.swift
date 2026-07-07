@@ -4,8 +4,9 @@
 // top. When the device moves outside the ring the border flashes red and
 // the device vibrates until the cruiser walks back inside.
 //
-// UI matches the shared Measure-app layout: right-centre capture button,
-// bottom-right LiDAR/AR toggle, and a compact centred status panel.
+// UI matches the shared Measure-app layout: right-centre capture button
+// and a compact centred status panel (plus the bottom-right LiDAR/AR
+// toggle in Developer mode).
 
 import SwiftUI
 import Common
@@ -77,14 +78,18 @@ public struct SamplingPlotScreen: View {
             // Right-centre capture button.
             MeasureControlColumn(capture: placePlotIfNeeded)
 
-            // Bottom-right LiDAR/AR toggle.
-            VStack {
-                Spacer()
-                HStack {
+            // Bottom-right LiDAR/AR toggle — Developer-mode research
+            // control only; field mode pins LiDAR devices to the mesh
+            // path (AppSettings.measurementSource).
+            if settings.developerMode {
+                VStack {
                     Spacer()
-                    MeasureSourceToggleButton()
-                        .padding(.trailing, 18)
-                        .padding(.bottom, 96)
+                    HStack {
+                        Spacer()
+                        MeasureSourceToggleButton()
+                            .padding(.trailing, 18)
+                            .padding(.bottom, 96)
+                    }
                 }
             }
 

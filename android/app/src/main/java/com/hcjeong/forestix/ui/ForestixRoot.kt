@@ -63,6 +63,11 @@ object Routes {
     const val TIMBER_HUB = "timberHub"
     const val FIELD_LOG = "fieldLog"
     const val DBH = "dbh"
+    /// Registered DBH route pattern. The optional `chain` flag
+    /// ("dbh?chain=true" — the map-home Full measurement row) makes DBH
+    /// Accept skip the continuation dialog and jump straight to Height on
+    /// the same tree; plain "dbh" keeps today's behaviour.
+    const val DBH_PATTERN = "dbh?chain={chain}"
     const val HEIGHT = "height"
     const val DISTANCE = "distance"
     const val SAMPLING = "sampling"
@@ -90,7 +95,12 @@ fun ForestixRoot() {
         composable(Routes.TREE_HUB) { TreeMeasurementHubScreen(nav) }
         composable(Routes.TIMBER_HUB) { TimberCruisingHubScreen(nav) }
         composable(Routes.FIELD_LOG) { FieldLogScreen(nav) }
-        composable(Routes.DBH) { DBHScanScreen(nav) }
+        composable(
+            Routes.DBH_PATTERN,
+            arguments = listOf(navArgument("chain") { type = NavType.BoolType; defaultValue = false }),
+        ) { back ->
+            DBHScanScreen(nav, chainToHeight = back.arguments?.getBoolean("chain") == true)
+        }
         composable(
             "height?tree={tree}",
             arguments = listOf(navArgument("tree") { type = NavType.IntType; defaultValue = -1 }),

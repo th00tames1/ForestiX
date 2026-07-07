@@ -54,10 +54,10 @@ public struct ARSceneMarker: Identifiable, Equatable {
     /// material so the camera feed shows through (useful for the DBH
     /// cylinder). Keep saturated for visibility against foliage.
     public var colorRGBA: SIMD4<Float>
-    /// When true the marker grows with camera distance so its APPARENT
-    /// (on-screen) size stays readable — a 8 cm sphere is fine at 3 m but
-    /// nearly invisible from 15 m across a height walk-off. Natural size
-    /// within the reference distance; linear growth beyond it, capped.
+    /// When true the marker is rescaled proportionally to camera distance
+    /// (clamped) so its APPARENT (on-screen) size stays constant — a 8 cm
+    /// sphere is fine at 3 m but nearly invisible from 15 m across a
+    /// height walk-off, and overwhelming at arm's length.
     public var scalesWithDistance: Bool
 
     public init(id: UUID = UUID(),
@@ -124,11 +124,17 @@ public struct ARCameraView: UIViewRepresentable {
         var updateSub: (any Cancellable)?
     }
 
-    /// Distance-compensated marker scaling: natural size out to this range…
-    private static let scaleReferenceM: Float = 3.0
-    /// …then linear growth with distance, capped so a marker seen from
-    /// across a stand doesn't balloon absurdly.
-    private static let scaleMax: Float = 6.0
+    /// Apparent-size-constant marker scaling: factor = distance / 2.5,
+    /// clamped to [scaleMin, scaleMax] — so the marker LOOKS the same
+    /// size at any range (1 m → 0.4×, 2.5 m → 1×, 20 m → 8×, 35 m → 14×).
+    /// The old scheme (natural size inside 3 m, capped ×6) read ~2× too
+    /// big up close and ~2× too small at height-walk-off distances.
+    private static let scaleReferenceM: Float = 2.5
+    /// Clamp floor — a point-blank marker shrinks no further than this.
+    private static let scaleMin: Float = 0.4
+    /// Clamp cap — a marker seen from across a stand stops growing here
+    /// so it never balloons absurdly.
+    private static let scaleMax: Float = 14.0
 
     public func makeUIView(context: Context) -> ARView {
         let view = ARView(frame: .zero,
@@ -153,7 +159,8 @@ public struct ARCameraView: UIViewRepresentable {
                 guard let anchor = coordinator.markerAnchors[id],
                       let pos = coordinator.markerPositions[id] else { continue }
                 let d = simd_distance(cam, pos)
-                let factor = min(Self.scaleMax, max(1, d / Self.scaleReferenceM))
+                let factor = min(Self.scaleMax,
+                                 max(Self.scaleMin, d / Self.scaleReferenceM))
                 for child in anchor.children {
                     child.scale = SIMD3<Float>(repeating: factor)
                 }

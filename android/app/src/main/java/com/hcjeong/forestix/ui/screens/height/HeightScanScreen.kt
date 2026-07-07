@@ -186,7 +186,6 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                     anchorX = anchor.x, anchorZ = anchor.z,
                     standingX = standing.x, standingZ = standing.z,
                     alphaTopRad = aTop, alphaBaseRad = aBase,
-                    trackingStateWasNormalThroughout = true,
                     vioDriftFraction = calibration.vioDriftFraction,
                 )
                 result = r

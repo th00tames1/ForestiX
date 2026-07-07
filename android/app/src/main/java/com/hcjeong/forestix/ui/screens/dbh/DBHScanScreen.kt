@@ -558,6 +558,14 @@ fun DBHScanScreen(nav: NavController) {
                 }
                 if (settings.developerMode) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Target", style = Forestix.type.caption, color = Color.White.copy(alpha = 0.8f))
+                        OutlinedTextField(
+                            value = settings.researchTreeId,
+                            onValueChange = { env.settings.setResearchTreeId(it.trim()) },
+                            placeholder = { Text("T1") },
+                            singleLine = true,
+                            modifier = Modifier.weight(0.8f),
+                        )
                         Text("True Ø (cm)", style = Forestix.type.caption, color = Color.White.copy(alpha = 0.8f))
                         OutlinedTextField(
                             value = researchTrueCm,
@@ -609,6 +617,9 @@ fun DBHScanScreen(nav: NavController) {
                                     "species" to (metaSpecies ?: ""),
                                     "note" to metaNote,
                                 )
+                                if (settings.researchTreeId.isNotEmpty()) {
+                                    fields["tree_id"] = settings.researchTreeId  // repeat auto-filled by record()
+                                }
                                 preview?.let { fields["distance_m"] = String.format(Locale.US, "%.2f", it.distanceM) }
                                 controller.cameraForwardElevationRad()?.let {
                                     fields["pitch_deg"] = String.format(Locale.US, "%.1f", it * 180f / Math.PI.toFloat())

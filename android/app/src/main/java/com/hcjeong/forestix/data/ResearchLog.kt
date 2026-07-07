@@ -53,6 +53,13 @@ object ResearchLog {
         f["platform"] = "Android"
         f["os_version"] = "Android ${Build.VERSION.RELEASE}"
         f["device_model"] = "${Build.MANUFACTURER} ${Build.MODEL}"
+        // 1-based repeat per (tree_id, measure_type), counted from the CSV so
+        // it survives restarts. Safe naive comma split: the only field that
+        // can contain a comma (note) sits AFTER the indices read here.
+        val tree = f["tree_id"]
+        if (!tree.isNullOrEmpty() && f["repeat"] == null) {
+            f["repeat"] = "${nextRepeat(context, tree, f["measure_type"] ?: "")}"
+        }
         val row = COLUMNS.joinToString(",") { csvEscape(f[it] ?: "") }
         val out = file(context)
         try {
@@ -61,6 +68,21 @@ object ResearchLog {
         } catch (_: Exception) {
             // Skip the row rather than corrupt the log.
         }
+    }
+
+    private fun nextRepeat(context: Context, treeId: String, measureType: String): Int {
+        val src = file(context)
+        if (!src.exists()) return 1
+        val typeIdx = COLUMNS.indexOf("measure_type")
+        val treeIdx = COLUMNS.indexOf("tree_id")
+        var n = 0
+        src.readLines().drop(1).forEach { line ->
+            val cols = line.split(",")
+            if (cols.size > maxOf(typeIdx, treeIdx) &&
+                cols[typeIdx] == measureType && cols[treeIdx] == treeId
+            ) n++
+        }
+        return n + 1
     }
 
     /// Copy the log into the shared-export cache and return a shareable Uri

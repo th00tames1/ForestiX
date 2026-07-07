@@ -278,6 +278,15 @@ public struct DistanceMeasureScreen: View {
             }
             if settings.developerMode {
                 HStack(spacing: 6) {
+                    Text("Target")
+                        .font(ForestixType.caption)
+                        .foregroundStyle(.white.opacity(0.8))
+                    TextField("D1", text: Binding(
+                        get: { settings.researchTreeId },
+                        set: { settings.researchTreeId = $0 }))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                        .accessibilityIdentifier("distance.researchTarget")
                     Text("True (m)")
                         .font(ForestixType.caption)
                         .foregroundStyle(.white.opacity(0.8))
@@ -382,6 +391,9 @@ public struct DistanceMeasureScreen: View {
             "unit": "m",
             "distance_m": String(format: "%.3f", measured),
         ]
+        if !settings.researchTreeId.isEmpty {
+            f["tree_id"] = settings.researchTreeId   // repeat auto-filled by record()
+        }
         if let p = raycaster.cameraPitchDeg {
             f["pitch_deg"] = String(format: "%.1f", p)
         }

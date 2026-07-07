@@ -36,7 +36,6 @@ public final class ResearchLog {
     ]
 
     private let queue = DispatchQueue(label: "forestix.researchlog")
-    private var repeatByTree: [String: Int] = [:]
 
     public var fileURL: URL {
         let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -51,25 +50,37 @@ public final class ResearchLog {
         return max(0, lines.count - 1) // minus header
     }
 
-    /// Next 1-based repeat index for a given tree id (resets per distinct id).
-    public func nextRepeat(for treeId: String) -> Int {
-        queue.sync {
-            let n = (repeatByTree[treeId] ?? 0) + 1
-            repeatByTree[treeId] = n
-            return n
+    /// Next 1-based repeat index for (tree id, measure type), counted from
+    /// the CSV itself so it survives app restarts. Must run on `queue`.
+    /// Naive comma split is safe here: the only field that can contain a
+    /// comma (note) sits AFTER the indices we read.
+    private func nextRepeatLocked(treeId: String, measureType: String) -> Int {
+        guard let text = try? String(contentsOf: fileURL, encoding: .utf8) else { return 1 }
+        let typeIdx = Self.columns.firstIndex(of: "measure_type") ?? 4
+        let treeIdx = Self.columns.firstIndex(of: "tree_id") ?? 7
+        var n = 0
+        for line in text.split(separator: "\n").dropFirst() {
+            let cols = line.split(separator: ",", omittingEmptySubsequences: false)
+            guard cols.count > max(typeIdx, treeIdx) else { continue }
+            if cols[typeIdx] == measureType, cols[treeIdx] == treeId { n += 1 }
         }
+        return n + 1
     }
 
     /// Append one measurement. The caller supplies the measurement-specific
-    /// fields; this fills timestamp / platform / os / device.
+    /// fields; this fills timestamp / platform / os / device, and — when a
+    /// tree_id is present — the 1-based repeat index for that target.
     public func record(_ fields: [String: String]) {
         var f = fields
         f["timestamp_iso"] = Self.timestamp()
         f["platform"] = "iOS"
         f["os_version"] = Self.osVersion()
         f["device_model"] = Self.deviceModel()
-        let row = Self.columns.map { Self.csvEscape(f[$0] ?? "") }.joined(separator: ",")
         queue.async {
+            if let tree = f["tree_id"], !tree.isEmpty, f["repeat"] == nil {
+                f["repeat"] = "\(self.nextRepeatLocked(treeId: tree, measureType: f["measure_type"] ?? ""))"
+            }
+            let row = Self.columns.map { Self.csvEscape(f[$0] ?? "") }.joined(separator: ",")
             let url = self.fileURL
             let exists = FileManager.default.fileExists(atPath: url.path)
             var out = ""
@@ -93,7 +104,6 @@ public final class ResearchLog {
     public func clear() {
         queue.async {
             try? FileManager.default.removeItem(at: self.fileURL)
-            self.repeatByTree.removeAll()
         }
     }
 

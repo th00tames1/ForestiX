@@ -760,6 +760,9 @@ public struct DBHScanScreen: View {
             "species": metaSpecies ?? "",
             "note": metaNote,
         ]
+        if !settings.researchTreeId.isEmpty {
+            f["tree_id"] = settings.researchTreeId   // repeat auto-filled by record()
+        }
         if let d = viewModel.distanceToStemCenterM {
             f["distance_m"] = String(format: "%.2f", d)
         }
@@ -823,6 +826,15 @@ public struct DBHScanScreen: View {
             .padding(.top, 2)
             if settings.developerMode {
                 HStack(spacing: 6) {
+                    Text("Target")
+                        .font(ForestixType.caption)
+                        .foregroundStyle(.white.opacity(0.8))
+                    TextField("T1", text: Binding(
+                        get: { settings.researchTreeId },
+                        set: { settings.researchTreeId = $0 }))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                        .accessibilityIdentifier("dbhScan.researchTarget")
                     Text("True Ø (cm)")
                         .font(ForestixType.caption)
                         .foregroundStyle(.white.opacity(0.8))

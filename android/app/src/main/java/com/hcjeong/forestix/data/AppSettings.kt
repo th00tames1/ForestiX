@@ -55,6 +55,11 @@ data class SettingsSnapshot(
     /// (depth source, intrinsics, point counts, raw chord, pitch, σ) on the
     /// AR screens and unlocks the validation-experiment tooling.
     val developerMode: Boolean = false,
+    /// Operator-set target/tree id written into every research-log row while
+    /// developer mode is on — groups repeats + joins to ground truth. Shared
+    /// across the scan screens and persisted so a field session survives
+    /// app restarts (mirror of iOS tc.researchTreeId).
+    val researchTreeId: String = "",
 )
 
 private val Context.settingsStore by preferencesDataStore(name = "forestix_settings")
@@ -76,6 +81,7 @@ class AppSettings(private val context: Context) {
         val dbhCaptureMethod = stringPreferencesKey("tc.dbhCaptureMethod")
         val dbhChordAlgorithm = stringPreferencesKey("tc.dbhChordAlgorithm")
         val developerMode = booleanPreferencesKey("tc.developerMode")
+        val researchTreeId = stringPreferencesKey("tc.researchTreeId")
     }
 
     private val _state = MutableStateFlow(loadSnapshot())
@@ -100,7 +106,13 @@ class AppSettings(private val context: Context) {
             region = p[Keys.region],
             regionPickerSeen = p[Keys.regionPickerSeen] ?: false,
             developerMode = p[Keys.developerMode] ?: false,
+            researchTreeId = p[Keys.researchTreeId] ?: "",
         )
+    }
+
+    fun setResearchTreeId(value: String) = update {
+        _state.value = _state.value.copy(researchTreeId = value)
+        it[Keys.researchTreeId] = value
     }
 
     fun setDeveloperMode(value: Boolean) = update {

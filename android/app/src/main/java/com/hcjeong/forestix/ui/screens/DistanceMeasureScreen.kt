@@ -141,6 +141,9 @@ fun DistanceMeasureScreen(nav: NavController) {
                 "unit" to "m",
                 "distance_m" to String.format(Locale.US, "%.3f", d),
             )
+            if (settings.researchTreeId.isNotEmpty()) {
+                fields["tree_id"] = settings.researchTreeId  // repeat auto-filled by record()
+            }
             controller.cameraForwardElevationRad()?.let {
                 fields["pitch_deg"] = String.format(Locale.US, "%.1f", it * 180f / Math.PI.toFloat())
             }
@@ -208,6 +211,14 @@ fun DistanceMeasureScreen(nav: NavController) {
             CenteredText(value?.let { formatDistance(it) } ?: "\u2014", large = true)
             if (settings.developerMode) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(ForestixSpace.sm)) {
+                    Text("Target", style = Forestix.type.caption, color = Color.White.copy(alpha = 0.8f))
+                    androidx.compose.material3.OutlinedTextField(
+                        value = settings.researchTreeId,
+                        onValueChange = { env.settings.setResearchTreeId(it.trim()) },
+                        placeholder = { Text("D1") },
+                        singleLine = true,
+                        modifier = Modifier.weight(0.8f),
+                    )
                     Text("True (m)", style = Forestix.type.caption, color = Color.White.copy(alpha = 0.8f))
                     androidx.compose.material3.OutlinedTextField(
                         value = researchTrueM,

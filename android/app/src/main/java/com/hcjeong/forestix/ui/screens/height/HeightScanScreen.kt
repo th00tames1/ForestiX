@@ -253,6 +253,14 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                     }
                     if (settings.developerMode && stage == Stage.COMPUTED) {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("Target", style = com.hcjeong.forestix.ui.theme.Forestix.type.caption, color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.8f))
+                            androidx.compose.material3.OutlinedTextField(
+                                value = settings.researchTreeId,
+                                onValueChange = { env.settings.setResearchTreeId(it.trim()) },
+                                placeholder = { Text("T1") },
+                                singleLine = true,
+                                modifier = Modifier.weight(0.8f),
+                            )
                             Text("True H (m)", style = com.hcjeong.forestix.ui.theme.Forestix.type.caption, color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.8f))
                             androidx.compose.material3.OutlinedTextField(
                                 value = researchTrueM,
@@ -303,6 +311,9 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                                         "alpha_top_deg" to String.format(Locale.US, "%.2f", (alphaTop ?: 0f) * 180f / Math.PI.toFloat()),
                                         "alpha_base_deg" to String.format(Locale.US, "%.2f", (alphaBase ?: 0f) * 180f / Math.PI.toFloat()),
                                     )
+                                    if (settings.researchTreeId.isNotEmpty()) {
+                                        fields["tree_id"] = settings.researchTreeId  // repeat auto-filled by record()
+                                    }
                                     researchTrueM.toDoubleOrNull()?.takeIf { it > 0 }?.let { t ->
                                         fields["true_value"] = String.format(Locale.US, "%.2f", t)
                                         fields["error"] = String.format(Locale.US, "%.2f", r.heightM - t)

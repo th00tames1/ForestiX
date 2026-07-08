@@ -25,13 +25,16 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.IosShare
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -68,6 +71,8 @@ import com.hcjeong.forestix.export.GeoJSONExporter
 import com.hcjeong.forestix.export.ZipWriter
 import com.hcjeong.forestix.export.uuidString
 import com.hcjeong.forestix.ui.clickableNoRipple
+import com.hcjeong.forestix.ui.screens.project.FormDivider
+import com.hcjeong.forestix.ui.screens.project.FormSection
 import com.hcjeong.forestix.ui.shareFile
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixSpace
@@ -370,81 +375,92 @@ private fun ExportContent(nav: NavController, project: Project) {
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
                 .padding(ForestixSpace.md),
-            verticalArrangement = Arrangement.spacedBy(ForestixSpace.sm),
+            verticalArrangement = Arrangement.spacedBy(ForestixSpace.md),
         ) {
-            ExportSectionHeader("Full cruise export")
-            ExportActionRow(
-                label = "Export all (PDF, CSV, GeoJSON, Shapefile)",
-                enabled = !isExporting,
-                trailing = if (isExporting) {
-                    {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(18.dp),
-                            strokeWidth = 2.dp,
+            FormSection(header = "Full cruise export") {
+                ExportActionRow(
+                    label = "Export all (PDF, CSV, GeoJSON, Shapefile)",
+                    icon = Icons.Filled.IosShare,
+                    enabled = !isExporting,
+                    trailing = if (isExporting) {
+                        {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
+                            )
+                        }
+                    } else null,
+                ) {
+                    scope.launch { viewModel.exportAll(context) }
+                }
+                if (isExporting || progress > 0) {
+                    FormDivider()
+                    Column(verticalArrangement = Arrangement.spacedBy(ForestixSpace.xxs)) {
+                        LinearProgressIndicator(
+                            progress = { progress.toFloat() },
+                            color = colors.primary,
+                            modifier = Modifier.fillMaxWidth(),
                         )
+                        Text(progressLabel, style = type.caption, color = colors.textSecondary)
                     }
-                } else null,
-            ) {
-                scope.launch { viewModel.exportAll(context) }
-            }
-            if (isExporting || progress > 0) {
-                Column(verticalArrangement = Arrangement.spacedBy(ForestixSpace.xxs)) {
-                    LinearProgressIndicator(
-                        progress = { progress.toFloat() },
-                        color = colors.primary,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    Text(progressLabel, style = type.caption, color = colors.textSecondary)
                 }
             }
 
-            SectionDivider()
-            ExportSectionHeader("Individual formats")
-            ExportActionRow("PDF report") { scope.launch { viewModel.exportPDFReport(context) } }
-            ExportActionRow("Trees (CSV)") { scope.launch { viewModel.exportTreesCSV(context) } }
-            ExportActionRow("Plots (CSV)") { scope.launch { viewModel.exportPlotsCSV(context) } }
-            ExportActionRow("Stand summary (CSV)") { scope.launch { viewModel.exportStandSummaryCSV(context) } }
-            ExportActionRow("Cruise (GeoJSON)") { scope.launch { viewModel.exportCruiseGeoJSON(context) } }
-            ExportActionRow("Plot centres (Shapefile ZIP)") { scope.launch { viewModel.exportShapefilePlots(context) } }
+            FormSection(header = "Individual formats") {
+                ExportActionRow("PDF report") { scope.launch { viewModel.exportPDFReport(context) } }
+                FormDivider()
+                ExportActionRow("Trees (CSV)") { scope.launch { viewModel.exportTreesCSV(context) } }
+                FormDivider()
+                ExportActionRow("Plots (CSV)") { scope.launch { viewModel.exportPlotsCSV(context) } }
+                FormDivider()
+                ExportActionRow("Stand summary (CSV)") { scope.launch { viewModel.exportStandSummaryCSV(context) } }
+                FormDivider()
+                ExportActionRow("Cruise (GeoJSON)") { scope.launch { viewModel.exportCruiseGeoJSON(context) } }
+                FormDivider()
+                ExportActionRow("Plot centres (Shapefile ZIP)") { scope.launch { viewModel.exportShapefilePlots(context) } }
+            }
 
-            SectionDivider()
-            ExportSectionHeader("Plan exports")
-            ExportActionRow("Planned plots CSV") { scope.launch { viewModel.exportCSV(context) } }
-            ExportActionRow("Strata CSV") { scope.launch { viewModel.exportStratumCSV(context) } }
-            ExportActionRow("Plan GeoJSON") { scope.launch { viewModel.exportGeoJSON(context) } }
+            FormSection(header = "Plan exports") {
+                ExportActionRow("Planned plots CSV") { scope.launch { viewModel.exportCSV(context) } }
+                FormDivider()
+                ExportActionRow("Strata CSV") { scope.launch { viewModel.exportStratumCSV(context) } }
+                FormDivider()
+                ExportActionRow("Plan GeoJSON") { scope.launch { viewModel.exportGeoJSON(context) } }
+            }
 
             val folder = lastSessionFolder
             if (folder != null) {
-                SectionDivider()
-                ExportSectionHeader("Last export folder")
-                Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .clickableNoRipple { viewModel.shareURL.value = folder }
-                        .padding(vertical = ForestixSpace.xs),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
-                ) {
-                    Text("Open", style = type.body, color = colors.primary)
-                    Text(folder.name, style = type.caption, color = colors.textSecondary)
+                FormSection(header = "Last export folder") {
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickableNoRipple { viewModel.shareURL.value = folder },
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Text("Open", style = type.body, color = colors.primary)
+                        Text(folder.name, style = type.caption, color = colors.textSecondary)
+                    }
                 }
             }
 
             if (exportedFiles.isNotEmpty()) {
-                SectionDivider()
-                ExportSectionHeader("Recent files")
-                for (file in exportedFiles) {
-                    Column(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickableNoRipple { viewModel.shareURL.value = file.url }
-                            .padding(vertical = ForestixSpace.xs),
-                        verticalArrangement = Arrangement.spacedBy(2.dp),
-                    ) {
-                        Text(file.displayName, style = type.body, color = colors.primary)
-                        Text(file.url.name, style = type.caption, color = colors.textSecondary)
+                FormSection(header = "Recent files") {
+                    exportedFiles.forEachIndexed { index, file ->
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .clickableNoRipple { viewModel.shareURL.value = file.url },
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
+                            Text(file.displayName, style = type.body, color = colors.primary)
+                            Text(file.url.name, style = type.caption, color = colors.textSecondary)
+                        }
+                        if (index != exportedFiles.lastIndex) FormDivider()
                     }
                 }
             }
+
+            Spacer(Modifier.height(ForestixSpace.xl))
         }
     }
 
@@ -461,43 +477,29 @@ private fun ExportContent(nav: NavController, project: Project) {
     }
 }
 
-// MARK: - Row + section helpers
-
-@Composable
-private fun ExportSectionHeader(title: String) {
-    Text(
-        title.uppercase(Locale.US),
-        style = Forestix.type.sectionHead,
-        color = Forestix.colors.textSecondary,
-        modifier = Modifier.padding(top = ForestixSpace.xs),
-    )
-}
-
-@Composable
-private fun SectionDivider() {
-    HorizontalDivider(color = Forestix.colors.textSecondary.copy(alpha = 0.15f))
-}
+// MARK: - Row helper
 
 @Composable
 private fun ExportActionRow(
     label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector? = null,
     enabled: Boolean = true,
     trailing: (@Composable () -> Unit)? = null,
     onClick: () -> Unit,
 ) {
     val colors = Forestix.colors
+    val tint = if (enabled) colors.primary else colors.textTertiary
     Row(
         Modifier
             .fillMaxWidth()
-            .clickableNoRipple { if (enabled) onClick() }
-            .padding(vertical = ForestixSpace.xs),
+            .clickableNoRipple { if (enabled) onClick() },
         verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs),
     ) {
-        Text(
-            label,
-            style = Forestix.type.body,
-            color = if (enabled) colors.primary else colors.textTertiary,
-        )
+        if (icon != null) {
+            Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(18.dp))
+        }
+        Text(label, style = Forestix.type.body, color = tint)
         if (trailing != null) {
             Spacer(Modifier.weight(1f))
             trailing()

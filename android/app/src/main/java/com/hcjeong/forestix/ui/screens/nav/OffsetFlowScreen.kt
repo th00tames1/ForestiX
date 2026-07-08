@@ -39,10 +39,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -69,6 +67,7 @@ import com.hcjeong.forestix.positioning.LocationService
 import com.hcjeong.forestix.positioning.OffsetFromOpening
 import com.hcjeong.forestix.ui.screens.MeasureBackButton
 import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixProminentButton
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import java.util.Locale
 import kotlin.math.cos
@@ -480,20 +479,22 @@ fun OffsetFlowScreen(
                 is OffsetFlowViewModel.Step.WalkToOpening -> Unit
             }
 
-            // MARK: - Actions
+            // MARK: - Actions (iOS `.forestixProminent` on the AR panel;
+            // Cancel/Restart stay plain/white so they read on the scrim)
             when (val s = step) {
                 is OffsetFlowViewModel.Step.AnchorPlot ->
-                    Button(onClick = { viewModel.anchorPlotCenter() }) { Text("Anchor here") }
+                    ForestixProminentButton(label = "Anchor here") { viewModel.anchorPlotCenter() }
                 is OffsetFlowViewModel.Step.WalkToOpening ->
-                    Button(onClick = { viewModel.beginOpeningAveraging() }) { Text("Capture fix here") }
+                    ForestixProminentButton(label = "Capture fix here") { viewModel.beginOpeningAveraging() }
                 is OffsetFlowViewModel.Step.AveragingAtOpening ->
                     TextButton(onClick = { viewModel.cancel() }) { Text("Cancel", color = Color.White) }
                 is OffsetFlowViewModel.Step.WalkBack ->
-                    Button(onClick = { viewModel.confirmPlotCenter() }) { Text("Confirm plot center") }
+                    ForestixProminentButton(label = "Confirm plot center") { viewModel.confirmPlotCenter() }
                 is OffsetFlowViewModel.Step.Computed ->
-                    Button(onClick = { onDone(s.result) }) { Text("Save") }
+                    ForestixProminentButton(label = "Save") { onDone(s.result) }
                 is OffsetFlowViewModel.Step.Failed ->
-                    OutlinedButton(onClick = { viewModel.cancel() }) { Text("Restart", color = Color.White) }
+                    // iOS renders Restart as a plain text button.
+                    TextButton(onClick = { viewModel.cancel() }) { Text("Restart", color = Color.White) }
             }
         }
     }

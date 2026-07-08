@@ -101,9 +101,9 @@ public enum ForestixType {
 
     /// Large section or screen title. Use sparingly (once per screen).
     public static let title       = Font.system(size: 28, weight: .semibold, design: .default)
-    /// Section heading inside a screen.
+    /// Section heading inside a screen. Call sites pass ALL-CAPS strings
+    /// — the documented contract on both platforms (no small caps).
     public static let sectionHead = Font.system(size: 13, weight: .semibold, design: .default)
-        .lowercaseSmallCaps()
     /// Default body copy.
     public static let body        = Font.system(size: 15, weight: .regular, design: .default)
     /// Body emphasis — short inline highlights.

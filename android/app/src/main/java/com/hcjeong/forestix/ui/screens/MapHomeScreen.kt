@@ -18,6 +18,14 @@ import android.graphics.BitmapFactory
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.EaseOut
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -39,7 +47,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.List
-import androidx.compose.material.icons.automirrored.filled.PlaylistAddCheck
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CenterFocusWeak
 import androidx.compose.material.icons.filled.Close
@@ -47,14 +54,15 @@ import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Height
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.Park
 import androidx.compose.material.icons.filled.Straighten
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.WbSunny
-import androidx.compose.material.icons.outlined.Forest
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
@@ -69,8 +77,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -78,6 +87,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -97,8 +108,11 @@ import com.hcjeong.forestix.geo.CoordinateConversions
 import com.hcjeong.forestix.positioning.CLLocationSnapshot
 import com.hcjeong.forestix.positioning.LocationService
 import com.hcjeong.forestix.ui.MeasurePhotoStore
+import com.hcjeong.forestix.ui.PendingTreeNumber
 import com.hcjeong.forestix.ui.Routes
 import com.hcjeong.forestix.ui.clickableNoRipple
+import com.hcjeong.forestix.ui.pressableNoRipple
+import com.hcjeong.forestix.ui.softDropShadow
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.ui.theme.ForestixSpace
@@ -112,9 +126,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
-/// Fallback camera when there's no fix and no located reading yet — the
-/// seed-data PNW working area (Portland), wide enough to orient.
-private val DefaultCenter = CoordinateConversions.LatLon(latitude = 45.5152, longitude = -122.6784)
+/// Seoul-ish fallback — used only when there is no fix and no located
+/// reading (fresh install, indoors). Mirrors iOS `fallbackCamera`.
+private val DefaultCenter = CoordinateConversions.LatLon(latitude = 37.5665, longitude = 126.9780)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -153,7 +167,8 @@ fun MapHomeScreen(nav: NavController) {
 
     val pins = remember(entries) { buildTreePins(entries) }
 
-    // Last fix → else newest located reading → else the PNW default.
+    // Last fix → else newest located reading → else the Seoul fallback,
+    // always at zoom 16 (iOS startUp()).
     val initialCamera = remember {
         val fromFix = LocationService.lastGlobalFix?.let {
             CoordinateConversions.LatLon(latitude = it.latitude, longitude = it.longitude)
@@ -161,8 +176,20 @@ fun MapHomeScreen(nav: NavController) {
         val fromEntry = entries.firstOrNull { it.latitude != null && it.longitude != null }?.let {
             CoordinateConversions.LatLon(latitude = it.latitude!!, longitude = it.longitude!!)
         }
-        val centre = fromFix ?: fromEntry ?: DefaultCenter
-        centre to if (fromFix != null || fromEntry != null) 16.0 else 12.0
+        (fromFix ?: fromEntry ?: DefaultCenter) to (fromFix == null && fromEntry == null)
+    }
+    // Fresh install in the field: nothing to centre on at launch, so the
+    // first GPS fix pulls the camera home — exactly once (iOS
+    // recenterOnFirstFix). MapView re-centres whenever `mapCenter` changes.
+    var mapCenter by remember { mutableStateOf(initialCamera.first) }
+    var awaitingFirstFix by remember { mutableStateOf(initialCamera.second) }
+    LaunchedEffect(fix) {
+        val snap = fix
+        if (awaitingFirstFix && snap != null) {
+            awaitingFirstFix = false
+            mapCenter = CoordinateConversions.LatLon(
+                latitude = snap.latitude, longitude = snap.longitude)
+        }
     }
     val camera = rememberMapCameraState()
 
@@ -176,12 +203,18 @@ fun MapHomeScreen(nav: NavController) {
 
     Box(Modifier.fillMaxSize().background(colors.canvas)) {
         MapView(
-            center = initialCamera.first,
+            center = mapCenter,
             modifier = Modifier.fillMaxSize(),
-            initialZoom = initialCamera.second,
+            initialZoom = 16.0,
             // Base stays the built-in satellite; the user template is an
-            // overlay on top, honouring the layers sheet's toggle.
-            overlayURLTemplate = if (settings.overlayEnabled) settings.tileURLTemplate else null,
+            // overlay on top, honouring the layers sheet's toggle AND the
+            // provider usage-policy acknowledgement (iOS
+            // makeOverlayTileCache gate).
+            overlayURLTemplate = if (settings.overlayEnabled && settings.providerUsageAcknowledged) {
+                settings.tileURLTemplate
+            } else {
+                null
+            },
             markers = pins.map { pin ->
                 MapMarker(
                     coordinate = pin.coordinate,
@@ -193,8 +226,8 @@ fun MapHomeScreen(nav: NavController) {
                     selected = pin.id == selectedPinId,
                 )
             },
-            attribution = settings.tileProviderLabel,
-            onMarkerTap = { selectedPinId = it },
+            // Tapping the selected pin again deselects it (iOS toggle).
+            onMarkerTap = { selectedPinId = if (selectedPinId == it) null else it },
             onMapTap = { selectedPinId = null },
             youLocation = fix?.let {
                 CoordinateConversions.LatLon(latitude = it.latitude, longitude = it.longitude)
@@ -219,7 +252,7 @@ fun MapHomeScreen(nav: NavController) {
             ) {
                 GpsChip(fix)
                 Spacer(Modifier.weight(1f))
-                RoundChromeButton(Icons.Filled.Layers, "Offline basemap") { offlineOpen = true }
+                RoundChromeButton(Icons.Filled.Layers, "Basemap layers") { offlineOpen = true }
                 val dark = settings.appearance == "dark"
                 RoundChromeButton(
                     icon = if (dark) Icons.Filled.WbSunny else Icons.Filled.DarkMode,
@@ -235,45 +268,68 @@ fun MapHomeScreen(nav: NavController) {
                     style = type.dataSmall.copy(fontSize = 10.sp, letterSpacing = 0.8.sp),
                     color = colors.textTertiary,
                     modifier = Modifier
+                        .pressableNoRipple { offlineOpen = true }
                         .clip(ForestixRadius.chip)
                         .background(colors.surface)
                         .border(1.dp, colors.divider, ForestixRadius.chip)
-                        .clickableNoRipple { offlineOpen = true }
                         .padding(horizontal = 10.dp, vertical = 4.dp),
                 )
             }
         }
 
-        // MARK: - Bottom: action cluster ①, or peek card ② when a pin is up
+        // MARK: - Bottom: action cluster ①, or peek card ② when a pin is up.
+        // Both slide/fade over 0.18 s ease-out like the iOS transitions.
 
+        // Keep the last selected pin so the card's exit animation has data.
+        var lastPin by remember { mutableStateOf<TreePin?>(null) }
+        selectedPin?.let { lastPin = it }
         Box(
             Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
                 .navigationBarsPadding(),
         ) {
-            val pin = selectedPin
-            if (pin == null) {
-                ActionCluster(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(bottom = ForestixSpace.md),
-                    onCruise = { nav.navigate(Routes.TIMBER_HUB) },
-                    onMeasure = { chooserOpen = true },
-                    onLog = { nav.navigate(Routes.FIELD_LOG) },
-                )
-            } else {
-                PeekCard(
-                    pin = pin,
-                    unitSystem = settings.unitSystem,
-                    activity = activity,
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(horizontal = 12.dp)
-                        .padding(bottom = 20.dp),
-                    onViewPhoto = { photoEntry = it },
-                    onMeasureAgain = { nav.navigate(Routes.DBH) },
-                )
+            AnimatedContent(
+                targetState = selectedPin != null,
+                modifier = Modifier.align(Alignment.BottomCenter),
+                contentAlignment = Alignment.BottomCenter,
+                transitionSpec = {
+                    val spec = tween<Float>(durationMillis = 180, easing = EaseOut)
+                    val slide = tween<IntOffset>(durationMillis = 180, easing = EaseOut)
+                    (slideInVertically(slide) { it } + fadeIn(spec)) togetherWith
+                        (slideOutVertically(slide) { it } + fadeOut(spec))
+                },
+                label = "peekCluster",
+            ) { showPeek ->
+                val pin = if (showPeek) selectedPin ?: lastPin else null
+                if (pin == null) {
+                    ActionCluster(
+                        modifier = Modifier.padding(bottom = ForestixSpace.sm),
+                        onCruise = { nav.navigate(Routes.TIMBER_HUB) },
+                        onMeasure = { chooserOpen = true },
+                        onLog = { nav.navigate(Routes.FIELD_LOG) },
+                    )
+                } else {
+                    PeekCard(
+                        pin = pin,
+                        unitSystem = settings.unitSystem,
+                        activity = activity,
+                        plotName = pin.entries.firstOrNull()?.plotID
+                            ?.let { env.history.plot(it) }
+                            ?.takeIf { !it.isDefault }?.name,
+                        modifier = Modifier
+                            .padding(horizontal = 12.dp)
+                            .padding(bottom = 20.dp),
+                        onViewPhoto = { photoEntry = it },
+                        onMeasureAgain = {
+                            // Lock the new reading to the tapped pin's tree
+                            // (iOS measureAgain → pendingTreeNumber).
+                            PendingTreeNumber.value =
+                                pin.treeNumber ?: env.history.suggestedNextTreeNumber
+                            nav.navigate(Routes.DBH)
+                        },
+                    )
+                }
             }
         }
     }
@@ -284,8 +340,13 @@ fun MapHomeScreen(nav: NavController) {
         MeasureChooserSheet(
             nextTree = env.history.suggestedNextTreeNumber,
             onDismiss = { chooserOpen = false },
-            onChoose = { route ->
+            onChoose = { route, lockTree ->
                 chooserOpen = false
+                // Full / DBH / Height lock the reading to the tree number
+                // the sheet header promised (iOS chooserRow actions).
+                if (lockTree) {
+                    PendingTreeNumber.value = env.history.suggestedNextTreeNumber
+                }
                 nav.navigate(route)
             },
         )
@@ -307,6 +368,22 @@ fun MapHomeScreen(nav: NavController) {
             activity = activity,
             onDismiss = { photoEntry = null },
         )
+    }
+
+    // First-launch UX: the map home hosts the region picker (it is the
+    // screen after the splash). Auto-present once; picking, skipping or
+    // swipe-dismissing all stamp regionPickerSeen, and it stays reachable
+    // later via Settings → Region.
+    if (settings.region == null && !settings.regionPickerSeen) {
+        ModalBottomSheet(
+            onDismissRequest = { env.settings.setRegionPickerSeen(true) },
+            containerColor = colors.surface,
+        ) {
+            RegionPickerSheet(onDismiss = {
+                // Selection/Skip already stamped regionPickerSeen — the
+                // state change hides the sheet.
+            })
+        }
     }
 }
 
@@ -406,14 +483,6 @@ private fun GpsChip(fix: CLLocationSnapshot?) {
         else -> colors.confidenceBad
     }
     val stale = ageSec != null && ageSec > 5
-    val label = when {
-        snap == null -> "no fix"
-        !stale -> String.format(Locale.US, "%.5f, %.5f", snap.latitude, snap.longitude)
-        else -> {
-            val age = if (ageSec!! < 60) "$ageSec s ago" else "${ageSec / 60} min ago"
-            String.format(Locale.US, "%.5f, %.5f · %s", snap.latitude, snap.longitude, age)
-        }
-    }
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -421,19 +490,40 @@ private fun GpsChip(fix: CLLocationSnapshot?) {
             .clip(ForestixRadius.control)
             .background(colors.surface)
             .border(1.dp, colors.divider, ForestixRadius.control)
-            .padding(horizontal = 11.dp, vertical = 8.dp),
+            .padding(horizontal = 11.dp, vertical = 7.dp),
     ) {
         Box(Modifier.size(7.dp).clip(CircleShape).background(dotColor))
-        Text(
-            label,
-            style = type.dataSmall.copy(fontSize = 11.sp),
-            color = if (snap == null) colors.textTertiary else colors.textPrimary,
-        )
+        if (snap != null) {
+            // Two-tone (iOS gpsChip): semibold primary coordinates, with
+            // the live age suffix in medium tertiary once stale.
+            Text(
+                String.format(Locale.US, "%.5f, %.5f", snap.latitude, snap.longitude),
+                style = type.dataSmall.copy(fontSize = 11.sp, fontWeight = FontWeight.SemiBold),
+                color = colors.textPrimary,
+                maxLines = 1,
+            )
+            if (stale) {
+                val age = if (ageSec!! < 60) "$ageSec s ago" else "${ageSec / 60} min ago"
+                Text(
+                    "· $age",
+                    style = type.dataSmall.copy(fontSize = 11.sp),
+                    color = colors.textTertiary,
+                    maxLines = 1,
+                )
+            }
+        } else {
+            Text(
+                "no fix",
+                style = type.dataSmall.copy(fontSize = 11.sp, fontWeight = FontWeight.SemiBold),
+                color = colors.textTertiary,
+                maxLines = 1,
+            )
+        }
     }
 }
 
-/// Mock `.roundbtn`, sized to the 44 dp hit-target rule and styled like
-/// ModeSelectionScreen's appearance toggle.
+/// Mock `.roundbtn`, sized to the 44 dp hit-target rule, with the shared
+/// map-chrome pressed feedback (iOS MapPressableStyle).
 @Composable
 private fun RoundChromeButton(
     icon: ImageVector,
@@ -441,15 +531,16 @@ private fun RoundChromeButton(
     onClick: () -> Unit,
 ) {
     val colors = Forestix.colors
-    IconButton(
-        onClick = onClick,
-        modifier = Modifier
+    Box(
+        Modifier
             .size(44.dp)
+            .pressableNoRipple(onClick = onClick)
             .clip(CircleShape)
             .background(colors.surfaceRaised)
             .border(1.dp, colors.divider, CircleShape),
+        contentAlignment = Alignment.Center,
     ) {
-        Icon(icon, contentDescription = contentDescription, tint = colors.textSecondary, modifier = Modifier.size(20.dp))
+        Icon(icon, contentDescription = contentDescription, tint = colors.textSecondary, modifier = Modifier.size(18.dp))
     }
 }
 
@@ -468,16 +559,16 @@ private fun ActionCluster(
         verticalAlignment = Alignment.Bottom,
         horizontalArrangement = Arrangement.spacedBy(26.dp),
     ) {
-        SideCircleButton("Cruise", Icons.Outlined.Forest, onCruise)
+        SideCircleButton("Cruise", Icons.Filled.Map, onCruise)
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Box(
                 Modifier
                     .size(74.dp)
-                    .shadow(10.dp, CircleShape)
+                    .pressableNoRipple(onClick = onMeasure)
+                    .softDropShadow(Color.Black.copy(alpha = 0.28f), 10.dp, 6.dp)
                     .clip(CircleShape)
                     .background(colors.primary)
-                    .border(4.dp, colors.surface, CircleShape)
-                    .clickableNoRipple(onMeasure),
+                    .border(4.dp, colors.surface, CircleShape),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
@@ -487,7 +578,7 @@ private fun ActionCluster(
                     modifier = Modifier.size(30.dp),
                 )
             }
-            ClusterLabel("Measure")
+            ClusterLabel("Measure", gap = 6.dp)
         }
         SideCircleButton("Log", Icons.AutoMirrored.Filled.List, onLog)
     }
@@ -500,31 +591,32 @@ private fun SideCircleButton(label: String, icon: ImageVector, onClick: () -> Un
         Box(
             Modifier
                 .size(54.dp)
-                .shadow(6.dp, CircleShape)
+                .pressableNoRipple(onClick = onClick)
+                .softDropShadow(Color.Black.copy(alpha = 0.18f), 6.dp, 3.dp)
                 .clip(CircleShape)
                 .background(colors.surface)
-                .border(1.dp, colors.divider, CircleShape)
-                .clickableNoRipple(onClick),
+                .border(1.dp, colors.divider, CircleShape),
             contentAlignment = Alignment.Center,
         ) {
             Icon(icon, contentDescription = label, tint = colors.textPrimary, modifier = Modifier.size(22.dp))
         }
-        ClusterLabel(label)
+        ClusterLabel(label, gap = 5.dp)
     }
 }
 
 /// Field fix: plain theme-tinted text vanished over satellite imagery, so
 /// each label sits in a small dark-glass pill. Deliberately hardcoded —
-/// the backdrop is a satellite photo in BOTH themes.
+/// the backdrop is a satellite photo in BOTH themes. Gap above: 6 under
+/// the capture button, 5 under the side circles (iOS spacing).
 @Composable
-private fun ClusterLabel(label: String) {
+private fun ClusterLabel(label: String, gap: Dp) {
     Text(
         label.uppercase(),
         style = Forestix.type.dataSmall.copy(
             fontSize = 10.5.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.6.sp),
         color = Color(0xFFF2F5F3),
         modifier = Modifier
-            .padding(top = 5.dp)
+            .padding(top = gap)
             .clip(RoundedCornerShape(5.dp))
             .background(Color(0xA606090A))
             .padding(horizontal = 8.dp, vertical = 3.dp),
@@ -538,6 +630,7 @@ private fun PeekCard(
     pin: TreePin,
     unitSystem: UnitSystem,
     activity: Activity?,
+    plotName: String?,
     modifier: Modifier = Modifier,
     onViewPhoto: (QuickMeasureEntry) -> Unit,
     onMeasureAgain: () -> Unit,
@@ -548,14 +641,17 @@ private fun PeekCard(
     val newest = pin.entries.first()
     val species = pin.entries.firstNotNullOfOrNull { it.speciesCode }
     val title = (pin.treeNumber?.let { "Tree $it" } ?: rowLabel(newest)) +
-        (species?.let { " · $it" } ?: "")
+        (species?.let { " · ${it.uppercase(Locale.US)}" } ?: "")
+    // Date, plus the plot name when the reading isn't on the default plot
+    // (iOS peekSubtitle: "7 Jul · 09:41 · Plot 2").
+    val subtitle = listOfNotNull(dateLine(newest.createdAt), plotName).joinToString(" · ")
     val photoOwner = pin.entries.firstOrNull { it.photoPath != null }
     val photoCount = pin.entries.count { it.photoPath != null }
 
     Column(
         modifier
             .fillMaxWidth()
-            .shadow(12.dp, shape)
+            .softDropShadow(Color.Black.copy(alpha = 0.22f), 14.dp, (-4).dp, cornerRadius = 14.dp)
             .clip(shape)
             .background(colors.surface)
             .border(1.dp, colors.divider, shape)
@@ -570,16 +666,22 @@ private fun PeekCard(
                 .clip(RoundedCornerShape(2.dp))
                 .background(colors.divider),
         )
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row {
             Text(
                 title,
-                style = type.bodyBold.copy(fontSize = 16.sp),
+                style = type.bodyBold.copy(fontSize = 16.sp, fontWeight = FontWeight.Bold),
                 color = colors.textPrimary,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f).alignByBaseline(),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            Text(dateLine(newest.createdAt), style = type.dataSmall.copy(fontSize = 11.sp), color = colors.textTertiary)
+            Text(
+                subtitle,
+                style = type.dataSmall.copy(fontSize = 11.sp),
+                color = colors.textTertiary,
+                modifier = Modifier.alignByBaseline(),
+                maxLines = 1,
+            )
         }
         Spacer(Modifier.size(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -588,19 +690,22 @@ private fun PeekCard(
                 val rows = latestPerKind(pin.entries)
                 rows.forEachIndexed { i, entry ->
                     MeasureRow(entry, unitSystem)
-                    if (i < rows.lastIndex) HorizontalDivider(color = colors.divider, thickness = 1.dp)
+                    if (i < rows.lastIndex) HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
                 }
             }
         }
         Spacer(Modifier.size(12.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs)) {
-            if (photoOwner != null) {
-                PeekActionButton(
-                    "View photo", primary = false, modifier = Modifier.weight(1f),
-                ) { onViewPhoto(photoOwner) }
-            }
+            // "View photo" is ALWAYS rendered — disabled and dimmed when
+            // the tree has no photo (iOS peek card).
             PeekActionButton(
-                "Measure this tree again", primary = true, modifier = Modifier.weight(1f),
+                "View photo", primary = false,
+                enabled = photoOwner != null,
+                modifier = Modifier.weight(1f),
+            ) { photoOwner?.let(onViewPhoto) }
+            PeekActionButton(
+                if (pin.treeNumber != null) "Measure this tree" else "New measurement",
+                primary = true, modifier = Modifier.weight(1f),
                 onClick = onMeasureAgain,
             )
         }
@@ -703,7 +808,7 @@ private fun PhotoThumb(photoName: String?, photoCount: Int, activity: Activity?)
                 Icons.Filled.Image,
                 contentDescription = if (photoName == null) "No photo" else "Photo loading",
                 tint = colors.textTertiary,
-                modifier = Modifier.align(Alignment.Center).size(28.dp),
+                modifier = Modifier.align(Alignment.Center).size(22.dp),
             )
         }
         if (photoCount > 1) {
@@ -727,6 +832,7 @@ private fun PeekActionButton(
     label: String,
     primary: Boolean,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
     val colors = Forestix.colors
@@ -734,12 +840,13 @@ private fun PeekActionButton(
     Box(
         modifier
             .heightIn(min = 44.dp)
+            .pressableNoRipple(enabled = enabled, onClick = onClick)
+            .alpha(if (enabled) 1f else 0.45f)
             .clip(shape)
             .then(
                 if (primary) Modifier.background(colors.primary)
                 else Modifier.border(1.dp, colors.divider, shape)
-            )
-            .clickableNoRipple(onClick),
+            ),
         contentAlignment = Alignment.Center,
     ) {
         Text(
@@ -758,7 +865,9 @@ private fun PeekActionButton(
 private fun MeasureChooserSheet(
     nextTree: Int,
     onDismiss: () -> Unit,
-    onChoose: (String) -> Unit,
+    /// (route, lockTree) — lockTree is true for the tree-bound rows
+    /// (Full / DBH / Height), which pin the reading to `nextTree`.
+    onChoose: (String, Boolean) -> Unit,
 ) {
     val colors = Forestix.colors
     val type = Forestix.type
@@ -770,43 +879,45 @@ private fun MeasureChooserSheet(
         ) {
             Text(
                 "MEASURE · TREE $nextTree (NEXT)",
-                style = type.sectionHead.copy(letterSpacing = 1.2.sp),
+                style = type.sectionHead.copy(
+                    fontWeight = FontWeight.ExtraBold, letterSpacing = 1.0.sp),
                 color = colors.textTertiary,
                 modifier = Modifier.padding(bottom = ForestixSpace.xs),
             )
             // Field fix: the chained DBH → Height capture is the common
-            // whole-tree workflow, so it leads the sheet (emphasised row).
-            // "dbh?chain=true" tells DBH Accept to jump straight to Height
-            // on the same tree instead of showing the continuation dialog.
+            // whole-tree workflow, so it leads the sheet (emphasised icon
+            // tile). "dbh?chain=true" tells DBH Accept to jump straight to
+            // Height on the same tree instead of the continuation dialog.
             ChoiceRow(
-                Icons.AutoMirrored.Filled.PlaylistAddCheck,
+                Icons.Filled.Park,
                 "Full measurement",
                 "DBH → Height, one tree",
                 emphasized = true,
-            ) { onChoose("${Routes.DBH}?chain=true") }
-            Spacer(Modifier.size(ForestixSpace.xs))
+            ) { onChoose("${Routes.DBH}?chain=true", true) }
+            HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
             ChoiceRow(Icons.Filled.Straighten, "Diameter (DBH)", "Depth · AR motion · AR caliper") {
-                onChoose(Routes.DBH)
+                onChoose(Routes.DBH, true)
             }
-            HorizontalDivider(color = colors.divider)
+            HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
             ChoiceRow(Icons.Filled.Height, "Height", "Walk-off tangent · crown add-on") {
-                onChoose(Routes.HEIGHT)
+                onChoose(Routes.HEIGHT, true)
             }
-            HorizontalDivider(color = colors.divider)
+            HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
             ChoiceRow(Icons.Filled.SwapHoriz, "Distance", "Live · two-point") {
-                onChoose(Routes.DISTANCE)
+                onChoose(Routes.DISTANCE, false)
             }
-            HorizontalDivider(color = colors.divider)
+            HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
             ChoiceRow(Icons.Filled.CenterFocusWeak, "Sampling plot", "Centre stake · boundary ring") {
-                onChoose(Routes.SAMPLING)
+                onChoose(Routes.SAMPLING, false)
             }
         }
     }
 }
 
-/// One chooser row. `emphasized` (the Full measurement row) fills the row
-/// with the muted primary tint and inverts the icon tile — "slightly
-/// emphasised", still clearly a sibling of the single-measure rows.
+/// One chooser row. `emphasized` (the Full measurement row) inverts the
+/// icon tile — solid primary + ink glyph, same treatment as the big (+)
+/// capture button — while the row itself stays plain like its siblings
+/// (iOS chooserRow).
 @Composable
 private fun ChoiceRow(
     icon: ImageVector,
@@ -821,19 +932,8 @@ private fun ChoiceRow(
         Modifier
             .fillMaxWidth()
             .heightIn(min = 56.dp)
-            .then(
-                if (emphasized) {
-                    Modifier
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(colors.primaryMuted)
-                        .clickableNoRipple(onClick)
-                        .padding(vertical = 6.dp, horizontal = 8.dp)
-                } else {
-                    Modifier
-                        .clickableNoRipple(onClick)
-                        .padding(vertical = 6.dp)
-                }
-            ),
+            .pressableNoRipple(onClick = onClick)
+            .padding(vertical = 13.dp, horizontal = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(ForestixSpace.sm),
     ) {
@@ -852,14 +952,18 @@ private fun ChoiceRow(
             )
         }
         Column(Modifier.weight(1f)) {
-            Text(title, style = type.bodyBold.copy(fontSize = 15.5.sp), color = colors.textPrimary)
+            Text(
+                title,
+                style = type.bodyBold.copy(fontSize = 15.5.sp, fontWeight = FontWeight.Bold),
+                color = colors.textPrimary,
+            )
             Text(subtitle, style = type.caption, color = colors.textSecondary)
         }
         Icon(
             Icons.AutoMirrored.Filled.KeyboardArrowRight,
             contentDescription = null,
             tint = colors.textTertiary,
-            modifier = Modifier.size(16.dp),
+            modifier = Modifier.size(13.dp),
         )
     }
 }
@@ -867,7 +971,8 @@ private fun ChoiceRow(
 // MARK: - Photo detail (mock ⑤) ------------------------------------------------
 
 /// Full-screen accept-snapshot viewer. Deliberately dark in both app
-/// appearances, matching the mock's photo screens.
+/// appearances, matching the mock's photo screens (iOS
+/// MeasurePhotoDetailView).
 @Composable
 private fun PhotoViewerDialog(
     entry: QuickMeasureEntry,
@@ -877,12 +982,19 @@ private fun PhotoViewerDialog(
 ) {
     val type = Forestix.type
     val tier = confidenceDescriptor(entry.confidenceRaw)
+    val ink = Color(0xFFF2F5F3)
+    val inkDim = Color(0xFFA5AEA8)
+    // Spinner while the JPEG decodes; "Photo unavailable" only once the
+    // decode has actually failed (iOS ProgressView behaviour).
+    var loadFailed by remember(entry.photoPath) { mutableStateOf(false) }
     val bitmap by produceState<Bitmap?>(initialValue = null, entry.photoPath, activity) {
-        value = withContext(Dispatchers.IO) {
+        val decoded = withContext(Dispatchers.IO) {
             val name = entry.photoPath
             if (name == null || activity == null) null
             else decodeSampled(MeasurePhotoStore.file(activity, name), targetPx = 1600)
         }
+        value = decoded
+        if (decoded == null) loadFailed = true
     }
     Dialog(
         onDismissRequest = onDismiss,
@@ -890,54 +1002,72 @@ private fun PhotoViewerDialog(
     ) {
         Box(Modifier.fillMaxSize().background(Color(0xFF0A0D0B))) {
             val image = bitmap
-            if (image != null) {
-                Image(
+            when {
+                image != null -> Image(
                     image.asImageBitmap(),
                     contentDescription = "Measurement photo",
                     contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize().padding(bottom = 96.dp),
+                    modifier = Modifier.fillMaxSize(),
                 )
-            } else {
-                Text(
+                !loadFailed -> CircularProgressIndicator(
+                    color = ink,
+                    modifier = Modifier.align(Alignment.Center),
+                )
+                else -> Text(
                     "Photo unavailable",
                     style = type.body,
                     color = Color(0xFF79837D),
                     modifier = Modifier.align(Alignment.Center),
                 )
             }
-            IconButton(
-                onClick = onDismiss,
-                modifier = Modifier
+            // Close — 44 dp dark-glass circle flush to the status-bar
+            // inset, trailing 14 (iOS xmark button).
+            Box(
+                Modifier
                     .align(Alignment.TopEnd)
                     .statusBarsPadding()
-                    .padding(top = ForestixSpace.xs, end = 14.dp)
+                    .padding(end = 14.dp)
                     .size(44.dp)
                     .clip(CircleShape)
-                    .background(Color(0xB306090A)),
+                    .background(Color(0xB306090A))
+                    .clickableNoRipple(onDismiss),
+                contentAlignment = Alignment.Center,
             ) {
-                Icon(Icons.Filled.Close, contentDescription = "Close photo", tint = Color(0xFFF2F5F3))
+                Icon(
+                    Icons.Filled.Close,
+                    contentDescription = "Close photo",
+                    tint = ink,
+                    modifier = Modifier.size(16.dp),
+                )
             }
-            // Bottom meta strip (mock `.photofull .meta`)
+            // Bottom meta strip (mock `.photofull .meta`) over a vertical
+            // fade into near-black.
             Column(
                 Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .background(Color(0xEB06090A))
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(Color.Transparent, Color(0xEB06090A)),
+                        ),
+                    )
                     .navigationBarsPadding()
-                    .padding(horizontal = 20.dp, vertical = ForestixSpace.md),
+                    .padding(start = 20.dp, end = 20.dp, top = 40.dp, bottom = 30.dp),
             ) {
-                Row(verticalAlignment = Alignment.Bottom) {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
-                        (if (entry.kind == MeasureKind.DBH) "Ø " else "") +
-                            valueText(entry, unitSystem),
-                        style = type.dataLarge,
-                        color = Color(0xFFF2F5F3),
+                        bigValueText(entry, unitSystem),
+                        style = type.dataLarge.copy(
+                            fontSize = 30.sp, fontWeight = FontWeight.ExtraBold),
+                        color = ink,
+                        modifier = Modifier.alignByBaseline(),
                     )
                     Text(
-                        "  " + listOfNotNull(sigmaText(entry, unitSystem), tier.label).joinToString(" · "),
+                        listOfNotNull(sigmaText(entry, unitSystem), tier.label)
+                            .joinToString(" · "),
                         style = type.dataSmall,
-                        color = Color(0xFFA5AEA8),
-                        modifier = Modifier.padding(bottom = 3.dp),
+                        color = inkDim,
+                        modifier = Modifier.alignByBaseline(),
                     )
                 }
                 Row(
@@ -947,15 +1077,36 @@ private fun PhotoViewerDialog(
                     MetaCell(
                         "TREE",
                         listOfNotNull(
-                            entry.treeNumber?.let { "T$it" }, entry.speciesCode,
+                            entry.treeNumber?.let { "T$it" },
+                            entry.speciesCode?.takeIf { it.isNotEmpty() }
+                                ?.uppercase(Locale.US),
                         ).joinToString(" · ").ifEmpty { "—" },
                     )
                     MetaCell("METHOD", entry.method)
-                    MetaCell("DATE", dateLine(entry.createdAt))
+                    MetaCell(
+                        "GPS",
+                        if (entry.latitude != null && entry.longitude != null) {
+                            String.format(
+                                Locale.US, "%.5f, %.5f", entry.latitude, entry.longitude)
+                        } else {
+                            "—"
+                        },
+                    )
                 }
             }
         }
     }
+}
+
+/// "Ø 32.4 cm" / "H 18.2 m" — the viewer's headline value with the iOS
+/// kind prefixes.
+private fun bigValueText(e: QuickMeasureEntry, system: UnitSystem): String {
+    val prefix = when (e.kind) {
+        MeasureKind.DBH -> "Ø "
+        MeasureKind.HEIGHT -> "H "
+        else -> ""
+    }
+    return prefix + valueText(e, system)
 }
 
 @Composable
@@ -964,14 +1115,15 @@ private fun MetaCell(label: String, value: String) {
     Column {
         Text(
             label,
-            style = type.dataSmall.copy(fontSize = 10.sp, letterSpacing = 0.8.sp),
-            color = Color(0xFF79837D),
+            style = type.dataSmall.copy(fontSize = 11.5.sp, fontWeight = FontWeight.Normal),
+            color = Color(0xFFB7C0BA),
         )
         Text(
             value,
             style = type.dataSmall.copy(fontWeight = FontWeight.Bold),
             color = Color(0xFFF2F5F3),
             modifier = Modifier.padding(top = 1.dp),
+            maxLines = 1,
         )
     }
 }
@@ -990,9 +1142,8 @@ private fun valueText(e: QuickMeasureEntry, system: UnitSystem): String = when (
     MeasureKind.DBH -> MeasurementFormatter.diameter(e.value, system)
     MeasureKind.HEIGHT -> MeasurementFormatter.height(e.value, system)
     MeasureKind.CROWN -> String.format(Locale.US, "%.1f × %.1f m", e.value, e.secondaryValue ?: 0.0)
-    MeasureKind.DISTANCE ->
-        if (e.value < 1) String.format(Locale.US, "%.0f cm", e.value * 100)
-        else String.format(Locale.US, "%.2f m", e.value)
+    // Unit-aware shared formatter (metric keeps the <1 m cm branch).
+    MeasureKind.DISTANCE -> MeasurementFormatter.distance(e.value, system)
     MeasureKind.SAMPLING_PLOT -> {
         val area = e.secondaryValue ?: (PI * e.value * e.value)
         String.format(Locale.US, "r %.1f m · %.0f m²", e.value, area)

@@ -45,8 +45,10 @@ public struct SettingsScreen: View {
             regionSection
             unitsSection
             logRuleSection
-            dbhMethodSection
             developerSection
+            if settings.developerMode {
+                dbhMethodSection
+            }
             calibrationSection
             basemapSection
             backupSection
@@ -208,9 +210,12 @@ public struct SettingsScreen: View {
         }
     }
 
+    // Developer-only — normal users get the single blessed DBH path;
+    // the algorithm picker rides below the Developer section and is
+    // visible only while developer mode is on (same gating on Android).
     private var dbhMethodSection: some View {
         Section(
-            header: Text("DBH measurement"),
+            header: Text("DBH algorithm"),
             footer: Text("Chord uses the trunk's projected pixel width × depth ÷ focal length — the same method ForestScanner / Arboreal use, stable on the narrow arcs a hand-held LiDAR phone actually sees. Switch to Partial-arc circle fit for irregular trunks where the silhouette under-reads the diameter.")
         ) {
             Picker("Method",
@@ -245,7 +250,10 @@ public struct SettingsScreen: View {
     }
 
     private var unitsSection: some View {
-        Section("Units") {
+        Section(
+            header: Text("Units"),
+            footer: Text("Display DBH, height and distance in metric or imperial.")
+        ) {
             Picker("Default units", selection: $unitSystem) {
                 Text("Imperial").tag(UnitSystem.imperial)
                 Text("Metric").tag(UnitSystem.metric)

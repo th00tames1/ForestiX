@@ -66,11 +66,6 @@ public struct AddTreeFlowScreen: View {
                             confidence: result.confidence)
                         presentingDBHScan = false
                     })
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Close") { presentingDBHScan = false }
-                    }
-                }
             }
         }
         .fullScreenCover(isPresented: $presentingHeightScan) {
@@ -84,11 +79,6 @@ public struct AddTreeFlowScreen: View {
                             confidence: result.confidence)
                         presentingHeightScan = false
                     })
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Close") { presentingHeightScan = false }
-                    }
-                }
             }
         }
         #endif

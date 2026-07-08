@@ -31,9 +31,12 @@ object MeasurementFormatter {
         UnitSystem.IMPERIAL -> String.format(Locale.US, "\u00B1%.1f ft", m * 3.28084)
     }
 
-    // Distance / generic length — stored m.
+    // Distance / generic length — stored m. Metric readings under a metre
+    // render in whole centimetres (field-glance precision).
     fun distance(m: Double, system: UnitSystem): String = when (system) {
-        UnitSystem.METRIC -> String.format(Locale.US, "%.2f m", m)
+        UnitSystem.METRIC ->
+            if (m < 1) String.format(Locale.US, "%.0f cm", m * 100)
+            else String.format(Locale.US, "%.2f m", m)
         UnitSystem.IMPERIAL -> String.format(Locale.US, "%.1f ft", m * 3.28084)
     }
 

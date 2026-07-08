@@ -20,7 +20,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -48,6 +47,7 @@ import io.github.sceneview.rememberEngine
 import io.github.sceneview.rememberMaterialLoader
 import io.github.sceneview.rememberNodes
 import io.github.sceneview.rememberView
+import com.hcjeong.forestix.ui.theme.ForestixProminentButton
 
 @Composable
 fun ArCameraView(
@@ -80,8 +80,8 @@ fun ArCameraView(
                 modifier = Modifier.padding(24.dp),
             ) {
                 Text("Camera access is needed for AR measurement.", color = Color.White)
-                Button(onClick = { launcher.launch(Manifest.permission.CAMERA) }) {
-                    Text("Grant camera access")
+                ForestixProminentButton(label = "Grant camera access") {
+                    launcher.launch(Manifest.permission.CAMERA)
                 }
             }
         }

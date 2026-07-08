@@ -93,7 +93,7 @@ public struct ReconCruiseScreen: View {
     private var tallyCounter: some View {
         VStack(spacing: ForestixSpace.xs) {
             Text("\(session.currentCount)")
-                .font(.system(size: 84, weight: .semibold, design: .rounded))
+                .font(.system(size: 84, weight: .semibold))
                 .foregroundStyle(ForestixPalette.primary)
                 .frame(minWidth: 160)
                 .contentShape(Rectangle())
@@ -167,11 +167,12 @@ public struct ReconCruiseScreen: View {
 
     private var actionBar: some View {
         HStack {
-            Button(role: .destructive) {
+            Button {
                 session.reset()
             } label: {
                 Text("Reset recon")
                     .font(ForestixType.caption)
+                    .foregroundStyle(ForestixPalette.confidenceBad)
             }
             Spacer()
             Button {

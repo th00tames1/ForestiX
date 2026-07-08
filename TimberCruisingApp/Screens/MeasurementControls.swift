@@ -3,11 +3,17 @@
 // soft drop shadows (offset .zero, opacity ~0.3, radius 2–4) over the live
 // camera, white-tinted SF Symbols, plus a centred half-width readout.
 //
+//   • Back button  — 44 pt floating circle pinned top-left; the AR screens
+//                    run full-bleed with the system nav bar hidden, so this
+//                    is the only exit affordance.
 //   • Capture "+"  — 70 pt solid-white record-style button (the primary).
-//   • Secondary    — 52 pt translucent circular icon buttons stacked under
+//   • Secondary    — 52 pt flat-scrim circular icon buttons stacked under
 //                    the capture button (mode toggle, etc.).
 //   • Source toggle — 52 pt circular icon button pinned bottom-right.
-//   • Status panel — centred, capped-width, translucent.
+//   • Status panel — centred, capped-width, flat black scrim.
+//
+// Scrims are flat black 0.55 (no materials) so the chrome renders
+// pixel-identical to the Android app's Compose overlays.
 
 import SwiftUI
 
@@ -16,6 +22,57 @@ import SwiftUI
 private extension View {
     func floatingShadow() -> some View {
         shadow(color: .black.opacity(0.3), radius: 3, x: 0, y: 0)
+    }
+}
+
+// MARK: - Back button (top-left, every AR screen)
+
+/// Circular floating back button pinned top-left so every full-bleed AR
+/// screen has a consistent, always-visible exit affordance over the
+/// camera feed (the system nav bar is hidden there). `dismiss` resolves
+/// against whichever presentation is active, so the same button pops a
+/// NavigationStack push and closes a fullScreenCover alike. Mirrors the
+/// Android `MeasureBackButton`.
+public struct MeasureBackButton: View {
+    @Environment(\.dismiss) private var dismiss
+
+    public init() {}
+
+    public var body: some View {
+        Button {
+            dismiss()
+        } label: {
+            ZStack {
+                Circle().fill(Color.black.opacity(0.55)).frame(width: 44, height: 44)
+                Circle().stroke(.white.opacity(0.18), lineWidth: 0.5).frame(width: 44, height: 44)
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+            .floatingShadow()
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Back")
+        .accessibilityIdentifier("measure.back")
+    }
+}
+
+/// Top-leading placement wrapper for `MeasureBackButton` — leading 16 /
+/// top 16 below the safe area, matching the Android chrome. Drop this
+/// into the screen's root ZStack.
+public struct MeasureBackButtonRow: View {
+    public init() {}
+
+    public var body: some View {
+        VStack {
+            HStack {
+                MeasureBackButton()
+                Spacer()
+            }
+            .padding(.leading, ForestixSpace.md)
+            .padding(.top, ForestixSpace.md)
+            Spacer()
+        }
     }
 }
 
@@ -50,7 +107,7 @@ public struct MeasureCaptureButton: View {
 
 // MARK: - Circular secondary button (icon + optional caption)
 
-/// 52 pt translucent circular icon button with an optional caption beneath,
+/// 52 pt flat-scrim circular icon button with an optional caption beneath,
 /// matching the SlashScan floating control look. Used for mode + source.
 public struct MeasureCircleButton: View {
     private let systemImage: String
@@ -72,7 +129,7 @@ public struct MeasureCircleButton: View {
         Button(action: action) {
             VStack(spacing: 3) {
                 ZStack {
-                    Circle().fill(.ultraThinMaterial).frame(width: 52, height: 52)
+                    Circle().fill(Color.black.opacity(0.55)).frame(width: 52, height: 52)
                     Circle().stroke(.white.opacity(0.18), lineWidth: 0.5).frame(width: 52, height: 52)
                     Image(systemName: systemImage)
                         .font(.system(size: 19, weight: .semibold))
@@ -167,7 +224,8 @@ public struct MeasureSourceToggleButton: View {
 // MARK: - Centred, half-width status panel
 
 /// Compact readout pinned to the bottom-centre. Capped width with centre-
-/// aligned content so it no longer spans the whole bottom edge.
+/// aligned content so it no longer spans the whole bottom edge. Sits a
+/// fixed 16 pt above the bottom safe-area inset on both platforms.
 public struct MeasureStatusPanel<Content: View>: View {
     private let content: Content
 
@@ -183,12 +241,12 @@ public struct MeasureStatusPanel<Content: View>: View {
         .frame(maxWidth: 340)
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .stroke(.white.opacity(0.12), lineWidth: 0.5)
         )
         .floatingShadow()
-        .padding(.bottom, 28)
+        .padding(.bottom, 16)
     }
 }

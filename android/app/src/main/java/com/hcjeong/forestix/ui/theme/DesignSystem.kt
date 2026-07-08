@@ -11,15 +11,39 @@
 
 package com.hcjeong.forestix.ui.theme
 
+import androidx.compose.animation.core.EaseOut
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.ProvidableCompositionLocal
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -34,6 +58,10 @@ import androidx.compose.ui.unit.sp
 /// pick the matching Material neutral ramp so dark mode "just works".
 data class ForestixColors(
     val primary: Color,
+    /// Dark ink drawn ON primary fills (same value in both appearances) —
+    /// public like iOS `ForestixPalette.primaryInk` so custom CTAs can
+    /// use it outside the Material colorScheme.
+    val primaryInk: Color,
     val primaryMuted: Color,
     val accent: Color,
     val confidenceOk: Color,
@@ -57,6 +85,7 @@ private val PrimaryInk = Color(0xFF06130A)     // dark ink ON primary (both mode
 
 private val FieldDark = ForestixColors(
     primary = Color(0xFF55D07A),
+    primaryInk = PrimaryInk,
     primaryMuted = Color(0xFF55D07A).copy(alpha = 0.16f),
     accent = Color(0xFFFFB454),
     confidenceOk = Color(0xFF55D07A),
@@ -73,6 +102,7 @@ private val FieldDark = ForestixColors(
 
 private val FieldLight = ForestixColors(
     primary = Color(0xFF2FA45B),
+    primaryInk = PrimaryInk,
     primaryMuted = Color(0xFF2FA45B).copy(alpha = 0.14f),
     accent = Color(0xFFB57614),
     confidenceOk = Color(0xFF1D7A43),
@@ -153,7 +183,119 @@ fun confidenceDescriptor(rawTier: String): TierDescriptor {
         "green" -> TierDescriptor("Good", c.confidenceOk)
         "yellow" -> TierDescriptor("Fair", c.confidenceWarn)
         "red" -> TierDescriptor("Check", c.confidenceBad)
-        else -> TierDescriptor(rawTier.replaceFirstChar { it.uppercase() }, c.textSecondary)
+        else -> TierDescriptor(capitalizedWords(rawTier), c.textSecondary)
+    }
+}
+
+/// Mirror of Swift's `.capitalized` — uppercase the first letter of every
+/// word (any non-letter is a boundary), lowercase the rest, so non-spec
+/// tiers render identically on both platforms ("very low" → "Very Low").
+private fun capitalizedWords(raw: String): String =
+    Regex("\\p{L}+").replace(raw.lowercase(java.util.Locale.US)) { match ->
+        match.value.replaceFirstChar { it.titlecase(java.util.Locale.US) }
+    }
+
+// MARK: - Primary button (Direction B) ------------------------------------
+
+/// Port of iOS `ForestixProminentButtonStyle` — the app-wide filled CTA:
+/// control radius 8, ≈46 dp tall (min 30 content + 8 dp vertical padding),
+/// horizontal padding 14, bodyBold 15 label in the dark primary ink, and a
+/// 0.78-alpha pressed state over 0.15 s ease-out. No M3 pills anywhere.
+@Composable
+fun ForestixProminentButton(
+    label: String,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    icon: ImageVector? = null,
+    onClick: () -> Unit,
+) {
+    val colors = LocalForestixColors.current
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val fillAlpha by animateFloatAsState(
+        targetValue = if (pressed) 0.78f else 1f,
+        animationSpec = tween(durationMillis = 150, easing = EaseOut),
+        label = "prominentPressed",
+    )
+    Box(
+        modifier
+            .heightIn(min = 46.dp)
+            .clip(ForestixRadius.control)
+            .background(colors.primary.copy(alpha = fillAlpha))
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                enabled = enabled,
+                role = Role.Button,
+                onClick = onClick,
+            )
+            .alpha(if (enabled) 1f else 0.45f)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            if (icon != null) {
+                Icon(icon, contentDescription = null,
+                    tint = colors.primaryInk, modifier = Modifier.size(18.dp))
+            }
+            Text(label, style = LocalForestixTypography.current.bodyBold,
+                color = colors.primaryInk)
+        }
+    }
+}
+
+/// Outlined sibling of ForestixProminentButton — same geometry and pressed
+/// timing, token divider border + primary-text label instead of the fill.
+/// `tint` recolours the label/icon (e.g. confidenceBad for iOS
+/// `role: .destructive` bordered buttons); default stays textPrimary.
+@Composable
+fun ForestixBorderedButton(
+    label: String,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    icon: ImageVector? = null,
+    tint: Color? = null,
+    onClick: () -> Unit,
+) {
+    val colors = LocalForestixColors.current
+    val contentColor = tint ?: colors.textPrimary
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val pressAlpha by animateFloatAsState(
+        targetValue = if (pressed) 0.78f else 1f,
+        animationSpec = tween(durationMillis = 150, easing = EaseOut),
+        label = "borderedPressed",
+    )
+    Box(
+        modifier
+            .heightIn(min = 46.dp)
+            .clip(ForestixRadius.control)
+            .border(1.dp, colors.divider, ForestixRadius.control)
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                enabled = enabled,
+                role = Role.Button,
+                onClick = onClick,
+            )
+            .alpha(if (enabled) pressAlpha else 0.45f)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            if (icon != null) {
+                Icon(icon, contentDescription = null,
+                    tint = contentColor, modifier = Modifier.size(18.dp))
+            }
+            Text(label, style = LocalForestixTypography.current.bodyBold,
+                color = contentColor)
+        }
     }
 }
 
@@ -186,15 +328,27 @@ fun ForestixTheme(
         MaterialTheme(
             colorScheme = base.copy(
                 primary = colors.primary,
-                onPrimary = PrimaryInk,
+                onPrimary = colors.primaryInk,
                 secondary = colors.accent,
-                onSecondary = PrimaryInk,
+                onSecondary = colors.primaryInk,
+                // Selected FilterChips (multi-select damage tags) — keep
+                // them on the Forestix palette instead of M3 lavender.
+                secondaryContainer = colors.primaryMuted,
+                onSecondaryContainer = colors.textPrimary,
                 background = colors.canvas,
                 onBackground = colors.textPrimary,
                 surface = colors.surface,
                 onSurface = colors.textPrimary,
                 surfaceVariant = colors.surfaceRaised,
                 onSurfaceVariant = colors.textSecondary,
+                // Tonal surface family used by dialogs / menus / sheets —
+                // mapped onto the Forestix surface ramp so no component
+                // ever renders the M3 purple-tinted neutrals.
+                surfaceContainerLowest = colors.surface,
+                surfaceContainerLow = colors.surface,
+                surfaceContainer = colors.surface,
+                surfaceContainerHigh = colors.surfaceRaised,
+                surfaceContainerHighest = colors.surfaceRaised,
                 outline = colors.divider,
                 error = colors.confidenceBad,
             ),

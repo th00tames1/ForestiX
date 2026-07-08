@@ -26,20 +26,26 @@ public struct SamplingPlotScreen: View {
     @StateObject private var session = ARKitSessionManager()
     @StateObject private var raycaster = ARCenterRaycaster()
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dismiss) private var dismiss
 
     @State private var center: SIMD3<Float>?
     @State private var radiusM: Double = 8.0
     @State private var isOutside: Bool = false
     @State private var distanceFromCenterM: Double?
     @State private var pollTimer: Timer?
-    @State private var flashOn: Bool = false
+    /// Haptic cadence clock — flips every 0.2 s poll tick so the
+    /// outside-warning buzz repeats every 0.4 s.
+    @State private var hapticTick: Bool = false
+    /// Border opacity for the outside warning — driven by a smooth
+    /// repeating 350 ms animation (0.95 ↔ 0.35), not the poll timer.
+    @State private var pulseAlpha: Double = 0.95
     @State private var captureFailureReason: String?
     #if canImport(UIKit)
     @State private var feedbackGen: UINotificationFeedbackGenerator?
     #endif
 
     // Stable marker ids so ARCameraView diffs (instead of tearing down and
-    // rebuilding every marker on every body re-eval — the 0.2 s flash timer
+    // rebuilding every marker on every body re-eval — the 0.2 s poll timer
     // re-evaluates `markers`, and fresh random UUIDs there made it rebuild
     // the 96-segment ring continuously, which tanked the frame rate).
     private static let baseSphereId = UUID(uuidString: "00000000-5A11-0000-0000-000000000001") ?? UUID()
@@ -57,17 +63,28 @@ public struct SamplingPlotScreen: View {
                          raycaster: raycaster)
                 .ignoresSafeArea()
 
-            // Live red border flash whenever the device is outside the
-            // sampling area.
+            // Live red border pulse whenever the device is outside the
+            // sampling area — a smooth 350 ms alpha breathe (0.95 ↔ 0.35)
+            // matching Android's infinite tween, not a hard flash.
             if isOutside {
                 Rectangle()
-                    .stroke(flashOn ? Color.red.opacity(0.95) : Color.red.opacity(0.35),
-                            lineWidth: 12)
+                    .stroke(Color.red.opacity(pulseAlpha), lineWidth: 12)
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
+                    .onAppear {
+                        pulseAlpha = 0.95
+                        withAnimation(.easeInOut(duration: 0.35)
+                            .repeatForever(autoreverses: true)) {
+                            pulseAlpha = 0.35
+                        }
+                    }
             }
 
             if center == nil { centerCrosshair }
+
+            // Floating back button — full-bleed chrome exit (the system
+            // nav bar is hidden on the AR screens).
+            MeasureBackButtonRow()
 
             // Top radius slider only.
             VStack(spacing: 0) {
@@ -75,8 +92,11 @@ public struct SamplingPlotScreen: View {
                 Spacer()
             }
 
-            // Right-centre capture button.
-            MeasureControlColumn(capture: placePlotIfNeeded)
+            // Right-centre capture button — hidden once the centre is
+            // placed (the tap would be a no-op; Reset is the way back).
+            if center == nil {
+                MeasureControlColumn(capture: placePlotIfNeeded)
+            }
 
             // Bottom-right LiDAR/AR toggle — Developer-mode research
             // control only; field mode pins LiDAR devices to the mesh
@@ -99,9 +119,10 @@ public struct SamplingPlotScreen: View {
                 bottomPanel
             }
         }
-        .navigationTitle("Sampling Plot")
+        // Full-bleed AR chrome — no system nav bar; the floating back
+        // button is the exit affordance for both presentation paths.
         #if os(iOS)
-        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.hidden, for: .navigationBar)
         #endif
         .onAppear {
             session.run()
@@ -129,7 +150,7 @@ public struct SamplingPlotScreen: View {
     private var topControls: some View {
         VStack(spacing: 8) {
             HStack {
-                Text("Sampling radius")
+                Text("SAMPLING RADIUS")
                     .font(ForestixType.sectionHead)
                     .tracking(1.2)
                     .foregroundStyle(.white.opacity(0.85))
@@ -143,10 +164,11 @@ public struct SamplingPlotScreen: View {
                 .accessibilityIdentifier("samplingPlot.radius")
         }
         .padding(10)
-        .background(.ultraThinMaterial)
-        .cornerRadius(10)
-        .padding(.horizontal)
-        .padding(.top, 8)
+        .background(Color.black.opacity(0.55))
+        .cornerRadius(ForestixRadius.card)
+        .padding(.horizontal, ForestixSpace.md)
+        // Below the floating back row: 16 top inset + 44 button + 8 gap.
+        .padding(.top, 68)
     }
 
     // MARK: - Bottom panel (centred, half-width)
@@ -158,10 +180,20 @@ public struct SamplingPlotScreen: View {
                     .font(ForestixType.caption)
                     .foregroundStyle(.white)
             }
-            Text(statusTitle)
-                .font(.callout)
-                .fontWeight(isOutside ? .bold : .regular)
-                .foregroundStyle(.white)
+            // Big tinted INSIDE / OUTSIDE readout once the centre is
+            // placed — a boundary state the cruiser can read at arm's
+            // length; plain body copy while still aiming.
+            if center == nil {
+                Text(statusTitle)
+                    .font(ForestixType.body)
+                    .foregroundStyle(.white)
+            } else {
+                Text(statusTitle)
+                    .font(ForestixType.dataLarge)
+                    .foregroundStyle(isOutside
+                                     ? ForestixPalette.confidenceBad
+                                     : ForestixPalette.confidenceOk)
+            }
             Text(distanceLine)
                 .font(ForestixType.dataSmall)
                 .foregroundStyle(.white.opacity(0.85))
@@ -181,8 +213,8 @@ public struct SamplingPlotScreen: View {
     }
 
     private var statusTitle: String {
-        if center == nil { return "Aim, then tap + to drop the plot centre" }
-        return isOutside ? "Outside sampling area — walk back inside" : "Inside sampling area"
+        if center == nil { return "Set the radius, aim at the plot centre, tap +" }
+        return isOutside ? "OUTSIDE — walk back inside" : "INSIDE sampling area"
     }
 
     private var distanceLine: String {
@@ -221,7 +253,7 @@ public struct SamplingPlotScreen: View {
         center = nil
         isOutside = false
         distanceFromCenterM = nil
-        flashOn = false
+        hapticTick = false
     }
 
     private func savePlot() {
@@ -235,16 +267,19 @@ public struct SamplingPlotScreen: View {
             confidenceRaw: "green",
             method: "ar.tap",
             plotID: history.activePlotID))
+        // Saving is the end of the flow — exit the screen (both
+        // platforms); staying here only invited a duplicate save.
+        dismiss()
     }
 
-    // MARK: - Polling (distance + flash + haptics)
+    // MARK: - Polling (distance + haptics)
 
     private func startPolling() {
         pollTimer?.invalidate()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in
             Task { @MainActor in
                 tickOutsideCheck()
-                flashOn.toggle()
+                hapticTick.toggle()
             }
         }
     }
@@ -271,7 +306,8 @@ public struct SamplingPlotScreen: View {
             isOutside = nowOutside
             if nowOutside { triggerOutsideHaptics() }
         }
-        if isOutside, flashOn { triggerOutsideHaptics() }
+        // Every other 0.2 s tick → a buzz every 0.4 s while outside.
+        if isOutside, hapticTick { triggerOutsideHaptics() }
     }
 
     private func currentCameraPosition() -> SIMD3<Float>? {

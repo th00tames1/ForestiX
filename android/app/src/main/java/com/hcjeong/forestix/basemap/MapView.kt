@@ -31,7 +31,9 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -49,9 +51,9 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.asAndroidPath
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
@@ -62,13 +64,13 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hcjeong.forestix.geo.CoordinateConversions
 import com.hcjeong.forestix.ui.theme.Forestix
-import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import kotlin.math.PI
 import kotlin.math.atan
@@ -81,7 +83,6 @@ import kotlin.math.log2
 import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.math.sinh
-import kotlin.math.sqrt
 import kotlin.math.tan
 
 // MARK: - Overlay models (mirror MapPolygon / Marker content on iOS)
@@ -239,12 +240,27 @@ fun MapView(
             style = Paint.Style.STROKE
         }
     }
-    // PIN paints — mono like the mock's --font-mono pin glyphs.
+    // PIN paints — mono like the mock's --font-mono pin glyphs. The label
+    // is heavy/800 (iOS `.heavy`, mock 800); pre-P devices fall back to bold.
     val pinLabel = remember {
         Paint().apply {
             isAntiAlias = true
             textAlign = Paint.Align.CENTER
-            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            typeface = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                Typeface.create(Typeface.MONOSPACE, 800, false)
+            } else {
+                Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            }
+        }
+    }
+    // iOS `.shadow(color: .black.opacity(0.3), radius: 4, y: 2)` on the
+    // teardrop body — a blurred silhouette drawn under the drop.
+    val pinShadow = remember(density) {
+        Paint().apply {
+            isAntiAlias = true
+            color = android.graphics.Color.argb(77, 0, 0, 0)
+            maskFilter = android.graphics.BlurMaskFilter(
+                4f * density, android.graphics.BlurMaskFilter.Blur.NORMAL)
         }
     }
     val badgeText = remember {
@@ -272,7 +288,7 @@ fun MapView(
                 .pointerInput(Unit) {
                     detectTransformGestures { _, pan, gestureZoom, _ ->
                         if (gestureZoom != 1f && gestureZoom > 0f) {
-                            camZoom = (camZoom + log2(gestureZoom.toDouble())).coerceIn(1.0, 19.0)
+                            camZoom = (camZoom + log2(gestureZoom.toDouble())).coerceIn(3.0, 19.0)
                         }
                         if (pan != Offset.Zero) {
                             val worldPx = 256.0 * density * 2.0.pow(camZoom)
@@ -288,39 +304,65 @@ fun MapView(
                     }
                 }
                 .pointerInput(markers, onMarkerTap, onMapTap) {
-                    if (onMarkerTap == null && onMapTap == null) return@pointerInput
-                    detectTapGestures { tap ->
-                        // Same projection as the draw pass, evaluated with the
-                        // camera as of the tap.
-                        val worldPx = 256.0 * density * 2.0.pow(camZoom)
-                        val originX = lonToXNorm(camCenter.longitude) * worldPx - size.width / 2.0
-                        val originY = latToYNorm(camCenter.latitude) * worldPx - size.height / 2.0
-                        val hitRadius = 24.dp.toPx()
-                        val tipToBody = (30.dp.toPx() / 2f) * sqrt(2f)
-                        var bestId: String? = null
-                        var bestDist = hitRadius
-                        for (m in markers) {
-                            val px = (lonToXNorm(m.coordinate.longitude) * worldPx - originX).toFloat()
-                            val py = (latToYNorm(m.coordinate.latitude) * worldPx - originY).toFloat()
-                            var d = hypot(tap.x - px, tap.y - py)
-                            if (m.shape == MapMarkerShape.PIN) {
-                                // The teardrop body floats above the tip point.
-                                d = minOf(d, hypot(tap.x - px, tap.y - (py - tipToBody)))
+                    detectTapGestures(
+                        // iOS BasemapMapView doubleTapZoom: one level in,
+                        // keeping the tapped point stationary.
+                        onDoubleTap = { tap ->
+                            val oldZoom = camZoom
+                            val newZoom = (oldZoom + 1.0).coerceIn(3.0, 19.0)
+                            if (newZoom != oldZoom) {
+                                val worldPx = 256.0 * density * 2.0.pow(oldZoom)
+                                val scale = 2.0.pow(newZoom - oldZoom)
+                                val cx = lonToXNorm(camCenter.longitude)
+                                val cy = latToYNorm(camCenter.latitude)
+                                val tx = cx + (tap.x - size.width / 2.0) / worldPx
+                                val ty = cy + (tap.y - size.height / 2.0) / worldPx
+                                val nx = tx + (cx - tx) / scale
+                                val ny = ty + (cy - ty) / scale
+                                camZoom = newZoom
+                                camCenter = CoordinateConversions.LatLon(
+                                    latitude = yNormToLat(ny.coerceIn(0.0, 1.0)),
+                                    longitude = xNormToLon(nx.coerceIn(0.0, 1.0)),
+                                )
                             }
-                            if (d <= bestDist) { bestDist = d; bestId = m.id }
-                        }
-                        val hit = bestId
-                        if (hit != null && onMarkerTap != null) onMarkerTap(hit) else onMapTap?.invoke()
-                    }
+                        },
+                        onTap = { tap ->
+                            if (onMarkerTap == null && onMapTap == null) return@detectTapGestures
+                            // Same projection as the draw pass, evaluated with
+                            // the camera as of the tap.
+                            val worldPx = 256.0 * density * 2.0.pow(camZoom)
+                            val originX = lonToXNorm(camCenter.longitude) * worldPx - size.width / 2.0
+                            val originY = latToYNorm(camCenter.latitude) * worldPx - size.height / 2.0
+                            val hitRadius = 24.dp.toPx()
+                            var bestId: String? = null
+                            var bestDist = hitRadius
+                            for (m in markers) {
+                                val px = (lonToXNorm(m.coordinate.longitude) * worldPx - originX).toFloat()
+                                val py = (latToYNorm(m.coordinate.latitude) * worldPx - originY).toFloat()
+                                var d = hypot(tap.x - px, tap.y - py)
+                                if (m.shape == MapMarkerShape.PIN) {
+                                    // The teardrop body floats above the
+                                    // bottom-anchored block's badge row.
+                                    val bodyDy = (if (m.badges.isEmpty()) 15.dp else 30.dp).toPx()
+                                    d = minOf(d, hypot(tap.x - px, tap.y - (py - bodyDy)))
+                                }
+                                if (d <= bestDist) { bestDist = d; bestId = m.id }
+                            }
+                            val hit = bestId
+                            if (hit != null && onMarkerTap != null) onMarkerTap(hit) else onMapTap?.invoke()
+                        },
+                    )
                 },
         ) {
             // Ticks are read so freshly-downloaded tiles invalidate us.
             @Suppress("UNUSED_EXPRESSION") baseTick
             @Suppress("UNUSED_EXPRESSION") overlayTick
 
-            drawRect(color = colors.surface)
+            drawRect(color = colors.canvas)
 
-            val tileZoom = floor(camZoom).toInt().coerceIn(0, 19)
+            // Nearest tile level (iOS `zoom.rounded()`) so fractional zooms
+            // never upscale a whole level blurrier.
+            val tileZoom = camZoom.roundToInt().coerceIn(0, 19)
             val n = 1 shl tileZoom
             val tilePx = 256.0 * density * 2.0.pow(camZoom - tileZoom)
             val worldPx = tilePx * n
@@ -332,6 +374,22 @@ fun MapView(
             val tx1 = floor((originX + size.width) / tilePx).toInt()
             val ty0 = floor(originY / tilePx).toInt().coerceAtLeast(0)
             val ty1 = floor((originY + size.height) / tilePx).toInt().coerceAtMost(n - 1)
+
+            // Faint tile-boundary grid under the tiles (iOS gridPath) —
+            // shows through only where a base tile hasn't arrived, and
+            // gives pan feedback over the bare canvas.
+            val gridColor = colors.divider.copy(alpha = 0.55f)
+            val gridStroke = 0.5.dp.toPx()
+            for (gx in tx0..(tx1 + 1)) {
+                val sx = (gx * tilePx - originX).toFloat()
+                drawLine(gridColor, Offset(sx, 0f), Offset(sx, size.height), gridStroke)
+            }
+            val gy0 = floor(originY / tilePx).toInt()
+            val gy1 = floor((originY + size.height) / tilePx).toInt()
+            for (gy in gy0..(gy1 + 1)) {
+                val sy = (gy * tilePx - originY).toFloat()
+                drawLine(gridColor, Offset(0f, sy), Offset(size.width, sy), gridStroke)
+            }
             for (layer in listOfNotNull(baseFetcher, overlayFetcher)) {
                 for (ty in ty0..ty1) {
                     for (tx in tx0..tx1) {
@@ -390,7 +448,11 @@ fun MapView(
 
             // MARK: Markers (planned-plot dots + map-home teardrop pins)
             val markerRadius = 6.dp.toPx()
-            for (marker in markers) {
+            // Selected pin draws last so it can never hide under a
+            // neighbour (iOS zIndex 2 on the selected marker).
+            val orderedMarkers =
+                if (markers.any { it.selected }) markers.sortedBy { it.selected } else markers
+            for (marker in orderedMarkers) {
                 val pt = screenPoint(marker.coordinate)
                 when (marker.shape) {
                     MapMarkerShape.DOT -> {
@@ -417,17 +479,22 @@ fun MapView(
 
                     MapMarkerShape.PIN -> {
                         // Mock `.pin .dot`: a 30 dp round rect with one sharp
-                        // corner, rotated -45° so the sharp corner becomes the
-                        // tip sitting exactly on the coordinate.
+                        // corner (radius 4), rotated -45° so the sharp corner
+                        // becomes the downward tip. The whole block is
+                        // BOTTOM-anchored on the coordinate like iOS / the
+                        // mock's translate(-50%, -100%): the badge row's
+                        // bottom sits ON the point, the 30 dp pin frame
+                        // stacks 3 dp above it, and the rotated drop
+                        // overflows that frame just like the SwiftUI layout.
                         val side = 30.dp.toPx()
-                        val tipToCentre = (side / 2f) * sqrt(2f)
-                        val centre = Offset(pt.x, pt.y - tipToCentre)
-                        // Ground shadow so the drop reads as "planted".
-                        drawOval(
-                            color = Color.Black.copy(alpha = 0.18f),
-                            topLeft = Offset(pt.x - 7.dp.toPx(), pt.y - 2.dp.toPx()),
-                            size = Size(14.dp.toPx(), 4.dp.toPx()),
-                        )
+                        badgeText.textSize = 8.5f * density
+                        val badgeFm = badgeText.fontMetrics
+                        // Content-driven chip height: text + 2 × 1 dp pad.
+                        val chipH = (badgeFm.descent - badgeFm.ascent) + 2f * density
+                        val hasBadges = marker.badges.isNotEmpty()
+                        val pinFrameBottom =
+                            if (hasBadges) pt.y - chipH - 3.dp.toPx() else pt.y
+                        val centre = Offset(pt.x, pinFrameBottom - side / 2f)
                         val body = Path().apply {
                             addRoundRect(
                                 RoundRect(
@@ -438,17 +505,30 @@ fun MapView(
                                     topLeft = CornerRadius(side / 2f),
                                     topRight = CornerRadius(side / 2f),
                                     bottomRight = CornerRadius(side / 2f),
-                                    bottomLeft = CornerRadius(2.dp.toPx()),
+                                    bottomLeft = CornerRadius(4.dp.toPx()),
                                 ),
                             )
                         }
+                        // Drop shadow (black 0.3, r4, y2) — blurred rotated
+                        // silhouette, offset downward in SCREEN space.
+                        drawIntoCanvas { canvas ->
+                            val bodyAndroid = body.asAndroidPath()
+                            val matrix = android.graphics.Matrix().apply {
+                                setRotate(-45f, centre.x, centre.y)
+                                postTranslate(0f, 2.dp.toPx())
+                            }
+                            val shadowPath = android.graphics.Path()
+                            bodyAndroid.transform(matrix, shadowPath)
+                            canvas.nativeCanvas.drawPath(shadowPath, pinShadow)
+                        }
                         rotate(degrees = -45f, pivot = centre) {
                             if (marker.selected) {
-                                // Mock `.pin.sel`: soft tint outline.
+                                // Mock `.pin.sel`: 3-wide primaryMuted
+                                // outline following the teardrop shape.
                                 drawPath(
                                     body,
-                                    color = marker.tint.copy(alpha = 0.35f),
-                                    style = Stroke(width = 7.dp.toPx()),
+                                    color = colors.primaryMuted,
+                                    style = Stroke(width = 3.dp.toPx()),
                                 )
                             }
                             drawPath(body, color = marker.tint)
@@ -473,22 +553,20 @@ fun MapView(
                                 )
                             }
                         }
-                        // Badge chips beneath the tip (mock `.pin .badges`).
-                        if (marker.badges.isNotEmpty()) {
+                        // Badge chips — bottom row of the block, sitting on
+                        // the coordinate (mock `.pin .badges`).
+                        if (hasBadges) {
                             drawIntoCanvas { canvas ->
-                                badgeText.textSize = 8.5f * density
                                 badgeText.color = colors.textSecondary.toArgb()
                                 badgeFill.color = colors.surface.toArgb()
                                 badgeStroke.color = colors.divider.toArgb()
                                 badgeStroke.strokeWidth = 1f * density
-                                val chipH = 12.dp.toPx()
                                 val padH = 4.dp.toPx()
                                 val gap = 2.dp.toPx()
                                 val corner = 3.dp.toPx()
                                 val widths = marker.badges.map { badgeText.measureText(it) + padH * 2 }
                                 var x = pt.x - (widths.sum() + gap * (marker.badges.size - 1)) / 2f
-                                val top = pt.y + 3.dp.toPx()
-                                val fm = badgeText.fontMetrics
+                                val top = pt.y - chipH
                                 marker.badges.forEachIndexed { i, badge ->
                                     val w = widths[i]
                                     canvas.nativeCanvas.drawRoundRect(
@@ -498,7 +576,7 @@ fun MapView(
                                     canvas.nativeCanvas.drawText(
                                         badge,
                                         x + w / 2f,
-                                        top + chipH / 2f - (fm.ascent + fm.descent) / 2f,
+                                        top + chipH / 2f - (badgeFm.ascent + badgeFm.descent) / 2f,
                                         badgeText,
                                     )
                                     x += w + gap
@@ -511,18 +589,22 @@ fun MapView(
         }
 
         // Imagery credit for the built-in satellite base — required by the
-        // Esri terms, so it stays on whenever that base is in use.
+        // Esri terms, so it stays on whenever that base is in use. Fixed
+        // dark-glass colours on purpose: it sits on satellite imagery, not
+        // on an app surface (iOS attributionBadge).
         if (baseIsBuiltin) {
             Text(
                 TileFetcher.ESRI_WORLD_IMAGERY_ATTRIBUTION,
-                style = Forestix.type.dataSmall.copy(fontSize = 9.5.sp),
-                color = colors.textSecondary,
+                style = Forestix.type.dataSmall.copy(
+                    fontSize = 9.sp, fontWeight = FontWeight.Normal),
+                color = Color.White.copy(alpha = 0.78f),
                 modifier = Modifier
                     .align(Alignment.BottomStart)
-                    .padding(ForestixSpace.xs)
-                    .clip(ForestixRadius.chip)
-                    .background(colors.surface.copy(alpha = 0.65f))
-                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                    .navigationBarsPadding()
+                    .padding(start = 10.dp, bottom = 2.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Color.Black.copy(alpha = 0.28f))
+                    .padding(horizontal = 6.dp, vertical = 2.5.dp),
             )
         }
 

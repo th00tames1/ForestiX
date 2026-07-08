@@ -32,6 +32,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
@@ -76,7 +77,7 @@ fun TimberCruisingHubScreen(nav: NavController) {
             TileLink("Reference", "Formulas \u00B7 log rules \u00B7 conversions", Icons.Filled.Book) {
                 nav.navigate(Routes.REFERENCE_LIBRARY)
             }
-            TileLink("Settings", "Developer mode \u00B7 units \u00B7 log rule", Icons.Filled.Settings) { nav.navigate(Routes.SETTINGS) }
+            TileLink("Settings", "Region \u00B7 units \u00B7 calibration", Icons.Filled.Settings) { nav.navigate(Routes.SETTINGS) }
         }
     }
 }
@@ -101,9 +102,11 @@ private fun TileLink(title: String, subtitle: String, icon: ImageVector, onClick
             ) {
                 Icon(icon, contentDescription = null, tint = colors.primary, modifier = Modifier.size(17.dp))
             }
-            Column(Modifier.weight(1f)) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(title, style = type.bodyBold, color = colors.textPrimary)
-                Text(subtitle, style = type.caption, color = colors.textSecondary)
+                Text(
+                    subtitle, style = type.caption, color = colors.textSecondary,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
             Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = colors.textTertiary, modifier = Modifier.size(12.dp))
         }

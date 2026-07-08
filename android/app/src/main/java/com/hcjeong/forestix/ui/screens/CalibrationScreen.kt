@@ -23,16 +23,22 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoFixHigh
+import androidx.compose.material.icons.filled.SaveAlt
+import androidx.compose.material.icons.filled.Scanner
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -61,6 +67,7 @@ import com.hcjeong.forestix.sensors.Vec3d
 import com.hcjeong.forestix.sensors.WallCalibration
 import com.hcjeong.forestix.sensors.WallCalibrationResult
 import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixProminentButton
 import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import java.util.Locale
@@ -364,7 +371,9 @@ fun CalibrationScreen(nav: NavController, projectId: String? = null) {
                 val hasAnyComputed =
                     wall is CalibrationViewModel.WallState.Computed ||
                         cylinder is CalibrationViewModel.CylinderState.Computed
-                Button(
+                // iOS renders both Apply actions as plain Form buttons
+                // (icon + tinted label), not filled/outlined pills.
+                TextButton(
                     onClick = {
                         scope.launch {
                             val updated = viewModel.applyTo(p)
@@ -379,9 +388,13 @@ fun CalibrationScreen(nav: NavController, projectId: String? = null) {
                         }
                     },
                     enabled = hasAnyComputed,
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("Apply scanned values to project") }
-                OutlinedButton(
+                ) {
+                    Icon(Icons.Filled.SaveAlt, contentDescription = null,
+                        modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Apply scanned values to project")
+                }
+                TextButton(
                     onClick = {
                         scope.launch {
                             val updated = CalibrationViewModel.sensibleDefaultsApplied(to = p)
@@ -397,8 +410,12 @@ fun CalibrationScreen(nav: NavController, projectId: String? = null) {
                             }
                         }
                     },
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("Use sensible defaults (skip scan)") }
+                ) {
+                    Icon(Icons.Filled.AutoFixHigh, contentDescription = null,
+                        modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Use sensible defaults (skip scan)")
+                }
                 Text(
                     "Wall + cylinder results write to this project's depth noise, LiDAR bias, " +
                         "and DBH α/β. The defaults shortcut applies the spec §7.10 identity " +
@@ -443,12 +460,13 @@ private fun WallSection(
     when (wall) {
         is CalibrationViewModel.WallState.Idle -> {
             Text("Not calibrated yet.", style = type.body, color = colors.textPrimary)
-            Button(
-                onClick = { viewModel.startWallScan() },
+            ForestixProminentButton(
+                label = "Start wall scan",
+                icon = Icons.Filled.Scanner,      // iOS scanner.fill
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(56.dp),
-            ) { Text("Start wall scan") }
+                    .heightIn(min = 56.dp),
+            ) { viewModel.startWallScan() }
         }
         is CalibrationViewModel.WallState.Scanning -> {
             // Live camera keeps the ARCore session (and depth frames) alive.
@@ -522,7 +540,7 @@ private fun CylinderSection(
             singleLine = true,
             modifier = Modifier.weight(1f),
         )
-        Button(onClick = { viewModel.addCylinderSample() }) { Text("Add") }
+        ForestixProminentButton(label = "Add") { viewModel.addCylinderSample() }
     }
 
     when (cylinder) {
@@ -531,7 +549,8 @@ private fun CylinderSection(
         }
         is CalibrationViewModel.CylinderState.Collecting -> {
             SampleList(cylinder.samples)
-            Button(
+            // iOS renders this as a plain Form button.
+            TextButton(
                 onClick = { viewModel.computeCylinderCalibration() },
                 enabled = cylinder.samples.size >= 2,
             ) { Text("Compute α, β") }

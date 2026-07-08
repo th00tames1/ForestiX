@@ -23,7 +23,6 @@ import com.hcjeong.forestix.ui.screens.DistanceMeasureScreen
 import com.hcjeong.forestix.ui.screens.ExportScreen
 import com.hcjeong.forestix.ui.screens.FieldLogScreen
 import com.hcjeong.forestix.ui.screens.MapHomeScreen
-import com.hcjeong.forestix.ui.screens.ModeSelectionScreen
 import com.hcjeong.forestix.ui.screens.ReferenceLibraryScreen
 import com.hcjeong.forestix.ui.screens.SamplingPlotScreen
 import com.hcjeong.forestix.ui.screens.SettingsScreen
@@ -58,7 +57,6 @@ object Routes {
     /// Map-first home (redesign v2): pins from the field log, the capture
     /// cluster, and the offline-basemap sheet. The app's start destination.
     const val MAP_HOME = "mapHome"
-    const val MODE = "mode"
     const val TREE_HUB = "treeHub"
     const val TIMBER_HUB = "timberHub"
     const val FIELD_LOG = "fieldLog"
@@ -91,7 +89,6 @@ fun ForestixRoot() {
     val nav = rememberNavController()
     NavHost(navController = nav, startDestination = Routes.MAP_HOME) {
         composable(Routes.MAP_HOME) { MapHomeScreen(nav) }
-        composable(Routes.MODE) { ModeSelectionScreen(nav) }
         composable(Routes.TREE_HUB) { TreeMeasurementHubScreen(nav) }
         composable(Routes.TIMBER_HUB) { TimberCruisingHubScreen(nav) }
         composable(Routes.FIELD_LOG) { FieldLogScreen(nav) }

@@ -80,7 +80,7 @@ public struct CruiseDesignScreen: View {
             if let message = viewModel.validationMessage {
                 Section {
                     Label(message, systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(ForestixPalette.confidenceWarn)
                 }
             }
         }
@@ -136,7 +136,7 @@ public struct CruiseDesignScreen: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text(sp.code)
-                    .font(.body.monospaced().bold())
+                    .font(ForestixType.data)
                     .frame(width: 44, alignment: .leading)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(sp.commonName)
@@ -149,29 +149,29 @@ public struct CruiseDesignScreen: View {
             if let eq = eq {
                 HStack(spacing: 6) {
                     Text(eq.form)
-                        .font(.caption.monospaced())
+                        .font(ForestixType.dataSmall)
                         .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(Color.accentColor.opacity(0.12))
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .background(ForestixPalette.primary.opacity(0.12))
+                        .clipShape(RoundedRectangle(cornerRadius: ForestixRadius.chip))
                     if eq.sourceCitation
                         .uppercased().contains("PLACEHOLDER") {
                         Label("placeholder",
                               systemImage: "exclamationmark.triangle.fill")
                             .labelStyle(.titleAndIcon)
                             .font(.caption)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(ForestixPalette.confidenceWarn)
                     } else {
                         Label("verified",
                               systemImage: "checkmark.seal.fill")
                             .font(.caption)
-                            .foregroundStyle(.green)
+                            .foregroundStyle(ForestixPalette.confidenceOk)
                     }
                 }
             } else {
                 Label("Missing equation \(sp.volumeEquationId)",
                       systemImage: "exclamationmark.octagon.fill")
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(ForestixPalette.confidenceBad)
             }
         }
         .padding(.vertical, 2)

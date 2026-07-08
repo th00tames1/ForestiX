@@ -108,7 +108,7 @@ public struct PlotTallyScreen: View {
     private func statCell(label: String, value: String) -> some View {
         VStack(spacing: 2) {
             Text(value)
-                .font(.title3.bold().monospacedDigit())
+                .font(ForestixType.data)
             Text(label)
                 .font(.caption2)
                 .foregroundStyle(.secondary)

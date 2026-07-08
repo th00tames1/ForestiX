@@ -231,7 +231,29 @@ object DBHEstimator {
     /// DBH digit + distance + a "locked" state — the Android analogue of
     /// iOS DBHEstimator.previewFit. Returns null if the tap is outside the
     /// depth map. `locked` = a plausible trunk fit this frame.
-    data class DbhPreview(val diameterCm: Float, val distanceM: Float, val locked: Boolean, val nPoints: Int)
+    /// `stripLeftFraction`/`stripRightFraction` are the trunk-strip edges as
+    /// fractions of the depth-map extent along the guide axis (× screen
+    /// width = the on-screen chord span, iOS PreviewFit parity). `tier` is
+    /// the preview confidence (green = tight width consistency).
+    data class DbhPreview(
+        val diameterCm: Float,
+        val distanceM: Float,
+        val locked: Boolean,
+        val nPoints: Int,
+        val stripLeftFraction: Float = 0f,
+        val stripRightFraction: Float = 0f,
+        val tier: ConfidenceTier = ConfidenceTier.YELLOW,
+    )
+
+    /// Per-frame chord fit + the strip extent it was read from.
+    private data class FrameChord(
+        val diameterM: Double,
+        val leftFrac: Float,
+        val rightFrac: Float,
+        /// Coefficient of variation of the per-row silhouette widths —
+        /// null for the DEPTH_BAND algorithm (no row stack there).
+        val widthCov: Double?,
+    )
 
     /// Single-frame chord diameter in metres, or null if the trunk strip
     /// can't be read this frame. This is the SAME quantity the committed
@@ -242,7 +264,7 @@ object DBHEstimator {
     private fun frameChordDiameterM(
         frame: ArDepthFrame, tapX: Double, tapY: Double, axis: GuideAxis, dTap: Float,
         cal: ProjectCalibration, algorithm: ChordAlgorithm,
-    ): Double? = when (algorithm) {
+    ): FrameChord? = when (algorithm) {
         ChordAlgorithm.SILHOUETTE -> frameSilhouetteDiameterM(frame, tapX, tapY, axis, dTap)
         ChordAlgorithm.DEPTH_BAND -> {
             val tapAlong = tapAlongAxis(tapX, tapY, axis)
@@ -254,9 +276,19 @@ object DBHEstimator {
                         frame.fx, frame.fy, frame.cx, frame.cy, frame.pose)
                 }
                 val chord = chordDiameterFromCloud(pts)
-                if (chord > 0.0) chord else null
+                if (chord > 0.0) {
+                    val extent = axisExtent(frame, axis).toFloat().coerceAtLeast(1f)
+                    FrameChord(chord, strip.min() / extent, strip.max() / extent, widthCov = null)
+                } else null
             }
         }
+    }
+
+    /// Walk length of the guide axis in depth-map pixels — the denominator
+    /// for the strip-edge fractions (iOS `frameExtent`).
+    private fun axisExtent(frame: ArDepthFrame, axis: GuideAxis): Int = when (axis) {
+        is GuideAxis.Row -> frame.width
+        is GuideAxis.Col -> frame.height
     }
 
     /// Silhouette strip walk — 1:1 port of iOS extractChordSilhouetteStrip.
@@ -307,11 +339,15 @@ object DBHEstimator {
     private fun frameSilhouetteDiameterM(
         frame: ArDepthFrame, tapX: Double, tapY: Double, axis: GuideAxis, dTap: Float,
         rowSpan: Int = 10, silhouetteJumpM: Float = 0.30f,
-    ): Double? {
+    ): FrameChord? {
         val fx = frame.fx
         if (fx <= 0) return null
         val centerAlong = tapAlongAxis(tapX, tapY, axis)
         val widths = ArrayList<Int>()
+        // First usable strip extent → the on-screen chord span (iOS
+        // `firstUsableExtent`).
+        var extentL = -1
+        var extentR = -1
         for (offset in -rowSpan..rowSpan) {
             val neighbour = when (axis) {
                 is GuideAxis.Row -> GuideAxis.Row(axis.y + offset)
@@ -324,6 +360,7 @@ object DBHEstimator {
             val w = r - l + 1
             if (w < 5) continue
             widths.add(w)
+            if (extentL < 0) { extentL = l; extentR = r }
         }
         if (widths.size < 5) return null
         widths.sort()
@@ -331,7 +368,20 @@ object DBHEstimator {
         val halfWidth = medianWidth / 2.0
         if (fx - halfWidth <= 1.0) return null
         val diameterM = medianWidth * dTap.toDouble() / (fx - halfWidth)
-        return if (diameterM > 0.0) diameterM else null
+        if (diameterM <= 0.0) return null
+        // Width consistency across the row stack — iOS chordPreviewFit's
+        // tier input (CoV ≤ 0.10 ⇒ green preview chip).
+        val mean = widths.sum().toDouble() / widths.size
+        val cov = if (mean > 0) {
+            sqrt(widths.sumOf { (it - mean) * (it - mean) } / widths.size) / mean
+        } else 1.0
+        val extent = axisExtent(frame, axis).toFloat().coerceAtLeast(1f)
+        return FrameChord(
+            diameterM,
+            if (extentL >= 0) extentL / extent else 0f,
+            if (extentR >= 0) extentR / extent else 1f,
+            widthCov = cov,
+        )
     }
 
     fun livePreview(
@@ -340,11 +390,18 @@ object DBHEstimator {
     ): DbhPreview? {
         val dTap = medianDepth(tapX, tapY, frame, 2) ?: return null
         if (dTap !in 0.4f..3.5f) return DbhPreview(0f, dTap, false, 0)
-        val chordM = frameChordDiameterM(frame, tapX, tapY, axis, dTap, cal, algorithm)
+        val chord = frameChordDiameterM(frame, tapX, tapY, axis, dTap, cal, algorithm)
             ?: return DbhPreview(0f, dTap, false, 0)
-        val locked = chordM in 0.025..2.0
-        val dia = (cal.dbhCorrectionAlpha + cal.dbhCorrectionBeta * (chordM * 100)).toFloat()
-        return DbhPreview(dia, dTap, locked, 1)
+        val locked = chord.diameterM in 0.025..2.0
+        val dia = (cal.dbhCorrectionAlpha + cal.dbhCorrectionBeta * (chord.diameterM * 100)).toFloat()
+        // Preview tier — width consistency, iOS chordPreviewFit parity:
+        // CoV ≤ 0.10 ⇒ green (chip shown); otherwise yellow (silent).
+        val tier = if (chord.widthCov != null && chord.widthCov <= 0.10) {
+            ConfidenceTier.GREEN
+        } else {
+            ConfidenceTier.YELLOW
+        }
+        return DbhPreview(dia, dTap, locked, 1, chord.leftFrac, chord.rightFrac, tier)
     }
 
     /// Committed DBH = MEDIAN of the per-frame chord diameters over the
@@ -367,7 +424,7 @@ object DBHEstimator {
 
         val diameters = ArrayList<Double>(frames.size)
         for (f in frames) {
-            frameChordDiameterM(f, tapX, tapY, axis, dTap, cal, algorithm)?.let { diameters.add(it) }
+            frameChordDiameterM(f, tapX, tapY, axis, dTap, cal, algorithm)?.let { diameters.add(it.diameterM) }
         }
         if (diameters.size < 3) return redChord("Not enough trunk surface; hold steadier / move closer", diameters.size)
 

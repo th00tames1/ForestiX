@@ -139,7 +139,7 @@ private fun RegionRow(region: Region, isSelected: Boolean, action: () -> Unit) {
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(glyph(region), contentDescription = null,
-                    tint = colors.primary, modifier = Modifier.size(18.dp))
+                    tint = colors.primary, modifier = Modifier.size(15.dp))
             }
             Column(
                 Modifier.weight(1f),
@@ -151,10 +151,10 @@ private fun RegionRow(region: Region, isSelected: Boolean, action: () -> Unit) {
             }
             if (isSelected) {
                 Icon(Icons.Filled.CheckCircle, contentDescription = "Selected",
-                    tint = colors.primary, modifier = Modifier.size(20.dp))
+                    tint = colors.primary, modifier = Modifier.size(17.dp))
             } else {
                 Icon(Icons.Filled.ChevronRight, contentDescription = null,
-                    tint = colors.textTertiary, modifier = Modifier.size(16.dp))
+                    tint = colors.textTertiary, modifier = Modifier.size(12.dp))
             }
         }
     }

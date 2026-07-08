@@ -97,7 +97,7 @@ public struct ARBoundaryScreen: View {
             actionRow
         }
         .padding()
-        .background(.ultraThinMaterial)
+        .background(Color.black.opacity(0.55))
         .cornerRadius(12)
         .padding(.horizontal)
         .padding(.bottom, 24)

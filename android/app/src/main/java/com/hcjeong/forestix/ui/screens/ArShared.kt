@@ -30,6 +30,10 @@ fun CenterCrosshair(modifier: Modifier = Modifier) {
             Modifier.size(36.dp).clip(CircleShape).border(4.dp, Color.Black.copy(alpha = 0.5f), CircleShape),
         )
         Box(Modifier.size(32.dp).clip(CircleShape).border(2.dp, Color.White, CircleShape))
+        // Dark backing bars under the white ticks for sun-glare contrast —
+        // iOS DistanceMeasureScreen crosshair (14×3 black 0.6 halos).
+        Box(Modifier.size(width = 14.dp, height = 3.dp).background(Color.Black.copy(alpha = 0.6f)))
+        Box(Modifier.size(width = 3.dp, height = 14.dp).background(Color.Black.copy(alpha = 0.6f)))
         Box(Modifier.size(width = 12.dp, height = 1.5.dp).background(Color.White))
         Box(Modifier.size(width = 1.5.dp, height = 12.dp).background(Color.White))
     }

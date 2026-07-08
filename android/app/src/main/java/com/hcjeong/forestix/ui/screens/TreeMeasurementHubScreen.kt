@@ -1,6 +1,7 @@
 // Tree Measurement hub — port of iOS TreeMeasurementHubScreen.
-// 2-column x 3-row grid, five tiles + an intentionally blank 6th slot,
-// then a Field Log row. Tiles route to the AR measurement screens.
+// 2-column grid of four tool tiles, then a Field Log row. Tiles route to
+// the AR measurement screens. Layout rhythm mirrors the iOS VStack:
+// caption → grid → field-log all 16 apart, 12 inside the grid.
 
 package com.hcjeong.forestix.ui.screens
 
@@ -12,25 +13,20 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.CenterFocusWeak
 import androidx.compose.material.icons.filled.Height
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Straighten
-import androidx.compose.material.icons.filled.SwapHoriz
-import androidx.compose.material.icons.filled.WbSunny
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -38,99 +34,93 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.ui.Routes
 import com.hcjeong.forestix.ui.clickableNoRipple
+import com.hcjeong.forestix.ui.softDropShadow
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 
-private data class Tool(val title: String, val subtitle: String, val icon: ImageVector, val route: String?)
+private data class Tool(
+    val title: String,
+    val subtitle: String,
+    val icon: ImageVector,
+    val route: String,
+    /// Icon rotation in degrees — the Distance tile turns the vertical
+    /// Height glyph into iOS's single ↔ double-headed arrow.
+    val iconRotation: Float = 0f,
+)
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TreeMeasurementHubScreen(nav: NavController) {
     val colors = Forestix.colors
     val type = Forestix.type
     val env = LocalAppEnvironment.current
     val entries by env.history.entries.collectAsStateWithLifecycle()
-    val settings by env.settings.state.collectAsStateWithLifecycle()
-
-    // First-launch UX (iOS QuickMeasureHomeScreen .task): auto-present the
-    // region picker once. Picking or skipping stamps regionPickerSeen, which
-    // removes the sheet; it stays reachable later via Settings → Region.
-    if (settings.region == null && !settings.regionPickerSeen) {
-        ModalBottomSheet(
-            onDismissRequest = { env.settings.setRegionPickerSeen(true) },
-        ) {
-            RegionPickerSheet(onDismiss = {
-                // Selection/Skip already stamped regionPickerSeen — the
-                // state change hides the sheet.
-            })
-        }
-    }
 
     val tools = listOf(
         Tool("Tree Diameter", "DBH via LiDAR scan", Icons.Filled.Straighten, Routes.DBH),
         Tool("Tree Height", "Height + crown, real scale", Icons.Filled.Height, Routes.HEIGHT),
         Tool("Sampling Plots", "Plot center + boundary", Icons.Filled.CenterFocusWeak, Routes.SAMPLING),
-        Tool("Distance Measurement", "Device-to-object + 2-point", Icons.Filled.SwapHoriz, Routes.DISTANCE),
+        Tool(
+            "Distance Measurement", "Device-to-object + 2-point",
+            Icons.Filled.Height, Routes.DISTANCE, iconRotation = 90f),
     )
 
-    ForestixScaffold(
-        nav, title = "Tree Measurement",
-        actions = {
-            androidx.compose.material3.IconButton(onClick = { nav.navigate(Routes.SETTINGS) }) {
-                androidx.compose.material3.Icon(
-                    Icons.Filled.Settings, contentDescription = "Settings", tint = colors.primary,
-                )
-            }
-        },
-    ) { padding ->
-        LazyVerticalGrid(
-            columns = GridCells.Fixed(2),
-            contentPadding = padding,
-            horizontalArrangement = Arrangement.spacedBy(ForestixSpace.sm),
-            verticalArrangement = Arrangement.spacedBy(ForestixSpace.sm),
-            modifier = Modifier.padding(horizontal = ForestixSpace.md),
+    ForestixScaffold(nav, title = "Tree Measurement") { padding ->
+        Column(
+            Modifier
+                .padding(padding)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = ForestixSpace.md),
+            verticalArrangement = Arrangement.spacedBy(ForestixSpace.md),
         ) {
-            item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(2) }) {
-                Text(
-                    "Direct measurement tools \u2014 readings save to the field log automatically.",
-                    style = type.caption, color = colors.textSecondary,
-                    modifier = Modifier.padding(top = ForestixSpace.sm),
-                )
-            }
-            items(tools) { tool ->
-                if (tool.route == null) {
-                    Spacer(Modifier.heightIn(min = 1.dp))
-                } else {
-                    ToolTile(tool) { nav.navigate(tool.route) }
+            Text(
+                "Direct measurement tools — readings save to the field log automatically.",
+                style = type.caption, color = colors.textSecondary,
+                modifier = Modifier.padding(top = ForestixSpace.sm),
+            )
+            Column(verticalArrangement = Arrangement.spacedBy(ForestixSpace.sm)) {
+                tools.chunked(2).forEach { rowTools ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(ForestixSpace.sm)) {
+                        rowTools.forEach { tool ->
+                            ToolTile(tool, Modifier.weight(1f)) { nav.navigate(tool.route) }
+                        }
+                        if (rowTools.size == 1) Spacer(Modifier.weight(1f))
+                    }
                 }
             }
-            item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(2) }) {
-                FieldLogRowLink(
-                    subtitle = if (entries.isEmpty()) "No readings yet" else "${entries.size} readings \u2014 view & export",
-                ) { nav.navigate(Routes.FIELD_LOG) }
-            }
+            FieldLogRowLink(
+                subtitle = if (entries.isEmpty()) "No readings yet" else "${entries.size} readings — view & export",
+            ) { nav.navigate(Routes.FIELD_LOG) }
+            Spacer(Modifier.height(ForestixSpace.lg))
         }
     }
 }
 
 @Composable
-private fun ToolTile(tool: Tool, onClick: () -> Unit) {
+private fun ToolTile(tool: Tool, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val colors = Forestix.colors
     val type = Forestix.type
     Surface(
         color = colors.surface,
         shape = ForestixRadius.card,
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .heightIn(min = 140.dp)
+            // iOS `.shadow(color: .black.opacity(0.04), radius: 6, y: 1)`.
+            .softDropShadow(
+                Color.Black.copy(alpha = 0.04f),
+                blurRadius = 6.dp, offsetY = 1.dp,
+                cornerRadius = ForestixRadius.cardDp)
             .clip(ForestixRadius.card)
             .border(0.5.dp, colors.primary.copy(alpha = 0.18f), ForestixRadius.card)
             .clickableNoRipple(onClick),
@@ -140,11 +130,18 @@ private fun ToolTile(tool: Tool, onClick: () -> Unit) {
                 Modifier.size(44.dp).clip(RoundedCornerShape(ForestixRadius.controlDp)).background(colors.primaryMuted),
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(tool.icon, contentDescription = null, tint = colors.primary, modifier = Modifier.size(20.dp))
+                Icon(
+                    tool.icon, contentDescription = null, tint = colors.primary,
+                    modifier = Modifier.size(20.dp).rotate(tool.iconRotation))
             }
             Spacer(Modifier.weight(1f))
-            Text(tool.title, style = type.bodyBold, color = colors.textPrimary)
-            Text(tool.subtitle, style = type.caption, color = colors.textSecondary)
+            // iOS inner VStack(spacing: 2) — title sits 2 above subtitle.
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(tool.title, style = type.bodyBold, color = colors.textPrimary)
+                Text(
+                    tool.subtitle, style = type.caption, color = colors.textSecondary,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
         }
     }
 }
@@ -158,14 +155,13 @@ private fun FieldLogRowLink(subtitle: String, onClick: () -> Unit) {
         shape = ForestixRadius.card,
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = ForestixSpace.md)
             .clip(ForestixRadius.card)
             .border(0.5.dp, colors.divider, ForestixRadius.card)
             .clickableNoRipple(onClick),
     ) {
         Row(Modifier.padding(ForestixSpace.md), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(ForestixSpace.sm)) {
             Icon(Icons.AutoMirrored.Filled.List, contentDescription = null, tint = colors.primary, modifier = Modifier.size(16.dp))
-            Column(Modifier.weight(1f)) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text("Field log", style = type.bodyBold, color = colors.textPrimary)
                 Text(subtitle, style = type.caption, color = colors.textSecondary)
             }

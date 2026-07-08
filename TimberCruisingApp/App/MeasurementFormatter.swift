@@ -74,9 +74,14 @@ public enum MeasurementFormatter {
     // MARK: - Distance / generic length
 
     /// Renders a horizontal distance (stored in metres) for display.
+    ///   • metric  → "3.42 m"; sub-metre readings switch to whole
+    ///     centimetres ("85 cm") — a close-range distance in "0.85 m"
+    ///     reads slower than the tape-measure unit cruisers expect.
+    ///   • imperial → "11.2 ft"
     public static func distance(m: Double, in system: UnitSystem) -> String {
         switch system {
         case .metric:
+            if m < 1 { return String(format: "%.0f cm", m * 100) }
             return String(format: "%.2f m", m)
         case .imperial:
             return String(format: "%.1f ft", m * 3.28084)

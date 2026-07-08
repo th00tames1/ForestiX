@@ -110,23 +110,55 @@ public struct ScanMetadataSheet: View {
 
     // MARK: - Damage
 
+    /// Multi-select damage tags as a wrapping chip row — the one place
+    /// chips are the control (single-choice pickers are segmented).
+    /// Mirrors Android's FilterChip row: selected = primary-muted fill +
+    /// primary border; unselected = surface + divider border.
     private var damageSection: some View {
         Section(
             header: Text("DAMAGE").font(ForestixType.sectionHead),
             footer: Text("Drives cull deductions in stand-and-stock reports.")
         ) {
-            ForEach(damageOptions, id: \.self) { tag in
-                Toggle(tag.capitalized, isOn: Binding(
-                    get: { damageCodes.contains(tag) },
-                    set: { isOn in
-                        if isOn {
-                            if !damageCodes.contains(tag) { damageCodes.append(tag) }
-                        } else {
-                            damageCodes.removeAll { $0 == tag }
-                        }
-                    }))
+            ChipWrapLayout(hSpacing: ForestixSpace.xs,
+                           vSpacing: ForestixSpace.xs) {
+                ForEach(damageOptions, id: \.self) { tag in
+                    damageChip(tag)
+                }
             }
+            .padding(.vertical, ForestixSpace.xxs)
         }
+    }
+
+    private func damageChip(_ tag: String) -> some View {
+        let selected = damageCodes.contains(tag)
+        return Button {
+            if selected {
+                damageCodes.removeAll { $0 == tag }
+            } else {
+                damageCodes.append(tag)
+            }
+        } label: {
+            Text(tag.capitalized)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(ForestixPalette.textPrimary)
+                .padding(.horizontal, ForestixSpace.sm)
+                .frame(height: 32)
+                .background(
+                    RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                     style: .continuous)
+                        .fill(selected
+                              ? ForestixPalette.primaryMuted
+                              : ForestixPalette.surface))
+                .overlay(
+                    RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                     style: .continuous)
+                        .stroke(selected
+                                ? ForestixPalette.primary
+                                : ForestixPalette.divider,
+                                lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
     private var damageOptions: [String] {
@@ -141,5 +173,76 @@ public struct ScanMetadataSheet: View {
                       text: $note, axis: .vertical)
                 .lineLimit(2...4)
         }
+    }
+}
+
+// MARK: - Wrapping chip layout
+
+/// Minimal flow layout for the damage chips: children lay out
+/// left-to-right at their ideal size and wrap to a new line when the
+/// row is full — the same geometry as the Compose `FlowRow` hosting
+/// Android's FilterChips.
+private struct ChipWrapLayout: Layout {
+
+    var hSpacing: CGFloat = 8
+    var vSpacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize,
+                      subviews: Subviews,
+                      cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        let rows = computeRows(maxWidth: maxWidth, subviews: subviews)
+        let height = rows.reduce(0) { $0 + $1.height }
+            + vSpacing * CGFloat(max(0, rows.count - 1))
+        let width = proposal.width ?? rows.map(\.width).max() ?? 0
+        return CGSize(width: width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect,
+                       proposal: ProposedViewSize,
+                       subviews: Subviews,
+                       cache: inout ()) {
+        var index = 0
+        var y = bounds.minY
+        for row in computeRows(maxWidth: bounds.width, subviews: subviews) {
+            var x = bounds.minX
+            for size in row.sizes {
+                subviews[index].place(
+                    at: CGPoint(x: x, y: y),
+                    proposal: ProposedViewSize(size))
+                x += size.width + hSpacing
+                index += 1
+            }
+            y += row.height + vSpacing
+        }
+    }
+
+    private struct Row {
+        var sizes: [CGSize] = []
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+    }
+
+    private func computeRows(maxWidth: CGFloat,
+                             subviews: Subviews) -> [Row] {
+        var rows: [Row] = []
+        var current = Row()
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            let widthIfAppended = current.sizes.isEmpty
+                ? size.width
+                : current.width + hSpacing + size.width
+            if widthIfAppended > maxWidth, !current.sizes.isEmpty {
+                rows.append(current)
+                current = Row()
+                current.width = size.width
+            } else {
+                current.width = widthIfAppended
+            }
+            current.sizes.append(size)
+            current.height = max(current.height, size.height)
+        }
+        if !current.sizes.isEmpty { rows.append(current) }
+        return rows
     }
 }

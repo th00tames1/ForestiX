@@ -42,7 +42,6 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -50,7 +49,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -90,6 +88,8 @@ import com.hcjeong.forestix.ui.Routes
 import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.screens.ForestixScaffold
 import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixBorderedButton
+import com.hcjeong.forestix.ui.theme.ForestixProminentButton
 import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import com.hcjeong.forestix.ui.theme.confidenceDescriptor
@@ -301,11 +301,11 @@ private fun AddTreeFlowContent(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (stepHistory.isNotEmpty()) {
-                    OutlinedButton(onClick = { viewModel.back() }) { Text("Back") }
+                    ForestixBorderedButton(label = "Back") { viewModel.back() }
                 }
                 Spacer(Modifier.weight(1f))
                 if (currentStep == AddTreeFlowViewModel.Step.HEIGHT) {
-                    OutlinedButton(onClick = { viewModel.skipHeight() }) { Text("Skip") }
+                    ForestixBorderedButton(label = "Skip") { viewModel.skipHeight() }
                 }
                 if (currentStep == AddTreeFlowViewModel.Step.REVIEW) {
                     // Three save paths so the cruiser doesn't get dumped back
@@ -315,11 +315,11 @@ private fun AddTreeFlowContent(
                     //   • Save & close       (close flow, go to plot)
                     var saveMenuOpen by remember { mutableStateOf(false) }
                     Box {
-                        Button(onClick = { saveMenuOpen = true }, enabled = !isSaving) {
-                            Icon(Icons.Filled.Check, contentDescription = null, Modifier.size(18.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("Save")
-                        }
+                        ForestixProminentButton(
+                            label = "Save",
+                            icon = Icons.Filled.Check,
+                            enabled = !isSaving,
+                        ) { saveMenuOpen = true }
                         DropdownMenu(expanded = saveMenuOpen, onDismissRequest = { saveMenuOpen = false }) {
                             DropdownMenuItem(
                                 text = { Text("Save & add stem") },
@@ -357,8 +357,8 @@ private fun AddTreeFlowContent(
                         }
                     }
                 } else {
-                    Button(onClick = { viewModel.advance() }, enabled = canAdvance) {
-                        Text("Next")
+                    ForestixProminentButton(label = "Next", enabled = canAdvance) {
+                        viewModel.advance()
                     }
                 }
             }
@@ -491,14 +491,12 @@ private fun DbhStep(viewModel: AddTreeFlowViewModel, onScan: () -> Unit) {
 
     FormColumn {
         FormSection {
-            Button(
-                onClick = onScan,
+            ForestixProminentButton(
+                label = "Scan with AR",
+                icon = Icons.Filled.Sensors,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
-            ) {
-                Icon(Icons.Filled.Sensors, contentDescription = null, Modifier.size(20.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Scan with AR", style = type.bodyBold)
-            }
+                onClick = onScan,
+            )
         }
         FormSection(header = "DBH (cm)") {
             NumberFieldRow(
@@ -571,14 +569,12 @@ private fun HeightStep(viewModel: AddTreeFlowViewModel, onScan: () -> Unit) {
             )
         }
         FormSection {
-            Button(
-                onClick = onScan,
+            ForestixProminentButton(
+                label = "Scan with VIO walk-off",
+                icon = Icons.Filled.Sensors,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
-            ) {
-                Icon(Icons.Filled.Sensors, contentDescription = null, Modifier.size(20.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Scan with VIO walk-off", style = type.bodyBold)
-            }
+                onClick = onScan,
+            )
         }
         FormSection(header = "Height (m)") {
             NumberFieldRow(

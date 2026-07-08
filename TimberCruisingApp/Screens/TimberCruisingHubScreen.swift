@@ -49,7 +49,7 @@ public struct TimberCruisingHubScreen: View {
                          "book",
                          destination: ReferenceLibraryScreen())
                 tileLink("Settings",
-                         "Region · units · calibration · backup",
+                         "Region · units · calibration",
                          "gearshape",
                          destination: SettingsScreen())
 

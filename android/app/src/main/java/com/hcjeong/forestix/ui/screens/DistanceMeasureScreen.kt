@@ -15,12 +15,11 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Button
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -35,12 +34,14 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -56,10 +57,13 @@ import com.hcjeong.forestix.data.QuickMeasureEntry
 import com.hcjeong.forestix.data.ResearchLog
 import com.hcjeong.forestix.sensors.DistanceSmoother
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.hcjeong.forestix.ui.softDropShadow
 import com.hcjeong.forestix.ui.theme.Forestix
-import com.hcjeong.forestix.ui.theme.ForestixSpace
+import com.hcjeong.forestix.ui.theme.ForestixBorderedButton
+import com.hcjeong.forestix.ui.theme.ForestixProminentButton
 import java.util.Locale
 import java.util.UUID
+import kotlin.math.roundToInt
 
 private enum class DistMode { LIVE, TWO_POINT }
 
@@ -129,7 +133,10 @@ fun DistanceMeasureScreen(nav: NavController) {
     }
 
     fun save(d: Double, kind: String) {
-        val src = if (controller.supportsDepth) "depth" else "ar"
+        // iOS raw-value vocabulary ("live.lidar" / "two-point.ar") so the
+        // two platforms' CSVs filter identically — "lidar" here means the
+        // depth path (ARCore Depth API on Android).
+        val src = if (controller.supportsDepth) "lidar" else "ar"
         env.history.append(distanceEntry(d, "$kind.$src", env.history.activePlotID.value))
         // Developer-mode research CSV row — measured vs tape distance,
         // sensing source, and aim pitch (distance-accuracy study).
@@ -189,7 +196,7 @@ fun DistanceMeasureScreen(nav: NavController) {
             a?.let { PointDot(it, density) }
             b?.let { PointDot(it, density) }
             if (a != null && b != null && twoPointDistance != null) {
-                DistancePill(formatDistance(twoPointDistance), Offset((a.x + b.x) / 2f, (a.y + b.y) / 2f), density)
+                DistancePill(formatDistance(twoPointDistance), Offset((a.x + b.x) / 2f, (a.y + b.y) / 2f))
             }
         }
 
@@ -197,76 +204,115 @@ fun DistanceMeasureScreen(nav: NavController) {
         MeasureControlColumn(
             onCapture = { capture() },
             extra = {
-                MeasurePill(if (mode == DistMode.LIVE) "Live" else "2-Point") {
+                MeasurePill(if (mode == DistMode.LIVE) "Live" else "2-Pt") {
                     mode = if (mode == DistMode.LIVE) DistMode.TWO_POINT else DistMode.LIVE
                     resetTwoPoint()
                 }
             },
         )
 
-        // Bottom-centre readout.
+        // Bottom-centre readout — row order: header, value, hint, dev
+        // fields, buttons (iOS bottomPanel).
         MeasureStatusPanel {
-            failure?.let { CenteredText(it, dim = true) }
-            CenteredText(if (mode == DistMode.LIVE) "DEVICE \u2192 TARGET" else "POINT A \u2192 POINT B", dim = true)
-            val value = if (mode == DistMode.LIVE) liveDistance else twoPointDistance
-            CenteredText(value?.let { formatDistance(it) } ?: "\u2014", large = true)
-            if (settings.developerMode) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(ForestixSpace.sm)) {
-                    Text("Target", style = Forestix.type.caption, color = Color.White.copy(alpha = 0.8f))
-                    androidx.compose.material3.OutlinedTextField(
-                        value = settings.researchTreeId,
-                        onValueChange = { env.settings.setResearchTreeId(it.trim()) },
-                        placeholder = { Text("D1") },
-                        singleLine = true,
-                        modifier = Modifier.weight(0.8f),
-                    )
-                    Text("True (m)", style = Forestix.type.caption, color = Color.White.copy(alpha = 0.8f))
-                    androidx.compose.material3.OutlinedTextField(
-                        value = researchTrueM,
-                        onValueChange = { researchTrueM = it.filter { c -> c.isDigit() || c == '.' } },
-                        placeholder = { Text("tape") },
-                        singleLine = true,
-                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
-                        modifier = Modifier.weight(1f),
-                    )
-                }
+            failure?.let {
+                Text(it, style = Forestix.type.caption, color = Color.White)
             }
+            Text(
+                if (mode == DistMode.LIVE) "DEVICE → TARGET" else "POINT A → POINT B",
+                style = Forestix.type.sectionHead.copy(letterSpacing = 1.2.sp),
+                color = Color.White.copy(alpha = 0.75f),
+            )
+            val value = if (mode == DistMode.LIVE) liveDistance else twoPointDistance
+            CenteredText(value?.let { formatDistance(it) } ?: "—", large = true)
             if (mode == DistMode.TWO_POINT) {
-                CenteredText(twoPointHint(pointA, pointB), dim = true)
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(ForestixSpace.sm)) {
-                    OutlinedButton(onClick = { resetTwoPoint() }, modifier = Modifier.weight(1f)) { Text("Reset") }
-                    Button(modifier = Modifier.weight(1f), onClick = {
-                        val d = twoPointDistance ?: return@Button
-                        save(d, "two-point"); resetTwoPoint()
-                    }, enabled = twoPointDistance != null) { Text("Save") }
+                Text(
+                    twoPointHint(pointA, pointB),
+                    style = Forestix.type.caption,
+                    color = Color.White.copy(alpha = 0.85f),
+                )
+            }
+            if (settings.developerMode) {
+                ResearchFieldsRow(
+                    targetValue = settings.researchTreeId,
+                    onTargetChange = { env.settings.setResearchTreeId(it.trim()) },
+                    targetPlaceholder = "D1",
+                    trueLabel = "True (m)",
+                    trueValue = researchTrueM,
+                    onTrueChange = { researchTrueM = it.filter { c -> c.isDigit() || c == '.' } },
+                    truePlaceholder = "tape",
+                )
+            }
+            when (mode) {
+                DistMode.LIVE -> {
+                    // Explicit full-width Save alongside the "+" capture —
+                    // disabled until a distance locks (iOS actionRow).
+                    ForestixProminentButton(
+                        "Save",
+                        modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+                        enabled = liveDistance != null,
+                    ) {
+                        val d = liveDistance
+                        if (d != null) save(d, "live")
+                    }
+                }
+                DistMode.TWO_POINT -> {
+                    Row(
+                        Modifier.fillMaxWidth().padding(top = 2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        ForestixBorderedButton("Reset", modifier = Modifier.weight(1f)) { resetTwoPoint() }
+                        ForestixProminentButton(
+                            "Save",
+                            modifier = Modifier.weight(1f),
+                            enabled = twoPointDistance != null,
+                        ) {
+                            val d = twoPointDistance
+                            if (d != null) { save(d, "two-point"); resetTwoPoint() }
+                        }
+                    }
                 }
             }
         }
     }
 }
 
+/// Two-point endpoint marker — white Ø22 disc with a yellow Ø16 core,
+/// centred exactly on the projected world point (iOS pointDot).
 @Composable
 private fun PointDot(at: Offset, density: Density) {
-    val xDp = with(density) { at.x.toDp() }
-    val yDp = with(density) { at.y.toDp() }
+    val half = with(density) { 11.dp.toPx() }
     Box(
-        Modifier.padding(start = (xDp - 9.dp).coerceAtLeast(0.dp), top = (yDp - 9.dp).coerceAtLeast(0.dp))
-            .size(18.dp).clip(CircleShape).background(Color.White),
+        Modifier
+            .offset { IntOffset((at.x - half).roundToInt(), (at.y - half).roundToInt()) }
+            .size(22.dp)
+            .clip(CircleShape)
+            .background(Color.White),
         contentAlignment = Alignment.Center,
     ) {
-        Box(Modifier.size(12.dp).clip(CircleShape).background(Color.Yellow))
+        Box(Modifier.size(16.dp).clip(CircleShape).background(Color.Yellow))
     }
 }
 
+/// Distance label pill centred on the exact A–B midpoint (both axes) with
+/// the iOS drop shadow (black 0.25, r3, y1).
 @Composable
-private fun DistancePill(text: String, center: Offset, density: Density) {
-    val xDp = with(density) { center.x.toDp() }
-    val yDp = with(density) { center.y.toDp() }
-    Box(Modifier.padding(start = (xDp - 40.dp).coerceAtLeast(0.dp), top = (yDp - 14.dp).coerceAtLeast(0.dp))) {
+private fun DistancePill(text: String, center: Offset) {
+    Box(Modifier.fillMaxSize()) {
         Text(
             text, color = Color.Black,
             style = Forestix.type.data.copy(fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 16.sp),
-            modifier = Modifier.clip(RoundedCornerShape(12.dp)).background(Color.White)
+            modifier = Modifier
+                .layout { measurable, constraints ->
+                    val placeable = measurable.measure(constraints)
+                    layout(constraints.maxWidth, constraints.maxHeight) {
+                        placeable.place(
+                            (center.x - placeable.width / 2f).roundToInt(),
+                            (center.y - placeable.height / 2f).roundToInt(),
+                        )
+                    }
+                }
+                .softDropShadow(Color.Black.copy(alpha = 0.25f), blurRadius = 3.dp, offsetY = 1.dp, cornerRadius = 12.dp)
+                .clip(RoundedCornerShape(12.dp)).background(Color.White)
                 .border(1.dp, Color.Black.copy(alpha = 0.25f), RoundedCornerShape(12.dp))
                 .padding(horizontal = 12.dp, vertical = 6.dp),
         )

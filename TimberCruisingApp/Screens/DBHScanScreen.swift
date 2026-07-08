@@ -5,7 +5,8 @@
 //   • Fixed horizontal guide line at y = screen_height/2.
 //   • Center crosshair, red until depth-stable then green.
 //   • Status banner + result panel at the bottom.
-//   • Action row: Retake / Manual / Dual-view / Accept — shown per state.
+//   • Action row: Retake / Details / Accept — shown once a result lands
+//     ("Enter manually" is offered while aiming instead).
 //
 // Per Phase 2 decision #5, snapshot tests only render the overlay chrome;
 // the AR view is Color.black so visuals are deterministic across hosts.
@@ -88,12 +89,6 @@ public struct DBHScanScreen: View {
     private var isARMode: Bool { methodSource.isAR }
     private var isCaliperMode: Bool { methodSource == .arCaliper }
     private var isVIOMode: Bool { methodSource == .arMotion }
-    /// Methods offered by the picker on this device (no LiDAR ⇒ AR only).
-    private var availableMethods: [DBHMethodSource] {
-        settings.deviceSupportsLiDAR
-            ? [.lidarDepth, .arMotion, .arCaliper]
-            : [.arMotion, .arCaliper]
-    }
 
     public init(viewModel: @autoclosure @escaping () -> DBHScanViewModel,
                 onResult: @escaping (DBHResult) -> Void = { _ in },
@@ -108,37 +103,44 @@ public struct DBHScanScreen: View {
         // pipeline can't run, and the AR-motion / AR-caliper alternatives
         // are Developer-mode research tools — so block the scan UI
         // outright instead of starting an AR session the flow can't use.
-        if settings.deviceSupportsLiDAR || settings.developerMode {
-            scanBody
-        } else {
-            lidarRequiredPanel
+        Group {
+            if settings.deviceSupportsLiDAR || settings.developerMode {
+                scanBody
+            } else {
+                lidarRequiredPanel
+            }
         }
+        // Full-bleed AR chrome — no system nav bar; the floating back
+        // button is the exit affordance for both presentation paths
+        // (NavigationStack push and fullScreenCover).
+        #if os(iOS)
+        .toolbar(.hidden, for: .navigationBar)
+        #endif
     }
 
-    /// Centred blocker for non-LiDAR devices with Developer mode off —
+    /// Full-page blocker for non-LiDAR devices with Developer mode off —
     /// shown in place of the whole scan UI so the AR session never
-    /// spins up.
+    /// spins up. Keeps the same floating back chrome as the scan itself.
     private var lidarRequiredPanel: some View {
-        VStack(spacing: ForestixSpace.sm) {
-            Image(systemName: "cube.transparent")
-                .font(.system(size: 44, weight: .light))
-                .foregroundStyle(ForestixPalette.textTertiary)
-            Text("DBH scanning requires a LiDAR-equipped iPhone")
-                .font(ForestixType.bodyBold)
-                .foregroundStyle(ForestixPalette.textPrimary)
-                .multilineTextAlignment(.center)
-            Text("This iPhone doesn't have the LiDAR scanner the trunk scan relies on, so DBH scanning can't run here.")
-                .font(ForestixType.caption)
-                .foregroundStyle(ForestixPalette.textSecondary)
-                .multilineTextAlignment(.center)
+        ZStack {
+            VStack(spacing: ForestixSpace.sm) {
+                Image(systemName: "cube.transparent")
+                    .font(.system(size: 44, weight: .light))
+                    .foregroundStyle(ForestixPalette.textTertiary)
+                Text("DBH scanning requires a LiDAR-equipped iPhone")
+                    .font(ForestixType.bodyBold)
+                    .foregroundStyle(ForestixPalette.textPrimary)
+                    .multilineTextAlignment(.center)
+                Text("This iPhone doesn't have the LiDAR scanner the trunk scan relies on, so DBH scanning can't run here.")
+                    .font(ForestixType.caption)
+                    .foregroundStyle(ForestixPalette.textSecondary)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(ForestixSpace.lg)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            MeasureBackButtonRow()
         }
-        .padding(ForestixSpace.lg)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(ForestixPalette.canvas.ignoresSafeArea())
-        .navigationTitle("Diameter")
-        #if os(iOS)
-        .navigationBarTitleDisplayMode(.inline)
-        #endif
         .accessibilityIdentifier("dbhScan.lidarRequired")
     }
 
@@ -198,9 +200,9 @@ public struct DBHScanScreen: View {
             }
             .accessibilityElement(children: .ignore)
 
-            // Screen-wide tap catcher — the primary input for the two AR
-            // methods (caliper edge taps, VIO sweep start); the depth method
-            // also captures via the right-centre "+" button below.
+            // Screen-wide tap catcher — the AR caliper's trunk-edge taps.
+            // Every other method captures ONLY via the fixed "+" button,
+            // so a stray screen tap never fires a capture.
             tapCatcher
 
             VStack(spacing: 0) {
@@ -208,32 +210,28 @@ public struct DBHScanScreen: View {
                 Spacer()
             }
 
-            // Right-centre "+" capture button — active once armed (green
-            // crosshair) or while VIO-aiming, so the cruiser taps a fixed
-            // control instead of the whole screen.
-            if dbhCanCapture {
+            // Floating back button — full-bleed chrome exit (the system
+            // nav bar is hidden on the AR screens).
+            MeasureBackButtonRow()
+
+            // Right-centre "+" capture button — a fixed control shown for
+            // the whole aiming phase (the view model ignores taps until
+            // the crosshair arms / the sweep is ready), so the layout
+            // never jumps. The AR caliper taps the trunk edges directly
+            // and hides it.
+            if showsCaptureButton {
                 MeasureControlColumn(capture: onCaptureButton)
             }
 
-            // Bottom-right DBH method picker — Developer-mode research
-            // control cycling LiDAR depth / AR motion / AR caliper (the
-            // within-device comparison). Field mode always scans with the
+            // Bottom-centre status / result panel, with the Developer-mode
+            // DBH method picker (Depth / Motion / Caliper) floating 12 pt
+            // above it while aiming. Field mode always scans with the
             // LiDAR depth path, so the picker is hidden there.
-            if settings.developerMode {
-                VStack {
-                    Spacer()
-                    HStack {
-                        Spacer()
-                        dbhMethodPickerButton
-                            .padding(.trailing, 18)
-                            .padding(.bottom, 96)
-                    }
-                }
-            }
-
-            // Bottom-centre status / result panel.
-            VStack {
+            VStack(spacing: 12) {
                 Spacer()
+                if settings.developerMode, isAiming {
+                    dbhMethodPicker
+                }
                 bottomPanel
             }
         }
@@ -254,10 +252,6 @@ public struct DBHScanScreen: View {
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
         }
-        .navigationTitle("Diameter")
-        #if os(iOS)
-        .navigationBarTitleDisplayMode(.inline)
-        #endif
         .onAppear {
             // Phase 19 — pull the cruiser's chosen DBH method off
             // AppSettings every time the screen comes back into view
@@ -332,55 +326,67 @@ public struct DBHScanScreen: View {
 
     // MARK: - Top status strip
 
-    /// Thin row pinned just under the nav bar. GPS accuracy on the
-    /// left — TiltBadge moved to float right above the crosshair so
-    /// the cruiser sees device level at the same focal point as the
-    /// trunk circle they're aiming at.
+    /// GPS accuracy pill at leading 72 / top 22 — clear of the floating
+    /// back button, same offsets as Android. TiltBadge floats right
+    /// above the crosshair so the cruiser sees device level at the same
+    /// focal point as the trunk circle they're aiming at.
     private var topStrip: some View {
         HStack(spacing: ForestixSpace.xs) {
             GPSAccuracyBadge()
             Spacer()
         }
-        .padding(.horizontal, ForestixSpace.sm)
-        .padding(.top, ForestixSpace.xs)
+        .padding(.leading, 72)
+        .padding(.top, 22)
     }
 
     // MARK: - Tap capture
 
-    /// Transparent overlay that forwards taps on the AR region to the
-    /// view model. The bottom action panel sits above this on the
+    /// Transparent overlay that forwards AR-caliper trunk-edge taps to
+    /// the view model. The bottom action panel sits above this on the
     /// Z-axis, so button taps continue to work — this catcher only
-    /// receives taps that miss the panel.
+    /// receives taps that miss the panel. The depth + motion paths
+    /// capture exclusively via the fixed "+" button; a stray screen tap
+    /// must not fire a capture.
     private var tapCatcher: some View {
         Color.clear
             .contentShape(Rectangle())
             .accessibilityIdentifier("dbhScan.tapCatcher")
-            // SpatialTapGesture carries the tap location, which the AR
-            // caliper needs (the other paths ignore it).
+            // SpatialTapGesture carries the tap location the AR
+            // caliper's edge taps need.
             .gesture(SpatialTapGesture().onEnded { ev in
                 if isCaliperMode { captureAREdge(at: ev.location) }
-                else if isVIOMode { startVIOSweep() }
-                else { captureTap() }
             })
     }
 
-    /// Whether the current state shows the floating "+" capture button.
-    /// LiDAR aim/armed → capture; AR-motion aiming → start the sweep. The
-    /// AR caliper taps the trunk edges directly, so no "+".
     /// True while the AR caliper is waiting for either edge tap — the
     /// window during which the centre-distance smoother samples.
     private var caliperAiming: Bool {
         viewModel.state == .arAwaitingLeft || viewModel.state == .arAwaitingRight
     }
 
-    private var dbhCanCapture: Bool {
+    /// True for every pre-capture aiming state (any method) — the window
+    /// in which the "Enter manually" escape hatch and the Developer-mode
+    /// method picker are offered. Mirrors Android's `Stage.AIMING`.
+    private var isAiming: Bool {
         switch viewModel.state {
-        // `.aligning` is intentionally excluded: `viewModel.tap` requires
-        // `.armed` (a stable green crosshair), so enabling "+" in `.aligning`
-        // gave a live-but-dead button. VIO has no depth gate, so `.vioAiming`
-        // stays enabled.
-        case .armed, .vioAiming: return true
-        default:                 return false
+        case .idle, .aligning, .armed,
+             .arAwaitingLeft, .arAwaitingRight, .vioAiming:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Whether the floating "+" capture button is rendered. It stays on
+    /// screen for the whole aiming phase — a no-op until the crosshair
+    /// arms (`viewModel.tap` requires `.armed`; the sweep start requires
+    /// `.vioAiming`) — so the control layout is stable while the cruiser
+    /// lines up. The AR caliper taps the trunk edges directly, so no "+".
+    private var showsCaptureButton: Bool {
+        guard !isCaliperMode else { return false }
+        switch viewModel.state {
+        case .idle, .aligning, .armed, .vioAiming: return true
+        default:                                   return false
         }
     }
 
@@ -403,8 +409,7 @@ public struct DBHScanScreen: View {
     }
 
     /// Capture the trunk at the depth-map centre — the crosshair the
-    /// cruiser lined up on the trunk. Fired by both the "+" button and a
-    /// stray screen tap.
+    /// cruiser lined up on the trunk. Fired by the "+" button.
     private func captureTap() {
         let frame = viewModel.session.latestDepthFrame
         let width  = Double(frame?.width  ?? 256)
@@ -496,32 +501,47 @@ public struct DBHScanScreen: View {
             .position(x: size.width / 2, y: size.height / 2)
     }
 
-    /// Corner button cycling the DBH method (LiDAR / AR motion / AR caliper).
-    private var dbhMethodPickerButton: some View {
-        Button(action: cycleDBHMethod) {
-            HStack(spacing: 5) {
-                Image(systemName: "camera.metering.matrix")
-                    .font(.system(size: 12, weight: .semibold))
-                Text(methodSource.displayName)
-                    .font(.system(size: 13, weight: .semibold))
-            }
-            .foregroundStyle(.white)
-            .padding(.horizontal, 12).padding(.vertical, 8)
-            .background(.black.opacity(0.55), in: Capsule())
-            .overlay(Capsule().stroke(.white.opacity(0.3), lineWidth: 0.5))
+    /// Segmented Depth | Motion | Caliper pill picking the DBH capture
+    /// method — mirrors Android's `DbhMethodSelector`: black-0.55
+    /// container, selected segment filled with the primary tint and
+    /// dark-ink label. The Depth segment dims on non-LiDAR hardware.
+    private var dbhMethodPicker: some View {
+        HStack(spacing: 0) {
+            methodSegment(.lidarDepth, label: "Depth",
+                          dim: !settings.deviceSupportsLiDAR)
+            methodSegment(.arMotion, label: "Motion")
+            methodSegment(.arCaliper, label: "Caliper")
         }
+        .padding(3)
+        .background(Color.black.opacity(0.55),
+                    in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(.white.opacity(0.18), lineWidth: 0.5)
+        )
+        .shadow(color: .black.opacity(0.3), radius: 3, x: 0, y: 0)
         .accessibilityIdentifier("dbhScan.methodPicker")
     }
 
-    private func cycleDBHMethod() {
-        let methods = availableMethods
-        let next: DBHMethodSource
-        if let i = methods.firstIndex(of: methodSource) {
-            next = methods[(i + 1) % methods.count]
-        } else {
-            next = methods.first ?? .arCaliper
+    private func methodSegment(_ method: DBHMethodSource,
+                               label: String,
+                               dim: Bool = false) -> some View {
+        let selected = methodSource == method
+        return Button {
+            guard !dim else { return }
+            settings.dbhMethodSource = method
+        } label: {
+            Text(label)
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .foregroundStyle(selected
+                                 ? ForestixPalette.primaryInk
+                                 : .white.opacity(dim ? 0.40 : 0.85))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                .background(selected ? ForestixPalette.primary : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
-        settings.dbhMethodSource = next
+        .buttonStyle(.plain)
     }
 
     // MARK: - Chrome
@@ -764,6 +784,16 @@ public struct DBHScanScreen: View {
                 bannerView(banner, tint: .orange)
             }
             statusBanner
+            // Escape hatch for trees the sensors can't read — offered for
+            // the whole aiming phase (the result row no longer carries a
+            // Manual button; its middle slot opens the details sheet).
+            if isAiming {
+                Button("Enter manually") { viewModel.enterManualEntry() }
+                    .buttonStyle(.plain)
+                    .font(ForestixType.body)
+                    .foregroundStyle(ForestixPalette.primary)
+                    .accessibilityIdentifier("dbhScan.enterManually")
+            }
             if let result = viewModel.result, viewModel.state != .manualEntry {
                 resultPanel(result)
             }
@@ -855,6 +885,15 @@ public struct DBHScanScreen: View {
                     cm: Double(r.diameterCm), in: settings.unitSystem))
                     .font(ForestixType.dataLarge)
                     .foregroundStyle(.white)
+                // Fit precision beside the value — same construction as
+                // the Height result line. Hidden on red: a rejected fit's
+                // σ is noise, and the tier chip carries the warning.
+                if r.confidence != .red {
+                    Text(MeasurementFormatter.diameterSigma(
+                        mm: Double(r.sigmaRmm), in: settings.unitSystem))
+                        .font(ForestixType.dataSmall)
+                        .foregroundStyle(.white.opacity(0.75))
+                }
                 Spacer()
                 // Phase 18.2: yellow is treated as a normal record-able
                 // fit, so we don't flag it. Only show the chip + hint
@@ -868,24 +907,6 @@ public struct DBHScanScreen: View {
                     .font(ForestixType.caption)
                     .foregroundStyle(.white.opacity(0.9))
             }
-            HStack {
-                Spacer()
-                Button {
-                    presentingMetadata = true
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "tag")
-                            .font(.system(size: 11, weight: .semibold))
-                        Text(metadataChipLabel)
-                            .font(ForestixType.dataSmall)
-                    }
-                    .padding(.horizontal, 10).padding(.vertical, 5)
-                    .overlay(Capsule().stroke(.white.opacity(0.4), lineWidth: 0.5))
-                    .foregroundStyle(.white)
-                }
-                .accessibilityIdentifier("dbhScan.editMetadata")
-            }
-            .padding(.top, 2)
             if settings.developerMode {
                 HStack(spacing: 6) {
                     Text("Target")
@@ -910,18 +931,6 @@ public struct DBHScanScreen: View {
         }
         .foregroundStyle(.white)
         .accessibilityIdentifier("dbhScan.resultPanel")
-    }
-
-    /// Pill label for the metadata-edit chip — surfaces what's
-    /// already attached so the cruiser doesn't have to open the
-    /// sheet to remember.
-    private var metadataChipLabel: String {
-        var bits: [String] = []
-        if let s = metaSpecies, !s.isEmpty { bits.append(s) }
-        if let p = metaPosition, p != .dbh { bits.append(p.displayName) }
-        if !metaDamage.isEmpty { bits.append("\(metaDamage.count) tag") }
-        if bits.isEmpty { return "Add details" }
-        return bits.joined(separator: " · ")
     }
 
     /// Short cruiser-actionable sentence matching the tier. The spec
@@ -972,27 +981,24 @@ public struct DBHScanScreen: View {
     @ViewBuilder
     private var actionRow: some View {
         switch viewModel.state {
-        case .fitted:
+        case .fitted, .rejected:
+            // One result row for every outcome: Retake / Details / Accept.
+            // Details opens the metadata sheet; Accept stays disabled for
+            // a red (or missing) fit, whose escape hatch is Retake or the
+            // aiming-phase "Enter manually" button.
             HStack(spacing: 12) {
                 Button("Retake") { viewModel.retake() }
                     .buttonStyle(.bordered)
                     .frame(maxWidth: .infinity)
-                Button("Manual") { viewModel.enterManualEntry() }
+                Button("Details") { presentingMetadata = true }
                     .buttonStyle(.bordered)
                     .frame(maxWidth: .infinity)
+                    .accessibilityIdentifier("dbhScan.editMetadata")
                 Button("Accept") { viewModel.accept() }
                     .buttonStyle(.forestixProminent)
                     .frame(maxWidth: .infinity)
-                    .disabled(viewModel.result?.confidence == .red)
-            }
-        case .rejected:
-            HStack(spacing: 12) {
-                Button("Retake") { viewModel.retake() }
-                    .buttonStyle(.forestixProminent)
-                    .frame(maxWidth: .infinity)
-                Button("Manual") { viewModel.enterManualEntry() }
-                    .buttonStyle(.bordered)
-                    .frame(maxWidth: .infinity)
+                    .disabled(viewModel.result == nil
+                              || viewModel.result?.confidence == .red)
             }
         case .manualEntry:
             HStack(spacing: 12) {

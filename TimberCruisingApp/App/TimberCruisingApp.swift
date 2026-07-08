@@ -4,8 +4,7 @@
 //
 // Map-first home (design/forestix-redesign-v2-maphome.html): the root is
 // MapHomeScreen — pins over the basemap, big (+) capture action, Cruise/
-// Log side circles. ModeSelectionScreen remains in the tree for direct
-// use but is no longer the landing surface.
+// Log side circles. It also hosts the first-run RegionPicker.
 
 import SwiftUI
 

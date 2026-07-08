@@ -14,8 +14,8 @@ struct ForestixApp: App {
         WindowGroup {
             ContentView()
                 // Appearance is user-selected (AppSettings.appearance,
-                // default light) and applied in RootView; the splash just
-                // takes the light default via the dynamic tokens.
+                // default light) and applied in RootView; the splash
+                // applies the same saved value itself (LaunchSplash).
                 .tint(ForestixPalette.primary)
         }
     }

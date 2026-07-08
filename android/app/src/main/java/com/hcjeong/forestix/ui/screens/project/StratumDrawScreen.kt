@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.text.KeyboardOptions
@@ -33,7 +34,6 @@ import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
@@ -76,6 +76,7 @@ import com.hcjeong.forestix.geo.CoordinateConversions
 import com.hcjeong.forestix.positioning.LocationService
 import com.hcjeong.forestix.ui.screens.ForestixScaffold
 import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixProminentButton
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import java.util.Locale
 import java.util.UUID
@@ -262,18 +263,11 @@ private fun StratumDrawContent(nav: NavController, project: Project) {
                     modifier = Modifier.fillMaxWidth(),
                 )
 
-                Button(
-                    onClick = { scope.launch { viewModel.save() } },
+                ForestixProminentButton(
+                    label = if (isSaving) "Saving…" else "Save stratum",
                     enabled = viewModel.canSave,
-                    modifier = Modifier.fillMaxWidth().height(56.dp),
-                ) {
-                    if (isSaving) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                        Spacer(Modifier.size(ForestixSpace.xs))
-                    }
-                    Text(if (isSaving) "Saving…" else "Save stratum", style = type.bodyBold)
-                }
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+                ) { scope.launch { viewModel.save() } }
             }
         }
     }

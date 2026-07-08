@@ -112,15 +112,20 @@ public struct HeightScanScreen: View {
             VStack(spacing: 0) {
                 // Same GPS-accuracy strip as the Diameter scan — gives
                 // the cruiser a single-glance read on canopy quality
-                // before they anchor.
+                // before they anchor. Leading 72 / top 22 clears the
+                // floating back button (same offsets as Android).
                 HStack {
                     GPSAccuracyBadge()
                     Spacer()
                 }
-                .padding(.horizontal, ForestixSpace.sm)
-                .padding(.top, ForestixSpace.xs)
+                .padding(.leading, 72)
+                .padding(.top, 22)
                 Spacer()
             }
+
+            // Floating back button — full-bleed chrome exit (the system
+            // nav bar is hidden on the AR screens).
+            MeasureBackButtonRow()
 
             // Right-centre "+" capture button — replaces the centre
             // Anchor Here / Aim Top / Aim Base buttons. It fires the
@@ -151,9 +156,10 @@ public struct HeightScanScreen: View {
             }
         }
         .devHUDOverlay(settings.developerMode, title: "HEIGHT", lines: devHUDLines)
-        .navigationTitle("Height")
+        // Full-bleed AR chrome — no system nav bar; the floating back
+        // button is the exit affordance for both presentation paths.
         #if os(iOS)
-        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.hidden, for: .navigationBar)
         #endif
         .onAppear { viewModel.onAppear() }
         .onDisappear { viewModel.onDisappear() }
@@ -365,7 +371,7 @@ public struct HeightScanScreen: View {
                 .foregroundStyle(ForestixPalette.confidenceWarn)
         case .done:
             if let w = crownWidthM, let h = crownHeightM {
-                Text(String(format: "Crown  %.2f m wide · %.2f m tall", w, h))
+                Text(String(format: "Crown %.2f m wide · %.2f m tall", w, h))
                     .font(ForestixType.data)
                     .foregroundStyle(.white)
             }

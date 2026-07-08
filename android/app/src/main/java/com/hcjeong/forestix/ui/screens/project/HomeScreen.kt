@@ -19,23 +19,28 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.AddCircle
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Park
+import androidx.compose.material.icons.filled.Replay
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
@@ -55,8 +60,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -68,7 +75,10 @@ import com.hcjeong.forestix.data.cruise.Project
 import com.hcjeong.forestix.data.cruise.UnitSystem
 import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.screens.ForestixScaffold
+import com.hcjeong.forestix.ui.screens.FormTextField
+import com.hcjeong.forestix.ui.screens.SwipeToDeleteRow
 import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixProminentButton
 import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import java.util.Locale
@@ -241,6 +251,10 @@ fun HomeScreen(nav: NavController) {
                             }
                         })
                 }
+                Text(
+                    "Swipe left to delete.",
+                    style = type.caption, color = colors.textTertiary,
+                    modifier = Modifier.padding(start = ForestixSpace.xs))
                 Spacer(Modifier.height(ForestixSpace.xl))
             }
         }
@@ -271,6 +285,7 @@ fun HomeScreen(nav: NavController) {
 /// pre-field checklist uses).
 @Composable
 private fun DeviceHealthBanners(context: Context) {
+    val colors = Forestix.colors
     // ARCore availability can transiently report UNKNOWN_CHECKING, so poll
     // it from state (bounded retry, same pattern as ArCameraView) instead
     // of a one-shot remember{}; the banner appears only on a definitive
@@ -293,7 +308,8 @@ private fun DeviceHealthBanners(context: Context) {
     }
     if (arUnsupported) {
         HealthBanner(
-            tint = Color(0xFFFF9500),   // iOS .orange
+            tint = colors.confidenceWarn,
+            icon = Icons.Filled.Info,          // iOS info.circle.fill
             title = "Manual-only mode",
             body = "This device has no ARCore support. DBH will need a caliper, " +
                 "height will need a tape. All project and export features " +
@@ -306,7 +322,8 @@ private fun DeviceHealthBanners(context: Context) {
     val isCharging = remember { bm?.isCharging ?: false }
     if (level <= 0.15f && !isCharging) {
         HealthBanner(
-            tint = Forestix.colors.confidenceBad,
+            tint = colors.confidenceBad,
+            icon = Icons.Filled.Warning,       // iOS exclamationmark.triangle.fill
             title = "Low battery (${(level * 100).toInt()}%)",
             body = "Scan auto-save has stepped up to every 10 seconds to protect " +
                 "in-progress work. Charge before your next plot.")
@@ -314,12 +331,19 @@ private fun DeviceHealthBanners(context: Context) {
 }
 
 @Composable
-private fun HealthBanner(tint: Color, title: String, body: String) {
+private fun HealthBanner(tint: Color, icon: ImageVector, title: String, body: String) {
     val type = Forestix.type
     Surface(color = tint, shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(title, style = type.bodyBold, color = Color.White)
-            Text(body, style = type.caption, color = Color.White.copy(alpha = 0.95f))
+        Row(
+            Modifier.padding(10.dp),
+            verticalAlignment = Alignment.Top,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Icon(icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(title, style = type.bodyBold, color = Color.White)
+                Text(body, style = type.caption, color = Color.White.copy(alpha = 0.95f))
+            }
         }
     }
 }
@@ -340,18 +364,42 @@ private fun ResumeBanner(
         shape = RoundedCornerShape(10.dp),
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text("Resume in-progress plot", style = type.bodyBold, color = Color.White)
-            Text(
-                candidate.summary + (project?.let { " · ${it.name}" } ?: ""),
-                style = type.caption, color = Color.White.copy(alpha = 0.95f))
-            if (project != null) {
-                Row(horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs)) {
-                    TextButton(onClick = onOpenProject) {
-                        Text("Open project", style = type.caption.copy(fontWeight = FontWeight.Bold), color = Color.White)
-                    }
-                    TextButton(onClick = onDismiss) {
-                        Text("Dismiss", style = type.caption.copy(fontWeight = FontWeight.Bold), color = Color.White)
+        Row(
+            Modifier.padding(12.dp),
+            verticalAlignment = Alignment.Top,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            // iOS arrow.counterclockwise.circle.fill
+            Icon(Icons.Filled.Replay, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text("Resume in-progress plot", style = type.bodyBold, color = Color.White)
+                Text(
+                    candidate.summary + (project?.let { " · ${it.name}" } ?: ""),
+                    style = type.caption, color = Color.White.copy(alpha = 0.95f))
+                if (project != null) {
+                    Row(
+                        Modifier.padding(top = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs),
+                    ) {
+                        // iOS capsule chips: white 0.22 fill / white 0.5 stroke.
+                        Text(
+                            "Open project",
+                            style = type.caption.copy(fontWeight = FontWeight.Bold),
+                            color = Color.White,
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(Color.White.copy(alpha = 0.22f))
+                                .clickableNoRipple(onOpenProject)
+                                .padding(horizontal = 10.dp, vertical = 5.dp))
+                        Text(
+                            "Dismiss",
+                            style = type.caption.copy(fontWeight = FontWeight.Bold),
+                            color = Color.White,
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .border(0.5.dp, Color.White.copy(alpha = 0.5f), CircleShape)
+                                .clickableNoRipple(onDismiss)
+                                .padding(horizontal = 10.dp, vertical = 5.dp))
                     }
                 }
             }
@@ -365,56 +413,42 @@ private fun ResumeBanner(
 private fun ProjectRow(project: Project, onClick: () -> Unit, onDelete: () -> Unit) {
     val colors = Forestix.colors
     val type = Forestix.type
-    var confirmingDelete by remember { mutableStateOf(false) }
 
     val owner = project.owner.ifEmpty { "No owner" }
     val units = project.units.raw.replaceFirstChar { it.uppercase(Locale.US) }
     val whenLabel = DateUtils.getRelativeTimeSpanString(project.createdAt)
 
-    Surface(
-        color = colors.surface,
-        shape = ForestixRadius.card,
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(ForestixRadius.card)
-            .border(0.5.dp, colors.divider, ForestixRadius.card)
-            .clickableNoRipple(onClick),
-    ) {
-        Row(
-            Modifier.padding(ForestixSpace.md),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(ForestixSpace.md),
+    // G9 — trailing swipe-to-delete replaces the persistent trash icon.
+    SwipeToDeleteRow(shape = ForestixRadius.card, onDelete = onDelete) {
+        Surface(
+            color = colors.surface,
+            shape = ForestixRadius.card,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(ForestixRadius.card)
+                .border(0.5.dp, colors.divider, ForestixRadius.card)
+                .clickableNoRipple(onClick),
         ) {
-            Box(
-                Modifier.size(40.dp).clip(RoundedCornerShape(ForestixRadius.controlDp)).background(colors.primaryMuted),
-                contentAlignment = Alignment.Center,
+            Row(
+                Modifier.padding(ForestixSpace.md),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(ForestixSpace.md),
             ) {
-                Icon(Icons.Filled.Folder, contentDescription = null, tint = colors.primary, modifier = Modifier.size(17.dp))
+                Box(
+                    Modifier.size(40.dp).clip(RoundedCornerShape(ForestixRadius.controlDp)).background(colors.primaryMuted),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.Filled.Folder, contentDescription = null, tint = colors.primary, modifier = Modifier.size(17.dp))
+                }
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(project.name, style = type.bodyBold, color = colors.textPrimary)
+                    Text(
+                        "$owner · $units · $whenLabel",
+                        style = type.caption, color = colors.textSecondary)
+                }
+                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = colors.textTertiary, modifier = Modifier.size(12.dp))
             }
-            Column(Modifier.weight(1f)) {
-                Text(project.name, style = type.bodyBold, color = colors.textPrimary)
-                Text(
-                    "$owner · $units · $whenLabel",
-                    style = type.caption, color = colors.textSecondary)
-            }
-            IconButton(onClick = { confirmingDelete = true }) {
-                Icon(Icons.Filled.Delete, contentDescription = "Delete", tint = colors.textTertiary, modifier = Modifier.size(18.dp))
-            }
-            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = colors.textTertiary, modifier = Modifier.size(12.dp))
         }
-    }
-
-    if (confirmingDelete) {
-        AlertDialog(
-            onDismissRequest = { confirmingDelete = false },
-            title = { Text("Delete “${project.name}”?") },
-            text = { Text("All strata, plots and trees in this project will be removed.") },
-            confirmButton = {
-                TextButton(onClick = { confirmingDelete = false; onDelete() }) { Text("Delete") }
-            },
-            dismissButton = {
-                TextButton(onClick = { confirmingDelete = false }) { Text("Cancel") }
-            })
     }
 }
 
@@ -435,7 +469,7 @@ private fun EmptyState(modifier: Modifier, onCreate: () -> Unit) {
         Spacer(Modifier.height(ForestixSpace.lg))
         Icon(
             Icons.Filled.Park, contentDescription = null,
-            tint = colors.confidenceOk, modifier = Modifier.size(54.dp))
+            tint = colors.primary.copy(alpha = 0.8f), modifier = Modifier.size(54.dp))
         Text("Welcome to Forestix", style = type.title, color = colors.textPrimary)
         Text(
             "A phone-based timber cruising app. Measure DBH with LiDAR, tree height " +
@@ -456,11 +490,12 @@ private fun EmptyState(modifier: Modifier, onCreate: () -> Unit) {
             }
         }
 
-        Button(onClick = onCreate, modifier = Modifier.fillMaxWidth().height(56.dp)) {
-            Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.size(ForestixSpace.xs))
-            Text("Create your first project", style = type.bodyBold)
-        }
+        ForestixProminentButton(
+            label = "Create your first project",
+            icon = Icons.Filled.AddCircle,      // iOS plus.circle.fill
+            modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+            onClick = onCreate,
+        )
 
         Text(
             "All data stays on this device — nothing is sent to any server.",
@@ -485,51 +520,81 @@ private fun OnboardingStep(n: Int, text: String) {
 }
 
 // MARK: - New Project sheet
+//
+// Bottom sheet mirroring the iOS NewProjectSheet: nav-bar chrome
+// (Cancel · centered "New Project" · Create) above Identity / Units
+// grouped Form sections.
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun NewProjectSheet(
     onDismiss: () -> Unit,
     onCreate: (name: String, owner: String, units: UnitSystem) -> Unit,
 ) {
+    val colors = Forestix.colors
     val type = Forestix.type
     var name by remember { mutableStateOf("") }
     var owner by remember { mutableStateOf("") }
     var units by remember { mutableStateOf(UnitSystem.IMPERIAL) }
+    val canCreate = name.trim().isNotEmpty()
 
-    AlertDialog(
+    ModalBottomSheet(
         onDismissRequest = onDismiss,
-        title = { Text("New Project") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(ForestixSpace.sm)) {
-                OutlinedTextField(
+        containerColor = colors.canvas,
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = ForestixSpace.md)
+                .padding(bottom = ForestixSpace.xl),
+            verticalArrangement = Arrangement.spacedBy(ForestixSpace.md),
+        ) {
+            // Nav-bar chrome (iOS inline title + Cancel / Create).
+            Box(Modifier.fillMaxWidth()) {
+                TextButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.align(Alignment.CenterStart),
+                ) { Text("Cancel", style = type.body, color = colors.primary) }
+                Text(
+                    "New Project",
+                    style = type.bodyBold.copy(fontSize = 17.sp),
+                    color = colors.textPrimary,
+                    modifier = Modifier.align(Alignment.Center))
+                TextButton(
+                    onClick = { onCreate(name, owner, units) },
+                    enabled = canCreate,
+                    modifier = Modifier.align(Alignment.CenterEnd),
+                ) {
+                    Text(
+                        "Create", style = type.bodyBold,
+                        color = if (canCreate) colors.primary else colors.textTertiary)
+                }
+            }
+            FormSection(header = "Identity") {
+                FormTextField(
                     value = name, onValueChange = { name = it },
-                    label = { Text("Project name") }, singleLine = true,
-                    modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(
+                    placeholder = "Project name",
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words))
+                FormDivider()
+                FormTextField(
                     value = owner, onValueChange = { owner = it },
-                    label = { Text("Owner / cruiser") }, singleLine = true,
-                    modifier = Modifier.fillMaxWidth())
+                    placeholder = "Owner / cruiser",
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words))
+            }
+            FormSection(header = "Units") {
                 SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                     SegmentedButton(
                         selected = units == UnitSystem.IMPERIAL,
                         onClick = { units = UnitSystem.IMPERIAL },
                         shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-                    ) { Text("Imperial (ft, in, acres)", style = type.caption) }
+                    ) { Text("Imperial (ft, in, acres)", style = type.caption, maxLines = 1) }
                     SegmentedButton(
                         selected = units == UnitSystem.METRIC,
                         onClick = { units = UnitSystem.METRIC },
                         shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-                    ) { Text("Metric (m, cm, ha)", style = type.caption) }
+                    ) { Text("Metric (m, cm, ha)", style = type.caption, maxLines = 1) }
                 }
             }
-        },
-        confirmButton = {
-            TextButton(
-                enabled = name.trim().isNotEmpty(),
-                onClick = { onCreate(name, owner, units) },
-            ) { Text("Create") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
-        })
+        }
+    }
 }

@@ -32,11 +32,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddCircle
 import androidx.compose.material.icons.filled.CallSplit
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -61,7 +59,9 @@ import com.hcjeong.forestix.data.cruise.Tree
 import com.hcjeong.forestix.sensors.ConfidenceTier
 import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.screens.ForestixScaffold
+import com.hcjeong.forestix.ui.screens.SwipeToDeleteRow
 import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixProminentButton
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import com.hcjeong.forestix.ui.theme.confidenceDescriptor
 import java.util.Locale
@@ -198,24 +198,27 @@ fun PlotTallyScreen(
                     ListHeader("Trees (${liveTrees.size})")
                 }
                 items(liveTrees, key = { it.id }) { tree ->
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickableNoRipple { onOpenTree(tree) }
-                            .padding(horizontal = ForestixSpace.md, vertical = ForestixSpace.xs),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        TreeRow(tree, Modifier.weight(1f))
-                        // Android stand-in for the iOS trailing swipe action.
-                        IconButton(onClick = { scope.launch { vm.softDelete(tree.id) } }) {
-                            Icon(
-                                Icons.Filled.Delete,
-                                contentDescription = "Delete",
-                                tint = colors.confidenceBad,
-                                modifier = Modifier.size(18.dp))
+                    // iOS trailing swipe-to-soft-delete (G9).
+                    SwipeToDeleteRow(onDelete = { scope.launch { vm.softDelete(tree.id) } }) {
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .background(colors.canvas)
+                                .clickableNoRipple { onOpenTree(tree) }
+                                .padding(horizontal = ForestixSpace.md, vertical = ForestixSpace.xs),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            TreeRow(tree, Modifier.weight(1f))
                         }
                     }
                     HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
+                }
+                item {
+                    Text(
+                        "Swipe left to delete.",
+                        style = type.caption, color = colors.textTertiary,
+                        modifier = Modifier.padding(
+                            horizontal = ForestixSpace.md, vertical = ForestixSpace.xs))
                 }
 
                 if (softDeletedTrees.isNotEmpty()) {
@@ -250,17 +253,12 @@ fun PlotTallyScreen(
                 Modifier.fillMaxWidth().padding(ForestixSpace.md),
                 horizontalArrangement = Arrangement.spacedBy(ForestixSpace.sm),
             ) {
-                Button(
+                ForestixProminentButton(
+                    label = "Add Tree",
+                    icon = Icons.Filled.AddCircle,      // iOS plus.circle.fill
+                    modifier = Modifier.weight(1f),
                     onClick = onAddTree,
-                    modifier = Modifier.weight(1f).height(48.dp),
-                ) {
-                    Icon(
-                        Icons.Filled.AddCircle,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(ForestixSpace.xs))
-                    Text("Add Tree")
-                }
+                )
             }
         }
     }

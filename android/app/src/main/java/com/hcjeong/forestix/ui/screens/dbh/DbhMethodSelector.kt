@@ -73,7 +73,8 @@ private fun Segment(label: String, selected: Boolean, dim: Boolean, onClick: () 
     val colors = Forestix.colors
     val bg = if (selected) colors.primary else Color.Transparent
     val fg = when {
-        selected -> Color.White
+        // Dark ink on the primary fill — iOS methodSegment parity.
+        selected -> colors.primaryInk
         dim -> Color.White.copy(alpha = 0.40f)
         else -> Color.White.copy(alpha = 0.85f)
     }

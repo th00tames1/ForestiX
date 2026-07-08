@@ -57,6 +57,13 @@ private struct LaunchSplash: View {
                 .scaledToFit()
                 .frame(width: 180, height: 180)
         }
+        // Themed by the SAVED appearance setting (default light) — the
+        // same value RootView applies once the environment is up — so
+        // launch matches the appearance the cruiser last chose rather
+        // than the system trait.
+        .preferredColorScheme(
+            UserDefaults.standard.string(forKey: AppSettings.Keys.appearance) == "dark"
+                ? .dark : .light)
     }
 }
 

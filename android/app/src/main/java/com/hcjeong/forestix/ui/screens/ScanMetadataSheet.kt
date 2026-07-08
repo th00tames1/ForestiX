@@ -1,31 +1,41 @@
-// Post-scan metadata dialog — attaches species + position + damage + note
+// Post-scan metadata sheet — attaches species + position + damage + note
 // to a freshly-fitted scan before the cruiser hits Accept. Port of the iOS
-// ScanMetadataSheet (Screens/ScanMetadataSheet.swift): same fields, same
-// damage-code vocabulary, so the recorded QuickMeasureEntry rows join
-// across platforms.
+// ScanMetadataSheet (Screens/ScanMetadataSheet.swift): same presentation
+// (bottom sheet titled "Reading details" with a Done affordance), same
+// fields, same damage-code vocabulary, so the recorded QuickMeasureEntry
+// rows join across platforms.
 
 package com.hcjeong.forestix.ui.screens
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -33,8 +43,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.common.Region
@@ -42,15 +54,18 @@ import com.hcjeong.forestix.common.RegionalSpecies
 import com.hcjeong.forestix.data.StemPosition
 import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixRadius
+import com.hcjeong.forestix.ui.theme.ForestixSpace
+import java.util.Locale
 
 /// Damage-code vocabulary — identical to iOS ScanMetadataSheet.damageOptions.
 val ScanDamageOptions = listOf("sweep", "fork", "broken-top", "rot", "scar", "lean")
 
 /// Metadata editor shown from the scan screens' "Details" action. All state
 /// is hoisted so the caller owns the values when it records the entry.
-@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ScanMetadataDialog(
+fun ScanMetadataSheet(
     speciesCode: String?,
     onSpeciesCode: (String?) -> Unit,
     position: StemPosition?,
@@ -73,20 +88,37 @@ fun ScanMetadataDialog(
         val region = Region.fromRaw(settings.region) ?: Region.ALL
         RegionalSpecies.defaultSpecies(region) + ("OT" to "Other")
     }
-    AlertDialog(
+    ModalBottomSheet(
         onDismissRequest = onDismiss,
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
-        title = { Text("Scan details") },
-        text = {
-            Column(
-                Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                Text("SPECIES", style = type.sectionHead, color = colors.textSecondary)
-                // Regional species picker — mirrors the iOS Picker of
-                // "CODE · Common name" rows plus an Unspecified entry
-                // (ScanMetadataSheet.swift speciesSection). No free-text:
-                // codes always come from the curated vocabulary.
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = colors.canvas,
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = ForestixSpace.md)
+                .navigationBarsPadding()
+                .imePadding()
+                .padding(bottom = ForestixSpace.lg),
+            verticalArrangement = Arrangement.spacedBy(ForestixSpace.md),
+        ) {
+            // Title bar — inline centred title + trailing Done, mirroring
+            // the iOS NavigationStack toolbar.
+            Box(Modifier.fillMaxWidth().height(44.dp)) {
+                Text(
+                    "Reading details",
+                    style = type.body.copy(fontSize = 17.sp, fontWeight = FontWeight.SemiBold),
+                    color = colors.textPrimary,
+                    modifier = Modifier.align(Alignment.Center),
+                )
+                TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.CenterEnd)) {
+                    Text("Done")
+                }
+            }
+
+            // SPECIES ------------------------------------------------------
+            MetadataSection(header = "SPECIES") {
                 var speciesMenuOpen by remember { mutableStateOf(false) }
                 val selectedLabel = speciesCode?.let { code ->
                     speciesOptions.firstOrNull { it.first == code }
@@ -100,9 +132,15 @@ fun ScanMetadataDialog(
                             .padding(vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text(selectedLabel, style = type.body, color = colors.primary)
+                        // Default label colour (no primary tint) — iOS Form
+                        // Picker row parity.
+                        Text(selectedLabel, style = type.body, color = colors.textPrimary)
                         Spacer(Modifier.weight(1f))
-                        Icon(Icons.Filled.ArrowDropDown, contentDescription = null, tint = colors.primary)
+                        Icon(
+                            Icons.Filled.ArrowDropDown,
+                            contentDescription = null,
+                            tint = colors.textSecondary,
+                        )
                     }
                     DropdownMenu(
                         expanded = speciesMenuOpen,
@@ -124,21 +162,39 @@ fun ScanMetadataDialog(
                         }
                     }
                 }
+            }
 
-                if (showPosition) {
-                    Text("MEASURED AT", style = type.sectionHead, color = colors.textSecondary)
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        StemPosition.entries.forEach { p ->
-                            FilterChip(
-                                selected = position == p,
-                                onClick = { onPosition(if (position == p) null else p) },
-                                label = { Text(p.displayName) },
-                            )
+            // POSITION -----------------------------------------------------
+            if (showPosition) {
+                MetadataSection(
+                    header = "POSITION",
+                    footer = "Default DBH = 1.3 m. Mark butt / upper / stump if you measured elsewhere.",
+                ) {
+                    // Single-choice segmented control, default DBH, never
+                    // deselectable (tap-again keeps the selection) — iOS
+                    // `.segmented` Picker parity.
+                    val current = position ?: StemPosition.DBH
+                    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                        StemPosition.entries.forEachIndexed { index, p ->
+                            SegmentedButton(
+                                selected = current == p,
+                                onClick = { onPosition(p) },
+                                shape = SegmentedButtonDefaults.itemShape(
+                                    index = index,
+                                    count = StemPosition.entries.size,
+                                ),
+                            ) { Text(p.displayName, style = type.caption, maxLines = 1) }
                         }
                     }
                 }
+            }
 
-                Text("DAMAGE / DEFECT", style = type.sectionHead, color = colors.textSecondary)
+            // DAMAGE -------------------------------------------------------
+            MetadataSection(
+                header = "DAMAGE",
+                footer = "Drives cull deductions in stand-and-stock reports.",
+            ) {
+                @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     ScanDamageOptions.forEach { tag ->
                         FilterChip(
@@ -149,21 +205,68 @@ fun ScanMetadataDialog(
                                     else damageCodes + tag,
                                 )
                             },
-                            label = { Text(tag) },
+                            label = { Text(capitalizedTag(tag)) },
                         )
                     }
                 }
+            }
 
-                Text("NOTE", style = type.sectionHead, color = colors.textSecondary)
+            // NOTE ---------------------------------------------------------
+            MetadataSection(header = "NOTE") {
                 OutlinedTextField(
                     value = note,
                     onValueChange = onNote,
                     placeholder = { Text("Free-text note (optional)") },
                     minLines = 2,
                     maxLines = 4,
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
+                    modifier = Modifier.fillMaxWidth(),
                 )
             }
-        },
-    )
+        }
+    }
 }
+
+/// Grouped form section — uppercase sectionHead header, surface card body,
+/// optional caption footer (the iOS insetGrouped Form look).
+@Composable
+private fun MetadataSection(
+    header: String,
+    footer: String? = null,
+    content: @Composable () -> Unit,
+) {
+    val type = Forestix.type
+    val colors = Forestix.colors
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            header,
+            style = type.sectionHead,
+            color = colors.textTertiary,
+            modifier = Modifier.padding(start = ForestixSpace.sm),
+        )
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .clip(ForestixRadius.card)
+                .background(colors.surface)
+                .padding(ForestixSpace.sm),
+        ) {
+            content()
+        }
+        footer?.let {
+            Text(
+                it,
+                style = type.caption,
+                color = colors.textTertiary,
+                modifier = Modifier.padding(start = ForestixSpace.sm),
+            )
+        }
+    }
+}
+
+/// Mirror of Swift's `.capitalized` for the damage tags — uppercase the
+/// first letter of every word (any non-letter is a boundary), so
+/// "broken-top" renders "Broken-Top" on both platforms.
+private fun capitalizedTag(raw: String): String =
+    Regex("\\p{L}+").replace(raw.lowercase(Locale.US)) { match ->
+        match.value.replaceFirstChar { it.titlecase(Locale.US) }
+    }

@@ -84,6 +84,14 @@ public struct MapHomeScreen: View {
     // Sheets / covers.
     @State private var presentingChooser = false
     @State private var presentingLayers = false
+    /// First-run region picker — hosted here (the app's root screen) so
+    /// it auto-presents right after the splash hands off.
+    @State private var presentingRegionPicker = false
+    /// Settings presented from the layers sheet's "Open Settings" row —
+    /// launched from the sheet's onDismiss so the two presentations
+    /// don't fight (same two-step pattern as `pendingChoice`).
+    @State private var presentingSettings = false
+    @State private var pendingOpenSettings = false
     @State private var photoViewer: PhotoViewerContext?
     /// Chooser row picked — launched from the sheet's onDismiss so the
     /// fullScreenCover doesn't fight the sheet dismissal animation.
@@ -134,6 +142,14 @@ public struct MapHomeScreen: View {
             .onChange(of: location.latestSnapshot) { _, snap in
                 recenterOnFirstFix(snap)
             }
+            .task {
+                // First-launch UX: auto-present the region picker once,
+                // after the splash has settled — but never re-prompt a
+                // cruiser who already has a region.
+                if settings.region == nil && !settings.regionPickerSeen {
+                    presentingRegionPicker = true
+                }
+            }
             #if os(iOS)
             .navigationBarHidden(true)
             .fullScreenCover(isPresented: $presentingDBHScan,
@@ -145,11 +161,6 @@ public struct MapHomeScreen: View {
                     DistanceMeasureScreen()
                         .environmentObject(history)
                         .environmentObject(settings)
-                        .toolbar {
-                            ToolbarItem(placement: .cancellationAction) {
-                                Button("Close") { presentingDistance = false }
-                            }
-                        }
                 }
             }
             .fullScreenCover(isPresented: $presentingSampling) {
@@ -157,11 +168,6 @@ public struct MapHomeScreen: View {
                     SamplingPlotScreen()
                         .environmentObject(history)
                         .environmentObject(settings)
-                        .toolbar {
-                            ToolbarItem(placement: .cancellationAction) {
-                                Button("Close") { presentingSampling = false }
-                            }
-                        }
                 }
             }
             .fullScreenCover(item: $photoViewer) { context in
@@ -171,9 +177,37 @@ public struct MapHomeScreen: View {
             #endif
             .sheet(isPresented: $presentingChooser,
                    onDismiss: launchPendingChoice) { measureChooser }
-            .sheet(isPresented: $presentingLayers) {
-                BasemapLayersSheet(visibleRegion: visibleRegion)
+            .sheet(isPresented: $presentingLayers, onDismiss: {
+                if pendingOpenSettings {
+                    pendingOpenSettings = false
+                    presentingSettings = true
+                }
+            }) {
+                BasemapLayersSheet(visibleRegion: visibleRegion,
+                                   onOpenSettings: {
+                    pendingOpenSettings = true
+                    presentingLayers = false
+                })
+                .environmentObject(settings)
+            }
+            // ANY dismissal — Skip, row pick, or a plain swipe-down —
+            // stamps regionPickerSeen so the picker never nags again.
+            .sheet(isPresented: $presentingRegionPicker,
+                   onDismiss: { settings.regionPickerSeen = true }) {
+                RegionPickerSheet()
                     .environmentObject(settings)
+            }
+            .sheet(isPresented: $presentingSettings) {
+                NavigationStack {
+                    SettingsScreen()
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) {
+                                Button("Close") { presentingSettings = false }
+                            }
+                        }
+                }
+                .environmentObject(environment)
+                .environmentObject(settings)
             }
         }
     }
@@ -223,8 +257,10 @@ public struct MapHomeScreen: View {
         .accessibilityIdentifier("mapHome.map")
     }
 
-    /// One pin per tree number (entries WITH coordinates only); entries
-    /// without a tree number stand alone, titled by their kind initial.
+    /// One pin per tree number with at least one located reading —
+    /// anchored at the newest located entry but carrying ALL of the
+    /// tree's entries (including no-fix readings); tree-less located
+    /// entries stand alone, titled by their kind letter.
     private struct MapPin: Identifiable {
         let id: String
         let treeNumber: Int?
@@ -246,24 +282,28 @@ public struct MapHomeScreen: View {
                 singles.append(entry)
             }
         }
-        var out: [MapPin] = byTree.map { number, group in
-            let latest = group[0]
+        var out: [MapPin] = byTree.keys.sorted().map { number in
+            // Anchor at the newest LOCATED reading, but the pin
+            // represents the WHOLE tree: badges, warn tint and the peek
+            // card include readings captured without a fix.
+            let anchor = byTree[number]![0]
+            let all = history.entries.filter { $0.treeNumber == number }
             return MapPin(id: "tree-\(number)",
                           treeNumber: number,
                           title: "T\(number)",
-                          entries: group,
-                          latitude: latest.latitude ?? 0,
-                          longitude: latest.longitude ?? 0)
+                          entries: all,
+                          latitude: anchor.latitude ?? 0,
+                          longitude: anchor.longitude ?? 0)
         }
         out += singles.map { entry in
             MapPin(id: "entry-\(entry.id.uuidString)",
                    treeNumber: nil,
-                   title: kindInitial(entry.kind),
+                   title: kindLetter(entry.kind),
                    entries: [entry],
                    latitude: entry.latitude ?? 0,
                    longitude: entry.longitude ?? 0)
         }
-        return out.sorted { $0.id < $1.id }
+        return out
     }
 
     private var markers: [BasemapMarker] {
@@ -296,8 +336,16 @@ public struct MapHomeScreen: View {
         return letters.isEmpty ? nil : letters
     }
 
-    private func kindInitial(_ kind: QuickMeasureEntry.Kind) -> String {
-        String(kind.rawValue.prefix(1)).uppercased()
+    /// Single-entry pin letter — distance is "L" and plot "P" so neither
+    /// collides with the DBH badge's "D".
+    private func kindLetter(_ kind: QuickMeasureEntry.Kind) -> String {
+        switch kind {
+        case .dbh:          return "D"
+        case .height:       return "H"
+        case .crown:        return "C"
+        case .distance:     return "L"
+        case .samplingPlot: return "P"
+        }
     }
 
     // MARK: Lifecycle
@@ -334,41 +382,74 @@ public struct MapHomeScreen: View {
     // MARK: Top chrome
 
     private var topChrome: some View {
-        HStack(alignment: .top, spacing: ForestixSpace.xs) {
-            gpsChip
-            Spacer()
-            Button {
-                presentingLayers = true
-            } label: {
-                Image(systemName: "square.stack.3d.up")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(ForestixPalette.textSecondary)
-                    .frame(width: 44, height: 44)
-                    .background(Circle().fill(ForestixPalette.surfaceRaised))
-                    .overlay(Circle().stroke(ForestixPalette.divider, lineWidth: 1))
-            }
-            .buttonStyle(MapPressableStyle())
-            .accessibilityLabel("Basemap layers")
-            .accessibilityIdentifier("mapHome.layers")
+        VStack(spacing: ForestixSpace.xs) {
+            HStack(spacing: ForestixSpace.xs) {
+                gpsChip
+                Spacer()
+                Button {
+                    presentingLayers = true
+                } label: {
+                    Image(systemName: "square.stack.3d.up")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(ForestixPalette.textSecondary)
+                        .frame(width: 44, height: 44)
+                        .background(Circle().fill(ForestixPalette.surfaceRaised))
+                        .overlay(Circle().stroke(ForestixPalette.divider, lineWidth: 1))
+                }
+                .buttonStyle(MapPressableStyle())
+                .accessibilityLabel("Basemap layers")
+                .accessibilityIdentifier("mapHome.layers")
 
-            // Appearance toggle — same look as ModeSelectionScreen's.
-            Button {
-                settings.appearance = settings.appearance == "dark" ? "light" : "dark"
-            } label: {
-                Image(systemName: settings.appearance == "dark" ? "sun.max.fill" : "moon.fill")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(ForestixPalette.textSecondary)
-                    .frame(width: 44, height: 44)
-                    .background(Circle().fill(ForestixPalette.surfaceRaised))
-                    .overlay(Circle().stroke(ForestixPalette.divider, lineWidth: 1))
+                // Appearance toggle — flips the saved appearance setting.
+                Button {
+                    settings.appearance = settings.appearance == "dark" ? "light" : "dark"
+                } label: {
+                    Image(systemName: settings.appearance == "dark" ? "sun.max.fill" : "moon.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(ForestixPalette.textSecondary)
+                        .frame(width: 44, height: 44)
+                        .background(Circle().fill(ForestixPalette.surfaceRaised))
+                        .overlay(Circle().stroke(ForestixPalette.divider, lineWidth: 1))
+                }
+                .buttonStyle(MapPressableStyle())
+                .accessibilityLabel(settings.appearance == "dark"
+                    ? "Switch to light appearance" : "Switch to dark appearance")
+                .accessibilityIdentifier("mapHome.appearanceToggle")
             }
-            .buttonStyle(MapPressableStyle())
-            .accessibilityLabel(settings.appearance == "dark"
-                ? "Switch to light appearance" : "Switch to dark appearance")
-            .accessibilityIdentifier("mapHome.appearanceToggle")
+            .padding(.horizontal, 14)
+
+            // The satellite base is built-in, so this hint only concerns
+            // the optional overlay (offline/no-network lives in the sheet).
+            if settings.tileURLTemplate == nil {
+                overlayHintChip
+            }
         }
-        .padding(.horizontal, 14)
         .padding(.top, ForestixSpace.xs)
+    }
+
+    /// Mock ① `.tilelabel` — tappable nudge into the layers sheet while
+    /// no overlay template is configured.
+    private var overlayHintChip: some View {
+        Button {
+            presentingLayers = true
+        } label: {
+            Text("OVERLAY TILES · ADD A TEMPLATE IN SETTINGS")
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .tracking(0.8)
+                .foregroundStyle(ForestixPalette.textTertiary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: ForestixRadius.chip,
+                                     style: .continuous)
+                        .fill(ForestixPalette.surface))
+                .overlay(
+                    RoundedRectangle(cornerRadius: ForestixRadius.chip,
+                                     style: .continuous)
+                        .stroke(ForestixPalette.divider, lineWidth: 1))
+        }
+        .buttonStyle(MapPressableStyle())
+        .accessibilityIdentifier("mapHome.overlayHint")
     }
 
     /// A fix older than this reads as stale (dense canopy, canyon
@@ -386,7 +467,10 @@ public struct MapHomeScreen: View {
     /// 60 s).
     private var gpsChip: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
-            let snap = location.latestSnapshot
+            // This screen's live service, else the newest fix any screen
+            // captured — the camera already seeds from lastGlobalFix, so
+            // the chip should agree with it.
+            let snap = location.latestSnapshot ?? LocationService.lastGlobalFix
             let age = snap.map { max(0, context.date.timeIntervalSince($0.timestamp)) }
             let stale = (age ?? 0) > Self.staleFixAge
             let dot: Color = {
@@ -511,7 +595,7 @@ public struct MapHomeScreen: View {
                 ZStack {
                     Circle().fill(ForestixPalette.surface)
                     Image(systemName: icon)
-                        .font(.system(size: 20, weight: .medium))
+                        .font(.system(size: 22, weight: .medium))
                         .foregroundStyle(ForestixPalette.textPrimary)
                 }
                 .frame(width: 54, height: 54)
@@ -588,7 +672,7 @@ public struct MapHomeScreen: View {
                     openPhotoViewer(pin)
                 } label: {
                     Text("View photo")
-                        .font(ForestixType.bodyBold)
+                        .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(ForestixPalette.textPrimary)
                         .frame(maxWidth: .infinity, minHeight: 44)
                         .background(
@@ -602,11 +686,21 @@ public struct MapHomeScreen: View {
                 .opacity(photos.isEmpty ? 0.45 : 1)
                 .accessibilityIdentifier("mapHome.peek.viewPhoto")
 
-                Button(pin.treeNumber != nil ? "Measure this tree"
-                                             : "New measurement") {
+                Button {
                     measureAgain(pin)
+                } label: {
+                    Text(pin.treeNumber != nil ? "Measure this tree"
+                                               : "New measurement")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(ForestixPalette.primaryInk)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .background(
+                            RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                             style: .continuous)
+                                .fill(ForestixPalette.primary))
+                        .contentShape(Rectangle())
                 }
-                .buttonStyle(.forestixProminent)
+                .buttonStyle(MapPressableStyle())
                 .accessibilityIdentifier("mapHome.peek.measureAgain")
             }
             .padding(.top, ForestixSpace.sm)
@@ -620,7 +714,7 @@ public struct MapHomeScreen: View {
                 .stroke(ForestixPalette.divider, lineWidth: 1))
         .shadow(color: Color.black.opacity(0.22), radius: 14, y: -4)
         .padding(.horizontal, ForestixSpace.sm)
-        .padding(.bottom, ForestixSpace.xs)
+        .padding(.bottom, 20)
         .transition(.move(edge: .bottom).combined(with: .opacity))
         .accessibilityIdentifier("mapHome.peek")
     }
@@ -699,7 +793,9 @@ public struct MapHomeScreen: View {
                 value = MeasurementFormatter.distance(m: entry.value, in: system)
                 sigma = entry.sigma.map { String(format: "±%.2f m", $0) }
             case .samplingPlot:
-                value = String(format: "r %.1f m", entry.value)
+                let area = entry.secondaryValue
+                    ?? (.pi * entry.value * entry.value)
+                value = String(format: "r %.1f m · %.0f m²", entry.value, area)
             }
             return PeekRow(id: kind.rawValue,
                            label: peekRowLabel(kind),
@@ -726,21 +822,25 @@ public struct MapHomeScreen: View {
                 .tracking(0.7)
                 .foregroundStyle(ForestixPalette.textTertiary)
                 .frame(width: 52, alignment: .leading)
-            Text(row.value)
-                .font(.system(size: 14.5, weight: .semibold, design: .monospaced))
-                .foregroundStyle(ForestixPalette.textPrimary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-            if let sigma = row.sigma {
-                Text(sigma)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(ForestixPalette.textTertiary)
+            HStack(spacing: 0) {
+                Text(row.value)
+                    .font(.system(size: 14.5, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(ForestixPalette.textPrimary)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                if let sigma = row.sigma {
+                    // Sigma trails the value after a single space —
+                    // the mock's inline <small>.
+                    Text(" " + sigma)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(ForestixPalette.textTertiary)
+                        .lineLimit(1)
+                }
             }
             Spacer(minLength: 4)
             tierChip(row.confidenceRaw)
         }
-        .frame(minHeight: 32)
+        .padding(.vertical, 6)
     }
 
     private func tierChip(_ raw: String) -> some View {
@@ -786,7 +886,8 @@ public struct MapHomeScreen: View {
                     .padding(.vertical, 2)
                     .background(
                         RoundedRectangle(cornerRadius: 4)
-                            .fill(Color.black.opacity(0.7)))
+                            .fill(Color(red: 6 / 255, green: 9 / 255, blue: 10 / 255)
+                                .opacity(0.70)))
                     .padding(4)
             }
         }
@@ -965,11 +1066,6 @@ public struct MapHomeScreen: View {
                     if fullMeasurementChain { chainHeightPending = true }
                     presentingDBHScan = false
                 })
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { presentingDBHScan = false }
-                }
-            }
         }
     }
 
@@ -1010,11 +1106,6 @@ public struct MapHomeScreen: View {
                 })
             .environmentObject(history)
             .environmentObject(settings)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { presentingHeightScan = false }
-                }
-            }
         }
     }
     #endif
@@ -1087,6 +1178,11 @@ private struct MeasurePhotoDetailView: View {
 
     private let ink = Color(red: 0.949, green: 0.961, blue: 0.953)      // #F2F5F3
     private let inkDim = Color(red: 0.647, green: 0.682, blue: 0.659)   // #A5AEA8
+    /// Meta-cell labels — dark-appearance textSecondary, fixed because
+    /// the chrome sits on a photograph regardless of the app theme.
+    private let labelDim = Color(red: 0.718, green: 0.753, blue: 0.729) // #B7C0BA
+    /// Dark-glass chrome base (mock `rgba(6,9,10,…)`).
+    private let glass = Color(red: 6 / 255, green: 9 / 255, blue: 10 / 255) // #06090A
 
     var body: some View {
         ZStack {
@@ -1110,10 +1206,10 @@ private struct MeasurePhotoDetailView: View {
                         dismiss()
                     } label: {
                         Image(systemName: "xmark")
-                            .font(.system(size: 15, weight: .semibold))
+                            .font(.system(size: 16, weight: .semibold))
                             .foregroundStyle(ink)
                             .frame(width: 44, height: 44)
-                            .background(Circle().fill(Color.black.opacity(0.6)))
+                            .background(Circle().fill(glass.opacity(0.70)))
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Close photo")
@@ -1161,8 +1257,8 @@ private struct MeasurePhotoDetailView: View {
         .padding(.top, 40)
         .padding(.bottom, 30)
         .background(
-            LinearGradient(colors: [Color.black.opacity(0),
-                                    Color.black.opacity(0.85)],
+            LinearGradient(colors: [glass.opacity(0),
+                                    glass.opacity(0.92)],
                            startPoint: .top, endPoint: .bottom))
     }
 
@@ -1170,7 +1266,7 @@ private struct MeasurePhotoDetailView: View {
         VStack(alignment: .leading, spacing: 1) {
             Text(label)
                 .font(.system(size: 11.5, design: .monospaced))
-                .foregroundStyle(inkDim)
+                .foregroundStyle(labelDim)
             Text(value)
                 .font(.system(size: 13, weight: .bold, design: .monospaced))
                 .foregroundStyle(ink)
@@ -1240,6 +1336,9 @@ private struct BasemapLayersSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     let visibleRegion: BasemapRegion?
+    /// "Open Settings" tapped while no overlay template is configured —
+    /// the host dismisses this sheet and presents Settings.
+    let onOpenSettings: () -> Void
 
     @StateObject private var downloader = OfflineTileDownloader()
     @State private var baseStats: TileCache.Stats?
@@ -1326,6 +1425,11 @@ private struct BasemapLayersSheet: View {
             .disabled(settings.tileURLTemplate == nil)
             .accessibilityIdentifier("mapHome.layers.overlayToggle")
 
+            if settings.tileURLTemplate == nil {
+                Button("Open Settings") { onOpenSettings() }
+                    .accessibilityIdentifier("mapHome.layers.openSettings")
+            }
+
             if settings.tileURLTemplate != nil,
                !settings.providerUsageAcknowledged {
                 Text("Overlay tiles stay hidden until you confirm the provider's usage policy in Settings → Basemap tiles.")
@@ -1364,11 +1468,18 @@ private struct BasemapLayersSheet: View {
                     downloader.cancel()
                 }
                 .accessibilityIdentifier("mapHome.layers.cancelDownload")
-            case let .finished(fetched, failed, alreadyCached):
+            case let .tooLarge(planned):
+                Text("Area too large (\(planned) tiles) — zoom in and try again.")
+                    .font(ForestixType.caption)
+                    .foregroundStyle(ForestixPalette.confidenceWarn)
+                downloadButton
+            case let .finished(fetched, failed, alreadyCached, cancelled):
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(fetched == 0 && failed == 0
-                         ? "Nothing to fetch — area already cached"
-                         : "Downloaded \(fetched) tiles")
+                    Text(cancelled
+                         ? "Cancelled — kept \(fetched) downloaded tiles."
+                         : fetched == 0 && failed == 0
+                             ? "Nothing to fetch — area already cached"
+                             : "Downloaded \(fetched) tiles")
                         .font(ForestixType.bodyBold)
                         .foregroundStyle(ForestixPalette.textPrimary)
                     Text(finishDetail(failed: failed, alreadyCached: alreadyCached))
@@ -1382,7 +1493,7 @@ private struct BasemapLayersSheet: View {
         } header: {
             Text("Offline download")
         } footer: {
-            Text("Fetches zoom \(OfflineBasemap.defaultZoomRange.lowerBound)–\(OfflineBasemap.defaultZoomRange.upperBound) tiles for the area the map is showing — satellite base plus the overlay when one is set — so the map keeps working with no signal.")
+            Text("Fetches zoom \(OfflineBasemap.defaultZoomRange.lowerBound)–\(OfflineBasemap.defaultZoomRange.upperBound) tiles for the area the map is showing — satellite base plus the overlay when one is set — so the map keeps working with no signal. Downloads cap at \(OfflineTileDownloader.maxPlannedTiles) tiles — zoom in if the area is too large.")
         }
     }
 
@@ -1458,10 +1569,18 @@ private struct BasemapLayersSheet: View {
 @MainActor
 private final class OfflineTileDownloader: ObservableObject {
 
+    /// Refuse plans bigger than this — a zoomed-out viewport at zoom
+    /// 12–17 explodes into millions of tiles; field areas stay well
+    /// under the cap. Applied to the COMBINED base + overlay count.
+    static let maxPlannedTiles = 4_000
+
     enum Phase: Equatable {
         case idle
         case running(done: Int, total: Int, failed: Int)
-        case finished(fetched: Int, failed: Int, alreadyCached: Int)
+        /// Plan exceeded `maxPlannedTiles` — nothing was fetched.
+        case tooLarge(planned: Int)
+        case finished(fetched: Int, failed: Int, alreadyCached: Int,
+                      cancelled: Bool)
     }
 
     @Published private(set) var phase: Phase = .idle
@@ -1492,15 +1611,21 @@ private final class OfflineTileDownloader: ObservableObject {
         let alreadyCached = cachedCount
         guard !work.isEmpty else {
             phase = .finished(fetched: 0, failed: 0,
-                              alreadyCached: alreadyCached)
+                              alreadyCached: alreadyCached,
+                              cancelled: false)
+            return
+        }
+        guard work.count <= Self.maxPlannedTiles else {
+            phase = .tooLarge(planned: work.count)
             return
         }
         phase = .running(done: 0, total: work.count, failed: 0)
         task = Task { [weak self] in
             var done = 0
             var failed = 0
+            var cancelled = false
             for item in work {
-                if Task.isCancelled { break }
+                if Task.isCancelled { cancelled = true; break }
                 do {
                     guard let url = item.cache.resolvedURL(for: item.key) else {
                         throw URLError(.badURL)
@@ -1519,7 +1644,8 @@ private final class OfflineTileDownloader: ObservableObject {
                                        failed: failed)
             }
             self?.phase = .finished(fetched: done - failed, failed: failed,
-                                    alreadyCached: alreadyCached)
+                                    alreadyCached: alreadyCached,
+                                    cancelled: cancelled)
         }
     }
 

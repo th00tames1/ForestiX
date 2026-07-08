@@ -151,10 +151,8 @@ public struct FieldLogScreen: View {
         let todayCount = history.entries.filter {
             cal.isDate($0.createdAt, inSameDayAs: now)
         }.count
-        let lastAgo = history.entries.first.map { entry -> String in
-            let fmt = RelativeDateTimeFormatter()
-            fmt.unitsStyle = .abbreviated
-            return fmt.localizedString(for: entry.createdAt, relativeTo: now)
+        let lastAgo = history.entries.first.map {
+            compactRelativeAgo($0.createdAt, now: now)
         } ?? "—"
 
         return HStack(alignment: .firstTextBaseline, spacing: ForestixSpace.lg) {
@@ -209,7 +207,7 @@ public struct FieldLogScreen: View {
             Text("No readings yet")
                 .font(ForestixType.bodyBold)
                 .foregroundStyle(ForestixPalette.textPrimary)
-            Text("Accept a scan in the Quick Measure instrument and it'll land here.")
+            Text("Accept a scan in a measurement tool and it'll land here.")
                 .font(ForestixType.caption)
                 .foregroundStyle(ForestixPalette.textSecondary)
                 .multilineTextAlignment(.center)
@@ -337,10 +335,29 @@ private struct FieldLogRow: View {
     }
 
     private var timestampText: String {
-        let rel = RelativeDateTimeFormatter()
-        rel.unitsStyle = .abbreviated
-        return rel.localizedString(for: entry.createdAt, relativeTo: Date())
+        compactRelativeAgo(entry.createdAt)
     }
+}
+
+// MARK: - Compact relative time
+
+/// Compact relative timestamp — "now" (<60 s), "5m", "3h", "2d",
+/// then "MMM d" from a week out. Verbatim port of the Android
+/// FieldLogScreen `relativeAgo` thresholds so the LAST summary cell
+/// and row timestamps render identically on both platforms.
+private func compactRelativeAgo(_ date: Date, now: Date = Date()) -> String {
+    let diff = max(0, now.timeIntervalSince(date))
+    let mins = Int(diff) / 60
+    let hrs  = mins / 60
+    let days = hrs / 24
+    if mins < 1  { return "now" }
+    if mins < 60 { return "\(mins)m" }
+    if hrs  < 24 { return "\(hrs)h" }
+    if days < 7  { return "\(days)d" }
+    let fmt = DateFormatter()
+    fmt.locale = Locale(identifier: "en_US")
+    fmt.dateFormat = "MMM d"
+    return fmt.string(from: date)
 }
 
 // MARK: - Tier chip (shared pattern)

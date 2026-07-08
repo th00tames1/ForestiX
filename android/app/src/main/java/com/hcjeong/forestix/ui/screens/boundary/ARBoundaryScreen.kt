@@ -26,8 +26,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.border
-import androidx.compose.material3.Button
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -44,6 +42,8 @@ import androidx.navigation.NavController
 import com.hcjeong.forestix.ar.ArController
 import com.hcjeong.forestix.ui.screens.MeasureBackButton
 import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixBorderedButton
+import com.hcjeong.forestix.ui.theme.ForestixProminentButton
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import kotlinx.coroutines.delay
 import java.util.Locale
@@ -130,7 +130,8 @@ fun ARBoundaryScreen(nav: NavController) {
                 .padding(horizontal = ForestixSpace.md)
                 .padding(bottom = ForestixSpace.lg)
                 .clip(RoundedCornerShape(12.dp))
-                .background(Color.Black.copy(alpha = 0.6f))
+                // G8 — AR chrome panels are flat black 0.55 on both platforms.
+                .background(Color.Black.copy(alpha = 0.55f))
                 .padding(ForestixSpace.md),
         ) {
             if (isDrifted) {
@@ -168,17 +169,23 @@ fun ARBoundaryScreen(nav: NavController) {
 
             if (centerWorld == null) {
                 Row {
-                    Button(onClick = {
-                        // iOS falls back to a synthetic origin center when no
-                        // AR frame exists yet so the flow stays exercisable.
+                    // iOS Button("Set Center").buttonStyle(.forestixProminent);
+                    // falls back to a synthetic origin center when no AR
+                    // frame exists yet so the flow stays exercisable.
+                    ForestixProminentButton(label = "Set Center") {
                         if (!viewModel.setCenterAtCurrentCamera()) {
                             viewModel.setCenter(com.hcjeong.forestix.ar.Vec3(0f, 0f, 0f))
                         }
-                    }) { Text("Set Center") }
+                    }
                 }
             } else {
                 Row(horizontalArrangement = Arrangement.spacedBy(ForestixSpace.sm)) {
-                    OutlinedButton(onClick = { viewModel.clearCenter() }) { Text("Reset") }
+                    // iOS `.bordered` — tinted label; primary reads on the
+                    // black AR panel in both appearances.
+                    ForestixBorderedButton(
+                        label = "Reset",
+                        tint = Forestix.colors.primary,
+                    ) { viewModel.clearCenter() }
                     Spacer(Modifier.weight(1f))
                 }
             }

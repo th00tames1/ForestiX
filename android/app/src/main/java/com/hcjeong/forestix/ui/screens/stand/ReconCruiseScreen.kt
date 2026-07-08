@@ -14,18 +14,29 @@ package com.hcjeong.forestix.ui.screens.stand
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AddCircle
+import androidx.compose.material.icons.filled.Assessment
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -170,9 +181,14 @@ fun ReconCruiseScreen(nav: NavController) {
                     onClick = { presentingSummary = true },
                     enabled = completedPlots.size >= 2,
                 ) {
-                    Text(
-                        "Summary", style = type.bodyBold,
-                        color = if (completedPlots.size >= 2) colors.primary else colors.textTertiary)
+                    val summaryTint =
+                        if (completedPlots.size >= 2) colors.primary else colors.textTertiary
+                    // iOS Label("Summary", systemImage: "chart.bar.doc.horizontal").
+                    Icon(
+                        Icons.Filled.Assessment, contentDescription = null,
+                        tint = summaryTint, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Summary", style = type.bodyBold, color = summaryTint)
                 }
             }
         }
@@ -190,30 +206,27 @@ fun ReconCruiseScreen(nav: NavController) {
     }
 }
 
-// MARK: - BAF picker (segmented, 3 most common values)
+// MARK: - BAF picker (M3 segmented, 3 most common values — iOS
+// `.pickerStyle(.segmented)` at width 220; selected label rides the
+// primary fill in primaryInk, never hardcoded white)
 
 @Composable
 private fun BafPicker(selected: Double, onSelect: (Double) -> Unit) {
     val colors = Forestix.colors
     val type = Forestix.type
-    Row(
-        Modifier
-            .clip(ForestixRadius.control)
-            .border(0.5.dp, colors.divider, ForestixRadius.control)
-            .background(colors.surface),
-    ) {
-        for (v in listOf(10.0, 20.0, 40.0)) {
-            val isSelected = v == selected
-            Text(
-                "${v.toInt()} ft²/ac",
-                style = if (isSelected) type.bodyBold else type.body,
-                color = if (isSelected) Color.White else colors.textPrimary,
-                modifier = Modifier
-                    .clip(ForestixRadius.control)
-                    .background(if (isSelected) colors.primary else Color.Transparent)
-                    .clickableNoRipple { onSelect(v) }
-                    .padding(horizontal = ForestixSpace.sm, vertical = 6.dp),
-            )
+    val options = listOf(10.0, 20.0, 40.0)
+    SingleChoiceSegmentedButtonRow(Modifier.width(220.dp)) {
+        options.forEachIndexed { index, v ->
+            SegmentedButton(
+                selected = v == selected,
+                onClick = { onSelect(v) },
+                shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
+                colors = SegmentedButtonDefaults.colors(
+                    activeContainerColor = colors.primary,
+                    activeContentColor = colors.primaryInk,
+                    inactiveContentColor = colors.textPrimary,
+                ),
+            ) { Text("${v.toInt()} ft²/ac", style = type.caption, maxLines = 1) }
         }
     }
 }
@@ -244,26 +257,38 @@ private fun TallyCounter(
                 .clickableNoRipple(onUndo),
         )
         Row(horizontalArrangement = Arrangement.spacedBy(ForestixSpace.md)) {
-            Text(
-                "+ In-tree",
-                style = type.bodyBold, color = Color.White,
-                modifier = Modifier
+            // iOS Label("In-tree", systemImage: "plus.circle.fill") capsule.
+            Row(
+                Modifier
                     .clip(CircleShape)
                     .background(colors.primary)
                     .clickableNoRipple(onTally)
                     .padding(horizontal = ForestixSpace.lg, vertical = ForestixSpace.sm),
-            )
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Icon(
+                    Icons.Filled.AddCircle, contentDescription = null,
+                    tint = Color.White, modifier = Modifier.size(18.dp))
+                Text("In-tree", style = type.bodyBold, color = Color.White)
+            }
             val saveEnabled = currentCount > 0
-            Text(
-                "✓ Save plot",
-                style = type.bodyBold, color = colors.primary,
-                modifier = Modifier
+            // iOS Label("Save plot", systemImage: "checkmark.circle") capsule.
+            Row(
+                Modifier
                     .alpha(if (saveEnabled) 1f else 0.4f)
                     .clip(CircleShape)
                     .border(1.5.dp, colors.primary, CircleShape)
                     .clickableNoRipple { if (saveEnabled) onSave() }
                     .padding(horizontal = ForestixSpace.lg, vertical = ForestixSpace.sm),
-            )
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Icon(
+                    Icons.Filled.CheckCircle, contentDescription = null,
+                    tint = colors.primary, modifier = Modifier.size(18.dp))
+                Text("Save plot", style = type.bodyBold, color = colors.primary)
+            }
         }
         Text(
             "Basal area = $currentCount × ${baf.toInt()} = ${(currentCount.toDouble() * baf).toInt()} ft²/ac",
@@ -322,10 +347,15 @@ private fun ReconSummarySheet(
             .padding(ForestixSpace.md),
         verticalArrangement = Arrangement.spacedBy(ForestixSpace.md),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Recon summary", style = type.bodyBold, color = colors.textPrimary)
-            Spacer(Modifier.weight(1f))
-            TextButton(onClick = onDone) {
+        // Nav-bar chrome inside the sheet — centered inline title +
+        // trailing Done (iOS `.navigationTitle` + confirmationAction).
+        Box(Modifier.fillMaxWidth()) {
+            Text(
+                "Recon summary",
+                style = type.bodyBold.copy(fontSize = 17.sp),
+                color = colors.textPrimary,
+                modifier = Modifier.align(Alignment.Center))
+            TextButton(onClick = onDone, modifier = Modifier.align(Alignment.CenterEnd)) {
                 Text("Done", style = type.bodyBold, color = colors.primary)
             }
         }
@@ -419,13 +449,17 @@ private fun ReconSummarySheet(
 private fun SummaryStat(label: String, value: String, modifier: Modifier = Modifier) {
     val colors = Forestix.colors
     val type = Forestix.type
-    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(
+        modifier,
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
         Text(
-            value, style = type.data, color = colors.textPrimary,
+            value, style = type.dataLarge, color = colors.textPrimary,
             maxLines = 1, textAlign = TextAlign.Center)
         Text(
-            label, style = type.sectionHead.copy(letterSpacing = 1.2.sp, fontSize = 10.sp),
-            color = colors.textTertiary, textAlign = TextAlign.Center)
+            label, style = type.sectionHead.copy(letterSpacing = 1.2.sp),
+            color = colors.textTertiary, maxLines = 1, textAlign = TextAlign.Center)
     }
 }
 

@@ -26,10 +26,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Button
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -43,6 +41,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.ar.ArController
@@ -54,6 +53,9 @@ import com.hcjeong.forestix.common.Units
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
 import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixBorderedButton
+import com.hcjeong.forestix.ui.theme.ForestixProminentButton
+import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import kotlinx.coroutines.delay
 import java.util.Locale
@@ -73,12 +75,12 @@ fun SamplingPlotScreen(nav: NavController) {
     var distanceFromCenter by remember { mutableStateOf<Double?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
 
-    // 4 Hz boundary check + haptics. Does NOT drive any animation/flash, so
+    // 5 Hz boundary check + haptics. Does NOT drive any animation/flash, so
     // it doesn't recompose the AR view — only the small readouts that read it.
     LaunchedEffect(Unit) {
         var tick = 0
         while (true) {
-            delay(250)
+            delay(200)
             val c = center
             val cam = controller.currentCameraPosition()
             if (c == null || cam == null) {
@@ -89,7 +91,7 @@ fun SamplingPlotScreen(nav: NavController) {
                 distanceFromCenter = d
                 val now = d > radiusM
                 if (now && !isOutside) haptics.warn()           // crossed out
-                else if (now && tick % 4 == 0) haptics.warn()   // ~every 1 s while out
+                else if (now && tick % 2 == 0) haptics.warn()   // every 0.4 s while out (iOS cadence)
                 isOutside = now
             }
             tick++
@@ -126,23 +128,40 @@ fun SamplingPlotScreen(nav: NavController) {
 
         MeasureBackButton { nav.popBackStack() }
 
-        // Top radius slider — left-padded to clear the back button.
+        // Top radius slider — full-width card below the floating back row
+        // (16 top inset + 44 button + 8 gap ⇒ top 68), iOS topControls.
         Column(
             Modifier.align(Alignment.TopCenter)
-                .padding(top = 8.dp, start = 72.dp, end = 16.dp)
-                .clip(RoundedCornerShape(ForestixSpace.sm)).background(Color.Black.copy(alpha = 0.6f)).padding(ForestixSpace.sm),
+                .padding(top = 68.dp, start = ForestixSpace.md, end = ForestixSpace.md)
+                .clip(ForestixRadius.card).background(Color.Black.copy(alpha = 0.55f)).padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("SAMPLING RADIUS", style = Forestix.type.sectionHead, color = Color.White.copy(alpha = 0.85f))
+                Text(
+                    "SAMPLING RADIUS",
+                    style = Forestix.type.sectionHead.copy(letterSpacing = 1.2.sp),
+                    color = Color.White.copy(alpha = 0.85f),
+                )
                 Text(String.format(Locale.US, "%.1f m", radiusM), style = Forestix.type.data, color = Color.White)
             }
-            Slider(value = radiusM.toFloat(), onValueChange = { radiusM = it.toDouble() }, valueRange = 1f..30f, steps = 57)
+            Slider(
+                value = radiusM.toFloat(),
+                onValueChange = { radiusM = it.toDouble() },
+                valueRange = 1f..30f,
+                steps = 57,
+                colors = SliderDefaults.colors(
+                    thumbColor = colors.confidenceWarn,
+                    activeTrackColor = colors.confidenceWarn,
+                ),
+            )
         }
 
         if (center == null) MeasureControlColumn(onCapture = { place() })
 
         MeasureStatusPanel {
-            failure?.let { CenteredText(it, dim = true) }
+            failure?.let {
+                Text(it, style = Forestix.type.caption, color = Color.White)
+            }
             if (center == null) {
                 CenteredText("Set the radius, aim at the plot centre, tap +")
             } else {
@@ -151,28 +170,44 @@ fun SamplingPlotScreen(nav: NavController) {
                     large = true,
                     color = if (isOutside) colors.confidenceBad else colors.confidenceOk,
                 )
-                val d = distanceFromCenter
-                CenteredText(
-                    if (d == null) "\u2014"
-                    else String.format(Locale.US, "%.1f m from centre \u00B7 %.0f m\u00B2", d, Units.circleAreaM2(radiusM)),
-                    dim = true,
-                )
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(ForestixSpace.sm)) {
-                    OutlinedButton(onClick = {
-                        center = null; isOutside = false; distanceFromCenter = null
-                    }, modifier = Modifier.weight(1f)) { Text("Reset") }
-                    Button(modifier = Modifier.weight(1f), onClick = {
-                        val r = radiusM
-                        env.history.append(
-                            QuickMeasureEntry(
-                                kind = MeasureKind.SAMPLING_PLOT, value = r,
-                                secondaryValue = Units.circleAreaM2(r),
-                                sigma = null, confidenceRaw = "green", method = "ar.tap",
-                                plotID = env.history.activePlotID.value,
-                            )
+            }
+            // Distance line \u2014 always rendered ("\u2014" until the centre lands),
+            // iOS distanceLine format + style.
+            Text(
+                distanceFromCenter?.let {
+                    String.format(Locale.US, "Centre: %.2f m \u00B7 area: %.1f m\u00B2", it, Units.circleAreaM2(radiusM))
+                } ?: "\u2014",
+                style = Forestix.type.dataSmall,
+                color = Color.White.copy(alpha = 0.85f),
+            )
+            // Reset / Save always visible, both disabled until the centre
+            // is placed; Save exits the flow (both platforms).
+            Row(
+                Modifier.fillMaxWidth().padding(top = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                ForestixBorderedButton(
+                    "Reset",
+                    modifier = Modifier.weight(1f),
+                    enabled = center != null,
+                ) {
+                    center = null; isOutside = false; distanceFromCenter = null
+                }
+                ForestixProminentButton(
+                    "Save",
+                    modifier = Modifier.weight(1f),
+                    enabled = center != null,
+                ) {
+                    val r = radiusM
+                    env.history.append(
+                        QuickMeasureEntry(
+                            kind = MeasureKind.SAMPLING_PLOT, value = r,
+                            secondaryValue = Units.circleAreaM2(r),
+                            sigma = null, confidenceRaw = "green", method = "ar.tap",
+                            plotID = env.history.activePlotID.value,
                         )
-                        nav.popBackStack()
-                    }) { Text("Save") }
+                    )
+                    nav.popBackStack()
                 }
             }
         }
@@ -189,5 +224,5 @@ private fun BoxScope.OutsideFlashOverlay(active: Boolean) {
         initialValue = 0.35f, targetValue = 0.95f,
         animationSpec = infiniteRepeatable(tween(350), RepeatMode.Reverse), label = "alpha",
     )
-    Box(Modifier.fillMaxSize().border(14.dp, Color.Red.copy(alpha = alpha)))
+    Box(Modifier.fillMaxSize().border(12.dp, Color.Red.copy(alpha = alpha)))
 }

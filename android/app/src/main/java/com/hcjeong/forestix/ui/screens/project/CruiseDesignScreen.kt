@@ -28,10 +28,12 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Dangerous
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -60,6 +62,7 @@ import com.hcjeong.forestix.data.cruise.SpeciesConfig
 import com.hcjeong.forestix.data.cruise.VolumeEquation
 import com.hcjeong.forestix.ui.screens.ForestixScaffold
 import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixProminentButton
 import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import java.util.Locale
@@ -85,6 +88,7 @@ fun CruiseDesignScreen(nav: NavController, projectId: String) {
     CruiseDesignContent(nav, loaded)
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun CruiseDesignContent(nav: NavController, project: Project) {
     val env = LocalAppEnvironment.current
@@ -128,19 +132,21 @@ private fun CruiseDesignContent(nav: NavController, project: Project) {
                 .padding(horizontal = ForestixSpace.md),
             verticalArrangement = Arrangement.spacedBy(ForestixSpace.md),
         ) {
-            // MARK: - Plot Type
+            // MARK: - Plot Type (segmented, iOS `.pickerStyle(.segmented)`)
             FormSection(header = "Plot Type") {
-                Row(horizontalArrangement = Arrangement.spacedBy(ForestixSpace.sm)) {
-                    FilterChip(
-                        selected = plotType == PlotType.FIXED_AREA,
-                        onClick = { viewModel.plotType.value = PlotType.FIXED_AREA },
-                        label = { Text("Fixed-area") },
-                    )
-                    FilterChip(
-                        selected = plotType == PlotType.VARIABLE_RADIUS,
-                        onClick = { viewModel.plotType.value = PlotType.VARIABLE_RADIUS },
-                        label = { Text("Variable-radius (prism)") },
-                    )
+                val plotTypeOptions = listOf(
+                    PlotType.FIXED_AREA to "Fixed-area",
+                    PlotType.VARIABLE_RADIUS to "Variable-radius (prism)",
+                )
+                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                    plotTypeOptions.forEachIndexed { index, (value, label) ->
+                        SegmentedButton(
+                            selected = plotType == value,
+                            onClick = { viewModel.plotType.value = value },
+                            shape = SegmentedButtonDefaults.itemShape(
+                                index = index, count = plotTypeOptions.size),
+                        ) { Text(label, style = type.caption, maxLines = 1) }
+                    }
                 }
                 if (plotType == PlotType.FIXED_AREA) {
                     LabeledField(
@@ -157,26 +163,18 @@ private fun CruiseDesignContent(nav: NavController, project: Project) {
                 }
             }
 
-            // MARK: - Sampling
+            // MARK: - Sampling (menu picker, iOS default Form `Picker`)
             FormSection(header = "Sampling") {
-                Text("Scheme", style = type.body, color = colors.textPrimary)
-                Row(horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs)) {
-                    FilterChip(
-                        selected = samplingScheme == SamplingScheme.SYSTEMATIC_GRID,
-                        onClick = { viewModel.samplingScheme.value = SamplingScheme.SYSTEMATIC_GRID },
-                        label = { Text("Systematic grid") },
-                    )
-                    FilterChip(
-                        selected = samplingScheme == SamplingScheme.STRATIFIED_RANDOM,
-                        onClick = { viewModel.samplingScheme.value = SamplingScheme.STRATIFIED_RANDOM },
-                        label = { Text("Stratified random") },
-                    )
-                    FilterChip(
-                        selected = samplingScheme == SamplingScheme.MANUAL,
-                        onClick = { viewModel.samplingScheme.value = SamplingScheme.MANUAL },
-                        label = { Text("Manual") },
-                    )
-                }
+                val schemeOptions = listOf(
+                    SamplingScheme.SYSTEMATIC_GRID to "Systematic grid",
+                    SamplingScheme.STRATIFIED_RANDOM to "Stratified random",
+                    SamplingScheme.MANUAL to "Manual",
+                )
+                MenuPickerRow(
+                    title = "Scheme",
+                    value = schemeOptions.firstOrNull { it.first == samplingScheme }?.second ?: "",
+                    options = schemeOptions.map { it.second },
+                ) { index -> viewModel.samplingScheme.value = schemeOptions[index].first }
                 when (samplingScheme) {
                     SamplingScheme.SYSTEMATIC_GRID ->
                         LabeledField(
@@ -205,13 +203,11 @@ private fun CruiseDesignContent(nav: NavController, project: Project) {
             // MARK: - Plan
             FormSection(header = "Plan") {
                 LabeledContentRow("Planned plots", "$plannedCount")
-                Button(
-                    onClick = { scope.launch { viewModel.generatePlannedPlots() } },
+                ForestixProminentButton(
+                    label = "Generate planned plots",
                     enabled = viewModel.isValid,
-                    modifier = Modifier.fillMaxWidth().height(44.dp),
-                ) {
-                    Text("Generate planned plots", style = type.bodyBold)
-                }
+                    modifier = Modifier.fillMaxWidth(),
+                ) { scope.launch { viewModel.generatePlannedPlots() } }
             }
 
             // MARK: - Species & equations (Phase 7.3, read-only)

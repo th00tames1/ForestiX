@@ -110,6 +110,10 @@ public struct DistanceMeasureScreen: View {
                     }
                 }
 
+                // Floating back button — full-bleed chrome exit (the
+                // system nav bar is hidden on the AR screens).
+                MeasureBackButtonRow()
+
                 // Bottom-centre status / value panel.
                 VStack {
                     Spacer()
@@ -117,9 +121,8 @@ public struct DistanceMeasureScreen: View {
                 }
             }
         }
-        .navigationTitle("Distance")
         #if os(iOS)
-        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.hidden, for: .navigationBar)
         #endif
         .onAppear {
             session.run()
@@ -210,7 +213,8 @@ public struct DistanceMeasureScreen: View {
                 if let a = currentScreenPoint(for: pointA, fallback: screenA, in: size),
                    let b = currentScreenPoint(for: pointB, fallback: screenB, in: size),
                    let d = twoPointDistanceM {
-                    distancePill(text: formatDistance(d))
+                    distancePill(text: MeasurementFormatter.distance(
+                        m: d, in: settings.unitSystem))
                         .position(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2)
                 }
             }
@@ -307,7 +311,8 @@ public struct DistanceMeasureScreen: View {
 
     private var currentDistanceString: String {
         let value = mode == .live ? liveDistanceM : twoPointDistanceM
-        return value.map(formatDistance) ?? "—"
+        return value.map { MeasurementFormatter.distance(
+            m: $0, in: settings.unitSystem) } ?? "—"
     }
 
     private var twoPointHint: String {
@@ -493,11 +498,6 @@ public struct DistanceMeasureScreen: View {
     }
 
     // MARK: - Helpers
-
-    private func formatDistance(_ m: Double) -> String {
-        if m < 1 { return String(format: "%.0f cm", m * 100) }
-        return String(format: "%.2f m", m)
-    }
 
     /// Project a stored world-space point onto the current camera's
     /// screen plane so two-point markers track the scene as the camera

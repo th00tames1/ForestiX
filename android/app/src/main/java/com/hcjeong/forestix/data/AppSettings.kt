@@ -97,6 +97,16 @@ class AppSettings(private val context: Context) {
     private val _state = MutableStateFlow(loadSnapshot())
     val state: StateFlow<SettingsSnapshot> = _state.asStateFlow()
 
+    companion object {
+        /// Synchronous read of the persisted appearance for the launch
+        /// splash — it paints BEFORE AppEnvironment (and this class) exist,
+        /// yet must follow the SAVED appearance setting (default light),
+        /// not a hardcoded light theme or the system trait.
+        fun peekAppearanceIsDark(context: Context): Boolean = runBlocking {
+            context.settingsStore.data.first()[Keys.appearance] == "dark"
+        }
+    }
+
     private fun loadSnapshot(): SettingsSnapshot = runBlocking {
         // First emission is the persisted prefs.
         val p = context.settingsStore.data.first()

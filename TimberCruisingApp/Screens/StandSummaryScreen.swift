@@ -57,7 +57,7 @@ public struct StandSummaryScreen: View {
         Section {
             HStack {
                 VStack(alignment: .leading) {
-                    Text(viewModel.project.name).font(.headline)
+                    Text(viewModel.project.name).font(ForestixType.bodyBold)
                     Text("\(viewModel.closedPlots.count) closed plot(s) · \(viewModel.totalLiveTreeCount) live trees")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -77,7 +77,7 @@ public struct StandSummaryScreen: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Text(String(format: "%.2f %@", stat.mean, unit))
-                        .font(.title2.bold().monospacedDigit())
+                        .font(ForestixType.dataLarge)
                     Spacer()
                     Text(String(format: "± %.2f (95%% confidence)", stat.ci95HalfWidth))
                         .font(.caption.monospacedDigit())
@@ -97,6 +97,7 @@ public struct StandSummaryScreen: View {
                             BarMark(
                                 x: .value("Plot", "\(row.plot.plotNumber)"),
                                 y: .value(title, row.value))
+                                .foregroundStyle(ForestixPalette.primary)
                         }
                         RuleMark(y: .value("Mean", stat.mean))
                             .foregroundStyle(.secondary)

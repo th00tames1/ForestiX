@@ -17,6 +17,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -31,18 +32,17 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DirectionsWalk
+import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.Straighten
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -56,8 +56,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
@@ -65,7 +67,10 @@ import com.hcjeong.forestix.data.cruise.Project
 import com.hcjeong.forestix.ui.Routes
 import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.screens.ForestixScaffold
+import com.hcjeong.forestix.ui.screens.SwipeToDeleteRow
 import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixBorderedButton
+import com.hcjeong.forestix.ui.theme.ForestixProminentButton
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import java.util.Locale
 import java.util.UUID
@@ -177,13 +182,8 @@ private fun ProjectDashboardContent(nav: NavController, project: Project) {
             }
 
             // MARK: - Strata (step 1)
-            FormSection(
-                header = "① Strata",
-                footer = if (strata.isNotEmpty())
-                    "Tap the trash icon to delete. Area is computed automatically from lat/lon."
-                else null,
-            ) {
-                if (strata.isEmpty()) {
+            if (strata.isEmpty()) {
+                FormSection(header = "① Strata") {
                     Row(verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs)) {
                         Icon(Icons.Filled.Map, contentDescription = null,
@@ -193,23 +193,18 @@ private fun ProjectDashboardContent(nav: NavController, project: Project) {
                     Text(
                         "A stratum is a cutting block you want to measure. Draw corners on the map, or import a prepared GeoJSON / KML file.",
                         style = type.caption, color = colors.textSecondary)
-                    Button(
-                        onClick = { nav.navigate(ProjectFlowRoutes.stratumDraw(project.id.toString())) },
-                        modifier = Modifier.fillMaxWidth().height(44.dp),
-                    ) {
-                        Text("Draw stratum on map")
-                    }
+                    ForestixProminentButton(
+                        label = "Draw stratum on map",
+                        icon = Icons.Filled.EditNote,   // iOS pencil.and.outline
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { nav.navigate(ProjectFlowRoutes.stratumDraw(project.id.toString())) }
                     Box {
                         var importMenuOpen by remember { mutableStateOf(false) }
-                        OutlinedButton(
-                            onClick = { importMenuOpen = true },
-                            modifier = Modifier.fillMaxWidth().height(40.dp),
-                        ) {
-                            Icon(Icons.Filled.FileDownload, contentDescription = null,
-                                modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.size(ForestixSpace.xs))
-                            Text("Import from file")
-                        }
+                        ForestixBorderedButton(
+                            label = "Import from file",
+                            icon = Icons.Filled.FileDownload,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { importMenuOpen = true }
                         DropdownMenu(
                             expanded = importMenuOpen,
                             onDismissRequest = { importMenuOpen = false },
@@ -232,24 +227,39 @@ private fun ProjectDashboardContent(nav: NavController, project: Project) {
                             )
                         }
                     }
-                } else {
+                }
+            } else {
+                // Full-bleed rows so the trailing swipe-to-delete reveal
+                // spans the card (G9); hairline dividers between rows.
+                FormSection(
+                    header = "① Strata",
+                    footer = "Swipe left to delete. Area is computed automatically from lat/lon.",
+                    contentPadding = PaddingValues(0.dp),
+                    rowSpacing = 0.dp,
+                ) {
                     strata.forEach { stratum ->
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Column(Modifier.weight(1f)) {
-                                Text(stratum.name, style = type.body, color = colors.textPrimary)
-                                Text(formatAcres(stratum.areaAcres.toDouble()),
-                                    style = type.caption, color = colors.textSecondary)
-                            }
-                            IconButton(onClick = { scope.launch { viewModel.delete(stratum.id) } }) {
-                                Icon(Icons.Filled.Delete, contentDescription = "Delete",
-                                    tint = colors.confidenceBad, modifier = Modifier.size(18.dp))
+                        SwipeToDeleteRow(onDelete = { scope.launch { viewModel.delete(stratum.id) } }) {
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .background(colors.surface)
+                                    .padding(horizontal = ForestixSpace.md, vertical = ForestixSpace.sm),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Text(stratum.name, style = type.body, color = colors.textPrimary)
+                                    Text(formatAcres(stratum.areaAcres.toDouble()),
+                                        style = type.caption, color = colors.textSecondary)
+                                }
                             }
                         }
+                        FormDivider(startIndent = ForestixSpace.md)
                     }
                     Row(
                         Modifier
                             .fillMaxWidth()
-                            .clickableNoRipple { nav.navigate(ProjectFlowRoutes.stratumDraw(project.id.toString())) },
+                            .clickableNoRipple { nav.navigate(ProjectFlowRoutes.stratumDraw(project.id.toString())) }
+                            .padding(horizontal = ForestixSpace.md, vertical = ForestixSpace.sm),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs),
                     ) {
@@ -268,6 +278,7 @@ private fun ProjectDashboardContent(nav: NavController, project: Project) {
                 NavRow(
                     title = "Cruise design",
                     subtitle = "Choose plot size + sampling method → plots are generated automatically",
+                    icon = Icons.Filled.Straighten,       // iOS ruler
                     enabled = strata.isNotEmpty(),
                 ) {
                     nav.navigate(ProjectFlowRoutes.cruiseDesign(project.id.toString()))
@@ -275,6 +286,7 @@ private fun ProjectDashboardContent(nav: NavController, project: Project) {
                 NavRow(
                     title = "Plot map",
                     subtitle = "Review generated plot locations",
+                    icon = Icons.Filled.Map,              // iOS map.fill
                 ) {
                     nav.navigate(ProjectFlowRoutes.plotMap(project.id.toString()))
                 }
@@ -289,6 +301,7 @@ private fun ProjectDashboardContent(nav: NavController, project: Project) {
                     NavRow(
                         title = "Go Cruise",
                         subtitle = cruiseSubtitle(plannedPlots.size, closedPlotCount),
+                        icon = Icons.Filled.DirectionsWalk,   // iOS figure.walk.circle.fill
                         bold = true,
                     ) {
                         nav.navigate(ProjectFlowRoutes.cruiseFlow(project.id.toString()))
@@ -376,7 +389,9 @@ private fun StepRow(n: Int, done: Boolean, title: String, hint: String) {
                 Icon(Icons.Filled.Check, contentDescription = null,
                     tint = Color.White, modifier = Modifier.size(14.dp))
             } else {
-                Text("$n", style = type.caption, color = colors.primary)
+                // iOS `.caption.bold()` step numeral.
+                Text("$n", style = type.caption.copy(fontWeight = FontWeight.Bold),
+                    color = colors.primary)
             }
         }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -390,6 +405,7 @@ private fun StepRow(n: Int, done: Boolean, title: String, hint: String) {
 private fun NavRow(
     title: String,
     subtitle: String? = null,
+    icon: ImageVector? = null,
     enabled: Boolean = true,
     bold: Boolean = false,
     onClick: () -> Unit,
@@ -402,7 +418,14 @@ private fun NavRow(
             .fillMaxWidth()
             .clickableNoRipple { if (enabled) onClick() },
         verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs),
     ) {
+        if (icon != null) {
+            Icon(
+                icon, contentDescription = null,
+                tint = colors.primary.copy(alpha = alpha),
+                modifier = Modifier.size(18.dp))
+        }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(
                 title,

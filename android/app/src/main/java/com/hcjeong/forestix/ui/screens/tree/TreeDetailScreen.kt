@@ -26,13 +26,10 @@ import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.CallSplit
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -59,6 +56,8 @@ import com.hcjeong.forestix.data.cruise.TreeStatus
 import com.hcjeong.forestix.sensors.ConfidenceTier
 import com.hcjeong.forestix.ui.screens.ForestixScaffold
 import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixBorderedButton
+import com.hcjeong.forestix.ui.theme.ForestixProminentButton
 import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import com.hcjeong.forestix.ui.theme.confidenceDescriptor
@@ -285,38 +284,33 @@ private fun TreeDetailContent(nav: NavController, viewModel: TreeDetailViewModel
             }
 
             // MARK: Actions
-            Button(
-                onClick = {
-                    scope.launch {
-                        viewModel.save()
-                        if (viewModel.errorMessage.value == null && !viewModel.dirty.value) {
-                            nav.popBackStack()
-                        }
-                    }
-                },
+            ForestixProminentButton(
+                label = "Save changes",
                 enabled = dirty && !isSaving,
-                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-            ) { Text("Save changes") }
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                scope.launch {
+                    viewModel.save()
+                    if (viewModel.errorMessage.value == null && !viewModel.dirty.value) {
+                        nav.popBackStack()
+                    }
+                }
+            }
 
             if (isDeleted) {
-                OutlinedButton(
-                    onClick = { scope.launch { viewModel.undelete() } },
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-                ) {
-                    Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = null, Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("Undelete")
-                }
+                ForestixBorderedButton(
+                    label = "Undelete",
+                    icon = Icons.AutoMirrored.Filled.Undo,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { scope.launch { viewModel.undelete() } }
             } else {
-                OutlinedButton(
-                    onClick = { scope.launch { viewModel.softDelete() } },
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = colors.confidenceBad),
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-                ) {
-                    Icon(Icons.Filled.Delete, contentDescription = null, Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("Soft delete")
-                }
+                // iOS `role: .destructive` bordered button — red label.
+                ForestixBorderedButton(
+                    label = "Soft delete",
+                    icon = Icons.Filled.Delete,
+                    tint = colors.confidenceBad,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { scope.launch { viewModel.softDelete() } }
             }
         }
     }

@@ -25,7 +25,6 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -47,6 +46,7 @@ import com.hcjeong.forestix.inventory.PlotStats
 import com.hcjeong.forestix.ui.screens.ForestixScaffold
 import com.hcjeong.forestix.ui.screens.project.FormSection
 import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixProminentButton
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import java.text.DateFormat
 import java.util.Date
@@ -227,35 +227,27 @@ fun PlotSummaryScreen(
 
             // MARK: - Actions
             if (closedAt == null) {
-                Button(
-                    onClick = {
-                        scope.launch {
-                            vm.close()
-                            if (vm.errorMessage.value == null && vm.closedAt.value != null) {
-                                // Navigation is the caller's job (iOS parity):
-                                // popping here would undo an onClosed() that
-                                // just pushed the stand summary.
-                                onClosed()
-                            }
-                        }
-                    },
+                ForestixProminentButton(
+                    label = "Close plot",
+                    icon = Icons.Filled.Lock,       // iOS lock.fill
                     enabled = validation.canClose && !isClosing,
-                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Icon(
-                        Icons.Filled.Lock,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(ForestixSpace.xs))
-                    Text("Close plot")
+                    scope.launch {
+                        vm.close()
+                        if (vm.errorMessage.value == null && vm.closedAt.value != null) {
+                            // Navigation is the caller's job (iOS parity):
+                            // popping here would undo an onClosed() that
+                            // just pushed the stand summary.
+                            onClosed()
+                        }
+                    }
                 }
             } else {
-                Button(
-                    onClick = { nav.popBackStack() },
-                    modifier = Modifier.fillMaxWidth().height(48.dp),
-                ) {
-                    Text("Done")
-                }
+                ForestixProminentButton(
+                    label = "Done",
+                    modifier = Modifier.fillMaxWidth(),
+                ) { nav.popBackStack() }
             }
 
             Spacer(Modifier.height(ForestixSpace.xl))

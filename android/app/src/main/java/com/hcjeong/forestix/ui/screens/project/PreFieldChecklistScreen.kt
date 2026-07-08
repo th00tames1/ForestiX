@@ -26,7 +26,6 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -50,6 +49,7 @@ import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.data.cruise.Project
 import com.hcjeong.forestix.ui.screens.ForestixScaffold
 import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixProminentButton
 import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import java.util.UUID
@@ -108,15 +108,11 @@ private fun PreFieldChecklistContent(nav: NavController, project: Project) {
                 }
             }
 
-            Button(
-                onClick = { scope.launch { viewModel.runAll(context) } },
-                modifier = Modifier.fillMaxWidth().height(44.dp),
-            ) {
-                Icon(Icons.Filled.Refresh, contentDescription = null,
-                    modifier = Modifier.size(16.dp))
-                Spacer(Modifier.size(ForestixSpace.xs))
-                Text("Re-run checks", style = type.bodyBold)
-            }
+            ForestixProminentButton(
+                label = "Re-run checks",
+                icon = Icons.Filled.Refresh,        // iOS arrow.clockwise
+                modifier = Modifier.fillMaxWidth(),
+            ) { scope.launch { viewModel.runAll(context) } }
 
             Spacer(Modifier.height(ForestixSpace.xl))
         }

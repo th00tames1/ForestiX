@@ -18,16 +18,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.offset
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.material3.Button
-import androidx.compose.material3.OutlinedButton
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ViewInAr
+import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -42,12 +40,16 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
@@ -56,6 +58,8 @@ import com.hcjeong.forestix.ar.ArCameraView
 import com.hcjeong.forestix.ar.ArSceneMarker
 import com.hcjeong.forestix.ar.MarkerShape
 import com.hcjeong.forestix.ar.Vec3
+import com.hcjeong.forestix.common.MeasurementFormatter
+import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.sensors.ArCaliperDbh
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
@@ -71,18 +75,28 @@ import com.hcjeong.forestix.sensors.DBHMethod
 import com.hcjeong.forestix.sensors.GuideAxis
 import com.hcjeong.forestix.sensors.VioMotionDbh
 import com.hcjeong.forestix.ui.MeasurePhotoStore
+import com.hcjeong.forestix.ui.PendingTreeNumber
 import com.hcjeong.forestix.ui.Routes
+import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.screens.ContinuationAction
 import com.hcjeong.forestix.ui.screens.ContinuationOrigin
-import com.hcjeong.forestix.ui.screens.MeasurementContinuationDialog
-import com.hcjeong.forestix.ui.screens.ScanMetadataDialog
+import com.hcjeong.forestix.ui.screens.MeasurementContinuationSheet
+import com.hcjeong.forestix.ui.screens.ScanMetadataSheet
 import com.hcjeong.forestix.ui.screens.CenteredText
 import com.hcjeong.forestix.ui.screens.DevHud
 import com.hcjeong.forestix.ui.screens.GPSAccuracyBadge
 import com.hcjeong.forestix.ui.screens.MeasureBackButton
 import com.hcjeong.forestix.ui.screens.MeasureControlColumn
+import com.hcjeong.forestix.ui.screens.MeasureFailureBanner
 import com.hcjeong.forestix.ui.screens.MeasureStatusPanel
+import com.hcjeong.forestix.ui.screens.ResearchFieldsRow
+import com.hcjeong.forestix.ui.screens.TiltBadge
 import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixBorderedButton
+import com.hcjeong.forestix.ui.theme.ForestixProminentButton
+import com.hcjeong.forestix.ui.theme.ForestixRadius
+import com.hcjeong.forestix.ui.theme.ForestixSpace
+import com.hcjeong.forestix.ui.theme.confidenceDescriptor
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -102,7 +116,13 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     val context = LocalContext.current
     val controller = remember { ArController() }
     val scope = rememberCoroutineScope()
-    var pendingTree by remember { mutableStateOf(env.history.suggestedNextTreeNumber) }
+    // Map-home tree lock ("Measure this tree again" / chooser rows) hands
+    // the tree number over via PendingTreeNumber — consume it once so the
+    // accepted reading lands on the promised tree; otherwise pick the next
+    // free number (iOS pendingTreeNumber parity).
+    var pendingTree by remember {
+        mutableStateOf(PendingTreeNumber.consume() ?: env.history.suggestedNextTreeNumber)
+    }
     // Manual DBH entry (typed cm) — mirror of the iOS .manualEntry state.
     var manualOpen by remember { mutableStateOf(false) }
     var manualText by remember { mutableStateOf("") }
@@ -284,7 +304,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 // says WHY the trunk couldn't be read.
                 result = firstRed
                 failure = if (firstRed == null)
-                    "Couldn't read the trunk consistently. Hold steadier, 1\u20133 m away, and retry."
+                    "Couldn't read the trunk consistently. Hold steadier, 1–3 m away, and retry."
                 else null
                 stage = if (firstRed != null) Stage.RESULT else Stage.AIMING
             } else {
@@ -358,6 +378,82 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         }
     }
 
+    // Accept the on-screen result — records the entry (photo + GPS fix),
+    // fires the continuation / height chain, and logs the research CSV row.
+    // Shared by the result row's Accept and the manual-entry Save (iOS
+    // submitManualEntry goes straight to .accepted).
+    fun acceptResult(r: DBHResult) {
+        // Auto-capture (map home): window snapshot as evidence of what was
+        // measured + the latest GPS fix from the badge's running location
+        // service.
+        val activity = context as? android.app.Activity
+        scope.launch {
+            val photo = activity?.let { MeasurePhotoStore.captureWindow(it) }
+            val fix = com.hcjeong.forestix.positioning.LocationService.lastGlobalFix
+            env.history.append(
+                QuickMeasureEntry(
+                    kind = MeasureKind.DBH, value = r.diameterCm.toDouble(),
+                    sigma = r.sigmaRmm.toDouble(), confidenceRaw = r.confidence.raw,
+                    method = r.method.raw, treeNumber = pendingTree,
+                    plotID = env.history.activePlotID.value,
+                    speciesCode = metaSpecies,
+                    position = metaPosition ?: StemPosition.DBH,
+                    damageCodes = metaDamage,
+                    note = metaNote.ifBlank { null },
+                    latitude = fix?.latitude,
+                    longitude = fix?.longitude,
+                    photoPath = photo,
+                )
+            )
+            // Full-measurement chain: skip the continuation dialog, go
+            // straight to Height on this tree. Navigate AFTER the append
+            // (this scope dies with the screen) and pop DBH so Height's
+            // continuation DONE returns to the map.
+            if (chainToHeight) {
+                nav.navigate("height?tree=$pendingTree") {
+                    popUpTo(Routes.DBH_PATTERN) { inclusive = true }
+                }
+            }
+        }
+        if (!chainToHeight) continuationTree = pendingTree
+        if (settings.developerMode) {
+            val fields = mutableMapOf(
+                "measure_type" to "dbh",
+                "method" to r.method.raw,
+                // Same raw vocabulary as iOS dbhMethodSource so the two
+                // platforms' CSVs filter identically; the platform column
+                // says whether "lidarDepth" means LiDAR or ARCore depth.
+                "depth_source" to when (captureMethod) {
+                    DbhCaptureMethod.DEPTH -> "lidarDepth"
+                    DbhCaptureMethod.MOTION -> "arMotion"
+                    DbhCaptureMethod.CALIPER -> "arCaliper"
+                },
+                "measured_value" to String.format(Locale.US, "%.2f", r.diameterCm),
+                "unit" to "cm",
+                "sigma" to String.format(Locale.US, "%.1f", r.sigmaRmm),
+                "confidence_tier" to r.confidence.raw,
+                "n_points" to "${r.nInliers}",
+                "arc_deg" to String.format(Locale.US, "%.1f", r.arcCoverageDeg),
+                "rmse_mm" to String.format(Locale.US, "%.1f", r.rmseMm),
+                "species" to (metaSpecies ?: ""),
+                "note" to metaNote,
+            )
+            if (settings.researchTreeId.isNotEmpty()) {
+                fields["tree_id"] = settings.researchTreeId  // repeat auto-filled by record()
+            }
+            preview?.let { fields["distance_m"] = String.format(Locale.US, "%.2f", it.distanceM) }
+            controller.cameraForwardElevationRad()?.let {
+                fields["pitch_deg"] = String.format(Locale.US, "%.1f", it * 180f / Math.PI.toFloat())
+            }
+            researchTrueCm.toDoubleOrNull()?.takeIf { it > 0 }?.let { t ->
+                fields["true_value"] = String.format(Locale.US, "%.2f", t)
+                fields["error"] = String.format(Locale.US, "%.2f", r.diameterCm - t)
+            }
+            ResearchLog.record(context, fields)
+            researchTrueCm = ""
+        }
+    }
+
     val locked = stage == Stage.AIMING && preview?.locked == true
 
     Box(Modifier.fillMaxSize()) {
@@ -385,13 +481,12 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
 
         MeasureBackButton { nav.popBackStack() }
 
-        // GPS-accuracy pill on the top strip — iOS DBHScanScreen `topStrip`
-        // (GPSAccuracyBadge leading, under the nav bar). Sits right of the
-        // back button, which owns Android's top-left corner.
+        // GPS-accuracy pill on the top strip — leading 72 / top 22, clear of
+        // the floating back button (same offsets as iOS DBHScanScreen).
         GPSAccuracyBadge(
             Modifier
                 .align(Alignment.TopStart)
-                .padding(start = 72.dp, top = 23.dp))
+                .padding(start = 72.dp, top = 22.dp))
 
         if (settings.developerMode) {
             val p = preview
@@ -423,55 +518,105 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 // aid instead (mirrors the iOS caliper overlay).
                 if (captureMethod == DbhCaptureMethod.DEPTH) {
                     // Horizontal guide line (dual stroke for sun-glare contrast).
-                    drawLine(Color.Black.copy(alpha = 0.55f), Offset(0f, cy), Offset(size.width, cy), strokeWidth = 3f)
-                    drawLine(Color.White.copy(alpha = 0.9f), Offset(0f, cy), Offset(size.width, cy), strokeWidth = 1.5f)
-                    // Live fit-width chord — width grows with diameter, shrinks
-                    // with distance (a recognition + size indicator).
+                    drawLine(
+                        Color.Black.copy(alpha = 0.55f),
+                        Offset(0f, cy), Offset(size.width, cy),
+                        strokeWidth = 3.dp.toPx(),
+                    )
+                    drawLine(
+                        Color.White.copy(alpha = 0.9f),
+                        Offset(0f, cy), Offset(size.width, cy),
+                        strokeWidth = 1.5.dp.toPx(),
+                    )
+                    // Live fit-width chord spanning the strip edges the
+                    // single-frame fit identified along the guide row — iOS
+                    // fitChord parity (fit-derived span + dark-halo side bars).
                     val p = preview
-                    if (locked && p != null && p.distanceM > 0f) {
-                        val chord = ((p.diameterCm / 100f) / p.distanceM * size.width * 0.9f)
-                            .coerceIn(0f, size.width * 0.95f)
-                        if (chord > 8f) {
-                            val cx = size.width / 2f
-                            val x0 = cx - chord / 2f; val x1 = cx + chord / 2f
-                            val g = Color(0xFF4A9B5C)
-                            drawLine(g, Offset(x0, cy), Offset(x1, cy), strokeWidth = 5f, cap = StrokeCap.Round)
-                            // side bars
-                            drawLine(g, Offset(x0, cy - 22f), Offset(x0, cy + 22f), strokeWidth = 4f)
-                            drawLine(g, Offset(x1, cy - 22f), Offset(x1, cy + 22f), strokeWidth = 4f)
+                    if (locked && p != null && p.stripRightFraction > p.stripLeftFraction) {
+                        val x0 = size.width * p.stripLeftFraction
+                        val x1 = size.width * p.stripRightFraction
+                        val half = 22.dp.toPx()
+                        drawLine(
+                            colors.confidenceOk.copy(alpha = 0.95f),
+                            Offset(x0, cy), Offset(x1, cy),
+                            strokeWidth = 4.dp.toPx(),
+                        )
+                        for (x in listOf(x0, x1)) {
+                            drawLine(
+                                Color.Black.copy(alpha = 0.55f),
+                                Offset(x, cy - half), Offset(x, cy + half),
+                                strokeWidth = 5.dp.toPx(),
+                            )
+                            drawLine(
+                                colors.confidenceOk,
+                                Offset(x, cy - half), Offset(x, cy + half),
+                                strokeWidth = 3.dp.toPx(),
+                            )
                         }
                     }
                 }
-                // AR-caliper: centre crosshair + captured left-edge marker.
+                // AR-caliper: centre plus glyph + captured left-edge dot
+                // (iOS arOverlay: 22 pt light plus, Ø12 dot with white ring).
                 if (captureMethod == DbhCaptureMethod.CALIPER) {
                     val cx = size.width / 2f
-                    drawLine(Color.White.copy(alpha = 0.9f), Offset(cx, cy - 16f), Offset(cx, cy + 16f), strokeWidth = 2f)
+                    val arm = 11.dp.toPx()
+                    val lw = 1.5.dp.toPx()
+                    drawLine(Color.White.copy(alpha = 0.85f), Offset(cx, cy - arm), Offset(cx, cy + arm), strokeWidth = lw)
+                    drawLine(Color.White.copy(alpha = 0.85f), Offset(cx - arm, cy), Offset(cx + arm, cy), strokeWidth = lw)
                     leftOffset?.let { lo ->
-                        drawCircle(Color(0xFF4A9B5C), radius = 9f, center = Offset(lo.x, lo.y))
+                        drawCircle(colors.confidenceOk, radius = 6.dp.toPx(), center = Offset(lo.x, lo.y))
+                        drawCircle(
+                            Color.White, radius = 6.dp.toPx(), center = Offset(lo.x, lo.y),
+                            style = Stroke(width = 1.5.dp.toPx()),
+                        )
                     }
                 }
-                // AR-motion: centre aim cross (the trunk band ROI is centred here).
+                // AR-motion: 46 dp aiming ring (green while sweeping) + a
+                // 16 pt centre plus (iOS vioOverlay).
                 if (captureMethod == DbhCaptureMethod.MOTION) {
                     val cx = size.width / 2f
-                    val c = if (stage == Stage.CAPTURING) Color(0xFF4A9B5C) else Color.White.copy(alpha = 0.9f)
-                    drawLine(c, Offset(cx, cy - 16f), Offset(cx, cy + 16f), strokeWidth = 2f)
-                    drawLine(c, Offset(cx - 16f, cy), Offset(cx + 16f, cy), strokeWidth = 2f)
+                    val ringColor = if (stage == Stage.CAPTURING) colors.confidenceOk
+                        else Color.White.copy(alpha = 0.85f)
+                    drawCircle(
+                        ringColor, radius = 23.dp.toPx(), center = Offset(cx, cy),
+                        style = Stroke(width = 2.dp.toPx()),
+                    )
+                    val arm = 8.dp.toPx()
+                    val lw = 2.dp.toPx()
+                    drawLine(Color.White.copy(alpha = 0.9f), Offset(cx, cy - arm), Offset(cx, cy + arm), strokeWidth = lw)
+                    drawLine(Color.White.copy(alpha = 0.9f), Offset(cx - arm, cy), Offset(cx + arm, cy), strokeWidth = lw)
                 }
             }
 
             if (captureMethod == DbhCaptureMethod.DEPTH) {
-                // Crosshair ring — green locked / amber aligning (depth only).
-                DbhRing(locked, colors.confidenceOk, colors.confidenceWarn, Modifier.align(Alignment.Center))
+                // Crosshair ring — green locked / red aligning (spec §5.2).
+                DbhRing(locked, colors.confidenceOk, colors.confidenceBad, Modifier.align(Alignment.Center))
+                // Device-tilt badge floating just above the ring so the
+                // cruiser sees level at the same focal point (iOS TiltBadge
+                // at midY − ringRadius − 22).
+                Box(Modifier.align(Alignment.Center).offset(y = (-58).dp)) {
+                    TiltBadge(controller)
+                }
                 // Live preview badge just below the ring.
                 Box(Modifier.align(Alignment.Center).offset(y = 64.dp)) {
-                    LivePreviewBadge(stage, preview, locked)
+                    LivePreviewBadge(preview, locked, settings.unitSystem)
                 }
             }
+        }
 
-            // DBH method picker (Depth / Motion / Caliper) floating above the
-            // panel — developer mode only; normal mode is depth-only.
-            if (stage == Stage.AIMING && settings.developerMode) {
-                Box(Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 140.dp)) {
+        if (stage == Stage.AIMING && !depthBlocked &&
+            (captureMethod == DbhCaptureMethod.DEPTH || captureMethod == DbhCaptureMethod.MOTION)
+        ) {
+            MeasureControlColumn(onCapture = {
+                if (captureMethod == DbhCaptureMethod.MOTION) startMotionSweep() else capture()
+            })
+        }
+
+        if (!depthBlocked) MeasureStatusPanel(
+            // Developer-mode method picker floats 12 dp above the status
+            // panel while aiming (iOS dbhMethodPicker placement).
+            above = if (stage == Stage.AIMING && settings.developerMode) {
+                {
                     DbhMethodSelector(
                         method = captureMethod,
                         onSelect = { m ->
@@ -491,201 +636,198 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         depthEnabled = controller.supportsDepth,
                     )
                 }
-            }
-        }
-
-        if (stage == Stage.AIMING && !depthBlocked &&
-            (captureMethod == DbhCaptureMethod.DEPTH || captureMethod == DbhCaptureMethod.MOTION)
+            } else null,
         ) {
-            MeasureControlColumn(onCapture = {
-                if (captureMethod == DbhCaptureMethod.MOTION) startMotionSweep() else capture()
-            })
-        }
-
-        // No Depth API + developer mode off → the scan can't run: replace
-        // the whole scanning UI with a centred blocker.
-        if (depthBlocked) {
-            DepthRequiredPanel(Modifier.align(Alignment.Center))
-        }
-
-        if (!depthBlocked) MeasureStatusPanel {
-            failure?.let { CenteredText(it, dim = true) }
-            when (stage) {
-                Stage.AIMING -> CenteredText(
-                    when {
+            failure?.let { MeasureFailureBanner(it) }
+            CenteredText(
+                when {
+                    manualOpen -> "Enter diameter manually in cm."
+                    stage == Stage.AIMING -> when {
                         captureMethod == DbhCaptureMethod.CALIPER ->
-                            if (caliperStep == 0) "AR caliper \u2014 aim at breast height, tap the LEFT trunk edge"
-                            else "Now tap the RIGHT trunk edge"
+                            if (caliperStep == 0) "AR caliper — aim at breast height, tap the LEFT trunk edge."
+                            else "Now tap the RIGHT trunk edge."
                         captureMethod == DbhCaptureMethod.MOTION ->
-                            "AR motion \u2014 aim at the trunk, tap + then sweep the phone slowly across it"
-                        locked -> "Trunk locked \u2014 tap + to scan"
-                        else -> "Aim at the trunk (1\u20133 m), centre the line"
-                    },
-                )
-                Stage.CAPTURING -> CenteredText(
-                    if (captureMethod == DbhCaptureMethod.MOTION)
-                        "Sweeping\u2026 keep the trunk centred and move side-to-side"
-                    else "Capturing ${maxOf(1, sampleProgress)}/$SAMPLE_COUNT \u2014 hold steady",
-                )
-                Stage.RESULT -> {}
-            }
+                            "AR motion — aim at the trunk, tap + then sweep the phone slowly across it."
+                        locked -> "Hold steady, then tap + to capture."
+                        else -> "Align the guide to the trunk's uphill side; hold steady."
+                    }
+                    stage == Stage.CAPTURING ->
+                        if (captureMethod == DbhCaptureMethod.MOTION)
+                            "Sweeping… keep the trunk centred and move side-to-side."
+                        else "Capturing ${maxOf(1, sampleProgress)}/$SAMPLE_COUNT — hold steady."
+                    result?.confidence == ConfidenceTier.RED ->
+                        result?.rejectionReason ?: "Scan rejected. Try again."
+                    else -> "Scan complete. Accept, retake, or add a second view."
+                },
+            )
             // Manual entry — typed diameter for trees the sensors can't read
             // (mirrors the iOS .manualEntry state, method "manualVisual").
             if (stage == Stage.AIMING) {
                 if (manualOpen) {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
                         OutlinedTextField(
                             value = manualText,
                             onValueChange = { manualText = it.filter { c -> c.isDigit() || c == '.' } },
-                            placeholder = { Text("DBH cm") },
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            modifier = Modifier.weight(1.4f),
-                        )
-                        Button(
-                            onClick = {
-                                val cm = manualText.toFloatOrNull()
-                                if (cm != null && cm > 0f) {
-                                    result = DBHResult(
-                                        diameterCm = cm, centerX = 0f, centerZ = 0f,
-                                        arcCoverageDeg = 0f, rmseMm = 0f, sigmaRmm = 0f,
-                                        nInliers = 0, confidence = ConfidenceTier.YELLOW,
-                                        method = DBHMethod.MANUAL_VISUAL, rejectionReason = null,
-                                    )
-                                    failure = null
-                                    manualOpen = false
-                                    stage = Stage.RESULT
-                                }
+                            placeholder = {
+                                Text(
+                                    if (settings.unitSystem == UnitSystem.METRIC) "Diameter in cm"
+                                    else "Diameter in inches",
+                                )
                             },
-                            enabled = (manualText.toFloatOrNull() ?: 0f) > 0f,
-                            modifier = Modifier.weight(1f).align(Alignment.CenterVertically),
-                        ) { Text("Save") }
-                        OutlinedButton(
-                            onClick = { manualOpen = false },
-                            modifier = Modifier.weight(1f).align(Alignment.CenterVertically),
-                        ) { Text("Cancel") }
-                    }
-                } else {
-                    TextButton(onClick = { manualOpen = true; manualText = "" }, modifier = Modifier.fillMaxWidth()) {
-                        Text("Enter manually")
-                    }
-                }
-            }
-            result?.let { r ->
-                if (r.confidence == ConfidenceTier.RED) {
-                    CenteredText("DBH \u2014 check", large = true)
-                    r.rejectionReason?.let { CenteredText(it, dim = true) }
-                } else {
-                    CenteredText(String.format(Locale.US, "DBH %.1f cm  \u00B1%.0f mm", r.diameterCm, r.sigmaRmm), large = true)
-                    CenteredText(String.format(Locale.US, "%d frames \u00B7 %s", r.nInliers, r.confidence.raw.uppercase()), dim = true)
-                }
-                if (settings.developerMode) {
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("Target", style = Forestix.type.caption, color = Color.White.copy(alpha = 0.8f))
-                        OutlinedTextField(
-                            value = settings.researchTreeId,
-                            onValueChange = { env.settings.setResearchTreeId(it.trim()) },
-                            placeholder = { Text("T1") },
                             singleLine = true,
-                            modifier = Modifier.weight(0.8f),
-                        )
-                        Text("True Ø (cm)", style = Forestix.type.caption, color = Color.White.copy(alpha = 0.8f))
-                        OutlinedTextField(
-                            value = researchTrueCm,
-                            onValueChange = { researchTrueCm = it.filter { c -> c.isDigit() || c == '.' } },
-                            placeholder = { Text("tape") },
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             modifier = Modifier.weight(1f),
                         )
+                        ForestixProminentButton(
+                            "Save",
+                            enabled = (manualText.toFloatOrNull() ?: 0f) > 0f,
+                        ) {
+                            val cm = manualText.toFloatOrNull()
+                            if (cm != null && cm > 0f) {
+                                val r = DBHResult(
+                                    diameterCm = cm, centerX = 0f, centerZ = 0f,
+                                    arcCoverageDeg = 0f, rmseMm = 0f, sigmaRmm = 0f,
+                                    nInliers = 0, confidence = ConfidenceTier.YELLOW,
+                                    method = DBHMethod.MANUAL_VISUAL, rejectionReason = null,
+                                )
+                                result = r
+                                failure = null
+                                manualOpen = false
+                                // iOS submitManualEntry goes straight to
+                                // .accepted — record and continue.
+                                acceptResult(r)
+                            }
+                        }
+                    }
+                    ForestixBorderedButton("Cancel", modifier = Modifier.fillMaxWidth()) {
+                        manualOpen = false
+                    }
+                } else {
+                    // Escape hatch for trees the sensors can't read — plain
+                    // text button, primary tint (iOS "Enter manually").
+                    Text(
+                        "Enter manually",
+                        style = Forestix.type.body,
+                        color = colors.primary,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier
+                            .clickableNoRipple { manualOpen = true; manualText = "" }
+                            .padding(vertical = 2.dp),
+                    )
+                }
+            }
+            if (stage == Stage.RESULT) result?.let { r ->
+                Column(
+                    Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    horizontalAlignment = Alignment.Start,
+                ) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        // Monospaced value via the shared unit-aware
+                        // formatter; σ beside it as a separate dataSmall
+                        // text (hidden on red — the chip carries the
+                        // warning). Red still shows the value.
+                        Text(
+                            MeasurementFormatter.diameter(r.diameterCm.toDouble(), settings.unitSystem),
+                            style = Forestix.type.dataLarge,
+                            color = Color.White,
+                        )
+                        if (r.confidence != ConfidenceTier.RED) {
+                            Text(
+                                MeasurementFormatter.diameterSigma(r.sigmaRmm.toDouble(), settings.unitSystem),
+                                style = Forestix.type.dataSmall,
+                                color = Color.White.copy(alpha = 0.75f),
+                            )
+                        }
+                        Spacer(Modifier.weight(1f))
+                        // Yellow is a normal record-able fit — chip + hint
+                        // only for green (good) or red (must retake).
+                        if (r.confidence != ConfidenceTier.YELLOW) {
+                            TierChip(r.confidence.raw)
+                        }
+                    }
+                    if (r.confidence != ConfidenceTier.YELLOW) {
+                        Text(
+                            dbhTierHint(r.confidence),
+                            style = Forestix.type.caption,
+                            color = Color.White.copy(alpha = 0.9f),
+                        )
+                    }
+                    if (settings.developerMode) {
+                        ResearchFieldsRow(
+                            targetValue = settings.researchTreeId,
+                            onTargetChange = { env.settings.setResearchTreeId(it.trim()) },
+                            targetPlaceholder = "T1",
+                            trueLabel = "True Ø (cm)",
+                            trueValue = researchTrueCm,
+                            onTrueChange = { researchTrueCm = it.filter { c -> c.isDigit() || c == '.' } },
+                            truePlaceholder = "tape",
+                        )
                     }
                 }
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { result = null; failure = null; stage = Stage.AIMING }, modifier = Modifier.weight(1f)) { Text("Retake") }
-                    OutlinedButton(onClick = { showMetadata = true }, modifier = Modifier.weight(1f)) { Text("Details") }
-                    Button(
-                        onClick = {
-                            // Auto-capture (map home): window snapshot as
-                            // evidence of what was measured + the latest GPS
-                            // fix from the badge's running location service.
-                            val activity = context as? android.app.Activity
-                            scope.launch {
-                                val photo = activity?.let { MeasurePhotoStore.captureWindow(it) }
-                                val fix = com.hcjeong.forestix.positioning.LocationService.lastGlobalFix
-                                env.history.append(
-                                    QuickMeasureEntry(
-                                        kind = MeasureKind.DBH, value = r.diameterCm.toDouble(),
-                                        sigma = r.sigmaRmm.toDouble(), confidenceRaw = r.confidence.raw,
-                                        method = r.method.raw, treeNumber = pendingTree,
-                                        plotID = env.history.activePlotID.value,
-                                        speciesCode = metaSpecies,
-                                        position = metaPosition ?: StemPosition.DBH,
-                                        damageCodes = metaDamage,
-                                        note = metaNote.ifBlank { null },
-                                        latitude = fix?.latitude,
-                                        longitude = fix?.longitude,
-                                        photoPath = photo,
-                                    )
-                                )
-                                // Full-measurement chain: skip the continuation
-                                // dialog, go straight to Height on this tree.
-                                // Navigate AFTER the append (this scope dies
-                                // with the screen) and pop DBH so Height's
-                                // continuation DONE returns to the map.
-                                if (chainToHeight) {
-                                    nav.navigate("height?tree=$pendingTree") {
-                                        popUpTo(Routes.DBH_PATTERN) { inclusive = true }
-                                    }
-                                }
-                            }
-                            if (!chainToHeight) continuationTree = pendingTree
-                            if (settings.developerMode) {
-                                val fields = mutableMapOf(
-                                    "measure_type" to "dbh",
-                                    "method" to r.method.raw,
-                                    // Same raw vocabulary as iOS dbhMethodSource so the two
-                                    // platforms' CSVs filter identically; the platform column
-                                    // says whether "lidarDepth" means LiDAR or ARCore depth.
-                                    "depth_source" to when (captureMethod) {
-                                        DbhCaptureMethod.DEPTH -> "lidarDepth"
-                                        DbhCaptureMethod.MOTION -> "arMotion"
-                                        DbhCaptureMethod.CALIPER -> "arCaliper"
-                                    },
-                                    "measured_value" to String.format(Locale.US, "%.2f", r.diameterCm),
-                                    "unit" to "cm",
-                                    "sigma" to String.format(Locale.US, "%.1f", r.sigmaRmm),
-                                    "confidence_tier" to r.confidence.raw,
-                                    "n_points" to "${r.nInliers}",
-                                    "arc_deg" to String.format(Locale.US, "%.1f", r.arcCoverageDeg),
-                                    "rmse_mm" to String.format(Locale.US, "%.1f", r.rmseMm),
-                                    "species" to (metaSpecies ?: ""),
-                                    "note" to metaNote,
-                                )
-                                if (settings.researchTreeId.isNotEmpty()) {
-                                    fields["tree_id"] = settings.researchTreeId  // repeat auto-filled by record()
-                                }
-                                preview?.let { fields["distance_m"] = String.format(Locale.US, "%.2f", it.distanceM) }
-                                controller.cameraForwardElevationRad()?.let {
-                                    fields["pitch_deg"] = String.format(Locale.US, "%.1f", it * 180f / Math.PI.toFloat())
-                                }
-                                researchTrueCm.toDoubleOrNull()?.takeIf { it > 0 }?.let { t ->
-                                    fields["true_value"] = String.format(Locale.US, "%.2f", t)
-                                    fields["error"] = String.format(Locale.US, "%.2f", r.diameterCm - t)
-                                }
-                                ResearchLog.record(context, fields)
-                                researchTrueCm = ""
-                            }
-                        },
-                        enabled = r.confidence != ConfidenceTier.RED,
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    ForestixBorderedButton("Retake", modifier = Modifier.weight(1f)) {
+                        result = null; failure = null; stage = Stage.AIMING
+                    }
+                    ForestixBorderedButton("Details", modifier = Modifier.weight(1f)) {
+                        showMetadata = true
+                    }
+                    ForestixProminentButton(
+                        "Accept",
                         modifier = Modifier.weight(1f),
-                    ) { Text("Accept") }
+                        enabled = r.confidence != ConfidenceTier.RED,
+                    ) { acceptResult(r) }
                 }
+            }
+        }
+
+        // No Depth API + developer mode off → the scan can't run: replace
+        // the whole scanning UI with a full-page canvas blocker (iOS
+        // lidarRequiredPanel presentation; the probe session keeps running
+        // hidden behind the opaque page).
+        if (depthBlocked) {
+            Box(Modifier.fillMaxSize().background(colors.canvas)) {
+                Column(
+                    Modifier
+                        .align(Alignment.Center)
+                        .padding(ForestixSpace.lg),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(ForestixSpace.sm),
+                ) {
+                    Icon(
+                        Icons.Outlined.ViewInAr,
+                        contentDescription = null,
+                        tint = colors.textTertiary,
+                        modifier = Modifier.size(44.dp),
+                    )
+                    Text(
+                        "DBH scanning requires the ARCore Depth API on this device",
+                        style = Forestix.type.bodyBold,
+                        color = colors.textPrimary,
+                        textAlign = TextAlign.Center,
+                    )
+                    Text(
+                        "This phone doesn't provide depth sensing, so the trunk scan can't run here.",
+                        style = Forestix.type.caption,
+                        color = colors.textSecondary,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+                MeasureBackButton { nav.popBackStack() }
             }
         }
 
         // Metadata editor (species / position / damage / note).
         if (showMetadata) {
-            ScanMetadataDialog(
+            ScanMetadataSheet(
                 speciesCode = metaSpecies, onSpeciesCode = { metaSpecies = it },
                 position = metaPosition, onPosition = { metaPosition = it },
                 damageCodes = metaDamage, onDamageCodes = { metaDamage = it },
@@ -696,10 +838,12 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
 
         // Post-save continuation — height same tree / next tree / done.
         continuationTree?.let { savedTree ->
-            MeasurementContinuationDialog(
+            MeasurementContinuationSheet(
                 origin = ContinuationOrigin.AFTER_DIAMETER,
                 treeNumber = savedTree,
-                treeSummary = env.history.summary(savedTree),
+                treeAlreadyHasHeight = env.history.entries.value.any {
+                    it.treeNumber == savedTree && it.kind == MeasureKind.HEIGHT
+                },
                 onAction = { action ->
                     continuationTree = null
                     when (action) {
@@ -724,31 +868,11 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     }
 }
 
-/// Centred blocker for normal (non-developer) mode on devices whose ARCore
-/// session lacks the Depth API — the DBH scan cannot run there. Styled
-/// like the status panel so it reads as part of the AR chrome.
 @Composable
-private fun DepthRequiredPanel(modifier: Modifier = Modifier) {
-    Column(
-        modifier
-            .padding(horizontal = 32.dp)
-            .clip(RoundedCornerShape(16.dp))
-            .background(Color.Black.copy(alpha = 0.65f))
-            .padding(horizontal = 20.dp, vertical = 18.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        CenteredText("DBH scanning requires the ARCore Depth API on this device")
-        CenteredText(
-            "This phone doesn't provide depth sensing, so the trunk scan can't run here.",
-            dim = true,
-        )
-    }
-}
-
-@Composable
-private fun DbhRing(locked: Boolean, ok: Color, warn: Color, modifier: Modifier) {
-    val ring = if (locked) ok else warn
+private fun DbhRing(locked: Boolean, ok: Color, bad: Color, modifier: Modifier) {
+    // Red until the depth fit stabilises, then green (spec §5.2 / iOS
+    // crosshairRing confidenceBad → confidenceOk).
+    val ring = if (locked) ok else bad
     Box(modifier.size(72.dp), contentAlignment = Alignment.Center) {
         Box(Modifier.size(72.dp).border(5.dp, Color.Black.copy(alpha = 0.6f), CircleShape))
         Box(Modifier.size(64.dp).border(2.5.dp, ring, CircleShape))
@@ -756,23 +880,80 @@ private fun DbhRing(locked: Boolean, ok: Color, warn: Color, modifier: Modifier)
 }
 
 @Composable
-private fun LivePreviewBadge(stage: Stage, preview: DBHEstimator.DbhPreview?, locked: Boolean) {
+private fun LivePreviewBadge(
+    preview: DBHEstimator.DbhPreview?,
+    locked: Boolean,
+    unitSystem: UnitSystem,
+) {
     val type = Forestix.type
     val p = preview ?: return
     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
         if (locked) {
-            Text(
-                String.format(Locale.US, "DBH: %.1f cm", p.diameterCm),
-                style = type.data, color = Color.White,
-                modifier = Modifier.clip(CircleShape).background(Color.Black.copy(alpha = 0.65f)).padding(horizontal = 8.dp, vertical = 4.dp),
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.65f))
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+            ) {
+                Text(
+                    "DBH: " + MeasurementFormatter.diameter(p.diameterCm.toDouble(), unitSystem),
+                    style = type.data, color = Color.White,
+                )
+                // Green-only tier chip — yellow stays silent (the cruiser
+                // sees a bare DBH digit), iOS Phase 18.2 behaviour.
+                if (p.tier == ConfidenceTier.GREEN) {
+                    PreviewTierChip(p.tier.raw)
+                }
+            }
         }
         if (p.distanceM > 0f) {
             Text(
-                String.format(Locale.US, "Distance: %.2f m", p.distanceM),
+                "Distance: " + MeasurementFormatter.distance(p.distanceM.toDouble(), unitSystem),
                 style = type.dataSmall, color = Color.White.copy(alpha = 0.85f),
-                modifier = Modifier.clip(CircleShape).background(Color.Black.copy(alpha = 0.45f)).padding(horizontal = 6.dp, vertical = 2.dp),
+                modifier = Modifier
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.45f))
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
             )
         }
     }
+}
+
+/// Compact tier chip beside the live DBH digit — 9 sp semibold, tracking
+/// 0.6, stroked chip-radius outline (iOS previewTierChip).
+@Composable
+private fun PreviewTierChip(rawTier: String) {
+    val d = confidenceDescriptor(rawTier)
+    Text(
+        d.label.uppercase(Locale.US),
+        style = TextStyle(fontSize = 9.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.6.sp),
+        color = d.color,
+        modifier = Modifier
+            .border(0.75.dp, d.color, ForestixRadius.chip)
+            .padding(horizontal = 5.dp, vertical = 1.dp),
+    )
+}
+
+/// Result-panel tier chip — 10 sp semibold, tracking 0.8, stroked chip
+/// outline (iOS tierChip). Shared look with the Height result panel.
+@Composable
+private fun TierChip(rawTier: String) {
+    val d = confidenceDescriptor(rawTier)
+    Text(
+        d.label.uppercase(Locale.US),
+        style = TextStyle(fontSize = 10.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.8.sp),
+        color = d.color,
+        modifier = Modifier
+            .border(0.75.dp, d.color, ForestixRadius.chip)
+            .padding(horizontal = 8.dp, vertical = 3.dp),
+    )
+}
+
+/// Short cruiser-actionable sentence matching the tier — iOS tierHint.
+private fun dbhTierHint(tier: ConfidenceTier): String = when (tier) {
+    ConfidenceTier.GREEN -> "Good — wide arc, low scatter. Safe to record."
+    ConfidenceTier.YELLOW -> "Fair — narrow arc or noisier fit. Consider a second pass."
+    ConfidenceTier.RED -> "Check — step left 1 m and retake, or enter manually."
 }

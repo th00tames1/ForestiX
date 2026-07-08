@@ -19,6 +19,9 @@ public struct HomeScreen: View {
         NavigationStack {
             content
                 .navigationTitle("Projects")
+                #if os(iOS)
+                .navigationBarTitleDisplayMode(.inline)
+                #endif
                 .toolbar {
                     ToolbarItem(placement: .primaryAction) {
                         Button {
@@ -98,10 +101,10 @@ public struct HomeScreen: View {
             VStack(spacing: 20) {
                 Image(systemName: "tree.fill")
                     .font(.system(size: 54))
-                    .foregroundStyle(.green.opacity(0.8))
+                    .foregroundStyle(ForestixPalette.primary.opacity(0.8))
                     .padding(.top, 24)
                 Text("Welcome to Forestix")
-                    .font(.title2).bold()
+                    .font(ForestixType.title)
                 Text("A phone-based timber cruising app. Measure DBH with LiDAR, tree height with AR, and compute stand statistics automatically.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -109,7 +112,7 @@ public struct HomeScreen: View {
                     .padding(.horizontal, 24)
 
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("How to get started").font(.headline)
+                    Text("How to get started").font(ForestixType.bodyBold)
                     onboardingStep(n: 1, text: "**Create a project** — name, units, cruiser")
                     onboardingStep(n: 2, text: "**Draw strata on the map** — tap the corners of each cutting block")
                     onboardingStep(n: 3, text: "**Design the cruise** — plot size and sampling method")
@@ -227,12 +230,12 @@ private struct DeviceHealthBanners: View {
     var body: some View {
         VStack(spacing: 8) {
             if !DeviceCapabilities.hasLiDAR {
-                banner(tint: .orange,
+                banner(tint: ForestixPalette.confidenceWarn,
                        title: "Manual-only mode",
                        body: "This device has no LiDAR sensor. DBH will need a caliper, height will need a tape. All project and export features remain available.")
             }
             if battery.isLow {
-                banner(tint: .red,
+                banner(tint: ForestixPalette.confidenceBad,
                        title: "Low battery (\(Int(battery.level * 100))%)",
                        body: "Scan auto-save has stepped up to every 10 seconds to protect in-progress work. Charge before your next plot.")
             }
@@ -246,7 +249,7 @@ private struct DeviceHealthBanners: View {
                                      title: String,
                                      body: String) -> some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: tint == .red
+            Image(systemName: tint == ForestixPalette.confidenceBad
                   ? "exclamationmark.triangle.fill"
                   : "info.circle.fill")
                 .font(.title3)
@@ -342,6 +345,9 @@ private struct NewProjectSheet: View {
                 }
             }
             .navigationTitle("New Project")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }

@@ -1,6 +1,6 @@
 // Hosting Activity — the Android equivalent of Forestix/ForestixApp.swift +
 // ContentView. Builds the AppEnvironment, then hands it to the Compose tree
-// rooted at ModeSelectionScreen (the two-button landing), matching RootView.
+// rooted at MapHomeScreen (the map-first home), matching RootView.
 
 package com.hcjeong.forestix
 
@@ -14,6 +14,7 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.hcjeong.forestix.data.AppSettings
 import com.hcjeong.forestix.ui.ForestixRoot
 import com.hcjeong.forestix.ui.theme.ForestixTheme
 import kotlinx.coroutines.delay
@@ -33,6 +34,10 @@ class MainActivity : ComponentActivity() {
                 delay(3_000)
                 value = true
             }
+            // Splash follows the SAVED appearance setting (default light) —
+            // read straight from DataStore because AppEnvironment doesn't
+            // exist yet while the splash is up.
+            val splashDark = remember { AppSettings.peekAppearanceIsDark(context) }
             val environment = env
             if (environment != null && splashElapsed) {
                 // Appearance is user-selected (default light); collecting it
@@ -46,8 +51,8 @@ class MainActivity : ComponentActivity() {
             } else {
                 // Branded splash while Room + bootstrap run, so the
                 // first frame isn't a blank window (mirrors the iOS
-                // LaunchSplash fix). Splash takes the light default.
-                ForestixTheme(darkTheme = false) {
+                // LaunchSplash fix). Themed by the persisted appearance.
+                ForestixTheme(darkTheme = splashDark) {
                     com.hcjeong.forestix.ui.LaunchSplash()
                 }
             }

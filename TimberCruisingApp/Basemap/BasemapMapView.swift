@@ -635,9 +635,11 @@ public struct BasemapMapView: View {
             VStack(spacing: 3) {
                 ZStack {
                     if marker.id == selectedMarkerID {
-                        Circle()
-                            .stroke(style.selectionHalo, lineWidth: 5)
-                            .frame(width: 41, height: 41)
+                        // Mock `.pin.sel` — soft outline following the
+                        // teardrop shape itself.
+                        teardrop()
+                            .stroke(style.selectionHalo, lineWidth: 3)
+                            .rotationEffect(.degrees(-45))
                     }
                     teardrop()
                         .fill(marker.tint)
@@ -665,7 +667,7 @@ public struct BasemapMapView: View {
                                         .fill(style.badgeBackground))
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 3)
-                                        .stroke(style.badgeBorder, lineWidth: 0.5))
+                                        .stroke(style.badgeBorder, lineWidth: 1))
                         }
                     }
                 }
@@ -680,13 +682,19 @@ public struct BasemapMapView: View {
 
     private var youDot: some View {
         ZStack {
+            // Expanding-fading ripple — r 8→18, alpha .30→0, restarting
+            // every 1.6 s (linear).
             Circle()
-                .fill(youBlue.opacity(0.20))
-                .frame(width: 34, height: 34)
-                .scaleEffect(pulsing ? 1.3 : 0.75)
-                .opacity(pulsing ? 0.35 : 1)
-                .animation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true),
+                .fill(youBlue)
+                .frame(width: 16, height: 16)
+                .scaleEffect(pulsing ? 18.0 / 8.0 : 1)
+                .opacity(pulsing ? 0 : 0.30)
+                .animation(.linear(duration: 1.6).repeatForever(autoreverses: false),
                            value: pulsing)
+            // Static halo (mock's r 13 ring @ .18).
+            Circle()
+                .fill(youBlue.opacity(0.18))
+                .frame(width: 26, height: 26)
             Circle()
                 .fill(youBlue)
                 .frame(width: 16, height: 16)

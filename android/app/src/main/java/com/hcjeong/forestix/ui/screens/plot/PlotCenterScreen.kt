@@ -25,11 +25,9 @@ import androidx.compose.material.icons.filled.BlurCircular
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -54,6 +52,8 @@ import com.hcjeong.forestix.positioning.GPSAveraging
 import com.hcjeong.forestix.positioning.LocationService
 import com.hcjeong.forestix.ui.screens.ForestixScaffold
 import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixBorderedButton
+import com.hcjeong.forestix.ui.theme.ForestixProminentButton
 import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import kotlinx.coroutines.CoroutineScope
@@ -399,12 +399,10 @@ private fun PhaseActions(
 ) {
     when (phase) {
         is PlotCenterViewModel.Phase.Good -> {
-            Button(
-                onClick = { onAccept(phase.result) },
+            ForestixProminentButton(
+                label = "Save plot center",
                 modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Save plot center")
-            }
+            ) { onAccept(phase.result) }
         }
 
         is PlotCenterViewModel.Phase.Poor -> {
@@ -412,33 +410,27 @@ private fun PhaseActions(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(ForestixSpace.sm),
             ) {
-                Button(
-                    onClick = { onTryOffset(phase.result) },
+                ForestixProminentButton(
+                    label = "Try Offset",
+                    modifier = Modifier.weight(1f),
+                ) { onTryOffset(phase.result) }
+                ForestixBorderedButton(
+                    label = "Save anyway",
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text("Try Offset")
-                }
-                OutlinedButton(
-                    onClick = {
-                        viewModel.acceptAnyway()
-                        onAccept(phase.result)
-                    },
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text("Save anyway")
+                    viewModel.acceptAnyway()
+                    onAccept(phase.result)
                 }
             }
         }
 
         is PlotCenterViewModel.Phase.Failed -> {
-            Button(
-                onClick = {
-                    viewModel.cancel()
-                    viewModel.start()
-                },
+            ForestixProminentButton(
+                label = "Retry",
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Retry")
+                viewModel.cancel()
+                viewModel.start()
             }
         }
 

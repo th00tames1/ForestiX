@@ -122,11 +122,6 @@ public struct TreeMeasurementHubScreen: View {
                 DistanceMeasureScreen()
                     .environmentObject(history)
                     .environmentObject(settings)
-                    .toolbar {
-                        ToolbarItem(placement: .cancellationAction) {
-                            Button("Close") { presentingDistance = false }
-                        }
-                    }
             }
         }
         .fullScreenCover(isPresented: $presentingSampling) {
@@ -134,11 +129,6 @@ public struct TreeMeasurementHubScreen: View {
                 SamplingPlotScreen()
                     .environmentObject(history)
                     .environmentObject(settings)
-                    .toolbar {
-                        ToolbarItem(placement: .cancellationAction) {
-                            Button("Close") { presentingSampling = false }
-                        }
-                    }
             }
         }
         #endif
@@ -221,11 +211,6 @@ public struct TreeMeasurementHubScreen: View {
                         photoPath: meta.photoPath))
                     presentingDBHScan = false
                 })
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { presentingDBHScan = false }
-                }
-            }
         }
     }
 
@@ -266,11 +251,6 @@ public struct TreeMeasurementHubScreen: View {
                 })
             .environmentObject(history)
             .environmentObject(settings)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { presentingHeightScan = false }
-                }
-            }
         }
     }
     #endif

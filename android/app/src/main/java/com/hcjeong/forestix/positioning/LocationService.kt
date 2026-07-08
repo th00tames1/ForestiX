@@ -45,6 +45,7 @@ fun Location.toCLLocationSnapshot(): CLLocationSnapshot = CLLocationSnapshot(
     longitude = longitude,
     horizontalAccuracyM = if (hasAccuracy()) accuracy.toDouble() else -1.0,
     timestamp = time,
+    altitudeM = if (hasAltitude()) altitude else null,
 )
 
 class LocationService(

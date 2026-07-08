@@ -137,17 +137,22 @@ public struct CLLocationSnapshot: Sendable, Equatable {
     public let longitude: Double
     public let horizontalAccuracyM: Double
     public let timestamp: Date
+    /// Metres above sea level; nil when the platform couldn't compute
+    /// one (CoreLocation flags that with a negative verticalAccuracy).
+    public let altitudeM: Double?
 
     public init(
         latitude: Double,
         longitude: Double,
         horizontalAccuracyM: Double,
-        timestamp: Date
+        timestamp: Date,
+        altitudeM: Double? = nil
     ) {
         self.latitude = latitude
         self.longitude = longitude
         self.horizontalAccuracyM = horizontalAccuracyM
         self.timestamp = timestamp
+        self.altitudeM = altitudeM
     }
 }
 
@@ -158,7 +163,8 @@ public extension CLLocationSnapshot {
             latitude: loc.coordinate.latitude,
             longitude: loc.coordinate.longitude,
             horizontalAccuracyM: loc.horizontalAccuracy,
-            timestamp: loc.timestamp)
+            timestamp: loc.timestamp,
+            altitudeM: loc.verticalAccuracy > 0 ? loc.altitude : nil)
     }
 }
 #endif

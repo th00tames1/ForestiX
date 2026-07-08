@@ -36,6 +36,9 @@ data class CLLocationSnapshot(
     val longitude: Double,
     val horizontalAccuracyM: Double,
     val timestamp: Long,
+    /** Metres above sea level; null when the fix carries no altitude
+     *  (mirrors the iOS negative-verticalAccuracy guard). */
+    val altitudeM: Double? = null,
 )
 
 // MARK: - GPSAveraging

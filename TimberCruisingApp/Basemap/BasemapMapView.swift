@@ -30,7 +30,8 @@ import ImageIO
 
 /// Continuous map camera. `zoom` is fractional — tiles render at the
 /// nearest integer level and are scaled — clamped to
-/// `BasemapMapView.zoomRange` (3…19).
+/// `BasemapMapView.zoomRange` (3…22; past `maxTileZoom` the z-19 tiles
+/// scale up, so dense stands can still be separated).
 public struct BasemapCamera: Equatable, Sendable {
     public var latitude: Double
     public var longitude: Double
@@ -306,8 +307,16 @@ final class BasemapTileLoader: ObservableObject {
 
 public struct BasemapMapView: View {
 
-    /// Interactive zoom bounds (slippy-map levels).
-    public static let zoomRange: ClosedRange<Double> = 3...19
+    /// Interactive zoom bounds (slippy-map levels). The camera zooms
+    /// well past the imagery's native maximum so trees standing a few
+    /// metres apart resolve into separate pins — dense-stand field
+    /// request.
+    public static let zoomRange: ClosedRange<Double> = 3...22
+
+    /// Deepest level tiles are FETCHED at (Esri World Imagery tops out
+    /// around z19). Beyond it the renderer overzooms: the z-19 tiles
+    /// draw scaled by 2^(zoom − 19).
+    public static let maxTileZoom: Double = 19
 
     @Binding private var camera: BasemapCamera
     /// Built-in satellite base — drawn first, under everything.
@@ -465,7 +474,7 @@ public struct BasemapMapView: View {
         _ = loader.revision   // re-render whenever a fetched tile lands
         guard cache != nil, size.width > 0, size.height > 0 else { return [] }
         let tz = Int(min(max(camera.zoom.rounded(), Self.zoomRange.lowerBound),
-                         Self.zoomRange.upperBound))
+                         Self.maxTileZoom))
         let n = 1 << tz
         let tileSize = 256 * pow(2, camera.zoom - Double(tz))
         let cx = Self.worldX(longitude: camera.longitude) * Double(n)
@@ -503,7 +512,7 @@ public struct BasemapMapView: View {
         var path = Path()
         guard size.width > 0, size.height > 0 else { return path }
         let tz = Int(min(max(camera.zoom.rounded(), zoomRange.lowerBound),
-                         zoomRange.upperBound))
+                         maxTileZoom))
         let n = 1 << tz
         let tileSize = 256 * pow(2, camera.zoom - Double(tz))
         let cx = worldX(longitude: camera.longitude) * Double(n)

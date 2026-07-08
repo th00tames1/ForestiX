@@ -460,11 +460,13 @@ public struct MapHomeScreen: View {
     /// Older than this the fix is effectively lost — the dot goes red.
     private static let lostFixAge: TimeInterval = 60
 
-    /// THE GPS chip — one chip, coordinates of the last known fix with
-    /// a freshness dot: green < 5 s, yellow 5–60 s, red past 60 s or
-    /// before the first fix ever lands ("no fix", no coords). Once the
-    /// fix goes stale the age counts up live (1 s tick, minutes past
-    /// 60 s).
+    /// THE GPS chip — labelled coordinate block of the last known fix
+    /// with a freshness dot: green < 5 s, yellow 5–60 s, red past 60 s
+    /// or before the first fix ever lands ("no fix", no coords). Once
+    /// the fix goes stale the age counts up live (1 s tick, minutes
+    /// past 60 s). Three short rows (X lat / Y lon / Z alt — Korean
+    /// surveying axis convention, per field feedback) keep the chip
+    /// narrow so it can never collide with the round buttons beside it.
     private var gpsChip: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             // This screen's live service, else the newest fix any screen
@@ -483,25 +485,40 @@ public struct MapHomeScreen: View {
                 guard let snap else { return "No GPS fix" }
                 var out = String(format: "GPS fix %.5f, %.5f",
                                  snap.latitude, snap.longitude)
+                if let alt = snap.altitudeM {
+                    out += String(format: ", altitude %.0f metres", alt)
+                }
                 if stale, let age { out += ", " + Self.fixAgeText(age) }
                 return out
             }()
-            HStack(spacing: 6) {
-                Circle().fill(dot).frame(width: 7, height: 7)
+            Group {
                 if let snap {
-                    Text(String(format: "%.5f, %.5f",
-                                snap.latitude, snap.longitude))
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(ForestixPalette.textPrimary)
-                    if stale, let age {
-                        Text("· \(Self.fixAgeText(age))")
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                            .foregroundStyle(ForestixPalette.textTertiary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Circle().fill(dot).frame(width: 7, height: 7)
+                            coordRow("X", String(format: "%.5f", snap.latitude))
+                        }
+                        coordRow("Y", String(format: "%.5f", snap.longitude))
+                            .padding(.leading, 13)
+                        HStack(spacing: 4) {
+                            coordRow("Z", snap.altitudeM.map {
+                                String(format: "%.0f m", $0)
+                            } ?? "—")
+                            if stale, let age {
+                                Text("· \(Self.fixAgeText(age))")
+                                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(ForestixPalette.textTertiary)
+                            }
+                        }
+                        .padding(.leading, 13)
                     }
                 } else {
-                    Text("no fix")
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(ForestixPalette.textTertiary)
+                    HStack(spacing: 6) {
+                        Circle().fill(dot).frame(width: 7, height: 7)
+                        Text("no fix")
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(ForestixPalette.textTertiary)
+                    }
                 }
             }
             .lineLimit(1)
@@ -516,6 +533,19 @@ public struct MapHomeScreen: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(a11y)
             .accessibilityIdentifier("mapHome.gps")
+        }
+    }
+
+    /// One labelled coordinate line — dim mono axis label, semibold
+    /// mono value.
+    private func coordRow(_ label: String, _ value: String) -> some View {
+        HStack(spacing: 4) {
+            Text(label)
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundStyle(ForestixPalette.textTertiary)
+            Text(value)
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(ForestixPalette.textPrimary)
         }
     }
 

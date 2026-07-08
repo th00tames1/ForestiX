@@ -288,7 +288,9 @@ fun MapView(
                 .pointerInput(Unit) {
                     detectTransformGestures { _, pan, gestureZoom, _ ->
                         if (gestureZoom != 1f && gestureZoom > 0f) {
-                            camZoom = (camZoom + log2(gestureZoom.toDouble())).coerceIn(3.0, 19.0)
+                            // 22, not the native tile max (19): past 19 the
+                            // renderer overzooms so dense stands separate.
+                            camZoom = (camZoom + log2(gestureZoom.toDouble())).coerceIn(3.0, 22.0)
                         }
                         if (pan != Offset.Zero) {
                             val worldPx = 256.0 * density * 2.0.pow(camZoom)
@@ -309,7 +311,7 @@ fun MapView(
                         // keeping the tapped point stationary.
                         onDoubleTap = { tap ->
                             val oldZoom = camZoom
-                            val newZoom = (oldZoom + 1.0).coerceIn(3.0, 19.0)
+                            val newZoom = (oldZoom + 1.0).coerceIn(3.0, 22.0)
                             if (newZoom != oldZoom) {
                                 val worldPx = 256.0 * density * 2.0.pow(oldZoom)
                                 val scale = 2.0.pow(newZoom - oldZoom)
@@ -361,7 +363,9 @@ fun MapView(
             drawRect(color = colors.canvas)
 
             // Nearest tile level (iOS `zoom.rounded()`) so fractional zooms
-            // never upscale a whole level blurrier.
+            // never upscale a whole level blurrier. Capped at the imagery's
+            // native max (19, iOS `maxTileZoom`) — the camera zooms to 22
+            // and the z-19 tiles simply draw scaled 2^(zoom−19) (overzoom).
             val tileZoom = camZoom.roundToInt().coerceIn(0, 19)
             val n = 1 shl tileZoom
             val tilePx = 256.0 * density * 2.0.pow(camZoom - tileZoom)

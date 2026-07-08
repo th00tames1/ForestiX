@@ -740,7 +740,7 @@ private fun DepthRequiredPanel(modifier: Modifier = Modifier) {
     ) {
         CenteredText("DBH scanning requires the ARCore Depth API on this device")
         CenteredText(
-            "Alternative AR methods (motion sweep, caliper) are available in Developer mode.",
+            "This phone doesn't provide depth sensing, so the trunk scan can't run here.",
             dim = true,
         )
     }

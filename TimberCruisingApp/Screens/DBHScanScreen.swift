@@ -127,7 +127,7 @@ public struct DBHScanScreen: View {
                 .font(ForestixType.bodyBold)
                 .foregroundStyle(ForestixPalette.textPrimary)
                 .multilineTextAlignment(.center)
-            Text("Alternative AR methods (motion sweep, two-tap caliper) are available in Developer mode.")
+            Text("This iPhone doesn't have the LiDAR scanner the trunk scan relies on, so DBH scanning can't run here.")
                 .font(ForestixType.caption)
                 .foregroundStyle(ForestixPalette.textSecondary)
                 .multilineTextAlignment(.center)

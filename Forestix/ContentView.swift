@@ -22,9 +22,15 @@ struct ContentView: View {
         }
         .task {
             guard environment == nil else { return }
-            // Yield once so the splash actually paints before we do the
-            // (main-actor-bound) Core Data + seed work.
-            await Task.yield()
+            // One `Task.yield()` is NOT enough here: the continuation can
+            // resume before Core Animation commits the splash frame, and
+            // the main-actor-bound build below then blocks that very first
+            // commit — the user stares at the system launch screen for the
+            // whole build (field report: ~5 s of blank white). A short real
+            // sleep lets the run loop finish a frame or two first; the
+            // splash is static, so the main thread stalling AFTER it has
+            // painted is invisible.
+            try? await Task.sleep(for: .milliseconds(120))
             // The splash stays up for a MINIMUM of 3 s — long enough to
             // cover the map home's first tile load, so the logo hands off
             // to imagery instead of a canvas-coloured flash of grid.

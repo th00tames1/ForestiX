@@ -30,7 +30,7 @@ import ImageIO
 
 /// Continuous map camera. `zoom` is fractional — tiles render at the
 /// nearest integer level and are scaled — clamped to
-/// `BasemapMapView.zoomRange` (3…22; past `maxTileZoom` the z-19 tiles
+/// `BasemapMapView.zoomRange` (3…24; past `maxTileZoom` the z-19 tiles
 /// scale up, so dense stands can still be separated).
 public struct BasemapCamera: Equatable, Sendable {
     public var latitude: Double
@@ -311,7 +311,7 @@ public struct BasemapMapView: View {
     /// well past the imagery's native maximum so trees standing a few
     /// metres apart resolve into separate pins — dense-stand field
     /// request.
-    public static let zoomRange: ClosedRange<Double> = 3...22
+    public static let zoomRange: ClosedRange<Double> = 3...24
 
     /// Deepest level tiles are FETCHED at (Esri World Imagery tops out
     /// around z19). Beyond it the renderer overzooms: the z-19 tiles

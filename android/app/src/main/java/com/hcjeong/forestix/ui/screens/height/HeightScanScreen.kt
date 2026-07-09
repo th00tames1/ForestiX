@@ -21,6 +21,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -37,7 +39,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.runtime.rememberCoroutineScope
@@ -62,7 +63,6 @@ import com.hcjeong.forestix.sensors.HeightResult
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hcjeong.forestix.ui.PendingTreeNumber
 import com.hcjeong.forestix.ui.Routes
-import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.screens.ContinuationAction
 import com.hcjeong.forestix.ui.screens.ContinuationOrigin
 import com.hcjeong.forestix.ui.screens.MeasurementContinuationSheet
@@ -71,6 +71,7 @@ import com.hcjeong.forestix.ui.screens.CenteredText
 import com.hcjeong.forestix.ui.screens.DevHud
 import com.hcjeong.forestix.ui.screens.GPSAccuracyBadge
 import com.hcjeong.forestix.ui.screens.MeasureBackButton
+import com.hcjeong.forestix.ui.screens.MeasureCircleButton
 import com.hcjeong.forestix.ui.screens.MeasureControlColumn
 import com.hcjeong.forestix.ui.screens.MeasureFailureBanner
 import com.hcjeong.forestix.ui.screens.MeasureStatusPanel
@@ -136,6 +137,10 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     // Manual height entry (typed metres) — iOS .manualEntry state.
     var manualOpen by remember { mutableStateOf(false) }
     var manualText by remember { mutableStateOf("") }
+    // Accept-snapshot chrome blackout: while true, every 2D panel/button is
+    // hidden so the captured JPEG shows only the AR feed + measurement
+    // overlays (captured buttons read as real buttons in the photo viewer).
+    var hidingChromeForCapture by remember { mutableStateOf(false) }
     // Scan metadata (species / damage / note) attached on Accept — iOS
     // ScanMetadataSheet(kind: .height); no stem position for heights.
     var metaSpecies by remember { mutableStateOf<String?>(null) }
@@ -259,7 +264,15 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     fun acceptResult(r: HeightResult) {
         val activity = context as? android.app.Activity
         scope.launch {
-            val photo = activity?.let { MeasurePhotoStore.captureWindow(it) }
+            // Chrome-less snapshot: hide the 2D chrome, give Compose one
+            // committed frame, capture, then restore.
+            val photo = activity?.let {
+                hidingChromeForCapture = true
+                delay(80)
+                val name = MeasurePhotoStore.captureWindow(it)
+                hidingChromeForCapture = false
+                name
+            }
             val fix = com.hcjeong.forestix.positioning.LocationService.lastGlobalFix
             env.history.append(
                 QuickMeasureEntry(
@@ -342,16 +355,16 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
         crosshairLabel?.let { label ->
             HeightAimCrosshair(label, Modifier.align(Alignment.Center))
         }
-        MeasureBackButton { nav.popBackStack() }
+        if (!hidingChromeForCapture) MeasureBackButton { nav.popBackStack() }
 
         // Same GPS-accuracy strip as the Diameter scan — leading 72 /
         // top 22, clear of the floating back button (iOS parity).
-        GPSAccuracyBadge(
+        if (!hidingChromeForCapture) GPSAccuracyBadge(
             Modifier
                 .align(Alignment.TopStart)
                 .padding(start = 72.dp, top = 22.dp))
 
-        if (settings.developerMode) {
+        if (settings.developerMode && !hidingChromeForCapture) {
             DevHud(
                 "HEIGHT",
                 listOfNotNull(
@@ -366,9 +379,20 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 ),
             )
         }
-        if (showCapture) MeasureControlColumn(onCapture = { if (crownActive) captureCrown() else captureHeight() })
+        if (showCapture && !hidingChromeForCapture) MeasureControlColumn(
+            onCapture = { if (crownActive) captureCrown() else captureHeight() },
+            // Manual entry rides the rail directly below the capture "+"
+            // while anchoring — the walk/aim stages keep Retake instead.
+            extra = if (stage == Stage.ANCHOR) {
+                {
+                    MeasureCircleButton(icon = Icons.Filled.Keyboard, caption = "Manual") {
+                        manualOpen = true; manualText = ""
+                    }
+                }
+            } else null,
+        )
 
-        MeasureStatusPanel {
+        if (!hidingChromeForCapture) MeasureStatusPanel {
             // Anchor / tracking failures — orange banner, tap to dismiss
             // (iOS anchorFailureBanner).
             failure?.let { MeasureFailureBanner(it) { failure = null } }
@@ -532,21 +556,10 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 }
             }
 
-            // Action rows per stage (iOS actionRow).
+            // Action rows per stage (iOS actionRow). ANCHOR has none — the
+            // manual escape hatch lives on the rail's Manual button.
             if (!manualOpen) when (stage) {
-                Stage.ANCHOR -> {
-                    // Escape hatch for trees the sensors can't read — plain
-                    // text button, primary tint (iOS "Enter manually").
-                    Text(
-                        "Enter manually",
-                        style = type.body,
-                        color = colors.primary,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier
-                            .clickableNoRipple { manualOpen = true; manualText = "" }
-                            .padding(vertical = 2.dp),
-                    )
-                }
+                Stage.ANCHOR -> {}
                 Stage.WALKING, Stage.AIM_BASE, Stage.AIM_TOP -> {
                     ForestixBorderedButton("Retake") { resetAll() }
                 }

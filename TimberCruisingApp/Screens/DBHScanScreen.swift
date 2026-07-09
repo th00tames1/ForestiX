@@ -6,7 +6,8 @@
 //   • Center crosshair, red until depth-stable then green.
 //   • Status banner + result panel at the bottom.
 //   • Action row: Retake / Details / Accept — shown once a result lands
-//     ("Enter manually" is offered while aiming instead).
+//     (a "Manual" rail button under the capture "+" is offered while
+//     aiming instead).
 //
 // Per Phase 2 decision #5, snapshot tests only render the overlay chrome;
 // the AR view is Color.black so visuals are deterministic across hosts.
@@ -64,6 +65,10 @@ public struct DBHScanScreen: View {
     @State private var metaDamage: [String] = []
     @State private var metaNote: String = ""
     @State private var presentingMetadata = false
+    /// True while the Accept-time window snapshot is being taken — hides
+    /// every piece of 2D chrome so the captured JPEG shows only the AR
+    /// feed and the measurement overlays (crosshair, chord, markers).
+    @State private var hidingChromeForCapture = false
 
     /// Bridge that turns SwiftUI screen taps into world-space rays / hits
     /// against the live ARView — used by the AR-caliper two-tap flow.
@@ -180,20 +185,27 @@ public struct DBHScanScreen: View {
                         // or below it. The live preview pills sit below;
                         // the TiltBadge sits above so the cruiser sees
                         // device level at the same focal point as the
-                        // trunk circle they're aiming at.
-                        TiltBadge()
-                            .position(x: geo.size.width / 2,
-                                      y: geo.size.height / 2
-                                           - Self.crosshairOuterRadius
-                                           - 22)
+                        // trunk circle they're aiming at. Both are 2D
+                        // chrome, so the Accept-time snapshot hides them
+                        // (the guide/chord/crosshair stay — they ARE the
+                        // measurement).
+                        if !hidingChromeForCapture {
+                            TiltBadge()
+                                .position(x: geo.size.width / 2,
+                                          y: geo.size.height / 2
+                                               - Self.crosshairOuterRadius
+                                               - 22)
+                        }
                         crosshairRing
                             .position(x: geo.size.width / 2,
                                       y: geo.size.height / 2)
-                        livePreviewBadge
-                            .position(x: geo.size.width / 2,
-                                      y: geo.size.height / 2
-                                           + Self.crosshairOuterRadius
-                                           + 28)
+                        if !hidingChromeForCapture {
+                            livePreviewBadge
+                                .position(x: geo.size.width / 2,
+                                          y: geo.size.height / 2
+                                               + Self.crosshairOuterRadius
+                                               + 28)
+                        }
                     }
                 }
                 .frame(width: geo.size.width, height: geo.size.height)
@@ -205,37 +217,52 @@ public struct DBHScanScreen: View {
             // so a stray screen tap never fires a capture.
             tapCatcher
 
-            VStack(spacing: 0) {
-                topStrip
-                Spacer()
-            }
-
-            // Floating back button — full-bleed chrome exit (the system
-            // nav bar is hidden on the AR screens).
-            MeasureBackButtonRow()
-
-            // Right-centre "+" capture button — a fixed control shown for
-            // the whole aiming phase (the view model ignores taps until
-            // the crosshair arms / the sweep is ready), so the layout
-            // never jumps. The AR caliper taps the trunk edges directly
-            // and hides it.
-            if showsCaptureButton {
-                MeasureControlColumn(capture: onCaptureButton)
-            }
-
-            // Bottom-centre status / result panel, with the Developer-mode
-            // DBH method picker (Depth / Motion / Caliper) floating 12 pt
-            // above it while aiming. Field mode always scans with the
-            // LiDAR depth path, so the picker is hidden there.
-            VStack(spacing: 12) {
-                Spacer()
-                if settings.developerMode, isAiming {
-                    dbhMethodPicker
+            // Everything below is 2D chrome — hidden as one block while
+            // the Accept-time window snapshot is captured so the JPEG
+            // shows only the AR feed + measurement overlays.
+            if !hidingChromeForCapture {
+                VStack(spacing: 0) {
+                    topStrip
+                    Spacer()
                 }
-                bottomPanel
+
+                // Floating back button — full-bleed chrome exit (the system
+                // nav bar is hidden on the AR screens).
+                MeasureBackButtonRow()
+
+                // Right-centre "+" capture button — a fixed control shown for
+                // the whole aiming phase (the view model ignores taps until
+                // the crosshair arms / the sweep is ready), so the layout
+                // never jumps. The Manual escape hatch sits directly below
+                // it. The AR caliper taps the trunk edges directly and hides
+                // the "+", so there Manual keeps the rail slot on its own.
+                if showsCaptureButton {
+                    MeasureControlColumn(capture: onCaptureButton) {
+                        manualRailButton
+                    }
+                } else if isAiming {
+                    HStack {
+                        Spacer()
+                        manualRailButton
+                            .padding(.trailing, 18)
+                    }
+                }
+
+                // Bottom-centre status / result panel, with the Developer-mode
+                // DBH method picker (Depth / Motion / Caliper) floating 12 pt
+                // above it while aiming. Field mode always scans with the
+                // LiDAR depth path, so the picker is hidden there.
+                VStack(spacing: 12) {
+                    Spacer()
+                    if settings.developerMode, isAiming {
+                        dbhMethodPicker
+                    }
+                    bottomPanel
+                }
             }
         }
-        .devHUDOverlay(settings.developerMode, title: "DBH", lines: devHUDLines)
+        .devHUDOverlay(settings.developerMode && !hidingChromeForCapture,
+                       title: "DBH", lines: devHUDLines)
         // While the caliper is aiming, sample the screen-centre AR distance
         // at ~10 Hz into the robust smoother; the edge taps then read the
         // spike-free average instead of a single flickery raycast. The task
@@ -285,21 +312,32 @@ public struct DBHScanScreen: View {
             // only on an explicit user confirmation (Quick Measure) can
             // distinguish a fitted preview from a committed reading.
             if newState == .accepted, let r = viewModel.result {
-                // Auto-capture (map home): snapshot the AR view + overlay
-                // as evidence of what was measured, plus the latest GPS
-                // fix from the badge's running location service.
-                let photo = MeasurePhotoStore.captureWindow()
-                let fix = LocationService.lastGlobalFix
-                let meta = ScanMetadata(
-                    speciesCode: metaSpecies,
-                    position: metaPosition,
-                    damageCodes: metaDamage,
-                    note: metaNote,
-                    photoPath: photo,
-                    latitude: fix?.latitude,
-                    longitude: fix?.longitude)
-                onAccept(r, meta)
-                recordResearchRow(r)
+                // Auto-capture (map home): snapshot the AR view + the
+                // measurement overlays as evidence of what was measured,
+                // plus the latest GPS fix from the badge's running
+                // location service. The 2D chrome is hidden first — a
+                // short sleep lets SwiftUI commit the chrome-less frame —
+                // so the JPEG doesn't show buttons/panels that read as
+                // live controls in the photo viewer. The entry must get
+                // its photoPath before it is appended, hence the await
+                // before onAccept.
+                Task { @MainActor in
+                    hidingChromeForCapture = true
+                    try? await Task.sleep(for: .milliseconds(80))
+                    let photo = MeasurePhotoStore.captureWindow()
+                    hidingChromeForCapture = false
+                    let fix = LocationService.lastGlobalFix
+                    let meta = ScanMetadata(
+                        speciesCode: metaSpecies,
+                        position: metaPosition,
+                        damageCodes: metaDamage,
+                        note: metaNote,
+                        photoPath: photo,
+                        latitude: fix?.latitude,
+                        longitude: fix?.longitude)
+                    onAccept(r, meta)
+                    recordResearchRow(r)
+                }
             }
         }
         .sheet(isPresented: $presentingMetadata) {
@@ -365,8 +403,8 @@ public struct DBHScanScreen: View {
     }
 
     /// True for every pre-capture aiming state (any method) — the window
-    /// in which the "Enter manually" escape hatch and the Developer-mode
-    /// method picker are offered. Mirrors Android's `Stage.AIMING`.
+    /// in which the Manual rail button and the Developer-mode method
+    /// picker are offered. Mirrors Android's `Stage.AIMING`.
     private var isAiming: Bool {
         switch viewModel.state {
         case .idle, .aligning, .armed,
@@ -784,16 +822,6 @@ public struct DBHScanScreen: View {
                 bannerView(banner, tint: .orange)
             }
             statusBanner
-            // Escape hatch for trees the sensors can't read — offered for
-            // the whole aiming phase (the result row no longer carries a
-            // Manual button; its middle slot opens the details sheet).
-            if isAiming {
-                Button("Enter manually") { viewModel.enterManualEntry() }
-                    .buttonStyle(.plain)
-                    .font(ForestixType.body)
-                    .foregroundStyle(ForestixPalette.primary)
-                    .accessibilityIdentifier("dbhScan.enterManually")
-            }
             if let result = viewModel.result, viewModel.state != .manualEntry {
                 resultPanel(result)
             }
@@ -802,6 +830,17 @@ public struct DBHScanScreen: View {
             }
             actionRow
         }
+    }
+
+    /// Rail escape hatch for trees the sensors can't read — sits
+    /// directly below the capture "+" and opens the same manual-entry
+    /// state the old status-panel text button did. Offered for the
+    /// whole aiming phase.
+    private var manualRailButton: some View {
+        MeasureCircleButton(systemImage: "keyboard", caption: "Manual") {
+            viewModel.enterManualEntry()
+        }
+        .accessibilityIdentifier("dbhScan.enterManually")
     }
 
     private var statusBanner: some View {
@@ -985,7 +1024,7 @@ public struct DBHScanScreen: View {
             // One result row for every outcome: Retake / Details / Accept.
             // Details opens the metadata sheet; Accept stays disabled for
             // a red (or missing) fit, whose escape hatch is Retake or the
-            // aiming-phase "Enter manually" button.
+            // aiming-phase Manual rail button.
             HStack(spacing: 12) {
                 Button("Retake") { viewModel.retake() }
                     .buttonStyle(.bordered)

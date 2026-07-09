@@ -59,6 +59,7 @@ import androidx.compose.material.icons.filled.Park
 import androidx.compose.material.icons.filled.Straighten
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.WbSunny
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -66,6 +67,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -106,6 +108,7 @@ import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
 import com.hcjeong.forestix.geo.CoordinateConversions
 import com.hcjeong.forestix.positioning.CLLocationSnapshot
+import com.hcjeong.forestix.positioning.GeoMath
 import com.hcjeong.forestix.positioning.LocationService
 import com.hcjeong.forestix.ui.MeasurePhotoStore
 import com.hcjeong.forestix.ui.PendingTreeNumber
@@ -122,6 +125,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.PI
+import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -134,7 +138,6 @@ private val DefaultCenter = CoordinateConversions.LatLon(latitude = 37.5665, lon
 @Composable
 fun MapHomeScreen(nav: NavController) {
     val colors = Forestix.colors
-    val type = Forestix.type
     val env = LocalAppEnvironment.current
     val context = LocalContext.current
     val activity = context as? Activity
@@ -195,6 +198,13 @@ fun MapHomeScreen(nav: NavController) {
 
     var selectedPinId by remember { mutableStateOf<String?>(null) }
     var chooserOpen by remember { mutableStateOf(false) }
+    // Peek-card "Measure this tree" scopes the chooser to that pin's tree
+    // (header "MEASURE · TREE N", no "(NEXT)"); null = plain chooser on the
+    // next free number. Cleared whenever the chooser dismisses.
+    var chooserTreeOverride by remember { mutableStateOf<Int?>(null) }
+    // Far-GPS confirmation before the scoped chooser: (tree, whole metres)
+    // when the current fix sits > 30 m from the tapped tree's pin.
+    var farTreeConfirm by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var offlineOpen by remember { mutableStateOf(false) }
     var photoEntry by remember { mutableStateOf<QuickMeasureEntry?>(null) }
 
@@ -259,22 +269,6 @@ fun MapHomeScreen(nav: NavController) {
                     contentDescription = if (dark) "Switch to light appearance" else "Switch to dark appearance",
                 ) { env.settings.setAppearance(if (dark) "light" else "dark") }
             }
-            // The satellite base is built-in, so this hint only concerns the
-            // optional overlay (offline/no-network lives in the sheet).
-            if (settings.tileURLTemplate == null) {
-                Spacer(Modifier.size(ForestixSpace.xs))
-                Text(
-                    "OVERLAY TILES · ADD A TEMPLATE IN SETTINGS",
-                    style = type.dataSmall.copy(fontSize = 10.sp, letterSpacing = 0.8.sp),
-                    color = colors.textTertiary,
-                    modifier = Modifier
-                        .pressableNoRipple { offlineOpen = true }
-                        .clip(ForestixRadius.chip)
-                        .background(colors.surface)
-                        .border(1.dp, colors.divider, ForestixRadius.chip)
-                        .padding(horizontal = 10.dp, vertical = 4.dp),
-                )
-            }
         }
 
         // MARK: - Bottom: action cluster ①, or peek card ② when a pin is up.
@@ -322,11 +316,29 @@ fun MapHomeScreen(nav: NavController) {
                             .padding(bottom = 20.dp),
                         onViewPhoto = { photoEntry = it },
                         onMeasureAgain = {
-                            // Lock the new reading to the tapped pin's tree
-                            // (iOS measureAgain → pendingTreeNumber).
-                            PendingTreeNumber.value =
-                                pin.treeNumber ?: env.history.suggestedNextTreeNumber
-                            nav.navigate(Routes.DBH)
+                            val tree = pin.treeNumber
+                            if (tree == null) {
+                                // Tree-less pin ("New measurement") — plain
+                                // chooser on the next free number.
+                                chooserOpen = true
+                            } else {
+                                // Field fix: opening a measurement on a pin
+                                // that is far from where the cruiser stands
+                                // is usually a mis-tap — confirm past 30 m.
+                                val snap = fix ?: LocationService.lastGlobalFix
+                                val distM = snap?.let {
+                                    GeoMath.distanceM(
+                                        it.latitude, it.longitude,
+                                        pin.coordinate.latitude, pin.coordinate.longitude,
+                                    )
+                                }
+                                if (distM != null && distM > 30.0) {
+                                    farTreeConfirm = tree to distM.roundToInt()
+                                } else {
+                                    chooserTreeOverride = tree
+                                    chooserOpen = true
+                                }
+                            }
                         },
                     )
                 }
@@ -339,15 +351,46 @@ fun MapHomeScreen(nav: NavController) {
     if (chooserOpen) {
         MeasureChooserSheet(
             nextTree = env.history.suggestedNextTreeNumber,
-            onDismiss = { chooserOpen = false },
+            treeOverride = chooserTreeOverride,
+            onDismiss = {
+                chooserOpen = false
+                chooserTreeOverride = null
+            },
             onChoose = { route, lockTree ->
                 chooserOpen = false
                 // Full / DBH / Height lock the reading to the tree number
-                // the sheet header promised (iOS chooserRow actions).
+                // the sheet header promised (iOS chooserRow actions) — the
+                // peek card's override tree when set, else the next free.
                 if (lockTree) {
-                    PendingTreeNumber.value = env.history.suggestedNextTreeNumber
+                    PendingTreeNumber.value =
+                        chooserTreeOverride ?: env.history.suggestedNextTreeNumber
                 }
+                chooserTreeOverride = null
                 nav.navigate(route)
+            },
+        )
+    }
+    // Far-GPS confirmation — shown before the scoped chooser when the tree's
+    // pin is > 30 m from the current fix (peek "Measure this tree" only).
+    farTreeConfirm?.let { (tree, metres) ->
+        AlertDialog(
+            onDismissRequest = { farTreeConfirm = null },
+            title = { Text("Tree $tree is $metres m away") },
+            text = {
+                Text(
+                    "Your current GPS position is about $metres m from this " +
+                        "tree's pin. Measure it anyway?",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    farTreeConfirm = null
+                    chooserTreeOverride = tree
+                    chooserOpen = true
+                }) { Text("Measure anyway") }
+            },
+            dismissButton = {
+                TextButton(onClick = { farTreeConfirm = null }) { Text("Cancel") }
             },
         )
     }
@@ -906,9 +949,13 @@ private fun PeekActionButton(
 @Composable
 private fun MeasureChooserSheet(
     nextTree: Int,
+    /// Non-null when the peek card scoped the sheet to an existing tree —
+    /// the header drops "(NEXT)" and the tree-bound rows lock to it.
+    treeOverride: Int? = null,
     onDismiss: () -> Unit,
     /// (route, lockTree) — lockTree is true for the tree-bound rows
-    /// (Full / DBH / Height), which pin the reading to `nextTree`.
+    /// (Full / DBH / Height), which pin the reading to `treeOverride`
+    /// when set, else `nextTree`.
     onChoose: (String, Boolean) -> Unit,
 ) {
     val colors = Forestix.colors
@@ -920,7 +967,8 @@ private fun MeasureChooserSheet(
                 .padding(bottom = ForestixSpace.xl),
         ) {
             Text(
-                "MEASURE · TREE $nextTree (NEXT)",
+                treeOverride?.let { "MEASURE · TREE $it" }
+                    ?: "MEASURE · TREE $nextTree (NEXT)",
                 style = type.sectionHead.copy(
                     fontWeight = FontWeight.ExtraBold, letterSpacing = 1.0.sp),
                 color = colors.textTertiary,

@@ -65,6 +65,10 @@ public struct HeightScanScreen: View {
     @State private var metaDamage: [String] = []
     @State private var metaNote: String = ""
     @State private var presentingMetadata = false
+    /// True while the Accept-time window snapshot is being taken — hides
+    /// every piece of 2D chrome so the captured JPEG shows only the AR
+    /// feed and the measurement overlays (crosshair + scene markers).
+    @State private var hidingChromeForCapture = false
     /// Developer-mode research capture: true height (m) from a clinometer /
     /// Vertex, typed before Accept; logged to the research CSV.
     @State private var researchTrueM: String = ""
@@ -109,53 +113,64 @@ public struct HeightScanScreen: View {
                          raycaster: raycaster)
                 .ignoresSafeArea()
             overlayChrome
-            VStack(spacing: 0) {
-                // Same GPS-accuracy strip as the Diameter scan — gives
-                // the cruiser a single-glance read on canopy quality
-                // before they anchor. Leading 72 / top 22 clears the
-                // floating back button (same offsets as Android).
-                HStack {
-                    GPSAccuracyBadge()
+            // Everything below is 2D chrome — hidden as one block while
+            // the Accept-time window snapshot is captured so the JPEG
+            // shows only the AR feed + measurement overlays.
+            if !hidingChromeForCapture {
+                VStack(spacing: 0) {
+                    // Same GPS-accuracy strip as the Diameter scan — gives
+                    // the cruiser a single-glance read on canopy quality
+                    // before they anchor. Leading 72 / top 22 clears the
+                    // floating back button (same offsets as Android).
+                    HStack {
+                        GPSAccuracyBadge()
+                        Spacer()
+                    }
+                    .padding(.leading, 72)
+                    .padding(.top, 22)
                     Spacer()
                 }
-                .padding(.leading, 72)
-                .padding(.top, 22)
-                Spacer()
-            }
 
-            // Floating back button — full-bleed chrome exit (the system
-            // nav bar is hidden on the AR screens).
-            MeasureBackButtonRow()
+                // Floating back button — full-bleed chrome exit (the system
+                // nav bar is hidden on the AR screens).
+                MeasureBackButtonRow()
 
-            // Right-centre "+" capture button — replaces the centre
-            // Anchor Here / Aim Top / Aim Base buttons. It fires the
-            // current stage's capture action.
-            if hasPrimaryCapture {
-                MeasureControlColumn(capture: primaryCapture)
-            }
-
-            // Bottom-right LiDAR/AR toggle — Developer-mode research
-            // control only; field mode pins LiDAR devices to the mesh
-            // path (AppSettings.measurementSource).
-            if settings.developerMode {
-                VStack {
-                    Spacer()
-                    HStack {
-                        Spacer()
-                        MeasureSourceToggleButton()
-                            .padding(.trailing, 18)
-                            .padding(.bottom, 96)
+                // Right-centre "+" capture button — replaces the centre
+                // Anchor Here / Aim Top / Aim Base buttons. It fires the
+                // current stage's capture action. The Manual escape hatch
+                // sits directly below it during the anchor stage.
+                if hasPrimaryCapture {
+                    MeasureControlColumn(capture: primaryCapture) {
+                        if showsManualRailButton {
+                            manualRailButton
+                        }
                     }
                 }
-            }
 
-            // Bottom-centre status / value panel.
-            VStack {
-                Spacer()
-                bottomPanel
+                // Bottom-right LiDAR/AR toggle — Developer-mode research
+                // control only; field mode pins LiDAR devices to the mesh
+                // path (AppSettings.measurementSource).
+                if settings.developerMode {
+                    VStack {
+                        Spacer()
+                        HStack {
+                            Spacer()
+                            MeasureSourceToggleButton()
+                                .padding(.trailing, 18)
+                                .padding(.bottom, 96)
+                        }
+                    }
+                }
+
+                // Bottom-centre status / value panel.
+                VStack {
+                    Spacer()
+                    bottomPanel
+                }
             }
         }
-        .devHUDOverlay(settings.developerMode, title: "HEIGHT", lines: devHUDLines)
+        .devHUDOverlay(settings.developerMode && !hidingChromeForCapture,
+                       title: "HEIGHT", lines: devHUDLines)
         // Full-bleed AR chrome — no system nav bar; the floating back
         // button is the exit affordance for both presentation paths.
         #if os(iOS)
@@ -170,17 +185,28 @@ public struct HeightScanScreen: View {
         }
         .onChange(of: viewModel.state) { _, newState in
             if newState == .accepted, let r = viewModel.result {
-                let photo = MeasurePhotoStore.captureWindow()
-                let fix = LocationService.lastGlobalFix
-                let meta = ScanMetadata(
-                    speciesCode: metaSpecies,
-                    damageCodes: metaDamage,
-                    note: metaNote,
-                    photoPath: photo,
-                    latitude: fix?.latitude,
-                    longitude: fix?.longitude)
-                onAccept(r, meta)
-                recordResearchRow(r)
+                // Auto-capture at Accept — the 2D chrome is hidden first
+                // (a short sleep lets SwiftUI commit the chrome-less
+                // frame) so the JPEG shows only the AR feed + overlays,
+                // not buttons/panels that read as live controls in the
+                // photo viewer. The entry must get its photoPath before
+                // it is appended, hence the await before onAccept.
+                Task { @MainActor in
+                    hidingChromeForCapture = true
+                    try? await Task.sleep(for: .milliseconds(80))
+                    let photo = MeasurePhotoStore.captureWindow()
+                    hidingChromeForCapture = false
+                    let fix = LocationService.lastGlobalFix
+                    let meta = ScanMetadata(
+                        speciesCode: metaSpecies,
+                        damageCodes: metaDamage,
+                        note: metaNote,
+                        photoPath: photo,
+                        latitude: fix?.latitude,
+                        longitude: fix?.longitude)
+                    onAccept(r, meta)
+                    recordResearchRow(r)
+                }
             }
         }
         .sheet(isPresented: $presentingMetadata) {
@@ -690,14 +716,32 @@ public struct HeightScanScreen: View {
         crownWidthM = nil; crownHeightM = nil
     }
 
+    /// Anchor stage only — exactly the states where the old status-panel
+    /// Manual text button showed. The rejected row keeps its own Manual
+    /// button, and manual entry itself needs no rail affordance.
+    private var showsManualRailButton: Bool {
+        switch viewModel.state {
+        case .idle, .anchorSet: return true
+        default:                return false
+        }
+    }
+
+    /// Rail escape hatch for trees the sensors can't read — sits
+    /// directly below the capture "+" and opens the same manual-entry
+    /// state the old status-panel button did.
+    private var manualRailButton: some View {
+        MeasureCircleButton(systemImage: "keyboard", caption: "Manual") {
+            viewModel.enterManualEntry()
+        }
+        .accessibilityIdentifier("heightScan.enterManually")
+    }
+
     /// Secondary actions only — the primary capture moved to the "+"
-    /// button on the trailing edge.
+    /// button on the trailing edge (and the anchor-stage Manual escape
+    /// hatch to the rail button beneath it).
     @ViewBuilder
     private var actionRow: some View {
         switch viewModel.state {
-        case .idle, .anchorSet:
-            Button("Manual") { viewModel.enterManualEntry() }
-                .buttonStyle(.bordered)
         case .walking, .aimTopArmed, .aimTopCaptured, .aimBaseArmed:
             Button("Retake") { viewModel.retake() }
                 .buttonStyle(.bordered)
@@ -740,7 +784,7 @@ public struct HeightScanScreen: View {
         case .manualEntry:
             Button("Cancel") { viewModel.retake() }
                 .buttonStyle(.bordered)
-        case .accepted:
+        case .idle, .anchorSet, .accepted:
             EmptyView()
         }
     }

@@ -111,12 +111,32 @@ public struct MapHomeScreen: View {
     /// consumes it to present the Height cover after the dismissal has
     /// settled (same two-step pattern as `pendingChoice`).
     @State private var chainHeightPending = false
+    /// Peek-card scoping — "Measure this tree" opens the chooser locked
+    /// to that pin's tree number instead of the next free one. Cleared
+    /// whenever the chooser dismisses so the plain (+) stays unscoped.
+    @State private var chooserTreeOverride: Int?
+    /// Far-GPS guard — set when the peek primary button is tapped while
+    /// the cruiser stands > 30 m from the pin; the alert asks before the
+    /// scoped chooser opens.
+    @State private var farTreeWarning: FarTreeWarning?
 
     public init() {}
 
     private enum MeasureChoice {
         case fullMeasurement, dbh, height, distance, sampling
     }
+
+    /// Payload for the far-GPS confirmation alert.
+    private struct FarTreeWarning: Identifiable {
+        let treeNumber: Int
+        let distanceM: Int
+        var id: Int { treeNumber }
+    }
+
+    /// Peek "Measure this tree" beyond this distance from the pin asks
+    /// for confirmation first — measuring a tree you're not standing at
+    /// is usually a mis-tap on the wrong pin.
+    private static let farTreeWarnDistanceM: Double = 30
 
     public var body: some View {
         NavigationStack {
@@ -177,6 +197,23 @@ public struct MapHomeScreen: View {
             #endif
             .sheet(isPresented: $presentingChooser,
                    onDismiss: launchPendingChoice) { measureChooser }
+            // Far-GPS guard — confirm before measuring a tree whose pin
+            // is > 30 m from the current fix (usually a wrong-pin tap).
+            .alert(farTreeWarning.map {
+                       "Tree \($0.treeNumber) is \($0.distanceM) m away"
+                   } ?? "",
+                   isPresented: Binding(
+                       get: { farTreeWarning != nil },
+                       set: { if !$0 { farTreeWarning = nil } }),
+                   presenting: farTreeWarning) { warning in
+                Button("Measure anyway") {
+                    openChooser(scopedTo: warning.treeNumber)
+                }
+                .keyboardShortcut(.defaultAction)
+                Button("Cancel", role: .cancel) {}
+            } message: { warning in
+                Text("Your current GPS position is about \(warning.distanceM) m from this tree's pin. Measure it anyway?")
+            }
             .sheet(isPresented: $presentingLayers, onDismiss: {
                 if pendingOpenSettings {
                     pendingOpenSettings = false
@@ -382,74 +419,41 @@ public struct MapHomeScreen: View {
     // MARK: Top chrome
 
     private var topChrome: some View {
-        VStack(spacing: ForestixSpace.xs) {
-            HStack(spacing: ForestixSpace.xs) {
-                gpsChip
-                Spacer()
-                Button {
-                    presentingLayers = true
-                } label: {
-                    Image(systemName: "square.stack.3d.up")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(ForestixPalette.textSecondary)
-                        .frame(width: 44, height: 44)
-                        .background(Circle().fill(ForestixPalette.surfaceRaised))
-                        .overlay(Circle().stroke(ForestixPalette.divider, lineWidth: 1))
-                }
-                .buttonStyle(MapPressableStyle())
-                .accessibilityLabel("Basemap layers")
-                .accessibilityIdentifier("mapHome.layers")
-
-                // Appearance toggle — flips the saved appearance setting.
-                Button {
-                    settings.appearance = settings.appearance == "dark" ? "light" : "dark"
-                } label: {
-                    Image(systemName: settings.appearance == "dark" ? "sun.max.fill" : "moon.fill")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(ForestixPalette.textSecondary)
-                        .frame(width: 44, height: 44)
-                        .background(Circle().fill(ForestixPalette.surfaceRaised))
-                        .overlay(Circle().stroke(ForestixPalette.divider, lineWidth: 1))
-                }
-                .buttonStyle(MapPressableStyle())
-                .accessibilityLabel(settings.appearance == "dark"
-                    ? "Switch to light appearance" : "Switch to dark appearance")
-                .accessibilityIdentifier("mapHome.appearanceToggle")
+        HStack(spacing: ForestixSpace.xs) {
+            gpsChip
+            Spacer()
+            Button {
+                presentingLayers = true
+            } label: {
+                Image(systemName: "square.stack.3d.up")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(ForestixPalette.textSecondary)
+                    .frame(width: 44, height: 44)
+                    .background(Circle().fill(ForestixPalette.surfaceRaised))
+                    .overlay(Circle().stroke(ForestixPalette.divider, lineWidth: 1))
             }
-            .padding(.horizontal, 14)
+            .buttonStyle(MapPressableStyle())
+            .accessibilityLabel("Basemap layers")
+            .accessibilityIdentifier("mapHome.layers")
 
-            // The satellite base is built-in, so this hint only concerns
-            // the optional overlay (offline/no-network lives in the sheet).
-            if settings.tileURLTemplate == nil {
-                overlayHintChip
+            // Appearance toggle — flips the saved appearance setting.
+            Button {
+                settings.appearance = settings.appearance == "dark" ? "light" : "dark"
+            } label: {
+                Image(systemName: settings.appearance == "dark" ? "sun.max.fill" : "moon.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(ForestixPalette.textSecondary)
+                    .frame(width: 44, height: 44)
+                    .background(Circle().fill(ForestixPalette.surfaceRaised))
+                    .overlay(Circle().stroke(ForestixPalette.divider, lineWidth: 1))
             }
+            .buttonStyle(MapPressableStyle())
+            .accessibilityLabel(settings.appearance == "dark"
+                ? "Switch to light appearance" : "Switch to dark appearance")
+            .accessibilityIdentifier("mapHome.appearanceToggle")
         }
+        .padding(.horizontal, 14)
         .padding(.top, ForestixSpace.xs)
-    }
-
-    /// Mock ① `.tilelabel` — tappable nudge into the layers sheet while
-    /// no overlay template is configured.
-    private var overlayHintChip: some View {
-        Button {
-            presentingLayers = true
-        } label: {
-            Text("OVERLAY TILES · ADD A TEMPLATE IN SETTINGS")
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                .tracking(0.8)
-                .foregroundStyle(ForestixPalette.textTertiary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
-                .background(
-                    RoundedRectangle(cornerRadius: ForestixRadius.chip,
-                                     style: .continuous)
-                        .fill(ForestixPalette.surface))
-                .overlay(
-                    RoundedRectangle(cornerRadius: ForestixRadius.chip,
-                                     style: .continuous)
-                        .stroke(ForestixPalette.divider, lineWidth: 1))
-        }
-        .buttonStyle(MapPressableStyle())
-        .accessibilityIdentifier("mapHome.overlayHint")
     }
 
     /// A fix older than this reads as stale (dense canopy, canyon
@@ -929,19 +933,55 @@ public struct MapHomeScreen: View {
         photoViewer = PhotoViewerContext(entry: entry, title: peekTitle(pin))
     }
 
-    /// "Measure this tree" — opens the DBH cover pre-locked to the pin's
-    /// tree number via the same pendingTreeNumber pattern the hub uses.
+    /// Peek primary button. "Measure this tree" opens the measure
+    /// chooser SCOPED to the pin's tree number — after a far-GPS
+    /// confirmation when the current fix sits > 30 m from the pin (no
+    /// fix at all skips the check). A tree-less pin ("New measurement")
+    /// gets the plain chooser, same as the big (+).
     private func measureAgain(_ pin: MapPin) {
-        pendingTreeNumber = pin.treeNumber ?? history.suggestedNextTreeNumber
-        fullMeasurementChain = false
-        presentingDBHScan = true
+        guard let tree = pin.treeNumber else {
+            chooserTreeOverride = nil
+            presentingChooser = true
+            return
+        }
+        if let fix = location.latestSnapshot ?? LocationService.lastGlobalFix {
+            let distanceM = CoordinateConversions.haversineMeters(
+                CoordinateConversions.LatLon(latitude: fix.latitude,
+                                             longitude: fix.longitude),
+                CoordinateConversions.LatLon(latitude: pin.latitude,
+                                             longitude: pin.longitude))
+            if distanceM > Self.farTreeWarnDistanceM {
+                farTreeWarning = FarTreeWarning(
+                    treeNumber: tree,
+                    distanceM: Int(distanceM.rounded()))
+                return
+            }
+        }
+        openChooser(scopedTo: tree)
+    }
+
+    /// Present the measure chooser locked to `tree` — the Full / DBH /
+    /// Height rows record against it instead of the next free number.
+    private func openChooser(scopedTo tree: Int) {
+        chooserTreeOverride = tree
+        presentingChooser = true
     }
 
     // MARK: Measure chooser (mock ③)
 
+    /// Tree number the chooser's tree rows lock the reading to — the
+    /// peek-card override when set, else the next free number.
+    private var chooserTargetTree: Int {
+        chooserTreeOverride ?? history.suggestedNextTreeNumber
+    }
+
     private var measureChooser: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("MEASURE · TREE \(history.suggestedNextTreeNumber) (NEXT)")
+            // Scoped from a tree pin the header drops "(NEXT)" — this is
+            // THAT tree, not the next free number.
+            Text(chooserTreeOverride == nil
+                 ? "MEASURE · TREE \(chooserTargetTree) (NEXT)"
+                 : "MEASURE · TREE \(chooserTargetTree)")
                 .font(.system(size: 13, weight: .heavy))
                 .tracking(1.0)
                 .foregroundStyle(ForestixPalette.textTertiary)
@@ -951,21 +991,21 @@ public struct MapHomeScreen: View {
             chooserRow("Full measurement", "DBH → Height, one tree",
                        icon: "tree", accessibilityID: "mapHome.choose.full",
                        divided: true, emphasized: true) {
-                pendingTreeNumber = history.suggestedNextTreeNumber
+                pendingTreeNumber = chooserTargetTree
                 pendingChoice = .fullMeasurement
                 presentingChooser = false
             }
             chooserRow("Diameter (DBH)", "Depth · AR motion · AR caliper",
                        icon: "ruler", accessibilityID: "mapHome.choose.dbh",
                        divided: true) {
-                pendingTreeNumber = history.suggestedNextTreeNumber
+                pendingTreeNumber = chooserTargetTree
                 pendingChoice = .dbh
                 presentingChooser = false
             }
             chooserRow("Height", "Walk-off tangent · crown add-on",
                        icon: "arrow.up.and.down", accessibilityID: "mapHome.choose.height",
                        divided: true) {
-                pendingTreeNumber = history.suggestedNextTreeNumber
+                pendingTreeNumber = chooserTargetTree
                 pendingChoice = .height
                 presentingChooser = false
             }
@@ -1041,6 +1081,10 @@ public struct MapHomeScreen: View {
     /// Runs from the chooser sheet's onDismiss so the cover presents
     /// only after the sheet has fully gone.
     private func launchPendingChoice() {
+        // The tree rows copied any peek-card override into
+        // pendingTreeNumber before dismissing — clear it here (EVERY
+        // dismissal path) so the next plain (+) chooser is unscoped.
+        chooserTreeOverride = nil
         guard let choice = pendingChoice else { return }
         pendingChoice = nil
         fullMeasurementChain = (choice == .fullMeasurement)

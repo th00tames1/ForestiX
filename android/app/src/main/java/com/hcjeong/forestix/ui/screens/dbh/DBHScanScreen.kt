@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.outlined.ViewInAr
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
@@ -77,7 +78,6 @@ import com.hcjeong.forestix.sensors.VioMotionDbh
 import com.hcjeong.forestix.ui.MeasurePhotoStore
 import com.hcjeong.forestix.ui.PendingTreeNumber
 import com.hcjeong.forestix.ui.Routes
-import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.screens.ContinuationAction
 import com.hcjeong.forestix.ui.screens.ContinuationOrigin
 import com.hcjeong.forestix.ui.screens.MeasurementContinuationSheet
@@ -86,6 +86,7 @@ import com.hcjeong.forestix.ui.screens.CenteredText
 import com.hcjeong.forestix.ui.screens.DevHud
 import com.hcjeong.forestix.ui.screens.GPSAccuracyBadge
 import com.hcjeong.forestix.ui.screens.MeasureBackButton
+import com.hcjeong.forestix.ui.screens.MeasureCircleButton
 import com.hcjeong.forestix.ui.screens.MeasureControlColumn
 import com.hcjeong.forestix.ui.screens.MeasureFailureBanner
 import com.hcjeong.forestix.ui.screens.MeasureStatusPanel
@@ -126,6 +127,10 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // Manual DBH entry (typed cm) — mirror of the iOS .manualEntry state.
     var manualOpen by remember { mutableStateOf(false) }
     var manualText by remember { mutableStateOf("") }
+    // Accept-snapshot chrome blackout: while true, every 2D panel/button is
+    // hidden so the captured JPEG shows only the AR feed + measurement
+    // overlays (captured buttons read as real buttons in the photo viewer).
+    var hidingChromeForCapture by remember { mutableStateOf(false) }
     // Scan metadata (species / position / damage / note) attached on Accept.
     var metaSpecies by remember { mutableStateOf<String?>(null) }
     var metaPosition by remember { mutableStateOf<StemPosition?>(StemPosition.DBH) }
@@ -388,7 +393,15 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         // service.
         val activity = context as? android.app.Activity
         scope.launch {
-            val photo = activity?.let { MeasurePhotoStore.captureWindow(it) }
+            // Chrome-less snapshot: hide the 2D chrome, give Compose one
+            // committed frame, capture, then restore.
+            val photo = activity?.let {
+                hidingChromeForCapture = true
+                delay(80)
+                val name = MeasurePhotoStore.captureWindow(it)
+                hidingChromeForCapture = false
+                name
+            }
             val fix = com.hcjeong.forestix.positioning.LocationService.lastGlobalFix
             env.history.append(
                 QuickMeasureEntry(
@@ -479,16 +492,16 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             )
         }
 
-        MeasureBackButton { nav.popBackStack() }
+        if (!hidingChromeForCapture) MeasureBackButton { nav.popBackStack() }
 
         // GPS-accuracy pill on the top strip — leading 72 / top 22, clear of
         // the floating back button (same offsets as iOS DBHScanScreen).
-        GPSAccuracyBadge(
+        if (!hidingChromeForCapture) GPSAccuracyBadge(
             Modifier
                 .align(Alignment.TopStart)
                 .padding(start = 72.dp, top = 22.dp))
 
-        if (settings.developerMode) {
+        if (settings.developerMode && !hidingChromeForCapture) {
             val p = preview
             DevHud(
                 "DBH",
@@ -593,26 +606,54 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 DbhRing(locked, colors.confidenceOk, colors.confidenceBad, Modifier.align(Alignment.Center))
                 // Device-tilt badge floating just above the ring so the
                 // cruiser sees level at the same focal point (iOS TiltBadge
-                // at midY − ringRadius − 22).
-                Box(Modifier.align(Alignment.Center).offset(y = (-58).dp)) {
-                    TiltBadge(controller)
-                }
-                // Live preview badge just below the ring.
-                Box(Modifier.align(Alignment.Center).offset(y = 64.dp)) {
-                    LivePreviewBadge(preview, locked, settings.unitSystem)
+                // at midY − ringRadius − 22). Both badges are 2D chrome, so
+                // the accept snapshot drops them (ring + chord stay).
+                if (!hidingChromeForCapture) {
+                    Box(Modifier.align(Alignment.Center).offset(y = (-58).dp)) {
+                        TiltBadge(controller)
+                    }
+                    // Live preview badge just below the ring.
+                    Box(Modifier.align(Alignment.Center).offset(y = 64.dp)) {
+                        LivePreviewBadge(preview, locked, settings.unitSystem)
+                    }
                 }
             }
         }
 
-        if (stage == Stage.AIMING && !depthBlocked &&
-            (captureMethod == DbhCaptureMethod.DEPTH || captureMethod == DbhCaptureMethod.MOTION)
-        ) {
-            MeasureControlColumn(onCapture = {
-                if (captureMethod == DbhCaptureMethod.MOTION) startMotionSweep() else capture()
-            })
+        if (stage == Stage.AIMING && !depthBlocked && !hidingChromeForCapture) {
+            if (captureMethod == DbhCaptureMethod.CALIPER) {
+                // The caliper captures via the trunk-edge taps, so there is
+                // no "+" — but the Manual escape hatch keeps its rail slot
+                // (hidden while the typed-entry row is open).
+                if (!manualOpen) {
+                    Column(
+                        modifier = Modifier.align(Alignment.CenterEnd).padding(end = 18.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        MeasureCircleButton(icon = Icons.Filled.Keyboard, caption = "Manual") {
+                            manualOpen = true; manualText = ""
+                        }
+                    }
+                }
+            } else {
+                MeasureControlColumn(
+                    onCapture = {
+                        if (captureMethod == DbhCaptureMethod.MOTION) startMotionSweep() else capture()
+                    },
+                    // Manual entry rides the rail directly below the capture
+                    // "+" (hidden while the typed-entry row is open).
+                    extra = if (!manualOpen) {
+                        {
+                            MeasureCircleButton(icon = Icons.Filled.Keyboard, caption = "Manual") {
+                                manualOpen = true; manualText = ""
+                            }
+                        }
+                    } else null,
+                )
+            }
         }
 
-        if (!depthBlocked) MeasureStatusPanel(
+        if (!depthBlocked && !hidingChromeForCapture) MeasureStatusPanel(
             // Developer-mode method picker floats 12 dp above the status
             // panel while aiming (iOS dbhMethodPicker placement).
             above = if (stage == Stage.AIMING && settings.developerMode) {
@@ -662,62 +703,49 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             )
             // Manual entry — typed diameter for trees the sensors can't read
             // (mirrors the iOS .manualEntry state, method "manualVisual").
-            if (stage == Stage.AIMING) {
-                if (manualOpen) {
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+            // Opened from the rail's Manual button under the capture "+".
+            if (stage == Stage.AIMING && manualOpen) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    OutlinedTextField(
+                        value = manualText,
+                        onValueChange = { manualText = it.filter { c -> c.isDigit() || c == '.' } },
+                        placeholder = {
+                            Text(
+                                if (settings.unitSystem == UnitSystem.METRIC) "Diameter in cm"
+                                else "Diameter in inches",
+                            )
+                        },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.weight(1f),
+                    )
+                    ForestixProminentButton(
+                        "Save",
+                        enabled = (manualText.toFloatOrNull() ?: 0f) > 0f,
                     ) {
-                        OutlinedTextField(
-                            value = manualText,
-                            onValueChange = { manualText = it.filter { c -> c.isDigit() || c == '.' } },
-                            placeholder = {
-                                Text(
-                                    if (settings.unitSystem == UnitSystem.METRIC) "Diameter in cm"
-                                    else "Diameter in inches",
-                                )
-                            },
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                            modifier = Modifier.weight(1f),
-                        )
-                        ForestixProminentButton(
-                            "Save",
-                            enabled = (manualText.toFloatOrNull() ?: 0f) > 0f,
-                        ) {
-                            val cm = manualText.toFloatOrNull()
-                            if (cm != null && cm > 0f) {
-                                val r = DBHResult(
-                                    diameterCm = cm, centerX = 0f, centerZ = 0f,
-                                    arcCoverageDeg = 0f, rmseMm = 0f, sigmaRmm = 0f,
-                                    nInliers = 0, confidence = ConfidenceTier.YELLOW,
-                                    method = DBHMethod.MANUAL_VISUAL, rejectionReason = null,
-                                )
-                                result = r
-                                failure = null
-                                manualOpen = false
-                                // iOS submitManualEntry goes straight to
-                                // .accepted — record and continue.
-                                acceptResult(r)
-                            }
+                        val cm = manualText.toFloatOrNull()
+                        if (cm != null && cm > 0f) {
+                            val r = DBHResult(
+                                diameterCm = cm, centerX = 0f, centerZ = 0f,
+                                arcCoverageDeg = 0f, rmseMm = 0f, sigmaRmm = 0f,
+                                nInliers = 0, confidence = ConfidenceTier.YELLOW,
+                                method = DBHMethod.MANUAL_VISUAL, rejectionReason = null,
+                            )
+                            result = r
+                            failure = null
+                            manualOpen = false
+                            // iOS submitManualEntry goes straight to
+                            // .accepted — record and continue.
+                            acceptResult(r)
                         }
                     }
-                    ForestixBorderedButton("Cancel", modifier = Modifier.fillMaxWidth()) {
-                        manualOpen = false
-                    }
-                } else {
-                    // Escape hatch for trees the sensors can't read — plain
-                    // text button, primary tint (iOS "Enter manually").
-                    Text(
-                        "Enter manually",
-                        style = Forestix.type.body,
-                        color = colors.primary,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier
-                            .clickableNoRipple { manualOpen = true; manualText = "" }
-                            .padding(vertical = 2.dp),
-                    )
+                }
+                ForestixBorderedButton("Cancel", modifier = Modifier.fillMaxWidth()) {
+                    manualOpen = false
                 }
             }
             if (stage == Stage.RESULT) result?.let { r ->

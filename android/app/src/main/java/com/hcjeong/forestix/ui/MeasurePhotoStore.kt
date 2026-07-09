@@ -3,9 +3,11 @@
 // MeasurePhotoStore: one file per entry under filesDir/measure-photos/,
 // QuickMeasureEntry.photoPath holds just the filename.
 //
-// The capture is the WHOLE window (AR feed + aiming overlay + value panel)
-// via PixelCopy — evidence of what was aimed at and what the instrument
-// showed, matching the iOS window snapshot.
+// The capture is the WHOLE window via PixelCopy — but the scan screens
+// hide their 2D chrome (panels, buttons, badges) for the capture frame, so
+// the JPEG is the AR feed + measurement overlays only: evidence of what
+// was aimed at, without fake-looking buttons in the photo viewer
+// (matches the iOS window snapshot).
 
 package com.hcjeong.forestix.ui
 

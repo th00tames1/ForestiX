@@ -130,6 +130,16 @@ class MapCameraState {
     internal var viewportSizePx: IntSize by mutableStateOf(IntSize.Zero)
     internal var densityScale: Float = 1f
 
+    /// One-shot host-requested camera move — MapView consumes and clears it.
+    internal var pendingMove: Pair<CoordinateConversions.LatLon, Double>? by mutableStateOf(null)
+
+    /// Recentre on `target` at `zoom` — the same snap the map does when the
+    /// host's `center` parameter changes, but usable when that parameter
+    /// hasn't changed (my-location button after the user panned away).
+    fun moveTo(target: CoordinateConversions.LatLon, zoom: Double) {
+        pendingMove = target to zoom
+    }
+
     /// Lat/lon corners of what's on screen as an outer ring (NW, NE, SE,
     /// SW) — the shape OfflineBasemap.planJob consumes. Null until the map
     /// has laid out and produced a camera.
@@ -197,6 +207,15 @@ fun MapView(
     LaunchedEffect(camCenter, camZoom) {
         cameraState?.let { it.center = camCenter; it.zoom = camZoom }
         onCameraChange?.invoke(camCenter, camZoom)
+    }
+
+    // Host-requested one-shot move (MapCameraState.moveTo — my-location
+    // button): same snap recentre as a `center` change, plus a zoom.
+    LaunchedEffect(cameraState?.pendingMove) {
+        val move = cameraState?.pendingMove ?: return@LaunchedEffect
+        camCenter = move.first
+        camZoom = move.second.coerceIn(3.0, 24.0)
+        cameraState.pendingMove = null
     }
 
     // Pulse phase for the "you" dot; only read during draw when a location

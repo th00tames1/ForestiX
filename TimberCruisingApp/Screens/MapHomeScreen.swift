@@ -68,10 +68,10 @@ public struct MapHomeScreen: View {
     /// the moment the screen appears, independent of any scan screen.
     @StateObject private var location = LocationService()
 
-    /// Seoul-ish fallback — used only when there is no fix and no
-    /// located entry (fresh install, indoors).
+    /// Peavy Hall (OSU College of Forestry) fallback — used only when
+    /// there is no fix and no located reading.
     private static let fallbackCamera = BasemapCamera(
-        latitude: 37.5665, longitude: 126.9780, zoom: 16)
+        latitude: 44.56417, longitude: -123.28556, zoom: 16)
 
     @State private var camera = MapHomeScreen.fallbackCamera
     @State private var cameraInitialised = false
@@ -422,6 +422,30 @@ public struct MapHomeScreen: View {
         HStack(spacing: ForestixSpace.xs) {
             gpsChip
             Spacer()
+            // My-location — jump the camera back to the newest fix (this
+            // screen's live service, else the last fix any screen saved).
+            // No fix yet: the button dims and the tap is a no-op.
+            let locateFix = location.latestSnapshot ?? LocationService.lastGlobalFix
+            Button {
+                guard let fix = locateFix else { return }
+                withAnimation(.easeOut(duration: 0.3)) {
+                    camera = BasemapCamera(latitude: fix.latitude,
+                                           longitude: fix.longitude,
+                                           zoom: max(camera.zoom, 16))
+                }
+            } label: {
+                Image(systemName: "location.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(ForestixPalette.textSecondary)
+                    .frame(width: 44, height: 44)
+                    .background(Circle().fill(ForestixPalette.surfaceRaised))
+                    .overlay(Circle().stroke(ForestixPalette.divider, lineWidth: 1))
+            }
+            .buttonStyle(MapPressableStyle())
+            .opacity(locateFix == nil ? 0.45 : 1)
+            .accessibilityLabel("My location")
+            .accessibilityIdentifier("mapHome.locate")
+
             Button {
                 presentingLayers = true
             } label: {

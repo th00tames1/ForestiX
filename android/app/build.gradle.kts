@@ -7,7 +7,9 @@ plugins {
 
 android {
     namespace = "com.hcjeong.forestix"
-    compileSdk = 34
+    // 35: androidx.core 1.16 (transitive via the 16 KB-aligned deps)
+    // requires it. targetSdk stays 34 — no runtime behaviour change.
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.hcjeong.forestix"
@@ -39,6 +41,10 @@ android {
 
     packaging {
         resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" }
+        // 16 KB page-size devices (Android 15+): native libs must ship
+        // uncompressed + zip-aligned so the OS can map them directly.
+        // Modern-AGP default, pinned explicitly.
+        jniLibs { useLegacyPackaging = false }
     }
 }
 
@@ -63,15 +69,22 @@ dependencies {
     implementation("androidx.room:room-runtime:2.6.1")
     implementation("androidx.room:room-ktx:2.6.1")
     ksp("androidx.room:room-compiler:2.6.1")
-    implementation("androidx.datastore:datastore-preferences:1.1.1")
+    // 1.1.2+ ships a 16 KB-aligned libdatastore_shared_counter.so.
+    implementation("androidx.datastore:datastore-preferences:1.1.7")
+    // Compose's transitive graphics-path 1.0.1 predates the 16 KB ELF
+    // alignment; 1.1.0 is aligned (libandroidx.graphics.path.so).
+    implementation("androidx.graphics:graphics-path:1.1.0")
 
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.1")
 
     // AR — ARCore + SceneView (Sceneform successor) for placing world
     // anchored markers and depth/plane hit-testing, mirroring ARKit +
-    // RealityKit on the iOS side.
-    implementation("com.google.ar:core:1.44.0")
-    implementation("io.github.sceneview:arsceneview:2.2.1")
+    // RealityKit on the iOS side. ARCore ≥ 1.49 and SceneView 2.3.0
+    // (bundles Filament 1.56) ship 16 KB-aligned .so files. NOTE:
+    // SceneView 2.3.1+ needs Kotlin 2.2 / Compose 1.10 / compileSdk 35 —
+    // beyond what Gradle 8.9 + Kotlin 2.0.20 support here.
+    implementation("com.google.ar:core:1.54.0")
+    implementation("io.github.sceneview:arsceneview:2.3.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

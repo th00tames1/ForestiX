@@ -108,6 +108,12 @@ private enum class Stage { AIMING, CAPTURING, RESULT }
 /// are kept (2 largest deviations trimmed) and averaged.
 private const val SAMPLE_COUNT = 5
 
+/// Consecutive bad/absent per-frame fits tolerated while locked before the
+/// HUD drops back to aiming (iOS `redResetCount` parity). Without this a
+/// single unusable frame flipped ring/chord/badge/status every tick — the
+/// field-reported "screen flashing" during aiming.
+private const val PREVIEW_MISS_RESET = 3
+
 /// `chainToHeight` = launched from the map-home "Full measurement" row
 /// ("dbh?chain=true"): Accept saves the diameter, skips the continuation
 /// dialog, and goes straight to Height on the same tree.
@@ -196,10 +202,22 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // User-selected per-frame chord algorithm (silhouette = iOS-identical).
     val chordAlgorithm = ChordAlgorithm.fromRaw(settings.dbhChordAlgorithm)
 
-    // Preview smoothing (EMA α=0.3 on the diameter, iOS parity) + a short
-    // lock streak so the digit + cylinder don't flicker on a single frame.
+    // Preview smoothing (EMA α=0.3 on the diameter + distance, iOS parity)
+    // + a short lock streak so the digit + cylinder don't flicker on a
+    // single frame.
     var smoothedDiaCm by remember { mutableStateOf<Float?>(null) }
+    var smoothedDistM by remember { mutableStateOf<Float?>(null) }
     var lockStreak by remember { mutableStateOf(0) }
+    // Dropout hysteresis: while locked, up to PREVIEW_MISS_RESET−1
+    // consecutive misses HOLD the last smoothed preview instead of
+    // unlocking — ring colour, chord, badge and status text stay steady
+    // through one-frame fit dropouts (iOS tolerates transient reds the
+    // same way).
+    var missStreak by remember { mutableStateOf(0) }
+    // Shown preview tier only flips after 2 consecutive frames agree, so
+    // the green chip can't blink in/out on the raw per-frame CoV.
+    var shownTier by remember { mutableStateOf(ConfidenceTier.YELLOW) }
+    var tierStreak by remember { mutableStateOf(0) }
     // Translucent 3D trunk cylinder at the live fit (quantised to ~1 cm so
     // ArCameraView doesn't rebuild its nodes every frame while holding).
     var cylinderMarker by remember { mutableStateOf<ArSceneMarker?>(null) }
@@ -213,12 +231,26 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     f, f.width / 2.0, f.height / 2.0, axis, calibration, chordAlgorithm,
                 )
                 if (raw != null && raw.locked) {
+                    missStreak = 0
                     val prev = smoothedDiaCm
                     val sm = if (prev == null) raw.diameterCm else 0.3f * raw.diameterCm + 0.7f * prev
                     smoothedDiaCm = sm
+                    val prevD = smoothedDistM
+                    val smD = if (prevD == null) raw.distanceM else 0.3f * raw.distanceM + 0.7f * prevD
+                    smoothedDistM = smD
                     lockStreak = (lockStreak + 1).coerceAtMost(10)
                     val shownLocked = lockStreak >= 2
-                    preview = raw.copy(diameterCm = sm, locked = shownLocked)
+                    // Tier hysteresis — flip only after 2 frames agree.
+                    if (raw.tier == shownTier) {
+                        tierStreak = 0
+                    } else {
+                        tierStreak += 1
+                        if (tierStreak >= 2) { shownTier = raw.tier; tierStreak = 0 }
+                    }
+                    preview = raw.copy(
+                        diameterCm = sm, distanceM = smD,
+                        locked = shownLocked, tier = shownTier,
+                    )
                     val cam = controller.currentCameraPosition()
                     val hit = controller.screenCenterHit()
                     cylinderMarker = if (shownLocked && cam != null && hit != null) {
@@ -234,9 +266,18 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                             floatArrayOf(0.30f, 0.65f, 1.0f, 0.45f),
                         )
                     } else null
+                } else if (preview?.locked == true && missStreak < PREVIEW_MISS_RESET - 1) {
+                    // Transient dropout while locked — hold the last smoothed
+                    // preview (ring, chord, badge and status text stay put).
+                    // Only PREVIEW_MISS_RESET consecutive misses unlock.
+                    missStreak += 1
                 } else {
+                    missStreak = 0
                     smoothedDiaCm = null
+                    smoothedDistM = null
                     lockStreak = 0
+                    tierStreak = 0
+                    shownTier = ConfidenceTier.YELLOW
                     cylinderMarker = null
                     preview = raw
                 }
@@ -672,6 +713,10 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                             caliperStep = 0; leftRay = null; leftOffset = null
                             result = null; failure = null
                             preview = null          // drop the stale depth fit
+                            smoothedDiaCm = null; smoothedDistM = null
+                            lockStreak = 0; missStreak = 0
+                            shownTier = ConfidenceTier.YELLOW; tierStreak = 0
+                            cylinderMarker = null
                             stage = Stage.AIMING
                         },
                         depthEnabled = controller.supportsDepth,

@@ -55,6 +55,7 @@ import androidx.compose.material.icons.filled.Height
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Park
 import androidx.compose.material.icons.filled.Straighten
 import androidx.compose.material.icons.filled.SwapHoriz
@@ -125,14 +126,15 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.PI
+import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
-/// Seoul-ish fallback — used only when there is no fix and no located
-/// reading (fresh install, indoors). Mirrors iOS `fallbackCamera`.
-private val DefaultCenter = CoordinateConversions.LatLon(latitude = 37.5665, longitude = 126.9780)
+/// Peavy Hall (OSU College of Forestry) fallback — used only when there is
+/// no fix and no located reading. Mirrors iOS `fallbackCamera`.
+private val DefaultCenter = CoordinateConversions.LatLon(latitude = 44.56417, longitude = -123.28556)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -170,7 +172,7 @@ fun MapHomeScreen(nav: NavController) {
 
     val pins = remember(entries) { buildTreePins(entries) }
 
-    // Last fix → else newest located reading → else the Seoul fallback,
+    // Last fix → else newest located reading → else the Peavy Hall fallback,
     // always at zoom 16 (iOS startUp()).
     val initialCamera = remember {
         val fromFix = LocationService.lastGlobalFix?.let {
@@ -262,6 +264,23 @@ fun MapHomeScreen(nav: NavController) {
             ) {
                 GpsChip(fix)
                 Spacer(Modifier.weight(1f))
+                // My-location: recentre on the freshest fix (this screen's
+                // live service, else the last global fix) without ever
+                // zooming OUT past 16. Dimmed no-op until any fix exists.
+                val locateSnap = fix ?: LocationService.lastGlobalFix
+                RoundChromeButton(
+                    Icons.Filled.MyLocation,
+                    "My location",
+                    enabled = locateSnap != null,
+                ) {
+                    locateSnap?.let {
+                        camera.moveTo(
+                            CoordinateConversions.LatLon(
+                                latitude = it.latitude, longitude = it.longitude),
+                            zoom = max(camera.zoom, 16.0),
+                        )
+                    }
+                }
                 RoundChromeButton(Icons.Filled.Layers, "Basemap layers") { offlineOpen = true }
                 val dark = settings.appearance == "dark"
                 RoundChromeButton(
@@ -608,18 +627,21 @@ private fun GpsCoordRow(label: String, value: String) {
 }
 
 /// Mock `.roundbtn`, sized to the 44 dp hit-target rule, with the shared
-/// map-chrome pressed feedback (iOS MapPressableStyle).
+/// map-chrome pressed feedback (iOS MapPressableStyle). `enabled = false`
+/// renders the 0.45-alpha disabled look and swallows taps.
 @Composable
 private fun RoundChromeButton(
     icon: ImageVector,
     contentDescription: String,
+    enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
     val colors = Forestix.colors
     Box(
         Modifier
             .size(44.dp)
-            .pressableNoRipple(onClick = onClick)
+            .alpha(if (enabled) 1f else 0.45f)
+            .pressableNoRipple(enabled = enabled, onClick = onClick)
             .clip(CircleShape)
             .background(colors.surfaceRaised)
             .border(1.dp, colors.divider, CircleShape),

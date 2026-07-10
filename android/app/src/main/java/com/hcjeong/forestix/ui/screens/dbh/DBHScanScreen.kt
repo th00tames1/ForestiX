@@ -207,6 +207,11 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // single frame.
     var smoothedDiaCm by remember { mutableStateOf<Float?>(null) }
     var smoothedDistM by remember { mutableStateOf<Float?>(null) }
+    // Cylinder anchor — EMA over the screen-centre hit (iOS
+    // smoothedCenterWorldXZ parity), held through one-frame hit-test
+    // misses. The raw per-frame hit wandered across the marker's 1 cm
+    // quantisation grid, changing the marker value nearly every tick.
+    var smoothedHitAnchor by remember { mutableStateOf<Vec3?>(null) }
     var lockStreak by remember { mutableStateOf(0) }
     // Dropout hysteresis: while locked, up to PREVIEW_MISS_RESET−1
     // consecutive misses HOLD the last smoothed preview instead of
@@ -218,8 +223,10 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // the green chip can't blink in/out on the raw per-frame CoV.
     var shownTier by remember { mutableStateOf(ConfidenceTier.YELLOW) }
     var tierStreak by remember { mutableStateOf(0) }
-    // Translucent 3D trunk cylinder at the live fit (quantised to ~1 cm so
-    // ArCameraView doesn't rebuild its nodes every frame while holding).
+    // Translucent 3D trunk cylinder at the live fit. Quantised to ~1 cm so
+    // the value only changes on a real move; ArCameraView then MOVES the
+    // existing node and rebuilds Filament resources only when the quantised
+    // radius itself changes.
     var cylinderMarker by remember { mutableStateOf<ArSceneMarker?>(null) }
 
     // Live single-frame preview loop while aiming (depth method only).
@@ -251,14 +258,30 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         diameterCm = sm, distanceM = smD,
                         locked = shownLocked, tier = shownTier,
                     )
+                    // Anchor EMA (α=0.3): the marker follows a stable trunk
+                    // point instead of the jittery per-frame hit; a null
+                    // hit this tick just holds the last anchor.
+                    controller.screenCenterHit()?.let { hitRaw ->
+                        val ph = smoothedHitAnchor
+                        smoothedHitAnchor = if (ph == null) hitRaw else Vec3(
+                            0.3f * hitRaw.x + 0.7f * ph.x,
+                            0.3f * hitRaw.y + 0.7f * ph.y,
+                            0.3f * hitRaw.z + 0.7f * ph.z,
+                        )
+                    }
                     val cam = controller.currentCameraPosition()
-                    val hit = controller.screenCenterHit()
-                    cylinderMarker = if (shownLocked && cam != null && hit != null) {
+                    val hit = smoothedHitAnchor
+                    cylinderMarker = if (shownLocked && hit != null) {
                         val rM = sm / 100f / 2f
-                        val dx = hit.x - cam.x; val dy = hit.y - cam.y; val dz = hit.z - cam.z
-                        val len = kotlin.math.sqrt(dx * dx + dy * dy + dz * dz)
-                        val cx = if (len > 1e-3f) hit.x + dx / len * rM else hit.x
-                        val cz = if (len > 1e-3f) hit.z + dz / len * rM else hit.z
+                        // Push the centre back by one radius along the view
+                        // ray (the hit is the trunk's FRONT surface).
+                        var cx = hit.x
+                        var cz = hit.z
+                        if (cam != null) {
+                            val dx = hit.x - cam.x; val dy = hit.y - cam.y; val dz = hit.z - cam.z
+                            val len = kotlin.math.sqrt(dx * dx + dy * dy + dz * dz)
+                            if (len > 1e-3f) { cx = hit.x + dx / len * rM; cz = hit.z + dz / len * rM }
+                        }
                         fun q(v: Float) = Math.round(v * 100f) / 100f   // 1 cm grid → stable equality
                         ArSceneMarker(
                             Vec3(q(cx), q(hit.y), q(cz)),
@@ -275,6 +298,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     missStreak = 0
                     smoothedDiaCm = null
                     smoothedDistM = null
+                    smoothedHitAnchor = null
                     lockStreak = 0
                     tierStreak = 0
                     shownTier = ConfidenceTier.YELLOW
@@ -714,6 +738,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                             result = null; failure = null
                             preview = null          // drop the stale depth fit
                             smoothedDiaCm = null; smoothedDistM = null
+                            smoothedHitAnchor = null
                             lockStreak = 0; missStreak = 0
                             shownTier = ConfidenceTier.YELLOW; tierStreak = 0
                             cylinderMarker = null

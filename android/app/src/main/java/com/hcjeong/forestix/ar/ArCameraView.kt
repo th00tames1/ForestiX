@@ -149,31 +149,53 @@ private fun ArSceneHost(
     // from the camera distance (see onSessionUpdated below).
     val scalingNodes = remember { mutableListOf<Pair<Node, Vec3>>() }
 
-    // Rebuild marker nodes whenever the marker set changes. Done in a
+    // Sync marker nodes whenever the marker set changes. Done in a
     // side-effect (not inline during composition) so we don't mutate the
-    // snapshot node list mid-composition.
+    // snapshot node list mid-composition. Position-only changes MOVE the
+    // existing nodes (transform update in place); Filament resources are
+    // destroyed and rebuilt only when the marker STRUCTURE (count, shape
+    // size, colour, scaling flag) actually changes — destroy+recreate on
+    // every 1 cm position step made the translucent DBH trunk cylinder
+    // blink at preview rate while locked.
+    val builtMarkers = remember { mutableListOf<ArSceneMarker>() }
     androidx.compose.runtime.LaunchedEffect(markers) {
-        // Destroy the previous nodes' native (Filament) resources before
-        // dropping them — clearing the list alone leaks geometry/material
-        // every rebuild, which piles up into progressively worse lag.
-        scalingNodes.clear()
-        childNodes.forEach { runCatching { it.destroy() } }
-        childNodes.clear()
-        markers.forEach { marker ->
-            val color = marker.colorRGBA
-            val material = materialLoader.createColorInstance(
-                color = dev.romainguy.kotlin.math.Float4(color[0], color[1], color[2], color[3]),
-                metallic = 0f, roughness = 1f, reflectance = 0f,
-            )
-            val node: Node = when (val s = marker.shape) {
-                is MarkerShape.Sphere -> SphereNode(engine, radius = s.radiusM, materialInstance = material)
-                is MarkerShape.Cylinder -> CylinderNode(engine, radius = s.radiusM, height = s.heightM, materialInstance = material)
-                is MarkerShape.Ring -> buildRingNode(engine, s, material)
-            }
-            node.worldPosition = Float3(marker.worldPosition.x, marker.worldPosition.y, marker.worldPosition.z)
-            childNodes.add(node)
-            if (marker.scalesWithDistance) scalingNodes.add(node to marker.worldPosition)
+        val moveOnly = markers.size == builtMarkers.size && markers.indices.all { i ->
+            val new = markers[i]; val old = builtMarkers[i]
+            new.shape == old.shape && new.colorRGBA.contentEquals(old.colorRGBA) &&
+                new.scalesWithDistance == old.scalesWithDistance
         }
+        if (moveOnly) {
+            scalingNodes.clear()
+            markers.forEachIndexed { i, marker ->
+                childNodes[i].worldPosition = Float3(
+                    marker.worldPosition.x, marker.worldPosition.y, marker.worldPosition.z)
+                if (marker.scalesWithDistance) scalingNodes.add(childNodes[i] to marker.worldPosition)
+            }
+        } else {
+            // Destroy the previous nodes' native (Filament) resources before
+            // dropping them — clearing the list alone leaks geometry/material
+            // every rebuild, which piles up into progressively worse lag.
+            scalingNodes.clear()
+            childNodes.forEach { runCatching { it.destroy() } }
+            childNodes.clear()
+            markers.forEach { marker ->
+                val color = marker.colorRGBA
+                val material = materialLoader.createColorInstance(
+                    color = dev.romainguy.kotlin.math.Float4(color[0], color[1], color[2], color[3]),
+                    metallic = 0f, roughness = 1f, reflectance = 0f,
+                )
+                val node: Node = when (val s = marker.shape) {
+                    is MarkerShape.Sphere -> SphereNode(engine, radius = s.radiusM, materialInstance = material)
+                    is MarkerShape.Cylinder -> CylinderNode(engine, radius = s.radiusM, height = s.heightM, materialInstance = material)
+                    is MarkerShape.Ring -> buildRingNode(engine, s, material)
+                }
+                node.worldPosition = Float3(marker.worldPosition.x, marker.worldPosition.y, marker.worldPosition.z)
+                childNodes.add(node)
+                if (marker.scalesWithDistance) scalingNodes.add(node to marker.worldPosition)
+            }
+        }
+        builtMarkers.clear()
+        builtMarkers.addAll(markers)
     }
 
     DisposableEffect(Unit) {

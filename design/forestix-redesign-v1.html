@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html lang="ko" data-dir="a" data-mode="light" data-screen="hub">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ForestiX 재디자인 — 방향 A/B/C × 핵심 화면 5</title>
+<style>
+/* =====================================================================
+   ForestiX redesign exploration — 3 directions × 5 core screens.
+
+   DESIGN NOTES (thinking out loud, per process):
+   - Root vocabulary observed in DesignSystem.swift/.kt: forest green
+     primary #2D5F4A, birch accent #C9A76B, muted tier colours, mono
+     data type, 4pt spacing scale, radii 6/10/12, "instrument not a
+     consumer app" philosophy. All three directions keep: mono data
+     numerals, semantic tier tokens, one primary action per screen.
+   - Direction A refines what exists (safe). B bets on outdoor
+     legibility (the app is used in forests, in sunlight, with gloves).
+     C bets on the "measurement ledger" identity (data-document feel).
+   - AR camera areas use an honest placeholder (labelled), not fake
+     photography.
+   ===================================================================== */
+
+/* ---------- viewer chrome (not part of the design) ---------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #ECEEEC;
+  color: #1D211F;
+  display: flex;
+  min-height: 100vh;
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
+.rail {
+  width: 320px; flex: 0 0 320px;
+  padding: 24px 20px;
+  border-right: 1px solid #D5D9D5;
+  background: #F5F6F4;
+  overflow-y: auto;
+}
+.rail h1 { font-size: 17px; font-weight: 700; letter-spacing: -0.01em; }
+.rail .sub { font-size: 12px; color: #5D655F; margin-top: 4px; line-height: 1.5; }
+.rail h2 {
+  font-size: 11px; font-weight: 700; letter-spacing: .08em;
+  color: #7A827C; margin: 24px 0 8px; text-transform: uppercase;
+}
+.dir-card {
+  display: block; width: 100%; text-align: left;
+  border: 1px solid #D5D9D5; border-radius: 10px;
+  background: #FFFFFF; padding: 10px 12px; margin-bottom: 8px;
+  cursor: pointer; font: inherit;
+  transition: border-color .2s ease, box-shadow .2s ease;
+}
+.dir-card:hover { border-color: #9AA69E; }
+.dir-card:focus-visible { outline: 2px solid #2D5F4A; outline-offset: 2px; }
+.dir-card[aria-pressed="true"] { border-color: #2D5F4A; box-shadow: 0 0 0 1px #2D5F4A inset; }
+.dir-card .name { font-size: 13px; font-weight: 700; }
+.dir-card .why { font-size: 11.5px; color: #5D655F; margin-top: 2px; line-height: 1.45; }
+.dir-swatches { display: flex; gap: 4px; margin-top: 7px; }
+.dir-swatches i { width: 18px; height: 18px; border-radius: 4px; border: 1px solid rgba(0,0,0,.12); }
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+.tab {
+  font: inherit; font-size: 12px; font-weight: 600;
+  padding: 7px 11px; border-radius: 8px; cursor: pointer;
+  border: 1px solid #D5D9D5; background: #FFFFFF; color: #333B36;
+  transition: background .2s ease, border-color .2s ease;
+}
+.tab:hover { border-color: #9AA69E; }
+.tab:focus-visible { outline: 2px solid #2D5F4A; outline-offset: 2px; }
+.tab[aria-pressed="true"] { background: #2D5F4A; border-color: #2D5F4A; color: #F5F6F4; }
+.mode-row { display: none; }
+:root[data-dir="a"] .mode-row { display: flex; gap: 6px; }
+.note {
+  font-size: 11.5px; color: #5D655F; line-height: 1.55;
+  border-top: 1px solid #D5D9D5; margin-top: 24px; padding-top: 12px;
+}
+.stage {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  padding: 32px; overflow: auto;
+}
+.phone {
+  width: 390px; height: 800px; flex: 0 0 auto;
+  border-radius: 40px; overflow: hidden; position: relative;
+  box-shadow: 0 24px 60px rgba(20,30,24,.28), 0 0 0 10px #23272A, 0 0 0 12px #3A4040;
+  background: var(--canvas);
+  color: var(--text-1);
+  font-family: var(--font-ui);
+}
+.screen { display: none; position: absolute; inset: 0; overflow: hidden; }
+:root[data-screen="hub"]      .screen[data-screen="hub"],
+:root[data-screen="dbh"]      .screen[data-screen="dbh"],
+:root[data-screen="height"]   .screen[data-screen="height"],
+:root[data-screen="log"]      .screen[data-screen="log"],
+:root[data-screen="settings"] .screen[data-screen="settings"] { display: block; }
+
+/* =====================================================================
+   DESIGN TOKENS — the actual redesign. One block per direction.
+   ===================================================================== */
+
+/* ---------- A · Forest Instrument (refined current) ---------- */
+:root[data-dir="a"][data-mode="light"] .phone {
+  --canvas: #F6F7F4;          /* toned white, not #FFF */
+  --surface: #FFFFFF;
+  --surface-2: #EEF0EC;
+  --divider: #E0E3DE;
+  --text-1: #1B201D;
+  --text-2: #5C645E;
+  --text-3: #9AA19B;
+  --primary: #2D5F4A;         /* existing forest green, kept */
+  --primary-ink: #F5F7F4;
+  --primary-soft: #2D5F4A26;
+  --accent: #A8834F;          /* birch, darkened for 4.5:1 on white */
+  --ok: #3E7A52;  --warn: #9A6E2E;  --bad: #A44B4B;
+  --ok-soft: #3E7A5220; --warn-soft: #9A6E2E20; --bad-soft: #A44B4B20;
+  --card-border: 1px solid var(--divider);
+  --card-shadow: 0 1px 2px rgba(27,32,29,.05);
+  --r-card: 14px; --r-ctl: 10px; --r-chip: 7px;
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-display: var(--font-ui);
+  --font-mono: ui-monospace, "SF Mono", "Roboto Mono", Menlo, monospace;
+  --data-xl: 30px; --data-lg: 22px; --data-md: 15px;
+  --label-tt: none; --label-ls: .06em;
+  --overlay-panel: rgba(20, 24, 21, .78);
+  --overlay-text: #F2F4F1;
+  --hit: 48px;
+}
+:root[data-dir="a"][data-mode="dark"] .phone {
+  --canvas: #121513;
+  --surface: #1C201D;
+  --surface-2: #262B27;
+  --divider: #313732;
+  --text-1: #ECEFEA;
+  --text-2: #A9B1AA;
+  --text-3: #6E766F;
+  --primary: #5B9377;         /* lifted for dark-canvas contrast */
+  --primary-ink: #0E1410;
+  --primary-soft: #5B937733;
+  --accent: #C9A76B;
+  --ok: #63A87C;  --warn: #C99A55;  --bad: #C46B6B;
+  --ok-soft: #63A87C26; --warn-soft: #C99A5526; --bad-soft: #C46B6B26;
+  --card-border: 1px solid var(--divider);
+  --card-shadow: none;
+  --r-card: 14px; --r-ctl: 10px; --r-chip: 7px;
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-display: var(--font-ui);
+  --font-mono: ui-monospace, "SF Mono", "Roboto Mono", Menlo, monospace;
+  --data-xl: 30px; --data-lg: 22px; --data-md: 15px;
+  --label-tt: none; --label-ls: .06em;
+  --overlay-panel: rgba(14, 17, 15, .82);
+  --overlay-text: #ECEFEA;
+  --hit: 48px;
+}
+
+/* ---------- B · Field High-Contrast (outdoor instrument, dark only) ---------- */
+:root[data-dir="b"] .phone {
+  --canvas: #0C0F10;
+  --surface: #171B1D;
+  --surface-2: #21272A;
+  --divider: #333B3F;
+  --text-1: #F2F5F3;
+  --text-2: #B7C0BA;
+  --text-3: #79837D;
+  --primary: #55D07A;          /* signal green — high chroma, dark bg only */
+  --primary-ink: #06130A;
+  --primary-soft: #55D07A29;
+  --accent: #FFB454;
+  --ok: #55D07A;  --warn: #FFB454;  --bad: #FF7A6B;
+  --ok-soft: #55D07A24; --warn-soft: #FFB45424; --bad-soft: #FF7A6B24;
+  --card-border: 1px solid #3A4348;
+  --card-shadow: none;
+  --r-card: 10px; --r-ctl: 8px; --r-chip: 5px;
+  --font-ui: -apple-system, "Segoe UI", system-ui, sans-serif;
+  --font-display: var(--font-ui);
+  --font-mono: ui-monospace, "SF Mono", "Roboto Mono", Menlo, monospace;
+  --data-xl: 38px; --data-lg: 26px; --data-md: 17px;   /* bigger numerals */
+  --label-tt: uppercase; --label-ls: .12em;
+  --overlay-panel: rgba(6, 9, 10, .88);
+  --overlay-text: #F2F5F3;
+  --hit: 56px;                 /* glove-sized targets */
+}
+
+/* ---------- C · Survey Ledger (cool paper, light only) ---------- */
+:root[data-dir="c"] .phone {
+  --canvas: #F3F4F1;
+  --surface: #FBFBF9;
+  --surface-2: #EBEDE8;
+  --divider: #D8DBD4;
+  --text-1: #23282B;
+  --text-2: #5A6165;
+  --text-3: #98A0A3;
+  --primary: #33544A;          /* ink-green */
+  --primary-ink: #F5F6F3;
+  --primary-soft: #33544A1F;
+  --accent: #B4531F;           /* drafting orange — CTA / critical only */
+  --ok: #47775B;  --warn: #A2701F;  --bad: #A8453A;
+  --ok-soft: #47775B1C; --warn-soft: #A2701F1C; --bad-soft: #A8453A1C;
+  --card-border: 1px solid #CDD1CA;
+  --card-shadow: none;
+  --r-card: 6px; --r-ctl: 5px; --r-chip: 3px;
+  --font-ui: -apple-system, "Segoe UI", system-ui, sans-serif;
+  --font-display: Georgia, "Times New Roman", serif;
+  --font-mono: ui-monospace, "SF Mono", "Roboto Mono", Menlo, monospace;
+  --data-xl: 32px; --data-lg: 22px; --data-md: 15px;
+  --label-tt: uppercase; --label-ls: .1em;
+  --overlay-panel: rgba(28, 32, 30, .82);
+  --overlay-text: #F3F4F1;
+  --hit: 48px;
+}
+
+/* =====================================================================
+   SHARED SCREEN COMPONENTS (styled entirely by tokens)
+   ===================================================================== */
+.statusbar {
+  height: 46px; display: flex; align-items: flex-end; justify-content: space-between;
+  padding: 0 26px 4px; font-size: 13px; font-weight: 600; color: var(--text-1);
+  font-family: var(--font-mono);
+}
+.nav {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 16px 10px;
+}
+.nav .back {
+  width: 34px; height: 34px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--surface-2); color: var(--text-1);
+  border: var(--card-border); font-size: 16px;
+}
+.nav .title {
+  font-family: var(--font-display);
+  font-size: 21px; font-weight: 700; letter-spacing: -0.01em;
+}
+.nav .spacer { flex: 1; }
+.pagepad { padding: 4px 16px 24px; overflow-y: auto; position: absolute; top: 104px; bottom: 0; left: 0; right: 0; }
+
+.sectionlabel {
+  font-size: 11px; font-weight: 700; letter-spacing: var(--label-ls);
+  text-transform: uppercase; color: var(--text-3); margin: 20px 2px 8px;
+}
+.card {
+  background: var(--surface); border: var(--card-border);
+  border-radius: var(--r-card); box-shadow: var(--card-shadow);
+}
+.tile {
+  display: flex; align-items: center; gap: 14px;
+  padding: 14px; margin-bottom: 10px; min-height: var(--hit);
+}
+.tile .ic {
+  width: 42px; height: 42px; flex: 0 0 42px; border-radius: var(--r-ctl);
+  background: var(--primary-soft); color: var(--primary);
+  display: flex; align-items: center; justify-content: center;
+}
+.tile .ic svg { width: 21px; height: 21px; }
+.tile .tt { flex: 1; min-width: 0; }
+.tile .tt .t1 { font-size: 15px; font-weight: 650; }
+.tile .tt .t2 { font-size: 12px; color: var(--text-2); margin-top: 2px; }
+.tile .chev { color: var(--text-3); font-size: 15px; }
+.tile .stat {
+  font-family: var(--font-mono); font-size: 13px; font-weight: 600;
+  color: var(--text-2); white-space: nowrap;
+}
+
+.chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; font-weight: 700; letter-spacing: var(--label-ls);
+  text-transform: var(--label-tt);
+  padding: 3px 9px; border-radius: var(--r-chip);
+}
+.chip.ok   { background: var(--ok-soft);   color: var(--ok); }
+.chip.warn { background: var(--warn-soft); color: var(--warn); }
+.chip.bad  { background: var(--bad-soft);  color: var(--bad); }
+.chip i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+
+.btn {
+  display: flex; align-items: center; justify-content: center;
+  min-height: var(--hit); border-radius: var(--r-ctl);
+  font-size: 15px; font-weight: 700; letter-spacing: .01em;
+  border: 1px solid transparent;
+}
+.btn.primary { background: var(--primary); color: var(--primary-ink); }
+.btn.secondary { background: transparent; color: var(--text-1); border-color: var(--divider); }
+:root[data-dir="c"] .btn.primary { background: var(--accent); color: #FBF6F1; }
+
+/* ---- AR overlay shared ---- */
+.arfeed {
+  position: absolute; inset: 0;
+  background:
+    linear-gradient(180deg, #313B33 0%, #232B26 42%, #161B18 100%);
+}
+.arfeed .feedlabel {
+  position: absolute; left: 14px; bottom: 12px;
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: .08em;
+  color: rgba(240,244,240,.4); text-transform: uppercase;
+}
+.overlay-top {
+  position: absolute; top: 54px; left: 14px; right: 14px;
+  display: flex; align-items: center; justify-content: space-between;
+}
+.gpsbadge {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--overlay-panel); color: var(--overlay-text);
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600;
+  padding: 6px 10px; border-radius: var(--r-chip);
+}
+.gpsbadge i { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
+.backfab {
+  width: 38px; height: 38px; border-radius: 50%;
+  background: var(--overlay-panel); color: var(--overlay-text);
+  display: flex; align-items: center; justify-content: center; font-size: 16px;
+}
+.guide { position: absolute; left: 0; right: 0; top: 47%; height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.85) 12%, rgba(255,255,255,.85) 88%, transparent); }
+.ring {
+  position: absolute; left: 50%; top: 47%; transform: translate(-50%, -50%);
+  width: 76px; height: 76px; border-radius: 50%;
+  border: 3px solid var(--ok);
+  box-shadow: 0 0 0 3px rgba(0,0,0,.35);
+}
+.fitchord {
+  position: absolute; left: 50%; top: 47%; transform: translate(-50%, -50%);
+  width: 132px; height: 4px; border-radius: 2px; background: var(--ok);
+}
+.fitchord::before, .fitchord::after {
+  content: ""; position: absolute; top: -9px; width: 4px; height: 22px;
+  border-radius: 2px; background: var(--ok);
+}
+.fitchord::before { left: 0; } .fitchord::after { right: 0; }
+.livebadge {
+  position: absolute; left: 50%; top: calc(47% + 58px); transform: translateX(-50%);
+  background: var(--overlay-panel); color: var(--overlay-text);
+  border-radius: var(--r-ctl); padding: 8px 14px; text-align: center;
+}
+.livebadge .v { font-family: var(--font-mono); font-size: var(--data-lg); font-weight: 700; }
+.livebadge .d { font-family: var(--font-mono); font-size: 11px; color: var(--text-3); margin-top: 1px; }
+:root[data-dir="b"] .livebadge .d { color: #93A09A; }
+.capfab {
+  position: absolute; right: 16px; top: 47%; transform: translateY(-50%);
+  width: var(--hit); height: var(--hit); border-radius: 50%;
+  background: var(--primary); color: var(--primary-ink);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 26px; font-weight: 400;
+  box-shadow: 0 4px 14px rgba(0,0,0,.4);
+}
+:root[data-dir="c"] .capfab { background: var(--accent); color: #FBF6F1; }
+.methodseg {
+  position: absolute; left: 50%; bottom: 196px; transform: translateX(-50%);
+  display: flex; background: var(--overlay-panel); border-radius: 999px; padding: 3px;
+}
+.methodseg span {
+  font-size: 12px; font-weight: 700; letter-spacing: var(--label-ls);
+  text-transform: var(--label-tt);
+  color: rgba(240,244,240,.75); padding: 7px 14px; border-radius: 999px;
+}
+.methodseg span.on { background: var(--primary); color: var(--primary-ink); }
+:root[data-dir="c"] .methodseg span.on { background: var(--accent); color: #FBF6F1; }
+.panel {
+  position: absolute; left: 24px; right: 24px; bottom: 26px;
+  background: var(--overlay-panel); color: var(--overlay-text);
+  border-radius: var(--r-card); padding: 14px 16px; text-align: center;
+  backdrop-filter: blur(10px);
+}
+.panel .hint { font-size: 13.5px; line-height: 1.45; }
+.panel .big {
+  font-family: var(--font-mono); font-size: var(--data-xl); font-weight: 700;
+  letter-spacing: -0.01em; margin: 2px 0;
+}
+.panel .sub { font-family: var(--font-mono); font-size: 12px; color: #A5AEA8; }
+.panel .row { display: flex; gap: 8px; margin-top: 12px; }
+.panel .row .btn { flex: 1; font-size: 14px; }
+.panel .btn.secondary { color: var(--overlay-text); border-color: rgba(255,255,255,.28); }
+
+/* ---- field log table ---- */
+.log-summary { display: flex; gap: 10px; margin-bottom: 4px; }
+.log-summary .cell { flex: 1; padding: 12px 14px; }
+.log-summary .k {
+  font-size: 10.5px; font-weight: 700; letter-spacing: var(--label-ls);
+  text-transform: uppercase; color: var(--text-3);
+}
+.log-summary .v {
+  font-family: var(--font-mono); font-size: 20px; font-weight: 700; margin-top: 3px;
+}
+.logrow {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 14px; min-height: var(--hit);
+  border-bottom: 1px solid var(--divider);
+}
+.logrow:last-child { border-bottom: none; }
+.logrow .kind {
+  width: 60px; flex: 0 0 60px;
+  font-size: 11px; font-weight: 700; letter-spacing: var(--label-ls);
+  text-transform: uppercase; color: var(--text-2);
+}
+.logrow .val { flex: 1; font-family: var(--font-mono); font-size: var(--data-md); font-weight: 650; }
+.logrow .val small { color: var(--text-3); font-weight: 500; }
+.logrow .tree { font-family: var(--font-mono); font-size: 12px; color: var(--text-2); width: 40px; }
+:root[data-dir="c"] .logrow { border-bottom: 1px dashed var(--divider); }
+
+/* ---- settings ---- */
+.setrow {
+  display: flex; align-items: center; gap: 12px;
+  padding: 13px 14px; min-height: var(--hit);
+  border-bottom: 1px solid var(--divider);
+}
+.setrow:last-child { border-bottom: none; }
+.setrow .tt { flex: 1; }
+.setrow .t1 { font-size: 15px; font-weight: 600; }
+.setrow .t2 { font-size: 12px; color: var(--text-2); margin-top: 2px; line-height: 1.4; }
+.segments { display: flex; gap: 4px; }
+.segments span {
+  font-size: 12px; font-weight: 700; padding: 6px 11px;
+  border-radius: var(--r-chip); border: 1px solid var(--divider); color: var(--text-2);
+}
+.segments span.on {
+  background: var(--primary-soft); border-color: var(--primary); color: var(--primary);
+}
+.switch { width: 44px; height: 26px; border-radius: 13px; background: var(--primary); position: relative; flex: 0 0 44px; }
+.switch::after { content: ""; position: absolute; top: 3px; right: 3px; width: 20px; height: 20px; border-radius: 50%; background: #FFF; }
+.switch.off { background: var(--surface-2); border: 1px solid var(--divider); }
+.switch.off::after { right: auto; left: 3px; background: var(--text-3); }
+
+/* C-direction ledger flourishes */
+:root[data-dir="c"] .pagepad {
+  background-image: repeating-linear-gradient(180deg, transparent 0 27px, #E4E7E0 27px 28px);
+}
+:root[data-dir="c"] .card { background: var(--surface); }
+</style>
+</head>
+<body>
+
+<!-- ======================= viewer rail ======================= -->
+<nav class="rail" aria-label="시안 컨트롤">
+  <h1>ForestiX 재디자인 · v1</h1>
+  <p class="sub">방향 3개 × 핵심 화면 5개. 방향을 고르면 실제 앱(SwiftUI + Compose)에 적용합니다.</p>
+
+  <h2>방향</h2>
+  <button class="dir-card" data-set-dir="a" aria-pressed="true">
+    <span class="name">A · Forest Instrument</span>
+    <span class="why">현재 어휘(숲녹색·버치)를 유지하고 뉴트럴·위계·카드 언어만 정제. 가장 안전한 개선.</span>
+    <span class="dir-swatches"><i style="background:#2D5F4A"></i><i style="background:#A8834F"></i><i style="background:#F6F7F4"></i><i style="background:#1B201D"></i></span>
+  </button>
+  <button class="dir-card" data-set-dir="b" aria-pressed="false">
+    <span class="name">B · Field High-Contrast</span>
+    <span class="why">야외 판독 최우선: 다크 전용, 큰 모노 수치, 고채도 신호색, 장갑 타깃(56px). 계기 그 자체.</span>
+    <span class="dir-swatches"><i style="background:#0C0F10"></i><i style="background:#55D07A"></i><i style="background:#FFB454"></i><i style="background:#F2F5F3"></i></span>
+  </button>
+  <button class="dir-card" data-set-dir="c" aria-pressed="false">
+    <span class="name">C · Survey Ledger</span>
+    <span class="why">측량 대장: 쿨톤 종이 + 괘선 리듬 + 세리프 표제. CTA에만 제도 오렌지 한 색.</span>
+    <span class="dir-swatches"><i style="background:#F3F4F1"></i><i style="background:#33544A"></i><i style="background:#B4531F"></i><i style="background:#23282B"></i></span>
+  </button>
+
+  <h2>화면</h2>
+  <div class="tabs" role="group" aria-label="화면 선택">
+    <button class="tab" data-set-screen="hub" aria-pressed="true">측정 허브</button>
+    <button class="tab" data-set-screen="dbh" aria-pressed="false">DBH 스캔</button>
+    <button class="tab" data-set-screen="height" aria-pressed="false">수고 결과</button>
+    <button class="tab" data-set-screen="log" aria-pressed="false">필드 로그</button>
+    <button class="tab" data-set-screen="settings" aria-pressed="false">설정</button>
+  </div>
+
+  <h2>모드 <span style="font-weight:400; text-transform:none; letter-spacing:0">(A 방향만 라이트/다크)</span></h2>
+  <div class="tabs mode-row" role="group" aria-label="라이트/다크">
+    <button class="tab" data-set-mode="light" aria-pressed="true">Light</button>
+    <button class="tab" data-set-mode="dark" aria-pressed="false">Dark</button>
+  </div>
+
+  <p class="note">
+    공통 원칙 — 세 방향 모두: 측정 수치는 모노스페이스 고정, 티어는 색+라벨 병기(색맹 대응),
+    화면당 주 행동 1개, 4pt 간격 스케일, WCAG 4.5:1.<br><br>
+    B는 다크 전용(야외 눈부심 대응), C는 라이트 전용(문서 은유)이 의도입니다.
+    AR 카메라 영역은 정직한 플레이스홀더로 표기했습니다.
+  </p>
+</nav>
+
+<!-- ======================= stage ======================= -->
+<main class="stage">
+  <div class="phone" role="img" aria-label="ForestiX 화면 시안">
+
+    <!-- ============ 1 · 측정 허브 ============ -->
+    <section class="screen" data-screen="hub">
+      <div class="statusbar"><span>9:41</span><span>▲ 87%</span></div>
+      <div class="nav">
+        <div class="back" aria-hidden="true">‹</div>
+        <div class="title">Tree Measurement</div>
+      </div>
+      <div class="pagepad">
+        <div class="sectionlabel">Measure</div>
+        <div class="card tile">
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/><path d="M4 12h16"/></svg></div>
+          <div class="tt"><div class="t1">Diameter (DBH)</div><div class="t2">Depth · AR motion · AR caliper</div></div>
+          <div class="chev">›</div>
+        </div>
+        <div class="card tile">
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20V6"/><path d="M7 11l5-5 5 5"/><path d="M5 20h14"/></svg></div>
+          <div class="tt"><div class="t1">Height</div><div class="t2">Walk-off tangent · crown add-on</div></div>
+          <div class="chev">›</div>
+        </div>
+        <div class="card tile">
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 17L20 7"/><circle cx="4" cy="17" r="2"/><circle cx="20" cy="7" r="2"/></svg></div>
+          <div class="tt"><div class="t1">Distance</div><div class="t2">Live · two-point</div></div>
+          <div class="chev">›</div>
+        </div>
+        <div class="card tile">
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/></svg></div>
+          <div class="tt"><div class="t1">Sampling plot</div><div class="t2">Centre stake · boundary ring</div></div>
+          <div class="chev">›</div>
+        </div>
+
+        <div class="sectionlabel">Today</div>
+        <div class="card">
+          <div class="logrow">
+            <span class="kind">DBH</span>
+            <span class="val">24.3 cm <small>±4 mm</small></span>
+            <span class="tree">T3</span>
+            <span class="chip ok"><i></i>Good</span>
+          </div>
+          <div class="logrow">
+            <span class="kind">Height</span>
+            <span class="val">16.3 m <small>±0.4 m</small></span>
+            <span class="tree">T3</span>
+            <span class="chip warn"><i></i>Fair</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 2 · DBH 스캔 (armed 상태) ============ -->
+    <section class="screen" data-screen="dbh">
+      <div class="arfeed"><span class="feedlabel">AR camera · live feed</span></div>
+      <div class="overlay-top">
+        <div class="backfab" aria-hidden="true">‹</div>
+        <div class="gpsbadge"><i></i>GPS ±3 m</div>
+      </div>
+      <div class="guide"></div>
+      <div class="fitchord"></div>
+      <div class="ring"></div>
+      <div class="livebadge">
+        <div class="v">Ø 24.3 cm</div>
+        <div class="d">1.8 m · locked</div>
+      </div>
+      <div class="capfab" aria-hidden="true">+</div>
+      <div class="methodseg">
+        <span class="on">Depth</span><span>Motion</span><span>Caliper</span>
+      </div>
+      <div class="panel">
+        <div class="hint">Hold steady, then tap <b>+</b> to capture · 5 samples</div>
+      </div>
+    </section>
+
+    <!-- ============ 3 · 수고 결과 ============ -->
+    <section class="screen" data-screen="height">
+      <div class="arfeed"><span class="feedlabel">AR camera · live feed</span></div>
+      <div class="overlay-top">
+        <div class="backfab" aria-hidden="true">‹</div>
+        <div class="gpsbadge"><i></i>GPS ±3 m</div>
+      </div>
+      <div class="panel" style="bottom: 26px;">
+        <div class="hint" style="display:flex; align-items:center; justify-content:center; gap:8px;">
+          Height <span class="chip ok"><i></i>Good</span>
+        </div>
+        <div class="big">16.3 m <span style="font-size: 16px; color: #A5AEA8;">±0.4 m</span></div>
+        <div class="sub">d 12.4 m · α&#8203;top 41.2° · α&#8203;base −6.8°</div>
+        <div class="row">
+          <div class="btn secondary">Retake</div>
+          <div class="btn secondary">Crown</div>
+          <div class="btn primary">Accept</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 4 · 필드 로그 ============ -->
+    <section class="screen" data-screen="log">
+      <div class="statusbar"><span>9:41</span><span>▲ 87%</span></div>
+      <div class="nav">
+        <div class="back" aria-hidden="true">‹</div>
+        <div class="title">Field Log</div>
+        <div class="spacer"></div>
+        <div class="back" title="Export" aria-hidden="true">↥</div>
+      </div>
+      <div class="pagepad">
+        <div class="log-summary">
+          <div class="card cell"><div class="k">Trees</div><div class="v">12</div></div>
+          <div class="card cell"><div class="k">Readings</div><div class="v">31</div></div>
+          <div class="card cell"><div class="k">Good</div><div class="v" style="color: var(--ok)">84%</div></div>
+        </div>
+        <div class="sectionlabel">Tree 3 · PSME</div>
+        <div class="card">
+          <div class="logrow">
+            <span class="kind">DBH</span>
+            <span class="val">24.3 cm <small>±4 mm</small></span>
+            <span class="tree">×5</span>
+            <span class="chip ok"><i></i>Good</span>
+          </div>
+          <div class="logrow">
+            <span class="kind">Height</span>
+            <span class="val">16.3 m <small>±0.4 m</small></span>
+            <span class="tree">×1</span>
+            <span class="chip warn"><i></i>Fair</span>
+          </div>
+          <div class="logrow">
+            <span class="kind">Crown</span>
+            <span class="val">5.8 × 7.2 m</span>
+            <span class="tree">×1</span>
+            <span class="chip ok"><i></i>Good</span>
+          </div>
+        </div>
+        <div class="sectionlabel">Tree 2 · TSHE</div>
+        <div class="card">
+          <div class="logrow">
+            <span class="kind">DBH</span>
+            <span class="val">31.7 cm <small>±6 mm</small></span>
+            <span class="tree">×5</span>
+            <span class="chip ok"><i></i>Good</span>
+          </div>
+          <div class="logrow">
+            <span class="kind">Height</span>
+            <span class="val">21.9 m <small>±0.7 m</small></span>
+            <span class="tree">×1</span>
+            <span class="chip bad"><i></i>Check</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 5 · 설정 ============ -->
+    <section class="screen" data-screen="settings">
+      <div class="statusbar"><span>9:41</span><span>▲ 87%</span></div>
+      <div class="nav">
+        <div class="back" aria-hidden="true">‹</div>
+        <div class="title">Settings</div>
+      </div>
+      <div class="pagepad">
+        <div class="sectionlabel">Display</div>
+        <div class="card">
+          <div class="setrow">
+            <div class="tt"><div class="t1">Units</div></div>
+            <div class="segments"><span class="on">Metric</span><span>Imperial</span></div>
+          </div>
+          <div class="setrow">
+            <div class="tt"><div class="t1">Log rule</div></div>
+            <div class="segments"><span class="on">Scribner</span><span>Int&nbsp;¼″</span><span>Doyle</span></div>
+          </div>
+          <div class="setrow">
+            <div class="tt"><div class="t1">Region</div><div class="t2">PNW — West Side · species pre-load</div></div>
+            <div class="chev" style="color: var(--text-3)">›</div>
+          </div>
+        </div>
+        <div class="sectionlabel">Measurement</div>
+        <div class="card">
+          <div class="setrow">
+            <div class="tt"><div class="t1">DBH algorithm</div><div class="t2">Silhouette matches iOS pixel-width</div></div>
+            <div class="segments"><span class="on">Silhouette</span><span>Depth-band</span></div>
+          </div>
+          <div class="setrow">
+            <div class="tt"><div class="t1">Calibration</div><div class="t2">Wall fit + cylinder fit — run before first pilot</div></div>
+            <div class="chev" style="color: var(--text-3)">›</div>
+          </div>
+        </div>
+        <div class="sectionlabel">Developer</div>
+        <div class="card">
+          <div class="setrow">
+            <div class="tt"><div class="t1">Developer / research mode</div><div class="t2">Live internals HUD + research CSV capture</div></div>
+            <div class="switch" role="img" aria-label="on"></div>
+          </div>
+          <div class="setrow">
+            <div class="tt"><div class="t1">Research CSV</div><div class="t2">128 rows on this device</div></div>
+            <div class="segments"><span>Export</span><span>Clear</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </div>
+</main>
+
+<script>
+// Viewer state — persisted so refresh keeps your place.
+(function () {
+  var root = document.documentElement;
+  var KEY = "forestix-redesign-v1";
+  try {
+    var saved = JSON.parse(localStorage.getItem(KEY) || "{}");
+    if (saved.dir) root.dataset.dir = saved.dir;
+    if (saved.mode) root.dataset.mode = saved.mode;
+    if (saved.screen) root.dataset.screen = saved.screen;
+  } catch (e) {}
+
+  function persist() {
+    try {
+      localStorage.setItem(KEY, JSON.stringify({
+        dir: root.dataset.dir, mode: root.dataset.mode, screen: root.dataset.screen
+      }));
+    } catch (e) {}
+  }
+  function syncPressed(sel, attr) {
+    document.querySelectorAll(sel).forEach(function (b) {
+      var k = Object.keys(b.dataset)[0];
+      b.setAttribute("aria-pressed", String(b.dataset[k] === root.dataset[attr]));
+    });
+  }
+  function syncAll() {
+    syncPressed("[data-set-dir]", "dir");
+    syncPressed("[data-set-mode]", "mode");
+    syncPressed("[data-set-screen]", "screen");
+  }
+  document.querySelectorAll("[data-set-dir]").forEach(function (b) {
+    b.addEventListener("click", function () { root.dataset.dir = b.dataset.setDir; syncAll(); persist(); });
+  });
+  document.querySelectorAll("[data-set-mode]").forEach(function (b) {
+    b.addEventListener("click", function () { root.dataset.mode = b.dataset.setMode; syncAll(); persist(); });
+  });
+  document.querySelectorAll("[data-set-screen]").forEach(function (b) {
+    b.addEventListener("click", function () { root.dataset.screen = b.dataset.setScreen; syncAll(); persist(); });
+  });
+  syncAll();
+})();
+</script>
+</body>
+</html>

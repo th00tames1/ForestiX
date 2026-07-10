@@ -1,0 +1,303 @@
+// Shared AR-measurement control chrome — Android mirror of iOS
+// MeasurementControls.swift, aligned with SlashScan: a right-edge vertical
+// stack of floating round buttons with soft drop shadows over the camera,
+// white-tinted icons, plus a centred half-width readout.
+//
+// Android note: there is no LiDAR hardware, so there is no LiDAR/AR source
+// toggle here — the app uses the ARCore Depth API automatically when the
+// device supports it and falls back to plane hits otherwise.
+
+package com.hcjeong.forestix.ui.screens
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Height
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.hcjeong.forestix.ui.clickableNoRipple
+import com.hcjeong.forestix.ui.theme.Forestix
+
+// MARK: - Back button (top-left, every AR screen)
+
+/// Circular translucent back button pinned top-left so every AR screen has
+/// a consistent, always-visible exit affordance over the camera feed.
+@Composable
+fun BoxScope.MeasureBackButton(onClick: () -> Unit) {
+    Box(
+        Modifier
+            .align(Alignment.TopStart)
+            .padding(start = 16.dp, top = 16.dp)
+            .size(44.dp)
+            .shadow(3.dp, CircleShape, clip = false)
+            .clip(CircleShape)
+            .background(Color.Black.copy(alpha = 0.55f))
+            .border(0.5.dp, Color.White.copy(alpha = 0.18f), CircleShape)
+            .clickableNoRipple(onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(22.dp))
+    }
+}
+
+// MARK: - Right-edge control column
+
+@Composable
+fun BoxScope.MeasureControlColumn(
+    onCapture: () -> Unit,
+    extra: @Composable (() -> Unit)? = null,
+) {
+    Column(
+        modifier = Modifier.align(Alignment.CenterEnd).padding(end = 18.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        CaptureButton(onCapture)
+        if (extra != null) extra()
+    }
+}
+
+@Composable
+fun CaptureButton(onClick: () -> Unit) {
+    val colors = Forestix.colors
+    Box(
+        Modifier
+            .size(70.dp)
+            .shadow(3.dp, CircleShape, clip = false)
+            .clip(CircleShape)
+            .background(Color.White)
+            .border(1.dp, Color.Black.copy(alpha = 0.10f), CircleShape)
+            .clickableNoRipple(onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        // 30 pt "+" glyph — same as the iOS
+        // `font(.system(size: 30, weight: .semibold))` capture icon.
+        Icon(Icons.Filled.Add, contentDescription = "Capture", tint = colors.primary, modifier = Modifier.size(30.dp))
+    }
+}
+
+/// 52 dp translucent circular icon button with an optional caption beneath
+/// — the SlashScan floating-control look. Used for the Distance mode toggle.
+@Composable
+fun MeasureCircleButton(
+    icon: ImageVector,
+    caption: String? = null,
+    dim: Boolean = false,
+    iconRotation: Float = 0f,
+    onClick: () -> Unit,
+) {
+    // Caption shadow (black 0.5, radius 1) for sun-glare legibility —
+    // mirrors the iOS `.shadow(color: .black.opacity(0.5), radius: 1)`.
+    val captionBlur = with(LocalDensity.current) { 1.dp.toPx() }
+    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Box(
+            Modifier
+                .size(52.dp)
+                .shadow(3.dp, CircleShape, clip = false)
+                .clip(CircleShape)
+                .background(Color.Black.copy(alpha = 0.55f))
+                .border(0.5.dp, Color.White.copy(alpha = 0.18f), CircleShape)
+                .clickableNoRipple(onClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                icon,
+                contentDescription = caption,
+                tint = Color.White.copy(alpha = if (dim) 0.55f else 1f),
+                modifier = Modifier.size(19.dp).rotate(iconRotation),
+            )
+        }
+        caption?.let {
+            Text(
+                it,
+                style = Forestix.type.dataSmall.copy(
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    fontFamily = FontFamily.Monospace,
+                    shadow = Shadow(Color.Black.copy(alpha = 0.5f), Offset.Zero, captionBlur),
+                ),
+                color = Color.White.copy(alpha = if (dim) 0.55f else 0.95f),
+            )
+        }
+    }
+}
+
+/// Distance Live / Two-point toggle — circular icon button with a caption.
+/// Icon = the vertical ↕ glyph rotated 90° (a single ↔), matching the iOS
+/// `arrow.left.and.right` symbol.
+@Composable
+fun MeasurePill(title: String, onClick: () -> Unit) {
+    MeasureCircleButton(icon = Icons.Filled.Height, caption = title, iconRotation = 90f, onClick = onClick)
+}
+
+// MARK: - Centred, half-width status panel
+
+/// Bottom-centre status panel. `above` renders floating content (e.g. the
+/// developer DBH method picker) 12 dp above the panel card — the iOS
+/// `VStack(spacing: 12) { picker; bottomPanel }` construction.
+@Composable
+fun BoxScope.MeasureStatusPanel(
+    above: (@Composable () -> Unit)? = null,
+    content: @Composable () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .align(Alignment.BottomCenter)
+            // Keep clear of the system navigation bar (edge-to-edge is on):
+            // inset first, then a 16dp visual gap above it.
+            .navigationBarsPadding()
+            .padding(bottom = 16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        if (above != null) above()
+        Column(
+            modifier = Modifier
+                .widthIn(max = 340.dp)
+                .shadow(3.dp, RoundedCornerShape(16.dp), clip = false)
+                .clip(RoundedCornerShape(16.dp))
+                .background(Color.Black.copy(alpha = 0.55f))
+                .border(0.5.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(16.dp))
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            content()
+        }
+    }
+}
+
+@Composable
+fun CenteredText(text: String, large: Boolean = false, dim: Boolean = false, color: Color = Color.White) {
+    Text(
+        text,
+        style = if (large) Forestix.type.dataLarge else Forestix.type.body,
+        color = color.copy(alpha = if (dim) 0.85f else 1f),
+        textAlign = TextAlign.Center,
+    )
+}
+
+// MARK: - Failure banner
+
+/// Amber failure/unsupported banner — port of the iOS `bannerView(_:tint:)`
+/// (bold callout row on an orange 0.8 fill, radius 8, leading-aligned).
+/// `onDismiss` makes it tappable-to-clear where iOS is (Height anchor
+/// failures); nil renders a static banner (DBH unsupported-method style).
+@Composable
+fun MeasureFailureBanner(text: String, onDismiss: (() -> Unit)? = null) {
+    val warn = Forestix.colors.confidenceWarn
+    val base = Modifier
+        .fillMaxWidth()
+        .clip(RoundedCornerShape(8.dp))
+        .background(warn.copy(alpha = 0.8f))
+    Text(
+        text,
+        style = Forestix.type.bodyBold.copy(fontSize = 16.sp, fontWeight = FontWeight.Bold),
+        color = Color.White,
+        textAlign = TextAlign.Start,
+        modifier = (if (onDismiss != null) base.clickableNoRipple(onDismiss) else base)
+            .padding(16.dp),
+    )
+}
+
+// MARK: - Developer research fields (Target / True value)
+
+/// Compact fixed-width research capture row — iOS parity: caption labels at
+/// white 0.8, a 70 dp Target-id field and a 90 dp true-value field with a
+/// decimal keyboard, HStack spacing 6.
+@Composable
+fun ResearchFieldsRow(
+    targetValue: String,
+    onTargetChange: (String) -> Unit,
+    targetPlaceholder: String,
+    trueLabel: String,
+    trueValue: String,
+    onTrueChange: (String) -> Unit,
+    truePlaceholder: String,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text("Target", style = Forestix.type.caption, color = Color.White.copy(alpha = 0.8f))
+        ResearchField(targetValue, onTargetChange, targetPlaceholder, width = 70.dp, decimal = false)
+        Text(trueLabel, style = Forestix.type.caption, color = Color.White.copy(alpha = 0.8f))
+        ResearchField(trueValue, onTrueChange, truePlaceholder, width = 90.dp, decimal = true)
+    }
+}
+
+/// Single compact field styled like the iOS `.roundedBorder` TextField:
+/// white fill, hairline border, radius 5, single line.
+@Composable
+private fun ResearchField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    placeholder: String,
+    width: Dp,
+    decimal: Boolean,
+) {
+    BasicTextField(
+        value = value,
+        onValueChange = onValueChange,
+        singleLine = true,
+        textStyle = TextStyle(fontSize = 17.sp, color = Color.Black),
+        keyboardOptions = if (decimal) {
+            KeyboardOptions(keyboardType = KeyboardType.Decimal)
+        } else {
+            KeyboardOptions.Default
+        },
+        cursorBrush = SolidColor(Color.Black),
+        modifier = Modifier.width(width),
+        decorationBox = { inner ->
+            Box(
+                Modifier
+                    .clip(RoundedCornerShape(5.dp))
+                    .background(Color.White)
+                    .border(0.5.dp, Color.Black.copy(alpha = 0.2f), RoundedCornerShape(5.dp))
+                    .padding(horizontal = 6.dp, vertical = 7.dp),
+            ) {
+                if (value.isEmpty()) {
+                    Text(placeholder, fontSize = 17.sp, color = Color.Black.copy(alpha = 0.3f), maxLines = 1)
+                }
+                inner()
+            }
+        },
+    )
+}

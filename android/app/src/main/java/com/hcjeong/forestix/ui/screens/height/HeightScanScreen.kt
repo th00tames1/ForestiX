@@ -1,0 +1,723 @@
+// Tree Height — Android, now using the SAME VIO walk-off tangent method as
+// iOS (HeightEstimator, spec §7.2): anchor the trunk, walk back (live d_h),
+// then capture the top + base aim angles; H = d_h·(tanα_top − tanα_base)
+// with the identical guard rails, σ_H, and green/yellow/red tiers. α comes
+// from the ARCore camera-forward elevation (the Android analogue of the
+// iOS IMU pitch). Crown is folded in afterwards, reusing the measured d_h.
+
+package com.hcjeong.forestix.ui.screens.height
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.runtime.rememberCoroutineScope
+import com.hcjeong.forestix.ui.MeasurePhotoStore
+import kotlinx.coroutines.launch
+import androidx.navigation.NavController
+import com.hcjeong.forestix.LocalAppEnvironment
+import com.hcjeong.forestix.ar.ArController
+import com.hcjeong.forestix.ar.ArCameraView
+import com.hcjeong.forestix.ar.ArSceneMarker
+import com.hcjeong.forestix.ar.MarkerShape
+import com.hcjeong.forestix.ar.Vec3
+import com.hcjeong.forestix.common.MeasurementFormatter
+import com.hcjeong.forestix.common.UnitSystem
+import com.hcjeong.forestix.data.MeasureKind
+import com.hcjeong.forestix.data.QuickMeasureEntry
+import com.hcjeong.forestix.data.ResearchLog
+import com.hcjeong.forestix.sensors.ConfidenceTier
+import com.hcjeong.forestix.sensors.HeightEstimator
+import com.hcjeong.forestix.sensors.HeightMethod
+import com.hcjeong.forestix.sensors.HeightResult
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.hcjeong.forestix.ui.PendingTreeNumber
+import com.hcjeong.forestix.ui.Routes
+import com.hcjeong.forestix.ui.screens.ContinuationAction
+import com.hcjeong.forestix.ui.screens.ContinuationOrigin
+import com.hcjeong.forestix.ui.screens.MeasurementContinuationSheet
+import com.hcjeong.forestix.ui.screens.ScanMetadataSheet
+import com.hcjeong.forestix.ui.screens.CenteredText
+import com.hcjeong.forestix.ui.screens.DevHud
+import com.hcjeong.forestix.ui.screens.GPSAccuracyBadge
+import com.hcjeong.forestix.ui.screens.MeasureBackButton
+import com.hcjeong.forestix.ui.screens.MeasureCircleButton
+import com.hcjeong.forestix.ui.screens.MeasureControlColumn
+import com.hcjeong.forestix.ui.screens.MeasureFailureBanner
+import com.hcjeong.forestix.ui.screens.MeasureStatusPanel
+import com.hcjeong.forestix.ui.screens.ResearchFieldsRow
+import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixBorderedButton
+import com.hcjeong.forestix.ui.theme.ForestixProminentButton
+import com.hcjeong.forestix.ui.theme.ForestixRadius
+import com.hcjeong.forestix.ui.theme.confidenceDescriptor
+import kotlinx.coroutines.delay
+import java.util.Locale
+import kotlin.math.abs
+
+// Aim BASE before TOP: from eye level you tilt down slightly to the base,
+// then sweep up to the top — one continuous motion, less device rotation.
+private enum class Stage { ANCHOR, WALKING, AIM_BASE, AIM_TOP, COMPUTED, REJECTED }
+private enum class CrownStep { NONE, LEFT, RIGHT, TOP, BOTTOM, DONE }
+
+/// Walk-off sweet spot assumes a ~30 m stem until better information
+/// exists — iOS HeightScanViewModel.expectedHeightM default.
+private const val EXPECTED_HEIGHT_M = 30f
+
+@Composable
+fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
+    val env = LocalAppEnvironment.current
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val controller = remember { ArController() }
+    // Continuation from a just-saved DBH passes the SAME tree number so the
+    // height lands on that tree; the map-home chooser hands one over via
+    // PendingTreeNumber; otherwise the next free number is used. The slot
+    // is consumed unconditionally so a stale lock can never leak into a
+    // later capture session.
+    var pendingTree by remember {
+        mutableStateOf(
+            PendingTreeNumber.consume().let { pending ->
+                treeOverride ?: pending ?: env.history.suggestedNextTreeNumber
+            },
+        )
+    }
+    var continuationTree by remember { mutableStateOf<Int?>(null) }
+    // Developer-mode research capture: true height (m) from a clinometer.
+    var researchTrueM by remember { mutableStateOf("") }
+    val settings by env.settings.state.collectAsStateWithLifecycle()
+    // Project calibration — identity for plain quick-measure (iOS parity),
+    // the active project's VIO drift fraction when launched from the
+    // Add-Tree flow (iOS injects it into HeightScanViewModel).
+    val calibration by env.activeScanCalibration.collectAsStateWithLifecycle()
+    val colors = Forestix.colors
+    val type = Forestix.type
+
+    var stage by remember { mutableStateOf(Stage.ANCHOR) }
+    var anchorPt by remember { mutableStateOf<Vec3?>(null) }
+    var standingLocked by remember { mutableStateOf<Vec3?>(null) }
+    var alphaBase by remember { mutableStateOf<Float?>(null) }
+    var alphaTop by remember { mutableStateOf<Float?>(null) }
+    var topMarker by remember { mutableStateOf<Vec3?>(null) }
+    var baseMarker by remember { mutableStateOf<Vec3?>(null) }
+    var dhLive by remember { mutableStateOf(0f) }
+    var result by remember { mutableStateOf<HeightResult?>(null) }
+    var failure by remember { mutableStateOf<String?>(null) }
+
+    // Manual height entry (typed metres) — iOS .manualEntry state.
+    var manualOpen by remember { mutableStateOf(false) }
+    var manualText by remember { mutableStateOf("") }
+    // Accept-snapshot chrome blackout: while true, every 2D panel/button is
+    // hidden so the captured JPEG shows only the AR feed + measurement
+    // overlays (captured buttons read as real buttons in the photo viewer).
+    var hidingChromeForCapture by remember { mutableStateOf(false) }
+    // Scan metadata (species / damage / note) attached on Accept — iOS
+    // ScanMetadataSheet(kind: .height); no stem position for heights.
+    var metaSpecies by remember { mutableStateOf<String?>(null) }
+    var metaDamage by remember { mutableStateOf<List<String>>(emptyList()) }
+    var metaNote by remember { mutableStateOf("") }
+    var showMetadata by remember { mutableStateOf(false) }
+
+    var crownStep by remember { mutableStateOf(CrownStep.NONE) }
+    var cL by remember { mutableStateOf<Vec3?>(null) }
+    var cR by remember { mutableStateOf<Vec3?>(null) }
+    var cT by remember { mutableStateOf<Vec3?>(null) }
+    var cB by remember { mutableStateOf<Vec3?>(null) }
+    var crownW by remember { mutableStateOf<Double?>(null) }
+    var crownH by remember { mutableStateOf<Double?>(null) }
+
+    // Live walk-off distance while walking back.
+    LaunchedEffect(stage) {
+        while (stage == Stage.WALKING) {
+            anchorPt?.let { a -> controller.horizontalDistanceTo(a)?.let { dhLive = it } }
+            delay(100)
+        }
+    }
+
+    fun markers(): List<ArSceneMarker> {
+        // scalesWithDistance keeps every sphere readable from across the
+        // walk-off — natural size up close, grows with camera distance.
+        val out = mutableListOf<ArSceneMarker>()
+        anchorPt?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.08f), floatArrayOf(1f, 0.30f, 0.30f, 1f), scalesWithDistance = true)) }
+        // Tree top (yellow) + base (green) spheres on the anchor's vertical
+        // axis at the alpha-derived height — same as iOS rebuildSceneMarkers.
+        topMarker?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.08f), floatArrayOf(1f, 0.85f, 0.15f, 1f), scalesWithDistance = true)) }
+        baseMarker?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.08f), floatArrayOf(0.25f, 0.85f, 0.35f, 1f), scalesWithDistance = true)) }
+        // Crown L/R yellow matches iOS exactly (1, 0.85, 0, 1); crown T/B cyan.
+        val yellow = floatArrayOf(1f, 0.85f, 0f, 1f); val cyan = floatArrayOf(0.2f, 0.7f, 1f, 1f)
+        cL?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.05f), yellow, scalesWithDistance = true)) }
+        cR?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.05f), yellow, scalesWithDistance = true)) }
+        cT?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.05f), cyan, scalesWithDistance = true)) }
+        cB?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.05f), cyan, scalesWithDistance = true)) }
+        return out
+    }
+
+    fun crownProjDistance(): Float = (result?.dHm ?: dhLive).let { if (it > 0.5f) it else 8f }
+
+    fun computeCrown() {
+        cL?.let { l -> cR?.let { r -> val dx = l.x - r.x; val dz = l.z - r.z; crownW = kotlin.math.sqrt((dx * dx + dz * dz).toDouble()) } }
+        cT?.let { t -> cB?.let { b -> crownH = abs(t.y - b.y).toDouble() } }
+        crownStep = CrownStep.DONE
+    }
+
+    fun captureCrown() {
+        controller.preferDepth = true
+        val hit = controller.screenCenterHit() ?: controller.forwardPointAtHorizontalDistance(crownProjDistance())
+        if (hit == null) { failure = "Couldn't read scene depth. Move slightly, then tap again."; return }
+        failure = null
+        when (crownStep) {
+            CrownStep.LEFT -> { cL = hit; crownStep = CrownStep.RIGHT }
+            CrownStep.RIGHT -> { cR = hit; crownStep = CrownStep.TOP }
+            CrownStep.TOP -> { cT = hit; crownStep = CrownStep.BOTTOM }
+            CrownStep.BOTTOM -> { cB = hit; computeCrown() }
+            else -> {}
+        }
+    }
+
+    fun captureHeight() {
+        when (stage) {
+            Stage.ANCHOR -> {
+                controller.preferDepth = true
+                val hit = controller.screenCenterHit()
+                if (hit == null) {
+                    failure = "Couldn't find the trunk at the crosshair. Aim at the trunk at eye level and try again."
+                    return
+                }
+                failure = null; anchorPt = hit; dhLive = 0f; stage = Stage.WALKING
+            }
+            Stage.WALKING -> { stage = Stage.AIM_BASE }
+            Stage.AIM_BASE -> {
+                val a = controller.cameraForwardElevationRad()
+                val s = controller.currentCameraPosition()
+                val anchor = anchorPt
+                if (a == null || s == null || anchor == null) { failure = "AR tracking not ready — try again."; return }
+                // Lock the standing pose on the first aim; both angles must
+                // come from the same spot (the §7.2 formula assumes it).
+                failure = null; alphaBase = a; standingLocked = s
+                val dh = kotlin.math.sqrt((s.x - anchor.x) * (s.x - anchor.x) + (s.z - anchor.z) * (s.z - anchor.z))
+                baseMarker = Vec3(anchor.x, s.y + dh * kotlin.math.tan(a), anchor.z)
+                stage = Stage.AIM_TOP
+            }
+            Stage.AIM_TOP -> {
+                val aTop = controller.cameraForwardElevationRad()
+                val anchor = anchorPt; val standing = standingLocked; val aBase = alphaBase
+                if (aTop == null || anchor == null || standing == null || aBase == null) {
+                    failure = "AR tracking not ready — try again."; return
+                }
+                failure = null; alphaTop = aTop
+                val dh = kotlin.math.sqrt((standing.x - anchor.x) * (standing.x - anchor.x) + (standing.z - anchor.z) * (standing.z - anchor.z))
+                topMarker = Vec3(anchor.x, standing.y + dh * kotlin.math.tan(aTop), anchor.z)
+                val r = HeightEstimator.estimate(
+                    anchorX = anchor.x, anchorZ = anchor.z,
+                    standingX = standing.x, standingZ = standing.z,
+                    alphaTopRad = aTop, alphaBaseRad = aBase,
+                    vioDriftFraction = calibration.vioDriftFraction,
+                )
+                result = r
+                stage = if (r.confidence == ConfidenceTier.RED) Stage.REJECTED else Stage.COMPUTED
+            }
+            else -> {}
+        }
+    }
+
+    fun resetCrown() { crownStep = CrownStep.NONE; cL = null; cR = null; cT = null; cB = null; crownW = null; crownH = null }
+    fun resetAll() {
+        stage = Stage.ANCHOR; anchorPt = null; standingLocked = null
+        alphaBase = null; alphaTop = null; topMarker = null; baseMarker = null
+        dhLive = 0f; result = null; failure = null; resetCrown()
+    }
+
+    // Accept the result: record the entry (photo + GPS + metadata), fold in
+    // the crown if measured, fire the continuation, and log the research
+    // row. Shared by the result row's Accept and the manual-entry Save
+    // (iOS submitManualEntry goes straight to .accepted).
+    fun acceptResult(r: HeightResult) {
+        val activity = context as? android.app.Activity
+        scope.launch {
+            // Chrome-less snapshot: hide the 2D chrome, give Compose one
+            // committed frame, capture, then restore.
+            val photo = activity?.let {
+                hidingChromeForCapture = true
+                delay(80)
+                val name = MeasurePhotoStore.captureWindow(it)
+                hidingChromeForCapture = false
+                name
+            }
+            val fix = com.hcjeong.forestix.positioning.LocationService.lastGlobalFix
+            env.history.append(
+                QuickMeasureEntry(
+                    kind = MeasureKind.HEIGHT, value = r.heightM.toDouble(),
+                    sigma = r.sigmaHm.toDouble(), confidenceRaw = r.confidence.raw,
+                    method = r.method.raw, treeNumber = pendingTree,
+                    plotID = env.history.activePlotID.value,
+                    speciesCode = metaSpecies,
+                    damageCodes = metaDamage,
+                    note = metaNote.ifBlank { null },
+                    latitude = fix?.latitude,
+                    longitude = fix?.longitude,
+                    photoPath = photo,
+                )
+            )
+        }
+        if (crownStep == CrownStep.DONE) {
+            val w = crownW; val ch = crownH
+            if (w != null && ch != null) {
+                env.history.append(
+                    QuickMeasureEntry(
+                        kind = MeasureKind.CROWN, value = w, secondaryValue = ch,
+                        sigma = null, confidenceRaw = "green", method = "ar.crown.dh",
+                        treeNumber = pendingTree, plotID = env.history.activePlotID.value,
+                    )
+                )
+            }
+        }
+        continuationTree = pendingTree
+        if (settings.developerMode) {
+            val fields = mutableMapOf(
+                "measure_type" to "height",
+                "method" to r.method.raw,
+                "depth_source" to "ar",
+                "measured_value" to String.format(Locale.US, "%.2f", r.heightM),
+                "unit" to "m",
+                "sigma" to String.format(Locale.US, "%.2f", r.sigmaHm),
+                "confidence_tier" to r.confidence.raw,
+                "distance_m" to String.format(Locale.US, "%.2f", r.dHm),
+                "alpha_top_deg" to String.format(Locale.US, "%.2f", r.alphaTopRad * 180f / Math.PI.toFloat()),
+                "alpha_base_deg" to String.format(Locale.US, "%.2f", r.alphaBaseRad * 180f / Math.PI.toFloat()),
+                "species" to (metaSpecies ?: ""),
+                "note" to metaNote,
+            )
+            if (settings.researchTreeId.isNotEmpty()) {
+                fields["tree_id"] = settings.researchTreeId  // repeat auto-filled by record()
+            }
+            researchTrueM.toDoubleOrNull()?.takeIf { it > 0 }?.let { t ->
+                fields["true_value"] = String.format(Locale.US, "%.2f", t)
+                fields["error"] = String.format(Locale.US, "%.2f", r.heightM - t)
+            }
+            ResearchLog.record(context, fields)
+            researchTrueM = ""
+        }
+    }
+
+    val crownActive = crownStep != CrownStep.NONE && crownStep != CrownStep.DONE
+    val showCapture = !manualOpen &&
+        (stage in listOf(Stage.ANCHOR, Stage.WALKING, Stage.AIM_TOP, Stage.AIM_BASE) || crownActive)
+
+    // Crosshair label — explains what the next "+" tap will capture; nil
+    // hides the crosshair (computed / rejected / manual states). Direct
+    // port of iOS crosshairLabel.
+    val crosshairLabel: String? = when {
+        manualOpen -> null
+        crownStep == CrownStep.LEFT -> "Aim at crown's LEFT edge"
+        crownStep == CrownStep.RIGHT -> "Aim at crown's RIGHT edge"
+        crownStep == CrownStep.TOP -> "Aim at HIGHEST branch"
+        crownStep == CrownStep.BOTTOM -> "Aim at LOWEST branch"
+        crownStep == CrownStep.DONE -> null
+        stage == Stage.ANCHOR -> "Aim at trunk (eye level)"
+        stage == Stage.WALKING -> "Walk back — aim stays on tree"
+        stage == Stage.AIM_TOP -> "Aim at treetop"
+        stage == Stage.AIM_BASE -> "Aim at trunk + ground"
+        else -> null
+    }
+
+    Box(Modifier.fillMaxSize()) {
+        ArCameraView(controller, markers(), modifier = Modifier.fillMaxSize())
+        crosshairLabel?.let { label ->
+            HeightAimCrosshair(label, Modifier.align(Alignment.Center))
+        }
+        if (!hidingChromeForCapture) MeasureBackButton { nav.popBackStack() }
+
+        // Same GPS-accuracy strip as the Diameter scan — leading 72 /
+        // top 22, clear of the floating back button (iOS parity).
+        if (!hidingChromeForCapture) GPSAccuracyBadge(
+            Modifier
+                .align(Alignment.TopStart)
+                .padding(start = 72.dp, top = 22.dp))
+
+        if (settings.developerMode && !hidingChromeForCapture) {
+            DevHud(
+                "HEIGHT",
+                listOfNotNull(
+                    "depth" to (if (controller.supportsDepth) "ARCore✓" else "plane"),
+                    "track" to (if (controller.trackingOk()) "OK" else "…"),
+                    "stage" to stage.name,
+                    "pitch" to (controller.cameraPitchDeg()?.let { String.format(Locale.US, "%+.1f°", it) } ?: "—"),
+                    "d_h live" to String.format(Locale.US, "%.1f m", dhLive),
+                    alphaBase?.let { "α_base" to String.format(Locale.US, "%+.1f°", Math.toDegrees(it.toDouble())) },
+                    alphaTop?.let { "α_top" to String.format(Locale.US, "%+.1f°", Math.toDegrees(it.toDouble())) },
+                    result?.let { "H" to String.format(Locale.US, "%.1f ±%.1f m · %s", it.heightM, it.sigmaHm, it.confidence.raw) },
+                ),
+            )
+        }
+        if (showCapture && !hidingChromeForCapture) MeasureControlColumn(
+            onCapture = { if (crownActive) captureCrown() else captureHeight() },
+            // Manual entry rides the rail directly below the capture "+"
+            // while anchoring — the walk/aim stages keep Retake instead.
+            extra = if (stage == Stage.ANCHOR) {
+                {
+                    MeasureCircleButton(icon = Icons.Filled.Keyboard, caption = "Manual") {
+                        manualOpen = true; manualText = ""
+                    }
+                }
+            } else null,
+        )
+
+        if (!hidingChromeForCapture) MeasureStatusPanel {
+            // Anchor / tracking failures — orange banner, tap to dismiss
+            // (iOS anchorFailureBanner).
+            failure?.let { MeasureFailureBanner(it) { failure = null } }
+            CenteredText(
+                when {
+                    manualOpen -> "Enter height manually in metres."
+                    stage == Stage.ANCHOR -> "Aim at the trunk at eye level, then tap +."
+                    stage == Stage.WALKING -> "Walk back, then tap + to continue."
+                    stage == Stage.AIM_BASE -> "Aim at where the trunk meets the ground, then tap +."
+                    stage == Stage.AIM_TOP -> "Aim at the treetop, then tap +."
+                    stage == Stage.REJECTED -> result?.rejectionReason ?: "Rejected."
+                    else -> "Height computed."
+                },
+            )
+
+            // Walking readout — big walked-back distance + amber sweet-spot
+            // hint (iOS walkingReadout).
+            if (stage == Stage.WALKING && !manualOpen) {
+                Column(
+                    Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                    horizontalAlignment = Alignment.Start,
+                ) {
+                    Text(
+                        "Walked back " + MeasurementFormatter.distance(dhLive.toDouble(), settings.unitSystem),
+                        style = type.dataLarge,
+                        color = Color.White,
+                    )
+                    Text(
+                        walkHintText(dhLive),
+                        style = type.caption,
+                        color = colors.confidenceWarn,
+                    )
+                }
+            }
+
+            // Manual entry — typed height (iOS .manualEntry: field + Save,
+            // Cancel row beneath).
+            if (manualOpen) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    OutlinedTextField(
+                        value = manualText,
+                        onValueChange = { manualText = it.filter { c -> c.isDigit() || c == '.' } },
+                        placeholder = {
+                            Text(
+                                if (settings.unitSystem == UnitSystem.METRIC) "Height in metres"
+                                else "Height in feet",
+                            )
+                        },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.weight(1f),
+                    )
+                    ForestixProminentButton(
+                        "Save",
+                        enabled = (manualText.toFloatOrNull() ?: 0f) > 1.3f,
+                    ) {
+                        val m = manualText.toFloatOrNull()
+                        if (m != null && m > 1.3f) {
+                            val r = HeightResult(
+                                heightM = m, dHm = 0f, alphaTopRad = 0f, alphaBaseRad = 0f,
+                                sigmaHm = 0f, confidence = ConfidenceTier.YELLOW,
+                                method = HeightMethod.MANUAL_ENTRY, rejectionReason = null,
+                            )
+                            result = r
+                            failure = null
+                            manualOpen = false
+                            // iOS submitManualEntry goes straight to
+                            // .accepted — record and continue.
+                            acceptResult(r)
+                        }
+                    }
+                }
+                ForestixBorderedButton("Cancel", modifier = Modifier.fillMaxWidth()) {
+                    manualOpen = false
+                }
+            }
+
+            // Result panel — unit-aware H + σ, tier chip (always on Height),
+            // actionable hint, and the α/d_h diagnostic line.
+            if (!manualOpen && (stage == Stage.COMPUTED || stage == Stage.REJECTED)) result?.let { r ->
+                Column(
+                    Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    horizontalAlignment = Alignment.Start,
+                ) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        // Always show the computed H — the red tier chip and
+                        // the status-banner rejection reason carry the
+                        // warning. σ is hidden on red (a rejected fit's σ is
+                        // noise).
+                        Text(
+                            MeasurementFormatter.height(r.heightM.toDouble(), settings.unitSystem),
+                            style = type.dataLarge,
+                            color = Color.White,
+                        )
+                        if (r.confidence != ConfidenceTier.RED) {
+                            Text(
+                                MeasurementFormatter.heightSigma(r.sigmaHm.toDouble(), settings.unitSystem),
+                                style = type.dataSmall,
+                                color = Color.White.copy(alpha = 0.75f),
+                            )
+                        }
+                        Spacer(Modifier.weight(1f))
+                        HeightTierChip(r.confidence.raw)
+                    }
+                    Text(
+                        heightTierHint(r.confidence),
+                        style = type.caption,
+                        color = Color.White.copy(alpha = 0.9f),
+                    )
+                    // Diagnostic — the raw captured inputs that fed the §7.2
+                    // formula (iOS diagnosticLine).
+                    Text(
+                        String.format(
+                            Locale.US, "α_top %+.1f° · α_base %+.1f° · d_h %.2f m",
+                            r.alphaTopRad * 180f / Math.PI.toFloat(),
+                            r.alphaBaseRad * 180f / Math.PI.toFloat(),
+                            r.dHm,
+                        ),
+                        style = type.caption,
+                        color = Color.White.copy(alpha = 0.55f),
+                    )
+                    if (settings.developerMode) {
+                        ResearchFieldsRow(
+                            targetValue = settings.researchTreeId,
+                            onTargetChange = { env.settings.setResearchTreeId(it.trim()) },
+                            targetPlaceholder = "T1",
+                            trueLabel = "True H (m)",
+                            trueValue = researchTrueM,
+                            onTrueChange = { researchTrueM = it.filter { c -> c.isDigit() || c == '.' } },
+                            truePlaceholder = "clinometer",
+                        )
+                    }
+                }
+            }
+
+            // Crown section — amber prompts while capturing; a mono data
+            // line once done (iOS crownSection).
+            if (!manualOpen && stage == Stage.COMPUTED) {
+                if (crownActive) {
+                    Text(
+                        crownPrompt(crownStep),
+                        style = type.caption,
+                        color = colors.confidenceWarn,
+                    )
+                } else if (crownStep == CrownStep.DONE && crownW != null && crownH != null) {
+                    Text(
+                        String.format(Locale.US, "Crown %.2f m wide · %.2f m tall", crownW, crownH),
+                        style = type.data,
+                        color = Color.White,
+                    )
+                }
+            }
+
+            // Action rows per stage (iOS actionRow). ANCHOR has none — the
+            // manual escape hatch lives on the rail's Manual button.
+            if (!manualOpen) when (stage) {
+                Stage.ANCHOR -> {}
+                Stage.WALKING, Stage.AIM_BASE, Stage.AIM_TOP -> {
+                    ForestixBorderedButton("Retake") { resetAll() }
+                }
+                Stage.COMPUTED -> {
+                    Column(
+                        Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        // Crown control: start it, or restart it once done.
+                        if (crownStep == CrownStep.NONE) {
+                            ForestixBorderedButton("Measure crown", modifier = Modifier.fillMaxWidth()) {
+                                crownStep = CrownStep.LEFT
+                            }
+                        } else if (crownStep == CrownStep.DONE) {
+                            ForestixBorderedButton("Redo crown", modifier = Modifier.fillMaxWidth()) {
+                                resetCrown()
+                            }
+                        }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            ForestixBorderedButton("Retake", modifier = Modifier.weight(1f)) { resetAll() }
+                            ForestixBorderedButton("Details", modifier = Modifier.weight(1f)) {
+                                showMetadata = true
+                            }
+                            ForestixProminentButton(
+                                "Accept",
+                                modifier = Modifier.weight(1f),
+                                enabled = result?.confidence != ConfidenceTier.RED,
+                            ) {
+                                result?.let { acceptResult(it) }
+                            }
+                        }
+                    }
+                }
+                Stage.REJECTED -> {
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        ForestixProminentButton("Retake") { resetAll() }
+                        ForestixBorderedButton("Manual") {
+                            resetAll(); manualOpen = true; manualText = ""
+                        }
+                    }
+                }
+            }
+        }
+
+        // Metadata editor (species / damage / note — no stem position for
+        // heights, iOS kind .height parity).
+        if (showMetadata) {
+            ScanMetadataSheet(
+                speciesCode = metaSpecies, onSpeciesCode = { metaSpecies = it },
+                position = null, onPosition = {},
+                damageCodes = metaDamage, onDamageCodes = { metaDamage = it },
+                note = metaNote, onNote = { metaNote = it },
+                showPosition = false,
+                onDismiss = { showMetadata = false },
+            )
+        }
+
+        // Post-save continuation — next tree's diameter or done.
+        continuationTree?.let { savedTree ->
+            MeasurementContinuationSheet(
+                origin = ContinuationOrigin.AFTER_HEIGHT,
+                treeNumber = savedTree,
+                treeAlreadyHasHeight = env.history.entries.value.any {
+                    it.treeNumber == savedTree && it.kind == MeasureKind.HEIGHT
+                },
+                onAction = { action ->
+                    continuationTree = null
+                    when (action) {
+                        ContinuationAction.START_NEW_TREE_DIAMETER,
+                        ContinuationAction.MEASURE_HEIGHT_SAME_TREE -> {
+                            nav.navigate(Routes.DBH) { popUpTo(Routes.TREE_HUB) }
+                        }
+                        ContinuationAction.DONE -> nav.popBackStack()
+                    }
+                },
+            )
+        }
+    }
+}
+
+/// Amber labelled aim crosshair — port of the iOS Height `crosshair(label:)`:
+/// dual-stroke 40/36 ring + cross with dark halos, and a state pill that
+/// explains what the next tap captures.
+@Composable
+private fun HeightAimCrosshair(label: String, modifier: Modifier = Modifier) {
+    val warn = Forestix.colors.confidenceWarn
+    Column(
+        modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+            Box(Modifier.size(40.dp).clip(CircleShape).border(4.dp, Color.Black.copy(alpha = 0.6f), CircleShape))
+            Box(Modifier.size(36.dp).clip(CircleShape).border(2.dp, warn, CircleShape))
+            Box(Modifier.size(width = 16.dp, height = 3.5.dp).background(Color.Black.copy(alpha = 0.6f)))
+            Box(Modifier.size(width = 3.5.dp, height = 16.dp).background(Color.Black.copy(alpha = 0.6f)))
+            Box(Modifier.size(width = 14.dp, height = 1.5.dp).background(warn))
+            Box(Modifier.size(width = 1.5.dp, height = 14.dp).background(warn))
+        }
+        Text(
+            label,
+            style = Forestix.type.dataSmall,
+            color = Color.White,
+            modifier = Modifier
+                .clip(RoundedCornerShape(4.dp))
+                .background(Color.Black.copy(alpha = 0.65f))
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+        )
+    }
+}
+
+/// Result-panel tier chip — 10 sp semibold, tracking 0.8, stroked chip
+/// outline; ALWAYS shown on Height (iOS behaviour).
+@Composable
+private fun HeightTierChip(rawTier: String) {
+    val d = confidenceDescriptor(rawTier)
+    Text(
+        d.label.uppercase(Locale.US),
+        style = TextStyle(fontSize = 10.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.8.sp),
+        color = d.color,
+        modifier = Modifier
+            .border(0.75.dp, d.color, ForestixRadius.chip)
+            .padding(horizontal = 8.dp, vertical = 3.dp),
+    )
+}
+
+/// Actionable one-liner per tier — same pattern as the Diameter result
+/// panel so the cruiser gets consistent guidance (iOS tierHint).
+private fun heightTierHint(tier: ConfidenceTier): String = when (tier) {
+    ConfidenceTier.GREEN -> "Good — geometry in sweet spot."
+    ConfidenceTier.YELLOW -> "Fair — long walk-off or steep aim. Acceptable."
+    ConfidenceTier.RED -> "Check — retake, or enter a tape estimate manually."
+}
+
+private fun crownPrompt(step: CrownStep): String = when (step) {
+    CrownStep.LEFT -> "Crown: aim at the LEFT edge, tap +"
+    CrownStep.RIGHT -> "Crown: aim at the RIGHT edge, tap +"
+    CrownStep.TOP -> "Crown: aim at the HIGHEST branch, tap +"
+    CrownStep.BOTTOM -> "Crown: aim at the LOWEST branch, tap +"
+    else -> ""
+}
+
+/// Sweet-spot walk-off guidance — iOS walkHintText + computeWalkHint:
+/// target band 0.6–1.0 × expected height.
+private fun walkHintText(dh: Float): String {
+    val lo = 0.6f * EXPECTED_HEIGHT_M
+    val hi = 1.0f * EXPECTED_HEIGHT_M
+    val delta = when {
+        dh < lo -> lo - dh
+        dh > hi -> hi - dh          // negative → walk forward
+        else -> 0f
+    }
+    return when {
+        delta > 0.1f ->
+            "Move back ${String.format(Locale.US, "%.1f", delta)} m " +
+                "(target ≈ 0.6–1.0 · ${EXPECTED_HEIGHT_M.toInt()} m)"
+        delta < -0.1f -> "Move forward ${String.format(Locale.US, "%.1f", -delta)} m"
+        else -> "You're in the sweet-spot band. Continue."
+    }
+}

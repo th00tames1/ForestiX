@@ -1,42 +1,70 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- AR camera + motion. CAMERA is required by ARCore; the location
+         permissions back the GPS plot-centre / navigation features that
+         mirror the iOS Positioning module. -->
     <uses-permission android:name="android.permission.CAMERA" />
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-    <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Basemap XYZ tile downloads (basemap/TileFetcher + OfflineBasemap
+         prefetch). Declared explicitly so tile fetching doesn't depend on
+         the sceneview AAR's merged-manifest INTERNET entry. -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- ARCore samples the IMU above 200 Hz; on Android 12+ (API 31+) the
+         high-rate sensor registration FAILS without this permission, which
+         surfaces as the native "Failed to register sensor to queue 0" crash
+         during Session.resume(). Normal install-time permission. -->
+    <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />
+
+    <uses-feature android:name="android.hardware.camera.ar" android:required="false" />
+    <uses-feature android:glEsVersion="0x00030000" android:required="true" />
 
     <application
+        android:name=".ForestixApplication"
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
-        android:label="@string/app_name"
+        android:label="Forestix"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/AppTheme">
-        <meta-data
-            android:name="com.google.ar.core"
-            android:value="optional" />
+        android:theme="@style/Theme.Forestix"
+        tools:targetApi="34">
 
-        <activity
-            android:name=".DbhScanActivity"
+        <!-- ARCore: optional so the app installs on non-AR devices and
+             falls back to the AR (estimated-plane) path, matching the
+             iOS LiDAR-vs-AR toggle behaviour. -->
+        <meta-data android:name="com.google.ar.core" android:value="optional" />
+
+        <!-- Shares exported CSV / ZIP from cache via a content:// URI,
+             the Android equivalent of the iOS UIActivityViewController. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
             android:exported="false"
-            android:screenOrientation="portrait" />
-        <activity
-            android:name=".HeightScanActivity"
-            android:exported="false"
-            android:screenOrientation="portrait" />
-        <activity
-            android:name=".AddTreeActivity"
-            android:exported="false"
-            android:screenOrientation="portrait" />
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:screenOrientation="portrait">
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
+            android:theme="@style/Theme.Forestix">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Deep links: forestix://plot?... mirrors URLRouter on iOS. -->
+            <intent-filter android:autoVerify="false">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="forestix" />
             </intent-filter>
         </activity>
     </application>

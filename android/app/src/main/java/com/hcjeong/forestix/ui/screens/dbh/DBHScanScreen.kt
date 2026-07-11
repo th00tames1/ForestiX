@@ -164,10 +164,19 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     var result by remember { mutableStateOf<DBHResult?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
     var preview by remember { mutableStateOf<DBHEstimator.DbhPreview?>(null) }
+    // Last RAW per-frame preview distance (m) — the un-smoothed dTap the
+    // estimator actually used. `preview.distanceM` is EMA-smoothed for the
+    // badge since round 6; the research CSV must keep logging the raw value
+    // (pre-round-6 semantics) so the σ analysis isn't fed filtered inputs.
+    var rawDistM by remember { mutableStateOf<Float?>(null) }
     // Dev-mode snapshot of the depth frame internals (developer mode only).
     var devDepth by remember { mutableStateOf<String?>(null) }
     var devIntr by remember { mutableStateOf<String?>(null) }
     var devAxis by remember { mutableStateOf<String?>(null) }
+    // Dev-mode one-line geometry check: depth WxH, the fx the chord identity
+    // consumed, raw vs smoothed distance — added after the round-6 stack
+    // regression so a field run can confirm depth geometry at a glance.
+    var devGeom by remember { mutableStateOf<String?>(null) }
 
     // AR-caliper (two-tap) method state.
     var sampleProgress by remember { mutableStateOf(0) }
@@ -239,6 +248,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 )
                 if (raw != null && raw.locked) {
                     missStreak = 0
+                    rawDistM = raw.distanceM
                     val prev = smoothedDiaCm
                     val sm = if (prev == null) raw.diameterCm else 0.3f * raw.diameterCm + 0.7f * prev
                     smoothedDiaCm = sm
@@ -296,6 +306,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     missStreak += 1
                 } else {
                     missStreak = 0
+                    rawDistM = null
                     smoothedDiaCm = null
                     smoothedDistM = null
                     smoothedHitAnchor = null
@@ -309,6 +320,16 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     devDepth = "${f.width}×${f.height}"
                     devIntr = String.format(Locale.US, "%.0f/%.0f  %.0f,%.0f", f.fx, f.fy, f.cx, f.cy)
                     devAxis = if (axis is com.hcjeong.forestix.sensors.GuideAxis.Row) "Row(y)" else "Col(x)"
+                    // One-glance geometry check (stack-regression sentinel):
+                    // depth WxH + the fx the chord identity divides by + raw
+                    // vs smoothed distance. A wrong depth aspect/orientation
+                    // or a broken intrinsics scale shows up here first.
+                    devGeom = String.format(
+                        Locale.US, "%d×%d fx%.0f d %s/%s",
+                        f.width, f.height, f.fx,
+                        raw?.distanceM?.let { String.format(Locale.US, "%.2f", it) } ?: "—",
+                        smoothedDistM?.let { String.format(Locale.US, "%.2f", it) } ?: "—",
+                    )
                 }
             }
             delay(150)
@@ -519,7 +540,10 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             if (settings.researchTreeId.isNotEmpty()) {
                 fields["tree_id"] = settings.researchTreeId  // repeat auto-filled by record()
             }
-            preview?.let { fields["distance_m"] = String.format(Locale.US, "%.2f", it.distanceM) }
+            // Raw per-frame distance (pre-round-6 semantics) — never the
+            // EMA-smoothed badge value; the display smoothing must not leak
+            // into research/σ inputs.
+            rawDistM?.let { fields["distance_m"] = String.format(Locale.US, "%.2f", it) }
             controller.cameraForwardElevationRad()?.let {
                 fields["pitch_deg"] = String.format(Locale.US, "%.1f", it * 180f / Math.PI.toFloat())
             }
@@ -575,6 +599,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     "track" to (if (controller.trackingOk()) "OK" else "…"),
                     devDepth?.let { "depthMap" to it },
                     devIntr?.let { "fx/fy cx,cy" to it },
+                    devGeom?.let { "geom" to it },
                     devAxis?.let { "axis" to it },
                     "dist" to (p?.distanceM?.let { String.format(Locale.US, "%.2f m", it) } ?: "—"),
                     "Ø live" to (p?.let { String.format(Locale.US, "%.1f cm", it.diameterCm) } ?: "—"),
@@ -737,6 +762,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                             caliperStep = 0; leftRay = null; leftOffset = null
                             result = null; failure = null
                             preview = null          // drop the stale depth fit
+                            rawDistM = null
                             smoothedDiaCm = null; smoothedDistM = null
                             smoothedHitAnchor = null
                             lockStreak = 0; missStreak = 0

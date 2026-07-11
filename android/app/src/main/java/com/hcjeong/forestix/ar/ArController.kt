@@ -215,6 +215,15 @@ class ArController {
     /// (negate the Y and Z columns) before back-projection, matching the
     /// world-XZ the iOS pipeline produces. NOTE: depth-image orientation +
     /// intrinsics scaling are device/rotation sensitive — validate on-device.
+    ///
+    /// GEOMETRY ASSUMPTION (round-7 regression finding): the fx/fy scaling
+    /// below (texture intrinsics × depth/texture size ratio, per axis) is
+    /// only correct while the depth image spans the SAME field of view as
+    /// the GPU texture on that axis. That held on the field-validated
+    /// ARCore 1.44 client; the 1.54 client changed the delivered depth
+    /// geometry on Samsung/Android 15-16 (DBH read ~2×), so the AR stack is
+    /// pinned in build.gradle.kts. Re-validate this scaling (dev-mode "geom"
+    /// HUD line: WxH + fx + raw/smoothed distance) before any ARCore bump.
     fun acquireDepthFrame(): ArDepthFrame? {
         val f = frame ?: return null
         if (f.camera.trackingState != TrackingState.TRACKING) return null

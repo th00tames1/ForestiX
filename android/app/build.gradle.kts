@@ -79,12 +79,31 @@ dependencies {
 
     // AR — ARCore + SceneView (Sceneform successor) for placing world
     // anchored markers and depth/plane hit-testing, mirroring ARKit +
-    // RealityKit on the iOS side. ARCore ≥ 1.49 and SceneView 2.3.0
-    // (bundles Filament 1.56) ship 16 KB-aligned .so files. NOTE:
-    // SceneView 2.3.1+ needs Kotlin 2.2 / Compose 1.10 / compileSdk 35 —
-    // beyond what Gradle 8.9 + Kotlin 2.0.20 support here.
-    implementation("com.google.ar:core:1.54.0")
-    implementation("io.github.sceneview:arsceneview:2.3.0")
+    // RealityKit on the iOS side.
+    //
+    // PINNED to the field-validated pair (ARCore 1.44 + SceneView 2.2.1).
+    // The round-6 bump to ARCore 1.54 / SceneView 2.3.0 broke measurements
+    // on-device (Samsung, Android 15/16): DBH read ~2× true and the height/
+    // cylinder screen-centre hit landed off the crosshair. Source/bytecode
+    // diff of SceneView 2.2.1↔2.3.0 and the ARCore 1.44↔1.54 API showed NO
+    // convention change (hitTest coords, setDisplayGeometry, intrinsics,
+    // depth-image contract all identical) — the behaviour delta is inside
+    // ARCore's closed native client (the compiled-against SDK version is
+    // negotiated with Play Services for AR and gates depth-map geometry /
+    // depth-point hit sampling), so it can't be adapted to in app code with
+    // confidence. Do NOT re-bump either artifact without re-running the
+    // DBH/height field checks (dev-mode "geom" HUD line shows depth WxH +
+    // fx + raw/smoothed distance for exactly this).
+    //
+    // 16 KB page-size status: ARCore 1.44's bundled .so files are already
+    // 16 KB-aligned, so this rollback costs nothing there. SceneView 2.2.1's
+    // Filament .so files are NOT yet aligned — that fix is DEFERRED until we
+    // can take SceneView 2.3.1+ (needs the Kotlin 2.2 / Compose 1.10 /
+    // Gradle ≥ 8.10 migration) AND its AR stack passes the field checks.
+    // AGP 8.7.3, compileSdk 35, datastore 1.1.7, graphics-path 1.1.0 and
+    // jniLibs.useLegacyPackaging=false are kept — safe and 16 KB-relevant.
+    implementation("com.google.ar:core:1.44.0")
+    implementation("io.github.sceneview:arsceneview:2.2.1")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

@@ -178,6 +178,8 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // against fx/fy to decide which registration the device honours.
     var devIntrImg by remember { mutableStateOf<String?>(null) }
     var devMap by remember { mutableStateOf<String?>(null) }
+    // Silhouette-edge legibility: found width vs OFF-FRAME row count.
+    var devEdge by remember { mutableStateOf<String?>(null) }
     // Dev-mode one-line geometry check: depth WxH, the fx the chord identity
     // consumed, raw vs smoothed distance — added after the round-6 stack
     // regression so a field run can confirm depth geometry at a glance.
@@ -342,6 +344,19 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 if (settings.developerMode) {
                     val isRow = axis is GuideAxis.Row
                     devDepth = "${f.width}×${f.height}"
+                    // Edge legibility: were both silhouette edges found inside
+                    // the frame (w = median width), or did rows run off the
+                    // border (OFF-FRAME → the fit is invalid by design)?
+                    devEdge = when {
+                        raw == null -> null
+                        raw.edgesClipped ->
+                            String.format(Locale.US, "OFF-FRAME %d rows", raw.clippedRows)
+                        raw.widthPx > 0 -> String.format(
+                            Locale.US, "L✓R✓ w%dpx%s", raw.widthPx,
+                            if (raw.clippedRows > 0) " clip${raw.clippedRows}" else "",
+                        )
+                        else -> null
+                    }
                     devIntr = String.format(Locale.US, "%.0f/%.0f  %.0f,%.0f", f.fx, f.fy, f.cx, f.cy)
                     // Alternative-registration focals (CPU image). If a
                     // known-diameter object reads true only when the used
@@ -646,6 +661,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     devIntr?.let { "fx/fy cx,cy" to it },
                     devIntrImg?.let { "fImg" to it },
                     devGeom?.let { "geom" to it },
+                    devEdge?.let { "edge" to it },
                     devAxis?.let { "axis" to it },
                     devMap?.let { "tap px" to it },
                     "dist" to (p?.distanceM?.let { String.format(Locale.US, "%.2f m", it) } ?: "—"),
@@ -833,6 +849,11 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         captureMethod == DbhCaptureMethod.MOTION ->
                             "AR motion — aim at the trunk, tap + then sweep the phone slowly across it."
                         locked -> "Hold steady, then tap + to capture."
+                        // Border-touch invalidity: the silhouette walk ran off
+                        // the image — the trunk's edges aren't in frame, so no
+                        // fit can lock. Honest guidance instead of a lock.
+                        preview?.edgesClipped == true ->
+                            "Edges not found — adjust framing."
                         else -> "Align the guide to the trunk's uphill side; hold steady."
                     }
                     stage == Stage.CAPTURING ->

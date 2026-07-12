@@ -173,6 +173,11 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     var devDepth by remember { mutableStateOf<String?>(null) }
     var devIntr by remember { mutableStateOf<String?>(null) }
     var devAxis by remember { mutableStateOf<String?>(null) }
+    // CPU-image-scaled focals (the alternative registration hypothesis) +
+    // the crosshair's mapped depth pixel — the field protocol reads these
+    // against fx/fy to decide which registration the device honours.
+    var devIntrImg by remember { mutableStateOf<String?>(null) }
+    var devMap by remember { mutableStateOf<String?>(null) }
     // Dev-mode one-line geometry check: depth WxH, the fx the chord identity
     // consumed, raw vs smoothed distance — added after the round-6 stack
     // regression so a field run can confirm depth geometry at a glance.
@@ -242,9 +247,17 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     LaunchedEffect(stage, captureMethod, depthBlocked) {
         while (stage == Stage.AIMING && captureMethod == DbhCaptureMethod.DEPTH && !depthBlocked) {
             controller.acquireDepthFrame()?.let { f ->
-                val axis = DBHEstimator.pickGuideAxis(f, f.width / 2.0, f.height / 2.0, calibration)
+                // Crosshair → depth pixel through ARCore's own view↔texture
+                // mapping (display rotation + aspect crop). Falls back to the
+                // grid centre while the mapping isn't available — same point
+                // for a centred crop, but the affine also carries the
+                // principal-point offset the centre assumption ignores.
+                val tap = f.viewToDepth(controller.viewWidthPx / 2f, controller.viewHeightPx / 2f)
+                val tapX = tap?.first ?: (f.width / 2.0)
+                val tapY = tap?.second ?: (f.height / 2.0)
+                val axis = DBHEstimator.pickGuideAxis(f, tapX, tapY, calibration)
                 val raw = DBHEstimator.livePreview(
-                    f, f.width / 2.0, f.height / 2.0, axis, calibration, chordAlgorithm,
+                    f, tapX, tapY, axis, calibration, chordAlgorithm,
                 )
                 if (raw != null && raw.locked) {
                     missStreak = 0
@@ -264,9 +277,19 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         tierStreak += 1
                         if (tierStreak >= 2) { shownTier = raw.tier; tierStreak = 0 }
                     }
+                    // Strip edges live on the DEPTH walk axis — rotate/crop
+                    // them into on-screen x fractions before the Canvas
+                    // multiplies by screen width (in portrait the walk axis
+                    // is the depth grid's y, mirrored+cropped vs the screen).
+                    val vf = stripViewFractions(
+                        f, axis, raw.stripLeftFraction, raw.stripRightFraction,
+                        controller.viewWidthPx.toFloat(),
+                    )
                     preview = raw.copy(
                         diameterCm = sm, distanceM = smD,
                         locked = shownLocked, tier = shownTier,
+                        stripLeftFraction = vf?.first ?: raw.stripLeftFraction,
+                        stripRightFraction = vf?.second ?: raw.stripRightFraction,
                     )
                     // Anchor EMA (α=0.3): the marker follows a stable trunk
                     // point instead of the jittery per-frame hit; a null
@@ -317,16 +340,34 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     preview = raw
                 }
                 if (settings.developerMode) {
+                    val isRow = axis is GuideAxis.Row
                     devDepth = "${f.width}×${f.height}"
                     devIntr = String.format(Locale.US, "%.0f/%.0f  %.0f,%.0f", f.fx, f.fy, f.cx, f.cy)
-                    devAxis = if (axis is com.hcjeong.forestix.sensors.GuideAxis.Row) "Row(y)" else "Col(x)"
+                    // Alternative-registration focals (CPU image). If a
+                    // known-diameter object reads true only when the used
+                    // focal is swapped for this value, the device registers
+                    // depth to the CPU image, not the texture.
+                    devIntrImg = if (f.fxImg > 0)
+                        String.format(Locale.US, "%.0f/%.0f", f.fxImg, f.fyImg) else null
+                    devAxis = if (isRow) "Row(y)" else "Col(x)"
+                    // Crosshair's mapped depth pixel + whether the view↔depth
+                    // affine is 90°-rotated (portrait ⇒ rot90).
+                    devMap = f.depthFromViewAffine?.let { m ->
+                        String.format(
+                            Locale.US, "%.0f,%.0f %s",
+                            tapX, tapY,
+                            if (kotlin.math.abs(m[1]) > kotlin.math.abs(m[0])) "rot90" else "rot0",
+                        )
+                    }
                     // One-glance geometry check (stack-regression sentinel):
-                    // depth WxH + the fx the chord identity divides by + raw
-                    // vs smoothed distance. A wrong depth aspect/orientation
-                    // or a broken intrinsics scale shows up here first.
+                    // depth WxH + the AXIS-MATCHED focal the chord identity
+                    // divides by + raw vs smoothed distance. A wrong depth
+                    // aspect/orientation or broken intrinsics show up here.
                     devGeom = String.format(
-                        Locale.US, "%d×%d fx%.0f d %s/%s",
-                        f.width, f.height, f.fx,
+                        Locale.US, "%d×%d %s%.0f d %s/%s",
+                        f.width, f.height,
+                        if (isRow) "fx" else "fy",
+                        if (isRow) f.fx else f.fy,
                         raw?.distanceM?.let { String.format(Locale.US, "%.2f", it) } ?: "—",
                         smoothedDistM?.let { String.format(Locale.US, "%.2f", it) } ?: "—",
                     )
@@ -375,14 +416,18 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     delay(50)
                 }
                 if (frames.size < 5) continue
-                val w = frames.first().width
-                val h = frames.first().height
+                val f0 = frames.first()
+                // Same crosshair→depth-pixel mapping as the live preview so
+                // the committed burst reads the exact spot the cruiser aimed.
+                val tap = f0.viewToDepth(controller.viewWidthPx / 2f, controller.viewHeightPx / 2f)
+                val tapX = tap?.first ?: (f0.width / 2.0)
+                val tapY = tap?.second ?: (f0.height / 2.0)
                 // Auto-pick the across-the-trunk axis (fixes severe under-read
                 // when the sensor orientation made the strip run along the trunk).
-                val axis = DBHEstimator.pickGuideAxis(frames.first(), w / 2.0, h / 2.0, calibration)
+                val axis = DBHEstimator.pickGuideAxis(f0, tapX, tapY, calibration)
                 // Chord (silhouette-width) method = median of the SAME per-frame
                 // chord the live preview shows, so preview ≈ recorded value.
-                val sub = DBHEstimator.estimateChord(frames, w / 2.0, h / 2.0, axis, calibration, chordAlgorithm)
+                val sub = DBHEstimator.estimateChord(frames, tapX, tapY, axis, calibration, chordAlgorithm)
                     ?: continue
                 if (sub.confidence == ConfidenceTier.RED) {
                     if (firstRed == null) firstRed = sub
@@ -599,8 +644,10 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     "track" to (if (controller.trackingOk()) "OK" else "…"),
                     devDepth?.let { "depthMap" to it },
                     devIntr?.let { "fx/fy cx,cy" to it },
+                    devIntrImg?.let { "fImg" to it },
                     devGeom?.let { "geom" to it },
                     devAxis?.let { "axis" to it },
+                    devMap?.let { "tap px" to it },
                     "dist" to (p?.distanceM?.let { String.format(Locale.US, "%.2f m", it) } ?: "—"),
                     "Ø live" to (p?.let { String.format(Locale.US, "%.1f cm", it.diameterCm) } ?: "—"),
                     "pts" to (p?.nPoints?.toString() ?: "—"),
@@ -1080,4 +1127,35 @@ private fun dbhTierHint(tier: ConfidenceTier): String = when (tier) {
     ConfidenceTier.GREEN -> "Good — wide arc, low scatter. Safe to record."
     ConfidenceTier.YELLOW -> "Fair — narrow arc or noisier fit. Consider a second pass."
     ConfidenceTier.RED -> "Check — step left 1 m and retake, or enter manually."
+}
+
+/// Map the estimator's strip edges (fractions of the DEPTH-map walk axis)
+/// to on-screen x fractions through the frame's depth→view affine. The walk
+/// axis is rotated 90°, aspect-cropped and possibly mirrored relative to
+/// the screen in portrait, so multiplying the raw depth fractions by screen
+/// width (the iOS behaviour, where the depth grid shares the screen's
+/// orientation) drew the chord bar at the wrong width and offset on
+/// Android. Null when the frame has no view mapping (callers keep the raw
+/// fractions as a fallback).
+private fun stripViewFractions(
+    f: ArDepthFrame,
+    axis: GuideAxis,
+    leftFrac: Float,
+    rightFrac: Float,
+    viewW: Float,
+): Pair<Float, Float>? {
+    if (viewW <= 1f) return null
+    val (extent, fixed) = when (axis) {
+        is GuideAxis.Row -> f.width to axis.y
+        is GuideAxis.Col -> f.height to axis.x
+    }
+    fun toViewX(alongPx: Double): Float? = when (axis) {
+        is GuideAxis.Row -> f.depthToView(alongPx, fixed.toDouble())?.first
+        is GuideAxis.Col -> f.depthToView(fixed.toDouble(), alongPx)?.first
+    }
+    val a = toViewX((leftFrac * extent).toDouble()) ?: return null
+    val b = toViewX((rightFrac * extent).toDouble()) ?: return null
+    val lo = (minOf(a, b) / viewW).coerceIn(0f, 1f)
+    val hi = (maxOf(a, b) / viewW).coerceIn(0f, 1f)
+    return lo to hi
 }

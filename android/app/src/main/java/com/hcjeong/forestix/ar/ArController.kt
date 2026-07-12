@@ -13,12 +13,16 @@ package com.hcjeong.forestix.ar
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.google.ar.core.Coordinates2d
+import com.google.ar.core.DepthPoint
 import com.google.ar.core.Frame
 import com.google.ar.core.Plane
+import com.google.ar.core.Point
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
 import com.hcjeong.forestix.sensors.ArDepthFrame
 import java.nio.ByteOrder
+import java.util.Locale
 import kotlin.math.sqrt
 
 class ArController {
@@ -103,22 +107,46 @@ class ArController {
         return f.camera.trackingState == TrackingState.TRACKING && viewWidthPx > 1 && viewHeightPx > 1
     }
 
+    /// Last screenCenterHit's trackable type + distance — dev-HUD readout so
+    /// a field run can see WHAT the anchor landed on ("depth 1.62m").
+    @Volatile var lastCenterHitInfo: String? = null
+        private set
+
     /// Hit the scene at the screen centre. Returns the nearest hit's world
     /// translation, or null when tracking isn't ready / nothing is hit.
     /// Callers must treat null as "tracking not ready", never substitute
     /// the camera position (which biases measurements) — same contract as
     /// the iOS raycaster.
+    ///
+    /// HIT SELECTION (field round 7): depth mode accepts only SURFACE hits —
+    /// DepthPoint (the depth-image sample ON the cast ray, the ARCore
+    /// analogue of the iOS LiDAR scene-mesh raycast) or Plane. Bare Point
+    /// (sparse feature-point) hits are rejected: ARCore returns feature
+    /// points NEAR the ray with the hit pose AT the point itself, so taking
+    /// the nearest-of-any-kind could anchor on a bark/foliage feature point
+    /// off the crosshair — the height-anchor sphere then renders visibly off
+    /// the aim and d_h (→ H) is computed from that wrong point. iOS never
+    /// consumes feature-point hits (mesh raycast → estimated planes only).
     fun screenCenterHit(): Vec3? {
-        if (!ready()) return null
+        if (!ready()) { lastCenterHitInfo = null; return null }
         val f = frame ?: return null
         val cx = viewWidthPx / 2f
         val cy = viewHeightPx / 2f
         val hits = try { f.hitTest(cx, cy) } catch (_: Throwable) { return null }
-        // LiDAR mode: nearest hit of any kind (depth points + planes).
-        // AR mode: estimated-plane hits only, so the behaviour matches the
-        // device that has no Depth API.
-        val hit = if (preferDepth) hits.firstOrNull()
+        // LiDAR mode: nearest SURFACE hit (depth-image points + planes).
+        // AR mode (no Depth API): estimated-plane hits first, then anything —
+        // the dev-only caliper/motion arms need some distance to work with.
+        val hit = if (preferDepth) hits.firstOrNull { it.trackable is DepthPoint || it.trackable is Plane }
         else hits.firstOrNull { it.trackable is Plane } ?: hits.firstOrNull()
+        lastCenterHitInfo = hit?.let {
+            val kind = when (it.trackable) {
+                is DepthPoint -> "depth"
+                is Plane -> "plane"
+                is Point -> "point"
+                else -> "other"
+            }
+            String.format(Locale.US, "%s %.2fm", kind, it.distance)
+        }
         hit ?: return null
         val t = hit.hitPose.translation
         return Vec3(t[0], t[1], t[2])
@@ -216,14 +244,19 @@ class ArController {
     /// world-XZ the iOS pipeline produces. NOTE: depth-image orientation +
     /// intrinsics scaling are device/rotation sensitive — validate on-device.
     ///
-    /// GEOMETRY ASSUMPTION (round-7 regression finding): the fx/fy scaling
-    /// below (texture intrinsics × depth/texture size ratio, per axis) is
-    /// only correct while the depth image spans the SAME field of view as
-    /// the GPU texture on that axis. That held on the field-validated
-    /// ARCore 1.44 client; the 1.54 client changed the delivered depth
-    /// geometry on Samsung/Android 15-16 (DBH read ~2×), so the AR stack is
-    /// pinned in build.gradle.kts. Re-validate this scaling (dev-mode "geom"
-    /// HUD line: WxH + fx + raw/smoothed distance) before any ARCore bump.
+    /// GEOMETRY CONTRACT (round-7 audit): the ARCore depth image is
+    /// registered to the GPU texture's TEXTURE_NORMALIZED space — the depth
+    /// developer guide indexes depth pixels with IMAGE_PIXELS→
+    /// TEXTURE_NORMALIZED coordinates, and Google's own BackgroundRenderer
+    /// samples the depth texture with the NDC→TEXTURE_NORMALIZED UVs it uses
+    /// for the camera texture. So texture intrinsics × depth/texture size
+    /// ratio PER AXIS is the correct depth-grid intrinsics — but when the
+    /// depth aspect ≠ texture aspect the result has fx ≠ fy (non-square
+    /// depth pixels) and consumers MUST pick the focal matching their walk
+    /// axis. The depth-px↔view-px affine below comes from ARCore's own
+    /// transformCoordinates2d, so tap + overlay mapping track the display
+    /// rotation/crop exactly. Re-validate on any ARCore bump (dev "geom"
+    /// HUD line: WxH + focal used + raw/smoothed distance).
     fun acquireDepthFrame(): ArDepthFrame? {
         val f = frame ?: return null
         if (f.camera.trackingState != TrackingState.TRACKING) return null
@@ -234,18 +267,23 @@ class ArController {
             val plane = image.planes[0]
             val shorts = plane.buffer.order(ByteOrder.nativeOrder()).asShortBuffer()
             val rowStrideShorts = plane.rowStride / 2
+            // D_16 is a packed 16-bit plane (pixelStride 2 → 1 short); honour
+            // the reported stride anyway so a padded layout can't shear the
+            // grid (a stride bug skews the whole silhouette extraction).
+            val pixelStrideShorts = (plane.pixelStride / 2).coerceAtLeast(1)
             val depth = FloatArray(w * h)
             val conf = ByteArray(w * h)
             for (y in 0 until h) {
                 val base = y * rowStrideShorts
                 for (x in 0 until w) {
-                    val mm = shorts.get(base + x).toInt() and 0xFFFF
+                    val mm = shorts.get(base + x * pixelStrideShorts).toInt() and 0xFFFF
                     val idx = y * w + x
                     if (mm in 1..8000) { depth[idx] = mm / 1000f; conf[idx] = 2 }
                     else { depth[idx] = 0f; conf[idx] = 0 }
                 }
             }
-            // Scale the full-res texture intrinsics down to the depth image.
+            // Scale the full-res texture intrinsics down to the depth image
+            // (per axis — see the geometry-contract note above).
             val ti = f.camera.textureIntrinsics
             val dims = ti.imageDimensions   // [texW, texH]
             val fl = ti.focalLength         // [fx, fy]
@@ -256,12 +294,52 @@ class ArController {
             val fy = fl[1] * sy
             val cx = pp[0] * sx
             val cy = pp[1] * sy
+            // Diagnostic alternative: CPU-image intrinsics scaled the same
+            // way — the correct values IF a device registered its depth to
+            // the CPU image instead of the texture. HUD-only.
+            var fxImg = 0.0
+            var fyImg = 0.0
+            try {
+                val ii = f.camera.imageIntrinsics
+                val idims = ii.imageDimensions
+                if (idims[0] > 0 && idims[1] > 0) {
+                    fxImg = ii.focalLength[0] * w.toDouble() / idims[0]
+                    fyImg = ii.focalLength[1] * h.toDouble() / idims[1]
+                }
+            } catch (_: Throwable) { /* diagnostics only */ }
+            // VIEW-px -> depth-px affine from ARCore's own coordinate
+            // transform (VIEW → TEXTURE_NORMALIZED is affine: display
+            // rotation + centred aspect crop — three points pin it down).
+            var depthFromView: FloatArray? = null
+            val vw = viewWidthPx.toFloat()
+            val vh = viewHeightPx.toFloat()
+            if (vw > 1f && vh > 1f) {
+                try {
+                    val viewPts = floatArrayOf(0f, 0f, vw, 0f, 0f, vh)
+                    val tex = FloatArray(6)
+                    f.transformCoordinates2d(
+                        Coordinates2d.VIEW, viewPts,
+                        Coordinates2d.TEXTURE_NORMALIZED, tex,
+                    )
+                    val u0 = tex[0] * w; val v0 = tex[1] * h
+                    val u1 = tex[2] * w; val v1 = tex[3] * h
+                    val u2 = tex[4] * w; val v2 = tex[5] * h
+                    val m = floatArrayOf(
+                        (u1 - u0) / vw, (u2 - u0) / vh, u0,
+                        (v1 - v0) / vw, (v2 - v0) / vh, v0,
+                    )
+                    if (m.all { it.isFinite() }) depthFromView = m
+                } catch (_: Throwable) { /* mapping unavailable this frame */ }
+            }
             val pose = FloatArray(16)
             f.camera.pose.toMatrix(pose, 0)
             // Negate column 1 (Y) and column 2 (Z) — OpenCV -> ARCore frame.
             for (i in 4..7) pose[i] = -pose[i]
             for (i in 8..11) pose[i] = -pose[i]
-            return ArDepthFrame(w, h, depth, conf, fx, fy, cx, cy, pose)
+            return ArDepthFrame(
+                w, h, depth, conf, fx, fy, cx, cy, pose,
+                fxImg = fxImg, fyImg = fyImg, depthFromViewAffine = depthFromView,
+            )
         } finally {
             image.close()
         }

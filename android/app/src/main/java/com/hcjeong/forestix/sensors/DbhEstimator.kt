@@ -66,6 +66,13 @@ data class DBHResult(
 
 /// Row-major depth + confidence grid with pinhole intrinsics and the
 /// column-major camera->world pose. Mirror of iOS ARDepthFrame.
+///
+/// Android note: fx/fy/cx/cy are the GPU-TEXTURE intrinsics scaled per axis
+/// to the depth grid (the ARCore depth image is registered to the texture's
+/// TEXTURE_NORMALIZED space). When the depth aspect differs from the texture
+/// aspect (typical: 4:3 depth vs 16:9 texture) the scaled fx and fy are NOT
+/// equal — consumers must use the focal matching the axis they measure
+/// along. iOS never sees this (sceneDepth and image are both 4:3 → fx==fy).
 class ArDepthFrame(
     val width: Int,
     val height: Int,
@@ -73,9 +80,44 @@ class ArDepthFrame(
     val confidence: ByteArray,    // 0/1/2, row-major
     val fx: Double, val fy: Double, val cx: Double, val cy: Double,
     val pose: FloatArray,         // column-major 4x4 (T_world_camera)
+    /// Diagnostic focals — what fx/fy would be if the depth image were
+    /// registered to the CPU IMAGE instead of the GPU texture (CPU-image
+    /// intrinsics × depth/CPU dims). Dev-HUD only: lets a field run decide
+    /// which registration the device actually honours.
+    val fxImg: Double = 0.0,
+    val fyImg: Double = 0.0,
+    /// VIEW-px -> depth-px affine (a, b, tx, c, d, ty):
+    ///   depthX = a·viewX + b·viewY + tx;  depthY = c·viewX + d·viewY + ty.
+    /// Built by the capture layer from ARCore's own VIEW→TEXTURE_NORMALIZED
+    /// transform, so it carries the display rotation + aspect crop exactly.
+    /// Null when the mapping isn't available (no viewport yet) — callers
+    /// fall back to centre-of-grid behaviour.
+    val depthFromViewAffine: FloatArray? = null,
 ) {
     fun depthAt(x: Int, y: Int): Float = depth[y * width + x]
     fun confidenceAt(x: Int, y: Int): Int = confidence[y * width + x].toInt() and 0xFF
+
+    /// Map a view-space pixel (e.g. the crosshair centre) to depth-grid
+    /// coordinates. Null when no mapping was captured.
+    fun viewToDepth(vx: Float, vy: Float): Pair<Double, Double>? {
+        val m = depthFromViewAffine ?: return null
+        val dx = m[0] * vx + m[1] * vy + m[2]
+        val dy = m[3] * vx + m[4] * vy + m[5]
+        return dx.toDouble() to dy.toDouble()
+    }
+
+    /// Map a depth-grid coordinate back to view-space pixels (inverse of
+    /// the affine). Null when no mapping / degenerate.
+    fun depthToView(dx: Double, dy: Double): Pair<Float, Float>? {
+        val m = depthFromViewAffine ?: return null
+        val det = m[0] * m[4] - m[1] * m[3]
+        if (abs(det) < 1e-9f) return null
+        val rx = dx - m[2]
+        val ry = dy - m[5]
+        val vx = (m[4] * rx - m[1] * ry) / det
+        val vy = (-m[3] * rx + m[0] * ry) / det
+        return vx.toFloat() to vy.toFloat()
+    }
 }
 
 sealed class GuideAxis {
@@ -291,12 +333,29 @@ object DBHEstimator {
         is GuideAxis.Col -> frame.height
     }
 
-    /// Silhouette strip walk — 1:1 port of iOS extractChordSilhouetteStrip.
+    /// Absolute validity band of the silhouette walk around the tap depth.
+    /// Cylinder model: for a trunk of radius r whose FRONT surface is at
+    /// depth z (≈ dTap), every true silhouette pixel lies at depth
+    /// z … √((z+r)²−r²) < z+r, so |d − dTap| < r for ALL trunk pixels.
+    /// With r ≤ 0.6 m (120 cm DBH — beyond any cruise tree) a pixel more
+    /// than 0.6 m off the tap depth provably is NOT the trunk. On crisp
+    /// LiDAR-style edges this band is a no-op (a >0.6 m step would already
+    /// break the per-step jump rule); it exists because ARCore's ML/fused
+    /// depth on non-ToF phones blurs the trunk→background edge into a
+    /// smooth ramp whose PER-STEP deltas stay under silhouetteJumpM — the
+    /// walk then never stops, the chord bar spans the screen, and the
+    /// diameter reads far too wide (field round 7).
+    private const val SILHOUETTE_MAX_DEV_M = 0.60f
+
+    /// Silhouette strip walk — port of iOS extractChordSilhouetteStrip.
     /// Walks outward from the tap seed along the axis, stopping at an invalid
-    /// pixel (conf 0 / depth ≤ 0) or a depth jump > silhouetteJumpM. Returns
-    /// the contiguous trunk pixel indices (the projected silhouette edges).
+    /// pixel (conf 0 / depth ≤ 0), a depth jump > silhouetteJumpM, or a pixel
+    /// outside the ±bandHalfWidthM validity band around bandCenterM (Android
+    /// addition, see SILHOUETTE_MAX_DEV_M). Returns the contiguous trunk
+    /// pixel indices (the projected silhouette edges).
     private fun extractChordSilhouetteStrip(
         frame: ArDepthFrame, axis: GuideAxis, tapAlong: Int, silhouetteJumpM: Float = 0.30f,
+        bandCenterM: Float = 0f, bandHalfWidthM: Float = Float.POSITIVE_INFINITY,
     ): List<Int> {
         val walkLength = when (axis) {
             is GuideAxis.Row -> { if (axis.y < 0 || axis.y >= frame.height) return emptyList(); frame.width }
@@ -305,7 +364,11 @@ object DBHEstimator {
         val clampedTap = tapAlong.coerceIn(0, walkLength - 1)
         fun depthAt(idx: Int): Float { val (x, y) = pixelCoords(axis, idx); return frame.depthAt(x, y) }
         fun valid(idx: Int): Boolean {
-            val (x, y) = pixelCoords(axis, idx); return frame.confidenceAt(x, y) >= 1 && frame.depthAt(x, y) > 0f
+            val (x, y) = pixelCoords(axis, idx)
+            if (frame.confidenceAt(x, y) < 1) return false
+            val d = frame.depthAt(x, y)
+            if (d <= 0f) return false
+            return bandCenterM <= 0f || abs(d - bandCenterM) <= bandHalfWidthM
         }
         var seed = clampedTap
         if (!valid(seed)) {
@@ -333,15 +396,27 @@ object DBHEstimator {
         return indices
     }
 
-    /// Per-frame silhouette diameter (m) — 1:1 port of iOS chordPreviewFit's
+    /// Per-frame silhouette diameter (m) — port of iOS chordPreviewFit's
     /// core: median silhouette width across ±rowSpan rows, then the pinhole
-    /// chord identity d = w·dTap/(fx − w/2). Null if too few usable rows.
+    /// chord identity d = w·dTap/(f − w/2). Null if too few usable rows.
+    ///
+    /// FOCAL CHOICE (Android): the width w is counted along the WALK axis —
+    /// depth-x for a Row walk (divide by fx), depth-y for a Col walk (divide
+    /// by fy). iOS always divides by fx because its depth grid has square
+    /// pixels (fx == fy); on Android the texture-registered per-axis scaling
+    /// makes fx ≠ fy whenever the depth aspect ≠ texture aspect (e.g. 4:3
+    /// depth on a 16:9 texture → fy = 4/3·fx), and a portrait trunk chord is
+    /// a Col walk — dividing by fx there over-reads the diameter by exactly
+    /// fy/fx (≈1.33×, field round 7).
     private fun frameSilhouetteDiameterM(
         frame: ArDepthFrame, tapX: Double, tapY: Double, axis: GuideAxis, dTap: Float,
         rowSpan: Int = 10, silhouetteJumpM: Float = 0.30f,
     ): FrameChord? {
-        val fx = frame.fx
-        if (fx <= 0) return null
+        val focal = when (axis) {
+            is GuideAxis.Row -> frame.fx
+            is GuideAxis.Col -> frame.fy
+        }
+        if (focal <= 0) return null
         val centerAlong = tapAlongAxis(tapX, tapY, axis)
         val widths = ArrayList<Int>()
         // First usable strip extent → the on-screen chord span (iOS
@@ -353,7 +428,10 @@ object DBHEstimator {
                 is GuideAxis.Row -> GuideAxis.Row(axis.y + offset)
                 is GuideAxis.Col -> GuideAxis.Col(axis.x + offset)
             }
-            val strip = extractChordSilhouetteStrip(frame, neighbour, centerAlong, silhouetteJumpM)
+            val strip = extractChordSilhouetteStrip(
+                frame, neighbour, centerAlong, silhouetteJumpM,
+                bandCenterM = dTap, bandHalfWidthM = SILHOUETTE_MAX_DEV_M,
+            )
             val l = strip.firstOrNull() ?: continue
             val r = strip.lastOrNull() ?: continue
             if (r <= l) continue
@@ -366,8 +444,8 @@ object DBHEstimator {
         widths.sort()
         val medianWidth = widths[widths.size / 2]
         val halfWidth = medianWidth / 2.0
-        if (fx - halfWidth <= 1.0) return null
-        val diameterM = medianWidth * dTap.toDouble() / (fx - halfWidth)
+        if (focal - halfWidth <= 1.0) return null
+        val diameterM = medianWidth * dTap.toDouble() / (focal - halfWidth)
         if (diameterM <= 0.0) return null
         // Width consistency across the row stack — iOS chordPreviewFit's
         // tier input (CoV ≤ 0.10 ⇒ green preview chip).

@@ -144,6 +144,13 @@ private fun ArSceneHost(
     val cameraNode = rememberARCameraNode(engine)
     val childNodes = rememberNodes()
     val androidView = LocalView.current
+    // The actual ARSceneView instance — ARCore's VIEW coordinate space is
+    // defined by setDisplayGeometry(rotation, width, height), which SceneView
+    // calls with THIS view's size on every layout. Sizing the controller from
+    // it (not the window's compose root) keeps hitTest coordinates and the
+    // depth↔view mapping in exactly that space even if the AR surface ever
+    // stops being full-bleed.
+    var sceneViewRef by remember { mutableStateOf<io.github.sceneview.ar.ARSceneView?>(null) }
 
     // Nodes whose apparent size should stay constant — rescaled every frame
     // from the camera distance (see onSessionUpdated below).
@@ -199,7 +206,10 @@ private fun ArSceneHost(
     }
 
     DisposableEffect(Unit) {
-        onDispose { controller.frame = null }
+        onDispose {
+            controller.frame = null
+            sceneViewRef = null
+        }
     }
 
     ARScene(
@@ -210,6 +220,7 @@ private fun ArSceneHost(
         cameraNode = cameraNode,
         childNodes = childNodes,
         planeRenderer = true,
+        onViewCreated = { sceneViewRef = this },
         sessionConfiguration = { session, config ->
             // Enable the Depth API when available (LiDAR-equivalent) so
             // hit-tests resolve against depth points, not just planes.
@@ -221,8 +232,16 @@ private fun ArSceneHost(
             config.lightEstimationMode = Config.LightEstimationMode.DISABLED
         },
         onSessionUpdated = { session, frame ->
-            controller.viewWidthPx = androidView.width
-            controller.viewHeightPx = androidView.height
+            // Prefer the AR surface's own size (the setDisplayGeometry
+            // source); the compose root is a fallback for the first frames.
+            val sv = sceneViewRef
+            if (sv != null && sv.width > 0 && sv.height > 0) {
+                controller.viewWidthPx = sv.width
+                controller.viewHeightPx = sv.height
+            } else {
+                controller.viewWidthPx = androidView.width
+                controller.viewHeightPx = androidView.height
+            }
             controller.onUpdate(session, frame)
             // Distance-compensated marker scaling — keeps flagged markers'
             // apparent size readable when the cruiser walks away (height

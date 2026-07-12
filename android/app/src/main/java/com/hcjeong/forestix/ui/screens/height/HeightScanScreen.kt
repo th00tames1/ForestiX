@@ -164,6 +164,18 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
         }
     }
 
+    // Dev-mode probe: raycast the crosshair a few times a second so the
+    // HUD's "hit" line (type + range of what an anchor tap WOULD capture)
+    // is live while aiming — the capture stages only raycast on the tap.
+    var devHitInfo by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(settings.developerMode) {
+        while (settings.developerMode) {
+            controller.screenCenterHit()
+            devHitInfo = controller.lastCenterHitInfo
+            delay(250)
+        }
+    }
+
     fun markers(): List<ArSceneMarker> {
         // scalesWithDistance keeps every sphere readable from across the
         // walk-off — natural size up close, grows with camera distance.
@@ -371,6 +383,10 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                     "depth" to (if (controller.supportsDepth) "ARCore✓" else "plane"),
                     "track" to (if (controller.trackingOk()) "OK" else "…"),
                     "stage" to stage.name,
+                    // What the last centre raycast landed on (type + range) —
+                    // the anchor sphere is placed exactly at this hit, so a
+                    // "point"/far reading here explains an off-trunk anchor.
+                    "hit" to (devHitInfo ?: "—"),
                     "pitch" to (controller.cameraPitchDeg()?.let { String.format(Locale.US, "%+.1f°", it) } ?: "—"),
                     "d_h live" to String.format(Locale.US, "%.1f m", dhLive),
                     alphaBase?.let { "α_base" to String.format(Locale.US, "%+.1f°", Math.toDegrees(it.toDouble())) },

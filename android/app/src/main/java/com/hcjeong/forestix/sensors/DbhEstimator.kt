@@ -13,6 +13,7 @@
 
 package com.hcjeong.forestix.sensors
 
+import com.hcjeong.forestix.ar.Vec3
 import java.util.Locale
 import kotlin.math.PI
 import kotlin.math.abs
@@ -300,6 +301,10 @@ object DBHEstimator {
         /// as `carryWidths` on the next tick (rolling row quorum while the
         /// aim is steady). Never includes borrowed carry widths.
         val cleanWidths: List<Int> = emptyList(),
+        /// World-space cylinder-axis centre of this tick's fit (strip
+        /// midpoint back-projected, pushed one radius behind the surface) —
+        /// the overlay cylinder's anchor. Null when no fit.
+        val centerWorld: Vec3? = null,
     )
 
     /// Per-frame chord fit + the strip extent it was read from.
@@ -312,6 +317,12 @@ object DBHEstimator {
         val widthCov: Double?,
         /// Median silhouette width in walk-axis pixels (dev HUD).
         val widthPx: Int = 0,
+        /// World-space CYLINDER-AXIS centre of this fit: the strip midpoint
+        /// back-projected at its own depth, pushed one radius behind the
+        /// front surface (iOS chordPreviewFit `center` parity). Anchors the
+        /// translucent cylinder overlay on the SAME fit the bar is drawn
+        /// from. Null when unavailable.
+        val centerWorld: Vec3? = null,
     )
 
     /// Per-frame scan outcome: the chord fit (null when unusable) plus how
@@ -556,6 +567,40 @@ object DBHEstimator {
         val cov = if (mean > 0) {
             sqrt(fitWidths.sumOf { (it - mean) * (it - mean) } / fitWidths.size) / mean
         } else 1.0
+        // Cylinder-overlay anchor — iOS chordPreviewFit `center` parity:
+        // back-project the guide row's strip MIDPOINT at its own depth
+        // (fallback dTap), then push one radius further along the
+        // camera→surface XZ ray — the cylinder AXIS sits one radius behind
+        // the visible front face. Because this is the SAME fit the chord
+        // bar is drawn from, the rendered cylinder and the bar agree in
+        // position and width by construction.
+        val centerWorld: Vec3? = if (extentL >= 0 && extentR >= 0) {
+            val midIdx = (extentL + extentR) / 2
+            val (mpx, mpy) = pixelCoords(axis, midIdx)
+            val pixDepth = frame.depthAt(mpx, mpy).toDouble()
+            val depthBP = if (pixDepth > 0) pixDepth else dTap.toDouble()
+            val surface = BackProjection.worldXZ(
+                mpx.toDouble(), mpy.toDouble(), depthBP,
+                frame.fx, frame.fy, frame.cx, frame.cy, frame.pose,
+            )
+            // World Y of the midpoint pixel (worldXZ omits it) — same
+            // row-1 dot product convention as BackProjection/Calibration.
+            val xc = (mpx - frame.cx) * depthBP / frame.fx
+            val yc = (mpy - frame.cy) * depthBP / frame.fy
+            val worldY = frame.pose[1] * xc + frame.pose[5] * yc +
+                frame.pose[9] * depthBP + frame.pose[13]
+            val camX = frame.pose[12].toDouble()
+            val camZ = frame.pose[14].toDouble()
+            val dx = surface.x - camX
+            val dz = surface.y - camZ          // V2.y carries world Z
+            val len = sqrt(dx * dx + dz * dz)
+            val rM = diameterM / 2.0
+            if (len > 1e-6) Vec3(
+                (surface.x + dx / len * rM).toFloat(),
+                worldY.toFloat(),
+                (surface.y + dz / len * rM).toFloat(),
+            ) else null
+        } else null
         val extent = axisExtent(frame, axis).toFloat().coerceAtLeast(1f)
         return FrameScan(
             FrameChord(
@@ -564,6 +609,7 @@ object DBHEstimator {
                 if (extentR >= 0) extentR / extent else 1f,
                 widthCov = cov,
                 widthPx = medianWidth,
+                centerWorld = centerWorld,
             ),
             clippedRows,
             ownWidths,
@@ -605,6 +651,7 @@ object DBHEstimator {
             dia, dTap, locked, 1, chord.leftFrac, chord.rightFrac, tier,
             clippedRows = scan.borderClippedRows, widthPx = chord.widthPx,
             cleanRows = scan.cleanWidths.size, cleanWidths = scan.cleanWidths,
+            centerWorld = chord.centerWorld,
         )
     }
 

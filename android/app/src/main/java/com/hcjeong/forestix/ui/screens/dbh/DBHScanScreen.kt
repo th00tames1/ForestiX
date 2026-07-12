@@ -59,6 +59,7 @@ import com.hcjeong.forestix.ar.ArCameraView
 import com.hcjeong.forestix.ar.ArSceneMarker
 import com.hcjeong.forestix.ar.MarkerShape
 import com.hcjeong.forestix.ar.Vec3
+import com.hcjeong.forestix.ar.distance
 import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.sensors.ArCaliperDbh
@@ -124,6 +125,13 @@ private const val PREVIEW_MISS_RESET = 7
 /// such tick is bridged with the EMA seed (could be an ML-depth hole /
 /// outlier); two consecutive divergent ticks reset the lock immediately.
 private const val TAP_JUMP_M = 0.5f
+
+/// Cylinder-anchor snap threshold: a chord-fit centre that moves by more
+/// than this in one tick is a real move (new aim spot / user stepped), so
+/// the anchor SNAPS there instead of EMA-lagging — a lagging anchor at a
+/// stale nearer depth rendered the cylinder up to z_old/z_new wider than
+/// the bar. Below it, the EMA (α=0.3) irons out hand tremor as before.
+private const val CYL_ANCHOR_SNAP_M = 0.05f
 
 /// `chainToHeight` = launched from the map-home "Full measurement" row
 /// ("dbh?chain=true"): Accept saves the diameter, skips the continuation
@@ -234,10 +242,11 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // single frame.
     var smoothedDiaCm by remember { mutableStateOf<Float?>(null) }
     var smoothedDistM by remember { mutableStateOf<Float?>(null) }
-    // Cylinder anchor — EMA over the screen-centre hit (iOS
-    // smoothedCenterWorldXZ parity), held through one-frame hit-test
-    // misses. The raw per-frame hit wandered across the marker's 1 cm
-    // quantisation grid, changing the marker value nearly every tick.
+    // Cylinder anchor — EMA over the CHORD FIT's own axis centre (iOS
+    // smoothedCenterWorldXZ parity), held through one-frame misses and
+    // SNAPPED when the fit centre moves beyond CYL_ANCHOR_SNAP_M. The raw
+    // per-tick centre wanders across the marker's 1 cm quantisation grid,
+    // so unsmoothed it changed the marker value nearly every tick.
     var smoothedHitAnchor by remember { mutableStateOf<Vec3?>(null) }
     var lockStreak by remember { mutableStateOf(0) }
     // Dropout hysteresis: while locked, up to PREVIEW_MISS_RESET−1
@@ -360,34 +369,43 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         stripLeftFraction = vf?.first ?: raw.stripLeftFraction,
                         stripRightFraction = vf?.second ?: raw.stripRightFraction,
                     )
-                    // Anchor EMA (α=0.3): the marker follows a stable trunk
-                    // point instead of the jittery per-frame hit; a null
-                    // hit this tick just holds the last anchor.
-                    controller.screenCenterHit()?.let { hitRaw ->
+                    // Cylinder anchor = the chord fit's OWN axis centre
+                    // (strip midpoint back-projected at its depth + pushed
+                    // one radius behind the front surface, computed in the
+                    // estimator) — the SAME fit the bar is drawn from, so
+                    // bar and cylinder agree in position and width by
+                    // construction. The old anchor EMA'd a SEPARATE raycast
+                    // (screenCenterHit): any bias or lag between that second
+                    // depth source and the measurement's dTap scaled the
+                    // cylinder's apparent width (∝ asin(r/z_axis)) and
+                    // shifted it laterally off the bar — the field-reported
+                    // intermittent 1.4–2× wide / off-centre cylinder.
+                    // EMA (α=0.3) still irons out hand tremor, but a move
+                    // beyond CYL_ANCHOR_SNAP_M SNAPS to the new centre so a
+                    // stale near-depth anchor can't linger after the user
+                    // moves.
+                    raw.centerWorld?.let { c ->
                         val ph = smoothedHitAnchor
-                        smoothedHitAnchor = if (ph == null) hitRaw else Vec3(
-                            0.3f * hitRaw.x + 0.7f * ph.x,
-                            0.3f * hitRaw.y + 0.7f * ph.y,
-                            0.3f * hitRaw.z + 0.7f * ph.z,
-                        )
+                        smoothedHitAnchor =
+                            if (ph == null || distance(ph, c) > CYL_ANCHOR_SNAP_M) c
+                            else Vec3(
+                                0.3f * c.x + 0.7f * ph.x,
+                                0.3f * c.y + 0.7f * ph.y,
+                                0.3f * c.z + 0.7f * ph.z,
+                            )
                     }
-                    val cam = controller.currentCameraPosition()
-                    val hit = smoothedHitAnchor
-                    cylinderMarker = if (shownLocked && hit != null) {
-                        val rM = sm / 100f / 2f
-                        // Push the centre back by one radius along the view
-                        // ray (the hit is the trunk's FRONT surface).
-                        var cx = hit.x
-                        var cz = hit.z
-                        if (cam != null) {
-                            val dx = hit.x - cam.x; val dy = hit.y - cam.y; val dz = hit.z - cam.z
-                            val len = kotlin.math.sqrt(dx * dx + dy * dy + dz * dz)
-                            if (len > 1e-3f) { cx = hit.x + dx / len * rM; cz = hit.z + dz / len * rM }
-                        }
+                    val anchor = smoothedHitAnchor
+                    cylinderMarker = if (shownLocked && anchor != null) {
                         fun q(v: Float) = Math.round(v * 100f) / 100f   // 1 cm grid → stable equality
+                        // Quantise the DIAMETER once (1 cm — the same grid
+                        // the displayed value uses), then halve. The old
+                        // q(rM) rounded the RADIUS to 1 cm, i.e. the
+                        // rendered diameter to a 2 cm grid (11.1 cm drew
+                        // as 12 — up to +18% width on small stems).
+                        val rM = (q(sm / 100f) / 2f).coerceAtLeast(0.01f)
                         ArSceneMarker(
-                            Vec3(q(cx), q(hit.y), q(cz)),
-                            MarkerShape.Cylinder(q(rM).coerceAtLeast(0.01f), 1.0f),
+                            Vec3(q(anchor.x), q(anchor.y), q(anchor.z)),
+                            MarkerShape.Cylinder(rM, 1.0f),
                             floatArrayOf(0.30f, 0.65f, 1.0f, 0.45f),
                         )
                     } else null

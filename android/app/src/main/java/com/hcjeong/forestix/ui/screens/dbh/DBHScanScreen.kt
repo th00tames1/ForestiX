@@ -109,10 +109,21 @@ private enum class Stage { AIMING, CAPTURING, RESULT }
 private const val SAMPLE_COUNT = 5
 
 /// Consecutive bad/absent per-frame fits tolerated while locked before the
-/// HUD drops back to aiming (iOS `redResetCount` parity). Without this a
-/// single unusable frame flipped ring/chord/badge/status every tick — the
-/// field-reported "screen flashing" during aiming.
-private const val PREVIEW_MISS_RESET = 3
+/// HUD drops back to aiming. The display freezes on the last good smoothed
+/// value through the hold — invisible while steady. At the 150 ms preview
+/// tick this holds (7−1)×150 ≈ 900 ms of misses. iOS parity in SPIRIT, not
+/// tick count: its redResetCount=3 rides a much faster preview tick, i.e. a
+/// sub-second wall-clock hold — matched here in wall-clock terms. Round-7
+/// field fix: ML-depth "breathing" produces miss runs of ~0.5 s on a
+/// perfectly steady aim, so the old 3-tick (0.45 s) hold flapped the lock.
+/// A REAL re-aim still cuts the hold short (~300 ms) via the tap-jump
+/// detector in the preview loop.
+private const val PREVIEW_MISS_RESET = 7
+
+/// Fresh-vs-held tap-depth divergence treated as a possible re-aim: one
+/// such tick is bridged with the EMA seed (could be an ML-depth hole /
+/// outlier); two consecutive divergent ticks reset the lock immediately.
+private const val TAP_JUMP_M = 0.5f
 
 /// `chainToHeight` = launched from the map-home "Full measurement" row
 /// ("dbh?chain=true"): Accept saves the diameter, skips the continuation
@@ -235,6 +246,18 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // through one-frame fit dropouts (iOS tolerates transient reds the
     // same way).
     var missStreak by remember { mutableStateOf(0) }
+    // Consecutive ticks whose FRESH centre median diverged > TAP_JUMP_M from
+    // the held smoothed distance while shown-locked. 1 = bridge with the EMA
+    // seed (hole/outlier); 2 = real re-aim → reset immediately (cuts the
+    // miss-hold short).
+    var tapJumpStreak by remember { mutableStateOf(0) }
+    // Clean-row widths of the last 2 preview ticks — rolling row quorum
+    // while shown-locked, so one tick's edge jitter clipping a couple of
+    // rows can't kill an established fit. Preview-only; the capture burst
+    // never sees carry. Cleared whenever the guide axis flips (widths are
+    // walk-axis pixels — mixing axes would median incompatible units).
+    val carryWidths = remember { ArrayDeque<List<Int>>() }
+    var lastAxisRow by remember { mutableStateOf<Boolean?>(null) }
     // Shown preview tier only flips after 2 consecutive frames agree, so
     // the green chip can't blink in/out on the raw per-frame CoV.
     var shownTier by remember { mutableStateOf(ConfidenceTier.YELLOW) }
@@ -258,9 +281,53 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 val tapX = tap?.first ?: (f.width / 2.0)
                 val tapY = tap?.second ?: (f.height / 2.0)
                 val axis = DBHEstimator.pickGuideAxis(f, tapX, tapY, calibration)
-                val raw = DBHEstimator.livePreview(
+                val isRowAxis = axis is GuideAxis.Row
+                if (lastAxisRow != isRowAxis) { carryWidths.clear(); lastAxisRow = isRowAxis }
+                // Preview-layer tap-depth seeding (lock stability). The
+                // fresh 5×5 median is the normal seed; while shown-locked, a
+                // hole (null) or a single wild excursion vs the held EMA
+                // distance is bridged by seeding from the EMA instead of
+                // failing the whole tick — the dominant flap cause, since a
+                // bad dTap shifts the envelope centre and fails all 21 rows
+                // at once. TWO consecutive excursions = a real re-aim →
+                // reset the lock immediately (don't ride the miss-hold).
+                val fresh = DBHEstimator.medianDepth(tapX, tapY, f, 2)
+                val heldD = smoothedDistM
+                var seededFromEma = false
+                var dTapSeed: Float? = fresh
+                if (preview?.locked == true && heldD != null) {
+                    when {
+                        fresh == null -> { dTapSeed = heldD; seededFromEma = true; tapJumpStreak = 0 }
+                        kotlin.math.abs(fresh - heldD) > TAP_JUMP_M -> {
+                            tapJumpStreak += 1
+                            if (tapJumpStreak >= 2) {
+                                // Real aim change: cleanly restart on fresh.
+                                missStreak = 0; rawDistM = null
+                                smoothedDiaCm = null; smoothedDistM = null
+                                smoothedHitAnchor = null; lockStreak = 0
+                                tierStreak = 0; shownTier = ConfidenceTier.YELLOW
+                                cylinderMarker = null; preview = null
+                                carryWidths.clear(); tapJumpStreak = 0
+                            } else {
+                                dTapSeed = heldD; seededFromEma = true
+                            }
+                        }
+                        else -> tapJumpStreak = 0
+                    }
+                } else {
+                    tapJumpStreak = 0
+                }
+                val raw = if (dTapSeed == null) null else DBHEstimator.livePreview(
                     f, tapX, tapY, axis, calibration, chordAlgorithm,
+                    dTapOverrideM = dTapSeed,
+                    // Rolling row quorum only continues an established lock.
+                    carryWidths = if (preview?.locked == true) carryWidths.flatten() else emptyList(),
                 )
+                // Feed this tick's own clean rows into the carry window.
+                if (raw != null && raw.cleanRows > 0) {
+                    carryWidths.addLast(raw.cleanWidths)
+                    while (carryWidths.size > 2) carryWidths.removeFirst()
+                }
                 if (raw != null && raw.locked) {
                     missStreak = 0
                     rawDistM = raw.distanceM
@@ -339,23 +406,32 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     tierStreak = 0
                     shownTier = ConfidenceTier.YELLOW
                     cylinderMarker = null
+                    carryWidths.clear()
+                    tapJumpStreak = 0
                     preview = raw
                 }
                 if (settings.developerMode) {
                     val isRow = axis is GuideAxis.Row
                     devDepth = "${f.width}×${f.height}"
-                    // Edge legibility: were both silhouette edges found inside
-                    // the frame (w = median width), or did rows run off the
-                    // border (OFF-FRAME → the fit is invalid by design)?
+                    // Edge legibility + miss diagnosis: found width / clean
+                    // rows on good ticks; the failing STAGE on miss ticks
+                    // (tap— = centre-median hole, range = dTap gate,
+                    // r n/5 = row quorum, OFF-FRAME = border clips). "ema"
+                    // marks ticks bridged by the EMA-seeded tap depth.
+                    val ema = if (seededFromEma) " ema" else ""
                     devEdge = when {
-                        raw == null -> null
+                        raw == null -> if (fresh == null) "miss tap—" else "miss —"
                         raw.edgesClipped ->
                             String.format(Locale.US, "OFF-FRAME %d rows", raw.clippedRows)
                         raw.widthPx > 0 -> String.format(
-                            Locale.US, "L✓R✓ w%dpx%s", raw.widthPx,
-                            if (raw.clippedRows > 0) " clip${raw.clippedRows}" else "",
+                            Locale.US, "L✓R✓ w%d r%d%s%s", raw.widthPx, raw.cleanRows,
+                            if (raw.clippedRows > 0) " c${raw.clippedRows}" else "", ema,
                         )
-                        else -> null
+                        raw.distanceM !in 0.4f..3.5f ->
+                            String.format(Locale.US, "miss range %.1fm", raw.distanceM)
+                        else -> String.format(
+                            Locale.US, "miss r%d/5 c%d%s", raw.cleanRows, raw.clippedRows, ema,
+                        )
                     }
                     devIntr = String.format(Locale.US, "%.0f/%.0f  %.0f,%.0f", f.fx, f.fy, f.cx, f.cy)
                     // Alternative-registration focals (CPU image). If a
@@ -831,6 +907,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                             lockStreak = 0; missStreak = 0
                             shownTier = ConfidenceTier.YELLOW; tierStreak = 0
                             cylinderMarker = null
+                            carryWidths.clear(); tapJumpStreak = 0
                             stage = Stage.AIMING
                         },
                         depthEnabled = controller.supportsDepth,

@@ -293,6 +293,13 @@ object DBHEstimator {
         val clippedRows: Int = 0,
         /// Median silhouette width in walk-axis pixels (dev HUD).
         val widthPx: Int = 0,
+        /// Clean rows THIS tick contributed (before any carry) — dev HUD
+        /// miss diagnosis ("rows 3/5") + the caller's rolling-quorum carry.
+        val cleanRows: Int = 0,
+        /// This tick's own clean-row widths — the caller may feed them back
+        /// as `carryWidths` on the next tick (rolling row quorum while the
+        /// aim is steady). Never includes borrowed carry widths.
+        val cleanWidths: List<Int> = emptyList(),
     )
 
     /// Per-frame chord fit + the strip extent it was read from.
@@ -310,10 +317,12 @@ object DBHEstimator {
     /// Per-frame scan outcome: the chord fit (null when unusable) plus how
     /// many rows were discarded because the silhouette walk ran off the
     /// image border — edges not found inside the frame, so their "width"
-    /// would have been the image extent, not the trunk.
+    /// would have been the image extent, not the trunk — and the clean-row
+    /// widths this frame produced on its own (rolling-quorum carry).
     private data class FrameScan(
         val chord: FrameChord?,
         val borderClippedRows: Int = 0,
+        val cleanWidths: List<Int> = emptyList(),
     )
 
     /// Rows that must have run off the border for a failed frame to be
@@ -330,8 +339,10 @@ object DBHEstimator {
     private fun frameChordDiameterM(
         frame: ArDepthFrame, tapX: Double, tapY: Double, axis: GuideAxis, dTap: Float,
         cal: ProjectCalibration, algorithm: ChordAlgorithm,
+        carryWidths: List<Int> = emptyList(),
     ): FrameScan = when (algorithm) {
-        ChordAlgorithm.SILHOUETTE -> frameSilhouetteDiameterM(frame, tapX, tapY, axis, dTap)
+        ChordAlgorithm.SILHOUETTE ->
+            frameSilhouetteDiameterM(frame, tapX, tapY, axis, dTap, carryWidths = carryWidths)
         ChordAlgorithm.DEPTH_BAND -> {
             val tapAlong = tapAlongAxis(tapX, tapY, axis)
             val strip = extractGuideStemStrip(frame, axis, tapAlong, dTap, 0.15f, cal.depthDiscontinuityM)
@@ -482,6 +493,12 @@ object DBHEstimator {
     private fun frameSilhouetteDiameterM(
         frame: ArDepthFrame, tapX: Double, tapY: Double, axis: GuideAxis, dTap: Float,
         rowSpan: Int = 10, silhouetteJumpM: Float = 0.30f,
+        /// Clean-row widths from the caller's immediately-preceding ticks
+        /// (rolling row quorum). Borrowed ONLY when this tick found at
+        /// least one clean row of its own but fewer than the 5-row quorum —
+        /// single-tick edge jitter then no longer kills an established fit.
+        /// The committed burst (estimateChord) never passes carry.
+        carryWidths: List<Int> = emptyList(),
     ): FrameScan {
         val focal = when (axis) {
             is GuideAxis.Row -> frame.fx
@@ -517,18 +534,27 @@ object DBHEstimator {
             widths.add(w)
             if (extentL < 0) { extentL = l; extentR = r }
         }
-        if (widths.size < 5) return FrameScan(null, clippedRows)
-        widths.sort()
-        val medianWidth = widths[widths.size / 2]
+        val ownWidths = widths.toList()
+        // Rolling row quorum: the 5-row requirement may be met across this
+        // tick + the carry, but ONLY when this tick contributed at least one
+        // clean row of its own (never fabricate a fit from stale rows).
+        val fitWidths = when {
+            widths.size >= 5 -> widths
+            widths.isNotEmpty() && widths.size + carryWidths.size >= 5 ->
+                ArrayList(widths).apply { addAll(carryWidths) }
+            else -> return FrameScan(null, clippedRows, ownWidths)
+        }
+        fitWidths.sort()
+        val medianWidth = fitWidths[fitWidths.size / 2]
         val halfWidth = medianWidth / 2.0
-        if (focal - halfWidth <= 1.0) return FrameScan(null, clippedRows)
+        if (focal - halfWidth <= 1.0) return FrameScan(null, clippedRows, ownWidths)
         val diameterM = medianWidth * dTap.toDouble() / (focal - halfWidth)
-        if (diameterM <= 0.0) return FrameScan(null, clippedRows)
+        if (diameterM <= 0.0) return FrameScan(null, clippedRows, ownWidths)
         // Width consistency across the row stack — iOS chordPreviewFit's
         // tier input (CoV ≤ 0.10 ⇒ green preview chip).
-        val mean = widths.sum().toDouble() / widths.size
+        val mean = fitWidths.sum().toDouble() / fitWidths.size
         val cov = if (mean > 0) {
-            sqrt(widths.sumOf { (it - mean) * (it - mean) } / widths.size) / mean
+            sqrt(fitWidths.sumOf { (it - mean) * (it - mean) } / fitWidths.size) / mean
         } else 1.0
         val extent = axisExtent(frame, axis).toFloat().coerceAtLeast(1f)
         return FrameScan(
@@ -540,21 +566,31 @@ object DBHEstimator {
                 widthPx = medianWidth,
             ),
             clippedRows,
+            ownWidths,
         )
     }
 
     fun livePreview(
         frame: ArDepthFrame, tapX: Double, tapY: Double, axis: GuideAxis, cal: ProjectCalibration,
         algorithm: ChordAlgorithm = ChordAlgorithm.SILHOUETTE,
+        /// Preview-layer tap-depth override (aiming robustness): the screen
+        /// may seed the walk from its EMA-smoothed distance when the fresh
+        /// centre median is a hole or a one-tick outlier, instead of failing
+        /// the tick. The committed burst (estimateChord) never overrides.
+        dTapOverrideM: Float? = null,
+        /// Clean-row widths from the previous 1–2 ticks (rolling quorum).
+        carryWidths: List<Int> = emptyList(),
     ): DbhPreview? {
-        val dTap = medianDepth(tapX, tapY, frame, 2) ?: return null
+        val dTap = dTapOverrideM ?: medianDepth(tapX, tapY, frame, 2) ?: return null
         if (dTap !in 0.4f..3.5f) return DbhPreview(0f, dTap, false, 0)
-        val scan = frameChordDiameterM(frame, tapX, tapY, axis, dTap, cal, algorithm)
+        val scan = frameChordDiameterM(frame, tapX, tapY, axis, dTap, cal, algorithm, carryWidths)
         val chord = scan.chord
             ?: return DbhPreview(
                 0f, dTap, false, 0,
                 edgesClipped = scan.borderClippedRows >= EDGE_CLIP_ROWS_MIN,
                 clippedRows = scan.borderClippedRows,
+                cleanRows = scan.cleanWidths.size,
+                cleanWidths = scan.cleanWidths,
             )
         val locked = chord.diameterM in 0.025..2.0
         val dia = (cal.dbhCorrectionAlpha + cal.dbhCorrectionBeta * (chord.diameterM * 100)).toFloat()
@@ -568,6 +604,7 @@ object DBHEstimator {
         return DbhPreview(
             dia, dTap, locked, 1, chord.leftFrac, chord.rightFrac, tier,
             clippedRows = scan.borderClippedRows, widthPx = chord.widthPx,
+            cleanRows = scan.cleanWidths.size, cleanWidths = scan.cleanWidths,
         )
     }
 

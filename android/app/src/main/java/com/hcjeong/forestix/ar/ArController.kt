@@ -152,6 +152,61 @@ class ArController {
         return Vec3(t[0], t[1], t[2])
     }
 
+    /// Height-anchor raycast (locked spec, field round 8). At eye level the
+    /// aim ray is near-horizontal, so when no DepthPoint is available the
+    /// plain surface filter above happily returns the ray's intersection
+    /// with ARCore's detected GROUND plane — tens of metres out (field:
+    /// 12.78 / 31.11 / 44.33 m as the pitch wobbled 7°→2° from ~1.6 m eye
+    /// height). Policy here: nearest DepthPoint within `maxDistM`; a Plane
+    /// hit is accepted ONLY when it is BOTH within the gate AND facing the
+    /// ray (plane normal within 30° of the reverse ray — a grazed ground
+    /// plane is ~88° off and can never anchor). Sparse Point hits never
+    /// anchor. `lastCenterHitInfo` reports what was accepted, or the first
+    /// rejection with its reason ("plane 31.2m rejected") for the dev HUD.
+    fun screenCenterAnchorHit(maxDistM: Float): Vec3? {
+        if (!ready()) { lastCenterHitInfo = null; return null }
+        val f = frame ?: return null
+        val hits = try { f.hitTest(viewWidthPx / 2f, viewHeightPx / 2f) } catch (_: Throwable) { return null }
+        val camT = f.camera.pose.translation
+        var rejected: String? = null
+        for (h in hits) {
+            val trackable = h.trackable
+            val d = h.distance
+            when (trackable) {
+                is DepthPoint -> {
+                    if (d <= maxDistM) {
+                        lastCenterHitInfo = String.format(Locale.US, "depth %.2fm", d)
+                        val t = h.hitPose.translation
+                        return Vec3(t[0], t[1], t[2])
+                    }
+                    if (rejected == null) rejected = String.format(Locale.US, "depth %.1fm rejected", d)
+                }
+                is Plane -> {
+                    if (d > maxDistM) {
+                        if (rejected == null) rejected = String.format(Locale.US, "plane %.1fm rejected", d)
+                        continue
+                    }
+                    // Facing check: plane normal (hit pose +Y) must be
+                    // within 30° of the REVERSE ray. dot(n, ray) ≤ −cos30°.
+                    val t = h.hitPose.translation
+                    val n = h.hitPose.yAxis
+                    val rx = t[0] - camT[0]; val ry = t[1] - camT[1]; val rz = t[2] - camT[2]
+                    val len = sqrt(rx * rx + ry * ry + rz * rz)
+                    if (len < 1e-4f) continue
+                    val dot = (n[0] * rx + n[1] * ry + n[2] * rz) / len
+                    if (dot <= -0.866f) {
+                        lastCenterHitInfo = String.format(Locale.US, "plane %.2fm", d)
+                        return Vec3(t[0], t[1], t[2])
+                    }
+                    if (rejected == null) rejected = String.format(Locale.US, "plane %.1fm oblique", d)
+                }
+                else -> { /* sparse Point / other: never an anchor */ }
+            }
+        }
+        lastCenterHitInfo = rejected
+        return null
+    }
+
     /// Project the camera-forward ray to a world point at exactly `d`
     /// metres of horizontal distance — fallback when no surface is hit
     /// (sky / canopy). Direct port of forwardPointAtHorizontalDistance.

@@ -47,6 +47,18 @@ public final class HeightScanViewModel: ObservableObject {
     /// pose (REQ-HGT-003). Updates at the ARKit frame rate.
     @Published public private(set) var dhMeters: Float = 0
 
+    /// Camera→anchor horizontal distance frozen at the moment the anchor
+    /// was captured — the walk panel's "Initial dist" line. Distinct from
+    /// `dhMeters`, which keeps updating as the cruiser walks.
+    @Published public private(set) var initialDistanceM: Float = 0
+
+    /// Horizontal displacement of the camera since the anchor was
+    /// captured — the walk panel's "Walked back" line. Starts at 0.00 and
+    /// grows as the cruiser walks; the old panel showed `dhMeters` here,
+    /// which initialises at the full camera→anchor distance and confused
+    /// users who hadn't moved yet.
+    @Published public private(set) var walkedBackMeters: Float = 0
+
     /// "Move back/forward X m" hint (REQ-HGT-003). Positive → walk back;
     /// negative → walk forward; zero → inside the sweet-spot band.
     @Published public private(set) var walkHintMeters: Float = 0
@@ -65,6 +77,13 @@ public final class HeightScanViewModel: ObservableObject {
     /// 0.6 · H_expected ≤ d_h ≤ 1.0 · H_expected gives the sweet spot.
     @Published public var expectedHeightM: Float = 30
 
+    /// Anchor range gate — the trunk anchor may only be captured while
+    /// the anchor raycast (camera→hit) distance is at most this. Beyond
+    /// it the LiDAR mesh / estimated-plane depth is unreliable, so the
+    /// capture "+" goes inert and the status line asks the cruiser to
+    /// move closer. Same value on Android.
+    public static let anchorMaxRangeM: Float = 4.0
+
     /// Fallback for REQ-HGT-006. Non-empty only in `.manualEntry`.
     @Published public var manualHeightM: String = ""
 
@@ -80,6 +99,10 @@ public final class HeightScanViewModel: ObservableObject {
     private var anchorPointWorld: SIMD3<Float>?
     private var alphaTopRad: Float?
     private var alphaBaseRad: Float?
+
+    /// Camera world position frozen at the moment the anchor was
+    /// captured — reference point for the "Walked back" displacement.
+    private var cameraPositionAtAnchor: SIMD3<Float>?
 
     /// Standing pose at aim-top tap — §7.2 uses the same standing point
     /// for both taps, so we lock it on the first tap and reuse it.
@@ -202,6 +225,14 @@ public final class HeightScanViewModel: ObservableObject {
         topAimedWorld = nil
         baseAimedWorld = nil
         anchorFailureReason = nil
+        // Freeze the walk-panel reference values: "Initial dist" is the
+        // camera→anchor horizontal distance at this instant, and the
+        // camera position becomes the origin the "Walked back"
+        // displacement is measured from (so it starts at 0.00).
+        cameraPositionAtAnchor = standingPointWorld
+        initialDistanceM = horizontalDistance(from: standingPointWorld,
+                                              to: anchorPointWorld)
+        walkedBackMeters = 0
         state = .anchorSet
         state = .walking
         updateLiveHint(standingPointWorld: standingPointWorld)
@@ -217,6 +248,13 @@ public final class HeightScanViewModel: ObservableObject {
         dhMeters = sqrt(dx * dx + dz * dz)
         walkHintMeters = computeWalkHint(dh: dhMeters,
                                          expectedH: expectedHeightM)
+        // Horizontal, like every other distance in the walk panel, so
+        // Initial dist + Walked back ≈ Total distance on a straight
+        // walk-off.
+        if let origin = cameraPositionAtAnchor {
+            walkedBackMeters = horizontalDistance(from: standingPointWorld,
+                                                  to: origin)
+        }
     }
 
     /// User decides they've walked far enough and tapped Continue.
@@ -300,24 +338,20 @@ public final class HeightScanViewModel: ObservableObject {
     ///     at 1–3 m distance (the previous concern about the ray
     ///     hitting the back of the trunk was a point-blank-only issue).
     ///
-    /// When the raycast misses (no LiDAR mesh in that direction yet,
-    /// or the cruiser aimed at sky), `anchorFailureReason` is set so
-    /// the UI can show a banner. Refusing the anchor is much better
-    /// than silently substituting the camera position, which would
-    /// leave the trunk-to-cruiser offset baked into d_h as a
-    /// systematic bias.
+    /// Anchor range gate: the tap is an inert no-op — matching the other
+    /// pre-armed inert "+" states — whenever the raycast missed (no LiDAR
+    /// mesh / plane in that direction yet, sky, tracking not ready) or
+    /// the hit is beyond `anchorMaxRangeM`, where depth is unreliable.
+    /// The anchor-stage status line continuously shows "Move closer —
+    /// anchor within 4 m of the trunk." in exactly those conditions, so
+    /// no banner fires here. Refusing the anchor is much better than
+    /// silently substituting the camera position, which would leave the
+    /// trunk-to-cruiser offset baked into d_h as a systematic bias.
     public func anchorHereNow(screenCenterHit: SIMD3<Float>? = nil) {
-        guard let cam = currentCameraTranslation() else {
-            anchorFailureReason =
-                "AR tracking not ready yet — wait a moment, then try again."
-            return
-        }
-        guard let anchor = screenCenterHit else {
-            anchorFailureReason =
-                "Couldn't find the trunk surface at the crosshair. "
-                + "Aim at the trunk at eye level and try again."
-            return
-        }
+        guard let cam = currentCameraTranslation(),
+              let anchor = screenCenterHit,
+              simd_distance(cam, anchor) <= Self.anchorMaxRangeM
+        else { return }
         anchorHere(anchorPointWorld: anchor,
                    standingPointWorld: cam)
     }
@@ -397,6 +431,9 @@ public final class HeightScanViewModel: ObservableObject {
         result = nil
         dhMeters = 0
         walkHintMeters = 0
+        cameraPositionAtAnchor = nil
+        initialDistanceM = 0
+        walkedBackMeters = 0
         alphaTopSampleCount = 0
         alphaBaseSampleCount = 0
         anchorFailureReason = nil
@@ -563,7 +600,9 @@ public extension HeightScanViewModel {
         result: HeightResult? = nil,
         dhMeters: Float = 0,
         walkHintMeters: Float = 0,
-        expectedHeightM: Float = 30
+        expectedHeightM: Float = 30,
+        initialDistanceM: Float = 0,
+        walkedBackMeters: Float = 0
     ) -> HeightScanViewModel {
         let vm = HeightScanViewModel(calibration: ProjectCalibration.identity)
         vm.applyPreview(
@@ -571,7 +610,9 @@ public extension HeightScanViewModel {
             result: result,
             dhMeters: dhMeters,
             walkHintMeters: walkHintMeters,
-            expectedHeightM: expectedHeightM)
+            expectedHeightM: expectedHeightM,
+            initialDistanceM: initialDistanceM,
+            walkedBackMeters: walkedBackMeters)
         return vm
     }
 
@@ -580,12 +621,16 @@ public extension HeightScanViewModel {
         result: HeightResult?,
         dhMeters: Float,
         walkHintMeters: Float,
-        expectedHeightM: Float
+        expectedHeightM: Float,
+        initialDistanceM: Float = 0,
+        walkedBackMeters: Float = 0
     ) {
         self.state = state
         self.result = result
         self.dhMeters = dhMeters
         self.walkHintMeters = walkHintMeters
         self.expectedHeightM = expectedHeightM
+        self.initialDistanceM = initialDistanceM
+        self.walkedBackMeters = walkedBackMeters
     }
 }

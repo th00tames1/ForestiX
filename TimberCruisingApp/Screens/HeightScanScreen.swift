@@ -72,6 +72,11 @@ public struct HeightScanScreen: View {
     /// Developer-mode research capture: true height (m) from a clinometer /
     /// Vertex, typed before Accept; logged to the research CSV.
     @State private var researchTrueM: String = ""
+    /// Live camera→crosshair raycast distance sampled while the anchor
+    /// stage is active — drives the ≤ 4 m anchor range gate's status
+    /// line. nil while the raycast misses (sky, no mesh/plane yet,
+    /// tracking not ready), which also counts as "gate not satisfied".
+    @State private var anchorAimDistanceM: Float?
     /// (mesh overlay removed — the Height scan uses the plane/tangent walk-off
     /// and the LiDAR reconstruction wireframe was just visual noise.)
     /// PLACEHOLDER-COMMENT
@@ -176,6 +181,28 @@ public struct HeightScanScreen: View {
         #if os(iOS)
         .toolbar(.hidden, for: .navigationBar)
         #endif
+        // While the anchor stage is live, sample the screen-centre raycast
+        // distance at ~10 Hz (same cadence as the DBH caliper smoother) so
+        // the status line can flip between the aim prompt and the "Move
+        // closer" range-gate message as the cruiser approaches the trunk.
+        // The tap itself re-raycasts, so the gate enforced by the view
+        // model always uses a fresh hit — this sampler only drives chrome.
+        .task(id: anchorAiming) {
+            guard anchorAiming else {
+                anchorAimDistanceM = nil
+                return
+            }
+            while !Task.isCancelled {
+                raycaster.preferLiDARMesh = settings.measurementSource == .lidar
+                if let cam = raycaster.cameraWorldPosition,
+                   let hit = raycaster.screenCenterHit() {
+                    anchorAimDistanceM = simd_distance(cam, hit)
+                } else {
+                    anchorAimDistanceM = nil
+                }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
         .onAppear { viewModel.onAppear() }
         .onDisappear { viewModel.onDisappear() }
         .onChange(of: viewModel.result?.heightM) { _, newValue in
@@ -350,9 +377,26 @@ public struct HeightScanScreen: View {
             .accessibilityIdentifier("heightScan.statusBanner")
     }
 
+    /// True while the anchor stage's crosshair rests on a raycast hit
+    /// within the ≤ 4 m range gate — the only condition under which the
+    /// "+" will actually capture the anchor.
+    private var anchorWithinGate: Bool {
+        guard let d = anchorAimDistanceM else { return false }
+        return d <= HeightScanViewModel.anchorMaxRangeM
+    }
+
+    /// True for the pre-anchor aiming states — the window in which the
+    /// range-gate sampler runs.
+    private var anchorAiming: Bool {
+        viewModel.state == .idle || viewModel.state == .anchorSet
+    }
+
     private var statusText: String {
         switch viewModel.state {
-        case .idle, .anchorSet:   return "Aim at the trunk at eye level, then tap +."
+        case .idle, .anchorSet:
+            return anchorWithinGate
+                ? "Aim at the trunk at eye level, then tap +."
+                : "Move closer — anchor within 4 m of the trunk."
         case .walking:            return "Walk back, then tap + to continue."
         case .aimTopArmed:        return "Aim at the treetop, then tap +."
         case .aimTopCaptured:     return "Top captured."
@@ -414,9 +458,23 @@ public struct HeightScanScreen: View {
         }
     }
 
+    /// Walk-stage panel: the anchoring distance frozen at capture, the
+    /// camera displacement since capture (starts at 0.00 — the old
+    /// single-line readout initialised at the full camera→anchor
+    /// distance, which read as "walked back 2 m" before the cruiser had
+    /// moved), and the current camera→anchor distance d_h as the primary
+    /// line. The amber sweet-spot hint keys off that total (d_h).
     private var walkingReadout: some View {
         VStack(alignment: .leading, spacing: 4) {
+            Text("Initial dist " + MeasurementFormatter.distance(
+                m: Double(viewModel.initialDistanceM), in: settings.unitSystem))
+                .font(ForestixType.dataSmall)
+                .foregroundStyle(.white.opacity(0.75))
             Text("Walked back " + MeasurementFormatter.distance(
+                m: Double(viewModel.walkedBackMeters), in: settings.unitSystem))
+                .font(ForestixType.dataSmall)
+                .foregroundStyle(.white.opacity(0.75))
+            Text("Total distance " + MeasurementFormatter.distance(
                 m: Double(viewModel.dhMeters), in: settings.unitSystem))
                 .font(ForestixType.dataLarge)
                 .foregroundStyle(.white)
@@ -805,9 +863,10 @@ public struct HeightScanScreen: View {
     /// crosshair at the trunk's base, and taps. The screen-centre
     /// raycast (LiDAR mesh first, plane fallback) returns the 3D
     /// world point of that trunk-base; the view model stores it as
-    /// the anchor. If the raycast misses, the view model surfaces
-    /// `anchorFailureReason` and the screen banner explains how to
-    /// reframe.
+    /// the anchor. The view model's ≤ 4 m range gate makes the tap an
+    /// inert no-op while the raycast misses or hits beyond the gate —
+    /// the status line ("Move closer — anchor within 4 m of the
+    /// trunk.") explains how to reframe.
     private func anchorTap() {
         raycaster.preferLiDARMesh = settings.measurementSource == .lidar
         viewModel.anchorHereNow(screenCenterHit: raycaster.screenCenterHit())

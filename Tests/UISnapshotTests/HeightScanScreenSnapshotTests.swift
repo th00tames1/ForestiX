@@ -72,11 +72,14 @@ final class HeightScanScreenSnapshotTests: XCTestCase {
 
     func testWalkingMoveBack() {
         // d_h = 12 m, expected 30 m → sweet spot 18-30 m → move back ≈ 6 m.
+        // Anchored from 2 m out and walked 10 m straight back → total 12 m.
         let vm = HeightScanViewModel.preview(
             state: .walking,
             dhMeters: 12,
             walkHintMeters: 6,
-            expectedHeightM: 30)
+            expectedHeightM: 30,
+            initialDistanceM: 2,
+            walkedBackMeters: 10)
         assertSnapshot(of: host(vm), as: .image(on: .iPhone13))
     }
 
@@ -85,7 +88,9 @@ final class HeightScanScreenSnapshotTests: XCTestCase {
             state: .walking,
             dhMeters: 22,
             walkHintMeters: 0,
-            expectedHeightM: 30)
+            expectedHeightM: 30,
+            initialDistanceM: 2,
+            walkedBackMeters: 20)
         assertSnapshot(of: host(vm), as: .image(on: .iPhone13))
     }
 

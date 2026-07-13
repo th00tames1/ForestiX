@@ -94,6 +94,13 @@ private enum class CrownStep { NONE, LEFT, RIGHT, TOP, BOTTOM, DONE }
 /// exists — iOS HeightScanViewModel.expectedHeightM default.
 private const val EXPECTED_HEIGHT_M = 30f
 
+/// Anchor range gate (locked spec, iOS applies the same): the trunk anchor
+/// may only be captured from a hit ≤ 4 m away. Field round 8: with no
+/// DepthPoint available, a near-horizontal eye-level aim intersected the
+/// detected GROUND plane 12–44 m out and the walk-off readout started at
+/// that phantom distance.
+private const val ANCHOR_MAX_M = 4.0f
+
 @Composable
 fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     val env = LocalAppEnvironment.current
@@ -131,6 +138,16 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     var topMarker by remember { mutableStateOf<Vec3?>(null) }
     var baseMarker by remember { mutableStateOf<Vec3?>(null) }
     var dhLive by remember { mutableStateOf(0f) }
+    // Walk-panel triplet (locked spec): camera→anchor horizontal distance
+    // at the MOMENT of anchoring, and the camera's displacement since then
+    // (starts at 0.00 — the old single readout confusingly opened at the
+    // full anchor distance). Total distance = dhLive (the d_h the math uses).
+    var anchorInitialDistM by remember { mutableStateOf<Float?>(null) }
+    var standingAtAnchor by remember { mutableStateOf<Vec3?>(null) }
+    var walkedLive by remember { mutableStateOf(0f) }
+    // Live anchor-aim validity (gated hit available?) — drives the locked
+    // "Move closer" status line and keeps the anchor "+" inert.
+    var anchorAimOk by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<HeightResult?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
 
@@ -156,20 +173,36 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     var crownW by remember { mutableStateOf<Double?>(null) }
     var crownH by remember { mutableStateOf<Double?>(null) }
 
-    // Live walk-off distance while walking back.
+    // Live walk-off distances while walking back: Total (camera→anchor,
+    // the d_h the math uses) + Walked (displacement since anchoring).
     LaunchedEffect(stage) {
         while (stage == Stage.WALKING) {
             anchorPt?.let { a -> controller.horizontalDistanceTo(a)?.let { dhLive = it } }
+            standingAtAnchor?.let { s0 -> controller.horizontalDistanceTo(s0)?.let { walkedLive = it } }
             delay(100)
         }
     }
 
-    // Dev-mode probe: raycast the crosshair a few times a second so the
-    // HUD's "hit" line (type + range of what an anchor tap WOULD capture)
-    // is live while aiming — the capture stages only raycast on the tap.
     var devHitInfo by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(settings.developerMode) {
-        while (settings.developerMode) {
+
+    // Anchor-stage aim gate poll (always on): a valid gated hit must exist
+    // for the "+" to do anything, and the status line shows the locked
+    // "Move closer" copy otherwise. Also feeds the dev HUD's hit line with
+    // accept/reject readouts ("plane 31.2m rejected").
+    LaunchedEffect(stage) {
+        if (stage != Stage.ANCHOR) return@LaunchedEffect
+        while (true) {
+            anchorAimOk = controller.screenCenterAnchorHit(ANCHOR_MAX_M) != null
+            devHitInfo = controller.lastCenterHitInfo
+            delay(250)
+        }
+    }
+
+    // Dev-mode probe for the OTHER stages: raycast the crosshair a few
+    // times a second so the HUD's hit line stays live (the anchor stage is
+    // covered by the gate poll above).
+    LaunchedEffect(settings.developerMode, stage) {
+        while (settings.developerMode && stage != Stage.ANCHOR) {
             controller.screenCenterHit()
             devHitInfo = controller.lastCenterHitInfo
             delay(250)
@@ -203,9 +236,12 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     }
 
     fun captureCrown() {
-        controller.preferDepth = true
-        val hit = controller.screenCenterHit() ?: controller.forwardPointAtHorizontalDistance(crownProjDistance())
-        if (hit == null) { failure = "Couldn't read scene depth. Move slightly, then tap again."; return }
+        // Geometric placement (locked spec, iOS parity): the capture ray
+        // direction at the current pitch × the anchor-plane horizontal
+        // distance. NO fresh hitTest — at 10–30 m those fall back to
+        // planes/garbage and put the sphere visibly off the crosshair.
+        val hit = controller.forwardPointAtHorizontalDistance(crownProjDistance())
+        if (hit == null) { failure = "AR tracking not ready — try again."; return }
         failure = null
         when (crownStep) {
             CrownStep.LEFT -> { cL = hit; crownStep = CrownStep.RIGHT }
@@ -219,13 +255,18 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     fun captureHeight() {
         when (stage) {
             Stage.ANCHOR -> {
-                controller.preferDepth = true
-                val hit = controller.screenCenterHit()
-                if (hit == null) {
-                    failure = "Couldn't find the trunk at the crosshair. Aim at the trunk at eye level and try again."
-                    return
-                }
-                failure = null; anchorPt = hit; dhLive = 0f; stage = Stage.WALKING
+                // Gated anchor (locked spec): DepthPoint or ray-facing Plane
+                // within 4 m only. No valid hit → the "+" is INERT — the
+                // status line already shows the locked "Move closer" copy.
+                val hit = controller.screenCenterAnchorHit(ANCHOR_MAX_M) ?: return
+                failure = null
+                anchorPt = hit
+                standingAtAnchor = controller.currentCameraPosition()
+                val d0 = controller.horizontalDistanceTo(hit) ?: 0f
+                anchorInitialDistM = d0
+                dhLive = d0
+                walkedLive = 0f
+                stage = Stage.WALKING
             }
             Stage.WALKING -> { stage = Stage.AIM_BASE }
             Stage.AIM_BASE -> {
@@ -266,7 +307,9 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     fun resetAll() {
         stage = Stage.ANCHOR; anchorPt = null; standingLocked = null
         alphaBase = null; alphaTop = null; topMarker = null; baseMarker = null
-        dhLive = 0f; result = null; failure = null; resetCrown()
+        dhLive = 0f; anchorInitialDistM = null; standingAtAnchor = null
+        walkedLive = 0f; anchorAimOk = false
+        result = null; failure = null; resetCrown()
     }
 
     // Accept the result: record the entry (photo + GPS + metadata), fold in
@@ -415,6 +458,10 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
             CenteredText(
                 when {
                     manualOpen -> "Enter height manually in metres."
+                    // Locked spec: while no gated hit exists the "+" is
+                    // inert and this exact copy explains why.
+                    stage == Stage.ANCHOR && !anchorAimOk ->
+                        "Move closer — anchor within 4 m of the trunk."
                     stage == Stage.ANCHOR -> "Aim at the trunk at eye level, then tap +."
                     stage == Stage.WALKING -> "Walk back, then tap + to continue."
                     stage == Stage.AIM_BASE -> "Aim at where the trunk meets the ground, then tap +."
@@ -424,8 +471,13 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 },
             )
 
-            // Walking readout — big walked-back distance + amber sweet-spot
-            // hint (iOS walkingReadout).
+            // Walking readout (locked spec, identical on iOS): three lines —
+            // Initial dist (camera→anchor at the anchoring moment), Walked
+            // back (displacement since anchoring, STARTS AT 0.00), and the
+            // primary Total distance (current camera→anchor horizontal
+            // distance — the d_h the math uses). The sweet-spot hint keys
+            // off Total. Replaces the single "Walked back" dataLarge line
+            // that confusingly opened at the full anchor distance.
             if (stage == Stage.WALKING && !manualOpen) {
                 Column(
                     Modifier.fillMaxWidth(),
@@ -433,7 +485,19 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                     horizontalAlignment = Alignment.Start,
                 ) {
                     Text(
-                        "Walked back " + MeasurementFormatter.distance(dhLive.toDouble(), settings.unitSystem),
+                        "Initial dist " + MeasurementFormatter.distance(
+                            (anchorInitialDistM ?: 0f).toDouble(), settings.unitSystem),
+                        style = type.dataSmall,
+                        // 0.75 — matches iOS's secondary walk-panel lines.
+                        color = Color.White.copy(alpha = 0.75f),
+                    )
+                    Text(
+                        "Walked back " + MeasurementFormatter.distance(walkedLive.toDouble(), settings.unitSystem),
+                        style = type.dataSmall,
+                        color = Color.White.copy(alpha = 0.75f),
+                    )
+                    Text(
+                        "Total distance " + MeasurementFormatter.distance(dhLive.toDouble(), settings.unitSystem),
                         style = type.dataLarge,
                         color = Color.White,
                     )

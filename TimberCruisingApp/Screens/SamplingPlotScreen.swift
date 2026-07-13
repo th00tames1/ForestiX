@@ -4,6 +4,14 @@
 // top. When the device moves outside the ring the border flashes red and
 // the device vibrates until the cruiser walks back inside.
 //
+// Field round 8: the plot centre is pinned to a REAL ARKit ARAnchor on
+// the app-shared AR session and recorded app-scoped in
+// `ActiveSamplingPlot.shared` — so the plot survives screen switches
+// (DBH / Height render it as a subdued overlay), benefits from ARKit's
+// world-map drift corrections, and re-appears when this screen is
+// reopened. Reset removes the anchor and clears the store; nothing is
+// persisted across app restarts (the AR world map dies with the process).
+//
 // UI matches the shared Measure-app layout: right-centre capture button
 // and a compact centred status panel (plus the bottom-right LiDAR/AR
 // toggle in Developer mode).
@@ -23,12 +31,19 @@ public struct SamplingPlotScreen: View {
 
     @EnvironmentObject private var history: QuickMeasureHistory
     @EnvironmentObject private var settings: AppSettings
-    @StateObject private var session = ARKitSessionManager()
+    /// App-shared AR session. Deliberately NOT observed (@StateObject) —
+    /// the manager publishes camera pose at 60 Hz, and observing it made
+    /// this screen's whole body re-evaluate every ARKit frame (the
+    /// sampling-screen lag). All per-frame state this screen needs comes
+    /// from the 0.2 s poll below.
+    private var session: ARKitSessionManager { .shared }
+    /// App-scoped active plot {anchorID, radiusM, placedAt} — observed,
+    /// but it only changes on place / radius change / reset.
+    @ObservedObject private var activePlot = ActiveSamplingPlot.shared
     @StateObject private var raycaster = ARCenterRaycaster()
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dismiss) private var dismiss
 
-    @State private var center: SIMD3<Float>?
     @State private var radiusM: Double = 8.0
     @State private var isOutside: Bool = false
     @State private var distanceFromCenterM: Double?
@@ -44,6 +59,10 @@ public struct SamplingPlotScreen: View {
     @State private var feedbackGen: UINotificationFeedbackGenerator?
     #endif
 
+    /// Shared-session client token for this screen (one instance at a
+    /// time, so a static token is safe and survives struct re-inits).
+    private static let arClientID = UUID()
+
     // Stable marker ids so ARCameraView diffs (instead of tearing down and
     // rebuilding every marker on every body re-eval — the 0.2 s poll timer
     // re-evaluates `markers`, and fresh random UUIDs there made it rebuild
@@ -54,6 +73,9 @@ public struct SamplingPlotScreen: View {
     private static let ringId       = UUID(uuidString: "00000000-5A11-0000-0000-000000000004") ?? UUID()
 
     public init() {}
+
+    /// A plot is active (placed on this screen or an earlier visit).
+    private var hasPlot: Bool { activePlot.plot != nil }
 
     public var body: some View {
         ZStack {
@@ -80,7 +102,7 @@ public struct SamplingPlotScreen: View {
                     }
             }
 
-            if center == nil { centerCrosshair }
+            if !hasPlot { centerCrosshair }
 
             // Floating back button — full-bleed chrome exit (the system
             // nav bar is hidden on the AR screens).
@@ -94,7 +116,7 @@ public struct SamplingPlotScreen: View {
 
             // Right-centre capture button — hidden once the centre is
             // placed (the tap would be a no-op; Reset is the way back).
-            if center == nil {
+            if !hasPlot {
                 MeasureControlColumn(capture: placePlotIfNeeded)
             }
 
@@ -125,7 +147,10 @@ public struct SamplingPlotScreen: View {
         .toolbar(.hidden, for: .navigationBar)
         #endif
         .onAppear {
-            session.run()
+            session.attach(client: Self.arClientID, configuration: .samplingPlot)
+            // An earlier visit may have left a plot active — pick its
+            // radius back up so the slider and ring agree with it.
+            if let plot = activePlot.plot { radiusM = plot.radiusM }
             startPolling()
             #if canImport(UIKit)
             feedbackGen = UINotificationFeedbackGenerator()
@@ -133,14 +158,26 @@ public struct SamplingPlotScreen: View {
             #endif
         }
         .onDisappear {
-            session.pause()
+            session.detach(client: Self.arClientID)
             stopPolling()
+        }
+        .onChange(of: radiusM) { _, r in
+            // Keep the app-scoped plot's radius in sync with the slider
+            // (no-op until a plot is placed) so DBH / Height overlay the
+            // same ring the cruiser last saw here.
+            activePlot.updateRadius(r)
         }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
-            case .active:                session.run(); startPolling()
-            case .inactive, .background: session.pause(); stopPolling()
-            @unknown default:            break
+            case .active:
+                session.attach(client: Self.arClientID,
+                               configuration: .samplingPlot)
+                startPolling()
+            case .inactive, .background:
+                session.detach(client: Self.arClientID)
+                stopPolling()
+            @unknown default:
+                break
             }
         }
     }
@@ -183,7 +220,7 @@ public struct SamplingPlotScreen: View {
             // Big tinted INSIDE / OUTSIDE readout once the centre is
             // placed — a boundary state the cruiser can read at arm's
             // length; plain body copy while still aiming.
-            if center == nil {
+            if !hasPlot {
                 Text(statusTitle)
                     .font(ForestixType.body)
                     .foregroundStyle(.white)
@@ -201,11 +238,11 @@ public struct SamplingPlotScreen: View {
                 Button("Reset") { reset() }
                     .buttonStyle(.forestixARSecondary)
                     .frame(maxWidth: .infinity)
-                    .disabled(center == nil)
+                    .disabled(!hasPlot)
                 Button("Save") { savePlot() }
                     .buttonStyle(.forestixProminent)
                     .frame(maxWidth: .infinity)
-                    .disabled(center == nil)
+                    .disabled(!hasPlot)
                     .accessibilityIdentifier("samplingPlot.save")
             }
             .padding(.top, 2)
@@ -213,7 +250,7 @@ public struct SamplingPlotScreen: View {
     }
 
     private var statusTitle: String {
-        if center == nil { return "Set the radius, aim at the plot centre, tap +" }
+        if !hasPlot { return "Set the radius, aim at the plot centre, tap +" }
         return isOutside ? "OUTSIDE — walk back inside" : "INSIDE sampling area"
     }
 
@@ -237,7 +274,7 @@ public struct SamplingPlotScreen: View {
     // MARK: - Plot placement
 
     private func placePlotIfNeeded() {
-        guard center == nil else { return }
+        guard !hasPlot else { return }
         raycaster.preferLiDARMesh = settings.measurementSource == .lidar
         guard let hit = raycaster.screenCenterHit()
                 ?? raycaster.forwardPointAtHorizontalDistance(3.0)
@@ -245,19 +282,32 @@ public struct SamplingPlotScreen: View {
             captureFailureReason = "Couldn't read scene depth. Aim at the ground and try again."
             return
         }
+        // Pin the centre to a real ARKit anchor on the shared session —
+        // ARKit's world-map corrections keep it fixed to the physical
+        // ground from here on; every marker derives from its live
+        // transform. Replaces any earlier plot's anchor.
+        guard let anchorID = session.addWorldAnchor(
+            at: hit, name: "forestix.samplingPlot.center")
+        else {
+            captureFailureReason = "Couldn't read scene depth. Aim at the ground and try again."
+            return
+        }
         captureFailureReason = nil
-        center = hit
+        activePlot.place(anchorID: anchorID, radiusM: radiusM)
     }
 
     private func reset() {
-        center = nil
+        if let plot = activePlot.plot {
+            session.removeWorldAnchor(id: plot.anchorID)
+        }
+        activePlot.clear()
         isOutside = false
         distanceFromCenterM = nil
         hapticTick = false
     }
 
     private func savePlot() {
-        guard center != nil else { return }
+        guard hasPlot else { return }
         let area = .pi * radiusM * radiusM
         history.append(QuickMeasureEntry(
             kind: .samplingPlot,
@@ -291,7 +341,12 @@ public struct SamplingPlotScreen: View {
 
     @MainActor
     private func tickOutsideCheck() {
-        guard let center else {
+        // The centre is the plot anchor's LIVE transform — ARKit's
+        // world-map corrections move it with the physical ground, so the
+        // distance readout stays honest even after drift/relocalization.
+        guard let plot = activePlot.plot,
+              let center = session.worldAnchorPosition(id: plot.anchorID)
+        else {
             isOutside = false
             distanceFromCenterM = nil
             return
@@ -332,32 +387,42 @@ public struct SamplingPlotScreen: View {
     // MARK: - Scene markers
 
     private var markers: [ARSceneMarker] {
-        guard let c = center else { return [] }
-        // Stable ids → ARCameraView only rebuilds a marker when its position
-        // or shape changes (e.g. radius), never on the flash timer. The ring
-        // colour is kept constant (in/out is shown by the red border flash +
-        // the panel) so an in/out flip doesn't churn the geometry either.
+        guard let plot = activePlot.plot else { return [] }
+        // Stable ids → ARCameraView only rebuilds a marker when its shape
+        // changes (e.g. radius), never on the flash timer. The ring colour
+        // is kept constant (in/out is shown by the red border flash + the
+        // panel) so an in/out flip doesn't churn the geometry either.
+        //
+        // Every marker is pinned to the plot's ARAnchor — positions are
+        // anchor-LOCAL offsets, and RealityKit tracks the anchor's live
+        // transform, so the whole assembly rides ARKit's world-map
+        // corrections without any per-frame work here.
+        let anchorID = plot.anchorID
         return [
             // Exact-centre red sphere so the tapped point is unmistakable.
             ARSceneMarker(id: Self.baseSphereId,
-                          worldPosition: c,
+                          worldPosition: SIMD3<Float>(0, 0, 0),
                           shape: .sphere(radiusM: 0.07),
-                          colorRGBA: SIMD4<Float>(1, 0.25, 0.25, 1)),
+                          colorRGBA: SIMD4<Float>(1, 0.25, 0.25, 1),
+                          worldAnchorID: anchorID),
             // Tall white pole rising from the tapped point.
             ARSceneMarker(id: Self.poleId,
-                          worldPosition: SIMD3<Float>(c.x, c.y + 0.6, c.z),
+                          worldPosition: SIMD3<Float>(0, 0.6, 0),
                           shape: .cylinder(radiusM: 0.05, heightM: 1.2),
-                          colorRGBA: SIMD4<Float>(1, 1, 1, 1)),
+                          colorRGBA: SIMD4<Float>(1, 1, 1, 1),
+                          worldAnchorID: anchorID),
             // Bright top sphere — visible from across the plot.
             ARSceneMarker(id: Self.topSphereId,
-                          worldPosition: SIMD3<Float>(c.x, c.y + 1.2, c.z),
+                          worldPosition: SIMD3<Float>(0, 1.2, 0),
                           shape: .sphere(radiusM: 0.12),
-                          colorRGBA: SIMD4<Float>(1, 0.85, 0.15, 1)),
+                          colorRGBA: SIMD4<Float>(1, 0.85, 0.15, 1),
+                          worldAnchorID: anchorID),
             // Thick boundary ring (constant cyan).
             ARSceneMarker(id: Self.ringId,
-                          worldPosition: SIMD3<Float>(c.x, c.y + 0.02, c.z),
+                          worldPosition: SIMD3<Float>(0, 0.02, 0),
                           shape: .ring(radiusM: Float(radiusM), thicknessM: 0.4),
-                          colorRGBA: SIMD4<Float>(0.2, 0.85, 1, 1)),
+                          colorRGBA: SIMD4<Float>(0.2, 0.85, 1, 1),
+                          worldAnchorID: anchorID),
         ]
     }
 }

@@ -42,9 +42,9 @@ import com.hcjeong.forestix.ui.MeasurePhotoStore
 import kotlinx.coroutines.launch
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
-import com.hcjeong.forestix.ar.ArController
 import com.hcjeong.forestix.ar.ArCameraView
 import com.hcjeong.forestix.ar.ArSceneMarker
+import com.hcjeong.forestix.ar.ArSessionHub
 import com.hcjeong.forestix.ar.MarkerShape
 import com.hcjeong.forestix.ar.Vec3
 import com.hcjeong.forestix.common.MeasurementFormatter
@@ -96,7 +96,9 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     val env = LocalAppEnvironment.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val controller = remember { ArController() }
+    // Shared app-scoped AR session (world coordinates survive navigation,
+    // and the sampling plot's anchor renders here as a subdued overlay).
+    val controller = ArSessionHub.controller
     // Continuation from a just-saved DBH passes the SAME tree number so the
     // height lands on that tree; the map-home chooser hands one over via
     // PendingTreeNumber; otherwise the next free number is used. The slot
@@ -396,7 +398,14 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     }
 
     Box(Modifier.fillMaxSize()) {
-        ArCameraView(controller, markers(), modifier = Modifier.fillMaxSize())
+        ArCameraView(
+            controller,
+            markers(),
+            modifier = Modifier.fillMaxSize(),
+            // Active sampling plot (if any) as a subdued, non-interactive
+            // overlay under the height markers.
+            plotOverlay = ArSessionHub.PlotOverlay.SUBDUED,
+        )
         crosshairLabel?.let { label ->
             HeightAimCrosshair(label, Modifier.align(Alignment.Center))
         }

@@ -142,6 +142,11 @@ public final class HeightScanViewModel: ObservableObject {
 
     // MARK: - Construction
 
+    /// Shared-session client token — one per view-model instance so a
+    /// mid-transition overlap (DBH → Height full-measurement chain)
+    /// can never pause the session under the incoming screen.
+    private let arClientID = UUID()
+
     public init(
         calibration: ProjectCalibration,
         session: ARKitSessionManager? = nil,
@@ -149,7 +154,10 @@ public final class HeightScanViewModel: ObservableObject {
         motion: IMUMotionService? = nil
     ) {
         self.calibration = calibration
-        self.session = session ?? ARKitSessionManager()
+        // Default to the APP-SHARED session (field round 8): one ARKit
+        // world frame across all measure screens, so the sampling-plot
+        // anchor placed elsewhere renders here too.
+        self.session = session ?? .shared
         let buffer = pitchBuffer ?? IMUPitchBuffer()
         self.pitchBuffer = buffer
         self.motion = motion ?? IMUMotionService(buffer: buffer)
@@ -159,14 +167,17 @@ public final class HeightScanViewModel: ObservableObject {
 
     public func onAppear() {
         if state == .idle { /* waiting for anchor tap */ }
-        session.run()
+        // Height keeps the depth stream (the walking readout reads the
+        // depth-frame camera pose) + mesh raycasts; no VIO feature
+        // stream. Applied with no reset options — anchors survive.
+        session.attach(client: arClientID, configuration: .heightScan)
         motion.start()
         subscribeToDepth()
     }
 
     public func onDisappear() {
         motion.stop()
-        session.pause()
+        session.detach(client: arClientID)
         depthCancellable?.cancel()
         depthCancellable = nil
     }

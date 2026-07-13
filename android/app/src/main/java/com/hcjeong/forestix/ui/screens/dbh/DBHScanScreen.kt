@@ -61,9 +61,9 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
-import com.hcjeong.forestix.ar.ArController
 import com.hcjeong.forestix.ar.ArCameraView
 import com.hcjeong.forestix.ar.ArSceneMarker
+import com.hcjeong.forestix.ar.ArSessionHub
 import com.hcjeong.forestix.ar.MarkerShape
 import com.hcjeong.forestix.ar.Vec3
 import com.hcjeong.forestix.ar.distance
@@ -146,7 +146,9 @@ private const val CYL_ANCHOR_SNAP_M = 0.05f
 fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     val env = LocalAppEnvironment.current
     val context = LocalContext.current
-    val controller = remember { ArController() }
+    // Shared app-scoped AR session (world coordinates survive navigation,
+    // and the sampling plot's anchor renders here as a subdued overlay).
+    val controller = ArSessionHub.controller
     val scope = rememberCoroutineScope()
     // Map-home tree lock ("Measure this tree again" / chooser rows) hands
     // the tree number over via PendingTreeNumber — consume it once so the
@@ -247,9 +249,9 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     var resultFromAdjust by remember { mutableStateOf(false) }
 
     // Caliper = depth-free AR arm → use plane hits for distance, not depth.
-    LaunchedEffect(captureMethod) {
-        controller.preferDepth = captureMethod == DbhCaptureMethod.DEPTH
-    }
+    // The preference rides ArCameraView's preferDepth param (applied on
+    // attach + on change), so the shared controller can't keep a stale
+    // value from another screen.
 
     // User-selected per-frame chord algorithm (silhouette = iOS-identical).
     val chordAlgorithm = ChordAlgorithm.fromRaw(settings.dbhChordAlgorithm)
@@ -856,7 +858,17 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         } else {
             emptyList()
         }
-        ArCameraView(controller, dbhMarkers, modifier = Modifier.fillMaxSize())
+        ArCameraView(
+            controller,
+            dbhMarkers,
+            // Depth-based hit filtering only for the depth capture method;
+            // the dev-only caliper/motion arms use plane hits.
+            preferDepth = captureMethod == DbhCaptureMethod.DEPTH,
+            modifier = Modifier.fillMaxSize(),
+            // Active sampling plot (if any) as a subdued, non-interactive
+            // overlay so the cruiser can see the boundary while measuring.
+            plotOverlay = ArSessionHub.PlotOverlay.SUBDUED,
+        )
 
         // Two-tap catcher for the AR-caliper method. Placed early in the Box
         // so the controls/status panel (later children) get taps first.

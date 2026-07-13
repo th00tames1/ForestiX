@@ -47,8 +47,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
-import com.hcjeong.forestix.ar.ArController
 import com.hcjeong.forestix.ar.ArCameraView
+import com.hcjeong.forestix.ar.ArSessionHub
 import com.hcjeong.forestix.ar.Vec3
 import com.hcjeong.forestix.ar.distance
 import com.hcjeong.forestix.common.MeasurementFormatter
@@ -72,7 +72,8 @@ fun DistanceMeasureScreen(nav: NavController) {
     val env = LocalAppEnvironment.current
     val context = LocalContext.current
     val settings by env.settings.state.collectAsStateWithLifecycle()
-    val controller = remember { ArController() }
+    // Shared app-scoped AR session (one ARCore world across the AR screens).
+    val controller = ArSessionHub.controller
     val density = LocalDensity.current
     fun formatDistance(m: Double) = MeasurementFormatter.distance(m, settings.unitSystem)
 

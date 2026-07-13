@@ -29,9 +29,16 @@ public struct DistanceMeasureScreen: View {
 
     @EnvironmentObject private var history: QuickMeasureHistory
     @EnvironmentObject private var settings: AppSettings
-    @StateObject private var session = ARKitSessionManager()
+    /// App-shared AR session. Deliberately NOT observed — the manager
+    /// publishes camera pose at 60 Hz and observing it re-evaluated this
+    /// whole body every ARKit frame; the 20 Hz live timer below is the
+    /// screen's only clock. (No sampling-plot overlay here by design.)
+    private var session: ARKitSessionManager { .shared }
     @StateObject private var raycaster = ARCenterRaycaster()
     @Environment(\.scenePhase) private var scenePhase
+
+    /// Shared-session client token for this screen.
+    private static let arClientID = UUID()
 
     public enum Mode: String, CaseIterable, Identifiable {
         case live = "Live"
@@ -125,18 +132,25 @@ public struct DistanceMeasureScreen: View {
         .toolbar(.hidden, for: .navigationBar)
         #endif
         .onAppear {
-            session.run()
+            session.attach(client: Self.arClientID,
+                           configuration: .distanceMeasure)
             startLiveTimer()
         }
         .onDisappear {
-            session.pause()
+            session.detach(client: Self.arClientID)
             stopLiveTimer()
         }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
-            case .active:                session.run(); startLiveTimer()
-            case .inactive, .background: session.pause(); stopLiveTimer()
-            @unknown default:            break
+            case .active:
+                session.attach(client: Self.arClientID,
+                               configuration: .distanceMeasure)
+                startLiveTimer()
+            case .inactive, .background:
+                session.detach(client: Self.arClientID)
+                stopLiveTimer()
+            @unknown default:
+                break
             }
         }
     }

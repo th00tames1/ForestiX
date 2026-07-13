@@ -60,6 +60,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import com.hcjeong.forestix.ar.ArCameraView
 import com.hcjeong.forestix.ar.ArController
+import com.hcjeong.forestix.ar.ArSessionHub
 import com.hcjeong.forestix.ar.Vec3
 import com.hcjeong.forestix.data.cruise.PlotCenterResult
 import com.hcjeong.forestix.positioning.GPSAveraging
@@ -332,7 +333,8 @@ fun OffsetFlowScreen(
     val colors = Forestix.colors
     val type = Forestix.type
 
-    val controller = remember { ArController() }
+    // Shared app-scoped AR session (one ARCore world across the AR screens).
+    val controller = ArSessionHub.controller
     val location = remember { LocationService(context) }
     // Live compass so anchorPlotCenter can heading-align the ARCore world
     // frame (see AnchorCompass docs for the sensor assumptions).

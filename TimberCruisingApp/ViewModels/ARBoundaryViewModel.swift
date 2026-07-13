@@ -54,7 +54,11 @@ public final class ARBoundaryViewModel: ObservableObject {
     // MARK: - Construction
 
     public init(session: ARKitSessionManager? = nil) {
-        self.session = session ?? ARKitSessionManager()
+        // Default to the app-shared session (field round 8) so the
+        // boundary screen lives in the same ARKit world frame as the
+        // measure screens. The cruise flow still injects its own
+        // flow-scoped session explicitly.
+        self.session = session ?? .shared
     }
 
     // MARK: - Lifecycle

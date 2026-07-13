@@ -25,6 +25,10 @@ public struct HeightScanScreen: View {
     @StateObject private var raycaster = ARCenterRaycaster()
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var settings: AppSettings
+    /// App-scoped active sampling plot — rendered as a subdued ring +
+    /// pole under the measurement markers so the cruiser keeps the plot
+    /// boundary in view while measuring. Changes only on place/reset.
+    @ObservedObject private var activePlot = ActiveSamplingPlot.shared
     public var onResult: (HeightResult) -> Void = { _ in }
     /// Fires when the cruiser explicitly accepts the result shown on
     /// screen (state → .accepted). Hosts that want to persist only on
@@ -114,7 +118,8 @@ public struct HeightScanScreen: View {
             // turn "cruiser tapped while aiming here" into a world hit.
             ARCameraView(manager: viewModel.session,
                          debugMeshOverlay: false,
-                         sceneMarkers: viewModel.sceneMarkers + crownMarkers,
+                         sceneMarkers: plotOverlayMarkers
+                             + viewModel.sceneMarkers + crownMarkers,
                          raycaster: raycaster)
                 .ignoresSafeArea()
             overlayChrome
@@ -664,6 +669,17 @@ public struct HeightScanScreen: View {
     private static let crownRightId  = UUID(uuidString: "00000000-C0C0-0000-0000-000000000002") ?? UUID()
     private static let crownTopId    = UUID(uuidString: "00000000-C0C0-0000-0000-000000000003") ?? UUID()
     private static let crownBottomId = UUID(uuidString: "00000000-C0C0-0000-0000-000000000004") ?? UUID()
+
+    /// Subdued sampling-plot context (ring + centre pole at ~0.5 alpha,
+    /// pinned to the plot's ARAnchor). Shown only while a plot is active
+    /// AND its anchor is still alive in the shared session. Non-
+    /// interactive and listed before the measurement markers.
+    private var plotOverlayMarkers: [ARSceneMarker] {
+        guard let plot = activePlot.plot,
+              viewModel.session.worldAnchorExists(id: plot.anchorID)
+        else { return [] }
+        return ActiveSamplingPlot.subduedOverlayMarkers(for: plot)
+    }
 
     private var crownMarkers: [ARSceneMarker] {
         // Stable ids so these aren't torn down + rebuilt on every frame.

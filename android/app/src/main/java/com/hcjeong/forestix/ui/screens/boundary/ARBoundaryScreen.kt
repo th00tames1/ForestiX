@@ -39,7 +39,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
-import com.hcjeong.forestix.ar.ArController
+import com.hcjeong.forestix.ar.ArSessionHub
 import com.hcjeong.forestix.ui.screens.MeasureBackButton
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixBorderedButton
@@ -50,7 +50,8 @@ import java.util.Locale
 
 @Composable
 fun ARBoundaryScreen(nav: NavController) {
-    val controller = remember { ArController() }
+    // Shared app-scoped AR session (one ARCore world across the AR screens).
+    val controller = ArSessionHub.controller
     val viewModel = remember { ARBoundaryViewModel(session = controller) }
 
     val centerWorld by viewModel.centerWorld.collectAsStateWithLifecycle()

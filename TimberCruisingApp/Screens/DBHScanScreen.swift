@@ -25,6 +25,10 @@ public struct DBHScanScreen: View {
     @StateObject private var viewModel: DBHScanViewModel
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var settings: AppSettings
+    /// App-scoped active sampling plot — rendered as a subdued ring +
+    /// pole under the measurement markers so the cruiser keeps the plot
+    /// boundary in view while measuring. Changes only on place/reset.
+    @ObservedObject private var activePlot = ActiveSamplingPlot.shared
     public var onResult: (DBHResult) -> Void = { _ in }
     /// Fired when the cruiser explicitly accepts the on-screen result
     /// (state → .accepted). Use this for flows that want to persist the
@@ -165,10 +169,11 @@ public struct DBHScanScreen: View {
             // stays locked to the tree as the phone moves.
             // Mesh overlay ON for DBH (field fix): the scene-reconstruction
             // wireframe is the "it's actually scanning" feedback cruisers
-            // asked for. Height keeps it off.
+            // asked for. Height keeps it off. The subdued sampling-plot
+            // overlay (if a plot is active) renders under the cylinder.
             ARCameraView(manager: viewModel.session,
                          debugMeshOverlay: true,
-                         sceneMarkers: cylinderMarkers,
+                         sceneMarkers: plotOverlayMarkers + cylinderMarkers,
                          raycaster: raycaster)
                 .ignoresSafeArea()
 
@@ -986,6 +991,19 @@ public struct DBHScanScreen: View {
     /// frame instead of diffed, which is ugly but not fatal.
     private static let cylinderMarkerId: UUID =
         UUID(uuidString: "00DBC415-0000-0000-0000-000000000001") ?? UUID()
+
+    /// Subdued sampling-plot context (ring + centre pole at ~0.5 alpha,
+    /// pinned to the plot's ARAnchor). Shown only while a plot is active
+    /// AND its anchor is still alive in the shared session — after an
+    /// app restart or a session reset there is no anchor, so nothing is
+    /// drawn. Non-interactive by construction (scene markers take no
+    /// input) and listed before the measurement markers.
+    private var plotOverlayMarkers: [ARSceneMarker] {
+        guard let plot = activePlot.plot,
+              viewModel.session.worldAnchorExists(id: plot.anchorID)
+        else { return [] }
+        return ActiveSamplingPlot.subduedOverlayMarkers(for: plot)
+    }
 
     // MARK: - Bottom panel
 

@@ -59,6 +59,7 @@ import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.ar.ArCameraView
 import com.hcjeong.forestix.ar.ArController
+import com.hcjeong.forestix.ar.ArSessionHub
 import com.hcjeong.forestix.data.cruise.Project
 import com.hcjeong.forestix.sensors.ArDepthFrame
 import com.hcjeong.forestix.sensors.CylinderCalibration
@@ -292,7 +293,8 @@ fun CalibrationScreen(nav: NavController, projectId: String? = null) {
         }
     }
 
-    val controller = remember { ArController() }
+    // Shared app-scoped AR session (one ARCore world across the AR screens).
+    val controller = ArSessionHub.controller
     val viewModel = remember { CalibrationViewModel(session = controller) }
     var selectedProcedure by remember { mutableStateOf(CalibrationViewModel.Procedure.WALL) }
     var appliedToast by remember { mutableStateOf<String?>(null) }

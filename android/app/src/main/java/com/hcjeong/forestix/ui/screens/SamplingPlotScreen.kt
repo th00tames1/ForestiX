@@ -4,10 +4,20 @@
 // big INSIDE / OUTSIDE status + distance/area. Leaving the ring pulses a red
 // border and vibrates.
 //
-// Performance: the marker list is hoisted into `remember(center, radius)` so
-// the AR nodes are NOT rebuilt on every frame, and the out-of-bounds flash is
-// an isolated animation (not a 5 Hz full-screen recomposition) — both were
-// causing severe lag.
+// The plot lives in the app-scoped ArSessionHub as a REAL ARCore anchor:
+//  - the centre stays pinned as ARCore corrects its map (the old raw-Vec3
+//    marker drifted with VIO error over time/movement);
+//  - the plot survives navigation — DBH/Height render it as a subdued
+//    overlay through the same shared AR session (it is NOT persisted across
+//    app restarts: the AR world it is defined in dies with the session);
+//  - re-entering this screen with an active plot resumes it (Reset clears).
+//
+// Performance: the hub renders the plot nodes directly (a radius change
+// rebuilds only the ring node against a cached material), the out-of-bounds
+// flash is an isolated animation, and — once the centre is placed — the
+// session's Depth API and the plane-grid renderer are switched OFF for the
+// walking phase: this screen never consumes depth images, and ARCore's ML
+// depth + per-frame plane-geometry updates were the dominant lag sources.
 
 package com.hcjeong.forestix.ui.screens
 
@@ -44,11 +54,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
-import com.hcjeong.forestix.ar.ArController
 import com.hcjeong.forestix.ar.ArCameraView
 import com.hcjeong.forestix.ar.ArSceneMarker
-import com.hcjeong.forestix.ar.MarkerShape
-import com.hcjeong.forestix.ar.Vec3
+import com.hcjeong.forestix.ar.ArSessionHub
 import com.hcjeong.forestix.common.Units
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
@@ -65,23 +73,28 @@ import kotlin.math.sqrt
 fun SamplingPlotScreen(nav: NavController) {
     val env = LocalAppEnvironment.current
     val context = LocalContext.current
-    val controller = remember { ArController() }
+    val controller = ArSessionHub.controller
     val haptics = remember { Haptics(context) }
     val colors = Forestix.colors
 
-    var center by remember { mutableStateOf<Vec3?>(null) }
-    var radiusM by remember { mutableStateOf(8.0) }
+    // Active plot + radius live in the hub (shared with DBH/Height's
+    // subdued overlay). Reading them here recomposes on place/reset.
+    val plot = ArSessionHub.activePlot
+    val radiusM = ArSessionHub.plotRadiusM
+    val placed = plot != null
+
     var isOutside by remember { mutableStateOf(false) }
     var distanceFromCenter by remember { mutableStateOf<Double?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
 
     // 5 Hz boundary check + haptics. Does NOT drive any animation/flash, so
-    // it doesn't recompose the AR view — only the small readouts that read it.
+    // it doesn't recompose the AR view — only the small readouts that read
+    // it. Distance is measured to the ANCHOR's corrected pose.
     LaunchedEffect(Unit) {
         var tick = 0
         while (true) {
             delay(200)
-            val c = center
+            val c = ArSessionHub.plotCenterWorld()
             val cam = controller.currentCameraPosition()
             if (c == null || cam == null) {
                 isOutside = false; distanceFromCenter = null
@@ -89,7 +102,7 @@ fun SamplingPlotScreen(nav: NavController) {
                 val dx = cam.x - c.x; val dz = cam.z - c.z
                 val d = sqrt((dx * dx + dz * dz).toDouble())
                 distanceFromCenter = d
-                val now = d > radiusM
+                val now = d > ArSessionHub.plotRadiusM
                 if (now && !isOutside) haptics.warn()           // crossed out
                 else if (now && tick % 2 == 0) haptics.warn()   // every 0.4 s while out (iOS cadence)
                 isOutside = now
@@ -98,33 +111,31 @@ fun SamplingPlotScreen(nav: NavController) {
         }
     }
 
-    // Markers rebuilt ONLY when the centre or radius changes (stable instance
-    // otherwise) so the ring geometry isn't recreated every frame.
-    val markerList = remember(center, radiusM) {
-        val c = center ?: return@remember emptyList<ArSceneMarker>()
-        listOf(
-            ArSceneMarker(c, MarkerShape.Sphere(0.07f), floatArrayOf(1f, 0.25f, 0.25f, 1f)),
-            ArSceneMarker(Vec3(c.x, c.y + 0.6f, c.z), MarkerShape.Cylinder(0.05f, 1.2f), floatArrayOf(1f, 1f, 1f, 1f)),
-            ArSceneMarker(Vec3(c.x, c.y + 1.2f, c.z), MarkerShape.Sphere(0.12f), floatArrayOf(1f, 0.85f, 0.15f, 1f)),
-            ArSceneMarker(Vec3(c.x, c.y + 0.02f, c.z), MarkerShape.Ring(radiusM.toFloat(), 0.4f), floatArrayOf(0.2f, 0.85f, 1f, 1f)),
-        )
-    }
-
     fun place() {
-        if (center != null) return
+        if (ArSessionHub.activePlot != null) return
         val hit = controller.screenCenterHit() ?: controller.forwardPointAtHorizontalDistance(3f)
-        if (hit == null) {
+        if (hit == null || !ArSessionHub.placePlot(hit)) {
             failure = "Couldn't read scene depth. Aim at the ground and try again."
             return
         }
-        failure = null; center = hit
+        failure = null
     }
 
     Box(Modifier.fillMaxSize()) {
-        ArCameraView(controller, markerList, modifier = Modifier.fillMaxSize())
+        // The hub renders the plot itself (OWNER = full alpha). Depth + the
+        // plane grid are only needed while AIMING for the centre; both are
+        // switched off for the long walking phase once the plot is placed.
+        ArCameraView(
+            controller,
+            emptyList<ArSceneMarker>(),
+            modifier = Modifier.fillMaxSize(),
+            enableDepth = !placed,
+            planeRenderer = !placed,
+            plotOverlay = ArSessionHub.PlotOverlay.OWNER,
+        )
 
         OutsideFlashOverlay(isOutside)
-        if (center == null) CenterCrosshair(Modifier.align(Alignment.Center))
+        if (!placed) CenterCrosshair(Modifier.align(Alignment.Center))
 
         MeasureBackButton { nav.popBackStack() }
 
@@ -146,7 +157,7 @@ fun SamplingPlotScreen(nav: NavController) {
             }
             Slider(
                 value = radiusM.toFloat(),
-                onValueChange = { radiusM = it.toDouble() },
+                onValueChange = { ArSessionHub.setPlotRadius(it.toDouble()) },
                 valueRange = 1f..30f,
                 steps = 57,
                 colors = SliderDefaults.colors(
@@ -156,27 +167,27 @@ fun SamplingPlotScreen(nav: NavController) {
             )
         }
 
-        if (center == null) MeasureControlColumn(onCapture = { place() })
+        if (!placed) MeasureControlColumn(onCapture = { place() })
 
         MeasureStatusPanel {
             failure?.let {
                 Text(it, style = Forestix.type.caption, color = Color.White)
             }
-            if (center == null) {
+            if (!placed) {
                 CenteredText("Set the radius, aim at the plot centre, tap +")
             } else {
                 CenteredText(
-                    if (isOutside) "OUTSIDE \u2014 walk back inside" else "INSIDE sampling area",
+                    if (isOutside) "OUTSIDE — walk back inside" else "INSIDE sampling area",
                     large = true,
                     color = if (isOutside) colors.confidenceBad else colors.confidenceOk,
                 )
             }
-            // Distance line \u2014 always rendered ("\u2014" until the centre lands),
+            // Distance line — always rendered ("—" until the centre lands),
             // iOS distanceLine format + style.
             Text(
                 distanceFromCenter?.let {
-                    String.format(Locale.US, "Centre: %.2f m \u00B7 area: %.1f m\u00B2", it, Units.circleAreaM2(radiusM))
-                } ?: "\u2014",
+                    String.format(Locale.US, "Centre: %.2f m · area: %.1f m²", it, Units.circleAreaM2(radiusM))
+                } ?: "—",
                 style = Forestix.type.dataSmall,
                 color = Color.White.copy(alpha = 0.85f),
             )
@@ -189,16 +200,17 @@ fun SamplingPlotScreen(nav: NavController) {
                 ForestixWhiteButton(
                     "Reset",
                     modifier = Modifier.weight(1f),
-                    enabled = center != null,
+                    enabled = placed,
                 ) {
-                    center = null; isOutside = false; distanceFromCenter = null
+                    ArSessionHub.clearPlot()
+                    isOutside = false; distanceFromCenter = null
                 }
                 ForestixProminentButton(
                     "Save",
                     modifier = Modifier.weight(1f),
-                    enabled = center != null,
+                    enabled = placed,
                 ) {
-                    val r = radiusM
+                    val r = ArSessionHub.plotRadiusM
                     env.history.append(
                         QuickMeasureEntry(
                             kind = MeasureKind.SAMPLING_PLOT, value = r,

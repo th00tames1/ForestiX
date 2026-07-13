@@ -202,13 +202,21 @@ public final class DBHScanViewModel: ObservableObject {
 
     // MARK: - Construction
 
+    /// Shared-session client token — one per view-model instance so a
+    /// mid-transition overlap (DBH cover dismissing while the Height
+    /// cover attaches) can never pause the session under the new screen.
+    private let arClientID = UUID()
+
     public init(
         calibration: ProjectCalibration,
         session: ARKitSessionManager? = nil,
         rawPointsWriter: (@Sendable ([SIMD2<Double>]) -> String?)? = nil,
         method: DBHMeasurementMethod = .chord
     ) {
-        self.session = session ?? ARKitSessionManager()
+        // Default to the APP-SHARED session (field round 8): one ARKit
+        // world frame across all measure screens, so the sampling-plot
+        // anchor placed elsewhere renders here too.
+        self.session = session ?? .shared
         self.calibration = calibration
         self.rawPointsWriter = rawPointsWriter
         self.dbhMeasurementMethod = method
@@ -238,10 +246,12 @@ public final class DBHScanViewModel: ObservableObject {
     public func onAppear() {
         // Always start the AR session — even on non-LiDAR devices we want
         // the camera feed to render so the cruiser can see what they're
-        // pointing at while entering DBH manually. `session.run()` is
-        // internally guarded against unsupported configurations, so it's
-        // safe to call on any device.
-        session.run()
+        // pointing at while entering DBH manually. Attaching is internally
+        // guarded against unsupported configurations, so it's safe to
+        // call on any device. The DBH configuration keeps the depth
+        // stream + VIO features + scene reconstruction on; applied with
+        // no reset options, so world anchors survive screen entry.
+        session.attach(client: arClientID, configuration: .dbhScan)
         subscribeToDepth()
         subscribeToFeatures()
 
@@ -283,7 +293,7 @@ public final class DBHScanViewModel: ObservableObject {
             captureSampleIndex = 0
             state = (state == .vioCapturing) ? .vioAiming : .aligning
         }
-        session.pause()
+        session.detach(client: arClientID)
     }
 
     private func subscribeToDepth() {

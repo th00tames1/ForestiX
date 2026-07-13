@@ -59,8 +59,8 @@ import com.hcjeong.forestix.sensors.DistanceSmoother
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hcjeong.forestix.ui.softDropShadow
 import com.hcjeong.forestix.ui.theme.Forestix
-import com.hcjeong.forestix.ui.theme.ForestixBorderedButton
 import com.hcjeong.forestix.ui.theme.ForestixProminentButton
+import com.hcjeong.forestix.ui.theme.ForestixWhiteButton
 import java.util.Locale
 import java.util.UUID
 import kotlin.math.roundToInt
@@ -260,7 +260,7 @@ fun DistanceMeasureScreen(nav: NavController) {
                         Modifier.fillMaxWidth().padding(top = 2.dp),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        ForestixBorderedButton("Reset", modifier = Modifier.weight(1f)) { resetTwoPoint() }
+                        ForestixWhiteButton("Reset", modifier = Modifier.weight(1f)) { resetTwoPoint() }
                         ForestixProminentButton(
                             "Save",
                             modifier = Modifier.weight(1f),

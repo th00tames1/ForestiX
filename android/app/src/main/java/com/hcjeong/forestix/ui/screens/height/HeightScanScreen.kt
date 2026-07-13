@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -36,11 +35,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.runtime.rememberCoroutineScope
 import com.hcjeong.forestix.ui.MeasurePhotoStore
 import kotlinx.coroutines.launch
@@ -77,10 +73,8 @@ import com.hcjeong.forestix.ui.screens.MeasureFailureBanner
 import com.hcjeong.forestix.ui.screens.MeasureStatusPanel
 import com.hcjeong.forestix.ui.screens.ResearchFieldsRow
 import com.hcjeong.forestix.ui.theme.Forestix
-import com.hcjeong.forestix.ui.theme.ForestixBorderedButton
 import com.hcjeong.forestix.ui.theme.ForestixProminentButton
-import com.hcjeong.forestix.ui.theme.ForestixRadius
-import com.hcjeong.forestix.ui.theme.confidenceDescriptor
+import com.hcjeong.forestix.ui.theme.ForestixWhiteButton
 import kotlinx.coroutines.delay
 import java.util.Locale
 import kotlin.math.abs
@@ -89,10 +83,6 @@ import kotlin.math.abs
 // then sweep up to the top — one continuous motion, less device rotation.
 private enum class Stage { ANCHOR, WALKING, AIM_BASE, AIM_TOP, COMPUTED, REJECTED }
 private enum class CrownStep { NONE, LEFT, RIGHT, TOP, BOTTOM, DONE }
-
-/// Walk-off sweet spot assumes a ~30 m stem until better information
-/// exists — iOS HeightScanViewModel.expectedHeightM default.
-private const val EXPECTED_HEIGHT_M = 30f
 
 /// Anchor range gate (locked spec, iOS applies the same): the trunk anchor
 /// may only be captured from a hit ≤ 4 m away. Field round 8: with no
@@ -471,13 +461,12 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 },
             )
 
-            // Walking readout (locked spec, identical on iOS): three lines —
-            // Initial dist (camera→anchor at the anchoring moment), Walked
-            // back (displacement since anchoring, STARTS AT 0.00), and the
-            // primary Total distance (current camera→anchor horizontal
-            // distance — the d_h the math uses). The sweet-spot hint keys
-            // off Total. Replaces the single "Walked back" dataLarge line
-            // that confusingly opened at the full anchor distance.
+            // Walking readout (locked spec, identical on iOS): ONLY three
+            // lines — Initial dist (camera→anchor at the anchoring moment),
+            // Walked back (displacement since anchoring, STARTS AT 0.00),
+            // and the primary Total distance (current camera→anchor
+            // horizontal distance — the d_h the math uses). Field fix: the
+            // sweet-spot / "Move back … (target …)" guidance is gone.
             if (stage == Stage.WALKING && !manualOpen) {
                 Column(
                     Modifier.fillMaxWidth(),
@@ -500,11 +489,6 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                         "Total distance " + MeasurementFormatter.distance(dhLive.toDouble(), settings.unitSystem),
                         style = type.dataLarge,
                         color = Color.White,
-                    )
-                    Text(
-                        walkHintText(dhLive),
-                        style = type.caption,
-                        color = colors.confidenceWarn,
                     )
                 }
             }
@@ -550,47 +534,25 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                         }
                     }
                 }
-                ForestixBorderedButton("Cancel", modifier = Modifier.fillMaxWidth()) {
+                ForestixWhiteButton("Cancel", modifier = Modifier.fillMaxWidth()) {
                     manualOpen = false
                 }
             }
 
-            // Result panel — unit-aware H + σ, tier chip (always on Height),
-            // actionable hint, and the α/d_h diagnostic line.
+            // Result panel — unit-aware H and the α/d_h diagnostic line.
+            // Field fix: no σ, no tier chip, no tier hint here — σ and the
+            // tier stay recorded internally, the tier still gates Accept,
+            // and a rejection's reason shows in the status line above.
             if (!manualOpen && (stage == Stage.COMPUTED || stage == Stage.REJECTED)) result?.let { r ->
                 Column(
                     Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                     horizontalAlignment = Alignment.Start,
                 ) {
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        // Always show the computed H — the red tier chip and
-                        // the status-banner rejection reason carry the
-                        // warning. σ is hidden on red (a rejected fit's σ is
-                        // noise).
-                        Text(
-                            MeasurementFormatter.height(r.heightM.toDouble(), settings.unitSystem),
-                            style = type.dataLarge,
-                            color = Color.White,
-                        )
-                        if (r.confidence != ConfidenceTier.RED) {
-                            Text(
-                                MeasurementFormatter.heightSigma(r.sigmaHm.toDouble(), settings.unitSystem),
-                                style = type.dataSmall,
-                                color = Color.White.copy(alpha = 0.75f),
-                            )
-                        }
-                        Spacer(Modifier.weight(1f))
-                        HeightTierChip(r.confidence.raw)
-                    }
                     Text(
-                        heightTierHint(r.confidence),
-                        style = type.caption,
-                        color = Color.White.copy(alpha = 0.9f),
+                        MeasurementFormatter.height(r.heightM.toDouble(), settings.unitSystem),
+                        style = type.dataLarge,
+                        color = Color.White,
                     )
                     // Diagnostic — the raw captured inputs that fed the §7.2
                     // formula (iOS diagnosticLine).
@@ -641,7 +603,7 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
             if (!manualOpen) when (stage) {
                 Stage.ANCHOR -> {}
                 Stage.WALKING, Stage.AIM_BASE, Stage.AIM_TOP -> {
-                    ForestixBorderedButton("Retake") { resetAll() }
+                    ForestixWhiteButton("Retake") { resetAll() }
                 }
                 Stage.COMPUTED -> {
                     Column(
@@ -651,17 +613,17 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                     ) {
                         // Crown control: start it, or restart it once done.
                         if (crownStep == CrownStep.NONE) {
-                            ForestixBorderedButton("Measure crown", modifier = Modifier.fillMaxWidth()) {
+                            ForestixWhiteButton("Measure crown", modifier = Modifier.fillMaxWidth()) {
                                 crownStep = CrownStep.LEFT
                             }
                         } else if (crownStep == CrownStep.DONE) {
-                            ForestixBorderedButton("Redo crown", modifier = Modifier.fillMaxWidth()) {
+                            ForestixWhiteButton("Redo crown", modifier = Modifier.fillMaxWidth()) {
                                 resetCrown()
                             }
                         }
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            ForestixBorderedButton("Retake", modifier = Modifier.weight(1f)) { resetAll() }
-                            ForestixBorderedButton("Details", modifier = Modifier.weight(1f)) {
+                            ForestixWhiteButton("Retake", modifier = Modifier.weight(1f)) { resetAll() }
+                            ForestixWhiteButton("Details", modifier = Modifier.weight(1f)) {
                                 showMetadata = true
                             }
                             ForestixProminentButton(
@@ -677,7 +639,7 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 Stage.REJECTED -> {
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         ForestixProminentButton("Retake") { resetAll() }
-                        ForestixBorderedButton("Manual") {
+                        ForestixWhiteButton("Manual") {
                             resetAll(); manualOpen = true; manualText = ""
                         }
                     }
@@ -752,52 +714,10 @@ private fun HeightAimCrosshair(label: String, modifier: Modifier = Modifier) {
     }
 }
 
-/// Result-panel tier chip — 10 sp semibold, tracking 0.8, stroked chip
-/// outline; ALWAYS shown on Height (iOS behaviour).
-@Composable
-private fun HeightTierChip(rawTier: String) {
-    val d = confidenceDescriptor(rawTier)
-    Text(
-        d.label.uppercase(Locale.US),
-        style = TextStyle(fontSize = 10.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.8.sp),
-        color = d.color,
-        modifier = Modifier
-            .border(0.75.dp, d.color, ForestixRadius.chip)
-            .padding(horizontal = 8.dp, vertical = 3.dp),
-    )
-}
-
-/// Actionable one-liner per tier — same pattern as the Diameter result
-/// panel so the cruiser gets consistent guidance (iOS tierHint).
-private fun heightTierHint(tier: ConfidenceTier): String = when (tier) {
-    ConfidenceTier.GREEN -> "Good — geometry in sweet spot."
-    ConfidenceTier.YELLOW -> "Fair — long walk-off or steep aim. Acceptable."
-    ConfidenceTier.RED -> "Check — retake, or enter a tape estimate manually."
-}
-
 private fun crownPrompt(step: CrownStep): String = when (step) {
     CrownStep.LEFT -> "Crown: aim at the LEFT edge, tap +"
     CrownStep.RIGHT -> "Crown: aim at the RIGHT edge, tap +"
     CrownStep.TOP -> "Crown: aim at the HIGHEST branch, tap +"
     CrownStep.BOTTOM -> "Crown: aim at the LOWEST branch, tap +"
     else -> ""
-}
-
-/// Sweet-spot walk-off guidance — iOS walkHintText + computeWalkHint:
-/// target band 0.6–1.0 × expected height.
-private fun walkHintText(dh: Float): String {
-    val lo = 0.6f * EXPECTED_HEIGHT_M
-    val hi = 1.0f * EXPECTED_HEIGHT_M
-    val delta = when {
-        dh < lo -> lo - dh
-        dh > hi -> hi - dh          // negative → walk forward
-        else -> 0f
-    }
-    return when {
-        delta > 0.1f ->
-            "Move back ${String.format(Locale.US, "%.1f", delta)} m " +
-                "(target ≈ 0.6–1.0 · ${EXPECTED_HEIGHT_M.toInt()} m)"
-        delta < -0.1f -> "Move forward ${String.format(Locale.US, "%.1f", -delta)} m"
-        else -> "You're in the sweet-spot band. Continue."
-    }
 }

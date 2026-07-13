@@ -193,6 +193,37 @@ public extension ButtonStyle where Self == ForestixProminentButtonStyle {
     static var forestixProminent: ForestixProminentButtonStyle { ForestixProminentButtonStyle() }
 }
 
+// MARK: - AR secondary button style (solid white)
+
+/// Secondary actions on the AR measurement screens (Retake / Details /
+/// Reset / Cancel / Manual). The outlined `.bordered` style disappears
+/// over a bright sky in the camera feed, so these render as SOLID WHITE
+/// with dark primary ink — mirroring the white capture "+" button — and
+/// stay legible against any background. Disabled dims to 0.45 opacity.
+/// Same geometry as `ForestixProminentButtonStyle` so mixed rows align.
+public struct ForestixARSecondaryButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+    public init() {}
+    public func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(ForestixType.bodyBold)
+            .foregroundStyle(ForestixPalette.primaryInk)
+            .frame(maxWidth: .infinity, minHeight: 30)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: ForestixRadius.control, style: .continuous)
+                    .fill(Color.white.opacity(configuration.isPressed ? 0.78 : 1))
+            )
+            .opacity(isEnabled ? 1 : 0.45)
+            .animation(.easeOut(duration: 0.15), value: configuration.isPressed)
+    }
+}
+
+public extension ButtonStyle where Self == ForestixARSecondaryButtonStyle {
+    static var forestixARSecondary: ForestixARSecondaryButtonStyle { ForestixARSecondaryButtonStyle() }
+}
+
 // MARK: - Confidence tier helpers
 
 public enum ConfidenceStyle {

@@ -53,10 +53,10 @@ import com.hcjeong.forestix.common.Units
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
 import com.hcjeong.forestix.ui.theme.Forestix
-import com.hcjeong.forestix.ui.theme.ForestixBorderedButton
 import com.hcjeong.forestix.ui.theme.ForestixProminentButton
 import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.ui.theme.ForestixSpace
+import com.hcjeong.forestix.ui.theme.ForestixWhiteButton
 import kotlinx.coroutines.delay
 import java.util.Locale
 import kotlin.math.sqrt
@@ -186,7 +186,7 @@ fun SamplingPlotScreen(nav: NavController) {
                 Modifier.fillMaxWidth().padding(top = 2.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                ForestixBorderedButton(
+                ForestixWhiteButton(
                     "Reset",
                     modifier = Modifier.weight(1f),
                     enabled = center != null,

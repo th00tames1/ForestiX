@@ -38,6 +38,7 @@ data class EntryRow(
     val latitude: Double?,
     val longitude: Double?,
     val photoPath: String?,
+    val captureMode: String?,
 ) {
     fun toDomain() = QuickMeasureEntry(
         id = UUID.fromString(id),
@@ -57,6 +58,7 @@ data class EntryRow(
         latitude = latitude,
         longitude = longitude,
         photoPath = photoPath,
+        captureMode = captureMode,
     )
 
     companion object {
@@ -78,6 +80,7 @@ data class EntryRow(
             latitude = e.latitude,
             longitude = e.longitude,
             photoPath = e.photoPath,
+            captureMode = e.captureMode,
         )
     }
 }
@@ -175,7 +178,15 @@ val QUICK_MEASURE_MIGRATION_1_2 = object : androidx.room.migration.Migration(1, 
     }
 }
 
-@Database(entities = [EntryRow::class, PlotRow::class], version = 2, exportSchema = false)
+/// v3: DBH capture-mode tag ("auto" / "manual" edge-bracket) — additive;
+/// null for older rows and for non-DBH kinds.
+val QUICK_MEASURE_MIGRATION_2_3 = object : androidx.room.migration.Migration(2, 3) {
+    override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE entries ADD COLUMN captureMode TEXT")
+    }
+}
+
+@Database(entities = [EntryRow::class, PlotRow::class], version = 3, exportSchema = false)
 @TypeConverters(Converters::class)
 abstract class ForestixDatabase : RoomDatabase() {
     abstract fun dao(): QuickMeasureDao

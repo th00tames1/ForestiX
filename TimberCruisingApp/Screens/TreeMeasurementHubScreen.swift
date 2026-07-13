@@ -208,7 +208,8 @@ public struct TreeMeasurementHubScreen: View {
                         note: meta.note.isEmpty ? nil : meta.note,
                         latitude: meta.latitude,
                         longitude: meta.longitude,
-                        photoPath: meta.photoPath))
+                        photoPath: meta.photoPath,
+                        captureMode: meta.captureMode))
                     presentingDBHScan = false
                 })
         }

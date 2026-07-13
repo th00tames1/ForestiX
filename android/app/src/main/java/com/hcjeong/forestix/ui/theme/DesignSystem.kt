@@ -299,6 +299,57 @@ fun ForestixBorderedButton(
     }
 }
 
+/// AR-screen sibling of ForestixBorderedButton — same geometry and pressed
+/// timing, but a SOLID WHITE fill with the primaryInk label (mirroring the
+/// white capture "+" aesthetic). Field fix: over bright sky the outlined
+/// buttons were invisible in the camera view; the solid fill reads in any
+/// light. AR action rows only — non-AR screens keep the bordered style.
+@Composable
+fun ForestixWhiteButton(
+    label: String,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    icon: ImageVector? = null,
+    onClick: () -> Unit,
+) {
+    val colors = LocalForestixColors.current
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val fillAlpha by animateFloatAsState(
+        targetValue = if (pressed) 0.78f else 1f,
+        animationSpec = tween(durationMillis = 150, easing = EaseOut),
+        label = "whitePressed",
+    )
+    Box(
+        modifier
+            .heightIn(min = 46.dp)
+            .clip(ForestixRadius.control)
+            .background(Color.White.copy(alpha = fillAlpha))
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                enabled = enabled,
+                role = Role.Button,
+                onClick = onClick,
+            )
+            .alpha(if (enabled) 1f else 0.45f)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            if (icon != null) {
+                Icon(icon, contentDescription = null,
+                    tint = colors.primaryInk, modifier = Modifier.size(18.dp))
+            }
+            Text(label, style = LocalForestixTypography.current.bodyBold,
+                color = colors.primaryInk)
+        }
+    }
+}
+
 // MARK: - Theme entry point ----------------------------------------------
 
 /// Convenience accessors so screens read `Forestix.colors.primary` and

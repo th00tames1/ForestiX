@@ -1157,7 +1157,8 @@ public struct MapHomeScreen: View {
                         note: meta.note.isEmpty ? nil : meta.note,
                         latitude: meta.latitude,
                         longitude: meta.longitude,
-                        photoPath: meta.photoPath))
+                        photoPath: meta.photoPath,
+                        captureMode: meta.captureMode))
                     // Full-measurement chain: an accepted DBH arms the
                     // Height cover; onDismiss presents it for the same
                     // tree number.

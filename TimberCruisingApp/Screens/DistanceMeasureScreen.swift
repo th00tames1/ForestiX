@@ -335,7 +335,7 @@ public struct DistanceMeasureScreen: View {
         case .twoPoint:
             HStack(spacing: 12) {
                 Button("Reset") { resetTwoPoint() }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.forestixARSecondary)
                     .frame(maxWidth: .infinity)
                 Button("Save") { saveTwoPointReading() }
                     .buttonStyle(.forestixProminent)

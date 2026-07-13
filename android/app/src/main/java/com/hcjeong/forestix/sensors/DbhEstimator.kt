@@ -655,6 +655,68 @@ object DBHEstimator {
         )
     }
 
+    // MARK: - Manual edge-bracket (ADJUST) constrained estimate
+
+    /// Constrained estimate for the manual edge-bracket (ADJUST) mode: the
+    /// user places the trunk's two silhouette edges as VIEW-space x
+    /// positions on the horizontal guide line, so the handle span IS the
+    /// width — depth only supplies z. Same pinhole chord identity and
+    /// axis-matched focal as the auto silhouette path,
+    /// d = w·z/(f_axis − w/2), where w is the span in depth walk-axis
+    /// pixels (view x mapped through the view↔depth affine) and z is the
+    /// median depth INSIDE the bracket at the guide row. The automatic
+    /// edge search never runs here; the auto path is untouched.
+    /// Null when the view↔depth mapping is unavailable or no usable depth
+    /// exists inside the bracket.
+    fun constrainedEstimate(
+        frame: ArDepthFrame,
+        leftViewX: Float,
+        rightViewX: Float,
+        guideViewY: Float,
+        cal: ProjectCalibration,
+    ): DbhPreview? {
+        val pL = frame.viewToDepth(min(leftViewX, rightViewX), guideViewY) ?: return null
+        val pR = frame.viewToDepth(max(leftViewX, rightViewX), guideViewY) ?: return null
+        val dxSpan = abs(pR.first - pL.first)
+        val dySpan = abs(pR.second - pL.second)
+        // Walk axis = the depth axis the screen-horizontal bracket spans
+        // (rotated 90° in portrait); divide by the SAME axis-matched focal
+        // as the auto path (fx for a depth-x walk, fy for a depth-y walk).
+        val isRowWalk = dxSpan >= dySpan
+        val focal = if (isRowWalk) frame.fx else frame.fy
+        if (focal <= 1.0) return null
+        val w = max(dxSpan, dySpan)
+        if (w < 2.0) return null
+        // Median depth INSIDE the bracket along the guide row.
+        val steps = Math.round(w).toInt().coerceAtLeast(2)
+        val depths = ArrayList<Float>(steps + 1)
+        for (i in 0..steps) {
+            val t = i.toDouble() / steps
+            val x = Math.round(pL.first + (pR.first - pL.first) * t).toInt()
+            val y = Math.round(pL.second + (pR.second - pL.second) * t).toInt()
+            if (x < 0 || x >= frame.width || y < 0 || y >= frame.height) continue
+            if (frame.confidenceAt(x, y) < 1) continue
+            val d = frame.depthAt(x, y)
+            if (d > 0f) depths.add(d)
+        }
+        if (depths.size < 3) return null
+        depths.sort()
+        val z = depths[depths.size / 2]
+        // Same null gates as iOS bracketChordFit: bracket depth 0.3–5 m,
+        // RAW diameter 2.5–100 cm — outside them there is no fit at all.
+        if (z !in 0.3f..5.0f) return null
+        val halfW = w / 2.0
+        if (focal - halfW <= 1.0) return null
+        val diameterM = w * z / (focal - halfW)
+        val rawCm = diameterM * 100.0
+        if (rawCm !in 2.5..100.0) return null
+        val dia = (cal.dbhCorrectionAlpha + cal.dbhCorrectionBeta * rawCm).toFloat()
+        // A returned fit IS capturable (the user vouches for the edges) —
+        // iOS tap-gate parity. nPoints carries the bracket span in
+        // walk-axis px (iOS PreviewFit.inlierCount).
+        return DbhPreview(dia, z, locked = true, nPoints = Math.round(w).toInt())
+    }
+
     /// Committed DBH = MEDIAN of the per-frame chord diameters over the
     /// burst (the iOS Phase-19 default "chord / silhouette" method). Uses the
     /// exact same per-frame chord the live preview shows, so what the cruiser

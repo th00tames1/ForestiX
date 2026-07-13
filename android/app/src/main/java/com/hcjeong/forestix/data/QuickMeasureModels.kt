@@ -70,6 +70,10 @@ data class QuickMeasureEntry(
     val longitude: Double? = null,
     /// Filename inside MeasurePhotoStore's directory (not a full path).
     val photoPath: String? = null,
+    /// How the DBH edges were found: "auto" (automatic edge-finding) or
+    /// "manual" (ADJUST edge-bracket). Null for non-DBH kinds and for
+    /// entries recorded before the column existed. Same vocabulary as iOS.
+    val captureMode: String? = null,
 ) {
     /// cm for diameter, m elsewhere.
     val valueUnit: String

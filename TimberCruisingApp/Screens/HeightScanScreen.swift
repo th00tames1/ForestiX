@@ -463,7 +463,9 @@ public struct HeightScanScreen: View {
     /// single-line readout initialised at the full camera→anchor
     /// distance, which read as "walked back 2 m" before the cruiser had
     /// moved), and the current camera→anchor distance d_h as the primary
-    /// line. The amber sweet-spot hint keys off that total (d_h).
+    /// line. Field fix: the amber target/sweet-spot hint is gone — the
+    /// walking stage shows ONLY these three lines plus the stage
+    /// instruction in the status banner.
     private var walkingReadout: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Initial dist " + MeasurementFormatter.distance(
@@ -478,25 +480,9 @@ public struct HeightScanScreen: View {
                 m: Double(viewModel.dhMeters), in: settings.unitSystem))
                 .font(ForestixType.dataLarge)
                 .foregroundStyle(.white)
-            Text(walkHintText)
-                .font(ForestixType.caption)
-                .foregroundStyle(ForestixPalette.confidenceWarn)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityIdentifier("heightScan.walkingReadout")
-    }
-
-    private var walkHintText: String {
-        let delta = viewModel.walkHintMeters
-        let expected = viewModel.expectedHeightM
-        if delta > 0.1 {
-            return "Move back \(String(format: "%.1f", delta)) m "
-                   + "(target ≈ 0.6–1.0 · \(Int(expected)) m)"
-        } else if delta < -0.1 {
-            return "Move forward \(String(format: "%.1f", -delta)) m"
-        } else {
-            return "You're in the sweet-spot band. Continue."
-        }
     }
 
     @ViewBuilder
@@ -539,22 +525,17 @@ public struct HeightScanScreen: View {
                 // keep H in a sensible range even on red, so showing
                 // "0.8 m — Too close, step back" is more useful than
                 // hiding the number.
+                // Field fix: the value stands alone — no ±σ text and no
+                // tier chip/hint on the scan screens. σ + tier are still
+                // recorded with the entry (history / CSV / FieldLog
+                // unchanged); a red result keeps its rejection reason in
+                // the status banner.
                 Text(MeasurementFormatter.height(
                     m: Double(r.heightM), in: settings.unitSystem))
                     .font(ForestixType.dataLarge)
                     .foregroundStyle(.white)
-                if r.confidence != .red {
-                    Text(MeasurementFormatter.heightSigma(
-                        m: Double(r.sigmaHm), in: settings.unitSystem))
-                        .font(ForestixType.dataSmall)
-                        .foregroundStyle(.white.opacity(0.75))
-                }
                 Spacer()
-                tierChip(r.confidence)
             }
-            Text(tierHint(r.confidence))
-                .font(ForestixType.caption)
-                .foregroundStyle(.white.opacity(0.9))
             // Phase 13.2 diagnostic — Bug B persists in real-device tests
             // (desk reads ~89.6 m). The math in HeightEstimator is correct
             // when fed sane α / d_h, so we surface the actual captured
@@ -625,30 +606,6 @@ public struct HeightScanScreen: View {
         return String(
             format: "α_top %+.1f° · α_base %+.1f° · d_h %.2f m",
             topDeg, baseDeg, Double(r.dHm))
-    }
-
-    /// Actionable one-liner per tier — same pattern as the Diameter
-    /// result panel so the cruiser gets consistent guidance.
-    private func tierHint(_ tier: ConfidenceTier) -> String {
-        switch tier {
-        case .green:  return "Good — geometry in sweet spot."
-        case .yellow: return "Fair — long walk-off or steep aim. Acceptable."
-        case .red:    return "Check — retake, or enter a tape estimate manually."
-        }
-    }
-
-    private func tierChip(_ tier: ConfidenceTier) -> some View {
-        let d = ConfidenceStyle.descriptor(for: tier.rawValue)
-        return Text(d.label.uppercased())
-            .font(.system(size: 10, weight: .semibold, design: .default))
-            .tracking(0.8)
-            .padding(.horizontal, 8).padding(.vertical, 3)
-            .overlay(
-                RoundedRectangle(cornerRadius: ForestixRadius.chip,
-                                 style: .continuous)
-                    .stroke(d.color, lineWidth: 0.75)
-            )
-            .foregroundStyle(d.color)
     }
 
     private var manualEntryPanel: some View {
@@ -802,23 +759,23 @@ public struct HeightScanScreen: View {
         switch viewModel.state {
         case .walking, .aimTopArmed, .aimTopCaptured, .aimBaseArmed:
             Button("Retake") { viewModel.retake() }
-                .buttonStyle(.bordered)
+                .buttonStyle(.forestixARSecondary)
         case .computed:
             VStack(spacing: 8) {
                 // Crown control: start it, or restart it once done.
                 if crownStep == .none {
                     Button("Measure crown") { crownStep = .left }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.forestixARSecondary)
                         .frame(maxWidth: .infinity)
                         .accessibilityIdentifier("heightScan.measureCrown")
                 } else if crownStep == .done {
                     Button("Redo crown") { resetCrown() }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.forestixARSecondary)
                         .frame(maxWidth: .infinity)
                 }
                 HStack(spacing: 12) {
                     Button("Retake") { viewModel.retake(); resetCrown() }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.forestixARSecondary)
                         .frame(maxWidth: .infinity)
                     Button("Accept") {
                         if crownStep == .done, let w = crownWidthM, let h = crownHeightM {
@@ -837,11 +794,11 @@ public struct HeightScanScreen: View {
                 Button("Retake") { viewModel.retake() }
                     .buttonStyle(.forestixProminent)
                 Button("Manual") { viewModel.enterManualEntry() }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.forestixARSecondary)
             }
         case .manualEntry:
             Button("Cancel") { viewModel.retake() }
-                .buttonStyle(.bordered)
+                .buttonStyle(.forestixARSecondary)
         case .idle, .anchorSet, .accepted:
             EmptyView()
         }

@@ -83,7 +83,10 @@ class AppEnvironment private constructor(
 
         private suspend fun build(app: Context): AppEnvironment {
             val db = Room.databaseBuilder(app, ForestixDatabase::class.java, "forestix.db")
-                .addMigrations(com.hcjeong.forestix.data.QUICK_MEASURE_MIGRATION_1_2)
+                .addMigrations(
+                    com.hcjeong.forestix.data.QUICK_MEASURE_MIGRATION_1_2,
+                    com.hcjeong.forestix.data.QUICK_MEASURE_MIGRATION_2_3,
+                )
                 .build()
             val history = QuickMeasureHistory.get(app, db.dao())
 

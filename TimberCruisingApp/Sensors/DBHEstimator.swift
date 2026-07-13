@@ -1335,6 +1335,178 @@ public enum DBHEstimator {
             rejectionReason: nil)
     }
 
+    // MARK: - Manual edge-bracket (ADJUST) fits
+
+    /// Single-frame DBH estimate constrained by two user-placed edge
+    /// handles instead of the automatic silhouette walk — the DBH
+    /// ADJUST mode's estimator. `leftFraction` / `rightFraction` are
+    /// handle positions normalised 0…1 along the walked axis (the same
+    /// normalisation `PreviewFit.stripLeftFraction` uses, so on-screen
+    /// handles and the published chord agree by construction: the
+    /// screen's view-x fraction maps 1:1 onto the depth map's walk-axis
+    /// extent, exactly like the fit-chord overlay in reverse).
+    ///
+    ///     w = handle span in walk-axis pixels
+    ///     z = median valid depth INSIDE the bracket at the guide row
+    ///     d = w·z / (f_axis − w/2)
+    ///
+    /// — the same axis-matched pinhole identity the auto chord path
+    /// uses, with the user's bracket supplying the width instead of the
+    /// silhouette edge-finder.
+    public static func bracketChordFit(
+        frame: ARDepthFrame,
+        guideAxis: GuideAxis,
+        leftFraction: Double,
+        rightFraction: Double
+    ) -> PreviewFit? {
+        let extent: Int
+        switch guideAxis {
+        case .row(let y):
+            guard y >= 0, y < frame.height else { return nil }
+            extent = frame.width
+        case .col(let x):
+            guard x >= 0, x < frame.width else { return nil }
+            extent = frame.height
+        }
+        let lo = min(leftFraction, rightFraction)
+        let hi = max(leftFraction, rightFraction)
+        let leftPx = lo * Double(extent)
+        let rightPx = hi * Double(extent)
+        let widthPx = rightPx - leftPx
+        guard widthPx >= 2 else { return nil }
+
+        // Median depth INSIDE the bracket at the guide row. Zero-depth /
+        // low-confidence pixels are skipped; a handful of valid returns
+        // is required before the median is trusted.
+        let iLo = max(0, Int(leftPx.rounded(.up)))
+        let iHi = min(extent - 1, Int(rightPx.rounded(.down)))
+        guard iHi >= iLo else { return nil }
+        var depths: [Float] = []
+        depths.reserveCapacity(iHi - iLo + 1)
+        for idx in iLo...iHi {
+            let (px, py) = pixelCoords(axis: guideAxis, idx: idx)
+            guard frame.confidence(atX: px, y: py) >= 1 else { continue }
+            let d = frame.depth(atX: px, y: py)
+            if d > 0 { depths.append(d) }
+        }
+        guard depths.count >= 3 else { return nil }
+        depths.sort()
+        let z = Double(depths[depths.count / 2])
+        guard (0.3...5.0).contains(z) else { return nil }
+
+        // Same focal the auto chord path uses.
+        let fx = Double(frame.intrinsics[0, 0])
+        guard fx - widthPx / 2.0 > 1.0 else { return nil }
+        let diameterM = widthPx * z / (fx - widthPx / 2.0)
+        let diameterCm = diameterM * 100.0
+        guard (2.5...100.0).contains(diameterCm) else { return nil }
+
+        // Centre for the cylinder overlay + distance HUD — bracket
+        // midpoint back-projected at its depth, pushed one radius behind
+        // the front surface (same construction as the auto chord path).
+        let midIdx = (iLo + iHi) / 2
+        let (mpx, mpy) = pixelCoords(axis: guideAxis, idx: midIdx)
+        let pixDepth = Double(frame.depth(atX: mpx, y: mpy))
+        let depthForBackProject = pixDepth > 0 ? pixDepth : z
+        let surfaceXZ = BackProjection.worldXZ(
+            x: Double(mpx), y: Double(mpy),
+            depth: depthForBackProject,
+            intrinsics: frame.intrinsics,
+            cameraPoseWorld: frame.cameraPoseWorld)
+        let cam = frame.cameraPoseWorld.columns.3
+        let camXZ = SIMD2<Double>(Double(cam.x), Double(cam.z))
+        let toSurface = surfaceXZ - camXZ
+        let dist = (toSurface.x * toSurface.x + toSurface.y * toSurface.y).squareRoot()
+        let unit: SIMD2<Double> = dist > 1e-6
+            ? SIMD2(toSurface.x / dist, toSurface.y / dist)
+            : SIMD2(0, 1)
+        let radiusM = diameterM / 2.0
+        let center = surfaceXZ + SIMD2(unit.x * radiusM, unit.y * radiusM)
+
+        // Tier: yellow for a single manual frame — the user vouches for
+        // the edges, so it's capturable, but only the burst's frame-to-
+        // frame agreement can promote a manual reading to green.
+        return PreviewFit(
+            diameterCm: diameterCm,
+            centerWorldXZ: center,
+            radiusM: radiusM,
+            stripLeftFraction: lo,
+            stripRightFraction: hi,
+            tier: .yellow,
+            inlierCount: Int(widthPx.rounded()),
+            arcDeg: 0,
+            rmseMm: 0,
+            rejectionReason: nil,
+            effectiveTapDepth: z)
+    }
+
+    /// Burst-mode manual-bracket measurement: `bracketChordFit` on every
+    /// frame, median diameter across frames, cylinder calibration applied
+    /// — mirrors `chordEstimate` with the user's bracket span in place of
+    /// the silhouette walk. Confidence follows the same CoV rule.
+    public static func bracketChordEstimate(
+        frames: [ARDepthFrame],
+        guideAxis: GuideAxis,
+        leftFraction: Double,
+        rightFraction: Double,
+        calibration cal: ProjectCalibration
+    ) -> DBHResult? {
+        guard frames.count >= 5 else { return nil }
+
+        var diameters: [Double] = []
+        var centersX: [Double] = []
+        var centersZ: [Double] = []
+        var widths: [Int] = []
+        for frame in frames {
+            guard let fit = bracketChordFit(
+                frame: frame,
+                guideAxis: guideAxis,
+                leftFraction: leftFraction,
+                rightFraction: rightFraction)
+            else { continue }
+            diameters.append(fit.diameterCm)
+            centersX.append(fit.centerWorldXZ.x)
+            centersZ.append(fit.centerWorldXZ.y)
+            widths.append(fit.inlierCount)
+        }
+
+        guard diameters.count >= 3 else {
+            return redResult(
+                reason: "Not enough usable frames; hold steadier or move closer",
+                method: .lidarChordSilhouette,
+                nInliers: diameters.count)
+        }
+
+        let sortedDia = diameters.sorted()
+        let medianRawCm = sortedDia[sortedDia.count / 2]
+        let mean = sortedDia.reduce(0, +) / Double(sortedDia.count)
+        let lo = sortedDia.first ?? mean
+        let hi = sortedDia.last ?? mean
+        let cov = mean > 0 ? (hi - lo) / mean : 1
+        let tier: ConfidenceTier = cov <= 0.15 ? .green : .yellow
+
+        let dbhCm = Double(cal.dbhCorrectionAlpha)
+            + Double(cal.dbhCorrectionBeta) * medianRawCm
+
+        let sortedCx = centersX.sorted()
+        let sortedCz = centersZ.sorted()
+        let medCenter = SIMD2<Float>(
+            Float(sortedCx[sortedCx.count / 2]),
+            Float(sortedCz[sortedCz.count / 2]))
+
+        return DBHResult(
+            diameterCm: Float(dbhCm),
+            centerXZ: medCenter,
+            arcCoverageDeg: 0,
+            rmseMm: 0,
+            sigmaRmm: 0,
+            nInliers: widths.reduce(0, +),
+            confidence: tier,
+            method: .lidarChordSilhouette,
+            rawPointsPath: nil,
+            rejectionReason: nil)
+    }
+
     // MARK: - Multi-sample aggregation (trimmed mean)
 
     /// Combine the hold-steady capture's repeated sub-measurements into one

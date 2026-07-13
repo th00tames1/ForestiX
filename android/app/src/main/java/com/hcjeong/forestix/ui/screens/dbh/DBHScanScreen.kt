@@ -6,6 +6,9 @@
 
 package com.hcjeong.forestix.ui.screens.dbh
 
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -13,7 +16,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.text.KeyboardOptions
@@ -21,9 +23,12 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.UnfoldMore
 import androidx.compose.material.icons.outlined.ViewInAr
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
@@ -40,7 +45,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
@@ -93,12 +100,11 @@ import com.hcjeong.forestix.ui.screens.MeasureFailureBanner
 import com.hcjeong.forestix.ui.screens.MeasureStatusPanel
 import com.hcjeong.forestix.ui.screens.ResearchFieldsRow
 import com.hcjeong.forestix.ui.screens.TiltBadge
+import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.theme.Forestix
-import com.hcjeong.forestix.ui.theme.ForestixBorderedButton
 import com.hcjeong.forestix.ui.theme.ForestixProminentButton
-import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.ui.theme.ForestixSpace
-import com.hcjeong.forestix.ui.theme.confidenceDescriptor
+import com.hcjeong.forestix.ui.theme.ForestixWhiteButton
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -229,6 +235,17 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     var leftRay by remember { mutableStateOf<Vec3?>(null) }
     var leftOffset by remember { mutableStateOf<Offset?>(null) }
 
+    // ADJUST edge-bracket mode (manual edge placement, depth method only):
+    // two draggable handles bracket the trunk on the guide line; the
+    // constrained estimate uses the handle span as the silhouette width.
+    var adjustMode by remember { mutableStateOf(false) }
+    var adjustLeftFrac by remember { mutableStateOf(0.25f) }
+    var adjustRightFrac by remember { mutableStateOf(0.75f) }
+    var adjustPreview by remember { mutableStateOf<DBHEstimator.DbhPreview?>(null) }
+    // Whether the on-screen result came from the ADJUST bracket — recorded
+    // as captureMode "manual" vs "auto" on Accept.
+    var resultFromAdjust by remember { mutableStateOf(false) }
+
     // Caliper = depth-free AR arm → use plane hits for distance, not depth.
     LaunchedEffect(captureMethod) {
         controller.preferDepth = captureMethod == DbhCaptureMethod.DEPTH
@@ -277,9 +294,12 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // radius itself changes.
     var cylinderMarker by remember { mutableStateOf<ArSceneMarker?>(null) }
 
-    // Live single-frame preview loop while aiming (depth method only).
-    LaunchedEffect(stage, captureMethod, depthBlocked) {
-        while (stage == Stage.AIMING && captureMethod == DbhCaptureMethod.DEPTH && !depthBlocked) {
+    // Live single-frame preview loop while aiming (depth method only;
+    // paused while the ADJUST bracket owns the edges).
+    LaunchedEffect(stage, captureMethod, depthBlocked, adjustMode) {
+        while (stage == Stage.AIMING && captureMethod == DbhCaptureMethod.DEPTH &&
+            !depthBlocked && !adjustMode
+        ) {
             controller.acquireDepthFrame()?.let { f ->
                 // Crosshair → depth pixel through ARCore's own view↔texture
                 // mapping (display rotation + aspect crop). Falls back to the
@@ -403,9 +423,14 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         // rendered diameter to a 2 cm grid (11.1 cm drew
                         // as 12 — up to +18% width on small stems).
                         val rM = (q(sm / 100f) / 2f).coerceAtLeast(0.01f)
+                        // 0.30 m tall, vertically CENTRED on the chord
+                        // height: the anchor y IS the guide-line height and
+                        // SceneView cylinders extend ±height/2 around their
+                        // position (field fix — the old 1.0 m sleeve dwarfed
+                        // the measure line).
                         ArSceneMarker(
                             Vec3(q(anchor.x), q(anchor.y), q(anchor.z)),
-                            MarkerShape.Cylinder(rM, 1.0f),
+                            MarkerShape.Cylinder(rM, 0.30f),
                             floatArrayOf(0.30f, 0.65f, 1.0f, 0.45f),
                         )
                     } else null
@@ -486,6 +511,26 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         }
     }
 
+    // ADJUST live estimate: the handle span (view px → depth px via the
+    // frame's own view↔depth affine) + the median depth inside the bracket
+    // at the guide row, refreshed on the same cadence as the auto preview.
+    LaunchedEffect(stage, captureMethod, adjustMode, depthBlocked) {
+        while (stage == Stage.AIMING && captureMethod == DbhCaptureMethod.DEPTH &&
+            adjustMode && !depthBlocked
+        ) {
+            controller.acquireDepthFrame()?.let { f ->
+                val w = controller.viewWidthPx.toFloat()
+                val cy = controller.viewHeightPx / 2f
+                adjustPreview = if (w > 1f) {
+                    DBHEstimator.constrainedEstimate(
+                        f, adjustLeftFrac * w, adjustRightFrac * w, cy, calibration,
+                    )
+                } else null
+            }
+            delay(150)
+        }
+    }
+
     // Caliper aiming: sample the centre AR distance at ~10 Hz into the
     // robust smoother; the second edge tap then reads the spike-free
     // average instead of a single flickery hit-test.
@@ -510,6 +555,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         if (preview?.locked != true) return
         stage = Stage.CAPTURING
         failure = null
+        resultFromAdjust = false
         scope.launch {
             val samples = ArrayList<DBHResult>()
             var firstRed: DBHResult? = null      // surface the FIRST red (matches iOS)
@@ -559,6 +605,91 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         }
     }
 
+    // ADJUST capture: the SAME 5-sub-sample burst shape as the auto path —
+    // each sub-sample is a short frame window whose per-frame CONSTRAINED
+    // chords (handle span + median bracket depth) are medianed; the shared
+    // aggregator then trims/averages the sub-samples, so σ comes from the
+    // cross-sample spread exactly like an auto capture (iOS
+    // bracketChordEstimate + aggregateSamples parity). The automatic edge
+    // search never runs. The handle fractions are latched at tap time so a
+    // mid-burst drag can't change what this capture measures.
+    fun captureAdjust() {
+        if (stage == Stage.CAPTURING) return
+        if (adjustPreview?.locked != true) return
+        stage = Stage.CAPTURING
+        failure = null
+        resultFromAdjust = true
+        val lockedLeftFrac = adjustLeftFrac
+        val lockedRightFrac = adjustRightFrac
+        scope.launch {
+            val subs = ArrayList<DBHResult>()
+            var firstRed: DBHResult? = null      // surface the FIRST red (matches iOS)
+            for (k in 1..SAMPLE_COUNT) {
+                sampleProgress = k
+                // Same ~0.5 s window per sub-sample as the auto burst.
+                val frames = ArrayList<ArDepthFrame>()
+                var attempts = 0
+                while (attempts < 24 && frames.size < 10) {
+                    controller.acquireDepthFrame()?.let { frames.add(it) }
+                    attempts++
+                    delay(50)
+                }
+                if (frames.size < 5) continue
+                val vw = controller.viewWidthPx.toFloat()
+                val cy = controller.viewHeightPx / 2f
+                if (vw <= 1f) continue
+                val diameters = ArrayList<Double>(frames.size)
+                var spanPxSum = 0
+                for (f in frames) {
+                    val est = DBHEstimator.constrainedEstimate(
+                        f, lockedLeftFrac * vw, lockedRightFrac * vw, cy, calibration,
+                    ) ?: continue
+                    diameters.add(est.diameterCm.toDouble())
+                    spanPxSum += est.nPoints
+                }
+                if (diameters.size < 3) {
+                    if (firstRed == null) {
+                        firstRed = DBHResult(
+                            diameterCm = 0f, centerX = 0f, centerZ = 0f,
+                            arcCoverageDeg = 0f, rmseMm = 0f, sigmaRmm = 0f,
+                            nInliers = diameters.size, confidence = ConfidenceTier.RED,
+                            method = DBHMethod.LIDAR_CHORD_SILHOUETTE,
+                            rejectionReason = "Not enough usable frames; hold steadier or move closer",
+                        )
+                    }
+                    continue
+                }
+                diameters.sort()
+                val medianCm = diameters[diameters.size / 2]
+                // Frame-to-frame agreement grades the sub-sample (iOS
+                // bracketChordEstimate: range/mean ≤ 15% ⇒ green).
+                val mean = diameters.average()
+                val cov = if (mean > 0) (diameters.last() - diameters.first()) / mean else 1.0
+                subs.add(
+                    DBHResult(
+                        diameterCm = medianCm.toFloat(), centerX = 0f, centerZ = 0f,
+                        arcCoverageDeg = 0f, rmseMm = 0f, sigmaRmm = 0f,
+                        nInliers = spanPxSum,
+                        confidence = if (cov <= 0.15) ConfidenceTier.GREEN else ConfidenceTier.YELLOW,
+                        method = DBHMethod.LIDAR_CHORD_SILHOUETTE, rejectionReason = null,
+                    ),
+                )
+            }
+            sampleProgress = 0
+            val agg = DBHEstimator.aggregateSamples(subs)
+            if (agg == null) {
+                result = firstRed
+                failure = if (firstRed == null)
+                    "Couldn't read the trunk consistently. Hold steadier, 1–3 m away, and retry."
+                else null
+                stage = if (firstRed != null) Stage.RESULT else Stage.AIMING
+            } else {
+                result = agg
+                stage = Stage.RESULT
+            }
+        }
+    }
+
     // AR motion: aim at the trunk, tap + to start a short sweep. Feature
     // points accumulate (de-duped by ARCore point id) over ~3 s, then the
     // circle fit runs — the Android port of the iOS VIO DBH method.
@@ -571,6 +702,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             return
         }
         failure = null
+        resultFromAdjust = false
         stage = Stage.CAPTURING
         scope.launch {
             controller.beginTrackingWatch()
@@ -612,7 +744,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             val d = (caliperSmoother.value() ?: controller.cameraToCenterDistance())?.toFloat()
             if (l != null && d != null) {
                 val res = ArCaliperDbh.estimate(l, ray, d)
-                if (res != null) { result = res; failure = null; stage = Stage.RESULT }
+                if (res != null) { result = res; resultFromAdjust = false; failure = null; stage = Stage.RESULT }
                 else failure = "Couldn't measure — re-aim with the trunk centred and tap both edges."
             } else {
                 failure = "No distance lock — centre the trunk on a surface and try again."
@@ -656,6 +788,10 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     latitude = fix?.latitude,
                     longitude = fix?.longitude,
                     photoPath = photo,
+                    // Edge provenance: "manual" when the ADJUST bracket
+                    // supplied the edges, "auto" otherwise (other measure
+                    // kinds leave the column null).
+                    captureMode = if (resultFromAdjust) "manual" else "auto",
                 )
             )
             // Full-measurement chain: skip the continuation dialog, go
@@ -735,6 +871,39 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             )
         }
 
+        // ADJUST-mode drag catcher: a drag grabs whichever handle is nearer
+        // at drag start (hit target = the nearer half of the screen, well
+        // over 44 dp). Early in the Box so the rail / status panel (later
+        // children) still win their own touches.
+        if (captureMethod == DbhCaptureMethod.DEPTH && adjustMode && stage == Stage.AIMING) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) {
+                        var draggingLeft = true
+                        detectDragGestures(
+                            onDragStart = { pos ->
+                                val w = size.width.toFloat().coerceAtLeast(1f)
+                                draggingLeft =
+                                    kotlin.math.abs(pos.x - adjustLeftFrac * w) <=
+                                    kotlin.math.abs(pos.x - adjustRightFrac * w)
+                            },
+                        ) { change, dragAmount ->
+                            change.consume()
+                            val w = size.width.toFloat().coerceAtLeast(1f)
+                            val df = dragAmount.x / w
+                            if (draggingLeft) {
+                                adjustLeftFrac = (adjustLeftFrac + df)
+                                    .coerceIn(0.02f, adjustRightFrac - 0.04f)
+                            } else {
+                                adjustRightFrac = (adjustRightFrac + df)
+                                    .coerceIn(adjustLeftFrac + 0.04f, 0.98f)
+                            }
+                        }
+                    },
+            )
+        }
+
         if (!hidingChromeForCapture) MeasureBackButton { nav.popBackStack() }
 
         // GPS-accuracy pill on the top strip — leading 72 / top 22, clear of
@@ -792,7 +961,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     // single-frame fit identified along the guide row — iOS
                     // fitChord parity (fit-derived span + dark-halo side bars).
                     val p = preview
-                    if (locked && p != null && p.stripRightFraction > p.stripLeftFraction) {
+                    if (!adjustMode && locked && p != null && p.stripRightFraction > p.stripLeftFraction) {
                         val x0 = size.width * p.stripLeftFraction
                         val x1 = size.width * p.stripRightFraction
                         val half = 22.dp.toPx()
@@ -811,6 +980,45 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                                 colors.confidenceOk,
                                 Offset(x, cy - half), Offset(x, cy + half),
                                 strokeWidth = 3.dp.toPx(),
+                            )
+                        }
+                    }
+                    // ADJUST bracket: subtle band highlight between the
+                    // handles, a chord bar tracking the handles exactly, and
+                    // two white draggable handle lines with grab circles
+                    // (dark halos for sun-glare legibility).
+                    if (adjustMode) {
+                        val lx = size.width * adjustLeftFrac
+                        val rx = size.width * adjustRightFrac
+                        drawRect(
+                            Color.White.copy(alpha = 0.10f),
+                            topLeft = Offset(lx, cy - 44.dp.toPx()),
+                            size = Size(rx - lx, 88.dp.toPx()),
+                        )
+                        drawLine(
+                            colors.confidenceOk.copy(alpha = 0.95f),
+                            Offset(lx, cy), Offset(rx, cy),
+                            strokeWidth = 4.dp.toPx(),
+                        )
+                        // White 2 dp handle lines (88 dp tall, black halo)
+                        // with Ø14 grab circles — iOS adjustHandle parity.
+                        val half = 44.dp.toPx()
+                        for (x in listOf(lx, rx)) {
+                            drawLine(
+                                Color.Black.copy(alpha = 0.45f),
+                                Offset(x, cy - half), Offset(x, cy + half),
+                                strokeWidth = 4.dp.toPx(),
+                            )
+                            drawLine(
+                                Color.White,
+                                Offset(x, cy - half), Offset(x, cy + half),
+                                strokeWidth = 2.dp.toPx(),
+                            )
+                            drawCircle(Color.White, radius = 7.dp.toPx(), center = Offset(x, cy))
+                            drawCircle(
+                                Color.Black.copy(alpha = 0.35f),
+                                radius = 7.dp.toPx(), center = Offset(x, cy),
+                                style = Stroke(width = 1.dp.toPx()),
                             )
                         }
                     }
@@ -850,7 +1058,22 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
 
             if (captureMethod == DbhCaptureMethod.DEPTH) {
                 // Crosshair ring — green locked / red aligning (spec §5.2).
-                DbhRing(locked, colors.confidenceOk, colors.confidenceBad, Modifier.align(Alignment.Center))
+                // During the capture burst it holds green and gains a
+                // determinate progress arc (3 dp, confidenceOk) sweeping
+                // 0→360° across the 5 frames.
+                val ringLocked = if (adjustMode) adjustPreview?.locked == true else locked
+                val burstRunning = stage == Stage.CAPTURING
+                val arcProgress by animateFloatAsState(
+                    targetValue = if (burstRunning) maxOf(1, sampleProgress) / SAMPLE_COUNT.toFloat() else 0f,
+                    animationSpec = tween(durationMillis = 450, easing = LinearEasing),
+                    label = "captureArc",
+                )
+                DbhRing(
+                    ringLocked || burstRunning,
+                    colors.confidenceOk, colors.confidenceBad,
+                    progress = if (burstRunning) arcProgress else null,
+                    modifier = Modifier.align(Alignment.Center),
+                )
                 // Device-tilt badge floating just above the ring so the
                 // cruiser sees level at the same focal point (iOS TiltBadge
                 // at midY − ringRadius − 22). Both badges are 2D chrome, so
@@ -859,9 +1082,18 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     Box(Modifier.align(Alignment.Center).offset(y = (-58).dp)) {
                         TiltBadge(controller)
                     }
-                    // Live preview badge just below the ring.
+                    // Directly under the crosshair: the capture-progress
+                    // pill while the burst runs (flips the instant "+" is
+                    // tapped, updates per frame); the live preview badge
+                    // otherwise.
                     Box(Modifier.align(Alignment.Center).offset(y = 64.dp)) {
-                        LivePreviewBadge(preview, locked, settings.unitSystem)
+                        when {
+                            burstRunning -> CapturingPill(maxOf(1, sampleProgress))
+                            adjustMode -> LivePreviewBadge(
+                                adjustPreview, adjustPreview?.locked == true, settings.unitSystem,
+                            )
+                            else -> LivePreviewBadge(preview, locked, settings.unitSystem)
+                        }
                     }
                 }
             }
@@ -870,14 +1102,14 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         if (stage == Stage.AIMING && !depthBlocked && !hidingChromeForCapture) {
             if (captureMethod == DbhCaptureMethod.CALIPER) {
                 // The caliper captures via the trunk-edge taps, so there is
-                // no "+" — but the Manual escape hatch keeps its rail slot
-                // (hidden while the typed-entry row is open).
+                // no "+" — but the typed-entry escape hatch keeps its rail
+                // slot (hidden while the typed-entry row is open).
                 if (!manualOpen) {
                     Column(
                         modifier = Modifier.align(Alignment.CenterEnd).padding(end = 18.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
-                        MeasureCircleButton(icon = Icons.Filled.Keyboard, caption = "Manual") {
+                        MeasureCircleButton(icon = Icons.Filled.Keyboard, caption = "Type") {
                             manualOpen = true; manualText = ""
                         }
                     }
@@ -885,14 +1117,58 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             } else {
                 MeasureControlColumn(
                     onCapture = {
-                        if (captureMethod == DbhCaptureMethod.MOTION) startMotionSweep() else capture()
+                        when {
+                            captureMethod == DbhCaptureMethod.MOTION -> startMotionSweep()
+                            adjustMode -> captureAdjust()
+                            else -> capture()
+                        }
                     },
-                    // Manual entry rides the rail directly below the capture
-                    // "+" (hidden while the typed-entry row is open).
+                    // Typed entry rides the rail directly below the capture
+                    // "+", with the ADJUST edge-bracket toggle beneath it
+                    // (depth method only; hidden while the typed-entry row
+                    // is open or while ADJUST is already active).
                     extra = if (!manualOpen) {
                         {
-                            MeasureCircleButton(icon = Icons.Filled.Keyboard, caption = "Manual") {
+                            MeasureCircleButton(icon = Icons.Filled.Keyboard, caption = "Type") {
                                 manualOpen = true; manualText = ""
+                            }
+                            if (captureMethod == DbhCaptureMethod.DEPTH && !adjustMode) {
+                                // Horizontal unfold (↕ rotated 90° ≈ the iOS
+                                // "arrow.left.and.right") — manual edge
+                                // placement for trunks the auto edge-finder
+                                // struggles with.
+                                MeasureCircleButton(
+                                    icon = Icons.Filled.UnfoldMore,
+                                    caption = "Adjust",
+                                    iconRotation = 90f,
+                                ) {
+                                    // Handles start at the current auto
+                                    // edges when a fit is up, else ±25% of
+                                    // the screen width around centre.
+                                    val p = preview
+                                    if (p != null && p.locked &&
+                                        p.stripRightFraction > p.stripLeftFraction
+                                    ) {
+                                        adjustLeftFrac = p.stripLeftFraction.coerceIn(0.02f, 0.90f)
+                                        adjustRightFrac = p.stripRightFraction
+                                            .coerceIn(adjustLeftFrac + 0.04f, 0.98f)
+                                    } else {
+                                        adjustLeftFrac = 0.25f
+                                        adjustRightFrac = 0.75f
+                                    }
+                                    adjustPreview = null
+                                    // Park the auto preview so its chrome
+                                    // (chord, badge, cylinder) can't linger
+                                    // under the bracket.
+                                    preview = null; rawDistM = null
+                                    smoothedDiaCm = null; smoothedDistM = null
+                                    smoothedHitAnchor = null
+                                    lockStreak = 0; missStreak = 0
+                                    shownTier = ConfidenceTier.YELLOW; tierStreak = 0
+                                    cylinderMarker = null
+                                    carryWidths.clear(); tapJumpStreak = 0
+                                    adjustMode = true
+                                }
                             }
                         }
                     } else null,
@@ -901,10 +1177,17 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         }
 
         if (!depthBlocked && !hidingChromeForCapture) MeasureStatusPanel(
-            // Developer-mode method picker floats 12 dp above the status
-            // panel while aiming (iOS dbhMethodPicker placement).
-            above = if (stage == Stage.AIMING && settings.developerMode) {
-                {
+            // 12 dp above the panel: the ADJUST exit pill while the bracket
+            // is up, else the developer-mode method picker while aiming
+            // (iOS dbhMethodPicker placement).
+            above = when {
+                stage == Stage.AIMING && adjustMode -> ({
+                    AutoModePill {
+                        adjustMode = false
+                        adjustPreview = null
+                    }
+                })
+                stage == Stage.AIMING && settings.developerMode -> ({
                     DbhMethodSelector(
                         method = captureMethod,
                         onSelect = { m ->
@@ -918,6 +1201,8 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                             )
                             caliperStep = 0; leftRay = null; leftOffset = null
                             result = null; failure = null
+                            adjustMode = false; adjustPreview = null
+                            resultFromAdjust = false
                             preview = null          // drop the stale depth fit
                             rawDistM = null
                             smoothedDiaCm = null; smoothedDistM = null
@@ -930,8 +1215,9 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         },
                         depthEnabled = controller.supportsDepth,
                     )
-                }
-            } else null,
+                })
+                else -> null
+            },
         ) {
             failure?.let { MeasureFailureBanner(it) }
             CenteredText(
@@ -943,6 +1229,12 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                             else "Now tap the RIGHT trunk edge."
                         captureMethod == DbhCaptureMethod.MOTION ->
                             "AR motion — aim at the trunk, tap + then sweep the phone slowly across it."
+                        // ADJUST keeps the standard aligning/armed copy
+                        // (iOS statusText parity): armed as soon as a
+                        // bracket fit exists.
+                        adjustMode ->
+                            if (adjustPreview?.locked == true) "Hold steady, then tap + to capture."
+                            else "Align the guide to the trunk's uphill side; hold steady."
                         locked -> "Hold steady, then tap + to capture."
                         // Border-touch invalidity: the silhouette walk ran off
                         // the image — the trunk's edges aren't in frame, so no
@@ -995,6 +1287,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                                 method = DBHMethod.MANUAL_VISUAL, rejectionReason = null,
                             )
                             result = r
+                            resultFromAdjust = false
                             failure = null
                             manualOpen = false
                             // iOS submitManualEntry goes straight to
@@ -1003,7 +1296,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         }
                     }
                 }
-                ForestixBorderedButton("Cancel", modifier = Modifier.fillMaxWidth()) {
+                ForestixWhiteButton("Cancel", modifier = Modifier.fillMaxWidth()) {
                     manualOpen = false
                 }
             }
@@ -1019,33 +1312,14 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         // Monospaced value via the shared unit-aware
-                        // formatter; σ beside it as a separate dataSmall
-                        // text (hidden on red — the chip carries the
-                        // warning). Red still shows the value.
+                        // formatter. Field fix: no σ and no tier chip here —
+                        // σ stays recorded internally (history/CSV) and the
+                        // tier still gates Accept; a red scan's reason shows
+                        // in the status line above.
                         Text(
                             MeasurementFormatter.diameter(r.diameterCm.toDouble(), settings.unitSystem),
                             style = Forestix.type.dataLarge,
                             color = Color.White,
-                        )
-                        if (r.confidence != ConfidenceTier.RED) {
-                            Text(
-                                MeasurementFormatter.diameterSigma(r.sigmaRmm.toDouble(), settings.unitSystem),
-                                style = Forestix.type.dataSmall,
-                                color = Color.White.copy(alpha = 0.75f),
-                            )
-                        }
-                        Spacer(Modifier.weight(1f))
-                        // Yellow is a normal record-able fit — chip + hint
-                        // only for green (good) or red (must retake).
-                        if (r.confidence != ConfidenceTier.YELLOW) {
-                            TierChip(r.confidence.raw)
-                        }
-                    }
-                    if (r.confidence != ConfidenceTier.YELLOW) {
-                        Text(
-                            dbhTierHint(r.confidence),
-                            style = Forestix.type.caption,
-                            color = Color.White.copy(alpha = 0.9f),
                         )
                     }
                     if (settings.developerMode) {
@@ -1061,10 +1335,10 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     }
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    ForestixBorderedButton("Retake", modifier = Modifier.weight(1f)) {
+                    ForestixWhiteButton("Retake", modifier = Modifier.weight(1f)) {
                         result = null; failure = null; stage = Stage.AIMING
                     }
-                    ForestixBorderedButton("Details", modifier = Modifier.weight(1f)) {
+                    ForestixWhiteButton("Details", modifier = Modifier.weight(1f)) {
                         showMetadata = true
                     }
                     ForestixProminentButton(
@@ -1156,14 +1430,68 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
 }
 
 @Composable
-private fun DbhRing(locked: Boolean, ok: Color, bad: Color, modifier: Modifier) {
+private fun DbhRing(locked: Boolean, ok: Color, bad: Color, progress: Float?, modifier: Modifier) {
     // Red until the depth fit stabilises, then green (spec §5.2 / iOS
-    // crosshairRing confidenceBad → confidenceOk).
+    // crosshairRing confidenceBad → confidenceOk). `progress` (0–1, non-null
+    // only during the capture burst) draws a determinate arc sweeping
+    // 0→360° over the ring so the burst is visibly running.
     val ring = if (locked) ok else bad
     Box(modifier.size(72.dp), contentAlignment = Alignment.Center) {
         Box(Modifier.size(72.dp).border(5.dp, Color.Black.copy(alpha = 0.6f), CircleShape))
         Box(Modifier.size(64.dp).border(2.5.dp, ring, CircleShape))
+        if (progress != null) {
+            Canvas(Modifier.size(72.dp)) {
+                // Rides the inner (64 dp) ring — iOS draws the arc on a
+                // 61.5 pt circle inside its 64 pt ring.
+                val stroke = 3.dp.toPx()
+                val d = 61.5.dp.toPx()
+                val inset = (size.width - d) / 2f
+                drawArc(
+                    color = ok,
+                    startAngle = -90f,
+                    sweepAngle = 360f * progress.coerceIn(0f, 1f),
+                    useCenter = false,
+                    topLeft = Offset(inset, inset),
+                    size = Size(d, d),
+                    style = Stroke(width = stroke, cap = StrokeCap.Round),
+                )
+            }
+        }
     }
+}
+
+/// Burst-progress pill floating directly under the crosshair — same pill
+/// style as the Height screen's aim labels (radius 4, black 0.65 fill,
+/// dataSmall white). Flips on the instant the "+" is tapped and counts the
+/// frames up.
+@Composable
+private fun CapturingPill(k: Int) {
+    Text(
+        "Capturing $k/$SAMPLE_COUNT — hold steady.",
+        style = Forestix.type.dataSmall,
+        color = Color.White,
+        modifier = Modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(Color.Black.copy(alpha = 0.65f))
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+    )
+}
+
+/// "Auto" exit pill shown 12 dp above the status panel while the ADJUST
+/// edge-bracket is up — black-0.55 capsule, white 12 sp semibold.
+@Composable
+private fun AutoModePill(onClick: () -> Unit) {
+    Text(
+        "Auto",
+        style = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.SemiBold),
+        color = Color.White,
+        modifier = Modifier
+            .clip(CircleShape)
+            .background(Color.Black.copy(alpha = 0.55f))
+            .border(0.5.dp, Color.White.copy(alpha = 0.18f), CircleShape)
+            .clickableNoRipple(onClick)
+            .padding(horizontal = 14.dp, vertical = 7.dp),
+    )
 }
 
 @Composable
@@ -1184,15 +1512,12 @@ private fun LivePreviewBadge(
                     .background(Color.Black.copy(alpha = 0.65f))
                     .padding(horizontal = 8.dp, vertical = 4.dp),
             ) {
+                // Bare DBH digit — field fix removed the live tier chip;
+                // the tier still drives lock gating internally.
                 Text(
                     "DBH: " + MeasurementFormatter.diameter(p.diameterCm.toDouble(), unitSystem),
                     style = type.data, color = Color.White,
                 )
-                // Green-only tier chip — yellow stays silent (the cruiser
-                // sees a bare DBH digit), iOS Phase 18.2 behaviour.
-                if (p.tier == ConfidenceTier.GREEN) {
-                    PreviewTierChip(p.tier.raw)
-                }
             }
         }
         if (p.distanceM > 0f) {
@@ -1206,43 +1531,6 @@ private fun LivePreviewBadge(
             )
         }
     }
-}
-
-/// Compact tier chip beside the live DBH digit — 9 sp semibold, tracking
-/// 0.6, stroked chip-radius outline (iOS previewTierChip).
-@Composable
-private fun PreviewTierChip(rawTier: String) {
-    val d = confidenceDescriptor(rawTier)
-    Text(
-        d.label.uppercase(Locale.US),
-        style = TextStyle(fontSize = 9.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.6.sp),
-        color = d.color,
-        modifier = Modifier
-            .border(0.75.dp, d.color, ForestixRadius.chip)
-            .padding(horizontal = 5.dp, vertical = 1.dp),
-    )
-}
-
-/// Result-panel tier chip — 10 sp semibold, tracking 0.8, stroked chip
-/// outline (iOS tierChip). Shared look with the Height result panel.
-@Composable
-private fun TierChip(rawTier: String) {
-    val d = confidenceDescriptor(rawTier)
-    Text(
-        d.label.uppercase(Locale.US),
-        style = TextStyle(fontSize = 10.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.8.sp),
-        color = d.color,
-        modifier = Modifier
-            .border(0.75.dp, d.color, ForestixRadius.chip)
-            .padding(horizontal = 8.dp, vertical = 3.dp),
-    )
-}
-
-/// Short cruiser-actionable sentence matching the tier — iOS tierHint.
-private fun dbhTierHint(tier: ConfidenceTier): String = when (tier) {
-    ConfidenceTier.GREEN -> "Good — wide arc, low scatter. Safe to record."
-    ConfidenceTier.YELLOW -> "Fair — narrow arc or noisier fit. Consider a second pass."
-    ConfidenceTier.RED -> "Check — step left 1 m and retake, or enter manually."
 }
 
 /// Map the estimator's strip edges (fractions of the DEPTH-map walk axis)

@@ -199,7 +199,7 @@ public struct SamplingPlotScreen: View {
                 .foregroundStyle(.white.opacity(0.85))
             HStack(spacing: 12) {
                 Button("Reset") { reset() }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.forestixARSecondary)
                     .frame(maxWidth: .infinity)
                     .disabled(center == nil)
                 Button("Save") { savePlot() }

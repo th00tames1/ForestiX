@@ -10,7 +10,7 @@
 //  * Maintain a rolling buffer of up to 120 CLLocationSnapshots (2 min
 //    at 1 Hz, enough for the 60 s averaging window + headroom).
 //  * Expose StateFlows `latestSnapshot` / `headingTrueDeg` for live
-//    tier badges and the compass arrow on NavigationScreen. Heading
+//    tier badges and the cruise map's navigation guide. Heading
 //    comes from the rotation-vector sensor with a geomagnetic
 //    declination correction (prefer true, fall back to magnetic —
 //    same rule as the CLHeading handler on iOS).
@@ -72,8 +72,7 @@ class LocationService(
     val authStatus: StateFlow<AuthStatus> = _authStatus.asStateFlow()
 
     /// Compass heading in degrees true north (0…360). null until the
-    /// first heading update arrives. Used by NavigationScreen for the
-    /// arrow rotation.
+    /// first heading update arrives.
     private val _headingTrueDeg = MutableStateFlow<Double?>(null)
     val headingTrueDeg: StateFlow<Double?> = _headingTrueDeg.asStateFlow()
 
@@ -155,9 +154,9 @@ class LocationService(
         running = false
     }
 
-    /// Grab the most recent `n` samples — what PlotCenterViewModel
-    /// feeds into `GPSAveraging.compute` once the averaging window
-    /// elapses.
+    /// Grab the most recent `n` samples — what the centre-recording
+    /// sheet feeds into `GPSAveraging.compute` once the averaging
+    /// window elapses.
     fun recentSamples(n: Int): List<CLLocationSnapshot> =
         _buffer.value.takeLast(n)
 

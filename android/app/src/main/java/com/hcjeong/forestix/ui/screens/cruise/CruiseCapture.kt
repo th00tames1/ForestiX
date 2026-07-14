@@ -13,8 +13,8 @@
 // UPDATES it — so a cruiser who backs out of the height leg still keeps a
 // valid DBH-only tree. CruiseMapScreen calls `end()` on every (re)entry,
 // which also restores the identity scan calibration `begin()` replaced
-// with the project's real ProjectCalibration (same publish/restore
-// contract as AddTreeFlowRetained).
+// with the project's real ProjectCalibration (the publish/restore
+// contract the retired add-tree flow established).
 
 package com.hcjeong.forestix.ui.screens.cruise
 

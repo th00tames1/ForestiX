@@ -1,16 +1,19 @@
 // Cruise-mode map — Android build of the approved v3 mock
 // design/forestix-redesign-v3-cruise.html (① cruise map, ② plot peek,
-// ④ tree peek, ⑤ project sheet; ③ tally loop rides the shared DBH→Height
-// chain via CruiseCapture).
+// ④ tree peek, ⑤ project sheet, ⑥ cruise setup, ⑦ planned plot + guide,
+// ⑧ inline centre record; ③ tally loop rides the shared DBH→Height chain
+// via CruiseCapture).
 //
 // The map IS the cruise: plot RING pins (amber = active/in-progress,
-// green = closed, dashed = planned style support) + cruise tree teardrop
-// pins are the whole workflow surface. The single primary (+) STATE-MORPHS:
+// green = closed, HOLLOW DASHED = planned) + cruise tree teardrop pins
+// are the whole workflow surface. The single primary (+) STATE-MORPHS:
 // no active plot → "Start plot" (AR sampling-ring component saving a cruise
 // Plot row); active plot → "Add tree · Plot N" straight into the shared
-// DBH→Height chain on the next auto tree number. Quick-measure pins NEVER
-// appear here and cruise pins never appear on the map home — the two data
-// worlds stay separate.
+// DBH→Height chain on the next auto tree number. A planned pin peeks into
+// "Record centre here" (inline GPS-averaging sheet) or "Navigate" (dashed
+// you-dot→plot guide line + live distance chip — the map is the nav).
+// Quick-measure pins NEVER appear here and cruise pins never appear on
+// the map home — the two data worlds stay separate.
 
 package com.hcjeong.forestix.ui.screens.cruise
 
@@ -53,10 +56,11 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.filled.GridOn
-import androidx.compose.material.icons.filled.IosShare
 import androidx.compose.material.icons.filled.MyLocation
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
@@ -71,15 +75,21 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.layout.offset
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -89,6 +99,7 @@ import com.hcjeong.forestix.AppEnvironment
 import com.hcjeong.forestix.basemap.MapMarker
 import com.hcjeong.forestix.basemap.MapMarkerShape
 import com.hcjeong.forestix.basemap.MapPolygonOverlay
+import com.hcjeong.forestix.basemap.MapPolylineOverlay
 import com.hcjeong.forestix.basemap.MapView
 import com.hcjeong.forestix.basemap.rememberMapCameraState
 import com.hcjeong.forestix.common.MeasurementFormatter
@@ -96,30 +107,37 @@ import com.hcjeong.forestix.common.Units
 import com.hcjeong.forestix.data.SettingsSnapshot
 import com.hcjeong.forestix.data.cruise.BreastHeightConvention
 import com.hcjeong.forestix.data.cruise.CruiseDesign
+import com.hcjeong.forestix.data.cruise.PlannedPlot
 import com.hcjeong.forestix.data.cruise.Plot
 import com.hcjeong.forestix.data.cruise.PlotType
 import com.hcjeong.forestix.data.cruise.Project
 import com.hcjeong.forestix.data.cruise.SamplingScheme
 import com.hcjeong.forestix.data.cruise.Tree
+import com.hcjeong.forestix.export.FullCruiseExporter
 import com.hcjeong.forestix.geo.CoordinateConversions
 import com.hcjeong.forestix.inventory.HDModel
 import com.hcjeong.forestix.inventory.PlotStats
 import com.hcjeong.forestix.inventory.PlotStatsCalculator
 import com.hcjeong.forestix.inventory.VolumeEquation
 import com.hcjeong.forestix.inventory.VolumeEquationFactory
+import com.hcjeong.forestix.positioning.GeoMath
 import com.hcjeong.forestix.positioning.LocationService
 import com.hcjeong.forestix.ui.Routes
 import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.pressableNoRipple
 import com.hcjeong.forestix.ui.screens.ClusterLabel
+import com.hcjeong.forestix.ui.screens.ExportViewModel
 import com.hcjeong.forestix.ui.screens.GpsChip
+import com.hcjeong.forestix.ui.screens.Haptics
 import com.hcjeong.forestix.ui.screens.PeekActionButton
 import com.hcjeong.forestix.ui.screens.PhotoThumb
 import com.hcjeong.forestix.ui.screens.RoundChromeButton
 import com.hcjeong.forestix.ui.screens.TierChipSoft
+import com.hcjeong.forestix.ui.screens.exportMimeFor
 import com.hcjeong.forestix.ui.screens.plot.PlotFlowRoutes
-import com.hcjeong.forestix.ui.screens.project.CruiseStepRoutes
 import com.hcjeong.forestix.ui.screens.project.ProjectFlowRoutes
+import com.hcjeong.forestix.ui.screens.zipFolderForShare
+import com.hcjeong.forestix.ui.shareFile
 import com.hcjeong.forestix.ui.softDropShadow
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixRadius
@@ -131,19 +149,25 @@ import java.util.UUID
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.max
+import kotlin.math.roundToInt
 import kotlin.math.sqrt
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /// Peavy Hall fallback (MapHomeScreen parity) — only when no fix and no
 /// cruise data exists yet.
 private val DefaultCenter = CoordinateConversions.LatLon(latitude = 44.56417, longitude = -123.28556)
 
 /// Everything the cruise map renders for the CURRENT project, loaded in one
-/// pass (fresh on entry + after every mutating action).
+/// pass (fresh on entry + after every mutating action). `plannedPlots` is
+/// the UNVISITED plan only — visited planned plots are represented by
+/// their real Plot rings.
 private data class CruiseData(
     val project: Project?,
     val plots: List<Plot>,
     val treesByPlot: Map<UUID, List<Tree>>,
+    val plannedPlots: List<PlannedPlot> = emptyList(),
 ) {
     val trees: List<Tree> get() = treesByPlot.values.flatten()
 }
@@ -186,6 +210,7 @@ fun CruiseMapScreen(nav: NavController) {
 
     var refresh by remember { mutableIntStateOf(0) }
     var data by remember { mutableStateOf(CruiseData(null, emptyList(), emptyMap())) }
+    val haptics = remember { Haptics(context) }
     var awaitingFirstFix by remember { mutableStateOf(LocationService.lastGlobalFix == null) }
     var mapCenter by remember {
         mutableStateOf(
@@ -200,7 +225,10 @@ fun CruiseMapScreen(nav: NavController) {
         val project = resolveCurrentProject(env, settings.cruiseProjectId)
         val plots = project?.let { env.plotRepository.listByProject(it.id) } ?: emptyList()
         val trees = plots.associate { it.id to env.treeRepository.listByPlot(it.id) }
-        data = CruiseData(project, plots, trees)
+        val planned = project?.let { p ->
+            env.plannedPlotRepository.listByProject(p.id).filter { !it.visited }
+        } ?: emptyList()
+        data = CruiseData(project, plots, trees, planned)
         // Stale active-plot guard (deleted / closed / other project).
         val active = settings.cruisePlotId?.let(::uuidOrNull)
         if (active != null && plots.none { it.id == active && it.closedAt == null }) {
@@ -240,7 +268,34 @@ fun CruiseMapScreen(nav: NavController) {
 
     var selectedId by remember { mutableStateOf<String?>(null) }
     var projectSheetOpen by remember { mutableStateOf(false) }
+    var cruiseSetupOpen by remember { mutableStateOf(false) }
+    var recordCentreFor by remember { mutableStateOf<PlannedPlot?>(null) }
     BackHandler(enabled = selectedId != null) { selectedId = null }
+
+    // MARK: - Navigate mode (mock ⑦ — the map is the nav)
+
+    /// Planned plot the dashed guide line + distance chip point at.
+    var navTargetId by remember { mutableStateOf<UUID?>(null) }
+    val navTarget = navTargetId?.let { id -> data.plannedPlots.firstOrNull { it.id == id } }
+    // Target vanished (recorded / regenerated / project switch) → clear.
+    LaunchedEffect(navTargetId, data) {
+        if (navTargetId != null && navTarget == null) navTargetId = null
+    }
+    val navFix = fix
+    val navDistanceM = if (navTarget != null && navFix != null) {
+        GeoMath.distanceM(
+            fromLat = navFix.latitude, fromLon = navFix.longitude,
+            toLat = navTarget.plannedLat, toLon = navTarget.plannedLon)
+    } else null
+    // Arrival: within 5 m fires one haptic and clears the guide (mock
+    // "5 m arrival buzz"; the retired NavigationScreen's radius).
+    LaunchedEffect(navDistanceM) {
+        val d = navDistanceM ?: return@LaunchedEffect
+        if (d <= 5.0) {
+            haptics.warn()
+            navTargetId = null
+        }
+    }
 
     // MARK: - Actions
 
@@ -311,8 +366,27 @@ fun CruiseMapScreen(nav: NavController) {
                 ?.takeIf { it.centerLat != 0.0 || it.centerLon != 0.0 }
                 ?.let { listOf(plotBoundaryOverlay(it, colors.accent)) }
                 ?: emptyList(),
+            // Navigate mode: dashed you-dot → planned-plot guide (mock ⑦).
+            polylines = if (navTarget != null && navFix != null) {
+                listOf(
+                    MapPolylineOverlay(
+                        points = listOf(
+                            CoordinateConversions.LatLon(
+                                latitude = navFix.latitude, longitude = navFix.longitude),
+                            CoordinateConversions.LatLon(
+                                latitude = navTarget.plannedLat,
+                                longitude = navTarget.plannedLon),
+                        ),
+                        color = colors.accent,
+                        dashed = true,
+                    ),
+                )
+            } else {
+                emptyList()
+            },
             markers = cruiseMarkers(data, activePlot, selectedId, colors.accent,
-                colors.confidenceOk, colors.confidenceWarn, colors.primary),
+                colors.confidenceOk, colors.confidenceWarn, colors.primary,
+                colors.textTertiary),
             onMarkerTap = { selectedId = if (selectedId == it) null else it },
             onMapTap = { selectedId = null },
             youLocation = fix?.let {
@@ -340,6 +414,44 @@ fun CruiseMapScreen(nav: NavController) {
             Spacer(Modifier.weight(1f))
             GpsChip(fix)
         }
+        // Navigate mode's floating live distance chip (mock `.distchip`) —
+        // pinned to the guide line's midpoint, same projection as the map
+        // draw pass (falls back to under-chrome centre until layout).
+        if (navTarget != null && navFix != null && navDistanceM != null) {
+            val a = camera.screenPoint(
+                CoordinateConversions.LatLon(
+                    latitude = navFix.latitude, longitude = navFix.longitude))
+            val b = camera.screenPoint(
+                CoordinateConversions.LatLon(
+                    latitude = navTarget.plannedLat, longitude = navTarget.plannedLon))
+            if (a != null && b != null) {
+                DistanceChip(
+                    navDistanceLabel(navDistanceM),
+                    modifier = Modifier
+                        .offset {
+                            IntOffset(
+                                ((a.x + b.x) / 2f).roundToInt(),
+                                ((a.y + b.y) / 2f).roundToInt(),
+                            )
+                        }
+                        // Centre the chip on the midpoint (offset places
+                        // the top-left corner there).
+                        .graphicsLayer {
+                            translationX = -size.width / 2f
+                            translationY = -size.height / 2f
+                        },
+                )
+            } else {
+                DistanceChip(
+                    navDistanceLabel(navDistanceM),
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .statusBarsPadding()
+                        .padding(top = 72.dp),
+                )
+            }
+        }
+
         // My-location under the chip column, trailing-aligned (keeps the
         // top row narrow enough for long project names).
         val locateSnap = fix ?: LocationService.lastGlobalFix
@@ -391,7 +503,27 @@ fun CruiseMapScreen(nav: NavController) {
                 val peekTree = sel?.takeIf { it.startsWith("tree-") }
                     ?.removePrefix("tree-")?.let(::uuidOrNull)
                     ?.let { id -> data.trees.firstOrNull { it.id == id } }
+                val peekPlanned = sel?.takeIf { it.startsWith("planned-") }
+                    ?.removePrefix("planned-")?.let(::uuidOrNull)
+                    ?.let { id -> data.plannedPlots.firstOrNull { it.id == id } }
                 when {
+                    peekPlanned != null -> PlannedPeekCard(
+                        planned = peekPlanned,
+                        fix = fix,
+                        navigating = navTargetId == peekPlanned.id,
+                        modifier = Modifier
+                            .padding(horizontal = 12.dp)
+                            .padding(bottom = 20.dp),
+                        onRecordCentre = {
+                            selectedId = null
+                            recordCentreFor = peekPlanned
+                        },
+                        onToggleNavigate = {
+                            navTargetId =
+                                if (navTargetId == peekPlanned.id) null else peekPlanned.id
+                        },
+                    )
+
                     peekPlot != null -> PlotPeekCard(
                         env = env,
                         plot = peekPlot,
@@ -452,6 +584,52 @@ fun CruiseMapScreen(nav: NavController) {
                 projectSheetOpen = false
                 nav.navigate(route)
             },
+            onCruiseSetup = {
+                projectSheetOpen = false
+                cruiseSetupOpen = true
+            },
+        )
+    }
+
+    // MARK: - Cruise setup sheet (mock ⑥ — replaces CruiseDesignScreen)
+
+    val setupProject = project
+    if (cruiseSetupOpen && setupProject != null) {
+        CruiseSetupSheet(
+            project = setupProject,
+            mapCentre = camera.center ?: mapCenter,
+            onDismiss = {
+                cruiseSetupOpen = false
+                refresh++
+            },
+            onDrawBoundary = {
+                cruiseSetupOpen = false
+                nav.navigate(ProjectFlowRoutes.stratumDraw(setupProject.id.toString()))
+            },
+        )
+    }
+
+    // MARK: - Inline centre recording (mock ⑧ — replaces PlotCenterScreen)
+
+    val recordPlanned = recordCentreFor
+    val recordProject = project
+    if (recordPlanned != null && recordProject != null) {
+        RecordCentreSheet(
+            project = recordProject,
+            planned = recordPlanned,
+            onDismiss = { recordCentreFor = null },
+            onSaved = { plot ->
+                recordCentreFor = null
+                if (navTargetId == recordPlanned.id) navTargetId = null
+                selectedId = "plot-${plot.id}"
+                refresh++
+            },
+            onUseOffset = {
+                recordCentreFor = null
+                nav.navigate(
+                    CruiseRoutes.offset(
+                        recordProject.id.toString(), recordPlanned.id.toString()))
+            },
         )
     }
 }
@@ -475,8 +653,8 @@ private suspend fun resolveCurrentProject(
 }
 
 /// Zero-gate fallback when (+) "Start plot" is tapped with no project yet:
-/// auto-named project, units from app settings, calibration defaults as
-/// HomeScreen.create (identity + 5 mm depth noise).
+/// auto-named project, units from app settings, calibration defaults
+/// (identity + 5 mm depth noise — the retired project screen's create).
 private suspend fun createDefaultProject(
     env: AppEnvironment,
     settings: SettingsSnapshot,
@@ -534,8 +712,8 @@ private fun plotBoundaryOverlay(plot: Plot, accent: Color): MapPolygonOverlay {
 
 private fun isWarn(raw: String?) = raw == "yellow" || raw == "red"
 
-/// Plot RING pins (status colour: amber in-progress / green closed) +
-/// cruise tree teardrop pins (label = tree number, D/H badges, warn tint).
+/// Plot RING pins (status colour: amber in-progress / green closed /
+/// HOLLOW DASHED tertiary = planned) + cruise tree teardrop pins.
 private fun cruiseMarkers(
     data: CruiseData,
     activePlot: Plot?,
@@ -544,8 +722,24 @@ private fun cruiseMarkers(
     ok: Color,
     warn: Color,
     primary: Color,
+    plannedTint: Color,
 ): List<MapMarker> {
     val markers = mutableListOf<MapMarker>()
+    // Unvisited planned plots (mock ⑦ `.plotpin.planned`): dashed hollow
+    // rings in the tertiary ink — visibly "not real yet".
+    for (planned in data.plannedPlots) {
+        val id = "planned-${planned.id}"
+        markers += MapMarker(
+            coordinate = CoordinateConversions.LatLon(
+                latitude = planned.plannedLat, longitude = planned.plannedLon),
+            title = "P${planned.plotNumber}",
+            tint = plannedTint,
+            id = id,
+            shape = MapMarkerShape.RING,
+            selected = id == selectedId,
+            dashed = true,
+        )
+    }
     for (plot in data.plots) {
         if (plot.centerLat == 0.0 && plot.centerLon == 0.0) continue
         val id = "plot-${plot.id}"
@@ -613,6 +807,193 @@ private fun ProjectChip(name: String, onClick: () -> Unit) {
             "▾",
             style = type.caption,
             color = colors.textTertiary,
+        )
+    }
+}
+
+/// Mock `.distchip` — the floating live distance readout while the dashed
+/// guide line is up ("142 m"; kilometres past ~1 km, iOS parity).
+private fun navDistanceLabel(metres: Double): String =
+    if (metres < 995) {
+        String.format(Locale.US, "%.0f m", metres)
+    } else {
+        String.format(Locale.US, "%.1f km", metres / 1000.0)
+    }
+
+@Composable
+private fun DistanceChip(text: String, modifier: Modifier = Modifier) {
+    val colors = Forestix.colors
+    Text(
+        text,
+        style = Forestix.type.dataSmall.copy(fontSize = 12.sp, fontWeight = FontWeight.Bold),
+        color = colors.textPrimary,
+        modifier = modifier
+            .softDropShadow(Color.Black.copy(alpha = 0.18f), 8.dp, 2.dp, cornerRadius = 999.dp)
+            .clip(RoundedCornerShape(999.dp))
+            .background(colors.surface)
+            .border(1.dp, colors.divider, RoundedCornerShape(999.dp))
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+    )
+}
+
+// MARK: - Planned-plot peek (mock ⑦) -------------------------------------------
+
+/// Peek for a HOLLOW DASHED planned pin: live distance + bearing from the
+/// current fix, a 54 dp "Record centre here" primary into the inline
+/// averaging sheet, and a "Navigate" toggle for the guide line.
+@Composable
+private fun PlannedPeekCard(
+    planned: PlannedPlot,
+    fix: com.hcjeong.forestix.positioning.CLLocationSnapshot?,
+    navigating: Boolean,
+    modifier: Modifier = Modifier,
+    onRecordCentre: () -> Unit,
+    onToggleNavigate: () -> Unit,
+) {
+    val colors = Forestix.colors
+    val type = Forestix.type
+    val shape = RoundedCornerShape(14.dp)
+
+    Column(
+        modifier
+            .fillMaxWidth()
+            .softDropShadow(Color.Black.copy(alpha = 0.22f), 14.dp, (-4).dp, cornerRadius = 14.dp)
+            .clip(shape)
+            .background(colors.surface)
+            .border(1.dp, colors.divider, shape)
+            .padding(14.dp),
+    ) {
+        Box(
+            Modifier
+                .align(Alignment.CenterHorizontally)
+                .padding(bottom = 10.dp)
+                .size(width = 36.dp, height = 4.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(colors.divider),
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            // LOCKED string "Plot N (planned)".
+            Text(
+                "Plot ${planned.plotNumber} (planned)",
+                style = type.bodyBold.copy(fontSize = 16.sp, fontWeight = FontWeight.Bold),
+                color = colors.textPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            Spacer(Modifier.size(8.dp))
+            PlannedChip()
+            Spacer(Modifier.weight(1f))
+        }
+        Spacer(Modifier.size(6.dp))
+        // LOCKED live line "X m · bearing Y°" from the current fix (the
+        // screen's live service, else the newest global fix).
+        val rangeFix = fix ?: LocationService.lastGlobalFix
+        Row(
+            Modifier.padding(vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs),
+        ) {
+            Text(
+                "FROM YOU",
+                style = type.caption.copy(
+                    fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.7.sp),
+                color = colors.textTertiary,
+                modifier = Modifier.width(72.dp),
+            )
+            Text(
+                if (rangeFix != null) {
+                    val d = GeoMath.distanceM(
+                        fromLat = rangeFix.latitude, fromLon = rangeFix.longitude,
+                        toLat = planned.plannedLat, toLon = planned.plannedLon)
+                    val b = GeoMath.bearingDeg(
+                        fromLat = rangeFix.latitude, fromLon = rangeFix.longitude,
+                        toLat = planned.plannedLat, toLon = planned.plannedLon)
+                    String.format(
+                        Locale.US, "%.0f m · bearing %.0f°", d, (b + 360.0).mod(360.0))
+                } else {
+                    "no GPS fix"
+                },
+                style = type.dataSmall.copy(fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold),
+                color = colors.textPrimary,
+                maxLines = 1,
+            )
+        }
+        Spacer(Modifier.size(ForestixSpace.sm))
+        // 54 dp primary — LOCKED "Record centre here".
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(min = 54.dp)
+                .pressableNoRipple(onClick = onRecordCentre)
+                .clip(ForestixRadius.card)
+                .background(colors.primary),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                "Record centre here",
+                style = type.bodyBold.copy(fontSize = 15.sp),
+                color = MaterialTheme.colorScheme.onPrimary,
+            )
+        }
+        Spacer(Modifier.size(8.dp))
+        // LOCKED secondary "Navigate" — toggles the dashed guide line;
+        // the active state reads in the accent outline.
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(min = 44.dp)
+                .pressableNoRipple(onClick = onToggleNavigate)
+                .clip(ForestixRadius.control)
+                .border(
+                    if (navigating) 1.5.dp else 1.dp,
+                    if (navigating) colors.accent else colors.divider,
+                    ForestixRadius.control,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                "Navigate",
+                style = type.bodyBold.copy(fontSize = 14.sp),
+                color = if (navigating) colors.accent else colors.textPrimary,
+            )
+        }
+    }
+}
+
+/// Shared status token, planned flavour: hollow-dashed grey like the pin
+/// (iOS plannedChip 1:1).
+@Composable
+private fun PlannedChip() {
+    val colors = Forestix.colors
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = Modifier
+            .clip(ForestixRadius.chip)
+            .background(colors.surfaceRaised)
+            .padding(horizontal = 7.dp, vertical = 2.dp),
+    ) {
+        val tertiary = colors.textTertiary
+        Box(
+            Modifier
+                .size(6.dp)
+                .drawBehind {
+                    drawCircle(
+                        color = tertiary,
+                        style = Stroke(
+                            width = 1.5.dp.toPx(),
+                            pathEffect = PathEffect.dashPathEffect(
+                                floatArrayOf(2.dp.toPx(), 2.dp.toPx())),
+                        ),
+                    )
+                },
+        )
+        Text(
+            "PLANNED",
+            style = Forestix.type.caption.copy(
+                fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.6.sp),
+            color = tertiary,
         )
     }
 }
@@ -1116,6 +1497,7 @@ private fun ProjectSheet(
     onDismiss: () -> Unit,
     onSwitch: (String) -> Unit,
     onNavigate: (String) -> Unit,
+    onCruiseSetup: () -> Unit,
 ) {
     val colors = Forestix.colors
     val type = Forestix.type
@@ -1280,14 +1662,7 @@ private fun ProjectSheet(
                 "Stand summary",
                 "Mean ± CI · per-plot table",
                 enabled = projectId != null,
-            ) { projectId?.let { onNavigate(CruiseStepRoutes.standSummary(it)) } }
-            HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
-            SheetChoiceRow(
-                Icons.Filled.IosShare,
-                "Export",
-                "PDF · CSV · GeoJSON · Shapefile",
-                enabled = projectId != null,
-            ) { projectId?.let { onNavigate(ProjectFlowRoutes.export(it)) } }
+            ) { projectId?.let { onNavigate(CruiseRoutes.standSummary(it)) } }
             HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
             SheetChoiceRow(
                 Icons.Filled.GridOn,
@@ -1295,9 +1670,24 @@ private fun ProjectSheet(
                 "Grid plots · strata · prism/BAF — optional",
                 enabled = projectId != null,
                 trailingChip = "Advanced",
-            ) { projectId?.let { onNavigate(ProjectFlowRoutes.cruiseDesign(it)) } }
+            ) { if (projectId != null) onCruiseSetup() }
 
-            // Relocated hub tools + the Phase A bridge to the old stack.
+            // Export collapse (mock ⑤ `.sheetcol`): one primary "Export
+            // all" through the existing bundle path, the 11-row picker
+            // relegated to a "Choose files…" line.
+            val exportProject = currentProject
+            if (exportProject != null) {
+                ExportAllBlock(
+                    env = env,
+                    project = exportProject,
+                    onChooseFiles = {
+                        onNavigate(ProjectFlowRoutes.export(exportProject.id.toString()))
+                    },
+                )
+            }
+
+            // Relocated hub tools (the Phase A "Classic view" bridge is
+            // retired with the legacy stack).
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -1309,13 +1699,111 @@ private fun ProjectSheet(
                     onNavigate(Routes.REFERENCE_LIBRARY)
                 }
                 ToolButton("Settings", Modifier.weight(1f)) { onNavigate(Routes.SETTINGS) }
-                // Temporary Phase A row: the old TimberCruisingHub stays
-                // reachable until Phase B retires the legacy screens.
-                ToolButton("Classic view", Modifier.weight(1f)) {
-                    onNavigate(Routes.TIMBER_HUB)
-                }
             }
         }
+    }
+}
+
+// MARK: - Export collapse (mock ⑤ `.sheetcol`) ---------------------------------
+
+/// Primary 54 dp "Export all" running the EXISTING full-bundle export
+/// (ExportViewModel.exportAll: CSV ×5 · GeoJSON ×2 · SHP ×3 · PDF) with
+/// live progress and the same zip-the-session-folder share hand-off the
+/// Export screen uses; "Choose files…" opens that kept screen.
+@Composable
+private fun ExportAllBlock(
+    env: AppEnvironment,
+    project: Project,
+    onChooseFiles: () -> Unit,
+) {
+    val colors = Forestix.colors
+    val type = Forestix.type
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val viewModel = remember(project.id) { ExportViewModel(project) }
+    LaunchedEffect(viewModel) { viewModel.configure(env) }
+
+    val isExporting by viewModel.isExporting.collectAsStateWithLifecycle()
+    val progress by viewModel.progress.collectAsStateWithLifecycle()
+    val progressLabel by viewModel.progressLabel.collectAsStateWithLifecycle()
+    val shareURL by viewModel.shareURL.collectAsStateWithLifecycle()
+    val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
+
+    // ExportScreen parity: folders ride one ACTION_SEND as a stored zip.
+    LaunchedEffect(shareURL) {
+        val target = shareURL ?: return@LaunchedEffect
+        try {
+            val file = withContext(Dispatchers.IO) {
+                if (target.isDirectory) zipFolderForShare(target) else target
+            }
+            if (file != null) {
+                shareFile(context, FullCruiseExporter.shareUri(context, file), exportMimeFor(file))
+            }
+        } finally {
+            viewModel.shareURL.value = null
+        }
+    }
+
+    Column(Modifier.fillMaxWidth().padding(top = ForestixSpace.sm)) {
+        // 54 dp primary — LOCKED "Export all".
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(min = 54.dp)
+                .pressableNoRipple(enabled = !isExporting, onClick = {
+                    scope.launch { viewModel.exportAll(context) }
+                })
+                .clip(ForestixRadius.card)
+                .background(colors.primary),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (isExporting) {
+                CircularProgressIndicator(
+                    color = MaterialTheme.colorScheme.onPrimary,
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.size(22.dp),
+                )
+            } else {
+                Text(
+                    "Export all",
+                    style = type.bodyBold.copy(fontSize = 15.sp),
+                    color = MaterialTheme.colorScheme.onPrimary,
+                )
+            }
+        }
+        if (isExporting) {
+            Column(Modifier.padding(top = ForestixSpace.xs)) {
+                LinearProgressIndicator(
+                    progress = { progress.toFloat() },
+                    color = colors.primary,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    progressLabel,
+                    style = type.caption,
+                    color = colors.textSecondary,
+                    modifier = Modifier.padding(top = 3.dp),
+                )
+            }
+        }
+        errorMessage?.let {
+            Text(
+                it,
+                style = type.caption,
+                color = colors.confidenceBad,
+                modifier = Modifier.padding(top = ForestixSpace.xs),
+            )
+        }
+        // LOCKED smaller "Choose files…" → the kept ExportScreen picker.
+        Text(
+            "Choose files…",
+            style = type.caption.copy(fontWeight = FontWeight.SemiBold),
+            color = colors.textSecondary,
+            modifier = Modifier
+                .align(Alignment.CenterHorizontally)
+                .clickableNoRipple(onChooseFiles)
+                .padding(top = ForestixSpace.xs, bottom = 2.dp),
+        )
     }
 }
 

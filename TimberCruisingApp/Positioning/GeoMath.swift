@@ -1,4 +1,5 @@
-// Geodesy helpers used by NavigationScreen and the track log.
+// Geodesy helpers used by the cruise map's navigation guide and
+// the track log.
 //
 // The plot-center math lives in GPSAveraging / OffsetFromOpening
 // (local ENU, good to sub-mm over 200 m). These helpers are the

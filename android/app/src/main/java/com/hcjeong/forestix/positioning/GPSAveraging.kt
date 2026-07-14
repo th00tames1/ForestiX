@@ -3,7 +3,7 @@
 //
 // Pure function: takes a buffer of location samples (1 Hz, from the
 // LocationService subscription) and returns a PlotCenterResult or null.
-// The caller (LocationService / PlotCenterViewModel) owns the location
+// The caller (LocationService / the centre-recording sheet) owns the location
 // callbacks and the 60 s wall clock — this module only does the
 // ENU-plane median + tier decision so the math is testable with
 // synthetic snapshots.

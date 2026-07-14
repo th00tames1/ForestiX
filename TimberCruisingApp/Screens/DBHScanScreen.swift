@@ -342,7 +342,7 @@ public struct DBHScanScreen: View {
         }
         .onChange(of: viewModel.result?.diameterCm) { _, newValue in
             // Fire the host callback when the VM publishes a NON-red result.
-            // The host (e.g. AddTreeFlowScreen) records it and dismisses the
+            // The host (e.g. the cruise add-tree chain) records it and dismisses the
             // cover, so a red/rejected fit (diameter 0 cm) must NOT be
             // forwarded — the cruiser stays on screen to retake instead.
             if newValue != nil, let r = viewModel.result, r.confidence != .red {

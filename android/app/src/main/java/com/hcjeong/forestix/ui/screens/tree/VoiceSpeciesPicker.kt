@@ -1,8 +1,9 @@
 // Port of iOS Screens/VoiceSpeciesPicker.swift + Common/VoiceRecognizer.swift.
 // Phase 7 — push-to-talk species picker.
 //
-// A self-contained Compose component for the AddTreeFlowScreen species
-// step. Hold the mic button, say the species name, release — the
+// A self-contained Compose push-to-talk species picker (built for the
+// retired add-tree stepper; kept as a reusable component). Hold the mic
+// button, say the species name, release — the
 // transcript is matched against the candidate species catalogue by
 // `SpeciesVoiceMatcher` and the best code (if any) is fed back into the
 // owning view's `onMatch` callback.

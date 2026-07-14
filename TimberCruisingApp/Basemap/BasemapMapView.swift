@@ -116,6 +116,27 @@ public struct BasemapMarker: Identifiable, Equatable {
     }
 }
 
+// MARK: - Guide line
+
+/// v3 (cruise mode) navigation guide: one dashed great-line from the
+/// cruiser (you-dot) to a planned plot, drawn in the mock's `.guide`
+/// language (2.5 pt, dash 2 9, round caps). The whole navigation UI is
+/// this line plus a host-rendered floating distance chip — there is no
+/// separate navigation screen.
+public struct BasemapGuideLine: Equatable {
+    public let from: CoordinateConversions.LatLon
+    public let to: CoordinateConversions.LatLon
+    public let color: Color
+
+    public init(from: CoordinateConversions.LatLon,
+                to: CoordinateConversions.LatLon,
+                color: Color) {
+        self.from = from
+        self.to = to
+        self.color = color
+    }
+}
+
 // MARK: - Style
 
 /// Colours injected by the host — the Basemap target cannot see the app
@@ -345,6 +366,7 @@ public struct BasemapMapView: View {
     private let markers: [BasemapMarker]
     private let selectedMarkerID: String?
     private let youLocation: CoordinateConversions.LatLon?
+    private let guideLine: BasemapGuideLine?
     private let style: BasemapStyle
     private let onMarkerTap: (String) -> Void
     private let onMapTap: () -> Void
@@ -368,6 +390,7 @@ public struct BasemapMapView: View {
                 markers: [BasemapMarker] = [],
                 selectedMarkerID: String? = nil,
                 youLocation: CoordinateConversions.LatLon? = nil,
+                guideLine: BasemapGuideLine? = nil,
                 style: BasemapStyle = BasemapStyle(),
                 onMarkerTap: @escaping (String) -> Void = { _ in },
                 onMapTap: @escaping () -> Void = {},
@@ -378,6 +401,7 @@ public struct BasemapMapView: View {
         self.markers = markers
         self.selectedMarkerID = selectedMarkerID
         self.youLocation = youLocation
+        self.guideLine = guideLine
         self.style = style
         self.onMarkerTap = onMarkerTap
         self.onMapTap = onMapTap
@@ -407,6 +431,27 @@ public struct BasemapMapView: View {
                     // (contours etc.) composite over the imagery.
                     for tile in overlayTiles {
                         context.draw(tile.image, in: tile.rect)
+                    }
+                    // Navigation guide — dashed you→plot line under the
+                    // pins (they are separate views above the Canvas).
+                    // Projected without clipping so the line still draws
+                    // when either endpoint is off-screen.
+                    if let guide = guideLine {
+                        let a = Self.screenPoint(latitude: guide.from.latitude,
+                                                 longitude: guide.from.longitude,
+                                                 camera: camera,
+                                                 viewportSize: canvasSize)
+                        let b = Self.screenPoint(latitude: guide.to.latitude,
+                                                 longitude: guide.to.longitude,
+                                                 camera: camera,
+                                                 viewportSize: canvasSize)
+                        var path = Path()
+                        path.move(to: a)
+                        path.addLine(to: b)
+                        context.stroke(path, with: .color(guide.color),
+                                       style: StrokeStyle(lineWidth: 2.5,
+                                                          lineCap: .round,
+                                                          dash: [2, 9]))
                     }
                 }
                 .contentShape(Rectangle())
@@ -451,6 +496,26 @@ public struct BasemapMapView: View {
             }
         }
         .clipped()
+    }
+
+    // MARK: Screen-point accessor (host overlays)
+
+    /// Pure projection of a coordinate into viewport points for a given
+    /// camera — the same maths the view uses, callable by the host to
+    /// float its own overlays over the map (e.g. the cruise-mode live
+    /// distance chip on the navigation guide line). No clipping: points
+    /// off-screen come back outside the viewport bounds.
+    public static func screenPoint(latitude: Double, longitude: Double,
+                                   camera: BasemapCamera,
+                                   viewportSize: CGSize) -> CGPoint {
+        let worldPts = worldPoints(zoom: camera.zoom)
+        let x = (worldX(longitude: longitude)
+            - worldX(longitude: camera.longitude)) * worldPts
+            + Double(viewportSize.width) / 2
+        let y = (worldY(latitude: latitude)
+            - worldY(latitude: camera.latitude)) * worldPts
+            + Double(viewportSize.height) / 2
+        return CGPoint(x: x, y: y)
     }
 
     // MARK: Visible-region accessor (offline downloader)

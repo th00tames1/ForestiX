@@ -18,8 +18,7 @@
 // toggle, "download visible area" (OfflineBasemap.planJob per layer →
 // sequential fetch into TileCache) and cache stats/clearing.
 //
-// Measurement flows are the SAME fullScreenCover wiring as
-// TreeMeasurementHubScreen — Accept persists into QuickMeasureHistory
+// Measurement flows are fullScreenCovers — Accept persists into QuickMeasureHistory
 // with the ScanMetadata GPS fix + auto-photo, which is exactly what
 // feeds the pins and peek cards here.
 
@@ -97,7 +96,7 @@ public struct MapHomeScreen: View {
     /// fullScreenCover doesn't fight the sheet dismissal animation.
     @State private var pendingChoice: MeasureChoice?
 
-    // Measurement covers — same state layout as TreeMeasurementHubScreen.
+    // Measurement covers.
     @State private var presentingDBHScan = false
     @State private var presentingHeightScan = false
     @State private var presentingDistance = false
@@ -607,8 +606,7 @@ public struct MapHomeScreen: View {
     private var actionCluster: some View {
         HStack(alignment: .bottom, spacing: 26) {
             // Cruise mode (v3 redesign) — the circle opens the cruise
-            // map, not the old hub. The hub stays reachable via the
-            // cruise project sheet's "Classic view" until Phase B.
+            // map. The old hub screens retired in Phase B.
             sideCircle(label: "Cruise", icon: "map",
                        accessibilityID: "mapHome.cruise") {
                 CruiseMapScreen()
@@ -1138,7 +1136,7 @@ public struct MapHomeScreen: View {
         }
     }
 
-    // MARK: Measurement covers — same wiring as TreeMeasurementHubScreen
+    // MARK: Measurement covers
 
     #if os(iOS)
     private var dbhCover: some View {

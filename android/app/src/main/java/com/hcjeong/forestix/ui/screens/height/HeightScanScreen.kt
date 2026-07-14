@@ -696,7 +696,9 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                     when (action) {
                         ContinuationAction.START_NEW_TREE_DIAMETER,
                         ContinuationAction.MEASURE_HEIGHT_SAME_TREE -> {
-                            nav.navigate(Routes.DBH) { popUpTo(Routes.TREE_HUB) }
+                            // (The old popUpTo(treeHub) was a no-op from the
+                            // map home — the hub retired with Phase B.)
+                            nav.navigate(Routes.DBH)
                         }
                         ContinuationAction.DONE -> nav.popBackStack()
                     }

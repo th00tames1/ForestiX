@@ -1443,9 +1443,9 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     continuationTree = null
                     when (action) {
                         ContinuationAction.MEASURE_HEIGHT_SAME_TREE -> {
-                            nav.navigate("height?tree=$savedTree") {
-                                popUpTo(Routes.TREE_HUB)
-                            }
+                            // (The old popUpTo(treeHub) was a no-op from the
+                            // map home — the hub retired with Phase B.)
+                            nav.navigate("height?tree=$savedTree")
                         }
                         ContinuationAction.START_NEW_TREE_DIAMETER -> {
                             // Reset in place for the next tree.

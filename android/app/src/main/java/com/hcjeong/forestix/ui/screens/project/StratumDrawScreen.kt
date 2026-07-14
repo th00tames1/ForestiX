@@ -162,7 +162,7 @@ private fun StratumDrawContent(nav: NavController, project: Project) {
     }
     // Release GPS on every exit path — the early stop() after the first
     // auto-centre fix never runs when the user pans first or leaves before
-    // a fix arrives (same pattern as NavigationScreen/PlotCenterScreen).
+    // a fix arrives (same pattern as the cruise map's location clients).
     DisposableEffect(Unit) {
         onDispose { location.stop() }
     }

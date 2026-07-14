@@ -3,8 +3,8 @@
 // Spec §6.2 says the PNW starter set ships in
 // `Resources/SpeciesDefaults.json` and `Resources/VolumeEquationsPNW.json`,
 // but the original Phase 0 build never wired them into Core Data, so a
-// real cruiser opening the app for the first time would land on
-// CruiseDesignScreen with an empty species picker.
+// real cruiser opening the app for the first time would face an
+// empty species picker.
 //
 // This file owns the JSON → typed-model decode. The actual Core Data
 // insertion lives in `Persistence/SeedDataLoader.swift` so this file

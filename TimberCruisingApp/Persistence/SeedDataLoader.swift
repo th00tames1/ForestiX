@@ -4,9 +4,8 @@
 // The bundled JSONs ship with the canonical PNW starter set
 // (Douglas-fir, western hemlock, western redcedar, red alder). Without
 // this loader, a real cruiser opening the app for the first time would
-// land on CruiseDesignScreen with an empty species picker and have no
-// way forward — which the audit found to be the single biggest field-
-// pilot blocker.
+// face an empty species picker with no way forward — which the audit
+// found to be the single biggest field-pilot blocker.
 //
 // Strategy: idempotent. On every launch we ask the species repository
 // for a count; if zero, we insert every entry from the bundled JSONs.

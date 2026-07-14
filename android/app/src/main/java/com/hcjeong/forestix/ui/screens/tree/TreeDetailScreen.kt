@@ -397,7 +397,7 @@ private fun DetailTierBadge(tier: ConfidenceTier) {
 }
 
 /// Numeric entry with trailing unit label (same local-text pattern as
-/// AddTreeFlowScreen.NumberFieldRow).
+/// the retired add-tree stepper's NumberFieldRow).
 @Composable
 private fun DetailNumberField(
     value: Float?,

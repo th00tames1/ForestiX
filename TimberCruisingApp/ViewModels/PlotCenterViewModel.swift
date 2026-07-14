@@ -1,11 +1,13 @@
-// Spec §4.5 + §7.3.1 PlotCenterScreen view model. REQ-CTR-001/005.
+// Spec §4.5 + §7.3.1 GPS-averaging view model. REQ-CTR-001/005.
+// Backs the cruise map's inline RecordCentreSheet (the old full-screen
+// PlotCenterScreen retired in the v3 redesign — the engine glue lives
+// on unchanged).
 //
 // Runs the 60 s GPS averaging window, surfaces live counters (sample
 // count, current median h-accuracy), and on completion hands the
-// buffer to `GPSAveraging.compute`. Tier A or B → done, auto-accept;
-// tier C/D → show the Offset-from-Opening fallback banner per §4.5
-// and let the user decide between "Accept anyway" (tier C/D plot,
-// recommend revisit) and "Try Offset".
+// buffer to `GPSAveraging.compute`. Tier A or B → `.good`; tier C/D →
+// `.poor`, and the host offers the Offset-from-Opening fallback per
+// §4.5 alongside saving anyway.
 
 import Foundation
 import Combine

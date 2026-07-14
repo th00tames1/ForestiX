@@ -7,7 +7,7 @@
 //  * Maintain a rolling buffer of up to 120 CLLocationSnapshots (2 min
 //    at 1 Hz, enough for the 60 s averaging window + headroom).
 //  * Expose @Published `latestSnapshot` / `latestHeading` for live
-//    tier badges and the compass arrow on NavigationScreen.
+//    tier badges and the cruise map's navigation guide.
 //  * A synchronous `tier(from:)` helper that classifies the most
 //    recent fix for the header badge without running the 60 s
 //    averager (REQ-NAV-003).
@@ -44,8 +44,7 @@ public final class LocationService: NSObject, ObservableObject {
     @Published public private(set) var authStatus: AuthStatus = .notDetermined
 
     /// Compass heading in degrees true north (0…360). nil until the
-    /// first heading update arrives. Used by NavigationScreen for
-    /// the arrow rotation.
+    /// first heading update arrives.
     @Published public private(set) var headingTrueDeg: Double?
 
     public let bufferCapacity: Int

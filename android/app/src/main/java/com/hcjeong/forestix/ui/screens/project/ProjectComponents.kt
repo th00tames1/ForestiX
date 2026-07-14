@@ -1,7 +1,7 @@
-// Shared list chrome for the project flow cluster — Compose stand-ins for
-// the iOS `List { Section(header:footer:) }` styling used across
-// ProjectDashboardScreen / CruiseDesignScreen / PreFieldChecklistScreen,
-// and (post parity pass) SettingsScreen / ExportScreen.
+// Shared list chrome — Compose stand-ins for the iOS
+// `List { Section(header:footer:) }` styling used across
+// SettingsScreen / ExportScreen / PlotSummaryScreen (the project-flow
+// screens that originated it retired in the v3 cruise redesign).
 
 package com.hcjeong.forestix.ui.screens.project
 

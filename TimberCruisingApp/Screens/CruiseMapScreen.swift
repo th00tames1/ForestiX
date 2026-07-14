@@ -1,14 +1,27 @@
 // CRUISE MODE — the map IS the cruise. Built to
-// design/forestix-redesign-v3-cruise.html (screens ① cruise mode,
-// ② plot peek, ③ tally loop, ④ tree peek, ⑤ project sheet), Phase A.
+// design/forestix-redesign-v3-cruise.html (screens ①–⑧), Phases A + B.
 //
 // Entered from the map home's Cruise side-circle; the floating back
 // returns home. Same satellite basemap stack as the home, but the pins
-// here are CRUISE data only: plots as ring markers (accent = active,
-// green = closed; the dashed "planned" style ships for Phase B) and
-// cruise trees as teardrop pins. Quick-measure pins never appear here,
-// and cruise pins never appear on the home — the two worlds stay
-// separate.
+// here are CRUISE data only: plots as ring markers (hollow dashed =
+// planned, accent = active, green = closed) and cruise trees as
+// teardrop pins. Quick-measure pins never appear here, and cruise pins
+// never appear on the home — the two worlds stay separate.
+//
+// Phase B adds the planned-plot loop, all inline over this one map:
+//   • Cruise setup (project sheet row) → CruiseSetupSheet, three
+//     defaulted fields + optional boundary; "Generate plots" drops
+//     hollow dashed ring pins.
+//   • Tapping a planned pin peeks "Plot N (planned)" with a live
+//     distance · bearing row; Navigate toggles the dashed map guide
+//     line + floating distance chip (arrival <5 m pulses a haptic and
+//     clears it) — there is no separate navigation screen.
+//   • "Record centre here" → RecordCentreSheet (inline 60 s GPS
+//     averaging ring; offset fallback one line away); saving converts
+//     the planned pin into a real active plot.
+//   • The project sheet exports with one primary "Export all" (full
+//     bundle + share sheet, progress inline); "Choose files…" keeps
+//     the per-file ExportScreen reachable.
 //
 // The single primary action is the state-morphing (+):
 //   • no active plot  → "Start plot" — the existing sampling-ring AR
@@ -26,9 +39,9 @@
 // the InventoryEngine, Add tree, Close plot, Details); tapping a tree
 // pin peeks the v2-anatomy card (photo, metric rows, chips, Edit
 // details — post-hoc, never a gate). The project chip opens the
-// project sheet: switcher, one-time naming, Stand summary, Export,
-// advanced Cruise setup, and the relocated hub tools (Field log ·
-// Reference · Settings · Classic view).
+// project sheet: switcher, one-time naming, Stand summary, advanced
+// Cruise setup, Export all + Choose files…, and the relocated hub
+// tools (Field log · Reference · Settings).
 
 import SwiftUI
 import Common
@@ -39,6 +52,7 @@ import Sensors
 import Positioning
 import Geo
 import Basemap
+import Export
 
 // MARK: - Screen
 
@@ -65,6 +79,7 @@ public struct CruiseMapScreen: View {
     // Cruise data snapshot (reloaded from the repositories).
     @State private var projects: [Project] = []
     @State private var plots: [Plot] = []
+    @State private var plannedPlots: [PlannedPlot] = []
     @State private var treesByPlot: [UUID: [Tree]] = [:]
     @State private var speciesByCode: [String: SpeciesConfig] = [:]
 
@@ -76,6 +91,19 @@ public struct CruiseMapScreen: View {
     @State private var pushed: CruiseDestination?
     @State private var pendingDestination: CruiseDestination?
     @State private var closePlotCandidateID: UUID?
+
+    // Phase B — planned-plot navigation + centre recording + setup.
+    @State private var navTargetPlannedID: UUID?
+    @State private var recordingTarget: PlannedPlot?
+    @State private var presentingCruiseSetup = false
+    @State private var pendingCruiseSetup = false
+
+    // Phase B — one-button Export all, run inline in the project sheet.
+    @State private var isExportingAll = false
+    @State private var exportProgress: Double = 0
+    @State private var exportLabel = ""
+    @State private var exportShareURL: ExportShareURL?
+    @State private var exportErrorMessage: String?
 
     // Add-tree chain scope (mirrors MapHomeScreen's chain plumbing).
     @State private var chainPlotID: UUID?
@@ -118,6 +146,7 @@ public struct CruiseMapScreen: View {
     public var body: some View {
         ZStack {
             map
+            if navGuide != nil { distanceChipOverlay }
             attributionBadge
             VStack(spacing: ForestixSpace.xs) {
                 topChrome
@@ -127,6 +156,8 @@ public struct CruiseMapScreen: View {
                 Spacer()
                 if let plot = selectedPlot {
                     plotPeekCard(for: plot)
+                } else if let planned = selectedPlannedPlot {
+                    plannedPeekCard(for: planned)
                 } else if let tree = selectedTree {
                     treePeekCard(for: tree)
                 } else {
@@ -142,6 +173,7 @@ public struct CruiseMapScreen: View {
         .onDisappear { location.stop() }
         .onChange(of: location.latestSnapshot) { _, snap in
             recenterOnFirstFix(snap)
+            checkNavArrival(snap)
         }
         // Returning from a pushed editor (Tree detail, Plot summary…)
         // re-reads the repositories so pins/peeks reflect the edits.
@@ -166,8 +198,43 @@ public struct CruiseMapScreen: View {
             if let destination = pendingDestination {
                 pendingDestination = nil
                 pushed = destination
+            } else if pendingCruiseSetup {
+                pendingCruiseSetup = false
+                presentingCruiseSetup = true
             }
         }) { projectSheet }
+        // Simplified cruise setup (mock ⑥) — a defaulted bottom sheet,
+        // not a pushed screen.
+        .sheet(isPresented: $presentingCruiseSetup,
+               onDismiss: { reload() }) {
+            if let project = currentProject {
+                CruiseSetupSheet(
+                    project: project,
+                    mapCentre: CoordinateConversions.LatLon(
+                        latitude: camera.latitude,
+                        longitude: camera.longitude),
+                    onGenerated: { reload() })
+                .environmentObject(environment)
+            }
+        }
+        // Inline GPS-averaging sheet (mock ⑧) — planned pin → real plot.
+        .sheet(item: $recordingTarget) { planned in
+            if let project = currentProject {
+                RecordCentreSheet(
+                    plannedPlot: planned,
+                    project: project,
+                    onSaved: { plot in
+                        if navTargetPlannedID == planned.id {
+                            navTargetPlannedID = nil
+                        }
+                        withAnimation(.easeOut(duration: 0.18)) {
+                            selectedPinID = "plot-\(plot.id.uuidString)"
+                        }
+                        reload()
+                    })
+                .environmentObject(environment)
+            }
+        }
         .navigationDestination(item: $pushed) { destination in
             destinationView(destination)
         }
@@ -205,10 +272,20 @@ public struct CruiseMapScreen: View {
         }
         guard let project = currentProject else {
             plots = []
+            plannedPlots = []
+            navTargetPlannedID = nil
             treesByPlot = [:]
             return
         }
         plots = (try? environment.plotRepository.listByProject(project.id)) ?? []
+        // Unvisited planned plots render as hollow dashed pins; visited
+        // ones already have a real Plot ring standing on them.
+        plannedPlots = ((try? environment.plannedPlotRepository
+            .listByProject(project.id)) ?? []).filter { !$0.visited }
+        if let target = navTargetPlannedID,
+           !plannedPlots.contains(where: { $0.id == target }) {
+            navTargetPlannedID = nil
+        }
         var byPlot: [UUID: [Tree]] = [:]
         for plot in plots {
             byPlot[plot.id] =
@@ -273,6 +350,7 @@ public struct CruiseMapScreen: View {
                 CoordinateConversions.LatLon(latitude: $0.latitude,
                                              longitude: $0.longitude)
             },
+            guideLine: navGuide,
             style: BasemapStyle(
                 canvas: ForestixPalette.canvas,
                 grid: ForestixPalette.divider.opacity(0.55),
@@ -307,6 +385,16 @@ public struct CruiseMapScreen: View {
                                            : ForestixPalette.confidenceOk,
                 shape: .ring(dashed: false))
         }
+        // Planned plots — the mock's hollow dashed "planned" ring style.
+        for planned in plannedPlots {
+            out.append(BasemapMarker(
+                id: "pplot-\(planned.id.uuidString)",
+                latitude: planned.plannedLat,
+                longitude: planned.plannedLon,
+                title: "P\(planned.plotNumber)",
+                tint: ForestixPalette.textTertiary,
+                shape: .ring(dashed: true)))
+        }
         for plot in plots {
             for tree in liveTrees(in: plot.id) {
                 guard let lat = tree.latitude, let lon = tree.longitude
@@ -326,6 +414,12 @@ public struct CruiseMapScreen: View {
         guard let id = selectedPinID, id.hasPrefix("plot-") else { return nil }
         let raw = String(id.dropFirst("plot-".count))
         return plots.first { $0.id.uuidString == raw }
+    }
+
+    private var selectedPlannedPlot: PlannedPlot? {
+        guard let id = selectedPinID, id.hasPrefix("pplot-") else { return nil }
+        let raw = String(id.dropFirst("pplot-".count))
+        return plannedPlots.first { $0.id.uuidString == raw }
     }
 
     private var selectedTree: Tree? {
@@ -613,8 +707,8 @@ public struct CruiseMapScreen: View {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         let now = Date()
-        // Same defaults as HomeViewModel.create — calibration starts at
-        // the spec's identity values until the cruiser runs Calibration.
+        // Calibration starts at the spec's identity values until the
+        // cruiser runs Calibration.
         let project = Project(
             id: UUID(),
             name: trimmed,
@@ -1211,6 +1305,217 @@ public struct CruiseMapScreen: View {
                 .stroke(ForestixPalette.divider, lineWidth: 1))
     }
 
+    // MARK: Planned-plot peek + map navigation (mock ⑦)
+
+    /// The dashed you→plot guide — non-nil only while navigating AND
+    /// holding a fix. The map draws the line; this screen floats the
+    /// live distance chip over it.
+    private var navGuide: BasemapGuideLine? {
+        guard let id = navTargetPlannedID,
+              let planned = plannedPlots.first(where: { $0.id == id }),
+              let fix = location.latestSnapshot
+        else { return nil }
+        return BasemapGuideLine(
+            from: CoordinateConversions.LatLon(latitude: fix.latitude,
+                                               longitude: fix.longitude),
+            to: CoordinateConversions.LatLon(latitude: planned.plannedLat,
+                                             longitude: planned.plannedLon),
+            color: ForestixPalette.accent)
+    }
+
+    /// Floating live distance chip pinned to the guide line's midpoint
+    /// (clamped into the viewport so it stays readable when the plot is
+    /// off-screen). Updates with every fix and camera change.
+    private var distanceChipOverlay: some View {
+        GeometryReader { geo in
+            if let guide = navGuide {
+                let a = BasemapMapView.screenPoint(
+                    latitude: guide.from.latitude,
+                    longitude: guide.from.longitude,
+                    camera: camera, viewportSize: geo.size)
+                let b = BasemapMapView.screenPoint(
+                    latitude: guide.to.latitude,
+                    longitude: guide.to.longitude,
+                    camera: camera, viewportSize: geo.size)
+                let mid = CGPoint(
+                    x: min(max((a.x + b.x) / 2, 60), geo.size.width - 60),
+                    y: min(max((a.y + b.y) / 2, 130), geo.size.height - 130))
+                let metres = CoordinateConversions.haversineMeters(guide.from,
+                                                                   guide.to)
+                Text(Self.distanceLabel(metres))
+                    .font(.system(size: 11, weight: .heavy, design: .monospaced))
+                    .foregroundStyle(ForestixPalette.textPrimary)
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 5)
+                    .background(Capsule().fill(ForestixPalette.surface))
+                    .overlay(Capsule().stroke(ForestixPalette.divider,
+                                              lineWidth: 1))
+                    .shadow(color: Color.black.opacity(0.18), radius: 4, y: 2)
+                    .position(mid)
+                    .accessibilityLabel("Distance to plot \(Self.distanceLabel(metres))")
+                    .accessibilityIdentifier("cruiseMap.navChip")
+            }
+        }
+        // Match the map's coordinate space — it draws edge-to-edge, so
+        // the projection maths must use the same full-screen viewport.
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+    }
+
+    private static func distanceLabel(_ metres: Double) -> String {
+        metres < 995 ? String(format: "%.0f m", metres)
+                     : String(format: "%.1f km", metres / 1000)
+    }
+
+    /// Arrival = within 5 m of the navigated plot: one haptic pulse
+    /// (the same arrival pattern the retired navigation screen used),
+    /// then the guide clears itself.
+    private func checkNavArrival(_ snap: CLLocationSnapshot?) {
+        guard let snap,
+              let id = navTargetPlannedID,
+              let planned = plannedPlots.first(where: { $0.id == id })
+        else { return }
+        let d = GeoMath.distanceM(
+            fromLat: snap.latitude, fromLon: snap.longitude,
+            toLat: planned.plannedLat, toLon: planned.plannedLon)
+        if d <= 5 {
+            HapticFeedback.play(.arrival)
+            withAnimation(.easeOut(duration: 0.25)) {
+                navTargetPlannedID = nil
+            }
+        }
+    }
+
+    /// Peek for a hollow dashed pin: live distance · bearing from the
+    /// current fix, "Record centre here" (→ inline averaging sheet) and
+    /// "Navigate" (toggles the map guide). Replaces NavigationScreen.
+    private func plannedPeekCard(for planned: PlannedPlot) -> some View {
+        let navigating = navTargetPlannedID == planned.id
+        return VStack(spacing: 0) {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(ForestixPalette.divider)
+                .frame(width: 36, height: 4)
+                .padding(.bottom, 10)
+
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("Plot \(planned.plotNumber) (planned)")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(ForestixPalette.textPrimary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                plannedChip
+                Spacer(minLength: 4)
+            }
+            .padding(.bottom, 6)
+
+            HStack(spacing: ForestixSpace.xs) {
+                Text("FROM YOU")
+                    .font(.system(size: 10, weight: .bold))
+                    .tracking(0.7)
+                    .foregroundStyle(ForestixPalette.textTertiary)
+                    .frame(width: 72, alignment: .leading)
+                Text(plannedRangeText(planned))
+                    .font(.system(size: 14.5, weight: .semibold,
+                                  design: .monospaced))
+                    .foregroundStyle(ForestixPalette.textPrimary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                Spacer(minLength: 4)
+            }
+            .padding(.vertical, 6)
+
+            VStack(spacing: ForestixSpace.xs) {
+                Button {
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        selectedPinID = nil
+                    }
+                    recordingTarget = planned
+                } label: {
+                    Text("Record centre here")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(ForestixPalette.primaryInk)
+                        .frame(maxWidth: .infinity, minHeight: 54)
+                        .background(
+                            RoundedRectangle(cornerRadius: ForestixRadius.card,
+                                             style: .continuous)
+                                .fill(ForestixPalette.primary))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(CruisePressableStyle())
+                .accessibilityIdentifier("cruiseMap.plannedPeek.record")
+
+                Button {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        navTargetPlannedID = navigating ? nil : planned.id
+                    }
+                } label: {
+                    Text("Navigate")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(navigating ? ForestixPalette.accent
+                                                    : ForestixPalette.textPrimary)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .background(
+                            RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                             style: .continuous)
+                                .stroke(navigating ? ForestixPalette.accent
+                                                   : ForestixPalette.divider,
+                                        lineWidth: navigating ? 1.5 : 1))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(CruisePressableStyle())
+                .accessibilityLabel(navigating ? "Stop navigating"
+                                               : "Navigate to plot")
+                .accessibilityIdentifier("cruiseMap.plannedPeek.navigate")
+            }
+            .padding(.top, ForestixSpace.sm)
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(ForestixPalette.surface))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(ForestixPalette.divider, lineWidth: 1))
+        .shadow(color: Color.black.opacity(0.22), radius: 14, y: -4)
+        .padding(.horizontal, ForestixSpace.sm)
+        .padding(.bottom, 20)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+        .accessibilityIdentifier("cruiseMap.plannedPeek")
+    }
+
+    /// Shared status token, planned flavour: hollow-grey like the pin.
+    private var plannedChip: some View {
+        HStack(spacing: 4) {
+            Circle()
+                .stroke(ForestixPalette.textTertiary,
+                        style: StrokeStyle(lineWidth: 1.5, dash: [2, 2]))
+                .frame(width: 6, height: 6)
+            Text("PLANNED")
+                .font(.system(size: 10, weight: .bold))
+                .tracking(0.6)
+        }
+        .foregroundStyle(ForestixPalette.textTertiary)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 2)
+        .background(
+            RoundedRectangle(cornerRadius: ForestixRadius.chip)
+                .fill(ForestixPalette.surfaceRaised))
+    }
+
+    /// LOCKED row format: "X m · bearing Y°" from the current fix.
+    private func plannedRangeText(_ planned: PlannedPlot) -> String {
+        guard let fix = location.latestSnapshot
+            ?? LocationService.lastGlobalFix else { return "no GPS fix" }
+        let d = GeoMath.distanceM(
+            fromLat: fix.latitude, fromLon: fix.longitude,
+            toLat: planned.plannedLat, toLon: planned.plannedLon)
+        let b = GeoMath.bearingDeg(
+            fromLat: fix.latitude, fromLon: fix.longitude,
+            toLat: planned.plannedLat, toLon: planned.plannedLon)
+        return String(format: "%.0f m · bearing %.0f°", d,
+                      (b + 360).truncatingRemainder(dividingBy: 360))
+    }
+
     // MARK: Project sheet (mock ⑤)
 
     private var projectSheet: some View {
@@ -1242,16 +1547,6 @@ public struct CruiseMapScreen: View {
                     presentingProjectSheet = false
                 }
                 sheetChoiceRow(
-                    "Export",
-                    subtitle: "PDF · CSV ×5 · GeoJSON ×2 · SHP ×3",
-                    icon: "square.and.arrow.up",
-                    accessibilityID: "cruiseMap.project.export",
-                    disabled: currentProject == nil
-                ) {
-                    pendingDestination = .export
-                    presentingProjectSheet = false
-                }
-                sheetChoiceRow(
                     "Cruise setup",
                     subtitle: "Grid plots · strata · prism/BAF — optional",
                     icon: "squareshape.split.3x3",
@@ -1259,11 +1554,17 @@ public struct CruiseMapScreen: View {
                     disabled: currentProject == nil,
                     trailingChip: "ADVANCED"
                 ) {
-                    pendingDestination = .cruiseSetup
+                    pendingCruiseSetup = true
                     presentingProjectSheet = false
                 }
 
-                // Relocated hub tools — small footer links.
+                // Export collapse (mock ⑤): ONE primary button runs the
+                // full bundle right here; the per-file picker folds into
+                // a small "Choose files…" line.
+                exportCluster
+
+                // Relocated hub tools — small footer links. (The Phase A
+                // "Classic view" bridge is retired.)
                 HStack(spacing: ForestixSpace.xs) {
                     footerTool("Field log") {
                         pendingDestination = .fieldLog
@@ -1277,12 +1578,6 @@ public struct CruiseMapScreen: View {
                         pendingDestination = .settings
                         presentingProjectSheet = false
                     }
-                    // Phase A bridge — the old hub stays reachable until
-                    // Phase B retires it.
-                    footerTool("Classic view") {
-                        pendingDestination = .classicHub
-                        presentingProjectSheet = false
-                    }
                 }
                 .padding(.top, ForestixSpace.sm)
 
@@ -1293,6 +1588,115 @@ public struct CruiseMapScreen: View {
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
         .presentationBackground(ForestixPalette.surface)
+        #if os(iOS)
+        // Share sheet pops over the project sheet once the bundle lands.
+        .sheet(item: $exportShareURL) { wrapper in
+            CruiseShareSheet(url: wrapper.url)
+        }
+        #endif
+        .alert("Export failed",
+               isPresented: Binding(
+                   get: { exportErrorMessage != nil },
+                   set: { if !$0 { exportErrorMessage = nil } })
+        ) {
+            Button("OK", role: .cancel) { exportErrorMessage = nil }
+        } message: {
+            Text(exportErrorMessage ?? "")
+        }
+    }
+
+    /// "Export all" primary + inline progress + "Choose files…" link.
+    private var exportCluster: some View {
+        VStack(spacing: ForestixSpace.xs) {
+            Button {
+                exportAll()
+            } label: {
+                HStack(spacing: 8) {
+                    if isExportingAll {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(ForestixPalette.primaryInk)
+                    }
+                    Text("Export all")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(ForestixPalette.primaryInk)
+                }
+                .frame(maxWidth: .infinity, minHeight: 54)
+                .background(
+                    RoundedRectangle(cornerRadius: ForestixRadius.card,
+                                     style: .continuous)
+                        .fill(ForestixPalette.primary))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(CruisePressableStyle())
+            .disabled(currentProject == nil || isExportingAll)
+            .opacity(currentProject == nil ? 0.45 : 1)
+            .accessibilityIdentifier("cruiseMap.project.exportAll")
+
+            if isExportingAll {
+                VStack(alignment: .leading, spacing: 3) {
+                    ProgressView(value: exportProgress)
+                        .tint(ForestixPalette.primary)
+                    Text(exportLabel)
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(ForestixPalette.textTertiary)
+                }
+            }
+
+            Button {
+                pendingDestination = .export
+                presentingProjectSheet = false
+            } label: {
+                Text("Choose files…")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(ForestixPalette.textTertiary)
+                    .frame(maxWidth: .infinity, minHeight: 32)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(CruisePressableStyle())
+            .disabled(currentProject == nil)
+            .accessibilityIdentifier("cruiseMap.project.chooseFiles")
+        }
+        .padding(.top, ForestixSpace.sm)
+    }
+
+    /// The existing full-bundle path (ExportBundleBuilder →
+    /// FullCruiseExporter), run inline with progress; projects that
+    /// never ran Cruise setup export against the synthesized fixed-area
+    /// design instead of erroring.
+    private func exportAll() {
+        guard let project = currentProject, !isExportingAll else { return }
+        isExportingAll = true
+        exportProgress = 0
+        exportLabel = "Preparing…"
+        Task { @MainActor in
+            do {
+                let source = FallbackDesignExportDataSource(
+                    base: RepositoryExportDataSource(project: project,
+                                                     env: environment),
+                    fallbackDesign: effectiveDesign())
+                let bundle = try ExportBundleBuilder.build(using: source)
+                let base = try FileManager.default.url(
+                    for: .documentDirectory, in: .userDomainMask,
+                    appropriateFor: nil, create: true)
+                let result = try FullCruiseExporter.write(
+                    bundle: bundle,
+                    into: base,
+                    progress: { done, total, label in
+                        exportProgress = total == 0
+                            ? 1 : Double(done) / Double(total)
+                        exportLabel = label
+                    })
+                isExportingAll = false
+                exportProgress = 1
+                exportLabel = "Done"
+                exportShareURL = ExportShareURL(url: result.folder)
+            } catch {
+                isExportingAll = false
+                exportProgress = 0
+                exportErrorMessage = error.localizedDescription
+            }
+        }
     }
 
     private var standSummarySubtitle: String {
@@ -1518,11 +1922,9 @@ public struct CruiseMapScreen: View {
         case treeDetails(UUID)
         case standSummary
         case export
-        case cruiseSetup
         case fieldLog
         case reference
         case settings
-        case classicHub
         var id: Self { self }
     }
 
@@ -1566,21 +1968,77 @@ public struct CruiseMapScreen: View {
             if let project = currentProject {
                 ExportScreen(project: project)
             }
-        case .cruiseSetup:
-            if let project = currentProject {
-                CruiseDesignScreen(project: project)
-            }
         case .fieldLog:
             FieldLogScreen()
         case .reference:
             ReferenceLibraryScreen()
         case .settings:
             SettingsScreen()
-        case .classicHub:
-            TimberCruisingHubScreen()
         }
     }
 }
+
+// MARK: - Export-all plumbing
+
+/// Identifiable URL wrapper for the share sheet's `.sheet(item:)`.
+private struct ExportShareURL: Identifiable {
+    let url: URL
+    var id: URL { url }
+}
+
+/// The repository-backed export source, with one difference: a project
+/// that skipped the optional Cruise setup has no CruiseDesign row, and
+/// the informal path must still export — fall back to the synthesized
+/// fixed-area design instead of throwing `designNotFound`.
+private struct FallbackDesignExportDataSource: ExportDataSource {
+    let base: RepositoryExportDataSource
+    let fallbackDesign: CruiseDesign
+
+    func project() throws -> Project { try base.project() }
+
+    func cruiseDesign(forProjectId id: UUID) throws -> CruiseDesign {
+        (try? base.cruiseDesign(forProjectId: id)) ?? fallbackDesign
+    }
+
+    func strata(forProjectId id: UUID) throws -> [Stratum] {
+        try base.strata(forProjectId: id)
+    }
+
+    func plannedPlots(forProjectId id: UUID) throws -> [PlannedPlot] {
+        try base.plannedPlots(forProjectId: id)
+    }
+
+    func plots(forProjectId id: UUID) throws -> [Plot] {
+        try base.plots(forProjectId: id)
+    }
+
+    func trees(forPlotId id: UUID) throws -> [Tree] {
+        try base.trees(forPlotId: id)
+    }
+
+    func species() throws -> [SpeciesConfig] { try base.species() }
+
+    func volumeEquations() throws -> [Models.VolumeEquation] {
+        try base.volumeEquations()
+    }
+
+    func hdFits(forProjectId id: UUID) throws -> [HeightDiameterFit] {
+        try base.hdFits(forProjectId: id)
+    }
+}
+
+#if os(iOS)
+/// Plain UIActivityViewController wrapper for the export-all share.
+private struct CruiseShareSheet: UIViewControllerRepresentable {
+    let url: URL
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: [url],
+                                 applicationActivities: nil)
+    }
+    func updateUIViewController(_: UIActivityViewController,
+                                context: Context) {}
+}
+#endif
 
 // MARK: - Pressed feedback (same language as the map home)
 

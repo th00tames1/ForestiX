@@ -11,7 +11,7 @@
 // until v0.5 lands.
 //
 // Data container: the chain itself is a list of world-space positions
-// + their lat/lon anchors. The platform glue (PlotCenterViewModel or a
+// + their lat/lon anchors. The platform glue (the centre-recording sheet or a
 // dedicated PositioningService) appends entries whenever a plot center
 // is confirmed and asks `transfer(to:)` to compute the lat/lon for a
 // subsequent plot reached by walking.

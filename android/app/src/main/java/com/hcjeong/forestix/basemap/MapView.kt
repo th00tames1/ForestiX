@@ -1,6 +1,7 @@
-// Compose slippy-map view — Android stand-in for the iOS PlotMapScreen's
-// MapKit `Map { MapPolygon / Marker }` content (spec §3.1 REQ-PRJ-004)
-// plus the offline tile overlay MapKit gets from TileCache+MapKit.
+// Compose slippy-map view — Android stand-in for the iOS basemap map
+// content (spec §3.1 REQ-PRJ-004: polygon + marker overlays, originally
+// ported from the retired PlotMapScreen's MapKit `Map`) plus the offline
+// tile overlay MapKit gets from TileCache+MapKit.
 //
 // A plain Canvas renderer: Web-Mercator tiles from two TileFetcher layers
 // — the built-in Esri World Imagery satellite base (or a caller-supplied
@@ -89,12 +90,21 @@ import kotlin.math.tan
 
 // MARK: - Overlay models (mirror MapPolygon / Marker content on iOS)
 
-/// One closed outer ring. Defaults mirror the iOS PlotMapScreen styling:
-/// `.green.opacity(0.18)` fill with a 2 pt green stroke.
+/// One closed outer ring. Defaults mirror the original iOS plot-map
+/// styling: `.green.opacity(0.18)` fill with a 2 pt green stroke.
 data class MapPolygonOverlay(
     val ring: List<CoordinateConversions.LatLon>,
     val fillColor: Color = Color(0xFF34C759).copy(alpha = 0.18f),
     val strokeColor: Color = Color(0xFF34C759),
+)
+
+/// An open polyline (v3 cruise mock `.guide`) — the dashed you-dot → plot
+/// navigation guide. Screen-projected like the polygon rings; `dashed`
+/// mirrors the mock's dotted 2/9 round-cap pattern (iOS BasemapGuideLine).
+data class MapPolylineOverlay(
+    val points: List<CoordinateConversions.LatLon>,
+    val color: Color = Color(0xFF34C759),
+    val dashed: Boolean = true,
 )
 
 /// How a MapMarker renders. DOT is the original plot-map style (small
@@ -148,6 +158,24 @@ class MapCameraState {
         pendingMove = target to zoom
     }
 
+    /// Pure projection of a coordinate into viewport pixels for the
+    /// current camera — the same maths the draw pass uses, callable by a
+    /// host to float its own overlays over the map (the cruise mode's
+    /// live distance chip rides the guide-line midpoint). Null until the
+    /// map has laid out. iOS BasemapMapView exposes the same accessor.
+    fun screenPoint(p: CoordinateConversions.LatLon): Offset? {
+        val c = center ?: return null
+        val size = viewportSizePx
+        if (size.width <= 0 || size.height <= 0) return null
+        val worldPx = 256.0 * densityScale * 2.0.pow(zoom)
+        val originX = lonToXNorm(c.longitude) * worldPx - size.width / 2.0
+        val originY = latToYNorm(c.latitude) * worldPx - size.height / 2.0
+        return Offset(
+            (lonToXNorm(p.longitude) * worldPx - originX).toFloat(),
+            (latToYNorm(p.latitude) * worldPx - originY).toFloat(),
+        )
+    }
+
     /// Lat/lon corners of what's on screen as an outer ring (NW, NE, SE,
     /// SW) — the shape OfflineBasemap.planJob consumes. Null until the map
     /// has laid out and produced a camera.
@@ -190,6 +218,7 @@ fun MapView(
     /// AppSettings.tileURLTemplate here (often transparent PNG tiles).
     overlayURLTemplate: String? = null,
     polygons: List<MapPolygonOverlay> = emptyList(),
+    polylines: List<MapPolylineOverlay> = emptyList(),
     markers: List<MapMarker> = emptyList(),
     attribution: String? = null,
     /// Tap within ~24 dp of a marker's screen point → its `id`.
@@ -456,6 +485,31 @@ fun MapView(
                 path.close()
                 drawPath(path, color = polygon.fillColor)
                 drawPath(path, color = polygon.strokeColor, style = Stroke(width = 2.dp.toPx()))
+            }
+
+            // MARK: Polylines (navigation guide) — over polygons, under pins
+            for (line in polylines) {
+                if (line.points.size < 2) continue
+                val path = Path()
+                line.points.forEachIndexed { i, p ->
+                    val pt = screenPoint(p)
+                    if (i == 0) path.moveTo(pt.x, pt.y) else path.lineTo(pt.x, pt.y)
+                }
+                drawPath(
+                    path,
+                    color = line.color,
+                    style = Stroke(
+                        width = 2.5.dp.toPx(),
+                        cap = androidx.compose.ui.graphics.StrokeCap.Round,
+                        pathEffect = if (line.dashed) {
+                            // Mock `.guide` / iOS guide: dotted 2 9, round caps.
+                            PathEffect.dashPathEffect(
+                                floatArrayOf(2.dp.toPx(), 9.dp.toPx()))
+                        } else {
+                            null
+                        },
+                    ),
+                )
             }
 
             // MARK: You-dot (map home) — pulsing blue fix under the pins

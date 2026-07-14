@@ -55,8 +55,7 @@ class AppEnvironment private constructor(
 ) {
     /// Calibration the shared quick-measure scan screens apply. iOS injects
     /// the project's ProjectCalibration into the scan view models when they
-    /// are launched from the Add-Tree flow (AddTreeFlowScreen.swift
-    /// `calibration(from:)`); Android's DBH/Height scan screens are shared
+    /// are launched from the cruise add-tree chain; Android's DBH/Height scan screens are shared
     /// nav routes, so the flow publishes the active project's calibration
     /// here on entry and restores identity when it leaves. Outside the flow
     /// this stays identity — matching the iOS quick-measure screens, which

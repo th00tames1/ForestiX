@@ -19,7 +19,7 @@
 // The chosen tree number is passed back via `onPick` and ends up on
 // the QuickMeasureEntry that the scan screen writes into history.
 //
-// Host inside a ModalBottomSheet (see ReconCruiseScreen for the pattern);
+// Host inside a ModalBottomSheet;
 // the caller dismisses the sheet from both callbacks.
 
 package com.hcjeong.forestix.ui.screens.tree

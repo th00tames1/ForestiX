@@ -53,6 +53,16 @@ public enum ForestixPalette {
     public static let accent         = dyn(rgb(0.710, 0.463, 0.078),   // #B57614
                                            rgb(1.000, 0.706, 0.329))   // #FFB454
 
+    /// CRUISE-mode accent — the mode's identity colour on the map home:
+    /// the cruise (+) capture button and the mode toggle's icon while
+    /// cruising. Deliberately outside the signal family so mode never
+    /// reads as a measurement tier; plot STATUS colours are unchanged
+    /// (accent-amber active / ok-green done / dashed planned).
+    public static let cruiseAccent    = dyn(rgb(0.184, 0.427, 0.698),   // #2F6DB2
+                                            rgb(0.416, 0.659, 0.871))   // #6AA8DE
+    /// Ink ON cruiseAccent surfaces — white in both appearances (locked).
+    public static let cruiseAccentInk = Color.white                     // #FFFFFF
+
     public static let confidenceOk   = dyn(rgb(0.114, 0.478, 0.263),   // #1D7A43
                                            rgb(0.333, 0.816, 0.478))   // #55D07A
     public static let confidenceWarn = dyn(rgb(0.604, 0.392, 0.078),   // #9A6414
@@ -82,6 +92,8 @@ public enum ForestixPalette {
     public static let primaryInk     = Color(red: 0.024, green: 0.075, blue: 0.039)
     public static let primaryMuted   = Color(red: 0.184, green: 0.643, blue: 0.357).opacity(0.14)
     public static let accent         = Color(red: 0.710, green: 0.463, blue: 0.078)
+    public static let cruiseAccent    = Color(red: 0.184, green: 0.427, blue: 0.698)
+    public static let cruiseAccentInk = Color.white
     public static let confidenceOk   = Color(red: 0.114, green: 0.478, blue: 0.263)
     public static let confidenceWarn = Color(red: 0.604, green: 0.392, blue: 0.078)
     public static let confidenceBad  = Color(red: 0.690, green: 0.227, blue: 0.180)

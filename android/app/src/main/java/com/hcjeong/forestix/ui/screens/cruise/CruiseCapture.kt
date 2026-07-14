@@ -1,20 +1,21 @@
 // Cruise tally-loop handoff — the cruise-mode analogue of PendingTreeNumber
 // (v3 redesign, design/forestix-redesign-v3-cruise.html screen ③).
 //
-// CruiseMapScreen `begin()`s a session before launching the SHARED
-// DBH→Height full-measurement chain ("dbh?chain=true"); while a session is
-// active the scan screens route their Accept through `recordDbh` /
-// `recordHeight` INSTEAD of QuickMeasureHistory.append — the accepted
+// The map home's cruise mode `begin()`s a session before launching the
+// SHARED DBH→Height full-measurement chain ("dbh?chain=true"); while a
+// session is active the scan screens route their Accept through `recordDbh`
+// / `recordHeight` INSTEAD of QuickMeasureHistory.append — the accepted
 // reading (value + σ + metadata + GPS + auto-photo) lands on a cruise
 // `Tree` row in the active plot, and the quick-measure world never sees it
 // (the two data worlds stay separate; no quick pin is dropped).
 //
 // The DBH leg CREATES the Tree row (height nullable), the Height leg
 // UPDATES it — so a cruiser who backs out of the height leg still keeps a
-// valid DBH-only tree. CruiseMapScreen calls `end()` on every (re)entry,
-// which also restores the identity scan calibration `begin()` replaced
-// with the project's real ProjectCalibration (the publish/restore
-// contract the retired add-tree flow established).
+// valid DBH-only tree. MapHomeScreen calls `end()` on every (re)entry (the
+// chain always pops back to it), which also restores the identity scan
+// calibration `begin()` replaced with the project's real
+// ProjectCalibration (the publish/restore contract the retired add-tree
+// flow established).
 
 package com.hcjeong.forestix.ui.screens.cruise
 

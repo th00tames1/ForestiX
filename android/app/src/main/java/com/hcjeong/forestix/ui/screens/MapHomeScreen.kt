@@ -9,6 +9,14 @@
 // and the single primary action is the centre (+) capture button. The
 // built-in Esri satellite base gives imagery out of the box; the user's
 // XYZ template renders as an overlay on top (toggle in the layers sheet).
+//
+// v3.1: the separate CruiseMapScreen is absorbed HERE as a toggled MODE
+// (tc.mapMode "measure" | "cruise") — one map, two modes, no navigation
+// between them. The left side-circle toggles the mode in place (camera and
+// zoom are shared, no snap), measure mode stays exactly this screen, and
+// cruise mode swaps in the CruiseModeContent pins/chrome/peeks/sheets:
+// quick pins are measure-only, cruise pins cruise-only. System back in
+// cruise mode returns to measure mode.
 
 package com.hcjeong.forestix.ui.screens
 
@@ -54,7 +62,6 @@ import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Height
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Layers
-import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Park
 import androidx.compose.material.icons.filled.Straighten
@@ -107,6 +114,7 @@ import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
+import com.hcjeong.forestix.data.SettingsSnapshot
 import com.hcjeong.forestix.geo.CoordinateConversions
 import com.hcjeong.forestix.positioning.CLLocationSnapshot
 import com.hcjeong.forestix.positioning.GeoMath
@@ -116,6 +124,16 @@ import com.hcjeong.forestix.ui.PendingTreeNumber
 import com.hcjeong.forestix.ui.Routes
 import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.pressableNoRipple
+import com.hcjeong.forestix.ui.screens.cruise.CruiseCapture
+import com.hcjeong.forestix.ui.screens.cruise.CruiseDistanceOverlay
+import com.hcjeong.forestix.ui.screens.cruise.CruiseModeBottomContent
+import com.hcjeong.forestix.ui.screens.cruise.CruiseModeEffects
+import com.hcjeong.forestix.ui.screens.cruise.CruiseModeSheets
+import com.hcjeong.forestix.ui.screens.cruise.CruiseModeState
+import com.hcjeong.forestix.ui.screens.cruise.ProjectChip
+import com.hcjeong.forestix.ui.screens.cruise.cruiseModeMarkers
+import com.hcjeong.forestix.ui.screens.cruise.cruiseModePolygons
+import com.hcjeong.forestix.ui.screens.cruise.cruiseModePolylines
 import com.hcjeong.forestix.ui.softDropShadow
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixRadius
@@ -146,6 +164,15 @@ fun MapHomeScreen(nav: NavController) {
     val settings by env.settings.state.collectAsStateWithLifecycle()
     val entries by env.history.entries.collectAsStateWithLifecycle()
 
+    // v3.1 merged cruise mode: ONE map, two modes, persisted (tc.mapMode).
+    val isCruise = settings.mapMode == "cruise"
+
+    // Re-entry housekeeping (was CruiseMapScreen's): a finished/abandoned
+    // cruise tally chain must not leak its session or its project scan
+    // calibration into the quick world — every landing on the home (the
+    // chain always pops back here) disarms it. Idempotent.
+    LaunchedEffect(Unit) { CruiseCapture.end(env) }
+
     // MARK: - Live GPS (GPSAccuracyBadge pattern: local service + launcher)
 
     val location = remember { LocationService(context) }
@@ -168,7 +195,8 @@ fun MapHomeScreen(nav: NavController) {
     }
     val fix by location.latestSnapshot.collectAsStateWithLifecycle()
 
-    // MARK: - Pins + camera
+    // MARK: - Pins + camera (the camera is SHARED across the mode toggle —
+    // switching modes never snaps or re-zooms the map)
 
     val pins = remember(entries) { buildTreePins(entries) }
 
@@ -210,8 +238,41 @@ fun MapHomeScreen(nav: NavController) {
     var offlineOpen by remember { mutableStateOf(false) }
     var photoEntry by remember { mutableStateOf<QuickMeasureEntry?>(null) }
 
+    // MARK: - Cruise mode state + effects (data load / navigate guide /
+    // actions run only while the mode is on; the holder survives toggles so
+    // the 180 ms exit crossfade renders from live data)
+
+    val cruise = remember { CruiseModeState() }
+    if (isCruise) {
+        CruiseModeEffects(
+            state = cruise,
+            nav = nav,
+            settings = settings,
+            fix = fix,
+            awaitingFirstFix = awaitingFirstFix,
+            onCentreOnCruiseGeometry = {
+                awaitingFirstFix = false
+                mapCenter = it
+            },
+        )
+    }
+
+    /// The toggle circle + system back both land here. Leaving a mode drops
+    /// its selection so no stale peek pops back on the next visit.
+    fun setMode(mode: String) {
+        selectedPinId = null
+        cruise.selectedId = null
+        env.settings.setMapMode(mode)
+    }
+
     val selectedPin = pins.firstOrNull { it.id == selectedPinId }
-    BackHandler(enabled = selectedPin != null) { selectedPinId = null }
+    // System back: cruise mode is a MODE of the home, not a destination —
+    // back first dismisses a raised peek (the mode-specific handlers below
+    // compose later, so they win while enabled), then flips cruise back to
+    // measure; measure mode keeps the default behaviour.
+    BackHandler(enabled = isCruise) { setMode("measure") }
+    BackHandler(enabled = !isCruise && selectedPin != null) { selectedPinId = null }
+    BackHandler(enabled = isCruise && cruise.selectedId != null) { cruise.selectedId = null }
 
     Box(Modifier.fillMaxSize().background(colors.canvas)) {
         MapView(
@@ -227,20 +288,43 @@ fun MapHomeScreen(nav: NavController) {
             } else {
                 null
             },
-            markers = pins.map { pin ->
-                MapMarker(
-                    coordinate = pin.coordinate,
-                    title = pin.title,
-                    tint = if (pin.warn) colors.confidenceWarn else colors.primary,
-                    id = pin.id,
-                    shape = MapMarkerShape.PIN,
-                    badges = pin.badges,
-                    selected = pin.id == selectedPinId,
-                )
+            // Mode content separation (v3.1): quick pins are measure-only,
+            // cruise pins/rings/guides cruise-only — the map itself (camera,
+            // zoom, base + overlay) is shared across the toggle.
+            polygons = if (isCruise) {
+                cruiseModePolygons(cruise, settings, colors.accent)
+            } else {
+                emptyList()
+            },
+            polylines = if (isCruise) {
+                cruiseModePolylines(cruise, fix, colors.accent)
+            } else {
+                emptyList()
+            },
+            markers = if (isCruise) {
+                cruiseModeMarkers(cruise, settings, colors)
+            } else {
+                pins.map { pin ->
+                    MapMarker(
+                        coordinate = pin.coordinate,
+                        title = pin.title,
+                        tint = if (pin.warn) colors.confidenceWarn else colors.primary,
+                        id = pin.id,
+                        shape = MapMarkerShape.PIN,
+                        badges = pin.badges,
+                        selected = pin.id == selectedPinId,
+                    )
+                }
             },
             // Tapping the selected pin again deselects it (iOS toggle).
-            onMarkerTap = { selectedPinId = if (selectedPinId == it) null else it },
-            onMapTap = { selectedPinId = null },
+            onMarkerTap = { id ->
+                if (isCruise) {
+                    cruise.selectedId = if (cruise.selectedId == id) null else id
+                } else {
+                    selectedPinId = if (selectedPinId == id) null else id
+                }
+            },
+            onMapTap = { if (isCruise) cruise.selectedId = null else selectedPinId = null },
             youLocation = fix?.let {
                 CoordinateConversions.LatLon(latitude = it.latitude, longitude = it.longitude)
             },
@@ -263,7 +347,22 @@ fun MapHomeScreen(nav: NavController) {
                 horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs),
             ) {
                 GpsChip(fix)
-                Spacer(Modifier.weight(1f))
+                // Cruise-mode chrome (v3.1): the project chip floats
+                // top-centre of the SAME row — GPS chip stays leading, the
+                // round buttons stay trailing, no back button.
+                Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                    // Fully qualified: the enclosing RowScope would otherwise
+                    // capture this call for its own AnimatedVisibility overload.
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = isCruise,
+                        enter = fadeIn(tween(durationMillis = 180, easing = EaseOut)),
+                        exit = fadeOut(tween(durationMillis = 180, easing = EaseOut)),
+                    ) {
+                        ProjectChip(cruise.project?.name ?: "New project") {
+                            cruise.projectSheetOpen = true
+                        }
+                    }
+                }
                 // My-location: recentre on the freshest fix (this screen's
                 // live service, else the last global fix) without ever
                 // zooming OUT past 16. Dimmed no-op until any fix exists.
@@ -290,8 +389,17 @@ fun MapHomeScreen(nav: NavController) {
             }
         }
 
+        // Cruise navigate mode: floating live distance chip riding the
+        // dashed guide line's midpoint (mock ⑦ `.distchip`).
+        if (isCruise) {
+            CruiseDistanceOverlay(cruise, camera, fix)
+        }
+
         // MARK: - Bottom: action cluster ①, or peek card ② when a pin is up.
-        // Both slide/fade over 0.18 s ease-out like the iOS transitions.
+        // Both slide/fade over 0.18 s ease-out like the iOS transitions; the
+        // MODE flip crossfades the whole region over the same 0.18 s ease-out
+        // (the side circles land on identical pixels, so only the toggle's
+        // icon/caption and the (+) visibly swap).
 
         // Keep the last selected pin so the card's exit animation has data.
         var lastPin by remember { mutableStateOf<TreePin?>(null) }
@@ -303,42 +411,38 @@ fun MapHomeScreen(nav: NavController) {
                 .navigationBarsPadding(),
         ) {
             AnimatedContent(
-                targetState = selectedPin != null,
+                targetState = isCruise,
                 modifier = Modifier.align(Alignment.BottomCenter),
                 contentAlignment = Alignment.BottomCenter,
                 transitionSpec = {
                     val spec = tween<Float>(durationMillis = 180, easing = EaseOut)
-                    val slide = tween<IntOffset>(durationMillis = 180, easing = EaseOut)
-                    (slideInVertically(slide) { it } + fadeIn(spec)) togetherWith
-                        (slideOutVertically(slide) { it } + fadeOut(spec))
+                    fadeIn(spec) togetherWith fadeOut(spec)
                 },
-                label = "peekCluster",
-            ) { showPeek ->
-                val pin = if (showPeek) selectedPin ?: lastPin else null
-                if (pin == null) {
-                    ActionCluster(
-                        modifier = Modifier.padding(bottom = ForestixSpace.sm),
-                        // v3 cruise redesign: the Cruise circle now enters
-                        // the cruise-mode map (back returns here). The old
-                        // hub stays reachable via the project sheet's
-                        // "Classic view" row until Phase B retires it.
-                        onCruise = { nav.navigate(Routes.CRUISE_MAP) },
-                        onMeasure = { chooserOpen = true },
-                        onLog = { nav.navigate(Routes.FIELD_LOG) },
+                label = "modeSwap",
+            ) { cruiseMode ->
+                if (cruiseMode) {
+                    CruiseModeBottomContent(
+                        state = cruise,
+                        nav = nav,
+                        fix = fix,
+                        onToggleMode = { setMode("measure") },
                     )
                 } else {
-                    PeekCard(
-                        pin = pin,
-                        unitSystem = settings.unitSystem,
+                    MeasureBottomContent(
+                        selectedPin = selectedPin,
+                        lastPin = lastPin,
+                        settings = settings,
                         activity = activity,
-                        plotName = pin.entries.firstOrNull()?.plotID
-                            ?.let { env.history.plot(it) }
-                            ?.takeIf { !it.isDefault }?.name,
-                        modifier = Modifier
-                            .padding(horizontal = 12.dp)
-                            .padding(bottom = 20.dp),
+                        plotNameFor = { pin ->
+                            pin.entries.firstOrNull()?.plotID
+                                ?.let { env.history.plot(it) }
+                                ?.takeIf { !it.isDefault }?.name
+                        },
+                        onToggleMode = { setMode("cruise") },
+                        onMeasure = { chooserOpen = true },
+                        onLog = { nav.navigate(Routes.FIELD_LOG) },
                         onViewPhoto = { photoEntry = it },
-                        onMeasureAgain = {
+                        onMeasureAgain = { pin ->
                             val tree = pin.treeNumber
                             if (tree == null) {
                                 // Tree-less pin ("New measurement") — plain
@@ -439,8 +543,9 @@ fun MapHomeScreen(nav: NavController) {
     // First-launch UX: the map home hosts the region picker (it is the
     // screen after the splash). Auto-present once; picking, skipping or
     // swipe-dismissing all stamp regionPickerSeen, and it stays reachable
-    // later via Settings → Region.
-    if (settings.region == null && !settings.regionPickerSeen) {
+    // later via Settings → Region. Measure mode only — the default mode is
+    // measure, so first run always lands here; cruise chrome stays clean.
+    if (!isCruise && settings.region == null && !settings.regionPickerSeen) {
         ModalBottomSheet(
             onDismissRequest = { env.settings.setRegionPickerSeen(true) },
             containerColor = colors.surface,
@@ -449,6 +554,70 @@ fun MapHomeScreen(nav: NavController) {
                 // Selection/Skip already stamped regionPickerSeen — the
                 // state change hides the sheet.
             })
+        }
+    }
+
+    // MARK: - Cruise-mode sheets (project ⑤ / cruise setup ⑥ / record ⑧)
+
+    if (isCruise) {
+        CruiseModeSheets(
+            state = cruise,
+            nav = nav,
+            camera = camera,
+            fallbackCentre = mapCenter,
+        )
+    }
+}
+
+// MARK: - Measure-mode bottom region -----------------------------------------
+
+/// The v2 home's cluster ↔ peek swap, byte-identical, lifted into its own
+/// composable so the v3.1 mode-flip AnimatedContent can host it as the
+/// measure branch.
+@Composable
+private fun MeasureBottomContent(
+    selectedPin: TreePin?,
+    lastPin: TreePin?,
+    settings: SettingsSnapshot,
+    activity: Activity?,
+    plotNameFor: (TreePin) -> String?,
+    onToggleMode: () -> Unit,
+    onMeasure: () -> Unit,
+    onLog: () -> Unit,
+    onViewPhoto: (QuickMeasureEntry) -> Unit,
+    onMeasureAgain: (TreePin) -> Unit,
+) {
+    AnimatedContent(
+        targetState = selectedPin != null,
+        contentAlignment = Alignment.BottomCenter,
+        transitionSpec = {
+            val spec = tween<Float>(durationMillis = 180, easing = EaseOut)
+            val slide = tween<IntOffset>(durationMillis = 180, easing = EaseOut)
+            (slideInVertically(slide) { it } + fadeIn(spec)) togetherWith
+                (slideOutVertically(slide) { it } + fadeOut(spec))
+        },
+        label = "peekCluster",
+    ) { showPeek ->
+        val pin = if (showPeek) selectedPin ?: lastPin else null
+        if (pin == null) {
+            ActionCluster(
+                modifier = Modifier.padding(bottom = ForestixSpace.sm),
+                onToggleMode = onToggleMode,
+                onMeasure = onMeasure,
+                onLog = onLog,
+            )
+        } else {
+            PeekCard(
+                pin = pin,
+                unitSystem = settings.unitSystem,
+                activity = activity,
+                plotName = plotNameFor(pin),
+                modifier = Modifier
+                    .padding(horizontal = 12.dp)
+                    .padding(bottom = 20.dp),
+                onViewPhoto = onViewPhoto,
+                onMeasureAgain = { onMeasureAgain(pin) },
+            )
         }
     }
 }
@@ -662,7 +831,7 @@ internal fun RoundChromeButton(
 @Composable
 private fun ActionCluster(
     modifier: Modifier = Modifier,
-    onCruise: () -> Unit,
+    onToggleMode: () -> Unit,
     onMeasure: () -> Unit,
     onLog: () -> Unit,
 ) {
@@ -672,7 +841,10 @@ private fun ActionCluster(
         verticalAlignment = Alignment.Bottom,
         horizontalArrangement = Arrangement.spacedBy(26.dp),
     ) {
-        SideCircleButton("Cruise", Icons.Filled.Map, onCruise)
+        // v3.1: the left circle is the MODE TOGGLE showing the CURRENT mode
+        // — tree icon + "MEASURE" here; hollow ring + "CRUISE" in cruise
+        // mode (CruiseModeContent's cluster). Tap flips the map in place.
+        SideCircleButton("Measure", Icons.Filled.Park, onClick = onToggleMode)
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Box(
                 Modifier
@@ -693,12 +865,20 @@ private fun ActionCluster(
             }
             ClusterLabel("Measure", gap = 6.dp)
         }
-        SideCircleButton("Log", Icons.AutoMirrored.Filled.List, onLog)
+        SideCircleButton("Log", Icons.AutoMirrored.Filled.List, onClick = onLog)
     }
 }
 
+/// 54 dp side circle + caption pill. `tint` overrides the glyph ink — the
+/// cruise cluster tints its mode-toggle ring in the cruise accent (v3.1).
+/// Internal: the cruise-mode cluster reuses it for its exact positions.
 @Composable
-private fun SideCircleButton(label: String, icon: ImageVector, onClick: () -> Unit) {
+internal fun SideCircleButton(
+    label: String,
+    icon: ImageVector,
+    tint: Color? = null,
+    onClick: () -> Unit,
+) {
     val colors = Forestix.colors
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
@@ -711,7 +891,12 @@ private fun SideCircleButton(label: String, icon: ImageVector, onClick: () -> Un
                 .border(1.dp, colors.divider, CircleShape),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(icon, contentDescription = label, tint = colors.textPrimary, modifier = Modifier.size(22.dp))
+            Icon(
+                icon,
+                contentDescription = label,
+                tint = tint ?: colors.textPrimary,
+                modifier = Modifier.size(22.dp),
+            )
         }
         ClusterLabel(label, gap = 5.dp)
     }

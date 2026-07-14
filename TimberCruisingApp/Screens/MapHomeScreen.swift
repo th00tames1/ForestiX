@@ -2,12 +2,25 @@
 // design/forestix-redesign-v2-maphome.html (screens ① map home,
 // ② pin selected, ③ measure sheet, ⑤ photo detail).
 //
-// The map is the home because a cruiser's data IS spatial: every quick-
-// measure entry with a GPS fix appears as a tree pin (one tree = one pin,
-// D/H/C badges say what's been measured), the pulsing blue dot is you,
-// and the single primary action is the big (+) capture button. Cruise
-// and Log are the side circles. Tapping a pin slides up a peek card —
-// the map never disappears under the cruiser.
+// ONE MAP, TWO MODES. The screen owns a single BasemapMapView and
+// renders one of two modes over it, flipped by the left side-circle
+// and persisted as `tc.mapMode`:
+//   • MEASURE (default) — quick measure, exactly as always: every
+//     located quick-measure entry is a tree pin (D/H/C badges), the
+//     green (+) opens the measure chooser, peek cards slide up.
+//   • CRUISE — the map IS the cruise (the retired CruiseMapScreen's
+//     content, hosted here from MapHomeScreen+Cruise.swift): plot
+//     rings + cruise tree pins, the (+) turns cruiseAccent-blue and
+//     morphs Start plot / Add tree, the project chip floats in the
+//     top row, planned-plot navigation draws the guide line.
+// Camera and zoom are SHARED across the toggle — switching modes never
+// snaps the map. Mode content stays separate: quick pins only in
+// measure, cruise pins only in cruise.
+//
+// The map is the home because a cruiser's data IS spatial: the pulsing
+// blue dot is you, and the single primary action is the big (+)
+// capture button. Tapping a pin slides up a peek card — the map never
+// disappears under the cruiser.
 //
 // Tiles come in two layers: a built-in satellite base (Esri World
 // Imagery — imagery out of the box whenever online, attribution label
@@ -59,26 +72,34 @@ fileprivate func makeOverlayTileCache(settings: AppSettings) -> TileCache? {
 
 public struct MapHomeScreen: View {
 
-    @EnvironmentObject private var environment: AppEnvironment
-    @EnvironmentObject private var settings: AppSettings
-    @EnvironmentObject private var history: QuickMeasureHistory
+    // Shared with the cruise-mode extension (MapHomeScreen+Cruise.swift),
+    // so internal rather than private.
+    @EnvironmentObject var environment: AppEnvironment
+    @EnvironmentObject var settings: AppSettings
+    @EnvironmentObject var history: QuickMeasureHistory
 
     /// The home owns its LocationService: the GPS chip must be live from
     /// the moment the screen appears, independent of any scan screen.
-    @StateObject private var location = LocationService()
+    /// Shared by both modes — cruise plot-centre stamping uses it too.
+    @StateObject var location = LocationService()
 
     /// Peavy Hall (OSU College of Forestry) fallback — used only when
     /// there is no fix and no located reading.
     private static let fallbackCamera = BasemapCamera(
         latitude: 44.56417, longitude: -123.28556, zoom: 16)
 
-    @State private var camera = MapHomeScreen.fallbackCamera
+    /// SHARED camera — one map serves both modes, so flipping the mode
+    /// toggle never snaps position or zoom.
+    @State var camera = MapHomeScreen.fallbackCamera
     @State private var cameraInitialised = false
     /// True while the camera still sits on the hardcoded fallback — the
     /// first real GPS fix recenters exactly once.
     @State private var awaitingFirstFix = false
     @State private var visibleRegion: BasemapRegion?
-    @State private var selectedPinID: String?
+    /// Shared selection — measure ids ("tree-…"/"entry-…") and cruise
+    /// ids ("plot-…"/"pplot-…"/"ctree-…") are prefix-disjoint, and the
+    /// toggle clears it, so a selection never leaks across modes.
+    @State var selectedPinID: String?
 
     // Sheets / covers.
     @State private var presentingChooser = false
@@ -119,7 +140,70 @@ public struct MapHomeScreen: View {
     /// scoped chooser opens.
     @State private var farTreeWarning: FarTreeWarning?
 
+    // MARK: Cruise-mode state
+    //
+    // Stored here because SwiftUI state can't live in extensions; every
+    // view/function that touches it is in MapHomeScreen+Cruise.swift
+    // (the extracted CruiseMapScreen content). Internal, not private,
+    // so the cross-file extension can reach it.
+
+    // Cruise data snapshot (reloaded from the repositories).
+    @State var projects: [Project] = []
+    @State var plots: [Plot] = []
+    @State var plannedPlots: [PlannedPlot] = []
+    @State var treesByPlot: [UUID: [Tree]] = [:]
+    @State var speciesByCode: [String: SpeciesConfig] = [:]
+
+    // Cruise sheets / covers / pushes.
+    @State var presentingProjectSheet = false
+    @State var presentingPlotSetup = false
+    @State var presentingCruiseDBH = false
+    @State var presentingCruiseHeight = false
+    @State var pushed: CruiseDestination?
+    @State var pendingDestination: CruiseDestination?
+    @State var closePlotCandidateID: UUID?
+
+    // Planned-plot navigation + centre recording + setup.
+    @State var navTargetPlannedID: UUID?
+    @State var recordingTarget: PlannedPlot?
+    @State var presentingCruiseSetup = false
+    @State var pendingCruiseSetup = false
+
+    // One-button Export all, run inline in the project sheet.
+    @State var isExportingAll = false
+    @State var exportProgress: Double = 0
+    @State var exportLabel = ""
+    @State var exportShareURL: ExportShareURL?
+    @State var exportErrorMessage: String?
+
+    // Cruise add-tree chain scope (parallel to the measure chain).
+    @State var chainPlotID: UUID?
+    @State var chainTreeNumber: Int = 1
+    @State var chainTreeID: UUID?
+    @State var cruiseChainHeightPending = false
+
+    // Project sheet "New project" one-time naming.
+    @State var namingNewProject = false
+    @State var newProjectName = ""
+
     public init() {}
+
+    // MARK: Mode toggle
+
+    /// `tc.mapMode` — the persisted mode the screen renders.
+    private var isCruiseMode: Bool { settings.mapMode == "cruise" }
+
+    /// Flip modes (the left side-circle). Camera stays put — the map is
+    /// shared — and the selection clears so a peek never leaks across
+    /// the mode boundary. Same easeOut 0.18 as the peek transitions.
+    private func toggleMapMode() {
+        let enteringCruise = !isCruiseMode
+        withAnimation(.easeOut(duration: 0.18)) {
+            selectedPinID = nil
+            settings.mapMode = enteringCruise ? "cruise" : "measure"
+        }
+        if enteringCruise { reloadCruise() }
+    }
 
     private enum MeasureChoice {
         case fullMeasurement, dbh, height, distance, sampling
@@ -139,8 +223,9 @@ public struct MapHomeScreen: View {
 
     public var body: some View {
         NavigationStack {
-            ZStack {
+            cruisePresentations(over: ZStack {
                 map
+                if isCruiseMode, navGuide != nil { distanceChipOverlay }
                 attributionBadge
                 VStack(spacing: ForestixSpace.xs) {
                     topChrome
@@ -148,18 +233,33 @@ public struct MapHomeScreen: View {
                 }
                 VStack {
                     Spacer()
-                    if let pin = selectedPin {
+                    if isCruiseMode {
+                        // Cruise peeks — plot ring, planned ring, tree pin.
+                        if let plot = selectedPlot {
+                            plotPeekCard(for: plot)
+                        } else if let planned = selectedPlannedPlot {
+                            plannedPeekCard(for: planned)
+                        } else if let tree = selectedTree {
+                            treePeekCard(for: tree)
+                        } else {
+                            actionCluster
+                        }
+                    } else if let pin = selectedPin {
                         peekCard(for: pin)
                     } else {
                         actionCluster
                     }
                 }
-            }
+            })
             .background(ForestixPalette.canvas.ignoresSafeArea())
-            .onAppear { startUp() }
+            .onAppear {
+                startUp()
+                if isCruiseMode { reloadCruise() }
+            }
             .onDisappear { location.stop() }
             .onChange(of: location.latestSnapshot) { _, snap in
                 recenterOnFirstFix(snap)
+                if isCruiseMode { checkNavArrival(snap) }
             }
             .task {
                 // First-launch UX: auto-present the region picker once,
@@ -258,17 +358,21 @@ public struct MapHomeScreen: View {
         settings.overlayEnabled ? makeOverlayTileCache(settings: settings) : nil
     }
 
+    /// ONE map for both modes — the pins swap with the mode (quick pins
+    /// in measure, plot rings + cruise trees in cruise) but the camera,
+    /// tiles and gestures are the same view all along.
     private var map: some View {
         BasemapMapView(
             camera: $camera,
             baseTileCache: baseTileCache,
             overlayTileCache: overlayTileCache,
-            markers: markers,
+            markers: isCruiseMode ? cruiseMarkers : markers,
             selectedMarkerID: selectedPinID,
             youLocation: location.latestSnapshot.map {
                 CoordinateConversions.LatLon(latitude: $0.latitude,
                                              longitude: $0.longitude)
             },
+            guideLine: isCruiseMode ? navGuide : nil,
             style: BasemapStyle(
                 canvas: ForestixPalette.canvas,
                 grid: ForestixPalette.divider.opacity(0.55),
@@ -421,6 +525,14 @@ public struct MapHomeScreen: View {
         HStack(spacing: ForestixSpace.xs) {
             gpsChip
             Spacer()
+            // CRUISE chrome — the project chip floats in the same top
+            // row, centred between the GPS chip (stays leading) and the
+            // round buttons (unchanged). No back button: cruise is a
+            // mode now, not a pushed screen.
+            if isCruiseMode {
+                cruiseProjectChip
+                Spacer()
+            }
             // My-location — jump the camera back to the newest fix (this
             // screen's live service, else the last fix any screen saved).
             // No fix yet: the button dims and the tap is a no-op.
@@ -605,31 +717,55 @@ public struct MapHomeScreen: View {
 
     private var actionCluster: some View {
         HStack(alignment: .bottom, spacing: 26) {
-            // Cruise mode (v3 redesign) — the circle opens the cruise
-            // map. The old hub screens retired in Phase B.
-            sideCircle(label: "Cruise", icon: "map",
-                       accessibilityID: "mapHome.cruise") {
-                CruiseMapScreen()
-            }
+            // Mode toggle (left circle, where CRUISE used to push) —
+            // shows the CURRENT mode; tapping flips it. Everything else
+            // in the cluster keeps its exact position.
+            modeToggleCircle
 
             VStack(spacing: 6) {
+                if isCruiseMode, let plot = activePlot {
+                    tallyPill(for: plot)
+                        .padding(.bottom, 6)
+                }
                 Button {
-                    presentingChooser = true
+                    if isCruiseMode {
+                        cruisePrimaryAction()
+                    } else {
+                        presentingChooser = true
+                    }
                 } label: {
                     ZStack {
-                        Circle().fill(ForestixPalette.primary)
+                        Circle().fill(isCruiseMode ? ForestixPalette.cruiseAccent
+                                                   : ForestixPalette.primary)
                         Image(systemName: "plus")
                             .font(.system(size: 30, weight: .semibold))
-                            .foregroundStyle(ForestixPalette.primaryInk)
+                            .foregroundStyle(isCruiseMode ? ForestixPalette.cruiseAccentInk
+                                                          : ForestixPalette.primaryInk)
                     }
                     .frame(width: 74, height: 74)
                     .overlay(Circle().stroke(ForestixPalette.surface, lineWidth: 4))
+                    // Cruise scoped state (active plot): accent halo like
+                    // the mock's `.capture.scoped` — status colour, so it
+                    // matches the active plot ring.
+                    .overlay {
+                        if isCruiseMode && activePlot != nil {
+                            Circle()
+                                .inset(by: -5)
+                                .stroke(ForestixPalette.accent.opacity(0.35),
+                                        lineWidth: 4)
+                            Circle()
+                                .inset(by: -1)
+                                .stroke(ForestixPalette.accent, lineWidth: 1.5)
+                        }
+                    }
                     .shadow(color: Color.black.opacity(0.28), radius: 10, y: 6)
                 }
                 .buttonStyle(MapPressableStyle())
-                .accessibilityLabel("New measurement")
-                .accessibilityIdentifier("mapHome.measure")
-                clusterLabel("Measure")
+                .accessibilityLabel(isCruiseMode ? cruisePrimaryLabel
+                                                 : "New measurement")
+                .accessibilityIdentifier(isCruiseMode ? "cruiseMap.primary"
+                                                      : "mapHome.measure")
+                clusterLabel(isCruiseMode ? cruisePrimaryLabel : "Measure")
             }
 
             sideCircle(label: "Log", icon: "list.bullet",
@@ -639,6 +775,34 @@ public struct MapHomeScreen: View {
         }
         .padding(.bottom, ForestixSpace.sm)
         .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+
+    /// The left side-circle — same size and position the CRUISE push
+    /// circle had, now the mode toggle. Shows the CURRENT mode: tree
+    /// glyph + MEASURE, hollow plot-ring glyph + CRUISE (icon tinted
+    /// with the cruise accent while cruising).
+    private var modeToggleCircle: some View {
+        VStack(spacing: 5) {
+            Button {
+                toggleMapMode()
+            } label: {
+                ZStack {
+                    Circle().fill(ForestixPalette.surface)
+                    Image(systemName: isCruiseMode ? "smallcircle.circle" : "tree")
+                        .font(.system(size: 22, weight: .medium))
+                        .foregroundStyle(isCruiseMode ? ForestixPalette.cruiseAccent
+                                                      : ForestixPalette.textPrimary)
+                }
+                .frame(width: 54, height: 54)
+                .overlay(Circle().stroke(ForestixPalette.divider, lineWidth: 1))
+                .shadow(color: Color.black.opacity(0.18), radius: 6, y: 3)
+            }
+            .buttonStyle(MapPressableStyle())
+            .accessibilityLabel(isCruiseMode ? "Switch to measure mode"
+                                             : "Switch to cruise mode")
+            .accessibilityIdentifier("mapHome.modeToggle")
+            clusterLabel(isCruiseMode ? "Cruise" : "Measure")
+        }
     }
 
     private func sideCircle<Destination: View>(

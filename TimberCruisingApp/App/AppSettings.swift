@@ -53,6 +53,7 @@ public final class AppSettings: ObservableObject {
         public static let researchTrueValue       = "tc.researchTrueValue"
         public static let researchSpecies         = "tc.researchSpecies"
         public static let currentCruiseProjectID  = "tc.currentCruiseProjectID"
+        public static let mapMode                 = "tc.mapMode"
     }
 
     private let defaults: UserDefaults
@@ -123,8 +124,8 @@ public final class AppSettings: ObservableObject {
 
     /// CRUISE MODE — id of the project the cruise map is currently
     /// scoped to (the project chip). nil until the cruiser has picked
-    /// or created one; CruiseMapScreen falls back to the most recently
-    /// updated project.
+    /// or created one; the map home's cruise mode falls back to the
+    /// most recently updated project.
     public var currentCruiseProjectID: UUID? {
         get {
             guard let raw = defaults.string(forKey: Keys.currentCruiseProjectID)
@@ -139,6 +140,15 @@ public final class AppSettings: ObservableObject {
             }
             objectWillChange.send()
         }
+    }
+
+    /// Map home mode — "measure" (quick measure, the default) or
+    /// "cruise". One map, two modes: the home screen renders the mode
+    /// this returns and the toggle circle flips it. Persisted so the
+    /// app reopens in the mode the cruiser was working in.
+    public var mapMode: String {
+        get { defaults.string(forKey: Keys.mapMode) ?? "measure" }
+        set { defaults.set(newValue, forKey: Keys.mapMode); objectWillChange.send() }
     }
 
     /// Pre-loaded regional species filter. nil = no region picked yet

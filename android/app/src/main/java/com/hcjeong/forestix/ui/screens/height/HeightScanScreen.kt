@@ -330,8 +330,9 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 // Storage failure must not crash the AR screen — the tree
                 // keeps its DBH-only row from the first leg either way.
                 runCatching { CruiseCapture.recordHeight(env, r, photoPath = photo, fix = fix) }
-                // Back to CruiseMapScreen (the chain popped DBH already);
-                // the new tree pin appears and the tally pill ticks up.
+                // Back to the map home in cruise mode (the chain popped DBH
+                // already; tc.mapMode is still "cruise"); the new tree pin
+                // appears and the tally pill ticks up.
                 nav.popBackStack()
             } else {
                 env.history.append(

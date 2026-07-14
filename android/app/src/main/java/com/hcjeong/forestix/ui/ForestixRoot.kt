@@ -1,11 +1,12 @@
 // Navigation root — the Compose analogue of the iOS NavigationStack tree.
-// Routes mirror the screen graph after the v3 cruise redesign: the map-first
-// home (pins + capture cluster; design/forestix-redesign-v2-maphome.html)
-// -> the five AR measurement tools + the shared Field Log, and the cruise
-// mode (design/forestix-redesign-v3-cruise.html) living entirely behind the
-// Cruise circle: cruise map -> AR start-plot / offset fallback / stratum
-// draw / plot summary / tree detail / stand summary / export. The old
-// hub/dashboard cruise stack was retired in Phase B (both platforms).
+// Routes mirror the screen graph after the v3.1 cruise-mode merge: the ONE
+// map home (design/forestix-redesign-v2-maphome.html) renders measure OR
+// cruise mode in place (tc.mapMode toggle — no cruise-map destination)
+// -> the five AR measurement tools + the shared Field Log, plus the cruise
+// mode's pushed flows (design/forestix-redesign-v3-cruise.html): AR
+// start-plot / offset fallback / stratum draw / plot summary / tree detail
+// / stand summary / export. The old hub/dashboard cruise stack was retired
+// in Phase B (both platforms).
 
 package com.hcjeong.forestix.ui
 
@@ -24,7 +25,6 @@ import com.hcjeong.forestix.ui.screens.MapHomeScreen
 import com.hcjeong.forestix.ui.screens.ReferenceLibraryScreen
 import com.hcjeong.forestix.ui.screens.SamplingPlotScreen
 import com.hcjeong.forestix.ui.screens.SettingsScreen
-import com.hcjeong.forestix.ui.screens.cruise.CruiseMapScreen
 import com.hcjeong.forestix.ui.screens.cruise.CruiseOffsetHostScreen
 import com.hcjeong.forestix.ui.screens.cruise.CruiseRoutes
 import com.hcjeong.forestix.ui.screens.cruise.CruiseStartPlotScreen
@@ -57,9 +57,6 @@ object Routes {
     /// calibrationSection NavigationLink { CalibrationScreen() }.
     const val CALIBRATION = "calibration"
     const val REFERENCE_LIBRARY = "referenceLibrary"
-
-    /// v3 cruise mode — the map home's Cruise circle enters here.
-    const val CRUISE_MAP = "cruiseMap"
 }
 
 /// Required-string route argument; screens behind these routes are only
@@ -92,9 +89,9 @@ fun ForestixRoot() {
         composable(Routes.CALIBRATION) { CalibrationScreen(nav) }
         composable(Routes.REFERENCE_LIBRARY) { ReferenceLibraryScreen(nav) }
 
-        // MARK: - Cruise mode (v3 redesign: the map IS the cruise)
+        // MARK: - Cruise mode (v3.1: a MODE of the map home, not a route —
+        // only its pushed flows live in the graph)
 
-        composable(Routes.CRUISE_MAP) { CruiseMapScreen(nav) }
         composable(CruiseRoutes.START_PLOT) { back ->
             CruiseStartPlotScreen(nav, back.arg("projectId"))
         }

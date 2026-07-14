@@ -74,6 +74,11 @@ data class SettingsSnapshot(
     /// Cruise mode: the ACTIVE plot the (+) button scopes "Add tree" to.
     /// Null = no active plot ("Start plot" state). Cleared on close/switch.
     val cruisePlotId: String? = null,
+    /// Map-home mode (v3.1): the single map screen renders "measure"
+    /// (quick-measure home, default) or "cruise" (the absorbed cruise map).
+    /// Persisted so the app reopens in the mode the cruiser left it in
+    /// (mirror of iOS tc.mapMode).
+    val mapMode: String = "measure",
 )
 
 private val Context.settingsStore by preferencesDataStore(name = "forestix_settings")
@@ -100,6 +105,7 @@ class AppSettings(private val context: Context) {
         val appearance = stringPreferencesKey("tc.appearance")
         val cruiseProjectId = stringPreferencesKey("tc.cruiseProjectId")
         val cruisePlotId = stringPreferencesKey("tc.cruisePlotId")
+        val mapMode = stringPreferencesKey("tc.mapMode")
     }
 
     private val _state = MutableStateFlow(loadSnapshot())
@@ -139,7 +145,13 @@ class AppSettings(private val context: Context) {
             appearance = p[Keys.appearance] ?: "light",
             cruiseProjectId = p[Keys.cruiseProjectId],
             cruisePlotId = p[Keys.cruisePlotId],
+            mapMode = if (p[Keys.mapMode] == "cruise") "cruise" else "measure",
         )
+    }
+
+    fun setMapMode(value: String) = update {
+        _state.value = _state.value.copy(mapMode = value)
+        it[Keys.mapMode] = value
     }
 
     fun setCruiseProjectId(value: String?) = update {

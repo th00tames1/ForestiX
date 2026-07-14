@@ -68,6 +68,12 @@ data class SettingsSnapshot(
     /// High-Contrast identity in both; ForestixTheme maps this to the
     /// light or dark token set (mirror of iOS tc.appearance).
     val appearance: String = "light",
+    /// Cruise mode (v3 redesign): the CURRENT project shown in the cruise
+    /// map's project chip. Null = no project yet ("New project" chip).
+    val cruiseProjectId: String? = null,
+    /// Cruise mode: the ACTIVE plot the (+) button scopes "Add tree" to.
+    /// Null = no active plot ("Start plot" state). Cleared on close/switch.
+    val cruisePlotId: String? = null,
 )
 
 private val Context.settingsStore by preferencesDataStore(name = "forestix_settings")
@@ -92,6 +98,8 @@ class AppSettings(private val context: Context) {
         val developerMode = booleanPreferencesKey("tc.developerMode")
         val researchTreeId = stringPreferencesKey("tc.researchTreeId")
         val appearance = stringPreferencesKey("tc.appearance")
+        val cruiseProjectId = stringPreferencesKey("tc.cruiseProjectId")
+        val cruisePlotId = stringPreferencesKey("tc.cruisePlotId")
     }
 
     private val _state = MutableStateFlow(loadSnapshot())
@@ -129,7 +137,19 @@ class AppSettings(private val context: Context) {
             developerMode = p[Keys.developerMode] ?: false,
             researchTreeId = p[Keys.researchTreeId] ?: "",
             appearance = p[Keys.appearance] ?: "light",
+            cruiseProjectId = p[Keys.cruiseProjectId],
+            cruisePlotId = p[Keys.cruisePlotId],
         )
+    }
+
+    fun setCruiseProjectId(value: String?) = update {
+        _state.value = _state.value.copy(cruiseProjectId = value)
+        if (value == null) it.remove(Keys.cruiseProjectId) else it[Keys.cruiseProjectId] = value
+    }
+
+    fun setCruisePlotId(value: String?) = update {
+        _state.value = _state.value.copy(cruisePlotId = value)
+        if (value == null) it.remove(Keys.cruisePlotId) else it[Keys.cruisePlotId] = value
     }
 
     fun setAppearance(value: String) = update {

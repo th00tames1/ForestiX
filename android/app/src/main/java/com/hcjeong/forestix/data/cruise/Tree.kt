@@ -73,6 +73,10 @@ data class Tree(
     var photoPath: String?,
     var rawScanPath: String?,           // optional .ply
 
+    // Cruise-mode map pin (v3 redesign): GPS fix captured at Accept.
+    var latitude: Double? = null,
+    var longitude: Double? = null,
+
     var createdAt: Long,
     var updatedAt: Long,
     var deletedAt: Long?,               // soft-delete

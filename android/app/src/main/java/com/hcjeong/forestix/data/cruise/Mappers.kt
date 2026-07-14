@@ -289,6 +289,9 @@ object TreeMapper {
         photoPath = s.photoPath,
         rawScanPath = s.rawScanPath,
 
+        latitude = s.latitude,
+        longitude = s.longitude,
+
         createdAt = s.createdAt,
         updatedAt = s.updatedAt,
         deletedAt = s.deletedAt,
@@ -342,6 +345,8 @@ object TreeMapper {
             notes = e.notes,
             photoPath = e.photoPath,
             rawScanPath = e.rawScanPath,
+            latitude = e.latitude,
+            longitude = e.longitude,
             createdAt = e.createdAt,
             updatedAt = e.updatedAt,
             deletedAt = e.deletedAt,

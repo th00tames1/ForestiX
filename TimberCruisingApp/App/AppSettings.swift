@@ -52,6 +52,7 @@ public final class AppSettings: ObservableObject {
         public static let researchTreeId          = "tc.researchTreeId"
         public static let researchTrueValue       = "tc.researchTrueValue"
         public static let researchSpecies         = "tc.researchSpecies"
+        public static let currentCruiseProjectID  = "tc.currentCruiseProjectID"
     }
 
     private let defaults: UserDefaults
@@ -118,6 +119,26 @@ public final class AppSettings: ObservableObject {
     public var advancedMode: Bool {
         get { defaults.bool(forKey: Keys.advancedMode) }
         set { defaults.set(newValue, forKey: Keys.advancedMode); objectWillChange.send() }
+    }
+
+    /// CRUISE MODE — id of the project the cruise map is currently
+    /// scoped to (the project chip). nil until the cruiser has picked
+    /// or created one; CruiseMapScreen falls back to the most recently
+    /// updated project.
+    public var currentCruiseProjectID: UUID? {
+        get {
+            guard let raw = defaults.string(forKey: Keys.currentCruiseProjectID)
+            else { return nil }
+            return UUID(uuidString: raw)
+        }
+        set {
+            if let id = newValue {
+                defaults.set(id.uuidString, forKey: Keys.currentCruiseProjectID)
+            } else {
+                defaults.removeObject(forKey: Keys.currentCruiseProjectID)
+            }
+            objectWillChange.send()
+        }
     }
 
     /// Pre-loaded regional species filter. nil = no region picked yet

@@ -72,7 +72,17 @@ public struct SamplingPlotScreen: View {
     private static let topSphereId  = UUID(uuidString: "00000000-5A11-0000-0000-000000000003") ?? UUID()
     private static let ringId       = UUID(uuidString: "00000000-5A11-0000-0000-000000000004") ?? UUID()
 
-    public init() {}
+    /// CRUISE MODE — when set, Save hands the placed ring (radius in
+    /// metres) to the caller instead of appending a QuickMeasureEntry;
+    /// the caller persists it as a cruise `Plot`. The quick-measure
+    /// path passes nothing and keeps today's behaviour byte-identical.
+    /// The AR anchor + `ActiveSamplingPlot` are placed the same way on
+    /// both paths, so the scan screens' ring overlay comes for free.
+    private let onSaveCruisePlot: ((Double) -> Void)?
+
+    public init(onSaveCruisePlot: ((Double) -> Void)? = nil) {
+        self.onSaveCruisePlot = onSaveCruisePlot
+    }
 
     /// A plot is active (placed on this screen or an earlier visit).
     private var hasPlot: Bool { activePlot.plot != nil }
@@ -308,6 +318,13 @@ public struct SamplingPlotScreen: View {
 
     private func savePlot() {
         guard hasPlot else { return }
+        // Cruise mode: the host persists the ring as a cruise Plot;
+        // nothing is written to the quick-measure history.
+        if let onSaveCruisePlot {
+            onSaveCruisePlot(radiusM)
+            dismiss()
+            return
+        }
         let area = .pi * radiusM * radiusM
         history.append(QuickMeasureEntry(
             kind: .samplingPlot,

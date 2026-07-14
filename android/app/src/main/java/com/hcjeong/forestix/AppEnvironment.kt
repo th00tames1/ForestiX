@@ -91,7 +91,9 @@ class AppEnvironment private constructor(
             val history = QuickMeasureHistory.get(app, db.dao())
 
             val cruiseDb = Room.databaseBuilder(
-                app, CruiseDatabase::class.java, CruiseDatabase.NAME).build()
+                app, CruiseDatabase::class.java, CruiseDatabase.NAME)
+                .addMigrations(CruiseDatabase.MIGRATION_1_2)
+                .build()
             val speciesConfigRepository = RoomSpeciesConfigRepository(cruiseDb.speciesConfigDao())
             val volumeEquationRepository = RoomVolumeEquationRepository(cruiseDb.volumeEquationDao())
 

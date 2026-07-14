@@ -318,7 +318,11 @@ fun MapHomeScreen(nav: NavController) {
                 if (pin == null) {
                     ActionCluster(
                         modifier = Modifier.padding(bottom = ForestixSpace.sm),
-                        onCruise = { nav.navigate(Routes.TIMBER_HUB) },
+                        // v3 cruise redesign: the Cruise circle now enters
+                        // the cruise-mode map (back returns here). The old
+                        // hub stays reachable via the project sheet's
+                        // "Classic view" row until Phase B retires it.
+                        onCruise = { nav.navigate(Routes.CRUISE_MAP) },
                         onMeasure = { chooserOpen = true },
                         onLog = { nav.navigate(Routes.FIELD_LOG) },
                     )
@@ -524,8 +528,9 @@ private fun buildTreePins(entries: List<QuickMeasureEntry>): List<TreePin> {
 /// Three short rows (X lat / Y lon / Z alt — Korean surveying axis
 /// convention, per field feedback) keep the chip narrow so it can never
 /// collide with the round buttons beside it (iOS gpsChip 1:1).
+/// Internal: the cruise-mode map (v3) reuses the same chip verbatim.
 @Composable
-private fun GpsChip(fix: CLLocationSnapshot?) {
+internal fun GpsChip(fix: CLLocationSnapshot?) {
     val colors = Forestix.colors
     val type = Forestix.type
     // This screen's live service, else the newest fix any screen captured.
@@ -629,8 +634,9 @@ private fun GpsCoordRow(label: String, value: String) {
 /// Mock `.roundbtn`, sized to the 44 dp hit-target rule, with the shared
 /// map-chrome pressed feedback (iOS MapPressableStyle). `enabled = false`
 /// renders the 0.45-alpha disabled look and swallows taps.
+/// Internal: shared with the cruise-mode map's chrome (v3).
 @Composable
-private fun RoundChromeButton(
+internal fun RoundChromeButton(
     icon: ImageVector,
     contentDescription: String,
     enabled: Boolean = true,
@@ -715,8 +721,9 @@ private fun SideCircleButton(label: String, icon: ImageVector, onClick: () -> Un
 /// each label sits in a small dark-glass pill. Deliberately hardcoded —
 /// the backdrop is a satellite photo in BOTH themes. Gap above: 6 under
 /// the capture button, 5 under the side circles (iOS spacing).
+/// Internal: the cruise map's morphing (+) label reuses it (v3).
 @Composable
-private fun ClusterLabel(label: String, gap: Dp) {
+internal fun ClusterLabel(label: String, gap: Dp) {
     Text(
         label.uppercase(),
         style = Forestix.type.dataSmall.copy(
@@ -863,8 +870,9 @@ private fun MeasureRow(entry: QuickMeasureEntry, unitSystem: UnitSystem) {
 }
 
 /// Mock `.chip` — soft tier-coloured background, dot + uppercase label.
+/// Internal: the cruise tree/plot peeks reuse it (v3).
 @Composable
-private fun TierChipSoft(rawTier: String) {
+internal fun TierChipSoft(rawTier: String) {
     val d = confidenceDescriptor(rawTier)
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -886,8 +894,9 @@ private fun TierChipSoft(rawTier: String) {
 
 /// 96 dp thumbnail: the entry's auto-captured accept snapshot, a grey
 /// placeholder when the group has none, and a ×K overlay for extras.
+/// Internal: the cruise tree peek reuses it (v3).
 @Composable
-private fun PhotoThumb(photoName: String?, photoCount: Int, activity: Activity?) {
+internal fun PhotoThumb(photoName: String?, photoCount: Int, activity: Activity?) {
     val colors = Forestix.colors
     val thumb by produceState<Bitmap?>(initialValue = null, photoName, activity) {
         value = withContext(Dispatchers.IO) {
@@ -934,8 +943,9 @@ private fun PhotoThumb(photoName: String?, photoCount: Int, activity: Activity?)
     }
 }
 
+/// Internal: the cruise peeks reuse the same action button (v3).
 @Composable
-private fun PeekActionButton(
+internal fun PeekActionButton(
     label: String,
     primary: Boolean,
     modifier: Modifier = Modifier,

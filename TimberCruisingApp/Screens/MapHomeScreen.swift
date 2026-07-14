@@ -606,9 +606,12 @@ public struct MapHomeScreen: View {
 
     private var actionCluster: some View {
         HStack(alignment: .bottom, spacing: 26) {
+            // Cruise mode (v3 redesign) — the circle opens the cruise
+            // map, not the old hub. The hub stays reachable via the
+            // cruise project sheet's "Classic view" until Phase B.
             sideCircle(label: "Cruise", icon: "map",
                        accessibilityID: "mapHome.cruise") {
-                TimberCruisingHubScreen()
+                CruiseMapScreen()
             }
 
             VStack(spacing: 6) {

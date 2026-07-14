@@ -86,6 +86,7 @@ import com.hcjeong.forestix.sensors.VioMotionDbh
 import com.hcjeong.forestix.ui.MeasurePhotoStore
 import com.hcjeong.forestix.ui.PendingTreeNumber
 import com.hcjeong.forestix.ui.Routes
+import com.hcjeong.forestix.ui.screens.cruise.CruiseCapture
 import com.hcjeong.forestix.ui.screens.ContinuationAction
 import com.hcjeong.forestix.ui.screens.ContinuationOrigin
 import com.hcjeong.forestix.ui.screens.MeasurementContinuationSheet
@@ -766,6 +767,9 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         // measured + the latest GPS fix from the badge's running location
         // service.
         val activity = context as? android.app.Activity
+        // Cruise tally session (v3): captured once so the whole accept
+        // rides ONE consistent routing decision.
+        val cruise = CruiseCapture.target
         scope.launch {
             // Chrome-less snapshot: hide the 2D chrome, give Compose one
             // committed frame, capture, then restore.
@@ -777,25 +781,43 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 name
             }
             val fix = com.hcjeong.forestix.positioning.LocationService.lastGlobalFix
-            env.history.append(
-                QuickMeasureEntry(
-                    kind = MeasureKind.DBH, value = r.diameterCm.toDouble(),
-                    sigma = r.sigmaRmm.toDouble(), confidenceRaw = r.confidence.raw,
-                    method = r.method.raw, treeNumber = pendingTree,
-                    plotID = env.history.activePlotID.value,
-                    speciesCode = metaSpecies,
-                    position = metaPosition ?: StemPosition.DBH,
-                    damageCodes = metaDamage,
-                    note = metaNote.ifBlank { null },
-                    latitude = fix?.latitude,
-                    longitude = fix?.longitude,
-                    photoPath = photo,
-                    // Edge provenance: "manual" when the ADJUST bracket
-                    // supplied the edges, "auto" otherwise (other measure
-                    // kinds leave the column null).
-                    captureMode = if (resultFromAdjust) "manual" else "auto",
+            if (cruise != null) {
+                // Cruise mode: the SAME accept pedigree (value + σ + meta +
+                // GPS + photo) lands on a cruise Tree row in the active
+                // plot — the quick-measure history (and its map pins) never
+                // sees cruise readings. A storage failure must not crash
+                // the AR screen; the missing pin surfaces it on the map.
+                runCatching {
+                    CruiseCapture.recordDbh(
+                        env, r,
+                        speciesCode = metaSpecies,
+                        damageCodes = metaDamage,
+                        note = metaNote,
+                        photoPath = photo,
+                        fix = fix,
+                    )
+                }
+            } else {
+                env.history.append(
+                    QuickMeasureEntry(
+                        kind = MeasureKind.DBH, value = r.diameterCm.toDouble(),
+                        sigma = r.sigmaRmm.toDouble(), confidenceRaw = r.confidence.raw,
+                        method = r.method.raw, treeNumber = pendingTree,
+                        plotID = env.history.activePlotID.value,
+                        speciesCode = metaSpecies,
+                        position = metaPosition ?: StemPosition.DBH,
+                        damageCodes = metaDamage,
+                        note = metaNote.ifBlank { null },
+                        latitude = fix?.latitude,
+                        longitude = fix?.longitude,
+                        photoPath = photo,
+                        // Edge provenance: "manual" when the ADJUST bracket
+                        // supplied the edges, "auto" otherwise (other measure
+                        // kinds leave the column null).
+                        captureMode = if (resultFromAdjust) "manual" else "auto",
+                    )
                 )
-            )
+            }
             // Full-measurement chain: skip the continuation dialog, go
             // straight to Height on this tree. Navigate AFTER the append
             // (this scope dies with the screen) and pop DBH so Height's

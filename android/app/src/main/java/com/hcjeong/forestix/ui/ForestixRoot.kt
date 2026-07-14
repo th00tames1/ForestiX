@@ -29,6 +29,9 @@ import com.hcjeong.forestix.ui.screens.SettingsScreen
 import com.hcjeong.forestix.ui.screens.TimberCruisingHubScreen
 import com.hcjeong.forestix.ui.screens.TreeMeasurementHubScreen
 import com.hcjeong.forestix.ui.screens.boundary.ARBoundaryScreen
+import com.hcjeong.forestix.ui.screens.cruise.CruiseMapScreen
+import com.hcjeong.forestix.ui.screens.cruise.CruiseRoutes
+import com.hcjeong.forestix.ui.screens.cruise.CruiseStartPlotScreen
 import com.hcjeong.forestix.ui.screens.dbh.DBHScanScreen
 import com.hcjeong.forestix.ui.screens.height.HeightScanScreen
 import com.hcjeong.forestix.ui.screens.nav.NavigationScreen
@@ -77,6 +80,11 @@ object Routes {
     const val PROJECTS = "projects"
     const val RECON_CRUISE = "reconCruise"
     const val REFERENCE_LIBRARY = "referenceLibrary"
+
+    /// v3 cruise mode — the map home's Cruise circle enters here (the old
+    /// TimberCruisingHub stays reachable via the cruise project sheet's
+    /// "Classic view" row until Phase B).
+    const val CRUISE_MAP = "cruiseMap"
 }
 
 /// Required-string route argument; screens behind these routes are only
@@ -109,6 +117,13 @@ fun ForestixRoot() {
         composable(Routes.SAMPLING) { SamplingPlotScreen(nav) }
         composable(Routes.SETTINGS) { SettingsScreen(nav) }
         composable(Routes.CALIBRATION) { CalibrationScreen(nav) }
+
+        // MARK: - Cruise mode (v3 redesign: the map IS the cruise)
+
+        composable(Routes.CRUISE_MAP) { CruiseMapScreen(nav) }
+        composable(CruiseRoutes.START_PLOT) { back ->
+            CruiseStartPlotScreen(nav, back.arg("projectId"))
+        }
 
         // MARK: - Timber-cruising hub tiles
 

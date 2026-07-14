@@ -59,6 +59,7 @@ import com.hcjeong.forestix.sensors.HeightResult
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hcjeong.forestix.ui.PendingTreeNumber
 import com.hcjeong.forestix.ui.Routes
+import com.hcjeong.forestix.ui.screens.cruise.CruiseCapture
 import com.hcjeong.forestix.ui.screens.ContinuationAction
 import com.hcjeong.forestix.ui.screens.ContinuationOrigin
 import com.hcjeong.forestix.ui.screens.MeasurementContinuationSheet
@@ -310,6 +311,10 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     // (iOS submitManualEntry goes straight to .accepted).
     fun acceptResult(r: HeightResult) {
         val activity = context as? android.app.Activity
+        // Cruise tally session (v3): the height leg folds into the Tree row
+        // the DBH leg created, then the chain returns to the cruise map —
+        // no quick-history entry, no continuation sheet.
+        val cruise = CruiseCapture.target
         scope.launch {
             // Chrome-less snapshot: hide the 2D chrome, give Compose one
             // committed frame, capture, then restore.
@@ -321,22 +326,31 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 name
             }
             val fix = com.hcjeong.forestix.positioning.LocationService.lastGlobalFix
-            env.history.append(
-                QuickMeasureEntry(
-                    kind = MeasureKind.HEIGHT, value = r.heightM.toDouble(),
-                    sigma = r.sigmaHm.toDouble(), confidenceRaw = r.confidence.raw,
-                    method = r.method.raw, treeNumber = pendingTree,
-                    plotID = env.history.activePlotID.value,
-                    speciesCode = metaSpecies,
-                    damageCodes = metaDamage,
-                    note = metaNote.ifBlank { null },
-                    latitude = fix?.latitude,
-                    longitude = fix?.longitude,
-                    photoPath = photo,
+            if (cruise != null) {
+                // Storage failure must not crash the AR screen — the tree
+                // keeps its DBH-only row from the first leg either way.
+                runCatching { CruiseCapture.recordHeight(env, r, photoPath = photo, fix = fix) }
+                // Back to CruiseMapScreen (the chain popped DBH already);
+                // the new tree pin appears and the tally pill ticks up.
+                nav.popBackStack()
+            } else {
+                env.history.append(
+                    QuickMeasureEntry(
+                        kind = MeasureKind.HEIGHT, value = r.heightM.toDouble(),
+                        sigma = r.sigmaHm.toDouble(), confidenceRaw = r.confidence.raw,
+                        method = r.method.raw, treeNumber = pendingTree,
+                        plotID = env.history.activePlotID.value,
+                        speciesCode = metaSpecies,
+                        damageCodes = metaDamage,
+                        note = metaNote.ifBlank { null },
+                        latitude = fix?.latitude,
+                        longitude = fix?.longitude,
+                        photoPath = photo,
+                    )
                 )
-            )
+            }
         }
-        if (crownStep == CrownStep.DONE) {
+        if (cruise == null && crownStep == CrownStep.DONE) {
             val w = crownW; val ch = crownH
             if (w != null && ch != null) {
                 env.history.append(
@@ -348,7 +362,7 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 )
             }
         }
-        continuationTree = pendingTree
+        if (cruise == null) continuationTree = pendingTree
         if (settings.developerMode) {
             val fields = mutableMapOf(
                 "measure_type" to "height",

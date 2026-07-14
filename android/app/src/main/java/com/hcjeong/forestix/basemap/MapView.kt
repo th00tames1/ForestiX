@@ -53,8 +53,10 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.asAndroidPath
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.drawscope.rotate
@@ -97,8 +99,11 @@ data class MapPolygonOverlay(
 
 /// How a MapMarker renders. DOT is the original plot-map style (small
 /// circle, halo label above); PIN is the map-home teardrop from the mock —
-/// 30 dp drop with the title inside and badge chips ("D"/"H"/"C") beneath.
-enum class MapMarkerShape { DOT, PIN }
+/// 30 dp drop with the title inside and badge chips ("D"/"H"/"C") beneath;
+/// RING is the cruise-mode plot marker (v3 mock `.plotpin .ringdot`) — a
+/// ~30 dp hollow circle CENTRE-anchored on the coordinate, title inside in
+/// the tint, `dashed` stroke for planned-plot styling.
+enum class MapMarkerShape { DOT, PIN, RING }
 
 /// A labelled point, the analogue of `Marker("#5", coordinate:).tint(...)`.
 /// `id` is echoed back through MapView's onMarkerTap when the user taps
@@ -111,8 +116,11 @@ data class MapMarker(
     val shape: MapMarkerShape = MapMarkerShape.DOT,
     /// Small mono chips drawn under a PIN ("D"/"H"/"C" in the mock).
     val badges: List<String> = emptyList(),
-    /// PIN only: soft tint halo around the drop (mock `.pin.sel`).
+    /// PIN/RING: soft tint halo around the body (mock `.pin.sel`/`.plotpin.sel`).
     val selected: Boolean = false,
+    /// RING only: dashed stroke — the v3 planned-plot style
+    /// (mock `.plotpin.planned`).
+    val dashed: Boolean = false,
 )
 
 // MARK: - Camera state (map home / offline downloader)
@@ -579,32 +587,85 @@ fun MapView(
                         // Badge chips — bottom row of the block, sitting on
                         // the coordinate (mock `.pin .badges`).
                         if (hasBadges) {
+                            drawBadgeRow(
+                                marker, pt, chipH, badgeFm, badgeText, badgeFill, badgeStroke,
+                                textColor = colors.textSecondary.toArgb(),
+                                fillColor = colors.surface.toArgb(),
+                                strokeColor = colors.divider.toArgb(),
+                            )
+                        }
+                    }
+
+                    MapMarkerShape.RING -> {
+                        // Cruise plot marker (v3 mock `.plotpin .ringdot`):
+                        // a 34 dp hollow circle CENTRE-anchored on the
+                        // coordinate — 3 dp tint ring over a surface disc,
+                        // title inside in the tint. `dashed` = planned.
+                        val radius = 17.dp.toPx()
+                        // box-shadow: 0 2px 8px rgba(0,0,0,.25) analogue.
+                        drawIntoCanvas { canvas ->
+                            canvas.nativeCanvas.drawCircle(
+                                pt.x, pt.y + 2.dp.toPx(), radius, pinShadow)
+                        }
+                        if (marker.selected) {
+                            // Mock `.plotpin.sel`: 3-wide soft-tint outline
+                            // 2 dp outside the ring.
+                            drawCircle(
+                                color = marker.tint.copy(alpha = 0.28f),
+                                radius = radius + 3.5.dp.toPx(),
+                                center = pt,
+                                style = Stroke(width = 3.dp.toPx()),
+                            )
+                        }
+                        drawCircle(
+                            color = if (marker.dashed) {
+                                colors.surface.copy(alpha = 0.8f)
+                            } else {
+                                colors.surface
+                            },
+                            radius = radius,
+                            center = pt,
+                        )
+                        drawCircle(
+                            color = marker.tint,
+                            radius = radius,
+                            center = pt,
+                            style = Stroke(
+                                width = 3.dp.toPx(),
+                                pathEffect = if (marker.dashed) {
+                                    PathEffect.dashPathEffect(
+                                        floatArrayOf(4.dp.toPx(), 3.dp.toPx()))
+                                } else {
+                                    null
+                                },
+                            ),
+                        )
+                        marker.title?.let { title ->
                             drawIntoCanvas { canvas ->
-                                badgeText.color = colors.textSecondary.toArgb()
-                                badgeFill.color = colors.surface.toArgb()
-                                badgeStroke.color = colors.divider.toArgb()
-                                badgeStroke.strokeWidth = 1f * density
-                                val padH = 4.dp.toPx()
-                                val gap = 2.dp.toPx()
-                                val corner = 3.dp.toPx()
-                                val widths = marker.badges.map { badgeText.measureText(it) + padH * 2 }
-                                var x = pt.x - (widths.sum() + gap * (marker.badges.size - 1)) / 2f
-                                val top = pt.y - chipH
-                                marker.badges.forEachIndexed { i, badge ->
-                                    val w = widths[i]
-                                    canvas.nativeCanvas.drawRoundRect(
-                                        x, top, x + w, top + chipH, corner, corner, badgeFill)
-                                    canvas.nativeCanvas.drawRoundRect(
-                                        x, top, x + w, top + chipH, corner, corner, badgeStroke)
-                                    canvas.nativeCanvas.drawText(
-                                        badge,
-                                        x + w / 2f,
-                                        top + chipH / 2f - (badgeFm.ascent + badgeFm.descent) / 2f,
-                                        badgeText,
-                                    )
-                                    x += w + gap
-                                }
+                                pinLabel.textSize = 10.5f * density
+                                pinLabel.color = marker.tint.toArgb()
+                                val fm = pinLabel.fontMetrics
+                                canvas.nativeCanvas.drawText(
+                                    title,
+                                    pt.x,
+                                    pt.y - (fm.ascent + fm.descent) / 2f,
+                                    pinLabel,
+                                )
                             }
+                        }
+                        // Badge chips (e.g. tree tally) — below the ring.
+                        if (marker.badges.isNotEmpty()) {
+                            badgeText.textSize = 8.5f * density
+                            val badgeFm2 = badgeText.fontMetrics
+                            val chipH2 = (badgeFm2.descent - badgeFm2.ascent) + 2f * density
+                            drawBadgeRow(
+                                marker,
+                                Offset(pt.x, pt.y + radius + 3.dp.toPx() + chipH2),
+                                chipH2, badgeFm2, badgeText, badgeFill, badgeStroke,
+                                textColor = colors.textSecondary.toArgb(),
+                                fillColor = colors.surface.toArgb(),
+                                strokeColor = colors.divider.toArgb(),
+                            )
                         }
                     }
                 }
@@ -640,6 +701,50 @@ fun MapView(
                     .align(Alignment.BottomEnd)
                     .padding(ForestixSpace.xs),
             )
+        }
+    }
+}
+
+/// One bottom-anchored row of badge chips ("D"/"H" under a PIN, tallies
+/// under a RING): `anchor.y` is the row's BOTTOM edge and the row centres
+/// horizontally on `anchor.x`. The shared marker paints are (re)coloured
+/// here so both call sites stay in lockstep.
+private fun DrawScope.drawBadgeRow(
+    marker: MapMarker,
+    anchor: Offset,
+    chipH: Float,
+    fm: Paint.FontMetrics,
+    text: Paint,
+    fill: Paint,
+    stroke: Paint,
+    textColor: Int,
+    fillColor: Int,
+    strokeColor: Int,
+) {
+    drawIntoCanvas { canvas ->
+        text.color = textColor
+        fill.color = fillColor
+        stroke.color = strokeColor
+        stroke.strokeWidth = 1.dp.toPx()
+        val padH = 4.dp.toPx()
+        val gap = 2.dp.toPx()
+        val corner = 3.dp.toPx()
+        val widths = marker.badges.map { text.measureText(it) + padH * 2 }
+        var x = anchor.x - (widths.sum() + gap * (marker.badges.size - 1)) / 2f
+        val top = anchor.y - chipH
+        marker.badges.forEachIndexed { i, badge ->
+            val w = widths[i]
+            canvas.nativeCanvas.drawRoundRect(
+                x, top, x + w, top + chipH, corner, corner, fill)
+            canvas.nativeCanvas.drawRoundRect(
+                x, top, x + w, top + chipH, corner, corner, stroke)
+            canvas.nativeCanvas.drawText(
+                badge,
+                x + w / 2f,
+                top + chipH / 2f - (fm.ascent + fm.descent) / 2f,
+                text,
+            )
+            x += w + gap
         }
     }
 }

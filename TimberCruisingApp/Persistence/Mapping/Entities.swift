@@ -123,6 +123,10 @@ public final class TreeEntity: NSManagedObject {
     @NSManaged public var createdAt: Date
     @NSManaged public var updatedAt: Date
     @NSManaged public var deletedAt: Date?
+
+    // Model v2 — GPS fix captured at Accept (cruise map pins).
+    @NSManaged public var latitude: NSNumber?
+    @NSManaged public var longitude: NSNumber?
 }
 
 @objc(SpeciesConfigEntity)

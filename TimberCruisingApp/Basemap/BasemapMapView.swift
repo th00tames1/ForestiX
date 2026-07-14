@@ -76,25 +76,43 @@ public struct BasemapRegion: Equatable, Sendable {
 
 // MARK: - Marker
 
-/// One teardrop pin. `badge` renders as one small chip per character
-/// ("DH" → [D][H]) — the mock's measurement-kind badges under the dot.
+/// One map marker. The default `.teardrop` is the tree pin from the v2
+/// mock; `badge` renders as one small chip per character ("DH" →
+/// [D][H]) — the mock's measurement-kind badges under the dot.
+///
+/// v3 (cruise mode) adds `.ring` — the plot ring marker: a hollow
+/// 34 pt circle centred ON the coordinate (not bottom-anchored),
+/// stroked and labelled in `tint`. `dashed: true` is the "planned"
+/// style (hollow dashed); solid rings read active/done purely through
+/// the tint the host passes (accent = active, ok-green = done).
 public struct BasemapMarker: Identifiable, Equatable {
+
+    public enum Shape: Equatable, Sendable {
+        /// Bottom-anchored teardrop pin (tree).
+        case teardrop
+        /// Centre-anchored hollow ring (cruise plot).
+        case ring(dashed: Bool)
+    }
+
     public let id: String
     public let latitude: Double
     public let longitude: Double
-    /// Short label inside the dot, e.g. "T3".
+    /// Short label inside the dot, e.g. "T3" (or "P2" on a ring).
     public let title: String
     public let tint: Color
     public let badge: String?
+    public let shape: Shape
 
     public init(id: String, latitude: Double, longitude: Double,
-                title: String, tint: Color, badge: String? = nil) {
+                title: String, tint: Color, badge: String? = nil,
+                shape: Shape = .teardrop) {
         self.id = id
         self.latitude = latitude
         self.longitude = longitude
         self.title = title
         self.tint = tint
         self.badge = badge
+        self.shape = shape
     }
 }
 
@@ -617,12 +635,22 @@ public struct BasemapMapView: View {
         return CGPoint(x: x, y: y)
     }
 
-    /// The pin is bottom-anchored at its coordinate (dot above, badges
-    /// at the anchor — the mock's translate(-50%, -100%)). `.position`
-    /// centres, so shift up by half the pin's height.
+    /// The teardrop is bottom-anchored at its coordinate (dot above,
+    /// badges at the anchor — the mock's translate(-50%, -100%)).
+    /// `.position` centres, so shift up by half the pin's height.
+    ///
+    /// A ring is CENTRE-anchored (the mock's translate(-50%, -50%)):
+    /// with no badge the offset is zero; with a badge hanging below,
+    /// shift down so the ring circle itself stays on the coordinate
+    /// (ring 34 + 3 gap + ~13 badge ⇒ offset = 17 − height/2 = −8).
     private func markerAnchorOffset(_ marker: BasemapMarker) -> CGFloat {
         let hasBadge = !(marker.badge ?? "").isEmpty
-        return (hasBadge ? 48 : 30) / 2
+        switch marker.shape {
+        case .teardrop:
+            return (hasBadge ? 48 : 30) / 2
+        case .ring:
+            return hasBadge ? -8 : 0
+        }
     }
 
     /// Teardrop from the mock: rounded square with one sharp corner,
@@ -642,42 +670,23 @@ public struct BasemapMapView: View {
             onMarkerTap(marker.id)
         } label: {
             VStack(spacing: 3) {
-                ZStack {
-                    if marker.id == selectedMarkerID {
-                        // Mock `.pin.sel` — soft outline following the
-                        // teardrop shape itself.
-                        teardrop()
-                            .stroke(style.selectionHalo, lineWidth: 3)
-                            .rotationEffect(.degrees(-45))
-                    }
-                    teardrop()
-                        .fill(marker.tint)
-                        .overlay(teardrop().stroke(style.pinStroke, lineWidth: 2.5))
-                        .rotationEffect(.degrees(-45))
-                        .shadow(color: Color.black.opacity(0.3), radius: 4, y: 2)
-                    Text(marker.title)
-                        .font(.system(size: 10.5, weight: .heavy, design: .monospaced))
-                        .foregroundStyle(style.pinInk)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.6)
+                switch marker.shape {
+                case .teardrop: teardropHead(marker)
+                case .ring(let dashed): ringHead(marker, dashed: dashed)
                 }
-                .frame(width: 30, height: 30)
 
                 if let badge = marker.badge, !badge.isEmpty {
-                    HStack(spacing: 2) {
-                        ForEach(Array(badge.enumerated()), id: \.offset) { _, letter in
-                            Text(String(letter))
-                                .font(.system(size: 8.5, weight: .bold, design: .monospaced))
-                                .foregroundStyle(style.badgeText)
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 3)
-                                        .fill(style.badgeBackground))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 3)
-                                        .stroke(style.badgeBorder, lineWidth: 1))
+                    switch marker.shape {
+                    case .teardrop:
+                        // One chip per character — the D/H/C badges.
+                        HStack(spacing: 2) {
+                            ForEach(Array(badge.enumerated()), id: \.offset) { _, letter in
+                                badgeChip(String(letter))
+                            }
                         }
+                    case .ring:
+                        // Whole-string chip (e.g. a tally count).
+                        badgeChip(badge)
                     }
                 }
             }
@@ -687,6 +696,69 @@ public struct BasemapMapView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Map pin \(marker.title)")
+    }
+
+    private func teardropHead(_ marker: BasemapMarker) -> some View {
+        ZStack {
+            if marker.id == selectedMarkerID {
+                // Mock `.pin.sel` — soft outline following the
+                // teardrop shape itself.
+                teardrop()
+                    .stroke(style.selectionHalo, lineWidth: 3)
+                    .rotationEffect(.degrees(-45))
+            }
+            teardrop()
+                .fill(marker.tint)
+                .overlay(teardrop().stroke(style.pinStroke, lineWidth: 2.5))
+                .rotationEffect(.degrees(-45))
+                .shadow(color: Color.black.opacity(0.3), radius: 4, y: 2)
+            Text(marker.title)
+                .font(.system(size: 10.5, weight: .heavy, design: .monospaced))
+                .foregroundStyle(style.pinInk)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+        }
+        .frame(width: 30, height: 30)
+    }
+
+    /// Plot ring (v3 mock `.plotpin .ringdot`): hollow 34 pt circle,
+    /// border + label in the marker tint, surface-coloured fill (a bit
+    /// translucent for the dashed "planned" style).
+    private func ringHead(_ marker: BasemapMarker, dashed: Bool) -> some View {
+        ZStack {
+            if marker.id == selectedMarkerID {
+                Circle()
+                    .stroke(style.selectionHalo, lineWidth: 3)
+                    .frame(width: 42, height: 42)
+            }
+            Circle()
+                .fill(style.badgeBackground.opacity(dashed ? 0.8 : 1))
+                .shadow(color: Color.black.opacity(0.25), radius: 4, y: 2)
+            Circle()
+                .stroke(marker.tint,
+                        style: StrokeStyle(lineWidth: 3,
+                                           dash: dashed ? [4, 3] : []))
+            Text(marker.title)
+                .font(.system(size: 10.5, weight: .heavy, design: .monospaced))
+                .foregroundStyle(marker.tint)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+        }
+        .frame(width: 34, height: 34)
+    }
+
+    private func badgeChip(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+            .foregroundStyle(style.badgeText)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 1)
+            .background(
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(style.badgeBackground))
+            .overlay(
+                RoundedRectangle(cornerRadius: 3)
+                    .stroke(style.badgeBorder, lineWidth: 1))
     }
 
     private var youDot: some View {

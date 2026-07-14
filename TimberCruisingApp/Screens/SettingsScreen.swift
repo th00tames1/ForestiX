@@ -43,6 +43,7 @@ public struct SettingsScreen: View {
             // on AppSettings is preserved for back-compat but the
             // Settings UI doesn't expose it any more.
             regionSection
+            appearanceSection
             unitsSection
             logRuleSection
             developerSection
@@ -148,6 +149,24 @@ public struct SettingsScreen: View {
                 }
             }
             .accessibilityIdentifier("settings.region")
+        }
+    }
+
+    // LOCKED strings/placement (Android matches): "Light" | "Dark"
+    // segmented control, right after Region, no footer. Replaces the
+    // retired sun/moon button on the map's top row.
+    private var appearanceSection: some View {
+        Section(header: Text("Appearance")) {
+            Picker("Appearance",
+                   selection: Binding(
+                    get: { settings.appearance },
+                    set: { settings.appearance = $0 })
+            ) {
+                Text("Light").tag("light")
+                Text("Dark").tag("dark")
+            }
+            .pickerStyle(.segmented)
+            .accessibilityIdentifier("settings.appearance")
         }
     }
 

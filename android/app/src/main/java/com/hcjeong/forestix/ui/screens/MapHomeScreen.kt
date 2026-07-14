@@ -44,12 +44,14 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -58,7 +60,6 @@ import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CenterFocusWeak
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Height
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Layers
@@ -66,7 +67,6 @@ import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Park
 import androidx.compose.material.icons.filled.Straighten
 import androidx.compose.material.icons.filled.SwapHoriz
-import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -89,9 +89,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -381,11 +383,6 @@ fun MapHomeScreen(nav: NavController) {
                     }
                 }
                 RoundChromeButton(Icons.Filled.Layers, "Basemap layers") { offlineOpen = true }
-                val dark = settings.appearance == "dark"
-                RoundChromeButton(
-                    icon = if (dark) Icons.Filled.WbSunny else Icons.Filled.DarkMode,
-                    contentDescription = if (dark) "Switch to light appearance" else "Switch to dark appearance",
-                ) { env.settings.setAppearance(if (dark) "light" else "dark") }
             }
         }
 
@@ -397,9 +394,10 @@ fun MapHomeScreen(nav: NavController) {
 
         // MARK: - Bottom: action cluster ①, or peek card ② when a pin is up.
         // Both slide/fade over 0.18 s ease-out like the iOS transitions; the
-        // MODE flip crossfades the whole region over the same 0.18 s ease-out
-        // (the side circles land on identical pixels, so only the toggle's
-        // icon/caption and the (+) visibly swap).
+        // MODE flip crossfades the whole region over the same 0.18 s ease-out.
+        // Both modes' clusters are built on the same fixed ClusterSlots
+        // geometry, so every circle lands on identical pixels and only the
+        // glyphs, fills and caption pills visibly swap.
 
         // Keep the last selected pin so the card's exit animation has data.
         var lastPin by remember { mutableStateOf<TreePin?>(null) }
@@ -828,6 +826,27 @@ internal fun RoundChromeButton(
 
 // MARK: - Bottom action cluster (mock `.actioncluster`) -----------------------
 
+/// Fixed slot geometry shared by BOTH mode clusters (v3.1). Every circle's
+/// frame derives ONLY from these constants — captions and pills render as
+/// NON-MEASURING decoration (fixed-width slots with centre-overflow, a
+/// reserved tally zone, a halo painted outside its slot) — so the MEASURE
+/// and CRUISE clusters measure pixel-identically and the mode flip
+/// crossfades in place instead of re-centring the row (iOS parity).
+internal object ClusterSlots {
+    /// Side-circle Ø = its slot width.
+    val side = 54.dp
+    /// (+) circle Ø = its slot width in BOTH modes (the cruise scoped halo
+    /// DRAWS outside this slot rather than enlarging it — the Android twin
+    /// of the iOS negative-inset overlay).
+    val capture = 74.dp
+    /// Gap between the three slots.
+    val gap = 26.dp
+    /// Reserved zone above the (+) where the cruise tally pill floats —
+    /// same height when empty (measure mode / no active plot) so the
+    /// pill's arrival can never resize or shift the cluster.
+    val tallyZone = 48.dp
+}
+
 @Composable
 private fun ActionCluster(
     modifier: Modifier = Modifier,
@@ -839,33 +858,84 @@ private fun ActionCluster(
     Row(
         modifier,
         verticalAlignment = Alignment.Bottom,
-        horizontalArrangement = Arrangement.spacedBy(26.dp),
+        horizontalArrangement = Arrangement.spacedBy(ClusterSlots.gap),
     ) {
         // v3.1: the left circle is the MODE TOGGLE showing the CURRENT mode
-        // — tree icon + "MEASURE" here; hollow ring + "CRUISE" in cruise
-        // mode (CruiseModeContent's cluster). Tap flips the map in place.
+        // — tree icon + "MEASURE" here; plot-centre target + "CRUISE" in
+        // cruise mode (CruiseModeContent's cluster). Tap flips the map in
+        // place.
         SideCircleButton("Measure", Icons.Filled.Park, onClick = onToggleMode)
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Box(
-                Modifier
-                    .size(74.dp)
-                    .pressableNoRipple(onClick = onMeasure)
-                    .softDropShadow(Color.Black.copy(alpha = 0.28f), 10.dp, 6.dp)
-                    .clip(CircleShape)
-                    .background(colors.primary)
-                    .border(4.dp, colors.surface, CircleShape),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    Icons.Filled.Add,
-                    contentDescription = "New measurement",
-                    tint = MaterialTheme.colorScheme.onPrimary,
-                    modifier = Modifier.size(30.dp),
-                )
-            }
-            ClusterLabel("Measure", gap = 6.dp)
-        }
+        CaptureColumn(
+            caption = "Measure",
+            contentDescription = "New measurement",
+            fill = colors.primary,
+            ink = MaterialTheme.colorScheme.onPrimary,
+            onClick = onMeasure,
+        )
         SideCircleButton("Log", Icons.AutoMirrored.Filled.List, onClick = onLog)
+    }
+}
+
+/// The centre capture column, geometry-invariant across modes: reserved
+/// tally zone (fixed height; the cruise pill renders inside it as
+/// unbounded-width overflow), the 74 dp (+) slot (the accent-scoped halo
+/// paints OUTSIDE the slot via drawBehind, mock `.capture.scoped`), and
+/// the caption pill centre-overflowing the slot width. Nothing
+/// mode-dependent is ever measured, so the (+) occupies identical screen
+/// pixels in measure and cruise mode by construction.
+/// Internal: the cruise-mode cluster reuses it for its exact positions.
+@Composable
+internal fun CaptureColumn(
+    caption: String,
+    contentDescription: String,
+    fill: Color,
+    ink: Color,
+    haloed: Boolean = false,
+    tallyPill: (@Composable () -> Unit)? = null,
+    onClick: () -> Unit,
+) {
+    val colors = Forestix.colors
+    val accent = colors.accent
+    Column(
+        Modifier.width(ClusterSlots.capture),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Box(
+            Modifier.height(ClusterSlots.tallyZone).fillMaxWidth(),
+            contentAlignment = Alignment.BottomCenter,
+        ) {
+            if (tallyPill != null) tallyPill()
+        }
+        Box(
+            Modifier
+                .size(ClusterSlots.capture)
+                // Accent-scoped outline while a plot is active — same ring
+                // as the retired 82 dp wrapper box (stroke centreline at
+                // slot radius + 3.25 dp), now layout-neutral.
+                .drawBehind {
+                    if (haloed) {
+                        drawCircle(
+                            color = accent,
+                            radius = size.minDimension / 2f + 3.25.dp.toPx(),
+                            style = Stroke(width = 1.5.dp.toPx()),
+                        )
+                    }
+                }
+                .pressableNoRipple(onClick = onClick)
+                .softDropShadow(Color.Black.copy(alpha = 0.28f), 10.dp, 6.dp)
+                .clip(CircleShape)
+                .background(fill)
+                .border(4.dp, colors.surface, CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Filled.Add,
+                contentDescription = contentDescription,
+                tint = ink,
+                modifier = Modifier.size(30.dp),
+            )
+        }
+        ClusterLabel(caption, gap = 6.dp)
     }
 }
 
@@ -880,10 +950,15 @@ internal fun SideCircleButton(
     onClick: () -> Unit,
 ) {
     val colors = Forestix.colors
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(
+        // Fixed slot: the caption pill centre-overflows this width, so
+        // "MEASURE" vs "CRUISE" can never re-measure the cluster.
+        Modifier.width(ClusterSlots.side),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
         Box(
             Modifier
-                .size(54.dp)
+                .size(ClusterSlots.side)
                 .pressableNoRipple(onClick = onClick)
                 .softDropShadow(Color.Black.copy(alpha = 0.18f), 6.dp, 3.dp)
                 .clip(CircleShape)
@@ -914,8 +989,15 @@ internal fun ClusterLabel(label: String, gap: Dp) {
         style = Forestix.type.dataSmall.copy(
             fontSize = 10.5.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.6.sp),
         color = Color(0xFFF2F5F3),
+        maxLines = 1,
+        softWrap = false,
         modifier = Modifier
             .padding(top = gap)
+            // Centre-overflow: the pill measures unbounded, reports the
+            // incoming fixed-slot width, and spills symmetrically — so
+            // caption text NEVER affects the cluster's geometry (v3.1
+            // mode-invariance).
+            .wrapContentWidth(unbounded = true)
             .clip(RoundedCornerShape(5.dp))
             .background(Color(0xA606090A))
             .padding(horizontal = 8.dp, vertical = 3.dp),

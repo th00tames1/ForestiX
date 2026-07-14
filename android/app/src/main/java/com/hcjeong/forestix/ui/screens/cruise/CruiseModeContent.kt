@@ -45,6 +45,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -53,10 +54,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.List
-import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Adjust
 import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.filled.GridOn
-import androidx.compose.material.icons.outlined.Circle
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -123,7 +123,8 @@ import com.hcjeong.forestix.positioning.LocationService
 import com.hcjeong.forestix.ui.Routes
 import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.pressableNoRipple
-import com.hcjeong.forestix.ui.screens.ClusterLabel
+import com.hcjeong.forestix.ui.screens.CaptureColumn
+import com.hcjeong.forestix.ui.screens.ClusterSlots
 import com.hcjeong.forestix.ui.screens.ExportViewModel
 import com.hcjeong.forestix.ui.screens.Haptics
 import com.hcjeong.forestix.ui.screens.PeekActionButton
@@ -964,11 +965,14 @@ private fun PlannedChip() {
 
 // MARK: - Morphing (+) cluster (mock ① `.actioncluster`, v3.1 merged) ----------
 
-/// Cruise flavour of the map home's action cluster: the SAME three-slot
-/// row (mode toggle circle · 74 dp capture · Log circle, exact positions),
-/// with the toggle showing the CURRENT mode (hollow ring + "CRUISE" in the
-/// cruise accent) and the (+) morphing between "Start plot" and
-/// "Add tree · Plot N" over the LOCKED cruise-accent fill + white glyph.
+/// Cruise flavour of the map home's action cluster: the SAME three fixed
+/// ClusterSlots (mode toggle circle · 74 dp capture · Log circle — pixel
+/// positions identical to measure mode by construction), with the toggle
+/// showing the CURRENT mode (plot-centre target ◎ + "CRUISE" in the cruise
+/// accent) and the (+) morphing between "Start plot" and "Add tree ·
+/// Plot N" over the LOCKED cruise-accent fill + white glyph. The tally
+/// pill floats in the shared reserved zone; the scoped halo paints outside
+/// the slot — neither is ever measured, so nothing shifts.
 @Composable
 private fun CruiseActionCluster(
     activePlot: Plot?,
@@ -979,79 +983,64 @@ private fun CruiseActionCluster(
     onLog: () -> Unit,
 ) {
     val colors = Forestix.colors
-    val type = Forestix.type
     Row(
         modifier,
         verticalAlignment = Alignment.Bottom,
-        horizontalArrangement = Arrangement.spacedBy(26.dp),
+        horizontalArrangement = Arrangement.spacedBy(ClusterSlots.gap),
     ) {
         SideCircleButton(
-            "Cruise", Icons.Outlined.Circle,
+            "Cruise", Icons.Filled.Adjust,
             tint = colors.cruiseAccent,
             onClick = onToggleMode,
         )
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            // Tally pill — LOCKED string "N trees" (mock `.tallypill`).
-            if (activePlot != null) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(7.dp),
-                    modifier = Modifier
-                        .padding(bottom = 12.dp)
-                        .softDropShadow(Color.Black.copy(alpha = 0.14f), 10.dp, 2.dp, cornerRadius = 999.dp)
-                        .clip(RoundedCornerShape(999.dp))
-                        .background(colors.surface)
-                        .border(1.dp, colors.divider, RoundedCornerShape(999.dp))
-                        .padding(horizontal = 13.dp, vertical = 7.dp),
-                ) {
-                    Box(Modifier.size(7.dp).clip(CircleShape).background(colors.accent))
-                    Text(
-                        "$treeCount trees",
-                        style = type.dataSmall.copy(fontSize = 11.sp, fontWeight = FontWeight.Bold),
-                        color = colors.textPrimary,
-                    )
-                }
-            }
-            // 74 dp primary (+) — LOCKED cruise-accent fill + WHITE glyph;
-            // accent-scoped outline while a plot is active (mock
-            // `.capture.scoped`). Plot status colours untouched.
-            Box(
-                Modifier
-                    .size(82.dp)
-                    .then(
-                        if (activePlot != null) {
-                            Modifier.border(1.5.dp, colors.accent, CircleShape)
-                        } else {
-                            Modifier
-                        },
-                    ),
-                contentAlignment = Alignment.Center,
-            ) {
-                Box(
-                    Modifier
-                        .size(74.dp)
-                        .pressableNoRipple(onClick = onCapture)
-                        .softDropShadow(Color.Black.copy(alpha = 0.28f), 10.dp, 6.dp)
-                        .clip(CircleShape)
-                        .background(colors.cruiseAccent)
-                        .border(4.dp, colors.surface, CircleShape),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        Icons.Filled.Add,
-                        contentDescription = if (activePlot == null) "Start plot" else "Add tree",
-                        tint = Color.White,
-                        modifier = Modifier.size(30.dp),
-                    )
-                }
-            }
-            // LOCKED strings: "Start plot" / "Add tree · Plot N".
-            ClusterLabel(
-                if (activePlot == null) "Start plot" else "Add tree · Plot ${activePlot.plotNumber}",
-                gap = 6.dp,
-            )
-        }
+        // 74 dp primary (+) — LOCKED cruise-accent fill + WHITE glyph;
+        // accent-scoped outline while a plot is active (mock
+        // `.capture.scoped`). Plot status colours untouched. LOCKED
+        // strings: "Start plot" / "Add tree · Plot N".
+        CaptureColumn(
+            caption = if (activePlot == null) {
+                "Start plot"
+            } else {
+                "Add tree · Plot ${activePlot.plotNumber}"
+            },
+            contentDescription = if (activePlot == null) "Start plot" else "Add tree",
+            fill = colors.cruiseAccent,
+            ink = Color.White,
+            haloed = activePlot != null,
+            tallyPill = if (activePlot == null) null else ({ TallyPill(treeCount) }),
+            onClick = onCapture,
+        )
         SideCircleButton("Log", Icons.AutoMirrored.Filled.List, onClick = onLog)
+    }
+}
+
+/// Tally pill — LOCKED string "N trees" (mock `.tallypill`). Lives in the
+/// cluster's reserved tally zone as unbounded-width overflow, so its width
+/// (and its appearance when a plot goes active) never re-measures the
+/// cluster.
+@Composable
+private fun TallyPill(treeCount: Int) {
+    val colors = Forestix.colors
+    val type = Forestix.type
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
+        modifier = Modifier
+            .padding(bottom = 12.dp)
+            .wrapContentWidth(unbounded = true)
+            .softDropShadow(Color.Black.copy(alpha = 0.14f), 10.dp, 2.dp, cornerRadius = 999.dp)
+            .clip(RoundedCornerShape(999.dp))
+            .background(colors.surface)
+            .border(1.dp, colors.divider, RoundedCornerShape(999.dp))
+            .padding(horizontal = 13.dp, vertical = 7.dp),
+    ) {
+        Box(Modifier.size(7.dp).clip(CircleShape).background(colors.accent))
+        Text(
+            "$treeCount trees",
+            style = type.dataSmall.copy(fontSize = 11.sp, fontWeight = FontWeight.Bold),
+            color = colors.textPrimary,
+            maxLines = 1,
+        )
     }
 }
 

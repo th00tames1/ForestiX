@@ -134,6 +134,23 @@ fun SettingsScreen(nav: NavController) {
                 }
             }
 
+            // MARK: - Appearance (segmented, Light → Dark — the map home's
+            // retired sun/moon chrome button, relocated; LOCKED strings +
+            // placement, iOS parity)
+            FormSection(header = "Appearance") {
+                val appearanceOptions = listOf("light" to "Light", "dark" to "Dark")
+                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                    appearanceOptions.forEachIndexed { index, (value, label) ->
+                        SegmentedButton(
+                            selected = settings.appearance == value,
+                            onClick = { env.settings.setAppearance(value) },
+                            shape = SegmentedButtonDefaults.itemShape(
+                                index = index, count = appearanceOptions.size),
+                        ) { Text(label, style = type.caption, maxLines = 1) }
+                    }
+                }
+            }
+
             // MARK: - Units (segmented, Imperial → Metric)
             FormSection(
                 header = "Units",

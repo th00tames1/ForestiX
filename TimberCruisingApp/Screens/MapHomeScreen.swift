@@ -523,7 +523,11 @@ public struct MapHomeScreen: View {
 
     private var topChrome: some View {
         HStack(spacing: ForestixSpace.xs) {
+            // layoutPriority pins the chip at its ideal size if the row
+            // ever runs short of width — a long cruise project name
+            // truncates its own chip instead of squeezing the GPS chip.
             gpsChip
+                .layoutPriority(1)
             Spacer()
             // CRUISE chrome — the project chip floats in the same top
             // row, centred between the GPS chip (stays leading) and the
@@ -570,22 +574,6 @@ public struct MapHomeScreen: View {
             .buttonStyle(MapPressableStyle())
             .accessibilityLabel("Basemap layers")
             .accessibilityIdentifier("mapHome.layers")
-
-            // Appearance toggle — flips the saved appearance setting.
-            Button {
-                settings.appearance = settings.appearance == "dark" ? "light" : "dark"
-            } label: {
-                Image(systemName: settings.appearance == "dark" ? "sun.max.fill" : "moon.fill")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(ForestixPalette.textSecondary)
-                    .frame(width: 44, height: 44)
-                    .background(Circle().fill(ForestixPalette.surfaceRaised))
-                    .overlay(Circle().stroke(ForestixPalette.divider, lineWidth: 1))
-            }
-            .buttonStyle(MapPressableStyle())
-            .accessibilityLabel(settings.appearance == "dark"
-                ? "Switch to light appearance" : "Switch to dark appearance")
-            .accessibilityIdentifier("mapHome.appearanceToggle")
         }
         .padding(.horizontal, 14)
         .padding(.top, ForestixSpace.xs)
@@ -719,14 +707,14 @@ public struct MapHomeScreen: View {
         HStack(alignment: .bottom, spacing: 26) {
             // Mode toggle (left circle, where CRUISE used to push) —
             // shows the CURRENT mode; tapping flips it. Everything else
-            // in the cluster keeps its exact position.
+            // in the cluster keeps its exact position: the caption slots
+            // are fixed-width and the cruise-only tally pill is a
+            // non-layout overlay, so flipping the mode can never change
+            // the cluster's measured size — the (+), side circle and LOG
+            // circle sit on identical pixels in both modes.
             modeToggleCircle
 
             VStack(spacing: 6) {
-                if isCruiseMode, let plot = activePlot {
-                    tallyPill(for: plot)
-                        .padding(.bottom, 6)
-                }
                 Button {
                     if isCruiseMode {
                         cruisePrimaryAction()
@@ -765,7 +753,22 @@ public struct MapHomeScreen: View {
                                                  : "New measurement")
                 .accessibilityIdentifier(isCruiseMode ? "cruiseMap.primary"
                                                       : "mapHome.measure")
-                clusterLabel(isCruiseMode ? cruisePrimaryLabel : "Measure")
+                // Tally pill floats ABOVE the (+) as an overlay so it
+                // never participates in layout measurement — appearing
+                // (or growing to "12 trees") cannot move the cluster.
+                .overlay(alignment: .top) {
+                    if isCruiseMode, let plot = activePlot {
+                        tallyPill(for: plot)
+                            .fixedSize()
+                            // Pill bottom 12 pt above the circle — the
+                            // gap the old in-column pill had (6 pt
+                            // padding + 6 pt VStack spacing).
+                            .alignmentGuide(.top) { $0[.bottom] + 12 }
+                            .allowsHitTesting(false)
+                    }
+                }
+                clusterCaption(isCruiseMode ? cruisePrimaryLabel : "Measure",
+                               slots: ["Measure"])
             }
 
             sideCircle(label: "Log", icon: "list.bullet",
@@ -779,8 +782,8 @@ public struct MapHomeScreen: View {
 
     /// The left side-circle — same size and position the CRUISE push
     /// circle had, now the mode toggle. Shows the CURRENT mode: tree
-    /// glyph + MEASURE, hollow plot-ring glyph + CRUISE (icon tinted
-    /// with the cruise accent while cruising).
+    /// glyph + MEASURE, target-reticle glyph + CRUISE (matches Android's
+    /// Adjust icon; tinted with the cruise accent while cruising).
     private var modeToggleCircle: some View {
         VStack(spacing: 5) {
             Button {
@@ -788,7 +791,7 @@ public struct MapHomeScreen: View {
             } label: {
                 ZStack {
                     Circle().fill(ForestixPalette.surface)
-                    Image(systemName: isCruiseMode ? "smallcircle.circle" : "tree")
+                    Image(systemName: isCruiseMode ? "target" : "tree")
                         .font(.system(size: 22, weight: .medium))
                         .foregroundStyle(isCruiseMode ? ForestixPalette.cruiseAccent
                                                       : ForestixPalette.textPrimary)
@@ -801,7 +804,8 @@ public struct MapHomeScreen: View {
             .accessibilityLabel(isCruiseMode ? "Switch to measure mode"
                                              : "Switch to cruise mode")
             .accessibilityIdentifier("mapHome.modeToggle")
-            clusterLabel(isCruiseMode ? "Cruise" : "Measure")
+            clusterCaption(isCruiseMode ? "Cruise" : "Measure",
+                           slots: ["Measure", "Cruise"])
         }
     }
 
@@ -829,6 +833,22 @@ public struct MapHomeScreen: View {
             .accessibilityLabel(label)
             .accessibilityIdentifier(accessibilityID)
             clusterLabel(label)
+        }
+    }
+
+    /// Fixed-width caption slot under a cluster circle — the live
+    /// caption draws centred over hidden sizing copies of every caption
+    /// the slot can show, so swapping captions on the mode toggle never
+    /// changes the column's measured width (mode-toggle layout
+    /// invariance). Captions longer than the slot — the cruise (+)
+    /// captions, "Add tree · Plot N" — overflow it symmetrically
+    /// instead of pushing the circles apart.
+    private func clusterCaption(_ active: String, slots: [String]) -> some View {
+        ZStack {
+            ForEach(slots, id: \.self) { clusterLabel($0).hidden() }
+            clusterLabel(active)
+                .fixedSize()
+                .frame(width: 0)
         }
     }
 

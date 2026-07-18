@@ -96,15 +96,40 @@ public final class StandSummaryViewModel: ObservableObject {
             var volRows: [(String, Double)] = []
             var liveTotal = 0
 
+            // POOLED H–D fallback (no species dimension): plot-level
+            // pooled pairs (≥3) first, stand-level pooled pairs as the
+            // fallback — via the existing HDModel machinery. Persisted
+            // §7.4 per-species fits (n ≥ 8) still take precedence; the
+            // pooled fit only fills species they don't cover.
+            let treesByPlotID: [UUID: [Tree]] = Dictionary(
+                uniqueKeysWithValues: try closedPlots.map {
+                    ($0.id, try treeRepo.listByPlot($0.id, includeDeleted: false))
+                })
+            let standPairs = Self.hdPairs(treesByPlotID.values.flatMap { $0 })
+            let standFit = standPairs.count >= 3
+                ? try? HDModel.fit(observations: standPairs, minN: 3)
+                : nil
+
             for plot in closedPlots {
-                let trees = try treeRepo.listByPlot(plot.id, includeDeleted: false)
+                let trees = treesByPlotID[plot.id] ?? []
+                let plotPairs = Self.hdPairs(trees)
+                let pooled = (plotPairs.count >= 3
+                              ? try? HDModel.fit(observations: plotPairs, minN: 3)
+                              : nil) ?? standFit
+                var effectiveFits = hdFits
+                if let pooled {
+                    for code in Set(trees.map(\.speciesCode))
+                    where effectiveFits[code] == nil {
+                        effectiveFits[code] = pooled
+                    }
+                }
                 let stats = PlotStatsCalculator.compute(
                     plot: plot,
                     cruiseDesign: design,
                     trees: trees,
                     species: speciesByCode,
                     volumeEquations: volByCode,
-                    hdFits: hdFits)
+                    hdFits: effectiveFits)
                 perPlot.append((plot, stats))
                 liveTotal += stats.liveTreeCount
 
@@ -129,6 +154,16 @@ public final class StandSummaryViewModel: ObservableObject {
             errorMessage = nil
         } catch {
             errorMessage = "Load failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// Fit-eligible (DBH, height) pairs — the engine's cleaning rule
+    /// (positive DBH, height above breast height).
+    static func hdPairs(_ trees: [Tree]) -> [(dbhCm: Float, heightM: Float)] {
+        trees.compactMap { tree in
+            guard tree.deletedAt == nil, tree.dbhCm > 0,
+                  let h = tree.heightM, h > 1.3 else { return nil }
+            return (dbhCm: tree.dbhCm, heightM: h)
         }
     }
 

@@ -176,11 +176,17 @@ public struct MapHomeScreen: View {
     @State var exportShareURL: ExportShareURL?
     @State var exportErrorMessage: String?
 
-    // Cruise add-tree chain scope (parallel to the measure chain).
+    // Cruise tally-loop scope: the plot being tallied, the tree number
+    // being aimed at (auto-increments per save), and the LAST saved /
+    // scoped tree — the Undo target and the scoped-height target.
     @State var chainPlotID: UUID?
     @State var chainTreeNumber: Int = 1
     @State var chainTreeID: UUID?
-    @State var cruiseChainHeightPending = false
+
+    // Heights sheet (plot peek → "Heights · N measured") + the scoped
+    // Height request staged across its dismissal.
+    @State var heightsSheetTarget: HeightsSheetTarget?
+    @State var pendingScopedHeight: ScopedHeightRequest?
 
     // Project sheet "New project" one-time naming.
     @State var namingNewProject = false

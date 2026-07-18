@@ -23,6 +23,7 @@ import com.hcjeong.forestix.data.cruise.VolumeEquationRepository
 import com.hcjeong.forestix.inventory.HDModel
 import com.hcjeong.forestix.inventory.PlotStats
 import com.hcjeong.forestix.inventory.PlotStatsCalculator
+import com.hcjeong.forestix.inventory.PooledHeights
 import com.hcjeong.forestix.inventory.StandStat
 import com.hcjeong.forestix.inventory.StandStatsCalculator
 import com.hcjeong.forestix.inventory.VolumeEquation
@@ -110,15 +111,25 @@ class StandSummaryViewModel(
             val volRows = mutableListOf<Pair<String, Double>>()
             var liveTotal = 0
 
+            // B. Pooled (species-blind) height curve for imputing missing
+            // heights: each plot's own (DBH, H) pairs at ≥ 3, the
+            // stand-wide pool as fallback — layered BENEATH the persisted
+            // §7.4 per-species fits (which keep priority).
+            val treesByPlot = closed.associate {
+                it.id to treeRepo.listByPlot(it.id, includeDeleted = false)
+            }
+            val standPooled = PooledHeights.fit(treesByPlot.values.flatten())
+
             for (plot in closed) {
-                val trees = treeRepo.listByPlot(plot.id, includeDeleted = false)
+                val trees = treesByPlot[plot.id].orEmpty()
+                val pooled = PooledHeights.fit(trees) ?: standPooled
                 val stats = PlotStatsCalculator.compute(
                     plot = plot,
                     cruiseDesign = design,
                     trees = trees,
                     species = speciesByCode,
                     volumeEquations = volByCode,
-                    hdFits = hdFits)
+                    hdFits = PooledHeights.overlay(hdFits, pooled, trees))
                 perPlot.add(PerPlotStat(plot, stats))
                 liveTotal += stats.liveTreeCount
 

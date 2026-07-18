@@ -26,6 +26,7 @@ import com.hcjeong.forestix.inventory.HDModel
 import com.hcjeong.forestix.inventory.PlotStats
 import com.hcjeong.forestix.inventory.PlotStatsCalculator
 import com.hcjeong.forestix.inventory.PlotValidation
+import com.hcjeong.forestix.inventory.PooledHeights
 import com.hcjeong.forestix.inventory.ValidationResult
 import com.hcjeong.forestix.inventory.VolumeEquation
 import com.hcjeong.forestix.inventory.VolumeEquationFactory
@@ -123,13 +124,27 @@ class PlotSummaryViewModel(
             // Non-fatal: fall back to an empty map; live trees still aggregate
             // TPA/BA/QMD, just not volume.
         }
+        // B. Pooled (species-blind) height curve for imputing missing
+        // heights: this plot's own (DBH, H) pairs at ≥ 3, the project-wide
+        // pool as fallback — layered BENEATH the persisted §7.4
+        // per-species fits (which keep priority).
+        val pooled = PooledHeights.fit(_trees.value) ?: try {
+            val all = mutableListOf<Tree>()
+            for (p in plotRepo.listByProject(project.id)) {
+                all += treeRepo.listByPlot(p.id, includeDeleted = false)
+            }
+            PooledHeights.fit(all)
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            null
+        }
         _stats.value = PlotStatsCalculator.compute(
             plot = plot,
             cruiseDesign = design,
             trees = _trees.value,
             species = _speciesByCode.value,
             volumeEquations = volEquations,
-            hdFits = _hdFitsByProject.value)
+            hdFits = PooledHeights.overlay(_hdFitsByProject.value, pooled, _trees.value))
     }
 
     private suspend fun loadProjectHDFits() {

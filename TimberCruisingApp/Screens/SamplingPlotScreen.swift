@@ -153,11 +153,9 @@ public struct SamplingPlotScreen: View {
                 Spacer()
             }
 
-            // Right-centre capture button — hidden once the centre is
-            // placed (the tap would be a no-op; Reset is the way back).
-            if !hasPlot {
-                MeasureControlColumn(capture: placePlotIfNeeded)
-            }
+            // Top-centre instruction banner (U1) — capture-failure hints
+            // first, else the aim string while placing.
+            MeasureTopBanner(topBannerText)
 
             // Bottom-right LiDAR/AR toggle — Developer-mode research
             // control only; field mode pins LiDAR devices to the mesh
@@ -174,10 +172,17 @@ public struct SamplingPlotScreen: View {
                 }
             }
 
-            // Bottom-centre compact status panel.
+            // Bottom block (U2): the camera-app shutter sits bottom-
+            // centre while aiming (no secondaries on this screen); once
+            // the centre is placed the INSIDE/OUTSIDE value panel with
+            // Reset / Save occupies the bottom instead.
             VStack {
                 Spacer()
-                bottomPanel
+                if hasPlot {
+                    bottomPanel
+                } else {
+                    MeasureShutterRow(capture: placePlotIfNeeded)
+                }
             }
         }
         // Full-bleed AR chrome — no system nav bar; the floating back
@@ -247,29 +252,18 @@ public struct SamplingPlotScreen: View {
         .padding(.top, 68)
     }
 
-    // MARK: - Bottom panel (centred, half-width)
+    // MARK: - Bottom panel (centred, half-width; placed state only)
 
     private var bottomPanel: some View {
         MeasureStatusPanel {
-            if let reason = captureFailureReason {
-                Text(reason)
-                    .font(ForestixType.caption)
-                    .foregroundStyle(.white)
-            }
-            // Big tinted INSIDE / OUTSIDE readout once the centre is
-            // placed — a boundary state the cruiser can read at arm's
-            // length; plain body copy while still aiming.
-            if !hasPlot {
-                Text(statusTitle)
-                    .font(ForestixType.body)
-                    .foregroundStyle(.white)
-            } else {
-                Text(statusTitle)
-                    .font(ForestixType.dataLarge)
-                    .foregroundStyle(isOutside
-                                     ? ForestixPalette.confidenceBad
-                                     : ForestixPalette.confidenceOk)
-            }
+            // Big tinted INSIDE / OUTSIDE readout — a boundary state the
+            // cruiser can read at arm's length. (The pre-placement aim
+            // instruction lives in the top banner.)
+            Text(statusTitle)
+                .font(ForestixType.dataLarge)
+                .foregroundStyle(isOutside
+                                 ? ForestixPalette.confidenceBad
+                                 : ForestixPalette.confidenceOk)
             Text(distanceLine)
                 .font(ForestixType.dataSmall)
                 .foregroundStyle(.white.opacity(0.85))
@@ -277,20 +271,24 @@ public struct SamplingPlotScreen: View {
                 Button("Reset") { reset() }
                     .buttonStyle(.forestixARSecondary)
                     .frame(maxWidth: .infinity)
-                    .disabled(!hasPlot)
                 Button("Save") { savePlot() }
                     .buttonStyle(.forestixProminent)
                     .frame(maxWidth: .infinity)
-                    .disabled(!hasPlot)
                     .accessibilityIdentifier("samplingPlot.save")
             }
             .padding(.top, 2)
         }
     }
 
+    /// Guidance for the top banner: capture failures first, else the
+    /// aim instruction while no centre is placed.
+    private var topBannerText: String? {
+        if let reason = captureFailureReason { return reason }
+        return hasPlot ? nil : "Set the radius, aim at the plot centre, tap +"
+    }
+
     private var statusTitle: String {
-        if !hasPlot { return "Set the radius, aim at the plot centre, tap +" }
-        return isOutside ? "OUTSIDE — walk back inside" : "INSIDE sampling area"
+        isOutside ? "OUTSIDE — walk back inside" : "INSIDE sampling area"
     }
 
     private var distanceLine: String {

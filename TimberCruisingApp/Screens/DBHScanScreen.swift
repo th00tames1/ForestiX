@@ -113,14 +113,40 @@ public struct DBHScanScreen: View {
     /// the widget's conditional presence.
     private let cruisePlotInfo: PlotMiniMapInfo?
 
+    /// CRUISE QUICK-TALLY LOOP — when non-nil this screen is the cruise
+    /// diameter loop: each Accept saves the tree via `onAccept`, then the
+    /// screen RESETS to aiming for the next tree instead of dismissing.
+    /// The value is the tree number currently being aimed at (the host
+    /// auto-increments it after every save) and drives the "Tree 8"
+    /// target pill. Quick-measure call sites pass nothing.
+    private let tallyTreeNumber: Int?
+    /// Undo tap on the tally toast — the host deletes the just-saved
+    /// tree row (and its photo) and steps the auto number back.
+    private let onUndoTally: (() -> Void)?
+
+    /// Saved-tree toast state: number shown in "Tree 7 saved · Undo".
+    @State private var tallyToastNumber: Int?
+    /// Bumps on every toast show so the 3 s auto-hide task restarts.
+    @State private var tallyToastGeneration = 0
+
+    /// Signed metres from the camera to the active cruise plot BOUNDARY
+    /// (|camera→centre| − radius; negative = inside). Polled from the
+    /// plot's AR anchor at 0.2 s — the sampling screen's inside/outside
+    /// machinery. nil while no anchor for THIS plot is alive.
+    @State private var boundarySignedM: Double?
+
     public init(viewModel: @autoclosure @escaping () -> DBHScanViewModel,
                 onResult: @escaping (DBHResult) -> Void = { _ in },
                 onAccept: @escaping (DBHResult, ScanMetadata) -> Void = { _, _ in },
-                cruisePlotInfo: PlotMiniMapInfo? = nil) {
+                cruisePlotInfo: PlotMiniMapInfo? = nil,
+                tallyTreeNumber: Int? = nil,
+                onUndoTally: (() -> Void)? = nil) {
         _viewModel = StateObject(wrappedValue: viewModel())
         self.onResult = onResult
         self.onAccept = onAccept
         self.cruisePlotInfo = cruisePlotInfo
+        self.tallyTreeNumber = tallyTreeNumber
+        self.onUndoTally = onUndoTally
     }
 
     /// What the top-right mini-map shows: the cruise plot when the
@@ -218,13 +244,15 @@ public struct DBHScanScreen: View {
                         // Crosshair ring is now positioned by GeometryReader
                         // at exactly (centerX, midY) so the guide line
                         // passes through the centre of the ring, not above
-                        // or below it. The live preview pills sit below;
-                        // the TiltBadge sits above so the cruiser sees
-                        // device level at the same focal point as the
-                        // trunk circle they're aiming at. Both are 2D
-                        // chrome, so the Accept-time snapshot hides them
-                        // (the guide/chord/crosshair stay — they ARE the
-                        // measurement).
+                        // or below it. The TiltBadge sits above so the
+                        // cruiser sees device level at the same focal
+                        // point as the trunk circle they're aiming at.
+                        // Both are 2D chrome, so the Accept-time snapshot
+                        // hides them (the guide/chord/crosshair stay —
+                        // they ARE the measurement). The live DBH/distance
+                        // readouts moved to the value strip above the
+                        // bottom-centre shutter; only the capture-progress
+                        // pill stays under the crosshair (locked).
                         if !hidingChromeForCapture {
                             TiltBadge()
                                 .position(x: geo.size.width / 2,
@@ -235,22 +263,13 @@ public struct DBHScanScreen: View {
                         crosshairRing
                             .position(x: geo.size.width / 2,
                                       y: geo.size.height / 2)
-                        if !hidingChromeForCapture {
-                            // During the 5-frame burst the live badge slot
-                            // shows the capture-progress pill instead, so
-                            // the "is it capturing?" answer sits directly
-                            // under the crosshair the cruiser is staring at.
-                            Group {
-                                if viewModel.state == .capturing {
-                                    captureProgressPill
-                                } else {
-                                    livePreviewBadge
-                                }
-                            }
-                            .position(x: geo.size.width / 2,
-                                      y: geo.size.height / 2
-                                           + Self.crosshairOuterRadius
-                                           + 28)
+                        if !hidingChromeForCapture,
+                           viewModel.state == .capturing {
+                            captureProgressPill
+                                .position(x: geo.size.width / 2,
+                                          y: geo.size.height / 2
+                                               + Self.crosshairOuterRadius
+                                               + 28)
                         }
                     }
                 }
@@ -283,16 +302,43 @@ public struct DBHScanScreen: View {
                     Spacer()
                 }
 
+                // Cruise tally target — small top-centre pill naming the
+                // tree the loop is aiming at, updating on every save.
+                if let target = tallyTreeNumber {
+                    VStack(spacing: 0) {
+                        tallyTargetPill(target)
+                            .padding(.top, 22)
+                        Spacer()
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+
+                // Top-centre instruction banner (U1) — the stage-guidance
+                // strings moved out of the bottom panel; the orange
+                // unsupported banner travels with it.
+                MeasureTopBanner(topBannerText) {
+                    if let banner = viewModel.unsupportedBanner {
+                        bannerView(banner, tint: .orange)
+                    }
+                }
+
                 // Plot mini-map — top-right, same row as the GPS badge.
                 // Non-interactive; kept up during ADJUST (it's clear of
                 // the centre handles), hidden with the rest of the 2D
-                // chrome during the Accept snapshot blackout.
+                // chrome during the Accept snapshot blackout. The cruise
+                // border chip renders directly under the card.
                 if let info = miniMapInfo {
                     VStack(spacing: 0) {
                         HStack {
                             Spacer()
-                            PlotMiniMapWidget(info: info)
-                                .padding(.trailing, ForestixSpace.md)
+                            VStack(alignment: .trailing, spacing: 6) {
+                                PlotMiniMapWidget(info: info)
+                                if let signed = boundarySignedM,
+                                   abs(signed) <= 2.0 {
+                                    borderChip(signed)
+                                }
+                            }
+                            .padding(.trailing, ForestixSpace.md)
                         }
                         .padding(.top, 22)
                         Spacer()
@@ -300,46 +346,44 @@ public struct DBHScanScreen: View {
                 }
 
                 // Floating back button — full-bleed chrome exit (the system
-                // nav bar is hidden on the AR screens).
+                // nav bar is hidden on the AR screens). In the cruise tally
+                // loop this is also the loop exit back to the cruise map.
                 MeasureBackButtonRow()
 
-                // Right-centre "+" capture button — a fixed control shown for
-                // the whole aiming phase (the view model ignores taps until
-                // the crosshair arms / the sweep is ready), so the layout
-                // never jumps. The Type escape hatch sits directly below
-                // it, with the ADJUST entry beneath (depth method only).
-                // The AR caliper taps the trunk edges directly and hides
-                // the "+", so there Type keeps the rail slot on its own.
-                if showsCaptureButton {
-                    MeasureControlColumn(capture: onCaptureButton) {
-                        manualRailButton
-                        if showsAdjustRailButton {
-                            adjustRailButton
-                        }
-                    }
-                } else if isAiming {
-                    HStack {
-                        Spacer()
-                        manualRailButton
-                            .padding(.trailing, 18)
-                    }
-                }
-
-                // Bottom-centre status / result panel, with the Developer-mode
-                // DBH method picker (Depth / Motion / Caliper) floating 12 pt
-                // above it while aiming. Field mode always scans with the
-                // LiDAR depth path, so the picker is hidden there. While
-                // ADJUST is active, the Auto pill floats 12 pt above the
-                // panel as the way back to automatic edge-finding.
+                // Bottom block (U2): while AIMING the camera-app shutter
+                // row sits bottom-centre — Type left, Adjust right — with
+                // the live value strip directly above it. RESULT states
+                // drop the shutter and show the status/result panel
+                // exactly as before. The Developer-mode method picker and
+                // the ADJUST Auto pill float 12 pt above whichever block
+                // is present. The undo toast (cruise tally) floats above
+                // the bottom controls.
                 VStack(spacing: 12) {
                     Spacer()
-                    if settings.developerMode, isAiming {
-                        dbhMethodPicker
+                    if let saved = tallyToastNumber {
+                        tallyUndoToast(saved)
                     }
                     if adjustOverlayVisible {
                         autoPillButton
+                    } else if settings.developerMode, isAiming {
+                        dbhMethodPicker
                     }
-                    bottomPanel
+                    if isAiming {
+                        liveValueStrip
+                        MeasureShutterRow(
+                            showsShutter: showsCaptureButton,
+                            capture: onCaptureButton,
+                            leading: .init(systemImage: "keyboard",
+                                           caption: "Type") {
+                                viewModel.enterManualEntry()
+                            },
+                            trailing: showsAdjustRailButton
+                                ? .init(systemImage: "arrow.left.and.right",
+                                        caption: "Adjust") { enterAdjustMode() }
+                                : nil)
+                    } else if showsResultPanel {
+                        bottomPanel
+                    }
                 }
             }
         }
@@ -359,6 +403,30 @@ public struct DBHScanScreen: View {
                     caliperSmoother.add(Double(simd_distance(cam, hit)))
                 }
                 try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
+        // Cruise border chip — poll the camera's horizontal distance to
+        // the plot's AR anchor at the sampling screen's 0.2 s cadence
+        // (same inside/outside machinery, read not observed).
+        .task(id: cruisePlotInfo?.plotID) {
+            guard cruisePlotInfo != nil else {
+                boundarySignedM = nil
+                return
+            }
+            while !Task.isCancelled {
+                boundarySignedM = liveBoundarySignedM()
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+        }
+        // Tally toast auto-hide — 3 s per show; the generation id
+        // restarts the clock when a new save replaces the toast.
+        .task(id: tallyToastGeneration) {
+            guard tallyToastNumber != nil else { return }
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            if !Task.isCancelled {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    tallyToastNumber = nil
+                }
             }
         }
         .onAppear {
@@ -423,6 +491,22 @@ public struct DBHScanScreen: View {
                             ? "manual" : "auto")
                     onAccept(r, meta)
                     recordResearchRow(r)
+                    // CRUISE QUICK-TALLY LOOP — the host saved the tree
+                    // and auto-incremented its target; reset this screen
+                    // (scan + per-tree metadata) to aiming for the next
+                    // trunk and offer Undo. (The struct copy that built
+                    // this task still carries the just-saved number.)
+                    if let saved = tallyTreeNumber {
+                        viewModel.retake()
+                        metaSpecies = nil
+                        metaPosition = .dbh
+                        metaDamage = []
+                        metaNote = ""
+                        withAnimation(.easeOut(duration: 0.18)) {
+                            tallyToastNumber = saved
+                        }
+                        tallyToastGeneration += 1
+                    }
                 }
             }
         }
@@ -948,57 +1032,129 @@ public struct DBHScanScreen: View {
             .accessibilityIdentifier("dbhScan.capturePill")
     }
 
-    /// Two pills floating below the crosshair:
-    ///   • "DBH: 34.5 cm" + tier chip — diameter estimate (bold, primary)
-    ///   • "Distance: 1.25 m" — camera-to-stem-axis distance (dimmer)
+    /// Compact live-value strip directly above the shutter row (U2):
+    ///   • "DBH: 34.5 cm" — diameter estimate (dataLarge, primary)
+    ///   • "Distance: 1.25 m" — camera-to-stem-axis distance (dataSmall)
     /// When the fit fails the §7.1 sanity tree (red) or hasn't settled
     /// yet, the numeric pill is replaced with a status string so the
     /// cruiser never reads a value the burst would later reject. Phase
     /// 14.4 made the published preview match the burst's quality bar —
-    /// the value on screen is the value you can record.
+    /// the value on screen is the value you can record. Depth path only
+    /// (the AR caliper/motion research modes have no live preview).
     @ViewBuilder
-    private var livePreviewBadge: some View {
-        if let cm = viewModel.previewDbhCm {
-            VStack(spacing: 3) {
-                // Field fix: no tier chip on the live badge — the digit
-                // (and the lock colour on the ring/chord) is the signal;
-                // tier logic stays internal for gating + records.
-                Text("DBH: " + MeasurementFormatter.diameter(
-                    cm: cm, in: settings.unitSystem))
-                    .font(ForestixType.data)
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 8).padding(.vertical, 4)
-                    .background(Color.black.opacity(0.65))
-                    .clipShape(Capsule())
-                    .accessibilityIdentifier("dbhScan.livePreview")
-                if let d = viewModel.distanceToStemCenterM {
-                    Text("Distance: " + MeasurementFormatter.distance(
-                        m: Double(d), in: settings.unitSystem))
-                        .font(ForestixType.dataSmall)
-                        .foregroundStyle(.white.opacity(0.85))
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(Color.black.opacity(0.45))
-                        .clipShape(Capsule())
-                        .accessibilityIdentifier("dbhScan.distanceBadge")
+    private var liveValueStrip: some View {
+        if methodSource == .lidarDepth {
+            if let cm = viewModel.previewDbhCm {
+                VStack(spacing: 4) {
+                    // Field fix carried over: no tier chip on the live
+                    // value — the digit (and the lock colour on the
+                    // ring/chord) is the signal; tier logic stays
+                    // internal for gating + records.
+                    MeasureValuePill(
+                        "DBH: " + MeasurementFormatter.diameter(
+                            cm: cm, in: settings.unitSystem),
+                        large: true)
+                        .accessibilityIdentifier("dbhScan.livePreview")
+                    if let d = viewModel.distanceToStemCenterM {
+                        MeasureValuePill(
+                            "Distance: " + MeasurementFormatter.distance(
+                                m: Double(d), in: settings.unitSystem),
+                            dimmed: true)
+                            .accessibilityIdentifier("dbhScan.distanceBadge")
+                    }
                 }
+            } else if let status = viewModel.previewStatusText {
+                // Phase 19 — only the legacy partial-arc method ever sets
+                // `previewStatusText` (the chord method returns nil for
+                // unmeasurable frames instead of producing a red fit).
+                MeasureValuePill(status)
+                    .accessibilityIdentifier("dbhScan.previewStatus")
             }
-        } else if let status = viewModel.previewStatusText {
-            // Phase 19 — only the legacy partial-arc method ever sets
-            // `previewStatusText` (the chord method returns nil for
-            // unmeasurable frames instead of producing a red fit). On
-            // the chord path the badge area stays empty until the
-            // chord actually locks, which is exactly what the cruiser
-            // expects from an Arboreal-style HUD.
-            Text(status)
-                .font(ForestixType.dataSmall)
-                .foregroundStyle(.white)
-                .padding(.horizontal, 8).padding(.vertical, 4)
-                .background(Color.black.opacity(0.65))
-                .clipShape(Capsule())
-                .accessibilityIdentifier("dbhScan.previewStatus")
-        } else {
-            Color.clear.frame(height: 40)
         }
+    }
+
+    // MARK: - Cruise tally chrome (target pill, undo toast, border chip)
+
+    /// Top-centre target pill — which tree number the tally loop is
+    /// aiming at right now. Updates as the host auto-increments.
+    /// (13 semibold on black 0.55 — Android parity.)
+    private func tallyTargetPill(_ number: Int) -> some View {
+        Text("Tree \(number)")
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(Color.black.opacity(0.55), in: Capsule())
+            .overlay(Capsule().stroke(.white.opacity(0.18), lineWidth: 0.5))
+            .accessibilityIdentifier("dbhScan.tallyTarget")
+    }
+
+    /// "Tree 7 saved · Undo" — dark-glass toast above the bottom
+    /// controls for 3 s after every tally Accept; Undo is the tappable
+    /// bold segment. Metrics mirror Android's snackbar-equivalent pill.
+    private func tallyUndoToast(_ number: Int) -> some View {
+        HStack(spacing: 0) {
+            Text("Tree \(number) saved · ")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(.white)
+            Button {
+                onUndoTally?()
+                tallyToastNumber = nil
+            } label: {
+                Text("Undo")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("dbhScan.tallyUndo")
+        }
+        .padding(.leading, 14)
+        .padding(.trailing, 4)
+        .padding(.vertical, 4)
+        .background(Color.black.opacity(0.65), in: Capsule())
+        .overlay(Capsule().stroke(.white.opacity(0.18), lineWidth: 0.5))
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+        .accessibilityIdentifier("dbhScan.tallyToast")
+    }
+
+    /// Signed camera→boundary distance from the plot's AR anchor
+    /// (negative = inside the ring). Reuses the sampling screen's
+    /// horizontal-distance machinery; nil when the live anchor doesn't
+    /// belong to THIS cruise plot (app restart, other ring placed).
+    private func liveBoundarySignedM() -> Double? {
+        guard let info = cruisePlotInfo else { return nil }
+        let store = ActiveSamplingPlot.shared
+        guard let plot = store.plot,
+              store.linkedCruisePlotID == info.plotID,
+              let centre = viewModel.session.worldAnchorPosition(id: plot.anchorID),
+              let cam = viewModel.session.currentCameraWorldPosition
+        else { return nil }
+        let dx = Double(cam.x - centre.x)
+        let dz = Double(cam.z - centre.z)
+        return (dx * dx + dz * dz).squareRoot() - info.radiusM
+    }
+
+    /// Dark-glass boundary pill under the mini-map: "Border 1.3 m"
+    /// while inside within 2 m of the ring, "Outside plot" (warn tint)
+    /// while outside within 2 m. Hidden otherwise. (12 semibold on
+    /// black 0.55 — Android parity.)
+    private func borderChip(_ signedM: Double) -> some View {
+        let outside = signedM >= 0
+        return Text(outside
+                    ? "Outside plot"
+                    : String(format: "Border %.1f m", -signedM))
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(outside
+                             ? ForestixPalette.confidenceWarn
+                             : .white)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(Color.black.opacity(0.55), in: Capsule())
+            .overlay(Capsule().stroke(.white.opacity(0.18), lineWidth: 0.5))
+            .accessibilityIdentifier("dbhScan.borderChip")
     }
 
     // MARK: - AR markers
@@ -1049,13 +1205,25 @@ public struct DBHScanScreen: View {
 
     // MARK: - Bottom panel
 
+    /// RESULT states that render the bottom status/result panel (U2) —
+    /// aiming states render the shutter row instead, and `.capturing`
+    /// renders nothing at the bottom (the crosshair pill + top banner
+    /// carry the progress).
+    private var showsResultPanel: Bool {
+        switch viewModel.state {
+        case .fitted, .rejected, .manualEntry, .accepted: return true
+        default: return false
+        }
+    }
+
+    /// Guidance line for the top banner — the stage strings unchanged
+    /// (during the burst it mirrors the under-crosshair capture pill,
+    /// Android parity).
+    private var topBannerText: String? { statusText }
+
     @ViewBuilder
     private var bottomPanel: some View {
         MeasureStatusPanel {
-            if let banner = viewModel.unsupportedBanner {
-                bannerView(banner, tint: .orange)
-            }
-            statusBanner
             if let result = viewModel.result, viewModel.state != .manualEntry {
                 resultPanel(result)
             }
@@ -1066,34 +1234,12 @@ public struct DBHScanScreen: View {
         }
     }
 
-    /// Rail escape hatch for trees the sensors can't read — sits
-    /// directly below the capture "+" and opens the same typed-entry
-    /// state the old status-panel text button did. Offered for the
-    /// whole aiming phase. Caption is "Type" (typed cm entry) so it
-    /// can't be confused with the ADJUST manual edge placement below.
-    private var manualRailButton: some View {
-        MeasureCircleButton(systemImage: "keyboard", caption: "Type") {
-            viewModel.enterManualEntry()
-        }
-        .accessibilityIdentifier("dbhScan.enterManually")
-    }
-
-    /// True when the ADJUST rail button is offered: depth method only —
-    /// the bracket estimate reads the depth map, so the AR caliper /
-    /// motion developer modes never see it. Hidden while ADJUST is
-    /// already active (the Auto pill is the way back).
+    /// True when the ADJUST flank is offered: depth method only — the
+    /// bracket estimate reads the depth map, so the AR caliper / motion
+    /// developer modes never see it. Hidden while ADJUST is already
+    /// active (the Auto pill is the way back).
     private var showsAdjustRailButton: Bool {
         methodSource == .lidarDepth && !viewModel.edgeAdjustActive
-    }
-
-    /// Rail entry into ADJUST mode — manual edge placement for trunks
-    /// the automatic edge-finding struggles with.
-    private var adjustRailButton: some View {
-        MeasureCircleButton(systemImage: "arrow.left.and.right",
-                            caption: "Adjust") {
-            enterAdjustMode()
-        }
-        .accessibilityIdentifier("dbhScan.adjustEdges")
     }
 
     /// Seed the handles from the current auto edges when the fit has
@@ -1108,13 +1254,6 @@ public struct DBHScanScreen: View {
             viewModel.edgeBracketRightFraction = 0.75
         }
         viewModel.edgeAdjustActive = true
-    }
-
-    private var statusBanner: some View {
-        Text(statusText)
-            .font(.callout)
-            .foregroundStyle(.white)
-            .accessibilityIdentifier("dbhScan.statusBanner")
     }
 
     private var statusText: String {

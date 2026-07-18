@@ -62,8 +62,9 @@ import com.hcjeong.forestix.ui.screens.CenterCrosshair
 import com.hcjeong.forestix.ui.screens.CenteredText
 import com.hcjeong.forestix.ui.screens.Haptics
 import com.hcjeong.forestix.ui.screens.MeasureBackButton
-import com.hcjeong.forestix.ui.screens.MeasureControlColumn
+import com.hcjeong.forestix.ui.screens.MeasureShutterBar
 import com.hcjeong.forestix.ui.screens.MeasureStatusPanel
+import com.hcjeong.forestix.ui.screens.MeasureTopChrome
 import com.hcjeong.forestix.ui.screens.SamplingPlotMiniMap
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixProminentButton
@@ -256,21 +257,25 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String) {
         // iOS shows no plot number on the creation screen either).
         if (placed) SamplingPlotMiniMap()
 
-        if (!placed) MeasureControlColumn(onCapture = { place() })
+        // U1 — capture/save-failure hints first, else the aim guidance
+        // while placing (sampling-tool parity; the INSIDE/OUTSIDE status
+        // is a value and stays in the bottom panel).
+        MeasureTopChrome(
+            instruction = failure
+                ?: if (!placed) "Set the radius, aim at the plot centre, tap +" else null,
+        )
 
-        MeasureStatusPanel {
-            failure?.let {
-                Text(it, style = Forestix.type.caption, color = Color.White)
-            }
-            if (!placed) {
-                CenteredText("Set the radius, aim at the plot centre, tap +")
-            } else {
-                CenteredText(
-                    if (isOutside) "OUTSIDE — walk back inside" else "INSIDE plot boundary",
-                    large = true,
-                    color = if (isOutside) colors.confidenceBad else colors.confidenceOk,
-                )
-            }
+        // U2 — bottom-centre shutter while aiming for the centre.
+        if (!placed) MeasureShutterBar(onCapture = { place() })
+
+        // Placed = the RESULT state: status panel with INSIDE/OUTSIDE +
+        // distance line + Reset/Save plot, as before.
+        if (placed) MeasureStatusPanel {
+            CenteredText(
+                if (isOutside) "OUTSIDE — walk back inside" else "INSIDE plot boundary",
+                large = true,
+                color = if (isOutside) colors.confidenceBad else colors.confidenceOk,
+            )
             Text(
                 distanceFromCenter?.let {
                     String.format(Locale.US, "Centre: %.2f m · area: %.1f m²", it, Units.circleAreaM2(radiusM))
@@ -285,7 +290,7 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String) {
                 ForestixWhiteButton(
                     "Reset",
                     modifier = Modifier.weight(1f),
-                    enabled = placed && !saving,
+                    enabled = !saving,
                 ) {
                     ArSessionHub.clearPlot()
                     isOutside = false; distanceFromCenter = null
@@ -293,7 +298,7 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String) {
                 ForestixProminentButton(
                     "Save plot",
                     modifier = Modifier.weight(1f),
-                    enabled = placed && !saving,
+                    enabled = !saving,
                 ) { save() }
             }
         }

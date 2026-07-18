@@ -182,15 +182,15 @@ public struct HeightScanScreen: View {
                 // nav bar is hidden on the AR screens).
                 MeasureBackButtonRow()
 
-                // Right-centre "+" capture button — replaces the centre
-                // Anchor Here / Aim Top / Aim Base buttons. It fires the
-                // current stage's capture action. The Manual escape hatch
-                // sits directly below it during the anchor stage.
-                if hasPrimaryCapture {
-                    MeasureControlColumn(capture: primaryCapture) {
-                        if showsManualRailButton {
-                            manualRailButton
-                        }
+                // Top-centre instruction banner (U1) — the stage strings
+                // moved out of the bottom panel (the crown aim prompts
+                // live on the crosshair label); the orange anchor-failure
+                // banner travels with it (tap to clear, as before).
+                MeasureTopBanner(statusText) {
+                    if let reason = viewModel.anchorFailureReason {
+                        bannerView(reason, tint: .orange)
+                            .accessibilityIdentifier("heightScan.anchorFailureBanner")
+                            .onTapGesture { viewModel.clearAnchorFailure() }
                     }
                 }
 
@@ -209,10 +209,35 @@ public struct HeightScanScreen: View {
                     }
                 }
 
-                // Bottom-centre status / value panel.
-                VStack {
+                // Bottom block (U2): capture stages get the camera-app
+                // shutter bottom-centre — "Manual" flanks left while
+                // anchoring, Retake flanks right once a walk/aim stage
+                // (or crown capture) could need restarting — with the
+                // live walk readout as the value strip above. RESULT
+                // states drop the shutter and show the existing
+                // value/action panel.
+                VStack(spacing: 12) {
                     Spacer()
-                    bottomPanel
+                    if hasPrimaryCapture {
+                        heightValueStrip
+                        MeasureShutterRow(
+                            capture: primaryCapture,
+                            leading: showsManualFlank
+                                ? .init(systemImage: "keyboard",
+                                        caption: "Manual") {
+                                    viewModel.enterManualEntry()
+                                }
+                                : nil,
+                            trailing: showsRetakeFlank
+                                ? .init(systemImage: "arrow.counterclockwise",
+                                        caption: "Retake") {
+                                    viewModel.retake()
+                                    resetCrown()
+                                }
+                                : nil)
+                    } else if showsResultPanel {
+                        bottomPanel
+                    }
                 }
             }
         }
@@ -398,25 +423,80 @@ public struct HeightScanScreen: View {
 
     // MARK: - Bottom panel
 
-    @ViewBuilder
-    private var bottomPanel: some View {
-        MeasureStatusPanel {
-            if let reason = viewModel.anchorFailureReason {
-                bannerView(reason, tint: .orange)
-                    .accessibilityIdentifier("heightScan.anchorFailureBanner")
-                    .onTapGesture { viewModel.clearAnchorFailure() }
-            }
-            statusBanner
-            stagePanel
-            actionRow
+    /// RESULT states that render the bottom value/action panel (U2) —
+    /// capture stages render the shutter row instead. Crown-capture
+    /// steps count as capture stages (`hasPrimaryCapture` wins first).
+    private var showsResultPanel: Bool {
+        switch viewModel.state {
+        case .computed, .rejected, .manualEntry: return true
+        default: return false
         }
     }
 
-    private var statusBanner: some View {
-        Text(statusText)
-            .font(.callout)
-            .foregroundStyle(.white)
-            .accessibilityIdentifier("heightScan.statusBanner")
+    /// Crown capture in progress — the shutter drives the four corner
+    /// taps; the crosshair label carries the aim prompt.
+    private var crownActive: Bool {
+        crownStep != .none && crownStep != .done
+    }
+
+    /// Manual flanks left during the anchor stage only.
+    private var showsManualFlank: Bool {
+        showsManualRailButton && !crownActive
+    }
+
+    /// Retake flanks right once there is a measurement in progress to
+    /// restart — the walk/aim stages plus crown capture.
+    private var showsRetakeFlank: Bool {
+        if crownActive { return true }
+        switch viewModel.state {
+        case .walking, .aimTopArmed, .aimTopCaptured, .aimBaseArmed:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Live value strip above the shutter (U2): the walk stage's three
+    /// distance lines — Initial dist, Walked back (starts at 0.00), and
+    /// the primary Total distance d_h — plus the computed height while
+    /// the crown sub-flow is capturing so the value stays on screen.
+    @ViewBuilder
+    private var heightValueStrip: some View {
+        if viewModel.state == .walking {
+            VStack(spacing: 4) {
+                MeasureValuePill(
+                    "Initial dist " + MeasurementFormatter.distance(
+                        m: Double(viewModel.initialDistanceM),
+                        in: settings.unitSystem),
+                    dimmed: true)
+                MeasureValuePill(
+                    "Walked back " + MeasurementFormatter.distance(
+                        m: Double(viewModel.walkedBackMeters),
+                        in: settings.unitSystem),
+                    dimmed: true)
+                MeasureValuePill(
+                    "Total distance " + MeasurementFormatter.distance(
+                        m: Double(viewModel.dhMeters),
+                        in: settings.unitSystem),
+                    large: true)
+            }
+            .accessibilityIdentifier("heightScan.walkingReadout")
+        } else if crownActive, let r = viewModel.result {
+            // Crown capture: keep the computed height on screen while
+            // the canopy taps run.
+            MeasureValuePill(
+                MeasurementFormatter.height(m: Double(r.heightM),
+                                            in: settings.unitSystem),
+                large: true)
+        }
+    }
+
+    @ViewBuilder
+    private var bottomPanel: some View {
+        MeasureStatusPanel {
+            stagePanel
+            actionRow
+        }
     }
 
     /// True while the anchor stage's crosshair rests on a raycast hit
@@ -456,8 +536,6 @@ public struct HeightScanScreen: View {
     @ViewBuilder
     private var stagePanel: some View {
         switch viewModel.state {
-        case .walking:
-            walkingReadout
         case .computed:
             if let r = viewModel.result { resultPanel(r) }
             crownSection
@@ -498,33 +576,6 @@ public struct HeightScanScreen: View {
         case .bottom: return "Crown: aim at the LOWEST branch, tap +"
         default:      return ""
         }
-    }
-
-    /// Walk-stage panel: the anchoring distance frozen at capture, the
-    /// camera displacement since capture (starts at 0.00 — the old
-    /// single-line readout initialised at the full camera→anchor
-    /// distance, which read as "walked back 2 m" before the cruiser had
-    /// moved), and the current camera→anchor distance d_h as the primary
-    /// line. Field fix: the amber target/sweet-spot hint is gone — the
-    /// walking stage shows ONLY these three lines plus the stage
-    /// instruction in the status banner.
-    private var walkingReadout: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Initial dist " + MeasurementFormatter.distance(
-                m: Double(viewModel.initialDistanceM), in: settings.unitSystem))
-                .font(ForestixType.dataSmall)
-                .foregroundStyle(.white.opacity(0.75))
-            Text("Walked back " + MeasurementFormatter.distance(
-                m: Double(viewModel.walkedBackMeters), in: settings.unitSystem))
-                .font(ForestixType.dataSmall)
-                .foregroundStyle(.white.opacity(0.75))
-            Text("Total distance " + MeasurementFormatter.distance(
-                m: Double(viewModel.dhMeters), in: settings.unitSystem))
-                .font(ForestixType.dataLarge)
-                .foregroundStyle(.white)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityIdentifier("heightScan.walkingReadout")
     }
 
     @ViewBuilder
@@ -794,25 +845,12 @@ public struct HeightScanScreen: View {
         }
     }
 
-    /// Rail escape hatch for trees the sensors can't read — sits
-    /// directly below the capture "+" and opens the same manual-entry
-    /// state the old status-panel button did.
-    private var manualRailButton: some View {
-        MeasureCircleButton(systemImage: "keyboard", caption: "Manual") {
-            viewModel.enterManualEntry()
-        }
-        .accessibilityIdentifier("heightScan.enterManually")
-    }
-
-    /// Secondary actions only — the primary capture moved to the "+"
-    /// button on the trailing edge (and the anchor-stage Manual escape
-    /// hatch to the rail button beneath it).
+    /// Secondary actions only — the primary capture is the bottom-centre
+    /// shutter (the walk/aim stages' Retake is its right flank, the
+    /// anchor-stage Manual escape hatch its left).
     @ViewBuilder
     private var actionRow: some View {
         switch viewModel.state {
-        case .walking, .aimTopArmed, .aimTopCaptured, .aimBaseArmed:
-            Button("Retake") { viewModel.retake() }
-                .buttonStyle(.forestixARSecondary)
         case .computed:
             VStack(spacing: 8) {
                 // Crown control: start it, or restart it once done.
@@ -852,7 +890,8 @@ public struct HeightScanScreen: View {
         case .manualEntry:
             Button("Cancel") { viewModel.retake() }
                 .buttonStyle(.forestixARSecondary)
-        case .idle, .anchorSet, .accepted:
+        case .idle, .anchorSet, .walking,
+             .aimTopArmed, .aimTopCaptured, .aimBaseArmed, .accepted:
             EmptyView()
         }
     }

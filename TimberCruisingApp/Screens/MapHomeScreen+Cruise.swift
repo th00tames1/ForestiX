@@ -38,11 +38,14 @@
 //     in the current project (auto-numbered "Plot N", centre from the
 //     GPS fix) and leaves `ActiveSamplingPlot` placed so the scan
 //     screens overlay the ring;
-//   • active plot     → "Add tree · Plot N" — the existing DBH→Height
-//     full-measurement chain, routed through the Accept path with the
-//     project's REAL calibration, so the cruise Tree inherits value +
-//     σ + species/damage metadata + GPS + auto-photo. Tree numbers
-//     auto-increment within the plot; zero typing per record.
+//   • active plot     → "Add tree · Plot N" — the DIAMETER LOOP: each
+//     DBH Accept saves a cruise Tree through the Accept path with the
+//     project's REAL calibration (value + σ + species/damage metadata +
+//     GPS + auto-photo), auto-increments the tree number, and resets
+//     the scan for the next trunk (Undo toast, 3 s). The floating back
+//     exits the loop. Heights are on demand: tree peek "Measure height"
+//     or the plot peek's HEIGHTS SHEET (pooled H–D curve estimates the
+//     rest once ≥3 pairs exist). Zero typing per record.
 //
 // Tapping a plot ring peeks the tally card (live TREES/BA/TPA/QMD via
 // the InventoryEngine, Add tree, Close plot, Details); tapping a tree
@@ -84,6 +87,21 @@ enum CruiseDestination: Hashable, Identifiable {
 struct ExportShareURL: Identifiable {
     let url: URL
     var id: URL { url }
+}
+
+/// Plot whose HEIGHTS SHEET is presented (plot peek → "Heights · N
+/// measured"). Internal because MapHomeScreen.swift owns the state.
+struct HeightsSheetTarget: Identifiable {
+    let plotID: UUID
+    var id: UUID { plotID }
+}
+
+/// Height screen scoped to one existing tree (tree peek / heights sheet
+/// "Measure height") — staged across the sheet dismissal, same two-step
+/// pattern as `pendingDestination`.
+struct ScopedHeightRequest {
+    let plotID: UUID
+    let treeID: UUID
 }
 
 // MARK: - Cruise mode
@@ -294,14 +312,37 @@ extension MapHomeScreen {
         #if os(iOS)
             .fullScreenCover(isPresented: $presentingPlotSetup,
                              onDismiss: { reloadCruise() }) { plotSetupCover }
+            // Cruise tally loop — the DBH cover saves tree after tree and
+            // only closes via the floating back; dismissal refreshes the
+            // map's pins + tally.
             .fullScreenCover(isPresented: $presentingCruiseDBH,
-                             onDismiss: continueCruiseChainAfterDBH) { cruiseDBHCover }
+                             onDismiss: { reloadCruise() }) { cruiseDBHCover }
             .fullScreenCover(isPresented: $presentingCruiseHeight,
-                             onDismiss: {
-                                 cruiseChainHeightPending = false
-                                 reloadCruise()
-                             }) { cruiseHeightCover }
+                             onDismiss: { reloadCruise() }) { cruiseHeightCover }
         #endif
+            // HEIGHTS SHEET (plot peek → "Heights · N measured") — the
+            // scoped Height cover launches from onDismiss so the two
+            // presentations never fight.
+            .sheet(item: $heightsSheetTarget, onDismiss: {
+                if let request = pendingScopedHeight {
+                    pendingScopedHeight = nil
+                    chainPlotID = request.plotID
+                    chainTreeID = request.treeID
+                    presentingCruiseHeight = true
+                }
+            }) { target in
+                if let plot = plots.first(where: { $0.id == target.plotID }) {
+                    PlotHeightsSheet(
+                        plot: plot,
+                        trees: liveTrees(in: plot.id),
+                        onMeasure: { tree in
+                            pendingScopedHeight = ScopedHeightRequest(
+                                plotID: plot.id, treeID: tree.id)
+                            heightsSheetTarget = nil
+                        })
+                    .environmentObject(settings)
+                }
+            }
             .sheet(isPresented: $presentingProjectSheet, onDismiss: {
                 namingNewProject = false
                 newProjectName = ""
@@ -475,26 +516,45 @@ extension MapHomeScreen {
         return created
     }
 
-    // MARK: Add-tree chain (DBH → Height through the Accept path)
+    // MARK: Add-tree quick-tally loop (diameter loop through the Accept path)
 
+    /// "Add tree" enters the DIAMETER LOOP: the DBH cover saves a tree
+    /// on every Accept, auto-increments the target number, and resets
+    /// itself for the next trunk — no Height chain, no return to the
+    /// map until the floating back. Per-tree height on demand lives on
+    /// the tree peek / heights sheet instead.
     func startAddTree(in plot: Plot) {
         chainPlotID = plot.id
         chainTreeNumber = nextTreeNumber(in: plot.id)
         chainTreeID = nil
-        cruiseChainHeightPending = false
         withAnimation(.easeOut(duration: 0.18)) { selectedPinID = nil }
         presentingCruiseDBH = true
     }
 
-    /// DBH cover dismissed. An accepted DBH hands straight off to the
-    /// Height cover for the SAME tree — the chain; closing without
-    /// accepting cancels it. (Same two-step pattern as the measure
-    /// chain.)
-    func continueCruiseChainAfterDBH() {
+    /// Height screen scoped to one EXISTING tree (tree peek / heights
+    /// sheet). Reuses the tally plumbing: `chainTreeID` is the tree the
+    /// accepted height lands on.
+    func startScopedHeight(plotID: UUID, treeID: UUID) {
+        chainPlotID = plotID
+        chainTreeID = treeID
+        withAnimation(.easeOut(duration: 0.18)) { selectedPinID = nil }
+        presentingCruiseHeight = true
+    }
+
+    /// Tally-toast Undo: delete the just-saved tree row (and its photo
+    /// via the store) and step the auto number back.
+    func undoLastTally() {
+        guard let id = chainTreeID,
+              let tree = try? environment.treeRepository.read(id: id)
+        else { return }
+        if let photo = tree.photoPath {
+            MeasurePhotoStore.delete(photo)
+        }
+        try? environment.treeRepository.hardDelete(id: id)
+        chainTreeID = nil
         reloadCruise()
-        if cruiseChainHeightPending {
-            cruiseChainHeightPending = false
-            presentingCruiseHeight = true
+        if let plotID = chainPlotID {
+            chainTreeNumber = nextTreeNumber(in: plotID)
         }
     }
 
@@ -509,12 +569,11 @@ extension MapHomeScreen {
             vioDriftFraction: project.vioDriftFraction)
     }
 
-    /// Plot mini-map payload for the plot the add-tree chain is
-    /// measuring into: plot number + radius + centre fix, and the live
-    /// trees' fixes tinted by confidence (warn for any yellow/red DBH
-    /// or Height tier). The height cover picks up the tree the DBH
-    /// step just created because `continueCruiseChainAfterDBH` reloads
-    /// before presenting it.
+    /// Plot mini-map payload for the plot the tally loop is measuring
+    /// into: plot number + radius + centre fix, and the live trees'
+    /// fixes tinted by confidence (warn for any yellow/red DBH or
+    /// Height tier). The loop's Accept reloads the snapshot before
+    /// advancing, so the widget gains each new dot immediately.
     func cruiseMiniMapInfo(plotID: UUID?) -> PlotMiniMapInfo? {
         guard let plotID,
               let plot = plots.first(where: { $0.id == plotID })
@@ -540,6 +599,12 @@ extension MapHomeScreen {
     }
 
     #if os(iOS)
+    /// The cruise DIAMETER LOOP cover. Accept saves the tree through the
+    /// existing path (calibration / GPS / photo / metadata), reloads the
+    /// snapshot so the mini-map + border chip track the new dot, and
+    /// advances the target number — the screen resets itself and shows
+    /// the Undo toast. No Height hand-off, no continuation sheet; the
+    /// floating back exits the loop.
     var cruiseDBHCover: some View {
         NavigationStack {
             DBHScanScreen(
@@ -547,10 +612,14 @@ extension MapHomeScreen {
                     calibration: calibration(from: currentProject)),
                 onAccept: { result, meta in
                     saveChainDBH(result, meta: meta)
-                    cruiseChainHeightPending = true
-                    presentingCruiseDBH = false
+                    reloadCruise()
+                    if let plotID = chainPlotID {
+                        chainTreeNumber = nextTreeNumber(in: plotID)
+                    }
                 },
-                cruisePlotInfo: cruiseMiniMapInfo(plotID: chainPlotID))
+                cruisePlotInfo: cruiseMiniMapInfo(plotID: chainPlotID),
+                tallyTreeNumber: chainTreeNumber,
+                onUndoTally: { undoLastTally() })
             .environmentObject(settings)
         }
     }
@@ -620,7 +689,8 @@ extension MapHomeScreen {
         }
     }
 
-    /// Accepted Height → update the tree the DBH step just created.
+    /// Accepted Height → update the scoped tree (tree peek / heights
+    /// sheet target).
     func saveChainHeight(_ result: HeightResult,
                          meta: HeightScanScreen.ScanMetadata) {
         guard let id = chainTreeID,
@@ -745,6 +815,26 @@ extension MapHomeScreen {
                     .accessibilityIdentifier("cruiseMap.plotPeek.addTree")
                 }
 
+                // PLOT SAMPLE HEIGHTS — full-width secondary into the
+                // heights sheet: the plot's measured (tree, DBH, height)
+                // pairs + on-demand height measurement + the pooled-curve
+                // status. LOCKED string "Heights · N measured".
+                Button {
+                    heightsSheetTarget = HeightsSheetTarget(plotID: plot.id)
+                } label: {
+                    Text("Heights · \(plotHeightsPairCount(in: plot.id)) measured")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(ForestixPalette.textPrimary)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .background(
+                            RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                             style: .continuous)
+                                .stroke(ForestixPalette.divider, lineWidth: 1))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(CruisePressableStyle())
+                .accessibilityIdentifier("cruiseMap.plotPeek.heights")
+
                 HStack(spacing: ForestixSpace.xs) {
                     if !isClosed {
                         Button {
@@ -845,7 +935,9 @@ extension MapHomeScreen {
     /// Live per-acre stats via the engine. Projects that skipped the
     /// formal cruise design get a synthesized fixed-area design — the
     /// engine only consults plotType/baf, and the expansion factor
-    /// comes from the plot's own recorded area.
+    /// comes from the plot's own recorded area. Missing heights are
+    /// estimated from the pooled H–D relation (plot pairs first, stand
+    /// fallback) so the volume terms track the height sampling.
     func plotStats(for plot: Plot, trees: [Tree]) -> PlotStats {
         PlotStatsCalculator.compute(
             plot: plot,
@@ -853,7 +945,69 @@ extension MapHomeScreen {
             trees: trees,
             species: speciesByCode,
             volumeEquations: [:],
-            hdFits: [:])
+            hdFits: pooledHDFits(plotTrees: trees))
+    }
+
+    // MARK: Pooled H–D relation (heights sheet + volume imputation)
+
+    /// Fit-eligible (DBH, height) pairs of a plot — the heights sheet's
+    /// list and the "Heights · N measured" count (matches Android's
+    /// PooledHeights.pairs gate).
+    func plotHeightsPairCount(in plotID: UUID) -> Int {
+        Self.hdPairs(liveTrees(in: plotID)).count
+    }
+
+    /// Fit-eligible (DBH, height) pairs — the same cleaning the engine
+    /// applies (positive DBH, height above breast height).
+    static func hdPairs(_ trees: [Tree]) -> [(dbhCm: Float, heightM: Float)] {
+        trees.compactMap { tree in
+            guard tree.deletedAt == nil, tree.dbhCm > 0,
+                  let h = tree.heightM, h > 1.3 else { return nil }
+            return (dbhCm: tree.dbhCm, heightM: h)
+        }
+    }
+
+    /// POOLED Näslund fit via the existing engine (`HDModel.fit`), no
+    /// species dimension: this plot's pairs when ≥3, else all loaded
+    /// plots' pairs (stand fallback) when ≥3, else nil. The §7.4
+    /// per-species machinery (n ≥ 8, persisted on plot close) is
+    /// unchanged — this pooled relation is the early-tally bridge.
+    func pooledHDFit(plotTrees: [Tree]) -> HDModel.Fit? {
+        let plotPairs = Self.hdPairs(plotTrees)
+        if plotPairs.count >= 3,
+           let fit = try? HDModel.fit(observations: plotPairs, minN: 3) {
+            return fit
+        }
+        let standPairs = Self.hdPairs(treesByPlot.values.flatMap { $0 })
+        if standPairs.count >= 3,
+           let fit = try? HDModel.fit(observations: standPairs, minN: 3) {
+            return fit
+        }
+        return nil
+    }
+
+    /// Effective fit map for `PlotStatsCalculator`: the persisted §7.4
+    /// per-species fits win; the pooled fit fills every species present
+    /// on the plot (including the blank code) that lacks one — the
+    /// Android PooledHeights.overlay contract.
+    func pooledHDFits(plotTrees: [Tree]) -> [String: HDModel.Fit] {
+        var out: [String: HDModel.Fit] = [:]
+        if let project = currentProject,
+           let persisted = try? environment.hdFitRepository
+               .listByProject(project.id) {
+            for fit in persisted {
+                if let f = HDModel.Fit.fromCoefficients(
+                    fit.coefficients, nObs: fit.nObs, rmse: fit.rmse) {
+                    out[fit.speciesCode] = f
+                }
+            }
+        }
+        if let pooled = pooledHDFit(plotTrees: plotTrees) {
+            for code in Set(plotTrees.map(\.speciesCode)) where out[code] == nil {
+                out[code] = pooled
+            }
+        }
+        return out
     }
 
     func effectiveDesign() -> CruiseDesign {
@@ -949,21 +1103,42 @@ extension MapHomeScreen {
             }
             .padding(.top, 11)
 
-            Button {
-                pushed = .treeDetails(tree.id)
-            } label: {
-                Text("Edit details")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(ForestixPalette.primaryInk)
-                    .frame(maxWidth: .infinity, minHeight: 44)
-                    .background(
-                        RoundedRectangle(cornerRadius: ForestixRadius.control,
-                                         style: .continuous)
-                            .fill(ForestixPalette.primary))
-                    .contentShape(Rectangle())
+            HStack(spacing: ForestixSpace.xs) {
+                // Per-tree height on demand — opens the Height screen
+                // scoped to THIS tree (the tally loop records diameters
+                // only).
+                Button {
+                    startScopedHeight(plotID: tree.plotId, treeID: tree.id)
+                } label: {
+                    Text("Measure height")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(ForestixPalette.textPrimary)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .background(
+                            RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                             style: .continuous)
+                                .stroke(ForestixPalette.divider, lineWidth: 1))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(CruisePressableStyle())
+                .accessibilityIdentifier("cruiseMap.treePeek.measureHeight")
+
+                Button {
+                    pushed = .treeDetails(tree.id)
+                } label: {
+                    Text("Edit details")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(ForestixPalette.primaryInk)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .background(
+                            RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                             style: .continuous)
+                                .fill(ForestixPalette.primary))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(CruisePressableStyle())
+                .accessibilityIdentifier("cruiseMap.treePeek.edit")
             }
-            .buttonStyle(CruisePressableStyle())
-            .accessibilityIdentifier("cruiseMap.treePeek.edit")
             .padding(.top, ForestixSpace.sm)
         }
         .padding(14)
@@ -1808,6 +1983,215 @@ private struct CruisePressableStyle: ButtonStyle {
             .opacity(configuration.isPressed ? 0.78 : 1)
             .scaleEffect(configuration.isPressed ? 0.97 : 1)
             .animation(.easeOut(duration: 0.15), value: configuration.isPressed)
+    }
+}
+
+// MARK: - Heights sheet (plot sample heights, pooled)
+
+/// The plot's measured (tree #, DBH, height) pairs + on-demand height
+/// measurement. Stage 1 lists the fit-eligible pairs with the primary
+/// "Measure height"; tapping it swaps in a compact horizontal tree-
+/// number picker (default = the last tallied tree) whose confirm hands
+/// the chosen tree to the host, which opens the scoped Height screen.
+/// The LOCKED pooled-curve caption appears once ≥3 pairs exist.
+/// Structure mirrors Android's PlotHeightsSheet.
+struct PlotHeightsSheet: View {
+    let plot: Plot
+    /// Live trees of the plot (already filtered by the host).
+    let trees: [Tree]
+    let onMeasure: (Tree) -> Void
+
+    @EnvironmentObject private var settings: AppSettings
+    @State private var picking = false
+    @State private var selectedTreeID: UUID?
+
+    /// Picker candidates — every live tree, tally order.
+    private var live: [Tree] {
+        trees.sorted { $0.treeNumber < $1.treeNumber }
+    }
+
+    /// List rows — the fit-eligible (DBH, height) pairs, tally order
+    /// (same gate as the pooled fit and the "N measured" count).
+    private var withHeights: [Tree] {
+        live.filter { ($0.heightM ?? 0) > 1.3 && $0.dbhCm > 0 }
+    }
+
+    /// Default picker selection: the LAST TALLIED tree (newest row) —
+    /// the cruiser usually heights the tree just measured.
+    private var lastTallied: Tree? {
+        trees.max { $0.createdAt < $1.createdAt }
+    }
+
+    private var selected: Tree? {
+        live.first { $0.id == selectedTreeID }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                Text("HEIGHTS · PLOT \(plot.plotNumber)")
+                    .font(.system(size: 13, weight: .heavy))
+                    .tracking(1.0)
+                    .foregroundStyle(ForestixPalette.textTertiary)
+                    .padding(.top, ForestixSpace.md)
+                    .padding(.bottom, ForestixSpace.xs)
+
+                // Measured (tree #, DBH, height) pairs — pooled, no
+                // species dimension.
+                if withHeights.isEmpty {
+                    Text("No heights measured yet")
+                        .font(ForestixType.caption)
+                        .foregroundStyle(ForestixPalette.textTertiary)
+                        .padding(.vertical, 12)
+                }
+                ForEach(withHeights) { tree in
+                    heightRow(tree)
+                }
+
+                // LOCKED caption — the pooled curve is live and volume
+                // estimation imputes the plot's unmeasured heights.
+                if withHeights.count >= 3 {
+                    Text("Height curve active — other trees estimated")
+                        .font(ForestixType.caption)
+                        .foregroundStyle(ForestixPalette.textSecondary)
+                        .padding(.top, ForestixSpace.xs)
+                        .accessibilityIdentifier("cruiseMap.heightsSheet.curve")
+                }
+
+                Spacer(minLength: 0).frame(height: ForestixSpace.sm)
+
+                if picking {
+                    pickerStage
+                } else {
+                    // 54 pt primary — LOCKED "Measure height".
+                    primaryButton("Measure height", enabled: !live.isEmpty) {
+                        if !live.isEmpty {
+                            selectedTreeID = lastTallied?.id
+                            picking = true
+                        }
+                    }
+                    .accessibilityIdentifier("cruiseMap.heightsSheet.measure")
+                }
+
+                Spacer(minLength: ForestixSpace.lg)
+            }
+            .padding(.horizontal, ForestixSpace.md)
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(ForestixPalette.surface)
+        .accessibilityIdentifier("cruiseMap.heightsSheet")
+    }
+
+    private func heightRow(_ tree: Tree) -> some View {
+        let system = settings.unitSystem
+        return HStack(spacing: ForestixSpace.xs) {
+            Text("Tree \(tree.treeNumber)")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(ForestixPalette.textPrimary)
+                .frame(width: 76, alignment: .leading)
+            Text(MeasurementFormatter.diameter(cm: Double(tree.dbhCm),
+                                               in: system))
+                .font(.system(size: 12.5, weight: .medium,
+                              design: .monospaced))
+                .foregroundStyle(ForestixPalette.textSecondary)
+            Spacer(minLength: 4)
+            Text(tree.heightM.map {
+                MeasurementFormatter.height(m: Double($0), in: system)
+            } ?? "—")
+                .font(.system(size: 13.5, weight: .semibold,
+                              design: .monospaced))
+                .foregroundStyle(ForestixPalette.textPrimary)
+        }
+        .padding(.vertical, 9)
+        .padding(.horizontal, 2)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(ForestixPalette.divider).frame(height: 0.5)
+        }
+    }
+
+    // MARK: Stage 2 — compact tree-number picker
+
+    @ViewBuilder
+    private var pickerStage: some View {
+        Text("TREE")
+            .font(.system(size: 10, weight: .bold))
+            .tracking(0.7)
+            .foregroundStyle(ForestixPalette.textTertiary)
+            .padding(.bottom, 6)
+
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(live) { tree in
+                    numberChip(tree)
+                }
+            }
+        }
+        .accessibilityIdentifier("cruiseMap.heightsSheet.picker")
+
+        primaryButton(selected.map { "Measure Tree \($0.treeNumber)" }
+                        ?? "Measure height",
+                      enabled: selected != nil) {
+            if let tree = selected { onMeasure(tree) }
+        }
+        .padding(.top, ForestixSpace.sm)
+        .accessibilityIdentifier("cruiseMap.heightsSheet.confirm")
+    }
+
+    /// One pickable tree chip — "Tree N · DBH" plus a check when it
+    /// already carries a height.
+    private func numberChip(_ tree: Tree) -> some View {
+        let isSelected = tree.id == selectedTreeID
+        let label = "Tree \(tree.treeNumber) · "
+            + MeasurementFormatter.diameter(cm: Double(tree.dbhCm),
+                                            in: settings.unitSystem)
+            + (tree.heightM != nil ? " ✓" : "")
+        return Button {
+            selectedTreeID = tree.id
+        } label: {
+            Text(label)
+                .font(.system(size: 13.5,
+                              weight: isSelected ? .bold : .medium,
+                              design: .monospaced))
+                .foregroundStyle(isSelected ? ForestixPalette.primary
+                                            : ForestixPalette.textPrimary)
+                .padding(.horizontal, 10)
+                .frame(minWidth: 44, minHeight: 44)
+                .background(
+                    RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                     style: .continuous)
+                        .fill(isSelected ? ForestixPalette.primaryMuted
+                                         : ForestixPalette.surface))
+                .overlay(
+                    RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                     style: .continuous)
+                        .stroke(isSelected ? ForestixPalette.primary
+                                           : ForestixPalette.divider,
+                                lineWidth: isSelected ? 1.5 : 1))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(CruisePressableStyle())
+    }
+
+    /// 54 pt primary — dimmed to a raised surface while unusable.
+    private func primaryButton(_ title: String,
+                               enabled: Bool,
+                               action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(enabled ? ForestixPalette.primaryInk
+                                         : ForestixPalette.textTertiary)
+                .frame(maxWidth: .infinity, minHeight: 54)
+                .background(
+                    RoundedRectangle(cornerRadius: ForestixRadius.card,
+                                     style: .continuous)
+                        .fill(enabled ? ForestixPalette.primary
+                                      : ForestixPalette.surfaceRaised))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(CruisePressableStyle())
+        .disabled(!enabled)
     }
 }
 

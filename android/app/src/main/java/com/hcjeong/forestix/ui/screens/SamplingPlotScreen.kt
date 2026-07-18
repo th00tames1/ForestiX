@@ -176,23 +176,28 @@ fun SamplingPlotScreen(nav: NavController) {
         // top-right, below the full-width radius card.
         if (placed) SamplingPlotMiniMap()
 
-        if (!placed) MeasureControlColumn(onCapture = { place() })
+        // U1 — capture-failure hints first, else the aim guidance while
+        // placing (iOS topBannerText parity; the placed state's
+        // INSIDE/OUTSIDE status is a value and stays in the panel below).
+        MeasureTopChrome(
+            instruction = failure
+                ?: if (!placed) "Set the radius, aim at the plot centre, tap +" else null,
+        )
 
-        MeasureStatusPanel {
-            failure?.let {
-                Text(it, style = Forestix.type.caption, color = Color.White)
-            }
-            if (!placed) {
-                CenteredText("Set the radius, aim at the plot centre, tap +")
-            } else {
-                CenteredText(
-                    if (isOutside) "OUTSIDE — walk back inside" else "INSIDE sampling area",
-                    large = true,
-                    color = if (isOutside) colors.confidenceBad else colors.confidenceOk,
-                )
-            }
-            // Distance line — always rendered ("—" until the centre lands),
-            // iOS distanceLine format + style.
+        // U2 — bottom-centre shutter while aiming for the centre (no
+        // secondaries on this screen).
+        if (!placed) MeasureShutterBar(onCapture = { place() })
+
+        // Placed = this screen's RESULT state: the existing status panel
+        // (INSIDE/OUTSIDE + distance line + Reset/Save) occupies the
+        // bottom as before.
+        if (placed) MeasureStatusPanel {
+            CenteredText(
+                if (isOutside) "OUTSIDE — walk back inside" else "INSIDE sampling area",
+                large = true,
+                color = if (isOutside) colors.confidenceBad else colors.confidenceOk,
+            )
+            // Distance line — iOS distanceLine format + style.
             Text(
                 distanceFromCenter?.let {
                     String.format(Locale.US, "Centre: %.2f m · area: %.1f m²", it, Units.circleAreaM2(radiusM))
@@ -200,8 +205,6 @@ fun SamplingPlotScreen(nav: NavController) {
                 style = Forestix.type.dataSmall,
                 color = Color.White.copy(alpha = 0.85f),
             )
-            // Reset / Save always visible, both disabled until the centre
-            // is placed; Save exits the flow (both platforms).
             Row(
                 Modifier.fillMaxWidth().padding(top = 2.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -209,7 +212,6 @@ fun SamplingPlotScreen(nav: NavController) {
                 ForestixWhiteButton(
                     "Reset",
                     modifier = Modifier.weight(1f),
-                    enabled = placed,
                 ) {
                     ArSessionHub.clearPlot()
                     isOutside = false; distanceFromCenter = null
@@ -217,7 +219,6 @@ fun SamplingPlotScreen(nav: NavController) {
                 ForestixProminentButton(
                     "Save",
                     modifier = Modifier.weight(1f),
-                    enabled = placed,
                 ) {
                     val r = ArSessionHub.plotRadiusM
                     env.history.append(

@@ -74,8 +74,10 @@ public final class PlotSummaryViewModel: ObservableObject {
                 uniqueKeysWithValues: try speciesRepo.list().map { ($0.code, $0) })
             validation = PlotValidation.validatePlotForClose(
                 plot: plot, trees: trees, speciesByCode: speciesByCode)
-            recomputeStats()
+            // Fits BEFORE stats so the first computation already imputes
+            // (it previously ran against last refresh's fits).
             loadProjectHDFits()
+            recomputeStats()
             errorMessage = nil
         } catch {
             errorMessage = "Load failed: \(error.localizedDescription)"
@@ -101,13 +103,56 @@ public final class PlotSummaryViewModel: ObservableObject {
             // Non-fatal: fall back to an empty map; live trees still aggregate
             // TPA/BA/QMD, just not volume.
         }
+        // POOLED H–D fallback: this plot's pairs (≥3) first, project-
+        // wide pooled pairs as the fallback — the persisted §7.4
+        // per-species fits keep precedence, the pooled fit fills the
+        // species they don't cover yet.
+        var effectiveFits = hdFitsByProject
+        if let pooled = pooledHDFit() {
+            for code in Set(trees.map(\.speciesCode))
+            where effectiveFits[code] == nil {
+                effectiveFits[code] = pooled
+            }
+        }
         stats = PlotStatsCalculator.compute(
             plot: plot,
             cruiseDesign: design,
             trees: trees,
             species: speciesByCode,
             volumeEquations: volEquations,
-            hdFits: hdFitsByProject)
+            hdFits: effectiveFits)
+    }
+
+    /// Fit-eligible (DBH, height) pairs — the engine's cleaning rule.
+    private static func hdPairs(_ trees: [Tree]) -> [(dbhCm: Float, heightM: Float)] {
+        trees.compactMap { tree in
+            guard tree.deletedAt == nil, tree.dbhCm > 0,
+                  let h = tree.heightM, h > 1.3 else { return nil }
+            return (dbhCm: tree.dbhCm, heightM: h)
+        }
+    }
+
+    /// Pooled Näslund fit via the existing `HDModel` engine, no species
+    /// dimension: plot pairs at ≥3, else all project plots' pairs at ≥3.
+    private func pooledHDFit() -> HDModel.Fit? {
+        let plotPairs = Self.hdPairs(trees)
+        if plotPairs.count >= 3,
+           let fit = try? HDModel.fit(observations: plotPairs, minN: 3) {
+            return fit
+        }
+        guard let allPlots = try? plotRepo.listByProject(project.id) else {
+            return nil
+        }
+        var pooled: [(dbhCm: Float, heightM: Float)] = []
+        for p in allPlots {
+            let plotTrees = (try? treeRepo.listByPlot(p.id, includeDeleted: false)) ?? []
+            pooled.append(contentsOf: Self.hdPairs(plotTrees))
+        }
+        if pooled.count >= 3,
+           let fit = try? HDModel.fit(observations: pooled, minN: 3) {
+            return fit
+        }
+        return nil
     }
 
     private func loadProjectHDFits() {

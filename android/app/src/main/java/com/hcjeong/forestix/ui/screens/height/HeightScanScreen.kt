@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -64,14 +65,14 @@ import com.hcjeong.forestix.ui.screens.ContinuationAction
 import com.hcjeong.forestix.ui.screens.ContinuationOrigin
 import com.hcjeong.forestix.ui.screens.MeasurementContinuationSheet
 import com.hcjeong.forestix.ui.screens.ScanMetadataSheet
-import com.hcjeong.forestix.ui.screens.CenteredText
 import com.hcjeong.forestix.ui.screens.DevHud
 import com.hcjeong.forestix.ui.screens.GPSAccuracyBadge
 import com.hcjeong.forestix.ui.screens.MeasureBackButton
 import com.hcjeong.forestix.ui.screens.MeasureCircleButton
-import com.hcjeong.forestix.ui.screens.MeasureControlColumn
-import com.hcjeong.forestix.ui.screens.MeasureFailureBanner
+import com.hcjeong.forestix.ui.screens.MeasureShutterBar
 import com.hcjeong.forestix.ui.screens.MeasureStatusPanel
+import com.hcjeong.forestix.ui.screens.MeasureTopChrome
+import com.hcjeong.forestix.ui.screens.MeasureValuePill
 import com.hcjeong.forestix.ui.screens.ResearchFieldsRow
 import com.hcjeong.forestix.ui.screens.ScanPlotMiniMap
 import com.hcjeong.forestix.ui.screens.scanPlotMiniMapVisible
@@ -122,7 +123,6 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     // the active project's VIO drift fraction when launched from the
     // Add-Tree flow (iOS injects it into HeightScanViewModel).
     val calibration by env.activeScanCalibration.collectAsStateWithLifecycle()
-    val colors = Forestix.colors
     val type = Forestix.type
 
     var stage by remember { mutableStateOf(Stage.ANCHOR) }
@@ -464,73 +464,99 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 topPadding = if (miniMapUp) 150.dp else 56.dp,
             )
         }
-        if (showCapture && !hidingChromeForCapture) MeasureControlColumn(
+        // U2 — bottom-centre shutter for the capture stages: "Manual"
+        // flanks left while anchoring, Retake flanks RIGHT once a
+        // walk/aim stage (or crown capture) could need restarting, and
+        // the WALKING readout triplet rides the live-value strip directly
+        // above the row (iOS MeasureShutterRow wiring 1:1).
+        if (showCapture && !hidingChromeForCapture) MeasureShutterBar(
             onCapture = { if (crownActive) captureCrown() else captureHeight() },
-            // Manual entry rides the rail directly below the capture "+"
-            // while anchoring — the walk/aim stages keep Retake instead.
-            extra = if (stage == Stage.ANCHOR) {
+            left = if (stage == Stage.ANCHOR && !crownActive) {
                 {
                     MeasureCircleButton(icon = Icons.Filled.Keyboard, caption = "Manual") {
                         manualOpen = true; manualText = ""
                     }
                 }
-            } else null,
+            } else {
+                null
+            },
+            right = if (crownActive || stage in listOf(
+                    Stage.WALKING, Stage.AIM_BASE, Stage.AIM_TOP)
+            ) {
+                {
+                    MeasureCircleButton(icon = Icons.Filled.Replay, caption = "Retake") {
+                        resetAll()
+                    }
+                }
+            } else {
+                null
+            },
+            valueStrip = when {
+                stage == Stage.WALKING -> ({
+                    // Walking readout (locked spec, identical on iOS): ONLY
+                    // three lines — Initial dist (camera→anchor at the
+                    // anchoring moment), Walked back (displacement since
+                    // anchoring, STARTS AT 0.00), and the primary Total
+                    // distance (current camera→anchor horizontal distance —
+                    // the d_h the math uses).
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        MeasureValuePill(
+                            "Initial dist " + MeasurementFormatter.distance(
+                                (anchorInitialDistM ?: 0f).toDouble(), settings.unitSystem),
+                            dimmed = true,
+                        )
+                        MeasureValuePill(
+                            "Walked back " + MeasurementFormatter.distance(
+                                walkedLive.toDouble(), settings.unitSystem),
+                            dimmed = true,
+                        )
+                        MeasureValuePill(
+                            "Total distance " + MeasurementFormatter.distance(
+                                dhLive.toDouble(), settings.unitSystem),
+                            large = true,
+                        )
+                    }
+                })
+                // Crown capture: keep the computed height on screen while
+                // the canopy taps run (iOS heightValueStrip parity).
+                crownActive && result != null -> ({
+                    MeasureValuePill(
+                        MeasurementFormatter.height(
+                            result!!.heightM.toDouble(), settings.unitSystem),
+                        large = true,
+                    )
+                })
+                else -> null
+            },
         )
 
-        if (!hidingChromeForCapture) MeasureStatusPanel {
-            // Anchor / tracking failures — orange banner, tap to dismiss
-            // (iOS anchorFailureBanner).
-            failure?.let { MeasureFailureBanner(it) { failure = null } }
-            CenteredText(
-                when {
-                    manualOpen -> "Enter height manually in metres."
-                    // Locked spec: while no gated hit exists the "+" is
-                    // inert and this exact copy explains why.
-                    stage == Stage.ANCHOR && !anchorAimOk ->
-                        "Move closer — anchor within 4 m of the trunk."
-                    stage == Stage.ANCHOR -> "Aim at the trunk at eye level, then tap +."
-                    stage == Stage.WALKING -> "Walk back, then tap + to continue."
-                    stage == Stage.AIM_BASE -> "Aim at where the trunk meets the ground, then tap +."
-                    stage == Stage.AIM_TOP -> "Aim at the treetop, then tap +."
-                    stage == Stage.REJECTED -> result?.rejectionReason ?: "Rejected."
-                    else -> "Height computed."
-                },
-            )
+        // U1 — stage guidance + the dismissible anchor/tracking failure
+        // banner, top-centre (iOS anchorFailureBanner semantics kept; the
+        // crown aim instructions live on the crosshair label).
+        if (!hidingChromeForCapture) MeasureTopChrome(
+            instruction = when {
+                manualOpen -> "Enter height manually in metres."
+                // Locked spec: while no gated hit exists the "+" is
+                // inert and this exact copy explains why.
+                stage == Stage.ANCHOR && !anchorAimOk ->
+                    "Move closer — anchor within 4 m of the trunk."
+                stage == Stage.ANCHOR -> "Aim at the trunk at eye level, then tap +."
+                stage == Stage.WALKING -> "Walk back, then tap + to continue."
+                stage == Stage.AIM_BASE -> "Aim at where the trunk meets the ground, then tap +."
+                stage == Stage.AIM_TOP -> "Aim at the treetop, then tap +."
+                stage == Stage.REJECTED -> result?.rejectionReason ?: "Rejected."
+                else -> "Height computed."
+            },
+            failure = failure,
+            onDismissFailure = { failure = null },
+        )
 
-            // Walking readout (locked spec, identical on iOS): ONLY three
-            // lines — Initial dist (camera→anchor at the anchoring moment),
-            // Walked back (displacement since anchoring, STARTS AT 0.00),
-            // and the primary Total distance (current camera→anchor
-            // horizontal distance — the d_h the math uses). Field fix: the
-            // sweet-spot / "Move back … (target …)" guidance is gone.
-            if (stage == Stage.WALKING && !manualOpen) {
-                Column(
-                    Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                    horizontalAlignment = Alignment.Start,
-                ) {
-                    Text(
-                        "Initial dist " + MeasurementFormatter.distance(
-                            (anchorInitialDistM ?: 0f).toDouble(), settings.unitSystem),
-                        style = type.dataSmall,
-                        // 0.75 — matches iOS's secondary walk-panel lines.
-                        color = Color.White.copy(alpha = 0.75f),
-                    )
-                    Text(
-                        "Walked back " + MeasurementFormatter.distance(walkedLive.toDouble(), settings.unitSystem),
-                        style = type.dataSmall,
-                        color = Color.White.copy(alpha = 0.75f),
-                    )
-                    Text(
-                        "Total distance " + MeasurementFormatter.distance(dhLive.toDouble(), settings.unitSystem),
-                        style = type.dataLarge,
-                        color = Color.White,
-                    )
-                }
-            }
-
-            // Manual entry — typed height (iOS .manualEntry: field + Save,
-            // Cancel row beneath).
+        // Manual entry — typed height (iOS .manualEntry: field + Save,
+        // Cancel row beneath). The panel keeps the field + action rows.
+        if (!hidingChromeForCapture && manualOpen) MeasureStatusPanel {
             if (manualOpen) {
                 Row(
                     Modifier.fillMaxWidth(),
@@ -574,12 +600,18 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                     manualOpen = false
                 }
             }
+        }
 
-            // Result panel — unit-aware H and the α/d_h diagnostic line.
-            // Field fix: no σ, no tier chip, no tier hint here — σ and the
-            // tier stay recorded internally, the tier still gates Accept,
-            // and a rejection's reason shows in the status line above.
-            if (!manualOpen && (stage == Stage.COMPUTED || stage == Stage.REJECTED)) result?.let { r ->
+        // RESULT states (COMPUTED / REJECTED, crown capture excepted — the
+        // shutter row owns the crown taps): the existing result panel
+        // occupies the bottom as before. Unit-aware H + the α/d_h
+        // diagnostic line. Field fix: no σ, no tier chip, no tier hint —
+        // σ and the tier stay recorded internally, the tier still gates
+        // Accept, and a rejection's reason shows in the banner above.
+        if (!hidingChromeForCapture && !manualOpen && !crownActive &&
+            (stage == Stage.COMPUTED || stage == Stage.REJECTED)
+        ) MeasureStatusPanel {
+            result?.let { r ->
                 Column(
                     Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -616,31 +648,20 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 }
             }
 
-            // Crown section — amber prompts while capturing; a mono data
-            // line once done (iOS crownSection).
-            if (!manualOpen && stage == Stage.COMPUTED) {
-                if (crownActive) {
-                    Text(
-                        crownPrompt(crownStep),
-                        style = type.caption,
-                        color = colors.confidenceWarn,
-                    )
-                } else if (crownStep == CrownStep.DONE && crownW != null && crownH != null) {
-                    Text(
-                        String.format(Locale.US, "Crown %.2f m wide · %.2f m tall", crownW, crownH),
-                        style = type.data,
-                        color = Color.White,
-                    )
-                }
+            // Crown line once measured (iOS crownSection — the capture
+            // prompts live in the top banner + crosshair label now).
+            if (stage == Stage.COMPUTED && crownStep == CrownStep.DONE &&
+                crownW != null && crownH != null
+            ) {
+                Text(
+                    String.format(Locale.US, "Crown %.2f m wide · %.2f m tall", crownW, crownH),
+                    style = type.data,
+                    color = Color.White,
+                )
             }
 
-            // Action rows per stage (iOS actionRow). ANCHOR has none — the
-            // manual escape hatch lives on the rail's Manual button.
-            if (!manualOpen) when (stage) {
-                Stage.ANCHOR -> {}
-                Stage.WALKING, Stage.AIM_BASE, Stage.AIM_TOP -> {
-                    ForestixWhiteButton("Retake") { resetAll() }
-                }
+            // Action rows (iOS actionRow).
+            when (stage) {
                 Stage.COMPUTED -> {
                     Column(
                         Modifier.fillMaxWidth(),
@@ -680,6 +701,7 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                         }
                     }
                 }
+                else -> {}
             }
         }
 
@@ -752,10 +774,3 @@ private fun HeightAimCrosshair(label: String, modifier: Modifier = Modifier) {
     }
 }
 
-private fun crownPrompt(step: CrownStep): String = when (step) {
-    CrownStep.LEFT -> "Crown: aim at the LEFT edge, tap +"
-    CrownStep.RIGHT -> "Crown: aim at the RIGHT edge, tap +"
-    CrownStep.TOP -> "Crown: aim at the HIGHEST branch, tap +"
-    CrownStep.BOTTOM -> "Crown: aim at the LOWEST branch, tap +"
-    else -> ""
-}

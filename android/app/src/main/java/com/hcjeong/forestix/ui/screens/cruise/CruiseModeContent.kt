@@ -1,8 +1,9 @@
 // Cruise MODE of the map home — the v3 cruise map (approved mock
 // design/forestix-redesign-v3-cruise.html: ① cruise map, ② plot peek,
 // ④ tree peek, ⑤ project sheet, ⑥ cruise setup, ⑦ planned plot + guide,
-// ⑧ inline centre record; ③ tally loop rides the shared DBH→Height chain
-// via CruiseCapture) absorbed into MapHomeScreen as a TOGGLED MODE (v3.1):
+// ⑧ inline centre record; ③ tally loop rides the shared DBH screen as a
+// DIAMETER LOOP via CruiseCapture — heights on demand from the tree peek
+// / plot heights sheet) absorbed into MapHomeScreen as a TOGGLED MODE (v3.1):
 // one map, two modes, no navigation between them. MapHomeScreen owns the
 // single MapView/camera and, while `tc.mapMode == "cruise"`, feeds it this
 // file's markers/overlays and hosts this file's chrome, peeks and sheets.
@@ -57,6 +58,7 @@ import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Adjust
 import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.filled.GridOn
+import androidx.compose.material.icons.filled.Height
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -76,6 +78,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
@@ -115,6 +118,7 @@ import com.hcjeong.forestix.geo.CoordinateConversions
 import com.hcjeong.forestix.inventory.HDModel
 import com.hcjeong.forestix.inventory.PlotStats
 import com.hcjeong.forestix.inventory.PlotStatsCalculator
+import com.hcjeong.forestix.inventory.PooledHeights
 import com.hcjeong.forestix.inventory.VolumeEquation
 import com.hcjeong.forestix.inventory.VolumeEquationFactory
 import com.hcjeong.forestix.positioning.CLLocationSnapshot
@@ -183,11 +187,15 @@ internal class CruiseModeState {
     var recordCentreFor by mutableStateOf<PlannedPlot?>(null)
     /// Planned plot the dashed guide line + distance chip point at (mock ⑦).
     var navTargetId by mutableStateOf<UUID?>(null)
+    /// Plot whose heights sheet is open ("Heights · N measured", B).
+    var heightsSheetFor by mutableStateOf<UUID?>(null)
 
     /// Actions — wired by CruiseModeEffects (they need nav/scope/settings).
     var startPlot: () -> Unit = {}
     var addTree: (Plot) -> Unit = {}
     var closePlot: (Plot) -> Unit = {}
+    /// Height on demand (tree peek "Measure height" / heights sheet).
+    var measureHeight: (Tree) -> Unit = {}
 
     val project: Project? get() = data.project
 
@@ -295,8 +303,10 @@ internal fun CruiseModeEffects(
     }
 
     /// (+) with an active plot / plot-peek primary: arm the cruise capture
-    /// session on the next auto tree number and enter the shared DBH→Height
-    /// full-measurement chain (project calibration, GPS + photo on Accept).
+    /// session on the next auto tree number and enter the shared DBH
+    /// screen's QUICK-TALLY DIAMETER LOOP (project calibration, GPS +
+    /// photo on Accept; the screen resets per save until the floating
+    /// back exits).
     state.addTree = addTree@{ plot ->
         val p = state.project ?: return@addTree
         scope.launch {
@@ -326,6 +336,21 @@ internal fun CruiseModeEffects(
             state.selectedId = null
             state.refresh++
         }
+    }
+
+    /// Per-tree height on demand (tree peek "Measure height" / the plot
+    /// heights sheet): arm a HEIGHT-ONLY cruise session on the EXISTING
+    /// tree row and enter the shared Height screen scoped to it — the
+    /// accepted reading folds into that row, the screen pops back here,
+    /// and the map's re-entry runs CruiseCapture.end() as always.
+    state.measureHeight = measureHeight@{ tree ->
+        val p = state.project ?: return@measureHeight
+        val plot = state.data.plots.firstOrNull { it.id == tree.plotId }
+            ?: return@measureHeight
+        CruiseCapture.beginHeight(env, p, plot, tree)
+        // Close the peek under the pushed screen (iOS startScopedHeight).
+        state.selectedId = null
+        nav.navigate("height?tree=${tree.treeNumber}")
     }
 }
 
@@ -480,10 +505,12 @@ internal fun CruiseModeBottomContent(
                 plot = peekPlot,
                 project = state.project,
                 trees = state.data.treesByPlot[peekPlot.id].orEmpty(),
+                allProjectTrees = state.data.trees,
                 modifier = Modifier
                     .padding(horizontal = 12.dp)
                     .padding(bottom = 20.dp),
                 onAddTree = { state.addTree(peekPlot) },
+                onHeights = { state.heightsSheetFor = peekPlot.id },
                 onClose = { state.closePlot(peekPlot) },
                 onDetails = {
                     nav.navigate(PlotFlowRoutes.plotSummary(peekPlot.id.toString()))
@@ -498,6 +525,7 @@ internal fun CruiseModeBottomContent(
                 modifier = Modifier
                     .padding(horizontal = 12.dp)
                     .padding(bottom = 20.dp),
+                onMeasureHeight = { state.measureHeight(peekTree) },
                 onEdit = {
                     nav.navigate(PlotFlowRoutes.treeDetail(peekTree.id.toString()))
                 },
@@ -569,6 +597,24 @@ internal fun CruiseModeSheets(
             onDrawBoundary = {
                 state.cruiseSetupOpen = false
                 nav.navigate(ProjectFlowRoutes.stratumDraw(setupProject.id.toString()))
+            },
+        )
+    }
+
+    // MARK: - Plot heights sheet (B — "Heights · N measured")
+
+    val heightsPlot = state.heightsSheetFor
+        ?.let { id -> state.data.plots.firstOrNull { it.id == id } }
+    if (heightsPlot != null) {
+        PlotHeightsSheet(
+            plot = heightsPlot,
+            trees = state.data.treesByPlot[heightsPlot.id].orEmpty(),
+            unitSystemMetric = state.project?.units ==
+                com.hcjeong.forestix.data.cruise.UnitSystem.METRIC,
+            onDismiss = { state.heightsSheetFor = null },
+            onMeasure = { tree ->
+                state.heightsSheetFor = null
+                state.measureHeight(tree)
             },
         )
     }
@@ -1052,8 +1098,10 @@ private fun PlotPeekCard(
     plot: Plot,
     project: Project?,
     trees: List<Tree>,
+    allProjectTrees: List<Tree>,
     modifier: Modifier = Modifier,
     onAddTree: () -> Unit,
+    onHeights: () -> Unit,
     onClose: () -> Unit,
     onDetails: () -> Unit,
 ) {
@@ -1065,9 +1113,13 @@ private fun PlotPeekCard(
     // Live stats via the SAME inventory engine PlotTallyScreen uses.
     var stats by remember(plot.id, trees.size) { mutableStateOf(PlotStats.empty) }
     LaunchedEffect(plot.id, trees.size) {
-        stats = computePlotStats(env, project, plot, trees)
+        stats = computePlotStats(env, project, plot, trees, allProjectTrees)
     }
     val nextTree = (trees.maxOfOrNull { it.treeNumber } ?: 0) + 1
+    // B. Pooled sample heights — "N measured" counts the live trees
+    // carrying a height (iOS measuredHeightCount parity; the pooled FIT
+    // additionally applies the engine's > 1.3 m cleaning).
+    val heightsCount = trees.count { it.deletedAt == null && it.heightM != null }
 
     Column(
         modifier
@@ -1132,7 +1184,38 @@ private fun PlotPeekCard(
                 "QMD", String.format(Locale.US, "%.1f", stats.qmdCm),
                 "cm", Modifier.weight(1f))
         }
-        Spacer(Modifier.size(12.dp))
+        // B. PLOT SAMPLE HEIGHTS — LOCKED string "Heights · N measured";
+        // list-row into the heights sheet (iOS plotPeek row 1:1), shown
+        // for open AND closed plots.
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(min = 44.dp)
+                .clickableNoRipple(onHeights),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Icon(
+                Icons.Filled.Height,
+                contentDescription = null,
+                tint = colors.textTertiary,
+                modifier = Modifier.size(16.dp),
+            )
+            Text(
+                "Heights · $heightsCount measured",
+                style = type.bodyBold.copy(fontSize = 13.sp, fontWeight = FontWeight.SemiBold),
+                color = colors.textPrimary,
+            )
+            Spacer(Modifier.weight(1f))
+            Icon(
+                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                tint = colors.textTertiary,
+                modifier = Modifier.size(14.dp),
+            )
+        }
+        HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
+        Spacer(Modifier.size(ForestixSpace.sm))
         if (!closed) {
             // 54 dp full-width primary with the next auto number baked in.
             Box(
@@ -1165,6 +1248,190 @@ private fun PlotPeekCard(
                 onDetails()
             }
         }
+    }
+}
+
+// MARK: - Plot heights sheet (B) -----------------------------------------------
+
+/// Pooled sample heights for one plot (no species dimension): the measured
+/// (tree #, DBH, height) pairs, the LOCKED "Height curve active — other
+/// trees estimated" caption once ≥ 3 pairs exist, and a 54 dp "Measure
+/// height" primary that opens a compact tree-number picker (default = the
+/// last tallied tree) into the Height screen for that tree.
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PlotHeightsSheet(
+    plot: Plot,
+    trees: List<Tree>,
+    unitSystemMetric: Boolean,
+    onDismiss: () -> Unit,
+    onMeasure: (Tree) -> Unit,
+) {
+    val colors = Forestix.colors
+    val type = Forestix.type
+    val unitSystem = if (unitSystemMetric) {
+        com.hcjeong.forestix.common.UnitSystem.METRIC
+    } else {
+        com.hcjeong.forestix.common.UnitSystem.IMPERIAL
+    }
+    val live = remember(trees) {
+        trees.filter { it.deletedAt == null }.sortedBy { it.treeNumber }
+    }
+    // List rows — trees carrying a height, tally order (iOS `measured`).
+    val withHeights = remember(trees) { live.filter { it.heightM != null } }
+    var pickerOpen by remember { mutableStateOf(false) }
+    // Default = the LAST TALLIED tree (newest row), not the highest number
+    // with a height — the cruiser usually heights the tree just measured.
+    var selectedId by remember {
+        mutableStateOf(live.maxByOrNull { it.createdAt }?.id)
+    }
+    val selected = live.firstOrNull { it.id == selectedId }
+
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = colors.surface) {
+        Column(
+            Modifier
+                .padding(horizontal = ForestixSpace.md)
+                .padding(bottom = ForestixSpace.xl)
+                .verticalScroll(rememberScrollState()),
+        ) {
+            Text(
+                "HEIGHTS · PLOT ${plot.plotNumber}",
+                style = type.sectionHead.copy(
+                    fontWeight = FontWeight.ExtraBold, letterSpacing = 1.0.sp),
+                color = colors.textTertiary,
+                modifier = Modifier.padding(bottom = ForestixSpace.xs),
+            )
+
+            // Measured (tree #, DBH, height) pairs — pooled, no species
+            // dimension.
+            if (withHeights.isEmpty()) {
+                Text(
+                    "No heights measured yet",
+                    style = type.caption,
+                    color = colors.textTertiary,
+                    modifier = Modifier.padding(vertical = 12.dp),
+                )
+            }
+            withHeights.forEach { t ->
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 9.dp, horizontal = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "Tree ${t.treeNumber}",
+                        style = type.bodyBold.copy(fontSize = 13.sp, fontWeight = FontWeight.Bold),
+                        color = colors.textPrimary,
+                        modifier = Modifier.width(76.dp),
+                    )
+                    Text(
+                        MeasurementFormatter.diameter(t.dbhCm.toDouble(), unitSystem),
+                        style = type.dataSmall.copy(
+                            fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold),
+                        color = colors.textSecondary,
+                    )
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        t.heightM?.let {
+                            MeasurementFormatter.height(it.toDouble(), unitSystem)
+                        } ?: "—",
+                        style = type.dataSmall.copy(
+                            fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold),
+                        color = colors.textPrimary,
+                    )
+                }
+                HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
+            }
+
+            // LOCKED caption — the pooled curve is live and volume
+            // estimation imputes the plot's unmeasured heights from it.
+            if (withHeights.size >= PooledHeights.MIN_PAIRS) {
+                Text(
+                    "Height curve active — other trees estimated",
+                    style = type.caption,
+                    color = colors.textSecondary,
+                    modifier = Modifier.padding(top = ForestixSpace.xs),
+                )
+            }
+            Spacer(Modifier.size(ForestixSpace.sm))
+
+            if (!pickerOpen) {
+                // 54 dp primary — LOCKED "Measure height"; stage 1 opens
+                // the compact tree-number picker.
+                HeightsSheetPrimary(enabled = live.isNotEmpty()) {
+                    selectedId = live.maxByOrNull { it.createdAt }?.id
+                    pickerOpen = true
+                }
+            } else {
+                // Compact tree-number picker (default = last tallied
+                // tree) — selectable "Tree N · DBH (✓)" rows, the
+                // Android analogue of the iOS wheel.
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 200.dp)
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    live.forEach { t ->
+                        val isSel = t.id == selectedId
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 44.dp)
+                                .pressableNoRipple(onClick = { selectedId = t.id })
+                                .clip(ForestixRadius.control)
+                                .background(
+                                    if (isSel) colors.primaryMuted else Color.Transparent)
+                                .padding(horizontal = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                "Tree ${t.treeNumber} · " +
+                                    MeasurementFormatter.diameter(
+                                        t.dbhCm.toDouble(), unitSystem) +
+                                    (if (t.heightM != null) " ✓" else ""),
+                                style = type.dataSmall.copy(
+                                    fontSize = 13.5.sp,
+                                    fontWeight = if (isSel) FontWeight.Bold
+                                    else FontWeight.Medium,
+                                ),
+                                color = if (isSel) colors.primary else colors.textPrimary,
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.size(ForestixSpace.xs))
+                // Stage 2 confirm — same LOCKED "Measure height" label.
+                HeightsSheetPrimary(enabled = selected != null) {
+                    selected?.let { onMeasure(it) }
+                }
+            }
+        }
+    }
+}
+
+/// The heights sheet's 54 dp primary — LOCKED "Measure height" on both
+/// stages (iOS measureButton parity: filled primary, 0.45 alpha when
+/// there is nothing to measure).
+@Composable
+private fun HeightsSheetPrimary(enabled: Boolean, onClick: () -> Unit) {
+    val colors = Forestix.colors
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(min = 54.dp)
+            .alpha(if (enabled) 1f else 0.45f)
+            .pressableNoRipple(enabled = enabled, onClick = onClick)
+            .clip(ForestixRadius.card)
+            .background(colors.primary),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            "Measure height",
+            style = Forestix.type.bodyBold.copy(fontSize = 15.sp),
+            color = MaterialTheme.colorScheme.onPrimary,
+        )
     }
 }
 
@@ -1231,11 +1498,15 @@ private fun StatsDivider() {
 /// PlotTallyViewModel.refresh + recomputeStats, folded into one pure pass
 /// for the peek card (species / volume equations / H–D fits from the repos,
 /// design falls back to a fixed-area stub exactly like AddTreeFlowScreen).
+/// B: missing heights are estimated from the POOLED (species-blind)
+/// DBH-height curve — plot-level pairs at ≥ 3, stand-level pool as
+/// fallback — beneath the persisted §7.4 per-species fits.
 private suspend fun computePlotStats(
     env: AppEnvironment,
     project: Project?,
     plot: Plot,
     trees: List<Tree>,
+    allProjectTrees: List<Tree> = emptyList(),
 ): PlotStats {
     return try {
         val design = env.cruiseDesignRepository.forProject(plot.projectId).firstOrNull()
@@ -1265,13 +1536,14 @@ private suspend fun computePlotStats(
                     ?.let { put(fit.speciesCode, it) }
             }
         }
+        val pooled = PooledHeights.fit(trees) ?: PooledHeights.fit(allProjectTrees)
         PlotStatsCalculator.compute(
             plot = plot,
             cruiseDesign = design,
             trees = trees,
             species = speciesByCode,
             volumeEquations = volBySpecies,
-            hdFits = hdFits,
+            hdFits = PooledHeights.overlay(hdFits, pooled, trees),
         )
     } catch (_: Exception) {
         PlotStats.empty
@@ -1287,6 +1559,7 @@ private fun TreePeekCard(
     unitSystemMetric: Boolean,
     activity: Activity?,
     modifier: Modifier = Modifier,
+    onMeasureHeight: () -> Unit,
     onEdit: () -> Unit,
 ) {
     val colors = Forestix.colors
@@ -1386,8 +1659,15 @@ private fun TreePeekCard(
             )
         }
         Spacer(Modifier.size(12.dp))
-        PeekActionButton("Edit details", primary = true, modifier = Modifier.fillMaxWidth()) {
-            onEdit()
+        Row(horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs)) {
+            // A. Per-tree height on demand — LOCKED string "Measure height"
+            // (the quick-tally loop dropped the chained Height leg).
+            PeekActionButton("Measure height", primary = false, modifier = Modifier.weight(1f)) {
+                onMeasureHeight()
+            }
+            PeekActionButton("Edit details", primary = true, modifier = Modifier.weight(1f)) {
+                onEdit()
+            }
         }
     }
 }

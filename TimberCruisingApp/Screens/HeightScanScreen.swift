@@ -853,16 +853,21 @@ public struct HeightScanScreen: View {
         switch viewModel.state {
         case .computed:
             VStack(spacing: 8) {
-                // Crown control: start it, or restart it once done.
-                if crownStep == .none {
-                    Button("Measure crown") { crownStep = .left }
-                        .buttonStyle(.forestixARSecondary)
-                        .frame(maxWidth: .infinity)
-                        .accessibilityIdentifier("heightScan.measureCrown")
-                } else if crownStep == .done {
-                    Button("Redo crown") { resetCrown() }
-                        .buttonStyle(.forestixARSecondary)
-                        .frame(maxWidth: .infinity)
+                // Crown control: start it, or restart it once done. Hidden
+                // in cruise-scoped sessions — the cruise Tree model has no
+                // crown fields, so a crown measured here would be silently
+                // dropped (Android gates identically).
+                if cruisePlotInfo == nil {
+                    if crownStep == .none {
+                        Button("Measure crown") { crownStep = .left }
+                            .buttonStyle(.forestixARSecondary)
+                            .frame(maxWidth: .infinity)
+                            .accessibilityIdentifier("heightScan.measureCrown")
+                    } else if crownStep == .done {
+                        Button("Redo crown") { resetCrown() }
+                            .buttonStyle(.forestixARSecondary)
+                            .frame(maxWidth: .infinity)
+                    }
                 }
                 HStack(spacing: 12) {
                     Button("Retake") { viewModel.retake(); resetCrown() }

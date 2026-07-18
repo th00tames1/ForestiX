@@ -78,10 +78,11 @@ public struct MapHomeScreen: View {
     @EnvironmentObject var settings: AppSettings
     @EnvironmentObject var history: QuickMeasureHistory
 
-    /// The home owns its LocationService: the GPS chip must be live from
-    /// the moment the screen appears, independent of any scan screen.
-    /// Shared by both modes — cruise plot-centre stamping uses it too.
-    @StateObject var location = LocationService()
+    /// The app-shared LocationService (subscriber-refcounted): the GPS
+    /// chip is live from the moment the screen appears — acquired in
+    /// `startUp()`, released in `onDisappear`. Shared by both modes —
+    /// cruise plot-centre stamping uses it too.
+    @ObservedObject var location = LocationService.shared
 
     /// Peavy Hall (OSU College of Forestry) fallback — used only when
     /// there is no fix and no located reading.
@@ -262,7 +263,7 @@ public struct MapHomeScreen: View {
                 startUp()
                 if isCruiseMode { reloadCruise() }
             }
-            .onDisappear { location.stop() }
+            .onDisappear { location.release() }
             .onChange(of: location.latestSnapshot) { _, snap in
                 recenterOnFirstFix(snap)
                 if isCruiseMode { checkNavArrival(snap) }
@@ -498,7 +499,7 @@ public struct MapHomeScreen: View {
 
     private func startUp() {
         location.requestAuthorization()
-        location.start()
+        location.acquire()
         guard !cameraInitialised else { return }
         cameraInitialised = true
         if let fix = LocationService.lastGlobalFix ?? location.latestSnapshot {

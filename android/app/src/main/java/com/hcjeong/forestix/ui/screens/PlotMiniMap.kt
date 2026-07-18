@@ -184,18 +184,19 @@ private fun PlotMiniMapCard(
     val controller = ArSessionHub.controller
     val radiusM = radiusOverrideM ?: ArSessionHub.plotRadiusM
 
-    // Local GPS + camera-forward compass. No permission launcher here: the
-    // scan screens' GPS badge / the cruise screens already own the request;
-    // without a grant the widget just loses the GPS fallback + declination.
-    val location = remember { LocationService(context) }
+    // Shared GPS (ref-counted subscriber) + camera-forward compass. No
+    // permission launcher here: the scan screens' GPS badge / the cruise
+    // screens already own the request; without a grant the widget just
+    // loses the GPS fallback + declination.
+    val location = remember { LocationService.shared(context) }
     val compass = remember { CameraFacingCompass(context, location) }
     val aligner = remember { ArNorthAligner() }
     DisposableEffect(Unit) {
-        if (LocationService.hasLocationPermission(context)) location.start()
+        location.acquire()
         compass.start()
         onDispose {
             compass.stop()
-            location.stop()
+            location.release()
         }
     }
 

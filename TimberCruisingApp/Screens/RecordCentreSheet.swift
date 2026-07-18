@@ -29,8 +29,12 @@ public struct RecordCentreSheet: View {
     public let project: Project
     public var onSaved: (Plot) -> Void
 
-    /// Own LocationService — the averaging window clears/stops its
-    /// buffer freely without fighting the map screen's GPS chip.
+    /// PRIVATE LocationService — deliberately NOT `LocationService.shared`.
+    /// The averaging engine owns the rolling buffer: it clearBuffer()s on
+    /// start and hands the buffer to GPSAveraging.compute at the end of
+    /// the window, and it start()/stop()s outside any subscriber
+    /// ref-count. Sharing would let the map chip / badge / mini-map race
+    /// the buffer (or a release() elsewhere stop the averager mid-window).
     @StateObject private var viewModel = PlotCenterViewModel(
         location: LocationService())
     /// Private AR session for the offset fallback (the manager's

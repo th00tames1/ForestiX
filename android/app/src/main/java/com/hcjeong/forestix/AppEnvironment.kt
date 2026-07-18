@@ -106,8 +106,22 @@ class AppEnvironment private constructor(
                 Log.w(TAG, "Seed data bootstrap failed", e)
             }
 
+            val settings = AppSettings(app)
+            // Depth-capability cache (both process singletons, so wiring
+            // here is leak-free): persist the AR session's definitive
+            // Depth-API verdict. Only a NEGATIVE gates anything —
+            // DBHScanScreen shows its unsupported blocker without probing
+            // — and any later positive report clears a stale negative, so
+            // the cache can never block a supported device.
+            com.hcjeong.forestix.ar.ArSessionHub.onDepthVerdict = { supported ->
+                val unsupported = !supported
+                if (settings.state.value.depthUnsupported != unsupported) {
+                    settings.setDepthUnsupported(unsupported)
+                }
+            }
+
             return AppEnvironment(
-                settings = AppSettings(app),
+                settings = settings,
                 history = history,
                 cruiseDatabase = cruiseDb,
                 projectRepository = RoomProjectRepository(cruiseDb.projectDao()),

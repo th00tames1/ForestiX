@@ -10,17 +10,18 @@
 //   • 5–15 m  → "GPS fair"   (ForestixPalette.confidenceWarn)
 //   • > 15 m / unknown → "GPS check" (ForestixPalette.confidenceBad)
 //
-// The badge owns a local `LocationService` so it works without any
-// AppEnvironment plumbing — it lights up regardless of which scan
-// screen hosts it. On macOS / non-CoreLocation hosts the service is
-// a no-op stub, so the badge silently falls back to "check".
+// The badge subscribes to the app-shared `LocationService` (refcounted
+// acquire/release) so it works without any AppEnvironment plumbing —
+// it lights up regardless of which scan screen hosts it. On macOS /
+// non-CoreLocation hosts the service is a no-op stub, so the badge
+// silently falls back to "check".
 
 import SwiftUI
 import Positioning
 
 public struct GPSAccuracyBadge: View {
 
-    @StateObject private var location = LocationService()
+    @ObservedObject private var location = LocationService.shared
 
     public init() {}
 
@@ -46,9 +47,9 @@ public struct GPSAccuracyBadge: View {
         .accessibilityLabel("GPS \(tier.label.lowercased())")
         .onAppear {
             location.requestAuthorization()
-            location.start()
+            location.acquire()
         }
-        .onDisappear { location.stop() }
+        .onDisappear { location.release() }
     }
 
     // MARK: - Tier classification

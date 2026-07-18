@@ -79,6 +79,17 @@ data class SettingsSnapshot(
     /// Persisted so the app reopens in the mode the cruiser left it in
     /// (mirror of iOS tc.mapMode).
     val mapMode: String = "measure",
+    /// Cached ARCore Depth-API capability verdict (Android-only; iOS
+    /// checks LiDAR statically). ONLY a definitive session report writes
+    /// it (ArSessionHub.applySessionConfig → the AppEnvironment-wired
+    /// recorder): true after `isDepthModeSupported` returned false, and
+    /// cleared back to false the moment any later session reports support
+    /// (e.g. an ARCore update adding the device) — so a cached negative
+    /// can never block a supported device. While true, DBHScanScreen
+    /// shows its unsupported blocker immediately WITHOUT spinning up a
+    /// probe AR session. Developer mode ignores it (the dev capture arms
+    /// are depth-free, and a dev-mode session re-probes the verdict).
+    val depthUnsupported: Boolean = false,
 )
 
 private val Context.settingsStore by preferencesDataStore(name = "forestix_settings")
@@ -106,6 +117,7 @@ class AppSettings(private val context: Context) {
         val cruiseProjectId = stringPreferencesKey("tc.cruiseProjectId")
         val cruisePlotId = stringPreferencesKey("tc.cruisePlotId")
         val mapMode = stringPreferencesKey("tc.mapMode")
+        val depthUnsupported = booleanPreferencesKey("tc.depthUnsupported")
     }
 
     private val _state = MutableStateFlow(loadSnapshot())
@@ -146,7 +158,13 @@ class AppSettings(private val context: Context) {
             cruiseProjectId = p[Keys.cruiseProjectId],
             cruisePlotId = p[Keys.cruisePlotId],
             mapMode = if (p[Keys.mapMode] == "cruise") "cruise" else "measure",
+            depthUnsupported = p[Keys.depthUnsupported] ?: false,
         )
+    }
+
+    fun setDepthUnsupported(value: Boolean) = update {
+        _state.value = _state.value.copy(depthUnsupported = value)
+        it[Keys.depthUnsupported] = value
     }
 
     fun setMapMode(value: String) = update {

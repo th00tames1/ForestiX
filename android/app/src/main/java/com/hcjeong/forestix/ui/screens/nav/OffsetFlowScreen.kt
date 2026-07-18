@@ -335,6 +335,11 @@ fun OffsetFlowScreen(
 
     // Shared app-scoped AR session (one ARCore world across the AR screens).
     val controller = ArSessionHub.controller
+    // PRIVATE location client — deliberately NOT LocationService.shared:
+    // the offset flow's plot-centre averaging clearBuffer()s and reads the
+    // rolling buffer as its own state, which must stay isolated from the
+    // passive subscribers on the shared instance (same rule as
+    // RecordCentreSheet; mirror of iOS).
     val location = remember { LocationService(context) }
     // Live compass so anchorPlotCenter can heading-align the ARCore world
     // frame (see AnchorCompass docs for the sensor assumptions).

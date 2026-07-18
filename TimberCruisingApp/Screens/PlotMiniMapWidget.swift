@@ -278,15 +278,16 @@ final class PlotMiniMapLiveModel: ObservableObject {
 
     private var info: PlotMiniMapInfo?
     private var timer: Timer?
-    /// Local service for fix + compass heading — same self-contained
-    /// pattern as GPSAccuracyBadge, so the widget lights up on every
-    /// host screen without AppEnvironment plumbing. Never observed.
-    private let location = LocationService()
+    /// App-shared service for fix + compass heading (refcounted
+    /// acquire/release) — same self-contained pattern as
+    /// GPSAccuracyBadge, so the widget lights up on every host screen
+    /// without AppEnvironment plumbing. Never observed.
+    private let location = LocationService.shared
 
     func start(info: PlotMiniMapInfo) {
         self.info = info
         location.requestAuthorization()
-        location.start()
+        location.acquire()
         timer?.invalidate()
         // 0.2 s — the sampling screen's existing poll cadence. Each tick
         // is a handful of float ops; GPS underneath only refreshes ~1 Hz.
@@ -304,7 +305,7 @@ final class PlotMiniMapLiveModel: ObservableObject {
     func stop() {
         timer?.invalidate()
         timer = nil
-        location.stop()
+        location.release()
     }
 
     private func tick() {

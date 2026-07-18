@@ -86,9 +86,10 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String) {
     val colors = Forestix.colors
     val scope = rememberCoroutineScope()
 
-    // Live GPS for the plot centre — same local-service pattern as the
-    // GPS badge, so Save stamps a FRESH fix instead of a stale global one.
-    val location = remember { LocationService(context) }
+    // Live GPS for the plot centre — same shared-service pattern as the
+    // GPS badge (updates run while this screen holds its subscription), so
+    // Save stamps a FRESH fix instead of a stale global one.
+    val location = remember { LocationService.shared(context) }
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
@@ -97,13 +98,14 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String) {
         if (granted) location.start()
     }
     LaunchedEffect(Unit) {
-        if (LocationService.hasLocationPermission(context)) {
-            location.start()
-        } else {
+        if (!LocationService.hasLocationPermission(context)) {
             launcher.launch(LocationService.PERMISSIONS)
         }
     }
-    DisposableEffect(Unit) { onDispose { location.stop() } }
+    DisposableEffect(Unit) {
+        location.acquire()
+        onDispose { location.release() }
+    }
     val fix by location.latestSnapshot.collectAsStateWithLifecycle()
 
     // Active plot + radius live in the hub (shared with DBH/Height's

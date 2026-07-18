@@ -105,8 +105,13 @@ fun RecordCentreSheet(
     val type = Forestix.type
     val scope = rememberCoroutineScope()
 
-    // Own 1 Hz location client — the averaging window clears/stops its
-    // buffer freely without fighting the map screen's GPS chip.
+    // Own PRIVATE 1 Hz location client — deliberately NOT
+    // LocationService.shared: the 60 s averaging window clearBuffer()s on
+    // open and treats the rolling buffer as its own state. On the shared
+    // instance that clear would wipe (and its samples would pollute) any
+    // other consumer's view of the buffer, and stop() semantics would
+    // fight the ref-count. Passive readers (chip/badge/mini-map) use the
+    // shared instance; averaging stays isolated (mirror of iOS).
     val location = remember { LocationService(context) }
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()

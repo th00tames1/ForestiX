@@ -175,9 +175,9 @@ fun MapHomeScreen(nav: NavController) {
     // chain always pops back here) disarms it. Idempotent.
     LaunchedEffect(Unit) { CruiseCapture.end(env) }
 
-    // MARK: - Live GPS (GPSAccuracyBadge pattern: local service + launcher)
+    // MARK: - Live GPS (GPSAccuracyBadge pattern: shared service + launcher)
 
-    val location = remember { LocationService(context) }
+    val location = remember { LocationService.shared(context) }
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
@@ -186,14 +186,13 @@ fun MapHomeScreen(nav: NavController) {
         if (granted) location.start()
     }
     LaunchedEffect(Unit) {
-        if (LocationService.hasLocationPermission(context)) {
-            location.start()
-        } else {
+        if (!LocationService.hasLocationPermission(context)) {
             launcher.launch(LocationService.PERMISSIONS)
         }
     }
     DisposableEffect(Unit) {
-        onDispose { location.stop() }
+        location.acquire()
+        onDispose { location.release() }
     }
     val fix by location.latestSnapshot.collectAsStateWithLifecycle()
 

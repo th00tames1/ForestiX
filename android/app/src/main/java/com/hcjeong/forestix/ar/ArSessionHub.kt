@@ -90,6 +90,15 @@ object ArSessionHub {
     /// only the hub's controller is fed frames from the shared session.
     val controller = ArController()
 
+    /// Persistence hook for the Depth-API capability verdict — wired once
+    /// by AppEnvironment to AppSettings (the hub has no settings access).
+    /// Invoked with the DEFINITIVE `isDepthModeSupported` answer on every
+    /// session (re)configure, from ANY AR screen: a negative lets the DBH
+    /// gate show its unsupported blocker on future entries without
+    /// starting a probe session, and a later positive (e.g. an ARCore
+    /// update adding the device) clears that cached negative.
+    var onDepthVerdict: ((Boolean) -> Unit)? = null
+
     /// How an attached screen renders the active sampling plot.
     enum class PlotOverlay {
         /// No plot geometry at all (Distance, boundary, offset, calibration).
@@ -330,6 +339,7 @@ object ArSessionHub {
         val depthSupported = session.isDepthModeSupported(Config.DepthMode.AUTOMATIC)
         controller.supportsDepth = depthSupported
         controller.depthSupportKnown = true
+        onDepthVerdict?.invoke(depthSupported)
         config.depthMode =
             if (depthSupported && screenWantsDepth) Config.DepthMode.AUTOMATIC
             else Config.DepthMode.DISABLED

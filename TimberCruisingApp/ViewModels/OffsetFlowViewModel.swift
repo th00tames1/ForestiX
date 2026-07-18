@@ -28,6 +28,10 @@ public final class OffsetFlowViewModel: ObservableObject {
         case failed(reason: String)
     }
 
+    /// A PRIVATE per-flow instance (never `LocationService.shared`) —
+    /// shared with the host RecordCentreSheet's PlotCenterViewModel; the
+    /// opening averager clears and consumes its rolling buffer, which
+    /// must stay isolated from the passive shared-instance subscribers.
     public let location: LocationService
     public let session: ARKitSessionManager
     public let openingAveragingDurationS: Int

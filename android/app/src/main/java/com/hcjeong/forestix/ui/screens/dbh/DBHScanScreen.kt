@@ -204,11 +204,17 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // Add-Tree flow (iOS injects it into DBHScanViewModel).
     val calibration by env.activeScanCalibration.collectAsStateWithLifecycle()
     // Field mode (developer mode OFF) requires the ARCore Depth API — the
-    // depth-free AR motion / AR caliper arms are developer tools. Only
-    // block once the session has actually REPORTED capability, so capable
-    // devices don't flash the blocker while AR is still starting up.
+    // depth-free AR motion / AR caliper arms are developer tools. Block
+    // when a previous session's DEFINITIVE negative verdict is cached
+    // (tc.depthUnsupported — then no probe session ever starts, see the
+    // ArCameraView gate below), or once the live session has actually
+    // REPORTED capability, so capable devices don't flash the blocker
+    // while AR is still starting up. Developer mode ignores the cache
+    // along with the blocker: the dev arms are depth-free, and a dev-mode
+    // session re-probes, refreshing/clearing the cached verdict.
     val depthBlocked = !settings.developerMode &&
-        controller.depthSupportKnown && !controller.supportsDepth
+        (settings.depthUnsupported ||
+            (controller.depthSupportKnown && !controller.supportsDepth))
     var stage by remember { mutableStateOf(Stage.AIMING) }
     var result by remember { mutableStateOf<DBHResult?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
@@ -973,7 +979,14 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         } else {
             emptyList()
         }
-        ArCameraView(
+        // The AR host only runs while the scan can: with the depth blocker
+        // up there is nothing to see or measure, so composing it would just
+        // burn a hidden ARCore session. Cached-unsupported entries never
+        // attach at all (no probe session); a live negative report flips
+        // depthBlocked mid-session, detaching this host — which pauses the
+        // shared session while the blocker is displayed (other screens'
+        // attach/resume semantics unchanged).
+        if (!depthBlocked) ArCameraView(
             controller,
             dbhMarkers,
             // Depth-based hit filtering only for the depth capture method;
@@ -1572,8 +1585,9 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
 
         // No Depth API + developer mode off → the scan can't run: replace
         // the whole scanning UI with a full-page canvas blocker (iOS
-        // lidarRequiredPanel presentation; the probe session keeps running
-        // hidden behind the opaque page).
+        // lidarRequiredPanel presentation). No AR session runs behind the
+        // opaque page — the host above is gated out, and a cached verdict
+        // skips the probe entirely on re-entry.
         if (depthBlocked) {
             Box(Modifier.fillMaxSize().background(colors.canvas)) {
                 Column(

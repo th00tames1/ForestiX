@@ -25,6 +25,9 @@ public final class PlotCenterViewModel: ObservableObject {
         case failed(reason: String)
     }
 
+    /// A PRIVATE per-flow instance (never `LocationService.shared`):
+    /// the averager clears and consumes the rolling buffer, which must
+    /// stay isolated from the passive shared-instance subscribers.
     public let location: LocationService
     public let averagingDurationS: Int
     public private(set) var startedAt: Date?

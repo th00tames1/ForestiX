@@ -48,12 +48,28 @@ public final class ActiveSamplingPlot: ObservableObject {
 
     @Published public private(set) var plot: Plot?
 
+    /// Persisted cruise `Plot` whose centre the current anchor marks —
+    /// stamped by the cruise Start-plot save, nil for quick-measure
+    /// rings. Lets the plot mini-map trust the anchor path only when
+    /// the anchor actually belongs to the plot being measured (a peek
+    /// "Add tree" can target an OLDER open plot than the last-placed
+    /// ring).
+    @Published public private(set) var linkedCruisePlotID: UUID?
+
     public init() {}
 
     /// Record a freshly placed plot (replaces any previous one — the
     /// caller removes the old ARAnchor from the session).
     public func place(anchorID: UUID, radiusM: Double) {
         plot = Plot(anchorID: anchorID, radiusM: radiusM, placedAt: Date())
+        linkedCruisePlotID = nil
+    }
+
+    /// Associate the placed ring with the cruise `Plot` it was just
+    /// saved as. No-op while nothing is placed.
+    public func link(cruisePlotID: UUID) {
+        guard plot != nil else { return }
+        linkedCruisePlotID = cruisePlotID
     }
 
     /// Keep the stored radius in sync with the sampling screen's slider.
@@ -67,6 +83,7 @@ public final class ActiveSamplingPlot: ObservableObject {
     /// Reset — the caller removes the ARAnchor from the session.
     public func clear() {
         plot = nil
+        linkedCruisePlotID = nil
     }
 
     // MARK: - Subdued overlay markers (DBH / Height)

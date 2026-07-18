@@ -38,9 +38,22 @@
 //  - A radius change rebuilds ONLY the ring node (reusing its material),
 //    not the whole 4-marker set.
 //  - Screens can turn the session's Depth API and the plane renderer off
-//    (sampling does both once the centre is placed — it never consumes
-//    depth images, and ARCore's ML depth-from-motion + per-frame plane
-//    geometry updates were the dominant frame cost while walking a plot).
+//    (ARCore's ML depth-from-motion + per-frame plane geometry updates
+//    were the dominant frame cost while walking a plot). NOTE: the
+//    sampling/plot-creation screens now keep DEPTH ON for ring occlusion
+//    (below) — they still switch the plane renderer off after placement.
+//
+// DEPTH OCCLUSION (sampling/plot-creation only): per-screen flag that
+// flips SceneView's ARCameraStream.isDepthOcclusionEnabled, so the plot
+// ring/pole render BEHIND real trunks (the camera quad writes per-pixel
+// scene depth from the ARCore depth image and depth-tests the virtual
+// geometry). Requires Config.DepthMode.AUTOMATIC — which is why those
+// screens keep depth enabled after placement, partially reverting the
+// earlier walking-phase depth shutdown (occlusion consumes a depth image
+// EVERY frame; the plane-renderer shutdown and material cache stay).
+// DBH/Height do NOT enable it: their treetop spheres + subdued ring
+// overlay must stay visible through canopy. The flag reverts on every
+// attach, so the next screen always gets its own choice.
 
 package com.hcjeong.forestix.ar
 
@@ -103,6 +116,23 @@ object ArSessionHub {
     var plotRadiusM by mutableDoubleStateOf(8.0)
         private set
 
+    /// Persisted cruise `Plot` whose centre the current anchor marks —
+    /// stamped by the cruise Start-plot save, null for quick-measure
+    /// rings. Lets the plot mini-map trust the anchor path only when the
+    /// anchor actually belongs to the plot being measured (an "Add tree"
+    /// can target an OLDER open plot than the last-placed ring). Mirror
+    /// of iOS ActiveSamplingPlot.linkedCruisePlotID.
+    @Volatile
+    var linkedCruisePlotId: java.util.UUID? = null
+        private set
+
+    /// Associate the placed ring with the cruise Plot it was just saved
+    /// as. No-op while nothing is placed.
+    fun linkPlot(cruisePlotId: java.util.UUID) {
+        if (activePlot == null) return
+        linkedCruisePlotId = cruisePlotId
+    }
+
     // MARK: - Internals
 
     private var sceneView: SharedArSceneView? = null
@@ -117,6 +147,7 @@ object ArSessionHub {
 
     // Per-screen session wishes (applied at attach + on live updates).
     private var screenWantsDepth = true
+    private var screenWantsOcclusion = false
     private var overlay = PlotOverlay.HIDDEN
 
     // Generic marker pipeline (one screen's markers at a time).
@@ -191,14 +222,17 @@ object ArSessionHub {
         enableDepth: Boolean,
         planeRendererEnabled: Boolean,
         plotOverlay: PlotOverlay,
+        depthOcclusion: Boolean = false,
     ): Int {
         obtainView(context)
         controller.preferDepth = preferDepth
         screenWantsDepth = enableDepth
+        screenWantsOcclusion = depthOcclusion
         overlay = plotOverlay
         clearMarkerNodes()
         sceneView?.planeRenderer?.isEnabled = planeRendererEnabled
         reconfigureSession()
+        applyOcclusion()
         rebuildPlotNodes()
         val token = ++attachSeq
         attachedToken = token
@@ -216,6 +250,7 @@ object ArSessionHub {
         enableDepth: Boolean,
         planeRendererEnabled: Boolean,
         plotOverlay: PlotOverlay,
+        depthOcclusion: Boolean = false,
     ) {
         if (attachedToken != token) return
         controller.preferDepth = preferDepth
@@ -224,6 +259,8 @@ object ArSessionHub {
             screenWantsDepth = enableDepth
             reconfigureSession()
         }
+        screenWantsOcclusion = depthOcclusion
+        applyOcclusion()
         if (overlay != plotOverlay) {
             overlay = plotOverlay
             rebuildPlotNodes()
@@ -259,6 +296,7 @@ object ArSessionHub {
         attachedToken = null
         activePlot?.anchor?.let { runCatching { it.detach() } }
         activePlot = null
+        linkedCruisePlotId = null
         lifecycleOwner?.registry?.let { registry ->
             if (registry.currentState != Lifecycle.State.INITIALIZED) {
                 registry.currentState = Lifecycle.State.DESTROYED
@@ -297,6 +335,9 @@ object ArSessionHub {
             else Config.DepthMode.DISABLED
         config.instantPlacementMode = Config.InstantPlacementMode.DISABLED
         config.lightEstimationMode = Config.LightEstimationMode.DISABLED
+        // Depth support may only become known here (first session create),
+        // so re-derive the occlusion material choice with it.
+        applyOcclusion()
     }
 
     private fun reconfigureSession() {
@@ -305,6 +346,22 @@ object ArSessionHub {
             val config = session.config
             applySessionConfig(session, config)
             session.configure(config)
+        }
+    }
+
+    /// Flip SceneView's camera-stream material between flat and
+    /// depth-occlusion (ARCameraStream.isDepthOcclusionEnabled). Only
+    /// meaningful while the session actually produces depth images —
+    /// with DepthMode.DISABLED the occlusion material's depth texture
+    /// would never update, so the flag is gated on the screen's depth
+    /// wish AND device support. Idempotent (the stream setter no-ops on
+    /// an unchanged value), called from attach / live updates / the
+    /// session-config hook.
+    private fun applyOcclusion() {
+        val view = sceneView ?: return
+        val enable = screenWantsOcclusion && screenWantsDepth && controller.supportsDepth
+        view.cameraStream?.let {
+            if (it.isDepthOcclusionEnabled != enable) it.isDepthOcclusionEnabled = enable
         }
     }
 
@@ -414,6 +471,7 @@ object ArSessionHub {
         }.getOrNull() ?: return false
         activePlot?.anchor?.let { runCatching { it.detach() } }
         activePlot = ActivePlot(anchor, System.currentTimeMillis())
+        linkedCruisePlotId = null   // fresh ring — not yet saved as a cruise plot
         rebuildPlotNodes()
         return true
     }
@@ -443,6 +501,7 @@ object ArSessionHub {
     fun clearPlot() {
         activePlot?.anchor?.let { runCatching { it.detach() } }
         activePlot = null
+        linkedCruisePlotId = null
         destroyPlotNodes()
     }
 

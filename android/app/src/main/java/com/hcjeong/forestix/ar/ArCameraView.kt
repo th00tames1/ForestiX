@@ -11,6 +11,9 @@
 //  - planeRenderer: SceneView's detected-plane grid visualization.
 //  - plotOverlay: how the active sampling plot renders on this screen
 //    (OWNER full alpha / SUBDUED 0.5 alpha / HIDDEN).
+//  - depthOcclusion: camera-stream depth occlusion (virtual geometry hides
+//    behind real surfaces). Sampling/plot-creation only — needs enableDepth
+//    and burns a depth image per frame (see ArSessionHub docs).
 //
 // The permission + availability gates stay per-screen; the session itself
 // pauses whenever no AR screen is attached (map home) and resumes on the
@@ -57,6 +60,7 @@ fun ArCameraView(
     enableDepth: Boolean = true,
     planeRenderer: Boolean = true,
     plotOverlay: ArSessionHub.PlotOverlay = ArSessionHub.PlotOverlay.HIDDEN,
+    depthOcclusion: Boolean = false,
 ) {
     // Screens must pass the shared controller — the hub only feeds frames
     // into ArSessionHub.controller.
@@ -122,7 +126,7 @@ fun ArCameraView(
         !arChecked -> Box(modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
             CircularProgressIndicator(color = Color.White)
         }
-        arOk -> SharedArHost(markers, preferDepth, enableDepth, planeRenderer, plotOverlay, modifier)
+        arOk -> SharedArHost(markers, preferDepth, enableDepth, planeRenderer, plotOverlay, depthOcclusion, modifier)
         else -> Box(modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -147,6 +151,7 @@ private fun SharedArHost(
     enableDepth: Boolean,
     planeRenderer: Boolean,
     plotOverlay: ArSessionHub.PlotOverlay,
+    depthOcclusion: Boolean,
     modifier: Modifier,
 ) {
     val context = LocalContext.current
@@ -159,16 +164,22 @@ private fun SharedArHost(
     // present a stale token and are ignored by the hub.
     var attachToken by remember { mutableStateOf<Int?>(null) }
     DisposableEffect(Unit) {
-        val token = ArSessionHub.attach(context, preferDepth, enableDepth, planeRenderer, plotOverlay)
+        val token = ArSessionHub.attach(
+            context, preferDepth, enableDepth, planeRenderer, plotOverlay,
+            depthOcclusion = depthOcclusion,
+        )
         attachToken = token
         onDispose { ArSessionHub.detach(token) }
     }
 
-    // Live per-screen knob changes (e.g. sampling turns depth + plane grid
+    // Live per-screen knob changes (e.g. sampling turns the plane grid
     // off once the plot centre is placed).
-    LaunchedEffect(attachToken, preferDepth, enableDepth, planeRenderer, plotOverlay) {
+    LaunchedEffect(attachToken, preferDepth, enableDepth, planeRenderer, plotOverlay, depthOcclusion) {
         val token = attachToken ?: return@LaunchedEffect
-        ArSessionHub.updateScreenConfig(token, preferDepth, enableDepth, planeRenderer, plotOverlay)
+        ArSessionHub.updateScreenConfig(
+            token, preferDepth, enableDepth, planeRenderer, plotOverlay,
+            depthOcclusion = depthOcclusion,
+        )
     }
 
     // Sync this screen's marker list into the shared scene. In-place moves

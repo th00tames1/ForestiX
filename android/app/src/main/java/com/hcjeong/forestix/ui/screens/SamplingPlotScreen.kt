@@ -15,9 +15,12 @@
 // Performance: the hub renders the plot nodes directly (a radius change
 // rebuilds only the ring node against a cached material), the out-of-bounds
 // flash is an isolated animation, and — once the centre is placed — the
-// session's Depth API and the plane-grid renderer are switched OFF for the
-// walking phase: this screen never consumes depth images, and ARCore's ML
-// depth + per-frame plane-geometry updates were the dominant lag sources.
+// plane-grid renderer is switched OFF for the walking phase. The Depth API
+// now stays ON the whole time: this screen runs camera-stream DEPTH
+// OCCLUSION so the boundary ring passes BEHIND real trunks (a deliberate
+// partial revert of the walking-phase depth shutdown — occlusion consumes
+// a depth image every frame; the plane-renderer + material-cache fixes
+// stay). A north-up plot mini-map floats top-right once the centre lands.
 
 package com.hcjeong.forestix.ui.screens
 
@@ -122,16 +125,18 @@ fun SamplingPlotScreen(nav: NavController) {
     }
 
     Box(Modifier.fillMaxSize()) {
-        // The hub renders the plot itself (OWNER = full alpha). Depth + the
-        // plane grid are only needed while AIMING for the centre; both are
-        // switched off for the long walking phase once the plot is placed.
+        // The hub renders the plot itself (OWNER = full alpha). The plane
+        // grid is only needed while AIMING for the centre; depth stays ON
+        // throughout because ring occlusion consumes it per frame (the
+        // ring hides behind real trunks — perf trade documented above).
         ArCameraView(
             controller,
             emptyList<ArSceneMarker>(),
             modifier = Modifier.fillMaxSize(),
-            enableDepth = !placed,
+            enableDepth = true,
             planeRenderer = !placed,
             plotOverlay = ArSessionHub.PlotOverlay.OWNER,
+            depthOcclusion = true,
         )
 
         OutsideFlashOverlay(isOutside)
@@ -166,6 +171,10 @@ fun SamplingPlotScreen(nav: NavController) {
                 ),
             )
         }
+
+        // North-up plot mini-map (ring + YOU) once the centre is placed —
+        // top-right, below the full-width radius card.
+        if (placed) SamplingPlotMiniMap()
 
         if (!placed) MeasureControlColumn(onCapture = { place() })
 

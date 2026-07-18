@@ -73,6 +73,8 @@ import com.hcjeong.forestix.ui.screens.MeasureControlColumn
 import com.hcjeong.forestix.ui.screens.MeasureFailureBanner
 import com.hcjeong.forestix.ui.screens.MeasureStatusPanel
 import com.hcjeong.forestix.ui.screens.ResearchFieldsRow
+import com.hcjeong.forestix.ui.screens.ScanPlotMiniMap
+import com.hcjeong.forestix.ui.screens.scanPlotMiniMapVisible
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixProminentButton
 import com.hcjeong.forestix.ui.theme.ForestixWhiteButton
@@ -433,6 +435,13 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 .align(Alignment.TopStart)
                 .padding(start = 72.dp, top = 22.dp))
 
+        // Plot mini-map — top-right, same row as the GPS badge: the active
+        // cruise plot (ring + YOU + measured trees) or the quick sampling
+        // ring (ring + YOU). Hidden with the rest of the 2D chrome during
+        // the Accept snapshot blackout.
+        val miniMapUp = scanPlotMiniMapVisible()
+        if (!hidingChromeForCapture) ScanPlotMiniMap()
+
         if (settings.developerMode && !hidingChromeForCapture) {
             DevHud(
                 "HEIGHT",
@@ -450,6 +459,9 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                     alphaTop?.let { "α_top" to String.format(Locale.US, "%+.1f°", Math.toDegrees(it.toDouble())) },
                     result?.let { "H" to String.format(Locale.US, "%.1f ±%.1f m · %s", it.heightM, it.sigmaHm, it.confidence.raw) },
                 ),
+                // Below the plot mini-map when it occupies the top-right
+                // slot (22 + 116 card + 12 gap).
+                topPadding = if (miniMapUp) 150.dp else 56.dp,
             )
         }
         if (showCapture && !hidingChromeForCapture) MeasureControlColumn(

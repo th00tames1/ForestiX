@@ -95,6 +95,17 @@ public struct ARCameraView: UIViewRepresentable {
 
     public let session: ARSession
     public var debugMeshOverlay: Bool
+    /// RealityKit scene-understanding occlusion: virtual content is
+    /// hidden where the reconstructed world mesh sits in front of it,
+    /// so the sampling ring visually passes BEHIND tree trunks instead
+    /// of floating over everything. Per-ARView (each screen owns its
+    /// own ARView over the shared session), so enabling it here never
+    /// leaks into another screen — DBH / Height deliberately keep it
+    /// OFF so their treetop spheres and subdued ring overlay stay
+    /// visible through canopy. Requires the session configuration to
+    /// run `sceneReconstruction` (all measure presets do on LiDAR
+    /// hardware); on non-LiDAR devices the option is a harmless no-op.
+    public var realWorldOcclusion: Bool
     public var sceneMarkers: [ARSceneMarker]
     /// Optional raycaster that gets bound to the underlying ARView on
     /// creation so callers can fire screen-centre raycasts (Height
@@ -103,10 +114,12 @@ public struct ARCameraView: UIViewRepresentable {
 
     public init(session: ARSession,
                 debugMeshOverlay: Bool = false,
+                realWorldOcclusion: Bool = false,
                 sceneMarkers: [ARSceneMarker] = [],
                 raycaster: ARCenterRaycaster? = nil) {
         self.session = session
         self.debugMeshOverlay = debugMeshOverlay
+        self.realWorldOcclusion = realWorldOcclusion
         self.sceneMarkers = sceneMarkers
         self.raycaster = raycaster
     }
@@ -160,6 +173,7 @@ public struct ARCameraView: UIViewRepresentable {
         // the ARKitSessionManager owns the session lifecycle.
         view.session = session
         applyDebugOptions(to: view)
+        applyOcclusion(to: view)
         view.renderOptions.insert(.disableMotionBlur)
         // Camera background fills behind any SwiftUI overlay we put
         // above this view — no need to set background colour.
@@ -193,6 +207,7 @@ public struct ARCameraView: UIViewRepresentable {
             view.session = session
         }
         applyDebugOptions(to: view)
+        applyOcclusion(to: view)
         // Rebind on every update in case the binding instance changed
         // (SwiftUI can recreate helpers across view updates).
         if raycaster?.arview !== view {
@@ -211,6 +226,20 @@ public struct ARCameraView: UIViewRepresentable {
         // and the mesh alone gives the same "is the scene tracked?"
         // signal. ARView ships with featurePoints off by default, so
         // explicit clearing is no longer needed.
+    }
+
+    /// Insert/remove the scene-understanding occlusion render option.
+    /// Applied on make AND update (idempotent set ops) so a screen that
+    /// flips the flag — or a recycled ARView — always converges on the
+    /// requested state. Occlusion consumes the same LiDAR mesh the
+    /// session's `sceneReconstruction` already builds; there is no
+    /// extra per-frame CPU cost in our code.
+    private func applyOcclusion(to view: ARView) {
+        if realWorldOcclusion {
+            view.environment.sceneUnderstanding.options.insert(.occlusion)
+        } else {
+            view.environment.sceneUnderstanding.options.remove(.occlusion)
+        }
     }
 
     // MARK: - Marker diffing
@@ -430,6 +459,7 @@ public struct ARCameraView: UIViewRepresentable {
 public struct ARCameraView: View {
     public init(session: Any,
                 debugMeshOverlay: Bool = false,
+                realWorldOcclusion: Bool = false,
                 sceneMarkers: [ARSceneMarker] = [],
                 raycaster: ARCenterRaycaster? = nil) {}
     public var body: some View { Color.black }
@@ -443,10 +473,12 @@ public struct ARCameraView: View {
 extension ARCameraView {
     public init(manager: ARKitSessionManager,
                 debugMeshOverlay: Bool = false,
+                realWorldOcclusion: Bool = false,
                 sceneMarkers: [ARSceneMarker] = [],
                 raycaster: ARCenterRaycaster? = nil) {
         self.init(session: manager.session,
                   debugMeshOverlay: debugMeshOverlay,
+                  realWorldOcclusion: realWorldOcclusion,
                   sceneMarkers: sceneMarkers,
                   raycaster: raycaster)
     }
@@ -455,10 +487,12 @@ extension ARCameraView {
 extension ARCameraView {
     public init(manager: Any,
                 debugMeshOverlay: Bool = false,
+                realWorldOcclusion: Bool = false,
                 sceneMarkers: [ARSceneMarker] = [],
                 raycaster: ARCenterRaycaster? = nil) {
         self.init(session: manager,
                   debugMeshOverlay: debugMeshOverlay,
+                  realWorldOcclusion: realWorldOcclusion,
                   sceneMarkers: sceneMarkers,
                   raycaster: raycaster)
     }

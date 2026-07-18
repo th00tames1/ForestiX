@@ -89,8 +89,17 @@ public struct SamplingPlotScreen: View {
 
     public var body: some View {
         ZStack {
+            // Real-world occlusion ON (this screen only): the boundary
+            // ring and centre pole render BEHIND tree trunks and other
+            // scanned geometry instead of floating over everything — the
+            // ring reads as if painted on the forest floor. The DBH /
+            // Height screens deliberately stay un-occluded so their
+            // treetop spheres and subdued ring overlay remain visible
+            // through canopy. (The `.samplingPlot` session preset keeps
+            // sceneReconstruction running, which feeds the occlusion.)
             ARCameraView(manager: session,
                          debugMeshOverlay: false,
+                         realWorldOcclusion: true,
                          sceneMarkers: markers,
                          raycaster: raycaster)
                 .ignoresSafeArea()
@@ -118,9 +127,29 @@ public struct SamplingPlotScreen: View {
             // nav bar is hidden on the AR screens).
             MeasureBackButtonRow()
 
-            // Top radius slider only.
+            // Top radius slider, with the plot mini-map tucked under its
+            // trailing edge once the centre is placed. (The locked
+            // top-right slot from the scan screens is occupied by the
+            // full-width slider card here, so the widget drops just
+            // below it — still top-right, still clear of the centre
+            // handles and the capture rail.)
             VStack(spacing: 0) {
                 topControls
+                if hasPlot {
+                    HStack {
+                        Spacer()
+                        PlotMiniMapWidget(info: PlotMiniMapInfo(
+                            plotID: nil,
+                            plotNumber: nil,
+                            radiusM: radiusM,
+                            centerLat: nil,
+                            centerLon: nil,
+                            treeCount: 0,
+                            trees: []))
+                            .padding(.trailing, ForestixSpace.md)
+                    }
+                    .padding(.top, ForestixSpace.xs)
+                }
                 Spacer()
             }
 

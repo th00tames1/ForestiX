@@ -83,6 +83,12 @@ public struct ARScreenConfiguration: Equatable, Sendable {
         depthStream: false, featurePoints: false, sceneReconstruction: true)
     /// Sampling plot: raycast on placement + camera pose polling — no
     /// depth copies, no feature stream (the screen's lag fix).
+    /// `sceneReconstruction` stays ON here for a second reason: the
+    /// sampling screen's ARView enables RealityKit scene-understanding
+    /// OCCLUSION (ring/pole pass behind real trunks), which consumes
+    /// the session's LiDAR mesh. Occlusion itself is a per-ARView
+    /// render option, so it never carries over to the other screens'
+    /// views when the shared session switches configuration.
     public static let samplingPlot = ARScreenConfiguration(
         depthStream: false, featurePoints: false, sceneReconstruction: true)
 }

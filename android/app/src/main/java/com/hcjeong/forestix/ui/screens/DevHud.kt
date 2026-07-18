@@ -28,18 +28,21 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 /// `lines` is a list of (label, value) pairs the caller assembles from its
 /// ArController + measurement state. Pass an empty list to hide.
+/// `topPadding` lets a screen push the HUD below other top-right chrome
+/// (the plot mini-map widget on DBH/Height when a plot is active).
 @Composable
-fun BoxScope.DevHud(title: String, lines: List<Pair<String, String>>) {
+fun BoxScope.DevHud(title: String, lines: List<Pair<String, String>>, topPadding: Dp = 56.dp) {
     if (lines.isEmpty()) return
     Column(
         modifier = Modifier
             .align(Alignment.TopEnd)
-            .padding(top = 56.dp, end = 8.dp)
+            .padding(top = topPadding, end = 8.dp)
             .widthIn(max = 230.dp)
             .clip(RoundedCornerShape(8.dp))
             .background(Color.Black.copy(alpha = 0.62f))

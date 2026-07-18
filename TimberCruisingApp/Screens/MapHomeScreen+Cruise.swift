@@ -430,7 +430,12 @@ extension MapHomeScreen {
             notes: "",
             coverPhotoPath: nil,
             panoramaPath: nil)
-        _ = try? environment.plotRepository.create(plot)
+        if (try? environment.plotRepository.create(plot)) != nil {
+            // Stamp the placed AR ring as THIS cruise plot's centre so
+            // the scan screens' mini-map may use the anchor path (the
+            // accurate one) for YOU while measuring into this plot.
+            ActiveSamplingPlot.shared.link(cruisePlotID: plot.id)
+        }
         reloadCruise()
     }
 
@@ -504,6 +509,36 @@ extension MapHomeScreen {
             vioDriftFraction: project.vioDriftFraction)
     }
 
+    /// Plot mini-map payload for the plot the add-tree chain is
+    /// measuring into: plot number + radius + centre fix, and the live
+    /// trees' fixes tinted by confidence (warn for any yellow/red DBH
+    /// or Height tier). The height cover picks up the tree the DBH
+    /// step just created because `continueCruiseChainAfterDBH` reloads
+    /// before presenting it.
+    func cruiseMiniMapInfo(plotID: UUID?) -> PlotMiniMapInfo? {
+        guard let plotID,
+              let plot = plots.first(where: { $0.id == plotID })
+        else { return nil }
+        let trees = liveTrees(in: plotID)
+        let dots: [PlotMiniMapInfo.TreeDot] = trees.compactMap { tree in
+            guard let lat = tree.latitude, let lon = tree.longitude
+            else { return nil }
+            let heightWarn = tree.heightConfidence.map { $0 != .green } ?? false
+            return PlotMiniMapInfo.TreeDot(
+                latitude: lat,
+                longitude: lon,
+                warn: tree.dbhConfidence != .green || heightWarn)
+        }
+        return PlotMiniMapInfo(
+            plotID: plot.id,
+            plotNumber: plot.plotNumber,
+            radiusM: plotRadiusM(plot),
+            centerLat: plot.centerLat,
+            centerLon: plot.centerLon,
+            treeCount: trees.count,
+            trees: dots)
+    }
+
     #if os(iOS)
     var cruiseDBHCover: some View {
         NavigationStack {
@@ -514,7 +549,8 @@ extension MapHomeScreen {
                     saveChainDBH(result, meta: meta)
                     cruiseChainHeightPending = true
                     presentingCruiseDBH = false
-                })
+                },
+                cruisePlotInfo: cruiseMiniMapInfo(plotID: chainPlotID))
             .environmentObject(settings)
         }
     }
@@ -527,7 +563,8 @@ extension MapHomeScreen {
                 onAccept: { result, meta in
                     saveChainHeight(result, meta: meta)
                     presentingCruiseHeight = false
-                })
+                },
+                cruisePlotInfo: cruiseMiniMapInfo(plotID: chainPlotID))
             .environmentObject(history)
             .environmentObject(settings)
         }

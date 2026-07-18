@@ -64,6 +64,7 @@ import com.hcjeong.forestix.ui.screens.Haptics
 import com.hcjeong.forestix.ui.screens.MeasureBackButton
 import com.hcjeong.forestix.ui.screens.MeasureControlColumn
 import com.hcjeong.forestix.ui.screens.MeasureStatusPanel
+import com.hcjeong.forestix.ui.screens.SamplingPlotMiniMap
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixProminentButton
 import com.hcjeong.forestix.ui.theme.ForestixRadius
@@ -191,7 +192,11 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String) {
                 env.settings.setCruiseProjectId(projectId)
                 env.settings.setCruisePlotId(newPlot.id.toString())
                 // Keep ArSessionHub.activePlot: the ring overlays the
-                // DBH/Height screens while this plot is tallied.
+                // DBH/Height screens while this plot is tallied. Stamp
+                // the anchor as THIS cruise plot's centre so the scan
+                // screens' mini-map may use the (accurate) anchor path
+                // for YOU while measuring into this plot.
+                ArSessionHub.linkPlot(newPlot.id)
                 nav.popBackStack()
             } catch (e: Exception) {
                 failure = "Couldn't save the plot: ${e.message ?: e}"
@@ -201,13 +206,17 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String) {
     }
 
     Box(Modifier.fillMaxSize()) {
+        // Sampling-tool parity: plane grid only while aiming; depth stays
+        // ON throughout for ring occlusion (the boundary ring passes
+        // BEHIND real trunks — see SamplingPlotScreen / ArSessionHub).
         ArCameraView(
             controller,
             emptyList<ArSceneMarker>(),
             modifier = Modifier.fillMaxSize(),
-            enableDepth = !placed,
+            enableDepth = true,
             planeRenderer = !placed,
             plotOverlay = ArSessionHub.PlotOverlay.OWNER,
+            depthOcclusion = true,
         )
 
         CruiseOutsideFlash(isOutside)
@@ -241,6 +250,11 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String) {
                 ),
             )
         }
+
+        // North-up plot mini-map (ring + YOU) once the centre is placed —
+        // top-right, below the full-width radius card (sampling parity;
+        // iOS shows no plot number on the creation screen either).
+        if (placed) SamplingPlotMiniMap()
 
         if (!placed) MeasureControlColumn(onCapture = { place() })
 

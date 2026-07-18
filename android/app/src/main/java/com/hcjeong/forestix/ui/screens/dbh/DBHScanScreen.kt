@@ -100,7 +100,9 @@ import com.hcjeong.forestix.ui.screens.MeasureControlColumn
 import com.hcjeong.forestix.ui.screens.MeasureFailureBanner
 import com.hcjeong.forestix.ui.screens.MeasureStatusPanel
 import com.hcjeong.forestix.ui.screens.ResearchFieldsRow
+import com.hcjeong.forestix.ui.screens.ScanPlotMiniMap
 import com.hcjeong.forestix.ui.screens.TiltBadge
+import com.hcjeong.forestix.ui.screens.scanPlotMiniMapVisible
 import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixProminentButton
@@ -947,6 +949,13 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 .align(Alignment.TopStart)
                 .padding(start = 72.dp, top = 22.dp))
 
+        // Plot mini-map — top-right, same row as the GPS badge: the active
+        // cruise plot (ring + YOU + measured trees) or the quick sampling
+        // ring (ring + YOU). Hidden with the rest of the 2D chrome during
+        // the Accept snapshot blackout.
+        val miniMapUp = scanPlotMiniMapVisible()
+        if (!hidingChromeForCapture) ScanPlotMiniMap()
+
         if (settings.developerMode && !hidingChromeForCapture) {
             val p = preview
             DevHud(
@@ -967,6 +976,9 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     "locked" to (if (p?.locked == true) "yes" else "no"),
                     result?.let { "Ø saved" to String.format(Locale.US, "%.1f ±%.0fmm", it.diameterCm, it.sigmaRmm) },
                 ),
+                // Below the plot mini-map when it occupies the top-right
+                // slot (22 + 116 card + 12 gap).
+                topPadding = if (miniMapUp) 150.dp else 56.dp,
             )
         }
 

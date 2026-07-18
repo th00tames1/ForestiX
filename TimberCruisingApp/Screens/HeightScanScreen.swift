@@ -85,14 +85,36 @@ public struct HeightScanScreen: View {
     /// and the LiDAR reconstruction wireframe was just visual noise.)
     /// PLACEHOLDER-COMMENT
 
+    /// CRUISE MODE — the active cruise plot's mini-map payload; nil on
+    /// the quick-measure path, where the widget falls back to the
+    /// quick ActiveSamplingPlot ring or stays hidden. See DBHScanScreen.
+    private let cruisePlotInfo: PlotMiniMapInfo?
+
     public init(viewModel: @autoclosure @escaping () -> HeightScanViewModel,
                 onResult: @escaping (HeightResult) -> Void = { _ in },
                 onAccept: @escaping (HeightResult, ScanMetadata) -> Void = { _, _ in },
-                onCrown: @escaping (Double, Double) -> Void = { _, _ in }) {
+                onCrown: @escaping (Double, Double) -> Void = { _, _ in },
+                cruisePlotInfo: PlotMiniMapInfo? = nil) {
         _viewModel = StateObject(wrappedValue: viewModel())
         self.onResult = onResult
         self.onAccept = onAccept
         self.onCrown = onCrown
+        self.cruisePlotInfo = cruisePlotInfo
+    }
+
+    /// What the top-right mini-map shows: the cruise plot when the
+    /// add-tree chain supplied one, else the quick sampling ring, else
+    /// nothing.
+    private var miniMapInfo: PlotMiniMapInfo? {
+        if let cruisePlotInfo { return cruisePlotInfo }
+        guard let plot = activePlot.plot else { return nil }
+        return PlotMiniMapInfo(plotID: nil,
+                               plotNumber: nil,
+                               radiusM: plot.radiusM,
+                               centerLat: nil,
+                               centerLon: nil,
+                               treeCount: 0,
+                               trees: [])
     }
 
     // MARK: - Crown sub-flow state
@@ -139,6 +161,21 @@ public struct HeightScanScreen: View {
                     .padding(.leading, 72)
                     .padding(.top, 22)
                     Spacer()
+                }
+
+                // Plot mini-map — top-right, same row as the GPS badge.
+                // Non-interactive; hidden with the rest of the 2D chrome
+                // during the Accept snapshot blackout.
+                if let info = miniMapInfo {
+                    VStack(spacing: 0) {
+                        HStack {
+                            Spacer()
+                            PlotMiniMapWidget(info: info)
+                                .padding(.trailing, ForestixSpace.md)
+                        }
+                        .padding(.top, 22)
+                        Spacer()
+                    }
                 }
 
                 // Floating back button — full-bleed chrome exit (the system

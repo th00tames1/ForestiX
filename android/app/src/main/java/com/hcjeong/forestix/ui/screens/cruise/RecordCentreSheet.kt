@@ -214,9 +214,9 @@ fun RecordCentreSheet(
                 .padding(bottom = ForestixSpace.xl),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // LOCKED sheet "Recording centre" (section-head voice).
+                // Sheet header — matches the planned-peek "Set plot centre" verb.
                 Text(
-                    "RECORDING CENTRE",
+                    "SET PLOT CENTRE",
                     style = type.sectionHead.copy(
                         fontWeight = FontWeight.ExtraBold, letterSpacing = 1.0.sp),
                     color = colors.textTertiary,

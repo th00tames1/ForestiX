@@ -96,7 +96,7 @@ public struct RecordCentreSheet: View {
     private var content: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: ForestixSpace.xs) {
-                Text("RECORDING CENTRE")
+                Text("SET PLOT CENTRE")
                     .font(.system(size: 13, weight: .heavy))
                     .tracking(1.0)
                     .foregroundStyle(ForestixPalette.textTertiary)

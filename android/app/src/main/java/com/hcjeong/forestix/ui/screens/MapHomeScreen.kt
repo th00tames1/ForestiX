@@ -65,6 +65,7 @@ import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Park
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Straighten
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material3.AlertDialog
@@ -132,7 +133,6 @@ import com.hcjeong.forestix.ui.screens.cruise.CruiseModeBottomContent
 import com.hcjeong.forestix.ui.screens.cruise.CruiseModeEffects
 import com.hcjeong.forestix.ui.screens.cruise.CruiseModeSheets
 import com.hcjeong.forestix.ui.screens.cruise.CruiseModeState
-import com.hcjeong.forestix.ui.screens.cruise.ProjectChip
 import com.hcjeong.forestix.ui.screens.cruise.cruiseModeMarkers
 import com.hcjeong.forestix.ui.screens.cruise.cruiseModePolygons
 import com.hcjeong.forestix.ui.screens.cruise.cruiseModePolylines
@@ -347,22 +347,13 @@ fun MapHomeScreen(nav: NavController) {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs),
             ) {
-                GpsChip(fix)
-                // Cruise-mode chrome (v3.1): the project chip floats
-                // top-centre of the SAME row — GPS chip stays leading, the
-                // round buttons stay trailing, no back button.
-                Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                    // Fully qualified: the enclosing RowScope would otherwise
-                    // capture this call for its own AnimatedVisibility overload.
-                    androidx.compose.animation.AnimatedVisibility(
-                        visible = isCruise,
-                        enter = fadeIn(tween(durationMillis = 180, easing = EaseOut)),
-                        exit = fadeOut(tween(durationMillis = 180, easing = EaseOut)),
-                    ) {
-                        ProjectChip(cruise.project?.name ?: "New project") {
-                            cruise.projectSheetOpen = true
-                        }
-                    }
+                // GPS chip leads, bounded by a flexible slot so its
+                // single-line SlashScan readout truncates instead of shoving
+                // the trailing round buttons off-screen. Shared by both modes
+                // (the cruise project chip is gone — the project lives in the
+                // bottom cluster's PROJECT circle + strip now).
+                Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                    GpsChip(fix)
                 }
                 // My-location: recentre on the freshest fix (this screen's
                 // live service, else the last global fix) without ever
@@ -382,6 +373,10 @@ fun MapHomeScreen(nav: NavController) {
                     }
                 }
                 RoundChromeButton(Icons.Filled.Layers, "Basemap layers") { offlineOpen = true }
+                // Settings — rightmost of the top-right group, both modes.
+                RoundChromeButton(Icons.Filled.Settings, "Settings") {
+                    nav.navigate(Routes.SETTINGS)
+                }
             }
         }
 
@@ -687,18 +682,21 @@ private fun buildTreePins(entries: List<QuickMeasureEntry>): List<TreePin> {
 
 // MARK: - Top chrome pieces ---------------------------------------------------
 
-/// Unified GPS chip — labelled coordinate block of the last known fix
-/// with a freshness dot: green < 5 s, yellow 5–60 s, red past 60 s or
-/// when no fix ever arrived (then the text is just "no fix"). Once the
-/// fix goes stale the age counts up live (1 s tick, minutes past 60 s).
-/// Three short rows (X lat / Y lon / Z alt — Korean surveying axis
-/// convention, per field feedback) keep the chip narrow so it can never
-/// collide with the round buttons beside it (iOS gpsChip 1:1).
-/// Internal: the cruise-mode map (v3) reuses the same chip verbatim.
+/// Unified GPS chip — one-line SlashScan live readout of the last known
+/// fix behind a freshness dot: green < 5 s, yellow ≤ 60 s, red past 60 s
+/// or when no fix ever arrived. The 1 s tick keeps the age (and the dot
+/// tier) counting live. Single mono line, byte-identical to the iOS
+/// sibling's format so both platforms render the same string.
+/// Internal: shared by both map modes' top chrome.
 @Composable
 internal fun GpsChip(fix: CLLocationSnapshot?) {
     val colors = Forestix.colors
     val type = Forestix.type
+    val context = LocalContext.current
+    // Bearing: LocationService.headingTrueDeg (the fix carries no course on
+    // Android) — 0 when the compass hasn't reported yet, per the locked spec.
+    val location = remember { LocationService.shared(context) }
+    val heading by location.headingTrueDeg.collectAsStateWithLifecycle()
     // This screen's live service, else the newest fix any screen captured.
     val snap = fix ?: LocationService.lastGlobalFix
     // 1 s clock so the age suffix + dot tier tick while the chip is on screen.
@@ -716,83 +714,39 @@ internal fun GpsChip(fix: CLLocationSnapshot?) {
         ageSec <= 60 -> colors.confidenceWarn
         else -> colors.confidenceBad
     }
-    val stale = ageSec != null && ageSec > 5
-    Column(
-        verticalArrangement = Arrangement.spacedBy(2.dp),
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
         modifier = Modifier
             .clip(ForestixRadius.control)
             .background(colors.surface)
             .border(1.dp, colors.divider, ForestixRadius.control)
             .padding(horizontal = 11.dp, vertical = 7.dp),
     ) {
-        if (snap != null) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Box(Modifier.size(7.dp).clip(CircleShape).background(dotColor))
-                GpsCoordRow("X", String.format(Locale.US, "%.5f", snap.latitude))
-            }
-            Box(Modifier.padding(start = 13.dp)) {
-                GpsCoordRow("Y", String.format(Locale.US, "%.5f", snap.longitude))
-            }
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                modifier = Modifier.padding(start = 13.dp),
-            ) {
-                GpsCoordRow(
-                    "Z",
-                    snap.altitudeM?.let { String.format(Locale.US, "%.0f m", it) } ?: "—",
-                )
-                if (stale) {
-                    val age = if (ageSec!! < 60) "$ageSec s ago" else "${ageSec / 60} min ago"
-                    Text(
-                        "· $age",
-                        style = type.dataSmall.copy(fontSize = 11.sp),
-                        color = colors.textTertiary,
-                        maxLines = 1,
-                    )
-                }
-            }
-        } else {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Box(Modifier.size(7.dp).clip(CircleShape).background(dotColor))
-                Text(
-                    "no fix",
-                    style = type.dataSmall.copy(fontSize = 11.sp, fontWeight = FontWeight.SemiBold),
-                    color = colors.textTertiary,
-                    maxLines = 1,
-                )
-            }
-        }
-    }
-}
-
-/// One labelled coordinate line — dim mono axis label, semibold mono
-/// value (iOS `coordRow` 1:1).
-@Composable
-private fun GpsCoordRow(label: String, value: String) {
-    val colors = Forestix.colors
-    val type = Forestix.type
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
+        Box(Modifier.size(7.dp).clip(CircleShape).background(dotColor))
         Text(
-            label,
+            text = if (snap != null && ageSec != null) {
+                // SlashScan single-line format (LOCKED, byte-identical to
+                // iOS): lon, lat, altitude m, bearing deg, horizontal
+                // accuracy m, seconds since the fix.
+                String.format(
+                    Locale.US,
+                    "GPS: %.2f %.2f %.2fm %ddeg %.0fm [%d sec old]",
+                    snap.longitude,
+                    snap.latitude,
+                    snap.altitudeM ?: 0.0,
+                    (heading ?: 0.0).toInt(),
+                    snap.horizontalAccuracyM,
+                    ageSec.toInt(),
+                )
+            } else {
+                "GPS: [not available]"
+            },
             style = type.dataSmall.copy(fontSize = 11.sp),
-            color = colors.textTertiary,
-            maxLines = 1,
-        )
-        Text(
-            value,
-            style = type.dataSmall.copy(fontSize = 11.sp, fontWeight = FontWeight.SemiBold),
             color = colors.textPrimary,
             maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }

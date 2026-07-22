@@ -14,7 +14,7 @@
 // no active plot → "Start plot" (AR sampling-ring component saving a cruise
 // Plot row); active plot → "Add tree · Plot N" straight into the shared
 // DBH→Height chain on the next auto tree number. A planned pin peeks into
-// "Record centre here" (inline GPS-averaging sheet) or "Navigate" (dashed
+// "Set plot centre (GPS)" (inline GPS-averaging sheet) or "Navigate" (dashed
 // you-dot→plot guide line + live distance chip — the map is the nav).
 // Quick-measure pins NEVER appear in cruise mode and cruise pins never
 // appear in measure mode — the two data worlds stay separate.
@@ -54,9 +54,9 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Adjust
 import androidx.compose.material.icons.filled.BarChart
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.Height
 import androidx.compose.material3.CircularProgressIndicator
@@ -534,13 +534,14 @@ internal fun CruiseModeBottomContent(
             else -> CruiseActionCluster(
                 activePlot = activePlot,
                 treeCount = activePlot?.let { state.data.treesByPlot[it.id]?.size } ?: 0,
+                projectName = state.project?.name ?: "New project",
                 modifier = Modifier.padding(bottom = ForestixSpace.sm),
                 onToggleMode = onToggleMode,
                 onCapture = {
                     val plot = state.activePlot(settings)
                     if (plot == null) state.startPlot() else state.addTree(plot)
                 },
-                onLog = { nav.navigate(Routes.FIELD_LOG) },
+                onProject = { state.projectSheetOpen = true },
             )
         }
     }
@@ -788,40 +789,6 @@ private fun cruiseMarkers(
 
 // MARK: - Chrome pieces -------------------------------------------------------
 
-/// Mock `.projchip` — current project name (or "New project") + a dim ▾;
-/// cruise mode's title AND switcher in one control, floated top-centre of
-/// the map home's top chrome row.
-@Composable
-internal fun ProjectChip(name: String, onClick: () -> Unit) {
-    val colors = Forestix.colors
-    val type = Forestix.type
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        modifier = Modifier
-            .pressableNoRipple(onClick = onClick)
-            .clip(ForestixRadius.control)
-            .background(colors.surface)
-            .border(1.dp, colors.divider, ForestixRadius.control)
-            .padding(horizontal = 11.dp, vertical = 10.dp),
-    ) {
-        Text(
-            name,
-            style = type.bodyBold.copy(fontSize = 12.sp),
-            color = colors.textPrimary,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            // Long names must never collide with the chips beside it.
-            modifier = Modifier.widthIn(max = 150.dp),
-        )
-        Text(
-            "▾",
-            style = type.caption,
-            color = colors.textTertiary,
-        )
-    }
-}
-
 /// Mock `.distchip` — the floating live distance readout while the dashed
 /// guide line is up ("142 m"; kilometres past ~1 km, iOS parity).
 private fun navDistanceLabel(metres: Double): String =
@@ -850,7 +817,7 @@ private fun DistanceChip(text: String, modifier: Modifier = Modifier) {
 // MARK: - Planned-plot peek (mock ⑦) -------------------------------------------
 
 /// Peek for a HOLLOW DASHED planned pin: live distance + bearing from the
-/// current fix, a 54 dp "Record centre here" primary into the inline
+/// current fix, a 54 dp "Set plot centre (GPS)" primary into the inline
 /// averaging sheet, and a "Navigate" toggle for the guide line.
 @Composable
 private fun PlannedPeekCard(
@@ -931,7 +898,7 @@ private fun PlannedPeekCard(
             )
         }
         Spacer(Modifier.size(ForestixSpace.sm))
-        // 54 dp primary — LOCKED "Record centre here".
+        // 54 dp primary — LOCKED "Set plot centre (GPS)".
         Box(
             Modifier
                 .fillMaxWidth()
@@ -942,7 +909,7 @@ private fun PlannedPeekCard(
             contentAlignment = Alignment.Center,
         ) {
             Text(
-                "Record centre here",
+                "Set plot centre (GPS)",
                 style = type.bodyBold.copy(fontSize = 15.sp),
                 color = MaterialTheme.colorScheme.onPrimary,
             )
@@ -1012,21 +979,24 @@ private fun PlannedChip() {
 // MARK: - Morphing (+) cluster (mock ① `.actioncluster`, v3.1 merged) ----------
 
 /// Cruise flavour of the map home's action cluster: the SAME three fixed
-/// ClusterSlots (mode toggle circle · 74 dp capture · Log circle — pixel
-/// positions identical to measure mode by construction), with the toggle
-/// showing the CURRENT mode (plot-centre target ◎ + "CRUISE" in the cruise
-/// accent) and the (+) morphing between "Start plot" and "Add tree ·
-/// Plot N" over the LOCKED cruise-accent fill + white glyph. The tally
-/// pill floats in the shared reserved zone; the scoped halo paints outside
-/// the slot — neither is ever measured, so nothing shifts.
+/// ClusterSlots (mode toggle circle · 74 dp capture · PROJECT circle —
+/// pixel positions identical to measure mode by construction), with the
+/// toggle showing the CURRENT mode (plot-centre target ◎ + "CRUISE" in the
+/// cruise accent) and the (+) morphing between "Start plot" and "Add tree ·
+/// Plot N" over the LOCKED cruise-accent fill + white glyph. The RIGHT
+/// circle is the PROJECT button (folder → project sheet), where measure
+/// mode keeps its Log circle. The project strip floats in the shared
+/// reserved zone; the scoped halo paints outside the slot — neither is ever
+/// measured, so nothing shifts.
 @Composable
 private fun CruiseActionCluster(
     activePlot: Plot?,
     treeCount: Int,
+    projectName: String,
     modifier: Modifier = Modifier,
     onToggleMode: () -> Unit,
     onCapture: () -> Unit,
-    onLog: () -> Unit,
+    onProject: () -> Unit,
 ) {
     val colors = Forestix.colors
     Row(
@@ -1042,7 +1012,8 @@ private fun CruiseActionCluster(
         // 74 dp primary (+) — LOCKED cruise-accent fill + WHITE glyph;
         // accent-scoped outline while a plot is active (mock
         // `.capture.scoped`). Plot status colours untouched. LOCKED
-        // strings: "Start plot" / "Add tree · Plot N".
+        // strings: "Start plot" / "Add tree · Plot N". The reserved tally
+        // zone now carries the always-on PROJECT STRIP (folds in the count).
         CaptureColumn(
             caption = if (activePlot == null) {
                 "Start plot"
@@ -1053,39 +1024,70 @@ private fun CruiseActionCluster(
             fill = colors.cruiseAccent,
             ink = Color.White,
             haloed = activePlot != null,
-            tallyPill = if (activePlot == null) null else ({ TallyPill(treeCount) }),
+            tallyPill = {
+                ProjectStrip(
+                    projectName = projectName,
+                    activePlot = activePlot,
+                    treeCount = treeCount,
+                    onClick = onProject,
+                )
+            },
             onClick = onCapture,
         )
-        SideCircleButton("Log", Icons.AutoMirrored.Filled.List, onClick = onLog)
+        // RIGHT circle: PROJECT (measure mode's Log slot) → project sheet.
+        SideCircleButton("Project", Icons.Filled.Folder, onClick = onProject)
     }
 }
 
-/// Tally pill — LOCKED string "N trees" (mock `.tallypill`). Lives in the
+/// Project strip — the cruise-only pill that REPLACES the old "N trees"
+/// tally pill (folding the count in): "<project> · Plot N · M trees", or
+/// "<project> · No active plot". A tappable dark-glass pill in the
 /// cluster's reserved tally zone as unbounded-width overflow, so its width
-/// (and its appearance when a plot goes active) never re-measures the
-/// cluster.
+/// never re-measures the pixel-invariant cluster; tapping opens the same
+/// project sheet as the PROJECT circle.
 @Composable
-private fun TallyPill(treeCount: Int) {
+private fun ProjectStrip(
+    projectName: String,
+    activePlot: Plot?,
+    treeCount: Int,
+    onClick: () -> Unit,
+) {
     val colors = Forestix.colors
     val type = Forestix.type
+    val text = if (activePlot != null) {
+        "$projectName · Plot ${activePlot.plotNumber} · $treeCount trees"
+    } else {
+        "$projectName · No active plot"
+    }
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(7.dp),
         modifier = Modifier
             .padding(bottom = 12.dp)
             .wrapContentWidth(unbounded = true)
-            .softDropShadow(Color.Black.copy(alpha = 0.14f), 10.dp, 2.dp, cornerRadius = 999.dp)
+            .softDropShadow(Color.Black.copy(alpha = 0.18f), 10.dp, 2.dp, cornerRadius = 999.dp)
+            .pressableNoRipple(onClick = onClick)
             .clip(RoundedCornerShape(999.dp))
-            .background(colors.surface)
-            .border(1.dp, colors.divider, RoundedCornerShape(999.dp))
+            .background(Color(0xCC06090A))
             .padding(horizontal = 13.dp, vertical = 7.dp),
     ) {
-        Box(Modifier.size(7.dp).clip(CircleShape).background(colors.accent))
+        // Status dot: accent while a plot is active, dim otherwise.
+        Box(
+            Modifier
+                .size(7.dp)
+                .clip(CircleShape)
+                .background(if (activePlot != null) colors.accent else colors.textTertiary),
+        )
         Text(
-            "$treeCount trees",
-            style = type.dataSmall.copy(fontSize = 11.sp, fontWeight = FontWeight.Bold),
-            color = colors.textPrimary,
+            text,
+            style = type.dataSmall.copy(fontSize = 11.sp, fontWeight = FontWeight.SemiBold),
+            color = Color(0xFFF2F5F3),
             maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
+            // Long project names truncate instead of stretching the pill
+            // across the whole screen; still layout-neutral (unbounded).
+            modifier = Modifier.widthIn(max = 260.dp),
         )
     }
 }

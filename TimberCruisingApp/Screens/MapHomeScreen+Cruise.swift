@@ -8,8 +8,8 @@
 // renders over the shared map plus its data and actions. The stored
 // state lives in MapHomeScreen.swift (SwiftUI state can't live in
 // extensions); the chrome differences are owned there too — no back
-// button (cruise is a mode, not a push), the project chip floats in
-// the top row, and the (+) turns cruiseAccent-blue with a white plus.
+// button (cruise is a mode, not a push), a tappable project strip
+// rides above the (+), and the (+) turns cruiseAccent-blue.
 //
 // The pins here are CRUISE data only: plots as ring markers (hollow
 // dashed = planned, accent = active, green = closed) and cruise trees
@@ -25,7 +25,7 @@
 //     distance · bearing row; Navigate toggles the dashed map guide
 //     line + floating distance chip (arrival <5 m pulses a haptic and
 //     clears it) — there is no separate navigation screen.
-//   • "Record centre here" → RecordCentreSheet (inline 60 s GPS
+//   • "Set plot centre (GPS)" → RecordCentreSheet (inline 60 s GPS
 //     averaging ring; offset fallback one line away); saving converts
 //     the planned pin into a real active plot.
 //   • The project sheet exports with one primary "Export all" (full
@@ -233,40 +233,6 @@ extension MapHomeScreen {
         return nil
     }
 
-    // MARK: Top chrome — the floating project chip
-
-    /// Project name + small chevron, floating in the home's top row
-    /// (centred between the GPS chip and the round buttons). Tap →
-    /// the project sheet. Replaces the retired back-button chrome.
-    var cruiseProjectChip: some View {
-        Button {
-            presentingProjectSheet = true
-        } label: {
-            HStack(spacing: 6) {
-                Text(currentProject?.name ?? "New project")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(ForestixPalette.textPrimary)
-                    .lineLimit(1)
-                Text("▾")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(ForestixPalette.textTertiary)
-            }
-            .padding(.horizontal, 11)
-            .padding(.vertical, 12)
-            .background(
-                RoundedRectangle(cornerRadius: ForestixRadius.control,
-                                 style: .continuous)
-                    .fill(ForestixPalette.surface))
-            .overlay(
-                RoundedRectangle(cornerRadius: ForestixRadius.control,
-                                 style: .continuous)
-                    .stroke(ForestixPalette.divider, lineWidth: 1))
-        }
-        .buttonStyle(CruisePressableStyle())
-        .accessibilityLabel("Project: \(currentProject?.name ?? "New project")")
-        .accessibilityIdentifier("cruiseMap.projectChip")
-    }
-
     // MARK: The state-morphing (+) (label + action; the button itself
     // is the home's shared 74 pt circle)
 
@@ -286,20 +252,42 @@ extension MapHomeScreen {
         }
     }
 
-    /// LOCKED string: "N trees".
-    func tallyPill(for plot: Plot) -> some View {
-        HStack(spacing: 7) {
-            Circle().fill(ForestixPalette.accent).frame(width: 7, height: 7)
-            Text("\(liveTrees(in: plot.id).count) trees")
-                .font(.system(size: 11, weight: .bold, design: .monospaced))
-                .foregroundStyle(ForestixPalette.textPrimary)
+    /// CRUISE PROJECT STRIP text — "<project> · Plot N · M trees" while a
+    /// plot is active, else "<project> · No active plot". Folds in the
+    /// live tree count the standalone tally pill used to show ("M trees"
+    /// unpluralised, matching the retired pill).
+    var projectStripText: String {
+        let name = currentProject?.name ?? "New project"
+        if let plot = activePlot {
+            return "\(name) · Plot \(plot.plotNumber) · \(liveTrees(in: plot.id).count) trees"
         }
-        .padding(.horizontal, 13)
-        .padding(.vertical, 7)
-        .background(Capsule().fill(ForestixPalette.surface))
-        .overlay(Capsule().stroke(ForestixPalette.divider, lineWidth: 1))
-        .shadow(color: Color.black.opacity(0.14), radius: 5, y: 2)
-        .accessibilityIdentifier("cruiseMap.tallyPill")
+        return "\(name) · No active plot"
+    }
+
+    /// The dark PROJECT pill floating above the (+): tappable into the
+    /// project sheet, mono/semibold, one line. Dark-glass chrome (fixed
+    /// colours — it sits over satellite imagery, like the cluster
+    /// captions) so it reads distinctly from measure's light "Log".
+    var projectStrip: some View {
+        Button {
+            presentingProjectSheet = true
+        } label: {
+            Text(projectStripText)
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(Color(red: 0.949, green: 0.961, blue: 0.953)) // #F2F5F3
+                .lineLimit(1)
+                .padding(.horizontal, 13)
+                .padding(.vertical, 7)
+                .background(
+                    Capsule().fill(Color(red: 6 / 255, green: 9 / 255, blue: 10 / 255)
+                        .opacity(0.72)))
+                .overlay(Capsule().stroke(Color.white.opacity(0.14), lineWidth: 1))
+                .shadow(color: Color.black.opacity(0.18), radius: 5, y: 2)
+                .contentShape(Capsule())
+        }
+        .buttonStyle(CruisePressableStyle())
+        .accessibilityLabel("Project: \(currentProject?.name ?? "New project")")
+        .accessibilityIdentifier("cruiseMap.projectStrip")
     }
 
     // MARK: Presentation host
@@ -1339,7 +1327,7 @@ extension MapHomeScreen {
     }
 
     /// Peek for a hollow dashed pin: live distance · bearing from the
-    /// current fix, "Record centre here" (→ inline averaging sheet) and
+    /// current fix, "Set plot centre (GPS)" (→ inline averaging sheet) and
     /// "Navigate" (toggles the map guide). Replaces NavigationScreen.
     func plannedPeekCard(for planned: PlannedPlot) -> some View {
         let navigating = navTargetPlannedID == planned.id
@@ -1383,7 +1371,7 @@ extension MapHomeScreen {
                     }
                     recordingTarget = planned
                 } label: {
-                    Text("Record centre here")
+                    Text("Set plot centre (GPS)")
                         .font(.system(size: 15, weight: .bold))
                         .foregroundStyle(ForestixPalette.primaryInk)
                         .frame(maxWidth: .infinity, minHeight: 54)

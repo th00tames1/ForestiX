@@ -11,8 +11,8 @@
 //   • CRUISE — the map IS the cruise (the retired CruiseMapScreen's
 //     content, hosted here from MapHomeScreen+Cruise.swift): plot
 //     rings + cruise tree pins, the (+) turns cruiseAccent-blue and
-//     morphs Start plot / Add tree, the project chip floats in the
-//     top row, planned-plot navigation draws the guide line.
+//     morphs Start plot / Add tree, a tappable project strip rides
+//     above the (+), planned-plot navigation draws the guide line.
 // Camera and zoom are SHARED across the toggle — switching modes never
 // snaps the map. Mode content stays separate: quick pins only in
 // measure, cruise pins only in cruise.
@@ -530,20 +530,13 @@ public struct MapHomeScreen: View {
 
     private var topChrome: some View {
         HStack(spacing: ForestixSpace.xs) {
-            // layoutPriority pins the chip at its ideal size if the row
-            // ever runs short of width — a long cruise project name
-            // truncates its own chip instead of squeezing the GPS chip.
+            // The GPS status line takes the leading width and TRUNCATES
+            // (never wraps) when the fix string runs long — the fixed
+            // round buttons on the right always stay on screen. Shared by
+            // both modes; cruise carries no separate project chip here
+            // anymore (the project lives on the bottom cluster now).
             gpsChip
-                .layoutPriority(1)
-            Spacer()
-            // CRUISE chrome — the project chip floats in the same top
-            // row, centred between the GPS chip (stays leading) and the
-            // round buttons (unchanged). No back button: cruise is a
-            // mode now, not a pushed screen.
-            if isCruiseMode {
-                cruiseProjectChip
-                Spacer()
-            }
+            Spacer(minLength: ForestixSpace.xs)
             // My-location — jump the camera back to the newest fix (this
             // screen's live service, else the last fix any screen saved).
             // No fix yet: the button dims and the tap is a no-op.
@@ -556,12 +549,7 @@ public struct MapHomeScreen: View {
                                            zoom: max(camera.zoom, 16))
                 }
             } label: {
-                Image(systemName: "location.fill")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(ForestixPalette.textSecondary)
-                    .frame(width: 44, height: 44)
-                    .background(Circle().fill(ForestixPalette.surfaceRaised))
-                    .overlay(Circle().stroke(ForestixPalette.divider, lineWidth: 1))
+                chromeButtonGlyph("location.fill")
             }
             .buttonStyle(MapPressableStyle())
             .opacity(locateFix == nil ? 0.45 : 1)
@@ -571,19 +559,37 @@ public struct MapHomeScreen: View {
             Button {
                 presentingLayers = true
             } label: {
-                Image(systemName: "square.stack.3d.up")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(ForestixPalette.textSecondary)
-                    .frame(width: 44, height: 44)
-                    .background(Circle().fill(ForestixPalette.surfaceRaised))
-                    .overlay(Circle().stroke(ForestixPalette.divider, lineWidth: 1))
+                chromeButtonGlyph("square.stack.3d.up")
             }
             .buttonStyle(MapPressableStyle())
             .accessibilityLabel("Basemap layers")
             .accessibilityIdentifier("mapHome.layers")
+
+            // Settings — rightmost of the top-right group, both modes.
+            // Reuses the existing SettingsScreen sheet.
+            Button {
+                presentingSettings = true
+            } label: {
+                chromeButtonGlyph("gearshape")
+            }
+            .buttonStyle(MapPressableStyle())
+            .accessibilityLabel("Settings")
+            .accessibilityIdentifier("mapHome.settings")
         }
         .padding(.horizontal, 14)
         .padding(.top, ForestixSpace.xs)
+    }
+
+    /// Shared 44 pt round chrome button glyph — surfaceRaised circle,
+    /// divider ring, 18 pt semibold textSecondary icon (locate / layers /
+    /// settings all render identically).
+    private func chromeButtonGlyph(_ icon: String) -> some View {
+        Image(systemName: icon)
+            .font(.system(size: 18, weight: .semibold))
+            .foregroundStyle(ForestixPalette.textSecondary)
+            .frame(width: 44, height: 44)
+            .background(Circle().fill(ForestixPalette.surfaceRaised))
+            .overlay(Circle().stroke(ForestixPalette.divider, lineWidth: 1))
     }
 
     /// A fix older than this reads as stale (dense canopy, canyon
@@ -594,13 +600,15 @@ public struct MapHomeScreen: View {
     /// Older than this the fix is effectively lost — the dot goes red.
     private static let lostFixAge: TimeInterval = 60
 
-    /// THE GPS chip — labelled coordinate block of the last known fix
-    /// with a freshness dot: green < 5 s, yellow 5–60 s, red past 60 s
-    /// or before the first fix ever lands ("no fix", no coords). Once
-    /// the fix goes stale the age counts up live (1 s tick, minutes
-    /// past 60 s). Three short rows (X lat / Y lon / Z alt — Korean
-    /// surveying axis convention, per field feedback) keep the chip
-    /// narrow so it can never collide with the round buttons beside it.
+    /// THE GPS chip — SlashScan's single-line live fix readout with a
+    /// leading freshness dot: green < 5 s, yellow 5–60 s, red past 60 s
+    /// or before the first fix ("GPS: [not available]"). One mono ~11 pt
+    /// line, TRUNCATED at the tail (never wrapped) so it can't collide
+    /// with the round buttons. Field order + decimals match SlashScan
+    /// exactly — longitude, latitude, altitude m, bearing deg, horizontal
+    /// accuracy m, seconds since the fix. Bearing is the compass heading
+    /// (LocationService.headingTrueDeg, 0 until the first heading update)
+    /// — same source Android uses, so the two platforms render identically.
     private var gpsChip: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             // This screen's live service, else the newest fix any screen
@@ -608,54 +616,43 @@ public struct MapHomeScreen: View {
             // the chip should agree with it.
             let snap = location.latestSnapshot ?? LocationService.lastGlobalFix
             let age = snap.map { max(0, context.date.timeIntervalSince($0.timestamp)) }
-            let stale = (age ?? 0) > Self.staleFixAge
             let dot: Color = {
                 guard snap != nil, let age else { return ForestixPalette.confidenceBad }
                 if age > Self.lostFixAge { return ForestixPalette.confidenceBad }
                 if age > Self.staleFixAge { return ForestixPalette.confidenceWarn }
                 return ForestixPalette.confidenceOk
             }()
+            // SlashScan format string (ios/ViewController.swift):
+            // "GPS: %.2f %.2f %.2fm %ddeg %.0fm [%d sec old]" — lon, lat,
+            // alt m, bearing deg, horizontal accuracy m, seconds old.
+            let text: String = {
+                guard let snap, let age else { return "GPS: [not available]" }
+                return String(format: "GPS: %.2f %.2f %.2fm %ddeg %.0fm [%d sec old]",
+                              snap.longitude,
+                              snap.latitude,
+                              snap.altitudeM ?? 0,
+                              Int(location.headingTrueDeg ?? 0),
+                              snap.horizontalAccuracyM,
+                              Int(age))
+            }()
             let a11y: String = {
-                guard let snap else { return "No GPS fix" }
+                guard let snap, let age else { return "No GPS fix" }
                 var out = String(format: "GPS fix %.5f, %.5f",
                                  snap.latitude, snap.longitude)
                 if let alt = snap.altitudeM {
                     out += String(format: ", altitude %.0f metres", alt)
                 }
-                if stale, let age { out += ", " + Self.fixAgeText(age) }
+                out += ", " + Self.fixAgeText(age)
                 return out
             }()
-            Group {
-                if let snap {
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 6) {
-                            Circle().fill(dot).frame(width: 7, height: 7)
-                            coordRow("X", String(format: "%.5f", snap.latitude))
-                        }
-                        coordRow("Y", String(format: "%.5f", snap.longitude))
-                            .padding(.leading, 13)
-                        HStack(spacing: 4) {
-                            coordRow("Z", snap.altitudeM.map {
-                                String(format: "%.0f m", $0)
-                            } ?? "—")
-                            if stale, let age {
-                                Text("· \(Self.fixAgeText(age))")
-                                    .font(.system(size: 11, weight: .medium, design: .monospaced))
-                                    .foregroundStyle(ForestixPalette.textTertiary)
-                            }
-                        }
-                        .padding(.leading, 13)
-                    }
-                } else {
-                    HStack(spacing: 6) {
-                        Circle().fill(dot).frame(width: 7, height: 7)
-                        Text("no fix")
-                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(ForestixPalette.textTertiary)
-                    }
-                }
+            HStack(spacing: 6) {
+                Circle().fill(dot).frame(width: 7, height: 7)
+                Text(text)
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(ForestixPalette.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
-            .lineLimit(1)
             .padding(.horizontal, 11)
             .padding(.vertical, 7)
             .background(
@@ -667,19 +664,6 @@ public struct MapHomeScreen: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(a11y)
             .accessibilityIdentifier("mapHome.gps")
-        }
-    }
-
-    /// One labelled coordinate line — dim mono axis label, semibold
-    /// mono value.
-    private func coordRow(_ label: String, _ value: String) -> some View {
-        HStack(spacing: 4) {
-            Text(label)
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
-                .foregroundStyle(ForestixPalette.textTertiary)
-            Text(value)
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                .foregroundStyle(ForestixPalette.textPrimary)
         }
     }
 
@@ -760,28 +744,26 @@ public struct MapHomeScreen: View {
                                                  : "New measurement")
                 .accessibilityIdentifier(isCruiseMode ? "cruiseMap.primary"
                                                       : "mapHome.measure")
-                // Tally pill floats ABOVE the (+) as an overlay so it
-                // never participates in layout measurement — appearing
-                // (or growing to "12 trees") cannot move the cluster.
-                .overlay(alignment: .top) {
-                    if isCruiseMode, let plot = activePlot {
-                        tallyPill(for: plot)
-                            .fixedSize()
-                            // Pill bottom 12 pt above the circle — the
-                            // gap the old in-column pill had (6 pt
-                            // padding + 6 pt VStack spacing).
-                            .alignmentGuide(.top) { $0[.bottom] + 12 }
-                            .allowsHitTesting(false)
-                    }
-                }
                 clusterCaption(isCruiseMode ? cruisePrimaryLabel : "Measure",
                                slots: ["Measure"])
             }
-
-            sideCircle(label: "Log", icon: "list.bullet",
-                       accessibilityID: "mapHome.log") {
-                FieldLogScreen()
+            // CRUISE PROJECT STRIP — a tappable dark pill floating ABOVE
+            // the (+) as a layout-NEUTRAL overlay so it never participates
+            // in the cluster's measurement (pixel-invariant geometry is
+            // preserved). It opens the project sheet and folds in the live
+            // tree count, replacing measure's standalone tally pill.
+            .overlay(alignment: .top) {
+                if isCruiseMode {
+                    projectStrip
+                        .fixedSize()
+                        // Pill bottom 12 pt above the circle — the gap the
+                        // old in-column tally pill had (6 pt padding + 6 pt
+                        // VStack spacing).
+                        .alignmentGuide(.top) { $0[.bottom] + 12 }
+                }
             }
+
+            rightClusterCircle
         }
         .padding(.bottom, ForestixSpace.sm)
         .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -816,31 +798,50 @@ public struct MapHomeScreen: View {
         }
     }
 
-    private func sideCircle<Destination: View>(
-        label: String,
-        icon: String,
-        accessibilityID: String,
-        @ViewBuilder destination: @escaping () -> Destination
-    ) -> some View {
+    /// The RIGHT cluster circle — mode-dependent, same size/position the
+    /// "Log" circle always had. MEASURE: "Log" pushes FieldLog
+    /// (list.bullet). CRUISE: "Project" opens the project sheet (folder).
+    /// The caption slot carries BOTH captions so its width is identical
+    /// across the mode flip — only the glyph, caption and action differ,
+    /// keeping the cluster pixel-invariant.
+    private var rightClusterCircle: some View {
         VStack(spacing: 5) {
-            NavigationLink {
-                destination()
-            } label: {
-                ZStack {
-                    Circle().fill(ForestixPalette.surface)
-                    Image(systemName: icon)
-                        .font(.system(size: 22, weight: .medium))
-                        .foregroundStyle(ForestixPalette.textPrimary)
+            if isCruiseMode {
+                Button {
+                    presentingProjectSheet = true
+                } label: {
+                    clusterCircleGlyph("folder")
                 }
-                .frame(width: 54, height: 54)
-                .overlay(Circle().stroke(ForestixPalette.divider, lineWidth: 1))
-                .shadow(color: Color.black.opacity(0.18), radius: 6, y: 3)
+                .buttonStyle(MapPressableStyle())
+                .accessibilityLabel("Project")
+                .accessibilityIdentifier("cruiseMap.projectCircle")
+            } else {
+                NavigationLink {
+                    FieldLogScreen()
+                } label: {
+                    clusterCircleGlyph("list.bullet")
+                }
+                .buttonStyle(MapPressableStyle())
+                .accessibilityLabel("Log")
+                .accessibilityIdentifier("mapHome.log")
             }
-            .buttonStyle(MapPressableStyle())
-            .accessibilityLabel(label)
-            .accessibilityIdentifier(accessibilityID)
-            clusterLabel(label)
+            clusterCaption(isCruiseMode ? "Project" : "Log",
+                           slots: ["Log", "Project"])
         }
+    }
+
+    /// The 54 pt surface circle shared by the right cluster circle —
+    /// icon centred, divider ring, soft drop shadow.
+    private func clusterCircleGlyph(_ icon: String) -> some View {
+        ZStack {
+            Circle().fill(ForestixPalette.surface)
+            Image(systemName: icon)
+                .font(.system(size: 22, weight: .medium))
+                .foregroundStyle(ForestixPalette.textPrimary)
+        }
+        .frame(width: 54, height: 54)
+        .overlay(Circle().stroke(ForestixPalette.divider, lineWidth: 1))
+        .shadow(color: Color.black.opacity(0.18), radius: 6, y: 3)
     }
 
     /// Fixed-width caption slot under a cluster circle — the live

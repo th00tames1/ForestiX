@@ -59,6 +59,7 @@ import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.Height
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -68,6 +69,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -124,12 +126,14 @@ import com.hcjeong.forestix.inventory.VolumeEquationFactory
 import com.hcjeong.forestix.positioning.CLLocationSnapshot
 import com.hcjeong.forestix.positioning.GeoMath
 import com.hcjeong.forestix.positioning.LocationService
+import com.hcjeong.forestix.ui.MeasurePhotoStore
 import com.hcjeong.forestix.ui.Routes
 import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.pressableNoRipple
 import com.hcjeong.forestix.ui.screens.CaptureColumn
 import com.hcjeong.forestix.ui.screens.ClusterSlots
 import com.hcjeong.forestix.ui.screens.ExportViewModel
+import com.hcjeong.forestix.ui.screens.FullScreenImageViewer
 import com.hcjeong.forestix.ui.screens.Haptics
 import com.hcjeong.forestix.ui.screens.PeekActionButton
 import com.hcjeong.forestix.ui.screens.PhotoThumb
@@ -194,6 +198,10 @@ internal class CruiseModeState {
     var startPlot: () -> Unit = {}
     var addTree: (Plot) -> Unit = {}
     var closePlot: (Plot) -> Unit = {}
+    /// Hard delete a plot + cascade its trees (plot peek "Delete plot").
+    var deletePlot: (Plot) -> Unit = {}
+    /// Hard delete a tree + its photo (tree peek "Delete tree").
+    var deleteTree: (Tree) -> Unit = {}
     /// Height on demand (tree peek "Measure height" / heights sheet).
     var measureHeight: (Tree) -> Unit = {}
 
@@ -332,6 +340,43 @@ internal fun CruiseModeEffects(
             } catch (_: Exception) {
                 plot.closedAt = null
                 plot.closedBy = null
+            }
+            state.selectedId = null
+            state.refresh++
+        }
+    }
+
+    /// Plot peek "Delete plot": cascade hard-delete every tree row (including
+    /// soft-deleted ones) then remove the plot row, clearing the active-plot
+    /// pointer if it was this one. Peek dismisses + map reloads on refresh.
+    state.deletePlot = { plot ->
+        scope.launch {
+            try {
+                env.treeRepository.listByPlot(plot.id, includeDeleted = true)
+                    .forEach { env.treeRepository.hardDelete(it.id) }
+                env.plotRepository.delete(plot.id)
+                if (settings.cruisePlotId == plot.id.toString()) {
+                    env.settings.setCruisePlotId(null)
+                }
+            } catch (_: Exception) {
+                // Storage error — leave the plot in place; the next tap retries.
+            }
+            state.selectedId = null
+            state.refresh++
+        }
+    }
+
+    /// Tree peek "Delete tree": hard delete the row + its auto-captured photo
+    /// (same MeasurePhotoStore the quick world uses). Peek dismisses + reloads.
+    state.deleteTree = { tree ->
+        scope.launch {
+            try {
+                tree.photoPath?.let { name ->
+                    (context as? Activity)?.let { MeasurePhotoStore.delete(it, name) }
+                }
+                env.treeRepository.hardDelete(tree.id)
+            } catch (_: Exception) {
+                // Storage error — leave the tree in place; the next tap retries.
             }
             state.selectedId = null
             state.refresh++
@@ -512,6 +557,7 @@ internal fun CruiseModeBottomContent(
                 onAddTree = { state.addTree(peekPlot) },
                 onHeights = { state.heightsSheetFor = peekPlot.id },
                 onClose = { state.closePlot(peekPlot) },
+                onDelete = { state.deletePlot(peekPlot) },
                 onDetails = {
                     nav.navigate(PlotFlowRoutes.plotSummary(peekPlot.id.toString()))
                 },
@@ -529,20 +575,46 @@ internal fun CruiseModeBottomContent(
                 onEdit = {
                     nav.navigate(PlotFlowRoutes.treeDetail(peekTree.id.toString()))
                 },
+                onDelete = { state.deleteTree(peekTree) },
             )
 
-            else -> CruiseActionCluster(
-                activePlot = activePlot,
-                treeCount = activePlot?.let { state.data.treesByPlot[it.id]?.size } ?: 0,
-                projectName = state.project?.name ?: "New project",
-                modifier = Modifier.padding(bottom = ForestixSpace.sm),
-                onToggleMode = onToggleMode,
-                onCapture = {
-                    val plot = state.activePlot(settings)
-                    if (plot == null) state.startPlot() else state.addTree(plot)
-                },
-                onProject = { state.projectSheetOpen = true },
-            )
+            else -> {
+                // (+) disambiguation (map-peek spec item 5): with unvisited
+                // planned plots and NO active plot, the (+) sets the nearest
+                // plot's centre (same flow as tapping its dashed pin →
+                // RecordCentreSheet) instead of starting a fresh plot.
+                // Nearest by current fix; no fix → first unvisited planned.
+                val plannedUnvisited = state.data.plannedPlots
+                CruiseActionCluster(
+                    activePlot = activePlot,
+                    hasPlannedUnvisited = plannedUnvisited.isNotEmpty(),
+                    treeCount = activePlot?.let { state.data.treesByPlot[it.id]?.size } ?: 0,
+                    projectName = state.project?.name ?: "New project",
+                    modifier = Modifier.padding(bottom = ForestixSpace.sm),
+                    onToggleMode = onToggleMode,
+                    onCapture = {
+                        val plot = state.activePlot(settings)
+                        when {
+                            plot != null -> state.addTree(plot)
+                            plannedUnvisited.isNotEmpty() -> {
+                                val f = fix ?: LocationService.lastGlobalFix
+                                val nearest = if (f == null) {
+                                    plannedUnvisited.first()
+                                } else {
+                                    plannedUnvisited.minByOrNull {
+                                        GeoMath.distanceM(
+                                            f.latitude, f.longitude,
+                                            it.plannedLat, it.plannedLon)
+                                    }
+                                }
+                                nearest?.let { state.recordCentreFor = it }
+                            }
+                            else -> state.startPlot()
+                        }
+                    },
+                    onProject = { state.projectSheetOpen = true },
+                )
+            }
         }
     }
 }
@@ -991,6 +1063,7 @@ private fun PlannedChip() {
 @Composable
 private fun CruiseActionCluster(
     activePlot: Plot?,
+    hasPlannedUnvisited: Boolean,
     treeCount: Int,
     projectName: String,
     modifier: Modifier = Modifier,
@@ -1011,16 +1084,22 @@ private fun CruiseActionCluster(
         )
         // 74 dp primary (+) — LOCKED cruise-accent fill + WHITE glyph;
         // accent-scoped outline while a plot is active (mock
-        // `.capture.scoped`). Plot status colours untouched. LOCKED
-        // strings: "Start plot" / "Add tree · Plot N". The reserved tally
-        // zone now carries the always-on PROJECT STRIP (folds in the count).
+        // `.capture.scoped`). Plot status colours untouched. LOCKED strings:
+        // active plot → "Add tree · Plot N"; unvisited plan waiting → "Set
+        // plot centre" (map-peek spec item 5); otherwise → "Start plot". The
+        // reserved tally zone carries the always-on PROJECT STRIP.
+        val captureLabel = when {
+            activePlot != null -> "Add tree · Plot ${activePlot.plotNumber}"
+            hasPlannedUnvisited -> "Set plot centre"
+            else -> "Start plot"
+        }
         CaptureColumn(
-            caption = if (activePlot == null) {
-                "Start plot"
-            } else {
-                "Add tree · Plot ${activePlot.plotNumber}"
+            caption = captureLabel,
+            contentDescription = when {
+                activePlot != null -> "Add tree"
+                hasPlannedUnvisited -> "Set plot centre"
+                else -> "Start plot"
             },
-            contentDescription = if (activePlot == null) "Start plot" else "Add tree",
             fill = colors.cruiseAccent,
             ink = Color.White,
             haloed = activePlot != null,
@@ -1105,12 +1184,14 @@ private fun PlotPeekCard(
     onAddTree: () -> Unit,
     onHeights: () -> Unit,
     onClose: () -> Unit,
+    onDelete: () -> Unit,
     onDetails: () -> Unit,
 ) {
     val colors = Forestix.colors
     val type = Forestix.type
     val shape = RoundedCornerShape(14.dp)
     val closed = plot.closedAt != null
+    var confirmDelete by remember(plot.id) { mutableStateOf(false) }
 
     // Live stats via the SAME inventory engine PlotTallyScreen uses.
     var stats by remember(plot.id, trees.size) { mutableStateOf(PlotStats.empty) }
@@ -1250,6 +1331,46 @@ private fun PlotPeekCard(
                 onDetails()
             }
         }
+        Spacer(Modifier.size(8.dp))
+        // Destructive "Delete plot" (map-peek spec item 4) — cascades to the
+        // plot's trees, behind an AlertDialog confirm. Explicit button for
+        // both open and closed plots; never long-press.
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(min = 44.dp)
+                .pressableNoRipple(onClick = { confirmDelete = true })
+                .clip(ForestixRadius.control)
+                .border(1.dp, colors.confidenceBad.copy(alpha = 0.5f), ForestixRadius.control),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                "Delete plot",
+                style = type.bodyBold.copy(fontSize = 14.sp),
+                color = colors.confidenceBad,
+            )
+        }
+    }
+
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = {
+                Text(
+                    "Delete Plot ${plot.plotNumber} and its ${trees.size} " +
+                        (if (trees.size == 1) "tree?" else "trees?"),
+                )
+            },
+            text = {
+                Text("This permanently removes the plot and all its trees. This cannot be undone.")
+            },
+            confirmButton = {
+                TextButton(onClick = { confirmDelete = false; onDelete() }) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDelete = false }) { Text("Cancel") }
+            },
+        )
     }
 }
 
@@ -1563,6 +1684,7 @@ private fun TreePeekCard(
     modifier: Modifier = Modifier,
     onMeasureHeight: () -> Unit,
     onEdit: () -> Unit,
+    onDelete: () -> Unit,
 ) {
     val colors = Forestix.colors
     val type = Forestix.type
@@ -1572,6 +1694,8 @@ private fun TreePeekCard(
     } else {
         com.hcjeong.forestix.common.UnitSystem.IMPERIAL
     }
+    var showPhoto by remember(tree.id) { mutableStateOf(false) }
+    var confirmDelete by remember(tree.id) { mutableStateOf(false) }
 
     Column(
         modifier
@@ -1614,13 +1738,16 @@ private fun TreePeekCard(
         }
         Spacer(Modifier.size(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            PhotoThumb(tree.photoPath, if (tree.photoPath != null) 1 else 0, activity)
+            // Tapping the thumbnail opens the full-screen viewer (map-peek
+            // spec item 3). The cruise tree photo lives in the same store.
+            PhotoThumb(
+                tree.photoPath, if (tree.photoPath != null) 1 else 0, activity,
+                onClick = tree.photoPath?.let { { showPhoto = true } },
+            )
             Column(Modifier.weight(1f)) {
                 TreeMetricRow(
                     label = "DBH",
                     value = MeasurementFormatter.diameter(tree.dbhCm.toDouble(), unitSystem),
-                    sigma = tree.dbhSigmaMm?.takeIf { it > 0 }
-                        ?.let { MeasurementFormatter.diameterSigma(it.toDouble(), unitSystem) },
                     tierRaw = tree.dbhConfidence.raw,
                 )
                 if (tree.heightM != null) {
@@ -1628,8 +1755,6 @@ private fun TreePeekCard(
                     TreeMetricRow(
                         label = "HEIGHT",
                         value = MeasurementFormatter.height(tree.heightM!!.toDouble(), unitSystem),
-                        sigma = tree.heightSigmaM?.takeIf { it > 0 }
-                            ?.let { MeasurementFormatter.heightSigma(it.toDouble(), unitSystem) },
                         tierRaw = tree.heightConfidence?.raw,
                     )
                 }
@@ -1667,15 +1792,56 @@ private fun TreePeekCard(
             PeekActionButton("Measure height", primary = false, modifier = Modifier.weight(1f)) {
                 onMeasureHeight()
             }
-            PeekActionButton("Edit details", primary = true, modifier = Modifier.weight(1f)) {
+            // "Edit this tree" (map-peek spec item 3, was "Edit details") —
+            // same TreeDetailScreen route: values + soft-delete + raw meta.
+            PeekActionButton("Edit this tree", primary = true, modifier = Modifier.weight(1f)) {
                 onEdit()
             }
         }
+        Spacer(Modifier.size(8.dp))
+        // Destructive "Delete tree" (map-peek spec item 4) — hard delete the
+        // row + its photo, behind an AlertDialog confirm. Explicit button,
+        // never long-press.
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(min = 44.dp)
+                .pressableNoRipple(onClick = { confirmDelete = true })
+                .clip(ForestixRadius.control)
+                .border(1.dp, colors.confidenceBad.copy(alpha = 0.5f), ForestixRadius.control),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                "Delete tree",
+                style = type.bodyBold.copy(fontSize = 14.sp),
+                color = colors.confidenceBad,
+            )
+        }
+    }
+
+    if (showPhoto) {
+        tree.photoPath?.let { name ->
+            FullScreenImageViewer(name, activity, onDismiss = { showPhoto = false })
+        }
+    }
+
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Delete Tree ${tree.treeNumber}?") },
+            text = { Text("This permanently removes the tree and its photo. This cannot be undone.") },
+            confirmButton = {
+                TextButton(onClick = { confirmDelete = false; onDelete() }) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDelete = false }) { Text("Cancel") }
+            },
+        )
     }
 }
 
 @Composable
-private fun TreeMetricRow(label: String, value: String, sigma: String?, tierRaw: String?) {
+private fun TreeMetricRow(label: String, value: String, tierRaw: String?) {
     val colors = Forestix.colors
     val type = Forestix.type
     Row(
@@ -1690,19 +1856,15 @@ private fun TreeMetricRow(label: String, value: String, sigma: String?, tierRaw:
             color = colors.textTertiary,
             modifier = Modifier.width(52.dp),
         )
+        // ±σ intentionally dropped from the peek metric row (map-peek spec
+        // item 1); the value stands alone. Sigma still ships to storage /
+        // CSV / FieldLog and the tree's Raw-metadata editor.
         Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
             Text(
                 value,
                 style = type.dataSmall.copy(fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold),
                 color = colors.textPrimary,
             )
-            if (sigma != null) {
-                Text(
-                    " $sigma",
-                    style = type.dataSmall.copy(fontSize = 11.sp),
-                    color = colors.textTertiary,
-                )
-            }
         }
         if (tierRaw != null) TierChipSoft(tierRaw)
     }

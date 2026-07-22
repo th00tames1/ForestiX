@@ -366,6 +366,19 @@ public final class QuickMeasureHistory: ObservableObject {
         recomputeCapacityFlag()
     }
 
+    /// Replace an existing entry in place, matched by id, and persist —
+    /// the quick-peek "Edit this tree" mutator. No-op if the id is gone.
+    /// Mirrors `delete`'s persistence (rewrite the sidecar + cache); the
+    /// caller supplies a fully-formed entry carrying the same id.
+    public func update(_ entry: QuickMeasureEntry) {
+        guard let idx = entries.firstIndex(where: { $0.id == entry.id })
+        else { return }
+        entries[idx] = entry
+        rewriteSidecar()
+        persistCache()
+        recomputeCapacityFlag()
+    }
+
     public func delete(id: UUID) {
         if let photo = entries.first(where: { $0.id == id })?.photoPath {
             MeasurePhotoStore.delete(photo)

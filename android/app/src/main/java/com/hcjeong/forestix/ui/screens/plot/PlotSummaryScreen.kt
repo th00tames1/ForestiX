@@ -21,6 +21,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Dangerous
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.filled.Warning
@@ -46,6 +47,7 @@ import com.hcjeong.forestix.inventory.PlotStats
 import com.hcjeong.forestix.ui.screens.ForestixScaffold
 import com.hcjeong.forestix.ui.screens.project.FormSection
 import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixBorderedButton
 import com.hcjeong.forestix.ui.theme.ForestixProminentButton
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import java.text.DateFormat
@@ -121,6 +123,7 @@ fun PlotSummaryScreen(
     val closedAt by vm.closedAt.collectAsStateWithLifecycle()
     val isClosing by vm.isClosing.collectAsStateWithLifecycle()
     val errorMessage by vm.errorMessage.collectAsStateWithLifecycle()
+    var confirmDelete by remember { mutableStateOf(false) }
 
     ForestixScaffold(nav, title = "Plot ${vm.plot.plotNumber} summary") { padding ->
         Column(
@@ -250,8 +253,51 @@ fun PlotSummaryScreen(
                 ) { nav.popBackStack() }
             }
 
+            // Destructive "Delete plot" (map-peek spec item 4) — cascades to
+            // the plot's trees, behind an AlertDialog confirm; pops back after.
+            ForestixBorderedButton(
+                label = "Delete plot",
+                icon = Icons.Filled.Delete,
+                tint = colors.confidenceBad,
+                modifier = Modifier.fillMaxWidth(),
+            ) { confirmDelete = true }
+
             Spacer(Modifier.height(ForestixSpace.xl))
         }
+    }
+
+    // MARK: - Delete confirm
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = {
+                Text(
+                    "Delete Plot ${vm.plot.plotNumber} and its ${stats.liveTreeCount} " +
+                        (if (stats.liveTreeCount == 1) "tree?" else "trees?"),
+                )
+            },
+            text = {
+                Text("This permanently removes the plot and all its trees. This cannot be undone.")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDelete = false
+                    scope.launch {
+                        try {
+                            env.treeRepository.listByPlot(vm.plot.id, includeDeleted = true)
+                                .forEach { env.treeRepository.hardDelete(it.id) }
+                            env.plotRepository.delete(vm.plot.id)
+                        } catch (_: Exception) {
+                            // Storage error — stay on the summary; retry later.
+                        }
+                        nav.popBackStack()
+                    }
+                }) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDelete = false }) { Text("Cancel") }
+            },
+        )
     }
 
     // MARK: - Error alert

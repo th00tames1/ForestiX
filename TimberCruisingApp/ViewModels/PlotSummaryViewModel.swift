@@ -40,6 +40,10 @@ public final class PlotSummaryViewModel: ObservableObject {
     @Published public private(set) var closedAt: Date? = nil
     @Published public private(set) var isLoading: Bool = false
     @Published public private(set) var isClosing: Bool = false
+    @Published public private(set) var isDeleting: Bool = false
+    /// Flips true once the plot + its trees are hard-removed — the view
+    /// dismisses back to the map on this.
+    @Published public private(set) var isDeleted: Bool = false
     @Published public private(set) var errorMessage: String? = nil
 
     public init(
@@ -211,6 +215,30 @@ public final class PlotSummaryViewModel: ObservableObject {
             errorMessage = nil
         } catch {
             errorMessage = "Close failed: \(error.localizedDescription). Your trees are saved; try again when you have signal."
+        }
+    }
+
+    // MARK: - Delete
+
+    /// Hard-remove this plot AND its trees (summary "Delete plot", mirrors
+    /// the map peek). Cascades every tree row (including soft-deleted, so
+    /// no orphans) and its photo, then the plot row itself. On success
+    /// `isDeleted` flips so the view can dismiss back to the map.
+    public func delete() {
+        guard !isClosing, !isDeleting else { return }
+        isDeleting = true
+        defer { isDeleting = false }
+        do {
+            let all = try treeRepo.listByPlot(plot.id, includeDeleted: true)
+            for tree in all {
+                if let photo = tree.photoPath { MeasurePhotoStore.delete(photo) }
+                try treeRepo.hardDelete(id: tree.id)
+            }
+            try plotRepo.delete(id: plot.id)
+            isDeleted = true
+            errorMessage = nil
+        } catch {
+            errorMessage = "Delete failed: \(error.localizedDescription)"
         }
     }
 

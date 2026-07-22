@@ -104,6 +104,15 @@ struct ScopedHeightRequest {
     let treeID: UUID
 }
 
+/// A cruise tree's auto-photo presented full-screen from the tree-peek
+/// thumbnail. Internal because MapHomeScreen.swift owns the `@State`.
+struct CruisePhotoContext: Identifiable {
+    let photoPath: String
+    let title: String
+    let subtitle: String
+    var id: String { photoPath }
+}
+
 // MARK: - Cruise mode
 
 extension MapHomeScreen {
@@ -132,6 +141,24 @@ extension MapHomeScreen {
 
     func nextTreeNumber(in plotID: UUID) -> Int {
         (liveTrees(in: plotID).map(\.treeNumber).max() ?? 0) + 1
+    }
+
+    /// The unvisited planned plot the (+) "Set plot centre" targets:
+    /// nearest to the current fix, or — with no fix — the lowest-numbered
+    /// one. nil when none exist. (`plannedPlots` is already filtered to
+    /// unvisited in `reloadCruise`.)
+    func nearestUnvisitedPlannedPlot() -> PlannedPlot? {
+        guard !plannedPlots.isEmpty else { return nil }
+        guard let fix = location.latestSnapshot ?? LocationService.lastGlobalFix
+        else {
+            return plannedPlots.min(by: { $0.plotNumber < $1.plotNumber })
+        }
+        return plannedPlots.min(by: { a, b in
+            GeoMath.distanceM(fromLat: fix.latitude, fromLon: fix.longitude,
+                              toLat: a.plannedLat, toLon: a.plannedLon)
+            < GeoMath.distanceM(fromLat: fix.latitude, fromLon: fix.longitude,
+                                toLat: b.plannedLat, toLon: b.plannedLon)
+        })
     }
 
     // MARK: Data
@@ -236,10 +263,16 @@ extension MapHomeScreen {
     // MARK: The state-morphing (+) (label + action; the button itself
     // is the home's shared 74 pt circle)
 
-    /// LOCKED strings: "Start plot" / "Add tree · Plot N".
+    /// LOCKED strings: "Add tree · Plot N" (active plot), "Set plot
+    /// centre" (unvisited planned plots waiting, none active), else
+    /// "Start plot" (ad-hoc). The (+) caption slot already absorbs the
+    /// variable width, so the cluster stays pixel-invariant.
     var cruisePrimaryLabel: String {
         if let plot = activePlot {
             return "Add tree · Plot \(plot.plotNumber)"
+        }
+        if !plannedPlots.isEmpty {
+            return "Set plot centre"
         }
         return "Start plot"
     }
@@ -247,6 +280,12 @@ extension MapHomeScreen {
     func cruisePrimaryAction() {
         if let plot = activePlot {
             startAddTree(in: plot)
+        } else if let planned = nearestUnvisitedPlannedPlot() {
+            // Unvisited planned plots exist: the (+) drives the nearest
+            // one's Set-plot-centre flow instead of an ad-hoc start —
+            // exactly as tapping that dashed pin → "Set plot centre (GPS)".
+            withAnimation(.easeOut(duration: 0.18)) { selectedPinID = nil }
+            recordingTarget = planned
         } else {
             presentingPlotSetup = true
         }
@@ -307,6 +346,10 @@ extension MapHomeScreen {
                              onDismiss: { reloadCruise() }) { cruiseDBHCover }
             .fullScreenCover(isPresented: $presentingCruiseHeight,
                              onDismiss: { reloadCruise() }) { cruiseHeightCover }
+            // Tree-peek thumbnail → full-screen photo viewer.
+            .fullScreenCover(item: $cruisePhotoContext) { context in
+                CruiseTreePhotoView(context: context)
+            }
         #endif
             // HEIGHTS SHEET (plot peek → "Heights · N measured") — the
             // scoped Height cover launches from onDismiss so the two
@@ -401,6 +444,40 @@ extension MapHomeScreen {
                    let plot = plots.first(where: { $0.id == id }) {
                     let n = liveTrees(in: plot.id).count
                     Text("Plot \(plot.plotNumber) has \(n) tree\(n == 1 ? "" : "s"). Closing stamps it done — you can reopen from Details.")
+                }
+            }
+            // Delete plot (peek) — cascades trees + photos, then the plot.
+            .alert("Delete plot?",
+                   isPresented: Binding(
+                       get: { deletePlotCandidateID != nil },
+                       set: { if !$0 { deletePlotCandidateID = nil } }),
+                   presenting: deletePlotCandidateID) { id in
+                Button("Delete plot", role: .destructive) {
+                    deletePlot(id: id)
+                    deletePlotCandidateID = nil
+                }
+                Button("Cancel", role: .cancel) { deletePlotCandidateID = nil }
+            } message: { id in
+                if let plot = plots.first(where: { $0.id == id }) {
+                    let n = liveTrees(in: plot.id).count
+                    Text("Delete Plot \(plot.plotNumber) and its \(n) tree\(n == 1 ? "" : "s")? This can't be undone.")
+                }
+            }
+            // Delete tree (peek) — the tree row + its photo.
+            .alert("Delete tree?",
+                   isPresented: Binding(
+                       get: { deleteTreeCandidateID != nil },
+                       set: { if !$0 { deleteTreeCandidateID = nil } }),
+                   presenting: deleteTreeCandidateID) { id in
+                Button("Delete tree", role: .destructive) {
+                    deleteTree(id: id)
+                    deleteTreeCandidateID = nil
+                }
+                Button("Cancel", role: .cancel) { deleteTreeCandidateID = nil }
+            } message: { id in
+                if let tree = treesByPlot.values.joined()
+                    .first(where: { $0.id == id }) {
+                    Text("Delete Tree \(tree.treeNumber)? This removes it and its photo from the map. This can't be undone.")
                 }
             }
     }
@@ -858,6 +935,25 @@ extension MapHomeScreen {
                     .buttonStyle(CruisePressableStyle())
                     .accessibilityIdentifier("cruiseMap.plotPeek.details")
                 }
+
+                // Hard removal from the map (confirmed) — cascades the
+                // plot's trees + photos, then the plot. Explicit button.
+                Button(role: .destructive) {
+                    deletePlotCandidateID = plot.id
+                } label: {
+                    Text("Delete plot")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(ForestixPalette.confidenceBad)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .background(
+                            RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                             style: .continuous)
+                                .stroke(ForestixPalette.confidenceBad.opacity(0.5),
+                                        lineWidth: 1))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(CruisePressableStyle())
+                .accessibilityIdentifier("cruiseMap.plotPeek.delete")
             }
             .padding(.top, ForestixSpace.sm)
         }
@@ -1024,6 +1120,35 @@ extension MapHomeScreen {
         reloadCruise()
     }
 
+    /// Hard-remove a plot AND its trees from the map (peek "Delete plot").
+    /// Cascades every tree row (including soft-deleted, so no orphans) and
+    /// its photo, then the plot row. The pin/peek dismiss after.
+    func deletePlot(id: UUID) {
+        let trees = (try? environment.treeRepository
+            .listByPlot(id, includeDeleted: true)) ?? []
+        for tree in trees {
+            if let photo = tree.photoPath { MeasurePhotoStore.delete(photo) }
+            try? environment.treeRepository.hardDelete(id: tree.id)
+        }
+        try? environment.plotRepository.delete(id: id)
+        withAnimation(.easeOut(duration: 0.18)) { selectedPinID = nil }
+        reloadCruise()
+    }
+
+    /// Hard-remove a single cruise tree (tree peek "Delete tree") and its
+    /// photo — the user wants it gone from the map, not soft-deleted. Pin/
+    /// peek dismiss after.
+    func deleteTree(id: UUID) {
+        if let tree = try? environment.treeRepository.read(id: id,
+                                                           includeDeleted: true),
+           let photo = tree.photoPath {
+            MeasurePhotoStore.delete(photo)
+        }
+        try? environment.treeRepository.hardDelete(id: id)
+        withAnimation(.easeOut(duration: 0.18)) { selectedPinID = nil }
+        reloadCruise()
+    }
+
     // MARK: Tree peek (mock ④)
 
     func treePeekCard(for tree: Tree) -> some View {
@@ -1051,16 +1176,29 @@ extension MapHomeScreen {
             .padding(.bottom, 10)
 
             HStack(alignment: .top, spacing: ForestixSpace.sm) {
-                cruisePhotoThumb(tree.photoPath)
+                // Tappable thumbnail → full-screen viewer (reuses the
+                // MeasurePhotoStore path); disabled with no photo.
+                Button {
+                    if let path = tree.photoPath {
+                        cruisePhotoContext = CruisePhotoContext(
+                            photoPath: path,
+                            title: tree.speciesCode.isEmpty
+                                ? "Tree \(tree.treeNumber)"
+                                : "Tree \(tree.treeNumber) · \(tree.speciesCode.uppercased())",
+                            subtitle: peekTreeSubtitle(tree, plot: plot))
+                    }
+                } label: {
+                    cruisePhotoThumb(tree.photoPath)
+                }
+                .buttonStyle(CruisePressableStyle())
+                .disabled(tree.photoPath == nil)
+                .accessibilityLabel("View photo")
+                .accessibilityIdentifier("cruiseMap.treePeek.photoThumb")
                 VStack(spacing: 0) {
                     metricRow(
                         label: "DBH",
                         value: MeasurementFormatter.diameter(cm: Double(tree.dbhCm),
                                                              in: system),
-                        sigma: tree.dbhSigmaMm.map {
-                            MeasurementFormatter.diameterSigma(mm: Double($0),
-                                                               in: system)
-                        },
                         tier: tree.dbhConfidence.rawValue,
                         divided: tree.heightM != nil)
                     if let h = tree.heightM {
@@ -1068,10 +1206,6 @@ extension MapHomeScreen {
                             label: "HEIGHT",
                             value: MeasurementFormatter.height(m: Double(h),
                                                                in: system),
-                            sigma: tree.heightSigmaM.map {
-                                MeasurementFormatter.heightSigma(m: Double($0),
-                                                                 in: system)
-                            },
                             tier: tree.heightConfidence?.rawValue ?? "green",
                             divided: false)
                     }
@@ -1079,7 +1213,7 @@ extension MapHomeScreen {
                 .frame(maxWidth: .infinity)
             }
 
-            // Post-hoc detail chips — read-only here; Edit details is
+            // Post-hoc detail chips — read-only here; "Edit this tree" is
             // the editor. Never a gate.
             HStack(spacing: 6) {
                 detailChip("SPECIES", tree.speciesCode.isEmpty
@@ -1091,41 +1225,62 @@ extension MapHomeScreen {
             }
             .padding(.top, 11)
 
-            HStack(spacing: ForestixSpace.xs) {
-                // Per-tree height on demand — opens the Height screen
-                // scoped to THIS tree (the tally loop records diameters
-                // only).
-                Button {
-                    startScopedHeight(plotID: tree.plotId, treeID: tree.id)
-                } label: {
-                    Text("Measure height")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(ForestixPalette.textPrimary)
-                        .frame(maxWidth: .infinity, minHeight: 44)
-                        .background(
-                            RoundedRectangle(cornerRadius: ForestixRadius.control,
-                                             style: .continuous)
-                                .stroke(ForestixPalette.divider, lineWidth: 1))
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(CruisePressableStyle())
-                .accessibilityIdentifier("cruiseMap.treePeek.measureHeight")
+            VStack(spacing: ForestixSpace.xs) {
+                HStack(spacing: ForestixSpace.xs) {
+                    // Per-tree height on demand — opens the Height screen
+                    // scoped to THIS tree (the tally loop records diameters
+                    // only).
+                    Button {
+                        startScopedHeight(plotID: tree.plotId, treeID: tree.id)
+                    } label: {
+                        Text("Measure height")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(ForestixPalette.textPrimary)
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                            .background(
+                                RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                                 style: .continuous)
+                                    .stroke(ForestixPalette.divider, lineWidth: 1))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(CruisePressableStyle())
+                    .accessibilityIdentifier("cruiseMap.treePeek.measureHeight")
 
-                Button {
-                    pushed = .treeDetails(tree.id)
+                    Button {
+                        pushed = .treeDetails(tree.id)
+                    } label: {
+                        Text("Edit this tree")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(ForestixPalette.primaryInk)
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                            .background(
+                                RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                                 style: .continuous)
+                                    .fill(ForestixPalette.primary))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(CruisePressableStyle())
+                    .accessibilityIdentifier("cruiseMap.treePeek.edit")
+                }
+
+                // Hard removal from the map (confirmed) — the tree row +
+                // its photo. Explicit button, never long-press.
+                Button(role: .destructive) {
+                    deleteTreeCandidateID = tree.id
                 } label: {
-                    Text("Edit details")
+                    Text("Delete tree")
                         .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(ForestixPalette.primaryInk)
+                        .foregroundStyle(ForestixPalette.confidenceBad)
                         .frame(maxWidth: .infinity, minHeight: 44)
                         .background(
                             RoundedRectangle(cornerRadius: ForestixRadius.control,
                                              style: .continuous)
-                                .fill(ForestixPalette.primary))
+                                .stroke(ForestixPalette.confidenceBad.opacity(0.5),
+                                        lineWidth: 1))
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(CruisePressableStyle())
-                .accessibilityIdentifier("cruiseMap.treePeek.edit")
+                .accessibilityIdentifier("cruiseMap.treePeek.delete")
             }
             .padding(.top, ForestixSpace.sm)
         }
@@ -1159,7 +1314,9 @@ extension MapHomeScreen {
         }
     }
 
-    func metricRow(label: String, value: String, sigma: String?,
+    // Peek display carries the value only; ±σ is deliberately NOT shown
+    // here (the tree record / CSV / FieldLog keep it).
+    func metricRow(label: String, value: String,
                    tier: String, divided: Bool) -> some View {
         HStack(spacing: ForestixSpace.xs) {
             Text(label)
@@ -1167,19 +1324,11 @@ extension MapHomeScreen {
                 .tracking(0.7)
                 .foregroundStyle(ForestixPalette.textTertiary)
                 .frame(width: 52, alignment: .leading)
-            HStack(spacing: 0) {
-                Text(value)
-                    .font(.system(size: 14.5, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(ForestixPalette.textPrimary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                if let sigma {
-                    Text(" " + sigma)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(ForestixPalette.textTertiary)
-                        .lineLimit(1)
-                }
-            }
+            Text(value)
+                .font(.system(size: 14.5, weight: .semibold, design: .monospaced))
+                .foregroundStyle(ForestixPalette.textPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
             Spacer(minLength: 4)
             cruiseTierChip(tier)
         }
@@ -2182,6 +2331,83 @@ struct PlotHeightsSheet: View {
         .disabled(!enabled)
     }
 }
+
+// MARK: - Cruise tree photo viewer (tree peek thumbnail → full screen)
+
+#if os(iOS)
+/// Full-screen viewer for a cruise tree's auto-photo, reached by tapping
+/// the tree-peek thumbnail. Reuses the MeasurePhotoStore path; the chrome
+/// is fixed dark (it sits on a photograph), matching the measure-mode
+/// photo detail's language.
+private struct CruiseTreePhotoView: View {
+    let context: CruisePhotoContext
+    @Environment(\.dismiss) private var dismiss
+    @State private var image: UIImage?
+
+    private let ink = Color(red: 0.949, green: 0.961, blue: 0.953)      // #F2F5F3
+    private let inkDim = Color(red: 0.647, green: 0.682, blue: 0.659)   // #A5AEA8
+    private let glass = Color(red: 6 / 255, green: 9 / 255, blue: 10 / 255) // #06090A
+
+    var body: some View {
+        ZStack {
+            Color(red: 0.039, green: 0.051, blue: 0.043).ignoresSafeArea() // #0A0D0B
+
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ProgressView().tint(ink)
+            }
+
+            VStack {
+                HStack {
+                    Spacer()
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(ink)
+                            .frame(width: 44, height: 44)
+                            .background(Circle().fill(glass.opacity(0.70)))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Close photo")
+                    .accessibilityIdentifier("cruiseMap.photo.close")
+                }
+                .padding(.horizontal, 14)
+                Spacer()
+            }
+
+            VStack {
+                Spacer()
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(context.title)
+                        .font(.system(size: 17, weight: .heavy))
+                        .foregroundStyle(ink)
+                    Text(context.subtitle)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(inkDim)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.top, 40)
+                .padding(.bottom, 30)
+                .background(
+                    LinearGradient(colors: [glass.opacity(0), glass.opacity(0.92)],
+                                   startPoint: .top, endPoint: .bottom))
+            }
+        }
+        .task {
+            let url = MeasurePhotoStore.url(for: context.photoPath)
+            let data = await Task.detached { try? Data(contentsOf: url) }.value
+            if let data { image = UIImage(data: data) }
+        }
+    }
+}
+#endif
 
 // MARK: - Photo thumbnail loader
 

@@ -15,6 +15,8 @@ public struct PlotSummaryScreen: View {
 
     public var onClosed: () -> Void = {}
 
+    @State private var confirmingDelete = false
+
     public init(viewModel: @autoclosure @escaping () -> PlotSummaryViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel())
     }
@@ -41,6 +43,15 @@ public struct PlotSummaryScreen: View {
             Button("OK", role: .cancel) { }
         } message: {
             Text(viewModel.errorMessage ?? "")
+        }
+        .alert("Delete plot?", isPresented: $confirmingDelete) {
+            Button("Delete plot", role: .destructive) {
+                viewModel.delete()
+                if viewModel.isDeleted { dismiss() }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Delete Plot \(viewModel.plot.plotNumber) and its \(viewModel.trees.count) tree\(viewModel.trees.count == 1 ? "" : "s")? This can't be undone.")
         }
     }
 
@@ -196,6 +207,18 @@ public struct PlotSummaryScreen: View {
                 .buttonStyle(.forestixProminent)
                 .controlSize(.large)
             }
+
+            // Hard removal from the map — cascades the plot's trees +
+            // photos, then the plot. Same affordance as the map peek.
+            Button(role: .destructive) {
+                confirmingDelete = true
+            } label: {
+                Label("Delete plot", systemImage: "trash")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .disabled(viewModel.isDeleting)
         }
     }
 }

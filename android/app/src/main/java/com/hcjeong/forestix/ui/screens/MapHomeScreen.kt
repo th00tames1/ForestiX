@@ -54,6 +54,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.List
@@ -75,6 +76,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -99,6 +101,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
@@ -238,6 +242,8 @@ fun MapHomeScreen(nav: NavController) {
     var farTreeConfirm by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var offlineOpen by remember { mutableStateOf(false) }
     var photoEntry by remember { mutableStateOf<QuickMeasureEntry?>(null) }
+    // Quick peek "Edit this tree" → compact edit sheet for one reading.
+    var editEntry by remember { mutableStateOf<QuickMeasureEntry?>(null) }
 
     // MARK: - Cruise mode state + effects (data load / navigate guide /
     // actions run only while the mode is on; the holder survives toggles so
@@ -434,6 +440,7 @@ fun MapHomeScreen(nav: NavController) {
                         onMeasure = { chooserOpen = true },
                         onLog = { nav.navigate(Routes.FIELD_LOG) },
                         onViewPhoto = { photoEntry = it },
+                        onEditEntry = { editEntry = it },
                         onMeasureAgain = { pin ->
                             val tree = pin.treeNumber
                             if (tree == null) {
@@ -531,6 +538,26 @@ fun MapHomeScreen(nav: NavController) {
             onDismiss = { photoEntry = null },
         )
     }
+    // Quick-edit sheet (map-peek spec item 2): value / species / note +
+    // destructive Delete on the tapped reading. Save persists through the
+    // history store's update mutator; Delete removes the row + its photo.
+    editEntry?.let { entry ->
+        QuickEntryEditSheet(
+            entry = entry,
+            onDismiss = { editEntry = null },
+            onSave = { updated ->
+                env.history.update(updated)
+                editEntry = null
+            },
+            onDelete = {
+                env.history.delete(entry.id)
+                editEntry = null
+                // The pin may vanish (last reading gone) — drop any selection
+                // so a stale peek can't linger over the deleted tree.
+                selectedPinId = null
+            },
+        )
+    }
 
     // First-launch UX: the map home hosts the region picker (it is the
     // screen after the splash). Auto-present once; picking, skipping or
@@ -577,6 +604,7 @@ private fun MeasureBottomContent(
     onMeasure: () -> Unit,
     onLog: () -> Unit,
     onViewPhoto: (QuickMeasureEntry) -> Unit,
+    onEditEntry: (QuickMeasureEntry) -> Unit,
     onMeasureAgain: (TreePin) -> Unit,
 ) {
     AnimatedContent(
@@ -608,6 +636,7 @@ private fun MeasureBottomContent(
                     .padding(horizontal = 12.dp)
                     .padding(bottom = 20.dp),
                 onViewPhoto = onViewPhoto,
+                onEditEntry = onEditEntry,
                 onMeasureAgain = { onMeasureAgain(pin) },
             )
         }
@@ -967,6 +996,7 @@ private fun PeekCard(
     plotName: String?,
     modifier: Modifier = Modifier,
     onViewPhoto: (QuickMeasureEntry) -> Unit,
+    onEditEntry: (QuickMeasureEntry) -> Unit,
     onMeasureAgain: () -> Unit,
 ) {
     val colors = Forestix.colors
@@ -1019,7 +1049,12 @@ private fun PeekCard(
         }
         Spacer(Modifier.size(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            PhotoThumb(photoOwner?.photoPath, photoCount, activity)
+            // Tapping the thumbnail opens the existing full-screen viewer
+            // (map-peek spec item 2 — the retired "View photo" button's job).
+            PhotoThumb(
+                photoOwner?.photoPath, photoCount, activity,
+                onClick = photoOwner?.let { owner -> { onViewPhoto(owner) } },
+            )
             Column(Modifier.weight(1f)) {
                 val rows = latestPerKind(pin.entries)
                 rows.forEachIndexed { i, entry ->
@@ -1030,13 +1065,13 @@ private fun PeekCard(
         }
         Spacer(Modifier.size(12.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs)) {
-            // "View photo" is ALWAYS rendered — disabled and dimmed when
-            // the tree has no photo (iOS peek card).
+            // "Edit this tree" replaces the redundant "View photo" (the thumb
+            // now opens the viewer): a compact edit sheet on the newest
+            // reading — value / species / note + destructive Delete.
             PeekActionButton(
-                "View photo", primary = false,
-                enabled = photoOwner != null,
+                "Edit this tree", primary = false,
                 modifier = Modifier.weight(1f),
-            ) { photoOwner?.let(onViewPhoto) }
+            ) { onEditEntry(newest) }
             PeekActionButton(
                 if (pin.treeNumber != null) "Measure this tree" else "New measurement",
                 primary = true, modifier = Modifier.weight(1f),
@@ -1072,18 +1107,14 @@ private fun MeasureRow(entry: QuickMeasureEntry, unitSystem: UnitSystem) {
             modifier = Modifier.width(52.dp),
         )
         Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+            // ±σ intentionally dropped from the peek metric row (map-peek
+            // spec item 1) — the value stands alone; sigma still ships to
+            // storage / CSV / FieldLog and the full-screen photo viewer.
             Text(
                 valueText(entry, unitSystem),
                 style = type.dataSmall.copy(fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold),
                 color = colors.textPrimary,
             )
-            sigmaText(entry, unitSystem)?.let {
-                Text(
-                    " $it",
-                    style = type.dataSmall.copy(fontSize = 11.sp),
-                    color = colors.textTertiary,
-                )
-            }
         }
         TierChipSoft(entry.confidenceRaw)
     }
@@ -1116,7 +1147,12 @@ internal fun TierChipSoft(rawTier: String) {
 /// placeholder when the group has none, and a ×K overlay for extras.
 /// Internal: the cruise tree peek reuses it (v3).
 @Composable
-internal fun PhotoThumb(photoName: String?, photoCount: Int, activity: Activity?) {
+internal fun PhotoThumb(
+    photoName: String?,
+    photoCount: Int,
+    activity: Activity?,
+    onClick: (() -> Unit)? = null,
+) {
     val colors = Forestix.colors
     val thumb by produceState<Bitmap?>(initialValue = null, photoName, activity) {
         value = withContext(Dispatchers.IO) {
@@ -1128,6 +1164,14 @@ internal fun PhotoThumb(photoName: String?, photoCount: Int, activity: Activity?
         Modifier
             .size(96.dp)
             .clip(ForestixRadius.card)
+            // Tappable only when it actually owns a photo to open.
+            .then(
+                if (onClick != null && photoName != null) {
+                    Modifier.clickableNoRipple(onClick)
+                } else {
+                    Modifier
+                }
+            )
             .background(colors.surfaceRaised)
             .border(1.dp, colors.divider, ForestixRadius.card),
     ) {
@@ -1467,6 +1511,193 @@ private fun MetaCell(label: String, value: String) {
             modifier = Modifier.padding(top = 1.dp),
             maxLines = 1,
         )
+    }
+}
+
+// MARK: - Quick-entry edit sheet (map-peek spec item 2) ------------------------
+
+/// Compact editor raised from the quick peek's "Edit this tree": the measured
+/// value (native cm/m), species code, and note for ONE reading, plus a
+/// destructive Delete behind an AlertDialog confirm (removes the row + its
+/// photo via the history store). Measurement math is untouched — only the
+/// stored value and labels change.
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun QuickEntryEditSheet(
+    entry: QuickMeasureEntry,
+    onDismiss: () -> Unit,
+    onSave: (QuickMeasureEntry) -> Unit,
+    onDelete: () -> Unit,
+) {
+    val colors = Forestix.colors
+    val type = Forestix.type
+    var valueField by remember(entry.id) { mutableStateOf(editFormatNumber(entry.value)) }
+    var species by remember(entry.id) { mutableStateOf(entry.speciesCode ?: "") }
+    var note by remember(entry.id) { mutableStateOf(entry.note ?: "") }
+    var confirmDelete by remember(entry.id) { mutableStateOf(false) }
+
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = colors.surface) {
+        Column(
+            Modifier
+                .padding(horizontal = ForestixSpace.md)
+                .padding(bottom = ForestixSpace.xl),
+            verticalArrangement = Arrangement.spacedBy(ForestixSpace.sm),
+        ) {
+            Text(
+                entry.treeNumber?.let { "EDIT · TREE $it" }
+                    ?: "EDIT · ${rowLabel(entry).uppercase(Locale.US)}",
+                style = type.sectionHead.copy(
+                    fontWeight = FontWeight.ExtraBold, letterSpacing = 1.0.sp),
+                color = colors.textTertiary,
+            )
+            // Measured value — edited in native units (cm for DBH, m else),
+            // matching storage; the display unit system doesn't apply here.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = valueField,
+                    onValueChange = { valueField = it },
+                    label = { Text(rowLabel(entry)) },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(entry.valueUnit, style = type.body, color = colors.textSecondary)
+            }
+            OutlinedTextField(
+                value = species,
+                onValueChange = { species = it },
+                label = { Text("Species code") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(
+                    capitalization = KeyboardCapitalization.Characters),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = note,
+                onValueChange = { note = it },
+                label = { Text("Note") },
+                minLines = 2,
+                maxLines = 4,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            PeekActionButton("Save changes", primary = true, modifier = Modifier.fillMaxWidth()) {
+                onSave(
+                    entry.copy(
+                        value = valueField.toDoubleOrNull() ?: entry.value,
+                        speciesCode = species.trim().ifEmpty { null },
+                        note = note.trim().ifEmpty { null },
+                    ),
+                )
+            }
+            // Destructive Delete — red-outlined, confirmed before it fires.
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 44.dp)
+                    .pressableNoRipple(onClick = { confirmDelete = true })
+                    .clip(ForestixRadius.control)
+                    .border(1.dp, colors.confidenceBad.copy(alpha = 0.5f), ForestixRadius.control),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "Delete",
+                    style = type.bodyBold.copy(fontSize = 14.sp),
+                    color = colors.confidenceBad,
+                )
+            }
+        }
+    }
+
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Delete this reading?") },
+            text = {
+                Text("This removes the measurement and its photo. This cannot be undone.")
+            },
+            confirmButton = {
+                TextButton(onClick = { confirmDelete = false; onDelete() }) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDelete = false }) { Text("Cancel") }
+            },
+        )
+    }
+}
+
+private fun editFormatNumber(v: Double): String =
+    if (v == v.toLong().toDouble()) {
+        v.toLong().toString()
+    } else {
+        String.format(Locale.US, "%.2f", v).trimEnd('0').trimEnd('.')
+    }
+
+// MARK: - Full-screen image viewer --------------------------------------------
+
+/// Bare full-screen photo viewer (image + close, no measurement meta) — the
+/// cruise tree peek's tappable thumbnail opens this. Reuses the quick-measure
+/// photo store + decoder; deliberately dark in both app appearances.
+@Composable
+internal fun FullScreenImageViewer(
+    photoName: String,
+    activity: Activity?,
+    onDismiss: () -> Unit,
+) {
+    val type = Forestix.type
+    val ink = Color(0xFFF2F5F3)
+    var loadFailed by remember(photoName) { mutableStateOf(false) }
+    val bitmap by produceState<Bitmap?>(initialValue = null, photoName, activity) {
+        val decoded = withContext(Dispatchers.IO) {
+            if (activity == null) null
+            else decodeSampled(MeasurePhotoStore.file(activity, photoName), targetPx = 1600)
+        }
+        value = decoded
+        if (decoded == null) loadFailed = true
+    }
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Box(Modifier.fillMaxSize().background(Color(0xFF0A0D0B))) {
+            val image = bitmap
+            when {
+                image != null -> Image(
+                    image.asImageBitmap(),
+                    contentDescription = "Measurement photo",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize(),
+                )
+                !loadFailed -> CircularProgressIndicator(
+                    color = ink,
+                    modifier = Modifier.align(Alignment.Center),
+                )
+                else -> Text(
+                    "Photo unavailable",
+                    style = type.body,
+                    color = Color(0xFF79837D),
+                    modifier = Modifier.align(Alignment.Center),
+                )
+            }
+            Box(
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .statusBarsPadding()
+                    .padding(end = 14.dp)
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xB306090A))
+                    .clickableNoRipple(onDismiss),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Filled.Close,
+                    contentDescription = "Close photo",
+                    tint = ink,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+        }
     }
 }
 

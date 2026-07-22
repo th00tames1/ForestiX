@@ -114,6 +114,9 @@ public struct MapHomeScreen: View {
     @State private var presentingSettings = false
     @State private var pendingOpenSettings = false
     @State private var photoViewer: PhotoViewerContext?
+    /// Quick-peek "Edit this tree" — the entry the compact edit sheet is
+    /// editing (the pin's primary reading). nil = sheet closed.
+    @State private var editingEntry: QuickMeasureEntry?
     /// Chooser row picked — launched from the sheet's onDismiss so the
     /// fullScreenCover doesn't fight the sheet dismissal animation.
     @State private var pendingChoice: MeasureChoice?
@@ -163,6 +166,12 @@ public struct MapHomeScreen: View {
     @State var pushed: CruiseDestination?
     @State var pendingDestination: CruiseDestination?
     @State var closePlotCandidateID: UUID?
+
+    // Map-peek destructive-delete targets (confirmed via .alert) and the
+    // cruise tree photo viewer opened from the tree-peek thumbnail.
+    @State var deletePlotCandidateID: UUID?
+    @State var deleteTreeCandidateID: UUID?
+    @State var cruisePhotoContext: CruisePhotoContext?
 
     // Planned-plot navigation + centre recording + setup.
     @State var navTargetPlannedID: UUID?
@@ -303,6 +312,11 @@ public struct MapHomeScreen: View {
             #endif
             .sheet(isPresented: $presentingChooser,
                    onDismiss: launchPendingChoice) { measureChooser }
+            // Quick-peek "Edit this tree" — the compact per-entry editor
+            // (value / species / note + confirmed delete).
+            .sheet(item: $editingEntry) { entry in
+                QuickEntryEditSheet(entry: entry, history: history)
+            }
             // Far-GPS guard — confirm before measuring a tree whose pin
             // is > 30 m from the current fix (usually a wrong-pin tap).
             .alert(farTreeWarning.map {
@@ -901,7 +915,18 @@ public struct MapHomeScreen: View {
             .padding(.bottom, 10)
 
             HStack(alignment: .top, spacing: ForestixSpace.sm) {
-                photoThumb(photos: photos)
+                // The thumbnail itself is now the photo affordance —
+                // tapping it opens the full-screen viewer (the old
+                // "View photo" button is replaced by "Edit this tree").
+                Button {
+                    openPhotoViewer(pin)
+                } label: {
+                    photoThumb(photos: photos)
+                }
+                .buttonStyle(MapPressableStyle())
+                .disabled(photos.isEmpty)
+                .accessibilityLabel("View photo")
+                .accessibilityIdentifier("mapHome.peek.photoThumb")
                 VStack(spacing: 0) {
                     let rows = peekRows(pin)
                     ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
@@ -920,9 +945,9 @@ public struct MapHomeScreen: View {
 
             HStack(spacing: ForestixSpace.xs) {
                 Button {
-                    openPhotoViewer(pin)
+                    editingEntry = primaryEntry(for: pin)
                 } label: {
-                    Text("View photo")
+                    Text("Edit this tree")
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(ForestixPalette.textPrimary)
                         .frame(maxWidth: .infinity, minHeight: 44)
@@ -933,9 +958,7 @@ public struct MapHomeScreen: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(MapPressableStyle())
-                .disabled(photos.isEmpty)
-                .opacity(photos.isEmpty ? 0.45 : 1)
-                .accessibilityIdentifier("mapHome.peek.viewPhoto")
+                .accessibilityIdentifier("mapHome.peek.edit")
 
                 Button {
                     measureAgain(pin)
@@ -1013,11 +1036,12 @@ public struct MapHomeScreen: View {
     }
 
     // One row per measurement kind — the LATEST entry of that kind.
+    // Peek display carries the value only; ±σ is deliberately NOT shown
+    // here (internal storage / CSV / FieldLog keep it).
     private struct PeekRow: Identifiable {
         let id: String
         let label: String
         let value: String
-        let sigma: String?
         let confidenceRaw: String
     }
 
@@ -1029,20 +1053,16 @@ public struct MapHomeScreen: View {
             guard let entry = pin.entries.first(where: { $0.kind == kind })
             else { return nil }
             let value: String
-            var sigma: String?
             switch kind {
             case .dbh:
                 value = MeasurementFormatter.diameter(cm: entry.value, in: system)
-                sigma = entry.sigma.map { MeasurementFormatter.diameterSigma(mm: $0, in: system) }
             case .height:
                 value = MeasurementFormatter.height(m: entry.value, in: system)
-                sigma = entry.sigma.map { MeasurementFormatter.heightSigma(m: $0, in: system) }
             case .crown:
                 value = String(format: "%.1f × %.1f m",
                                entry.value, entry.secondaryValue ?? 0)
             case .distance:
                 value = MeasurementFormatter.distance(m: entry.value, in: system)
-                sigma = entry.sigma.map { String(format: "±%.2f m", $0) }
             case .samplingPlot:
                 let area = entry.secondaryValue
                     ?? (.pi * entry.value * entry.value)
@@ -1051,7 +1071,6 @@ public struct MapHomeScreen: View {
             return PeekRow(id: kind.rawValue,
                            label: peekRowLabel(kind),
                            value: value,
-                           sigma: sigma,
                            confidenceRaw: entry.confidenceRaw)
         }
     }
@@ -1073,21 +1092,11 @@ public struct MapHomeScreen: View {
                 .tracking(0.7)
                 .foregroundStyle(ForestixPalette.textTertiary)
                 .frame(width: 52, alignment: .leading)
-            HStack(spacing: 0) {
-                Text(row.value)
-                    .font(.system(size: 14.5, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(ForestixPalette.textPrimary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                if let sigma = row.sigma {
-                    // Sigma trails the value after a single space —
-                    // the mock's inline <small>.
-                    Text(" " + sigma)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(ForestixPalette.textTertiary)
-                        .lineLimit(1)
-                }
-            }
+            Text(row.value)
+                .font(.system(size: 14.5, weight: .semibold, design: .monospaced))
+                .foregroundStyle(ForestixPalette.textPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
             Spacer(minLength: 4)
             tierChip(row.confidenceRaw)
         }
@@ -1148,6 +1157,20 @@ public struct MapHomeScreen: View {
         guard let entry = pin.entries.first(where: { $0.photoPath != nil })
         else { return }
         photoViewer = PhotoViewerContext(entry: entry, title: peekTitle(pin))
+    }
+
+    /// The pin's representative reading for "Edit this tree" — DBH first,
+    /// then height / crown / distance / plot, matching the peek row
+    /// order. Single-entry pins just return their one reading.
+    private func primaryEntry(for pin: MapPin) -> QuickMeasureEntry {
+        let order: [QuickMeasureEntry.Kind] = [.dbh, .height, .crown,
+                                               .distance, .samplingPlot]
+        for kind in order {
+            if let entry = pin.entries.first(where: { $0.kind == kind }) {
+                return entry
+            }
+        }
+        return pin.entries[0]
     }
 
     /// Peek primary button. "Measure this tree" opens the measure
@@ -1446,6 +1469,202 @@ private struct MeasurePhotoThumbnail: View {
     #else
     var body: some View { Color.clear }
     #endif
+}
+
+// MARK: - Quick entry edit sheet (map peek → "Edit this tree")
+
+/// Compact editor for one QuickMeasureEntry reached from the quick peek.
+/// Edits the measured value (native unit — cm for DBH, m otherwise), the
+/// species code and the note, then persists via QuickMeasureHistory
+/// `update`. A confirmed destructive Delete removes the entry AND its
+/// photo (through `delete`, which calls MeasurePhotoStore). The measure
+/// math is untouched — only the primary value the cruiser typed changes.
+private struct QuickEntryEditSheet: View {
+    let entry: QuickMeasureEntry
+    @ObservedObject var history: QuickMeasureHistory
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var valueText: String
+    @State private var speciesText: String
+    @State private var noteText: String
+    @State private var confirmingDelete = false
+
+    init(entry: QuickMeasureEntry, history: QuickMeasureHistory) {
+        self.entry = entry
+        _history = ObservedObject(wrappedValue: history)
+        _valueText = State(initialValue: Self.formatValue(entry.value))
+        _speciesText = State(initialValue: entry.speciesCode ?? "")
+        _noteText = State(initialValue: entry.note ?? "")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: ForestixSpace.sm) {
+            Text(headerText)
+                .font(.system(size: 13, weight: .heavy))
+                .tracking(1.0)
+                .foregroundStyle(ForestixPalette.textTertiary)
+                .padding(.top, ForestixSpace.md)
+
+            // Measured value — native unit (cm for DBH, m otherwise).
+            fieldLabel(kindTitle.uppercased())
+            HStack(spacing: ForestixSpace.xs) {
+                TextField("0.0", text: $valueText)
+                    .font(.system(size: 16, weight: .semibold, design: .monospaced))
+                    .textFieldStyle(.plain)
+                    #if os(iOS)
+                    .keyboardType(.decimalPad)
+                    #endif
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 44)
+                    .background(fieldBackground)
+                    .accessibilityIdentifier("mapHome.editSheet.value")
+                Text(entry.valueUnit)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(ForestixPalette.textSecondary)
+                    .frame(width: 32, alignment: .leading)
+            }
+
+            // Species — the short FIA code (free text; uppercased on save).
+            fieldLabel("SPECIES")
+            TextField("e.g. DF", text: $speciesText)
+                .font(.system(size: 15, weight: .semibold))
+                .textFieldStyle(.plain)
+                #if os(iOS)
+                .textInputAutocapitalization(.characters)
+                .autocorrectionDisabled(true)
+                #endif
+                .padding(.horizontal, 12)
+                .frame(minHeight: 44)
+                .background(fieldBackground)
+                .accessibilityIdentifier("mapHome.editSheet.species")
+
+            // Note.
+            fieldLabel("NOTE")
+            TextField("Optional note", text: $noteText, axis: .vertical)
+                .font(.system(size: 15))
+                .textFieldStyle(.plain)
+                .lineLimit(1...4)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .frame(minHeight: 44, alignment: .top)
+                .background(fieldBackground)
+                .accessibilityIdentifier("mapHome.editSheet.note")
+
+            Spacer(minLength: ForestixSpace.xs)
+
+            Button {
+                save()
+            } label: {
+                Text("Save changes")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(ForestixPalette.primaryInk)
+                    .frame(maxWidth: .infinity, minHeight: 54)
+                    .background(
+                        RoundedRectangle(cornerRadius: ForestixRadius.card,
+                                         style: .continuous)
+                            .fill(ForestixPalette.primary))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(MapPressableStyle())
+            .accessibilityIdentifier("mapHome.editSheet.save")
+
+            Button(role: .destructive) {
+                confirmingDelete = true
+            } label: {
+                Text("Delete")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(ForestixPalette.confidenceBad)
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .background(
+                        RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                         style: .continuous)
+                            .stroke(ForestixPalette.confidenceBad.opacity(0.5),
+                                    lineWidth: 1))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(MapPressableStyle())
+            .accessibilityIdentifier("mapHome.editSheet.delete")
+        }
+        .padding(.horizontal, ForestixSpace.md)
+        .padding(.bottom, ForestixSpace.md)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .presentationDetents([.height(430)])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(ForestixPalette.surface)
+        .alert("Delete this reading?", isPresented: $confirmingDelete) {
+            Button("Delete", role: .destructive) {
+                history.delete(id: entry.id)
+                dismiss()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes the \(kindTitle) reading and its photo. This can't be undone.")
+        }
+    }
+
+    private func save() {
+        let trimmedSpecies = speciesText
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedNote = noteText
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let newValue = Double(valueText.replacingOccurrences(of: ",", with: "."))
+            ?? entry.value
+        history.update(QuickMeasureEntry(
+            id: entry.id,
+            kind: entry.kind,
+            value: newValue,
+            secondaryValue: entry.secondaryValue,
+            sigma: entry.sigma,
+            confidenceRaw: entry.confidenceRaw,
+            method: entry.method,
+            createdAt: entry.createdAt,
+            treeNumber: entry.treeNumber,
+            plotID: entry.plotID,
+            speciesCode: trimmedSpecies.isEmpty ? nil : trimmedSpecies.uppercased(),
+            position: entry.position,
+            damageCodes: entry.damageCodes,
+            note: trimmedNote.isEmpty ? nil : trimmedNote,
+            latitude: entry.latitude,
+            longitude: entry.longitude,
+            photoPath: entry.photoPath,
+            captureMode: entry.captureMode))
+        dismiss()
+    }
+
+    private var headerText: String {
+        if let n = entry.treeNumber { return "EDIT · TREE \(n)" }
+        return "EDIT · \(kindTitle.uppercased())"
+    }
+
+    private var kindTitle: String {
+        switch entry.kind {
+        case .dbh:          return "DBH"
+        case .height:       return "Height"
+        case .crown:        return "Crown"
+        case .distance:     return "Distance"
+        case .samplingPlot: return "Plot radius"
+        }
+    }
+
+    private func fieldLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 10, weight: .bold))
+            .tracking(0.7)
+            .foregroundStyle(ForestixPalette.textTertiary)
+    }
+
+    private var fieldBackground: some View {
+        RoundedRectangle(cornerRadius: ForestixRadius.control, style: .continuous)
+            .fill(ForestixPalette.surfaceRaised)
+    }
+
+    /// Show the stored value compactly: integers with no decimals, else
+    /// up to two decimals with a lone trailing zero trimmed.
+    private static func formatValue(_ v: Double) -> String {
+        if v == v.rounded() { return String(format: "%.0f", v) }
+        return String(format: "%.2f", v)
+            .replacingOccurrences(of: "0$", with: "", options: .regularExpression)
+    }
 }
 
 // MARK: - Photo detail (mock ⑤)

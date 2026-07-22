@@ -208,10 +208,46 @@ public struct SettingsScreen: View {
                     Label("Clear research CSV", systemImage: "trash")
                 }
                 .disabled(!ResearchLog.shared.hasData)
+
+                // RAW-CAPTURE REPLAY — record the exact raw inputs each
+                // measurement consumes so estimator code can be re-run on
+                // stored field data offline. Off by default.
+                Toggle(isOn: Binding(
+                    get: { settings.rawCaptureEnabled },
+                    set: { settings.rawCaptureEnabled = $0 })
+                ) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Record raw captures")
+                        Text("Save every DBH burst + Height compute (depth buffers, intrinsics, poses, calibration) as a replayable bundle with a reproducibility self-check.")
+                            .font(ForestixType.caption)
+                            .foregroundStyle(ForestixPalette.textSecondary)
+                    }
+                }
+                .accessibilityIdentifier("settings.rawCaptureEnabled")
+                NavigationLink {
+                    RawCapturesScreen()
+                } label: {
+                    HStack {
+                        Label("Raw captures", systemImage: "shippingbox")
+                        Spacer()
+                        Text(rawCaptureSummaryText)
+                            .font(ForestixType.dataSmall)
+                            .foregroundStyle(ForestixPalette.textSecondary)
+                    }
+                }
+                .accessibilityIdentifier("settings.rawCaptures")
             }
         } header: {
             Text("Developer")
         }
+    }
+
+    /// "N · X MB" summary for the raw-captures row.
+    private var rawCaptureSummaryText: String {
+        let n = RawCaptureStore.count()
+        let bytes = RawCaptureStore.totalSizeBytes()
+        let size = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+        return "\(n) · \(size)"
     }
 
     private var modeSection: some View {

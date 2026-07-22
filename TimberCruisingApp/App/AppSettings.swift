@@ -47,6 +47,7 @@ public final class AppSettings: ObservableObject {
         public static let dbhMeasurementMethod    = "tc.dbhMeasurementMethod"
         public static let measurementSource       = "tc.measurementSource"
         public static let developerMode           = "tc.developerMode"
+        public static let rawCaptureEnabled       = "tc.rawCaptureEnabled"
         public static let appearance              = "tc.appearance"
         public static let dbhMethodSource         = "tc.dbhMethodSource"
         public static let researchTreeId          = "tc.researchTreeId"
@@ -203,6 +204,19 @@ public final class AppSettings: ObservableObject {
     public var developerMode: Bool {
         get { defaults.bool(forKey: Keys.developerMode) }
         set { defaults.set(newValue, forKey: Keys.developerMode); objectWillChange.send() }
+    }
+
+    /// RAW-CAPTURE REPLAY (developer-mode research) — when on, every DBH
+    /// burst and every Height compute serializes a bundle of the exact raw
+    /// inputs the estimator consumed (depth buffers, intrinsics, tap, axis,
+    /// poses, calibration, one reference RGB) plus a reproducibility
+    /// self-check, so the owner can re-run current/updated estimator code
+    /// on stored field data offline. Gated by BOTH this flag AND
+    /// `developerMode`; default OFF so field cruisers pay zero cost. The
+    /// Android sibling reads the same `tc.rawCaptureEnabled` key.
+    public var rawCaptureEnabled: Bool {
+        get { defaults.bool(forKey: Keys.rawCaptureEnabled) }
+        set { defaults.set(newValue, forKey: Keys.rawCaptureEnabled); objectWillChange.send() }
     }
 
     /// App appearance — "light" (default) or "dark". Both are the same

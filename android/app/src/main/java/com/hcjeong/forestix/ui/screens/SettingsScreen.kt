@@ -55,6 +55,7 @@ import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.data.ResearchLog
 import com.hcjeong.forestix.sensors.ChordAlgorithm
 import com.hcjeong.forestix.sensors.LogRule
+import com.hcjeong.forestix.sensors.RawCaptureStore
 import com.hcjeong.forestix.ui.Routes
 import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.screens.project.FormDivider
@@ -241,6 +242,45 @@ fun SettingsScreen(nav: NavController) {
                         ResearchLog.clear(context)
                         storeRefresh++
                     }
+
+                    // Raw-capture replay recorder — serialize the raw inputs
+                    // of every DBH burst / Height compute for offline
+                    // estimator iteration against field ground truth.
+                    FormDivider()
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text("Record raw captures", style = type.body, color = colors.textPrimary)
+                            Text(
+                                "Store raw depth, intrinsics, poses and calibration for each " +
+                                    "measurement so the estimator can be re-run offline. Off by default.",
+                                style = type.caption, color = colors.textSecondary,
+                            )
+                        }
+                        Switch(
+                            checked = settings.rawCaptureEnabled,
+                            onCheckedChange = { env.settings.setRawCaptureEnabled(it) },
+                        )
+                    }
+                    val rawCount = remember(storeRefresh) { RawCaptureStore.count(context) }
+                    val rawBytes = remember(storeRefresh) { RawCaptureStore.totalSizeBytes(context) }
+                    FormDivider()
+                    Row(
+                        Modifier.fillMaxWidth().clickableNoRipple { nav.navigate(Routes.RAW_CAPTURES) },
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs),
+                    ) {
+                        Icon(
+                            Icons.Filled.GridOn, contentDescription = null,
+                            tint = colors.primary, modifier = Modifier.size(18.dp))
+                        Text(
+                            "Raw captures — $rawCount · ${rawBytesLabel(rawBytes)}",
+                            style = type.body, color = colors.textPrimary,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Icon(
+                            Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null,
+                            tint = colors.textTertiary, modifier = Modifier.size(14.dp))
+                    }
                 }
             }
 
@@ -397,6 +437,13 @@ fun SettingsScreen(nav: NavController) {
             },
         )
     }
+}
+
+/// Compact byte-size label for the "Raw captures — N · X" row.
+private fun rawBytesLabel(bytes: Long): String = when {
+    bytes >= 1_048_576 -> String.format(java.util.Locale.US, "%.1f MB", bytes / 1_048_576.0)
+    bytes >= 1024 -> String.format(java.util.Locale.US, "%.0f KB", bytes / 1024.0)
+    else -> "$bytes B"
 }
 
 /// Grouped-form action row — iOS Form `Button` with a `Label`: icon + text

@@ -140,6 +140,24 @@ public final class HeightScanViewModel: ObservableObject {
 
     private var depthCancellable: AnyCancellable?
 
+    // MARK: - Raw-capture recording (developer-mode research)
+
+    /// When true (screen sets it from `developerMode && rawCaptureEnabled`),
+    /// every height `compute()` — accepted or not — serializes a raw-capture
+    /// bundle (anchor + base/top poses + angles + d_h + 5 Hz pose track).
+    public var rawCaptureEnabled: Bool = false
+    public var rawCaptureContext: RawCaptureContext = .quick
+    public var rawCaptureGPS: RawCaptureGPS?
+    @Published public private(set) var lastRecordedBundleID: String?
+
+    private var recordAnchorPose = matrix_identity_float4x4
+    private var recordAnchorHitType = "unknown"
+    private var recordAnchorTime: TimeInterval = 0
+    private var recordBasePose = matrix_identity_float4x4
+    private var recordTopPose = matrix_identity_float4x4
+    private var recordPoseSamples: [(tMs: Int, pose: simd_float4x4)] = []
+    private var lastPoseSampleTime: TimeInterval = 0
+
     // MARK: - Construction
 
     /// Shared-session client token — one per view-model instance so a
@@ -186,13 +204,30 @@ public final class HeightScanViewModel: ObservableObject {
         depthCancellable = session.$latestDepthFrame
             .compactMap { $0 }
             .sink { [weak self] frame in
-                guard let self, self.state == .walking else { return }
+                guard let self else { return }
+                self.collectPoseSampleIfNeeded(frame)
+                guard self.state == .walking else { return }
                 let pose = frame.cameraPoseWorld
                 let standing = SIMD3<Float>(pose.columns.3.x,
                                             pose.columns.3.y,
                                             pose.columns.3.z)
                 self.updateLiveHint(standingPointWorld: standing)
             }
+    }
+
+    /// Accumulate 5 Hz camera poses from anchor to compute (developer mode
+    /// only), so a future d_h derivation can be replayed from the walk track.
+    private func collectPoseSampleIfNeeded(_ frame: ARDepthFrame) {
+        guard rawCaptureEnabled, anchorPointWorld != nil else { return }
+        switch state {
+        case .walking, .aimBaseArmed, .aimTopArmed, .aimTopCaptured: break
+        default: return
+        }
+        guard recordPoseSamples.count < 600 else { return }        // ~2 min cap
+        guard frame.timestamp - lastPoseSampleTime >= 0.2 else { return }
+        lastPoseSampleTime = frame.timestamp
+        let tMs = Int((frame.timestamp - recordAnchorTime) * 1000)
+        recordPoseSamples.append((tMs: tMs, pose: frame.cameraPoseWorld))
     }
 
     /// Read the current ARKit camera translation in world space. Falls
@@ -244,6 +279,12 @@ public final class HeightScanViewModel: ObservableObject {
         initialDistanceM = horizontalDistance(from: standingPointWorld,
                                               to: anchorPointWorld)
         walkedBackMeters = 0
+        // Raw-capture arm: reset the walk-track and freeze the anchor pose /
+        // clock reference (developer mode only).
+        recordPoseSamples.removeAll(keepingCapacity: true)
+        lastPoseSampleTime = 0
+        recordAnchorPose = session.latestDepthFrame?.cameraPoseWorld ?? matrix_identity_float4x4
+        recordAnchorTime = session.latestDepthFrame?.timestamp ?? 0
         state = .anchorSet
         state = .walking
         updateLiveHint(standingPointWorld: standingPointWorld)
@@ -289,6 +330,7 @@ public final class HeightScanViewModel: ObservableObject {
         alphaBaseSampleCount = pitchBuffer.sampleCount(centeredOn: tapTime)
         standingPointWorldAtAimTop = standingPointWorld
         baseAimedWorld = aimedAtWorld
+        recordBasePose = session.latestDepthFrame?.cameraPoseWorld ?? matrix_identity_float4x4
         state = .aimTopArmed
         rebuildSceneMarkers()
     }
@@ -304,6 +346,7 @@ public final class HeightScanViewModel: ObservableObject {
         alphaTopRad = Float(median)
         alphaTopSampleCount = pitchBuffer.sampleCount(centeredOn: tapTime)
         topAimedWorld = aimedAtWorld
+        recordTopPose = session.latestDepthFrame?.cameraPoseWorld ?? matrix_identity_float4x4
         compute()
         rebuildSceneMarkers()
     }
@@ -358,11 +401,13 @@ public final class HeightScanViewModel: ObservableObject {
     /// no banner fires here. Refusing the anchor is much better than
     /// silently substituting the camera position, which would leave the
     /// trunk-to-cruiser offset baked into d_h as a systematic bias.
-    public func anchorHereNow(screenCenterHit: SIMD3<Float>? = nil) {
+    public func anchorHereNow(screenCenterHit: SIMD3<Float>? = nil,
+                              hitType: String = "unknown") {
         guard let cam = currentCameraTranslation(),
               let anchor = screenCenterHit,
               simd_distance(cam, anchor) <= Self.anchorMaxRangeM
         else { return }
+        recordAnchorHitType = hitType
         anchorHere(anchorPointWorld: anchor,
                    standingPointWorld: cam)
     }
@@ -418,6 +463,7 @@ public final class HeightScanViewModel: ObservableObject {
         guard state == .aimBaseArmed, anchorPointWorld != nil else { return }
         self.alphaBaseRad = alphaBaseRad
         standingPointWorldAtAimTop = standingPointWorld
+        recordBasePose = session.latestDepthFrame?.cameraPoseWorld ?? matrix_identity_float4x4
         state = .aimTopArmed
         rebuildSceneMarkers()
     }
@@ -428,6 +474,7 @@ public final class HeightScanViewModel: ObservableObject {
               alphaBaseRad != nil, standingPointWorldAtAimTop != nil
         else { return }
         self.alphaTopRad = alphaTopRad
+        recordTopPose = session.latestDepthFrame?.cameraPoseWorld ?? matrix_identity_float4x4
         compute()
         rebuildSceneMarkers()
     }
@@ -448,6 +495,8 @@ public final class HeightScanViewModel: ObservableObject {
         alphaTopSampleCount = 0
         alphaBaseSampleCount = 0
         anchorFailureReason = nil
+        recordPoseSamples.removeAll(keepingCapacity: true)
+        lastPoseSampleTime = 0
         state = .idle
         rebuildSceneMarkers()
     }
@@ -499,6 +548,40 @@ public final class HeightScanViewModel: ObservableObject {
         let r = HeightEstimator.estimate(input: input)
         result = r
         state = (r.confidence == .red) ? .rejected : .computed
+        recordRawHeightIfNeeded(result: r, anchor: anchor, standing: standing,
+                                alphaTop: at, alphaBase: ab)
+    }
+
+    /// Serialize the raw-capture bundle for this height compute (developer
+    /// mode only). Off the main actor — pure estimator + IO over Sendable
+    /// snapshots; only the bundle id returns to the main actor.
+    private func recordRawHeightIfNeeded(result r: HeightResult,
+                                         anchor: SIMD3<Float>,
+                                         standing: SIMD3<Float>,
+                                         alphaTop: Float,
+                                         alphaBase: Float) {
+        guard rawCaptureEnabled else { return }
+        let anchorPose = recordAnchorPose
+        let hitType = recordAnchorHitType
+        let distance = initialDistanceM
+        let basePose = recordBasePose
+        let topPose = recordTopPose
+        let dh = r.dHm
+        let samples = recordPoseSamples
+        let cal = calibration
+        let ctx = rawCaptureContext
+        let gps = rawCaptureGPS
+        Task.detached(priority: .utility) { [weak self] in
+            let id = RawCaptureRecorder.recordHeight(
+                anchorWorld: anchor, anchorHitType: hitType,
+                anchorDistanceM: distance, anchorPose: anchorPose,
+                basePitchRad: alphaBase, baseStanding: standing,
+                baseRotationPose: basePose,
+                topPitchRad: alphaTop, topPose: topPose,
+                dHM: dh, poseSamples: samples,
+                calibration: cal, context: ctx, gps: gps)
+            await MainActor.run { self?.lastRecordedBundleID = id }
+        }
     }
 
     // MARK: - Scene marker geometry

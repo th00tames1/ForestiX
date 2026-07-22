@@ -22,6 +22,7 @@ import com.hcjeong.forestix.ui.screens.DistanceMeasureScreen
 import com.hcjeong.forestix.ui.screens.ExportScreen
 import com.hcjeong.forestix.ui.screens.FieldLogScreen
 import com.hcjeong.forestix.ui.screens.MapHomeScreen
+import com.hcjeong.forestix.ui.screens.RawCapturesScreen
 import com.hcjeong.forestix.ui.screens.ReferenceLibraryScreen
 import com.hcjeong.forestix.ui.screens.SamplingPlotScreen
 import com.hcjeong.forestix.ui.screens.SettingsScreen
@@ -57,6 +58,8 @@ object Routes {
     /// calibrationSection NavigationLink { CalibrationScreen() }.
     const val CALIBRATION = "calibration"
     const val REFERENCE_LIBRARY = "referenceLibrary"
+    /// Developer-only raw-capture replay console (Settings › Developer).
+    const val RAW_CAPTURES = "rawCaptures"
 }
 
 /// Required-string route argument; screens behind these routes are only
@@ -88,6 +91,7 @@ fun ForestixRoot() {
         composable(Routes.SETTINGS) { SettingsScreen(nav) }
         composable(Routes.CALIBRATION) { CalibrationScreen(nav) }
         composable(Routes.REFERENCE_LIBRARY) { ReferenceLibraryScreen(nav) }
+        composable(Routes.RAW_CAPTURES) { RawCapturesScreen(nav) }
 
         // MARK: - Cruise mode (v3.1: a MODE of the map home, not a route —
         // only its pushed flows live in the graph)

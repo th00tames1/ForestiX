@@ -35,6 +35,8 @@ import simd
 
 #if canImport(ARKit) && os(iOS)
 import ARKit
+import CoreImage
+import ImageIO
 import os
 #endif
 
@@ -324,6 +326,25 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
         worldAnchorPosition(id: id) != nil
     }
 
+    /// Reference RGB of the current camera image as JPEG, for the
+    /// raw-capture recorder (developer mode only). Reads the live
+    /// `ARFrame.capturedImage` (YCbCr CVPixelBuffer) and encodes it via
+    /// CoreImage — no UIKit, no orientation rewrite (stored sensor-native,
+    /// matching the depth buffers). Returns nil when no frame is available
+    /// or encoding fails. Cheap enough to call once per burst.
+    public func currentCameraImageJPEG(quality: Double = 0.8) -> Data? {
+        guard let pixelBuffer = session.currentFrame?.capturedImage else { return nil }
+        let ci = CIImage(cvPixelBuffer: pixelBuffer)
+        let ctx = CIContext(options: nil)
+        let space = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        let qualityKey = CIImageRepresentationOption(
+            rawValue: kCGImageDestinationLossyCompressionQuality as String)
+        return ctx.jpegRepresentation(
+            of: ci,
+            colorSpace: space,
+            options: [qualityKey: quality])
+    }
+
     /// True if every frame observed since the last `run()` reported
     /// `.normal` tracking — used by §7.2 height measurement guard.
     public var trackingStayedNormal: Bool { trackedStateWasAlwaysNormal }
@@ -473,6 +494,7 @@ public final class ARKitSessionManager: ObservableObject {
     public func removeWorldAnchor(id: UUID) {}
     public func worldAnchorPosition(id: UUID) -> SIMD3<Float>? { nil }
     public func worldAnchorExists(id: UUID) -> Bool { false }
+    public func currentCameraImageJPEG(quality: Double = 0.8) -> Data? { nil }
     public var trackingStayedNormal: Bool { false }
     public func beginTrackingWatch() {}
     public var trackingStayedNormalSinceWatch: Bool { false }

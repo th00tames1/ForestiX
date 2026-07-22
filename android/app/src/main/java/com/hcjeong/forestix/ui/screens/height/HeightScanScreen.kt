@@ -57,6 +57,7 @@ import com.hcjeong.forestix.sensors.ConfidenceTier
 import com.hcjeong.forestix.sensors.HeightEstimator
 import com.hcjeong.forestix.sensors.HeightMethod
 import com.hcjeong.forestix.sensors.HeightResult
+import com.hcjeong.forestix.sensors.RawCaptureStore
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hcjeong.forestix.ui.PendingTreeNumber
 import com.hcjeong.forestix.ui.Routes
@@ -160,6 +161,21 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     var metaNote by remember { mutableStateOf("") }
     var showMetadata by remember { mutableStateOf(false) }
 
+    // Raw-capture recorder arm (developer mode + tc.rawCaptureEnabled) +
+    // the geometry a height bundle records: full camera poses at anchor /
+    // base / top, the anchor hit type, and the 5 Hz pose-sample trail from
+    // anchoring to compute. Populated only while armed; zero cost otherwise.
+    val rawCaptureArmed = settings.developerMode && settings.rawCaptureEnabled
+    var anchorPose by remember { mutableStateOf<FloatArray?>(null) }
+    var anchorHitType by remember { mutableStateOf("unknown") }
+    var basePose by remember { mutableStateOf<FloatArray?>(null) }
+    var topPose by remember { mutableStateOf<FloatArray?>(null) }
+    val poseSamples = remember { mutableListOf<RawCaptureStore.PoseSample>() }
+    var anchorTimeMs by remember { mutableStateOf(0L) }
+    // The most-recent compute's stored bundle id — flipped to accepted when
+    // the cruiser taps Accept (iOS markAccepted flow).
+    var lastRawCaptureId by remember { mutableStateOf<String?>(null) }
+
     var crownStep by remember { mutableStateOf(CrownStep.NONE) }
     var cL by remember { mutableStateOf<Vec3?>(null) }
     var cR by remember { mutableStateOf<Vec3?>(null) }
@@ -175,6 +191,20 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
             anchorPt?.let { a -> controller.horizontalDistanceTo(a)?.let { dhLive = it } }
             standingAtAnchor?.let { s0 -> controller.horizontalDistanceTo(s0)?.let { walkedLive = it } }
             delay(100)
+        }
+    }
+
+    // Raw-capture pose trail: sample the camera pose at 5 Hz from anchoring
+    // through compute (the walk-off + both aims) so the replay can re-derive
+    // d_h from the pose sequence and expose VIO drift. Armed-only.
+    LaunchedEffect(stage, rawCaptureArmed) {
+        if (!rawCaptureArmed) return@LaunchedEffect
+        while (stage == Stage.WALKING || stage == Stage.AIM_BASE || stage == Stage.AIM_TOP) {
+            controller.currentCameraPose()?.let {
+                poseSamples.add(RawCaptureStore.PoseSample(
+                    System.currentTimeMillis() - anchorTimeMs, it))
+            }
+            delay(200)
         }
     }
 
@@ -247,6 +277,49 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
         }
     }
 
+    // Serialize one Height compute for offline estimator replay (off the
+    // main thread). Records anchor / base / top geometry, d_h, calibration,
+    // and the 5 Hz pose trail; the store re-runs HeightEstimator.estimate
+    // from disk for the reproducibility self-check.
+    fun recordRawHeight(r: HeightResult, anchor: Vec3, aBase: Float, aTop: Float) {
+        if (!rawCaptureArmed) return
+        val aPose = anchorPose ?: return
+        val bPoseRaw = basePose ?: return
+        val tPose = topPose ?: return
+        val standing = standingLocked ?: return
+        // Pin the base camera_pose's translation column to the EXACT standing
+        // point the live estimator used, so the replay's standing == live and
+        // the self-check is exact (iOS parity).
+        val bPose = bPoseRaw.copyOf().also {
+            it[12] = standing.x; it[13] = standing.y; it[14] = standing.z
+        }
+        val cruise = CruiseCapture.target
+        val ctx = RawCaptureStore.CaptureContext(
+            mode = if (cruise != null) "cruise" else "quick",
+            projectId = cruise?.projectId?.toString(),
+            plotId = cruise?.plotId?.toString() ?: env.history.activePlotID.value?.toString(),
+            treeNumber = cruise?.treeNumber ?: pendingTree,
+            gps = com.hcjeong.forestix.positioning.LocationService.lastGlobalFix,
+        )
+        val samples = poseSamples.toList()
+        val hitType = anchorHitType
+        val dist = anchorInitialDistM ?: 0f
+        scope.launch {
+            val id = RawCaptureStore.recordHeight(
+                context = context,
+                anchorWorld = anchor, anchorHitType = hitType,
+                anchorDistanceM = dist, anchorPose = aPose,
+                basePitchDeg = (aBase * 180f / Math.PI.toFloat()), basePose = bPose,
+                topPitchDeg = (aTop * 180f / Math.PI.toFloat()), topPose = tPose,
+                dHm = r.dHm, live = r, cal = calibration,
+                poseSamples = samples,
+                unitSystem = if (settings.unitSystem == UnitSystem.METRIC) "metric" else "imperial",
+                ctx = ctx,
+            )
+            if (id != null) lastRawCaptureId = id
+        }
+    }
+
     fun captureHeight() {
         when (stage) {
             Stage.ANCHOR -> {
@@ -261,6 +334,14 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 anchorInitialDistM = d0
                 dhLive = d0
                 walkedLive = 0f
+                // Raw-capture: latch the anchor pose + hit provenance and
+                // start a fresh 5 Hz pose trail from this instant.
+                if (rawCaptureArmed) {
+                    anchorPose = controller.currentCameraPose()
+                    anchorHitType = controller.lastCenterHitInfo?.substringBefore(' ') ?: "unknown"
+                    poseSamples.clear()
+                    anchorTimeMs = System.currentTimeMillis()
+                }
                 stage = Stage.WALKING
             }
             Stage.WALKING -> { stage = Stage.AIM_BASE }
@@ -272,6 +353,7 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 // Lock the standing pose on the first aim; both angles must
                 // come from the same spot (the §7.2 formula assumes it).
                 failure = null; alphaBase = a; standingLocked = s
+                if (rawCaptureArmed) basePose = controller.currentCameraPose()
                 val dh = kotlin.math.sqrt((s.x - anchor.x) * (s.x - anchor.x) + (s.z - anchor.z) * (s.z - anchor.z))
                 baseMarker = Vec3(anchor.x, s.y + dh * kotlin.math.tan(a), anchor.z)
                 stage = Stage.AIM_TOP
@@ -283,6 +365,7 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                     failure = "AR tracking not ready — try again."; return
                 }
                 failure = null; alphaTop = aTop
+                if (rawCaptureArmed) topPose = controller.currentCameraPose()
                 val dh = kotlin.math.sqrt((standing.x - anchor.x) * (standing.x - anchor.x) + (standing.z - anchor.z) * (standing.z - anchor.z))
                 topMarker = Vec3(anchor.x, standing.y + dh * kotlin.math.tan(aTop), anchor.z)
                 val r = HeightEstimator.estimate(
@@ -292,6 +375,9 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                     vioDriftFraction = calibration.vioDriftFraction,
                 )
                 result = r
+                // Raw-capture: serialize this compute for offline replay
+                // (every compute, accepted or rejected). Off the main thread.
+                recordRawHeight(r, anchor, aBase, aTop)
                 stage = if (r.confidence == ConfidenceTier.RED) Stage.REJECTED else Stage.COMPUTED
             }
             else -> {}
@@ -305,6 +391,9 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
         dhLive = 0f; anchorInitialDistM = null; standingAtAnchor = null
         walkedLive = 0f; anchorAimOk = false
         result = null; failure = null; resetCrown()
+        // Drop the raw-capture geometry so a fresh measurement starts clean.
+        anchorPose = null; basePose = null; topPose = null
+        anchorHitType = "unknown"; poseSamples.clear()
     }
 
     // Accept the result: record the entry (photo + GPS + metadata), fold in
@@ -317,7 +406,17 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
         // the DBH leg created, then the chain returns to the cruise map —
         // no quick-history entry, no continuation sheet.
         val cruise = CruiseCapture.target
+        // Snapshot the dev "True H" field now — the developer block below
+        // clears it synchronously before the async launch runs.
+        val rawTrue = researchTrueM.toDoubleOrNull()?.takeIf { it > 0 }
         scope.launch {
+            // Flip the just-recorded raw-capture bundle to accepted (iOS
+            // markAccepted parity) + fold in the field-entered ground truth.
+            lastRawCaptureId?.let { rid ->
+                RawCaptureStore.markAccepted(context, rid)
+                if (rawTrue != null) RawCaptureStore.setTruth(context, rid, rawTrue)
+                lastRawCaptureId = null
+            }
             // Chrome-less snapshot: hide the 2D chrome, give Compose one
             // committed frame, capture, then restore.
             val photo = activity?.let {

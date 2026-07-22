@@ -94,7 +94,32 @@ class ArDepthFrame(
     /// Null when the mapping isn't available (no viewport yet) — callers
     /// fall back to centre-of-grid behaviour.
     val depthFromViewAffine: FloatArray? = null,
+    /// Raw sensor u16 depth (native millimetres, row-major) — populated
+    /// ONLY while the raw-capture recorder is armed
+    /// (ArController.captureRawDepth). The serialized replay bundles store
+    /// these bytes verbatim and re-ingest them through `ingestMmInto`, so a
+    /// replayed frame is bit-identical to what the estimator consumed live.
+    /// Null in normal operation (zero cost with recording off).
+    val rawDepthMm: ShortArray? = null,
 ) {
+    companion object {
+        /// Shared u16-mm → (metres, confidence) ingest rule — the SINGLE
+        /// definition of how a raw ARCore D_16 sample becomes the float
+        /// depth + confidence the estimators consume (1–8000 mm valid,
+        /// everything else a conf-0 hole). Used by the live capture path
+        /// (ArController.acquireDepthFrame) AND the raw-capture replay
+        /// deserializer so replayed inputs match live ones exactly.
+        fun ingestMmInto(mm: Int, idx: Int, depth: FloatArray, confidence: ByteArray) {
+            if (mm in 1..8000) {
+                depth[idx] = mm / 1000f
+                confidence[idx] = 2
+            } else {
+                depth[idx] = 0f
+                confidence[idx] = 0
+            }
+        }
+    }
+
     fun depthAt(x: Int, y: Int): Float = depth[y * width + x]
     fun confidenceAt(x: Int, y: Int): Int = confidence[y * width + x].toInt() and 0xFF
 
@@ -715,6 +740,107 @@ object DBHEstimator {
         // iOS tap-gate parity. nPoints carries the bracket span in
         // walk-axis px (iOS PreviewFit.inlierCount).
         return DbhPreview(dia, z, locked = true, nPoints = Math.round(w).toInt())
+    }
+
+    /// Single-frame ADJUST bracket fit in DEPTH-axis-fraction space — the
+    /// cross-platform-canonical manual-bracket primitive (iOS
+    /// DBHEstimator.bracketChordFit parity). The two handles are fractions
+    /// [0,1] ALONG THE GUIDE AXIS of the depth grid (row → x, col → y); their
+    /// span is the silhouette width w in walk-axis pixels and z is the median
+    /// depth inside that span at the guide line. Same pinhole chord identity
+    /// as the auto path, d = w·z/(f_axis − w/2), axis-matched focal. Returns
+    /// the RAW (un-calibrated) diameter (cm) + span, or null on the same
+    /// gates iOS uses (bracket depth 0.3–5 m, raw diameter 2.5–100 cm).
+    ///
+    /// This lives in depth-fraction space (not view-px like constrainedEstimate)
+    /// so the raw-capture manifest can store the two handles as view-independent
+    /// fractions — byte-identical to the iOS bracket schema (no view size / no
+    /// guide_y needed to replay). The live view-space ADJUST UI keeps using
+    /// constrainedEstimate; this is the recording/replay-shared entry point.
+    data class BracketFit(val diameterCm: Double, val spanPx: Int)
+
+    fun bracketChordFit(
+        frame: ArDepthFrame, guideAxis: GuideAxis, leftFraction: Double, rightFraction: Double,
+    ): BracketFit? {
+        val extent = axisExtent(frame, guideAxis)
+        if (extent < 2) return null
+        val lo = min(leftFraction, rightFraction)
+        val hi = max(leftFraction, rightFraction)
+        val a = Math.round(lo * extent).toInt().coerceIn(0, extent - 1)
+        val b = Math.round(hi * extent).toInt().coerceIn(0, extent - 1)
+        val w = b - a
+        if (w < 2) return null
+        val focal = when (guideAxis) {
+            is GuideAxis.Row -> frame.fx
+            is GuideAxis.Col -> frame.fy
+        }
+        if (focal <= 1.0) return null
+        // Bounds check the fixed guide coordinate.
+        when (guideAxis) {
+            is GuideAxis.Row -> if (guideAxis.y < 0 || guideAxis.y >= frame.height) return null
+            is GuideAxis.Col -> if (guideAxis.x < 0 || guideAxis.x >= frame.width) return null
+        }
+        val depths = ArrayList<Float>(w + 1)
+        for (idx in a..b) {
+            val (px, py) = pixelCoords(guideAxis, idx)
+            if (px < 0 || px >= frame.width || py < 0 || py >= frame.height) continue
+            if (frame.confidenceAt(px, py) < 1) continue
+            val d = frame.depthAt(px, py)
+            if (d > 0f) depths.add(d)
+        }
+        if (depths.size < 3) return null
+        depths.sort()
+        val z = depths[depths.size / 2]
+        if (z !in 0.3f..5.0f) return null
+        val halfW = w / 2.0
+        if (focal - halfW <= 1.0) return null
+        val diameterM = w * z.toDouble() / (focal - halfW)
+        val rawCm = diameterM * 100.0
+        if (rawCm !in 2.5..100.0) return null
+        return BracketFit(rawCm, w)
+    }
+
+    /// ADJUST bracket burst estimate over the stored frames — median of the
+    /// per-frame bracket fits, calibration applied, frame-to-frame agreement
+    /// grading the tier (iOS bracketChordEstimate parity: range/mean ≤ 15% ⇒
+    /// green). The recording + replay share THIS entry point (no forked
+    /// bracket math). `leftFraction`/`rightFraction` are guide-axis fractions.
+    fun bracketChordEstimate(
+        frames: List<ArDepthFrame>,
+        guideAxis: GuideAxis,
+        leftFraction: Double,
+        rightFraction: Double,
+        cal: ProjectCalibration,
+    ): DBHResult? {
+        if (frames.size < 5) return null
+        val diameters = ArrayList<Double>(frames.size)
+        var spanPxSum = 0
+        for (f in frames) {
+            val fit = bracketChordFit(f, guideAxis, leftFraction, rightFraction) ?: continue
+            diameters.add(fit.diameterCm)
+            spanPxSum += fit.spanPx
+        }
+        if (diameters.size < 3) {
+            return DBHResult(
+                diameterCm = 0f, centerX = 0f, centerZ = 0f,
+                arcCoverageDeg = 0f, rmseMm = 0f, sigmaRmm = 0f,
+                nInliers = diameters.size, confidence = ConfidenceTier.RED,
+                method = DBHMethod.LIDAR_CHORD_SILHOUETTE,
+                rejectionReason = "Not enough usable frames; hold steadier or move closer",
+            )
+        }
+        diameters.sort()
+        val medianRawCm = diameters[diameters.size / 2]
+        val mean = diameters.average()
+        val cov = if (mean > 0) (diameters.last() - diameters.first()) / mean else 1.0
+        val diaCm = cal.dbhCorrectionAlpha + cal.dbhCorrectionBeta * medianRawCm
+        return DBHResult(
+            diameterCm = diaCm.toFloat(), centerX = 0f, centerZ = 0f,
+            arcCoverageDeg = 0f, rmseMm = 0f, sigmaRmm = 0f,
+            nInliers = spanPxSum,
+            confidence = if (cov <= 0.15) ConfidenceTier.GREEN else ConfidenceTier.YELLOW,
+            method = DBHMethod.LIDAR_CHORD_SILHOUETTE, rejectionReason = null,
+        )
     }
 
     /// Committed DBH = MEDIAN of the per-frame chord diameters over the

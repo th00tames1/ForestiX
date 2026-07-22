@@ -270,7 +270,10 @@ public struct HeightScanScreen: View {
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
         }
-        .onAppear { viewModel.onAppear() }
+        .onAppear {
+            configureRawCapture()
+            viewModel.onAppear()
+        }
         .onDisappear { viewModel.onDisappear() }
         .onChange(of: viewModel.result?.heightM) { _, newValue in
             if newValue != nil, let r = viewModel.result {
@@ -299,6 +302,12 @@ public struct HeightScanScreen: View {
                         latitude: fix?.latitude,
                         longitude: fix?.longitude)
                     onAccept(r, meta)
+                    // Raw-capture (developer mode): store the clinometer/Vertex
+                    // truth on the just-recorded bundle if typed before Accept.
+                    if let id = viewModel.lastRecordedBundleID,
+                       let t = Double(researchTrueM), t > 0 {
+                        RawCaptureStore.updateTruth(id: id, value: t)
+                    }
                     recordResearchRow(r)
                 }
             }
@@ -923,7 +932,29 @@ public struct HeightScanScreen: View {
     /// trunk.") explains how to reframe.
     private func anchorTap() {
         raycaster.preferLiDARMesh = settings.measurementSource == .lidar
-        viewModel.anchorHereNow(screenCenterHit: raycaster.screenCenterHit())
+        viewModel.rawCaptureGPS = Self.currentGPS()
+        let hitType = settings.measurementSource == .lidar ? "lidarMesh" : "estimatedPlane"
+        viewModel.anchorHereNow(screenCenterHit: raycaster.screenCenterHit(),
+                                hitType: hitType)
+    }
+
+    /// Push the raw-capture recording config onto the view model (developer
+    /// mode only; the VM no-ops recording when disabled).
+    private func configureRawCapture() {
+        viewModel.rawCaptureEnabled = settings.developerMode && settings.rawCaptureEnabled
+        viewModel.rawCaptureContext = RawCaptureContext(
+            mode: cruisePlotInfo != nil ? "cruise" : "quick",
+            projectID: nil,
+            plotID: cruisePlotInfo?.plotID?.uuidString,
+            treeNumber: nil,
+            units: settings.unitSystem.rawValue)
+        viewModel.rawCaptureGPS = Self.currentGPS()
+    }
+
+    static func currentGPS() -> RawCaptureGPS? {
+        guard let fix = LocationService.lastGlobalFix else { return nil }
+        return RawCaptureGPS(lat: fix.latitude, lon: fix.longitude,
+                             accM: fix.horizontalAccuracyM)
     }
 
     /// Aim Top — crosshair on treetop. The sky has no plane, so the

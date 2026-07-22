@@ -436,6 +436,7 @@ public struct DBHScanScreen: View {
             // next return without leaving the scan screen.
             viewModel.dbhMeasurementMethod = settings.dbhMeasurementMethod
             viewModel.dbhMethodSource = settings.dbhMethodSource
+            configureRawCapture()
             viewModel.onAppear()
         }
         .onDisappear { viewModel.onDisappear() }
@@ -490,6 +491,15 @@ public struct DBHScanScreen: View {
                         captureMode: viewModel.resultCapturedManually
                             ? "manual" : "auto")
                     onAccept(r, meta)
+                    // Raw-capture (developer mode): store the tape-measured
+                    // truth on the just-recorded bundle if the cruiser typed
+                    // one before Accept. The bundle is written at burst
+                    // finalize; by the time the human taps Accept the detached
+                    // recorder has produced its id.
+                    if let id = viewModel.lastRecordedBundleID,
+                       let t = Double(researchTrueCm), t > 0 {
+                        RawCaptureStore.updateTruth(id: id, value: t)
+                    }
                     recordResearchRow(r)
                     // CRUISE QUICK-TALLY LOOP — the host saved the tree
                     // and auto-incremented its target; reset this screen
@@ -619,10 +629,32 @@ public struct DBHScanScreen: View {
     /// Capture the trunk at the depth-map centre — the crosshair the
     /// cruiser lined up on the trunk. Fired by the "+" button.
     private func captureTap() {
+        // Refresh the GPS tag right at burst start so the recorded bundle
+        // (developer mode) carries a fresh fix.
+        viewModel.rawCaptureGPS = Self.currentGPS()
         let frame = viewModel.session.latestDepthFrame
         let width  = Double(frame?.width  ?? 256)
         let height = Double(frame?.height ?? 192)
         viewModel.tap(at: SIMD2(width / 2.0, height / 2.0))
+    }
+
+    /// Push the raw-capture recording config onto the view model (developer
+    /// mode only; the VM no-ops recording when disabled).
+    private func configureRawCapture() {
+        viewModel.rawCaptureEnabled = settings.developerMode && settings.rawCaptureEnabled
+        viewModel.rawCaptureContext = RawCaptureContext(
+            mode: cruisePlotInfo != nil ? "cruise" : "quick",
+            projectID: nil,
+            plotID: cruisePlotInfo?.plotID?.uuidString,
+            treeNumber: tallyTreeNumber,
+            units: settings.unitSystem.rawValue)
+        viewModel.rawCaptureGPS = Self.currentGPS()
+    }
+
+    static func currentGPS() -> RawCaptureGPS? {
+        guard let fix = LocationService.lastGlobalFix else { return nil }
+        return RawCaptureGPS(lat: fix.latitude, lon: fix.longitude,
+                             accM: fix.horizontalAccuracyM)
     }
 
     /// AR-caliper edge tap. First tap caches the LEFT trunk-edge ray; the

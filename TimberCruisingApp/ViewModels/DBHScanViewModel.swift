@@ -122,6 +122,26 @@ public final class DBHScanViewModel: ObservableObject {
     /// silhouette / pixel-width method).
     @Published public var dbhMeasurementMethod: DBHMeasurementMethod = .chord
 
+    // MARK: - Raw-capture recording (developer-mode research)
+
+    /// When true (screen sets it from `developerMode && rawCaptureEnabled`),
+    /// every completed depth burst — accepted, rejected, or ADJUST-bracket —
+    /// serializes a raw-capture bundle. Off ⇒ zero recording cost.
+    public var rawCaptureEnabled: Bool = false
+    /// Context tags (mode / project / plot / tree / units) written into the
+    /// manifest. Set by the scan screen on appear.
+    public var rawCaptureContext: RawCaptureContext = .quick
+    /// Latest GPS fix, supplied by the screen (which owns the location read).
+    public var rawCaptureGPS: RawCaptureGPS?
+    /// Bundle id of the most recently recorded burst — the screen patches
+    /// its `accepted` flag + truth value at Accept.
+    @Published public private(set) var lastRecordedBundleID: String?
+    /// Representative depth frames (one per sub-sample) retained across the
+    /// burst for serialization. Only populated while recording is armed.
+    private var recordFrames: [ARDepthFrame] = []
+    /// Reference camera JPEG grabbed at burst start (developer mode only).
+    private var recordReferenceJPEG: Data?
+
     // MARK: - Burst state
 
     /// Hold-steady capture: the burst is now SEVERAL sub-measurements taken
@@ -289,6 +309,8 @@ public final class DBHScanViewModel: ObservableObject {
             captureGeneration &+= 1
             burstBuffer.removeAll(keepingCapacity: true)
             subSamples.removeAll(keepingCapacity: true)
+            recordFrames.removeAll(keepingCapacity: true)
+            recordReferenceJPEG = nil
             vioFeatureBuffer.removeAll(keepingCapacity: true)
             captureSampleIndex = 0
             state = (state == .vioCapturing) ? .vioAiming : .aligning
@@ -625,6 +647,10 @@ public final class DBHScanViewModel: ObservableObject {
         burstBuffer.removeAll(keepingCapacity: true)
         burstTap = tapPixel
         subSamples.removeAll(keepingCapacity: true)
+        // Raw-capture arm: start a fresh representative-frame set and grab
+        // the reference camera image at the burst's first moment.
+        recordFrames.removeAll(keepingCapacity: true)
+        recordReferenceJPEG = rawCaptureEnabled ? session.currentCameraImageJPEG() : nil
         captureSampleIndex = 1
         sampleStartTime = ProcessInfo.processInfo.systemUptime
         captureGeneration &+= 1
@@ -645,6 +671,8 @@ public final class DBHScanViewModel: ObservableObject {
     public func retake() {
         burstBuffer.removeAll()
         subSamples.removeAll(keepingCapacity: true)
+        recordFrames.removeAll(keepingCapacity: true)
+        recordReferenceJPEG = nil
         captureSampleIndex = 0
         captureGeneration &+= 1
         vioFeatureBuffer.removeAll(keepingCapacity: true)
@@ -751,6 +779,9 @@ public final class DBHScanViewModel: ObservableObject {
     private func finishSubSample() {
         let frames = burstBuffer
         burstBuffer.removeAll(keepingCapacity: true)
+        // Retain ONE representative depth frame per sub-sample (≤5 → the
+        // depth_0..4.bin bundle layout) for raw-capture replay.
+        if rawCaptureEnabled, let rep = frames.first { recordFrames.append(rep) }
         if let firstFrame = frames.first {
             let axis = DBHEstimator.pickGuideAxis(
                 frame: firstFrame,
@@ -809,6 +840,35 @@ public final class DBHScanViewModel: ObservableObject {
             state = .rejected
         }
         resultGeneration &+= 1
+        recordRawBurstIfNeeded()
+    }
+
+    /// Serialize the raw-capture bundle for the just-finished depth burst
+    /// (developer mode only). Off the main actor — the estimator + IO run in
+    /// a detached task over Sendable snapshots; only the resulting bundle id
+    /// hops back to update `lastRecordedBundleID`.
+    private func recordRawBurstIfNeeded() {
+        guard rawCaptureEnabled, !recordFrames.isEmpty else { return }
+        let framesToRecord = recordFrames
+        recordFrames.removeAll(keepingCapacity: true)
+        let tap = burstTap
+        let cal = calibration
+        let algo = dbhMeasurementMethod
+        let bracket = RawCaptureManifest.DBHBundle.Bracket(
+            enabled: burstUsedBracket, left: burstBracketLeft, right: burstBracketRight)
+        let manual = burstUsedBracket
+        let ctx = rawCaptureContext
+        let jpeg = recordReferenceJPEG
+        let gps = rawCaptureGPS
+        recordReferenceJPEG = nil
+        Task.detached(priority: .utility) { [weak self] in
+            let id = RawCaptureRecorder.recordDBH(
+                frames: framesToRecord, tapPixel: tap, calibration: cal,
+                algorithm: algo, bracket: bracket,
+                captureManual: manual, context: ctx,
+                referenceJPEG: jpeg, gps: gps)
+            await MainActor.run { self?.lastRecordedBundleID = id }
+        }
     }
 
     /// AR-caliper capture (non-LiDAR path). The screen supplies the two

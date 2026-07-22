@@ -59,6 +59,14 @@ class ArController {
     /// `preferLiDARMesh` flag. Pinned false on devices without the Depth API.
     @Volatile var preferDepth: Boolean = true
 
+    /// Raw-capture recorder arm (developer-mode only, set by the scan
+    /// screens from `developerMode && tc.rawCaptureEnabled`). While true,
+    /// acquireDepthFrame ALSO keeps a de-strided copy of the native u16-mm
+    /// depth plane on the returned frame (ArDepthFrame.rawDepthMm) so a
+    /// replay bundle can store the sensor bytes verbatim. Zero cost when
+    /// false — the copy is simply skipped, exactly the toggle-off contract.
+    @Volatile var captureRawDepth: Boolean = false
+
     fun onUpdate(session: Session, frame: Frame) {
         this.session = session
         this.frame = frame
@@ -328,13 +336,20 @@ class ArController {
             val pixelStrideShorts = (plane.pixelStride / 2).coerceAtLeast(1)
             val depth = FloatArray(w * h)
             val conf = ByteArray(w * h)
+            // Raw-capture arm: keep a compact, de-strided row-major u16-mm
+            // copy so a replay bundle stores exactly the bytes the estimator
+            // saw (honouring the reported row/pixel stride here means the
+            // .bin is a clean w*h grid, never a padded/sheared one).
+            val rawMm: ShortArray? = if (captureRawDepth) ShortArray(w * h) else null
             for (y in 0 until h) {
                 val base = y * rowStrideShorts
                 for (x in 0 until w) {
-                    val mm = shorts.get(base + x * pixelStrideShorts).toInt() and 0xFFFF
+                    val raw = shorts.get(base + x * pixelStrideShorts)
+                    val mm = raw.toInt() and 0xFFFF
                     val idx = y * w + x
-                    if (mm in 1..8000) { depth[idx] = mm / 1000f; conf[idx] = 2 }
-                    else { depth[idx] = 0f; conf[idx] = 0 }
+                    // Single shared ingest rule (replay uses the identical one).
+                    ArDepthFrame.ingestMmInto(mm, idx, depth, conf)
+                    if (rawMm != null) rawMm[idx] = raw
                 }
             }
             // Scale the full-res texture intrinsics down to the depth image
@@ -394,10 +409,92 @@ class ArController {
             return ArDepthFrame(
                 w, h, depth, conf, fx, fy, cx, cy, pose,
                 fxImg = fxImg, fyImg = fyImg, depthFromViewAffine = depthFromView,
+                rawDepthMm = rawMm,
             )
         } finally {
             image.close()
         }
+    }
+
+    /// Full 4x4 column-major camera pose (raw ARCore world frame, +Y up /
+    /// −Z forward — NOT the depth-frame's OpenCV-negated matrix). The
+    /// raw-capture recorder stores this for the height anchor/base/top +
+    /// the 5 Hz pose-sample trail. Null while not tracking.
+    fun currentCameraPose(): FloatArray? {
+        val f = frame ?: return null
+        if (f.camera.trackingState != TrackingState.TRACKING) return null
+        val m = FloatArray(16)
+        f.camera.pose.toMatrix(m, 0)
+        return m
+    }
+
+    /// One reference RGB JPEG of the current camera frame for a raw-capture
+    /// bundle (the estimator never consumes it — it's a human/field
+    /// reference). Converts ARCore's YUV_420_888 camera image to NV21 then
+    /// JPEG at `quality`. Returns false on any failure (bundle still saves,
+    /// just without an rgb_file). Best-effort + fully guarded so a recorder
+    /// hiccup can never crash the AR screen.
+    fun captureCameraJpeg(dest: java.io.File, quality: Int = 80): Boolean {
+        val f = frame ?: return false
+        return try {
+            val image = f.acquireCameraImage()
+            try {
+                if (image.format != android.graphics.ImageFormat.YUV_420_888) return false
+                val w = image.width
+                val h = image.height
+                val nv21 = yuv420ToNv21(image, w, h)
+                val yuv = android.graphics.YuvImage(nv21, android.graphics.ImageFormat.NV21, w, h, null)
+                java.io.FileOutputStream(dest).use { out ->
+                    yuv.compressToJpeg(android.graphics.Rect(0, 0, w, h), quality, out)
+                }
+                true
+            } finally {
+                image.close()
+            }
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /// Pack a YUV_420_888 Image into an NV21 byte array (Y plane, then
+    /// interleaved V/U), honouring row + pixel strides. Standard conversion
+    /// used only by the raw-capture reference JPEG.
+    private fun yuv420ToNv21(image: android.media.Image, w: Int, h: Int): ByteArray {
+        val out = ByteArray(w * h * 3 / 2)
+        val yPlane = image.planes[0]
+        val uPlane = image.planes[1]
+        val vPlane = image.planes[2]
+        val yBuf = yPlane.buffer
+        val uBuf = uPlane.buffer
+        val vBuf = vPlane.buffer
+        var pos = 0
+        val yRowStride = yPlane.rowStride
+        val yPixStride = yPlane.pixelStride
+        for (row in 0 until h) {
+            var col = row * yRowStride
+            for (x in 0 until w) {
+                out[pos++] = yBuf.get(col)
+                col += yPixStride
+            }
+        }
+        // Chroma: NV21 wants V,U interleaved at half resolution.
+        val uRowStride = uPlane.rowStride
+        val uPixStride = uPlane.pixelStride
+        val vRowStride = vPlane.rowStride
+        val vPixStride = vPlane.pixelStride
+        val cw = w / 2
+        val ch = h / 2
+        for (row in 0 until ch) {
+            var uCol = row * uRowStride
+            var vCol = row * vRowStride
+            for (x in 0 until cw) {
+                out[pos++] = vBuf.get(vCol)
+                out[pos++] = uBuf.get(uCol)
+                uCol += uPixStride
+                vCol += vPixStride
+            }
+        }
+        return out
     }
 
     /// Unproject a screen tap (pixels) to a WORLD-space ray direction. Only

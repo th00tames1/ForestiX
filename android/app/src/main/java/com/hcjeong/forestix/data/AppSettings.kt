@@ -64,6 +64,13 @@ data class SettingsSnapshot(
     /// across the scan screens and persisted so a field session survives
     /// app restarts (mirror of iOS tc.researchTreeId).
     val researchTreeId: String = "",
+    /// Raw-capture recording (developer mode only) — when ON, every DBH
+    /// capture burst and Height compute serializes a replay bundle (raw
+    /// depth u16 + intrinsics + poses + calibration) under
+    /// filesDir/raw-captures/ so the estimator can be re-run offline against
+    /// field ground truth. Default OFF; zero cost while off (mirror of iOS
+    /// tc.rawCaptureEnabled). Cross-platform schema is identical.
+    val rawCaptureEnabled: Boolean = false,
     /// App appearance — "light" (default) or "dark". Same Field
     /// High-Contrast identity in both; ForestixTheme maps this to the
     /// light or dark token set (mirror of iOS tc.appearance).
@@ -113,6 +120,7 @@ class AppSettings(private val context: Context) {
         val dbhChordAlgorithm = stringPreferencesKey("tc.dbhChordAlgorithm")
         val developerMode = booleanPreferencesKey("tc.developerMode")
         val researchTreeId = stringPreferencesKey("tc.researchTreeId")
+        val rawCaptureEnabled = booleanPreferencesKey("tc.rawCaptureEnabled")
         val appearance = stringPreferencesKey("tc.appearance")
         val cruiseProjectId = stringPreferencesKey("tc.cruiseProjectId")
         val cruisePlotId = stringPreferencesKey("tc.cruisePlotId")
@@ -154,6 +162,7 @@ class AppSettings(private val context: Context) {
             regionPickerSeen = p[Keys.regionPickerSeen] ?: false,
             developerMode = p[Keys.developerMode] ?: false,
             researchTreeId = p[Keys.researchTreeId] ?: "",
+            rawCaptureEnabled = p[Keys.rawCaptureEnabled] ?: false,
             appearance = p[Keys.appearance] ?: "light",
             cruiseProjectId = p[Keys.cruiseProjectId],
             cruisePlotId = p[Keys.cruisePlotId],
@@ -190,6 +199,11 @@ class AppSettings(private val context: Context) {
     fun setResearchTreeId(value: String) = update {
         _state.value = _state.value.copy(researchTreeId = value)
         it[Keys.researchTreeId] = value
+    }
+
+    fun setRawCaptureEnabled(value: Boolean) = update {
+        _state.value = _state.value.copy(rawCaptureEnabled = value)
+        it[Keys.rawCaptureEnabled] = value
     }
 
     fun setDeveloperMode(value: Boolean) = update {

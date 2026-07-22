@@ -35,6 +35,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -86,6 +87,7 @@ import com.hcjeong.forestix.sensors.DBHResult
 import com.hcjeong.forestix.sensors.DistanceSmoother
 import com.hcjeong.forestix.sensors.DBHMethod
 import com.hcjeong.forestix.sensors.GuideAxis
+import com.hcjeong.forestix.sensors.RawCaptureStore
 import com.hcjeong.forestix.sensors.VioMotionDbh
 import com.hcjeong.forestix.ui.MeasurePhotoStore
 import com.hcjeong.forestix.ui.PendingTreeNumber
@@ -283,6 +285,52 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
 
     // User-selected per-frame chord algorithm (silhouette = iOS-identical).
     val chordAlgorithm = ChordAlgorithm.fromRaw(settings.dbhChordAlgorithm)
+
+    // Raw-capture recorder arm (developer mode + tc.rawCaptureEnabled).
+    // While armed the shared controller keeps the native u16 depth on each
+    // acquired frame so a burst can be serialized for offline replay; reset
+    // on leave so no other screen inherits the cost.
+    val rawCaptureArmed = settings.developerMode && settings.rawCaptureEnabled
+    DisposableEffect(rawCaptureArmed) {
+        controller.captureRawDepth = rawCaptureArmed
+        onDispose { controller.captureRawDepth = false }
+    }
+    // The most-recent burst's stored bundle id — flipped to accepted when the
+    // cruiser taps Accept (iOS markAccepted flow).
+    var lastRawCaptureId by remember { mutableStateOf<String?>(null) }
+
+    // Serialize one DBH burst for offline estimator replay (off the main
+    // thread). `bracket` non-null = the ADJUST manual path. Fired at the end
+    // of every burst regardless of tier (accepted / rejected / ADJUST alike).
+    fun recordRawDbh(
+        frames: List<ArDepthFrame>,
+        tapX: Double, tapY: Double, axisRow: Boolean,
+        bracket: RawCaptureStore.BracketSpec?,
+    ) {
+        if (!rawCaptureArmed) return
+        val cruise = CruiseCapture.target
+        val ctx = RawCaptureStore.CaptureContext(
+            mode = if (cruise != null) "cruise" else "quick",
+            projectId = cruise?.projectId?.toString(),
+            plotId = cruise?.plotId?.toString() ?: env.history.activePlotID.value?.toString(),
+            treeNumber = cruise?.treeNumber ?: pendingTree,
+            gps = com.hcjeong.forestix.positioning.LocationService.lastGlobalFix,
+        )
+        scope.launch {
+            val id = RawCaptureStore.recordDbh(
+                context = context,
+                frames = frames,
+                tapX = tapX, tapY = tapY, axisRow = axisRow,
+                bracket = bracket,
+                cal = calibration,
+                algorithmRaw = settings.dbhChordAlgorithm,
+                unitSystem = if (settings.unitSystem == UnitSystem.METRIC) "metric" else "imperial",
+                ctx = ctx,
+                captureRgb = { file -> controller.captureCameraJpeg(file) },
+            )
+            if (id != null) lastRawCaptureId = id
+        }
+    }
 
     // Preview smoothing (EMA α=0.3 on the diameter + distance, iOS parity)
     // + a short lock streak so the digit + cylinder don't flicker on a
@@ -626,6 +674,10 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         scope.launch {
             val samples = ArrayList<DBHResult>()
             var firstRed: DBHResult? = null      // surface the FIRST red (matches iOS)
+            // Raw-capture: retain the first usable sub-sample's frames (+ its
+            // tap/axis) so the burst can be serialized for offline replay.
+            var recFrames: List<ArDepthFrame>? = null
+            var recTapX = 0.0; var recTapY = 0.0; var recAxisRow = false
             for (k in 1..SAMPLE_COUNT) {
                 sampleProgress = k
                 // ~0.5 s window per sub-sample (min 5 frames for the chord;
@@ -647,6 +699,10 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 // Auto-pick the across-the-trunk axis (fixes severe under-read
                 // when the sensor orientation made the strip run along the trunk).
                 val axis = DBHEstimator.pickGuideAxis(f0, tapX, tapY, calibration)
+                if (recFrames == null && rawCaptureArmed) {
+                    recFrames = frames.toList()
+                    recTapX = tapX; recTapY = tapY; recAxisRow = axis is GuideAxis.Row
+                }
                 // Chord (silhouette-width) method = median of the SAME per-frame
                 // chord the live preview shows, so preview ≈ recorded value.
                 val sub = DBHEstimator.estimateChord(frames, tapX, tapY, axis, calibration, chordAlgorithm)
@@ -656,6 +712,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 } else samples.add(sub)
             }
             sampleProgress = 0
+            recFrames?.let { recordRawDbh(it, recTapX, recTapY, recAxisRow, bracket = null) }
             val agg = DBHEstimator.aggregateSamples(samples)
             if (agg == null) {
                 // Surface the red sub-sample's reason when we have one — it
@@ -691,6 +748,10 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         scope.launch {
             val subs = ArrayList<DBHResult>()
             var firstRed: DBHResult? = null      // surface the FIRST red (matches iOS)
+            // Raw-capture: retain the first usable sub-sample's frames + the
+            // latched view-space bracket for offline replay.
+            var recFrames: List<ArDepthFrame>? = null
+            var recBracket: RawCaptureStore.BracketSpec? = null
             for (k in 1..SAMPLE_COUNT) {
                 sampleProgress = k
                 // Same ~0.5 s window per sub-sample as the auto burst.
@@ -705,6 +766,11 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 val vw = controller.viewWidthPx.toFloat()
                 val cy = controller.viewHeightPx / 2f
                 if (vw <= 1f) continue
+                if (recFrames == null && rawCaptureArmed) {
+                    recFrames = frames.toList()
+                    recBracket = RawCaptureStore.BracketSpec(
+                        lockedLeftFrac * vw, lockedRightFrac * vw, cy)
+                }
                 val diameters = ArrayList<Double>(frames.size)
                 var spanPxSum = 0
                 for (f in frames) {
@@ -743,6 +809,10 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 )
             }
             sampleProgress = 0
+            val rf = recFrames; val rb = recBracket
+            if (rf != null && rb != null) {
+                recordRawDbh(rf, tapX = 0.0, tapY = 0.0, axisRow = false, bracket = rb)
+            }
             val agg = DBHEstimator.aggregateSamples(subs)
             if (agg == null) {
                 result = firstRed
@@ -834,7 +904,17 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         // Cruise tally session (v3): captured once so the whole accept
         // rides ONE consistent routing decision.
         val cruise = CruiseCapture.target
+        // Snapshot the dev "True Ø" field now — the developer block below
+        // clears it synchronously before the async launch runs.
+        val rawTrue = researchTrueCm.toDoubleOrNull()?.takeIf { it > 0 }
         scope.launch {
+            // Flip the just-recorded raw-capture bundle to accepted (iOS
+            // markAccepted parity) + fold in the field-entered ground truth.
+            lastRawCaptureId?.let { rid ->
+                RawCaptureStore.markAccepted(context, rid)
+                if (rawTrue != null) RawCaptureStore.setTruth(context, rid, rawTrue)
+                lastRawCaptureId = null
+            }
             // Chrome-less snapshot: hide the 2D chrome, give Compose one
             // committed frame, capture, then restore.
             val photo = activity?.let {

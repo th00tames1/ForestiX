@@ -7,5 +7,10 @@
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar">true</item>
+        <!-- WHITE pre-Compose window so no grey Material default flashes
+             before the (white) LaunchSplash mounts, and the Android 12+
+             system splash sits on white to match the AFSL logo. -->
+        <item name="android:windowBackground">@android:color/white</item>
+        <item name="android:colorBackground">@android:color/white</item>
     </style>
 </resources>

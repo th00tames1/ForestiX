@@ -52,24 +52,23 @@ struct ContentView: View {
 }
 
 /// Launch placeholder shown while the environment is being built (and
-/// for the 3 s minimum above). Uses the same canvas colour as the app
-/// so there's no white flash, with the lab logo centered.
+/// for the 3 s minimum above). WHITE background with the AFSL lab logo
+/// centered — the logo is black line-art, so the splash is always white
+/// (it can't sit on the dark canvas), matching the system launch screen
+/// (LaunchBackground = white, LaunchLogo). Larger (300 pt) than before so
+/// the lab wordmark reads.
 private struct LaunchSplash: View {
     var body: some View {
         ZStack {
-            ForestixPalette.canvas.ignoresSafeArea()
+            Color.white.ignoresSafeArea()
             Image("LabLogo")
                 .resizable()
                 .scaledToFit()
-                .frame(width: 180, height: 180)
+                .frame(width: 300, height: 300)
         }
-        // Themed by the SAVED appearance setting (default light) — the
-        // same value RootView applies once the environment is up — so
-        // launch matches the appearance the cruiser last chose rather
-        // than the system trait.
-        .preferredColorScheme(
-            UserDefaults.standard.string(forKey: AppSettings.Keys.appearance) == "dark"
-                ? .dark : .light)
+        // Force light so the white splash + black logo never invert on a
+        // dark-appearance launch.
+        .preferredColorScheme(.light)
     }
 }
 

@@ -255,11 +255,9 @@ private fun BasemapSheetContent(
 
     FormSection(
         header = "OFFLINE DOWNLOAD",
-        footer = "Fetches zoom ${OfflineBasemap.defaultZoomRange.first}–" +
-            "${OfflineBasemap.defaultZoomRange.last} tiles for the area the " +
-            "map is showing — satellite base plus the overlay when one is " +
-            "set — so the map keeps working with no signal. Downloads cap " +
-            "at $MaxPlannedTiles tiles — zoom in if the area is too large.",
+        footer = "Downloads the visible area (base plus any overlay) for " +
+            "offline use. Max $MaxPlannedTiles tiles — zoom in if the area " +
+            "is too large.",
     ) {
         val launchDownload: () -> Unit = {
             startDownload(

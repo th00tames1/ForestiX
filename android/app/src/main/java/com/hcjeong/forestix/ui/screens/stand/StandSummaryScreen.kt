@@ -205,8 +205,8 @@ private fun PendingVolumeCard() {
         SummaryCard {
             Text("—", style = type.dataLarge, color = colors.textPrimary)
             Text(
-                "Volume coefficients pending — official NIFoS national table not yet " +
-                    "bundled. DBH, height, basal area and tree density are unaffected.",
+                "Volume isn't available for this region yet. Every other metric is " +
+                    "unaffected.",
                 style = type.caption, color = colors.textSecondary)
         }
     }

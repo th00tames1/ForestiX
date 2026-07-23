@@ -366,7 +366,7 @@ fun CruiseSetupSheet(
                 }
             }
             Text(
-                "Shown as hollow pins on the map — measuring is never locked",
+                "Shown as hollow pins. You can measure them any time.",
                 style = type.caption.copy(fontSize = 11.5.sp),
                 color = colors.textTertiary,
                 textAlign = TextAlign.Center,

@@ -400,8 +400,8 @@ public struct MapHomeScreen: View {
                 }
             } message: { candidates in
                 Text(candidates.count == 1
-                     ? "An in-progress plot from a recent session is still open. Resume where you left off, or discard this reminder — nothing is deleted."
-                     : "\(candidates.count) in-progress plots from recent sessions are still open. Resume one, or discard — nothing is deleted.")
+                     ? "A plot from an earlier session is still open. Resume it, or dismiss this reminder. Nothing is deleted."
+                     : "\(candidates.count) plots from earlier sessions are still open. Resume one, or dismiss this reminder. Nothing is deleted.")
             }
         }
     }
@@ -2083,7 +2083,7 @@ private struct BasemapLayersSheet: View {
         } header: {
             Text("Offline download")
         } footer: {
-            Text("Fetches zoom \(OfflineBasemap.defaultZoomRange.lowerBound)–\(OfflineBasemap.defaultZoomRange.upperBound) tiles for the area the map is showing — satellite base plus the overlay when one is set — so the map keeps working with no signal. Downloads cap at \(OfflineTileDownloader.maxPlannedTiles) tiles — zoom in if the area is too large.")
+            Text("Downloads the visible area (base plus any overlay) for offline use. Max \(OfflineTileDownloader.maxPlannedTiles) tiles — zoom in if the area is too large.")
         }
     }
 

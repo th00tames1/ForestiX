@@ -419,10 +419,8 @@ fun CalibrationScreen(nav: NavController, projectId: String? = null) {
                     Text("Use sensible defaults (skip scan)")
                 }
                 Text(
-                    "Wall + cylinder results write to this project's depth noise, LiDAR bias, " +
-                        "and DBH α/β. The defaults shortcut applies the spec §7.10 identity " +
-                        "values without scanning — useful for getting into the field on a " +
-                        "freshly installed phone.",
+                    "Applies your wall and cylinder scans to this project. No scans yet? " +
+                        "Use defaults to start measuring now and calibrate later.",
                     style = type.caption,
                     color = colors.textSecondary,
                 )

@@ -80,7 +80,7 @@ public struct PlotSummaryScreen: View {
             Button {
                 viewModel.reopen()
             } label: {
-                Label("Reopen plot", systemImage: "lock.open")
+                Text("Reopen plot")
             }
             .accessibilityIdentifier("plotSummary.reopen")
         }

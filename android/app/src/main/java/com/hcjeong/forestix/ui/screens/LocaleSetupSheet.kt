@@ -111,9 +111,7 @@ fun LocaleSetupSheet(onDismiss: () -> Unit) {
             Column(verticalArrangement = Arrangement.spacedBy(ForestixSpace.xs)) {
                 Text("Which country?", style = type.bodyBold, color = colors.textPrimary)
                 Text(
-                    "Sets the species presets and the volume standard (board-foot " +
-                        "log rules for the US, cubic metres elsewhere). You can change " +
-                        "this any time in Settings.",
+                    "Sets your units and volume standard. Change it any time in Settings.",
                     style = type.caption, color = colors.textSecondary)
             }
             Column(verticalArrangement = Arrangement.spacedBy(ForestixSpace.sm)) {
@@ -149,8 +147,8 @@ fun LocaleSetupSheet(onDismiss: () -> Unit) {
                 Text("Which forest do you cruise?", style = type.bodyBold,
                     color = colors.textPrimary)
                 Text(
-                    "Pre-loads the right species and sets the default log rule for " +
-                        "your region.",
+                    "Loads the right species list and log rule for your region. " +
+                        "Change it any time in Settings.",
                     style = type.caption, color = colors.textSecondary)
             }
             Column(verticalArrangement = Arrangement.spacedBy(ForestixSpace.sm)) {

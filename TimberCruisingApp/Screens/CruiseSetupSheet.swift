@@ -160,7 +160,7 @@ public struct CruiseSetupSheet: View {
                     .accessibilityIdentifier("cruiseSetup.generate")
                     .padding(.top, ForestixSpace.xs)
 
-                    Text("Shown as hollow pins on the map — measuring is never locked")
+                    Text("Shown as hollow pins. You can measure them any time.")
                         .font(.system(size: 11.5))
                         .foregroundStyle(ForestixPalette.textTertiary)
                         .frame(maxWidth: .infinity, alignment: .center)

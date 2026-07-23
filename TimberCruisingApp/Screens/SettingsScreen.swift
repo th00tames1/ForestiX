@@ -136,7 +136,7 @@ public struct SettingsScreen: View {
     private var countryRegionSection: some View {
         Section(
             header: Text("Country & region"),
-            footer: Text("Country sets your volume standard and units; the US adds a board-foot log rule and a timber-region species set, while other countries measure in cubic metres.")
+            footer: Text("Sets your units, species list, and volume standard. The US uses board-foot log rules; elsewhere is cubic metres.")
         ) {
             Picker("Country",
                    selection: Binding(
@@ -219,7 +219,7 @@ public struct SettingsScreen: View {
             ) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Developer / research mode")
-                    Text("Show live measurement internals (depth source, intrinsics, points, raw Ø, pitch, distance, σ) on the AR screens for the validation study.")
+                    Text("Overlay live measurement internals on the AR screens for the validation study.")
                         .font(ForestixType.caption)
                         .foregroundStyle(ForestixPalette.textSecondary)
                 }
@@ -231,7 +231,7 @@ public struct SettingsScreen: View {
                 // the accuracy study analyses. Rows are appended by the
                 // scan/distance screens whenever developer mode is on.
                 HStack {
-                    Label("Research CSV", systemImage: "tablecells")
+                    Text("Research CSV")
                     Spacer()
                     Text("\(ResearchLog.shared.rowCount()) rows")
                         .foregroundStyle(ForestixPalette.textSecondary)
@@ -259,7 +259,7 @@ public struct SettingsScreen: View {
                 ) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Record raw captures")
-                        Text("Save every DBH burst + Height compute (depth buffers, intrinsics, poses, calibration) as a replayable bundle with a reproducibility self-check.")
+                        Text("Save each scan's raw depth and pose data so measurements can be re-run offline. Off by default.")
                             .font(ForestixType.caption)
                             .foregroundStyle(ForestixPalette.textSecondary)
                     }
@@ -297,7 +297,7 @@ public struct SettingsScreen: View {
     private var dbhMethodSection: some View {
         Section(
             header: Text("DBH algorithm"),
-            footer: Text("Chord uses the trunk's projected pixel width × depth ÷ focal length — a projected-width method that stays stable on the narrow arcs a hand-held LiDAR phone actually sees. Switch to Partial-arc circle fit for irregular trunks where the silhouette under-reads the diameter.")
+            footer: Text("Chord is the stable default for hand-held scans. Switch to Partial-arc circle fit for irregular trunks the silhouette under-reads.")
         ) {
             Picker("Method",
                    selection: Binding(
@@ -315,7 +315,7 @@ public struct SettingsScreen: View {
     private var logRuleSection: some View {
         Section(
             header: Text("Log rule"),
-            footer: Text("Determines board-foot volume from DBH + height. Scribner is the USFS Western default; Doyle dominates the Eastern US; International ¼″ is the most accurate but rarely used in practice.")
+            footer: Text("Sets board-foot volume from DBH and height. Scribner (West), Doyle (East), or International ¼″ (most accurate).")
         ) {
             Picker("Log rule",
                    selection: Binding(
@@ -359,7 +359,7 @@ public struct SettingsScreen: View {
     private var basemapSection: some View {
         Section(
             header: Text("Basemap tiles"),
-            footer: Text("The map ships with a built-in satellite base layer (Esri World Imagery) — nothing to set up. A template pasted here draws as an OVERLAY on top of that imagery (contour or forest-service tiles, for example). Use an XYZ template that substitutes {z}/{x}/{y}, and confirm you've reviewed the provider's usage policy before the overlay will draw.")
+            footer: Text("Paste an XYZ template ({z}/{x}/{y}) to draw contour or forest-service tiles over the satellite base. It shows only after you confirm the provider's usage policy below.")
         ) {
             TextField("https://tile.example.com/{z}/{x}/{y}.png", text: $tileTemplate)
                 #if os(iOS)
@@ -388,7 +388,7 @@ public struct SettingsScreen: View {
     private var backupSection: some View {
         Section(
             header: Text("Backup & Restore"),
-            footer: Text("Backups include every project's Core Data, photos, and raw scans, packaged into a .tcproj file. Restore on this device or another.")
+            footer: Text("Saves every project, photo, and scan to a .tcproj file you can restore on any device.")
         ) {
             Button {
                 backup.backupAllProjects()
@@ -432,13 +432,13 @@ public struct SettingsScreen: View {
             Button {
                 backup.shareURL = ForestixLogger.currentLogURL
             } label: {
-                Label("Export analytics log", systemImage: "square.and.arrow.up")
+                Label("Export diagnostic log", systemImage: "square.and.arrow.up")
             }
             .accessibilityIdentifier("settings.exportLog")
             Button(role: .destructive) {
                 ForestixLogger.clear()
             } label: {
-                Label("Clear analytics log", systemImage: "trash")
+                Label("Clear diagnostic log", systemImage: "trash")
             }
             .accessibilityIdentifier("settings.clearLog")
         }
@@ -447,7 +447,7 @@ public struct SettingsScreen: View {
     private var dangerZoneSection: some View {
         Section(
             header: Text("Danger zone"),
-            footer: Text("Two-step confirmation. Used for onboarding a new cruiser on a shared device.")
+            footer: Text("Permanently erases every project on this device.")
         ) {
             Button(role: .destructive) {
                 isPresentingResetStep1 = true

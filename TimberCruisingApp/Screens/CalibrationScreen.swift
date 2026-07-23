@@ -106,7 +106,7 @@ public struct CalibrationScreen: View {
     private var applySection: some View {
         Section(
             header: Text("Apply"),
-            footer: Text("Wall + cylinder results write to this project's depth noise, LiDAR bias, and DBH α/β. The defaults shortcut applies the spec §7.10 identity values without scanning — useful for getting into the field on a freshly installed phone.")
+            footer: Text("Applies your wall and cylinder scans to this project. No scans yet? Use defaults to start measuring now and calibrate later.")
         ) {
             Button {
                 applyComputed()
@@ -150,7 +150,7 @@ public struct CalibrationScreen: View {
         let updated = CalibrationViewModel.sensibleDefaultsApplied(to: p)
         do {
             _ = try repo.update(updated)
-            appliedToast = "Sensible defaults applied — depth noise 5 mm, identity DBH correction. Run the wall + cylinder later for higher precision."
+            appliedToast = "Defaults applied. Run the wall and cylinder scans later for better precision."
             project = updated
         } catch {
             appliedToast = "Couldn't save: \(error.localizedDescription). Try again from Settings."

@@ -38,7 +38,7 @@ public struct LocaleSetupSheet: View {
             VStack(alignment: .leading, spacing: ForestixSpace.lg) {
                 intro(
                     title: "Where are you cruising?",
-                    detail: "Sets your volume standard and units. The United States adds a board-foot log rule; other countries measure in cubic metres. Change any time in Settings.")
+                    detail: "Sets your units and volume standard. Change it any time in Settings.")
                 VStack(spacing: ForestixSpace.sm) {
                     ForEach(Country.allCases) { country in
                         LocaleRow(
@@ -79,7 +79,7 @@ public struct LocaleSetupSheet: View {
             VStack(alignment: .leading, spacing: ForestixSpace.lg) {
                 intro(
                     title: "Pick your region",
-                    detail: "Pre-loads the right FIA species and sets the default log rule (Scribner in the West, Doyle in the East). You can change this any time in Settings.")
+                    detail: "Loads the right species list and log rule for your region. Change it any time in Settings.")
                 VStack(spacing: ForestixSpace.sm) {
                     ForEach(country.regions) { region in
                         LocaleRow(

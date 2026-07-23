@@ -238,7 +238,7 @@ private fun CapacityBanner() {
             horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs),
         ) {
             Icon(Icons.Filled.Warning, contentDescription = null, tint = colors.confidenceWarn, modifier = Modifier.size(16.dp))
-            Text("Log nearing capacity — export soon to archive older readings.", style = type.caption, color = colors.textSecondary)
+            Text("Log nearly full. Export soon to free space.", style = type.caption, color = colors.textSecondary)
         }
     }
 }

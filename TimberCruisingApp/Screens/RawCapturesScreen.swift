@@ -123,9 +123,6 @@ public struct RawCapturesScreen: View {
     private func row(_ sum: RawCaptureSummary) -> some View {
         let m = sum.manifest
         HStack(spacing: ForestixSpace.sm) {
-            Image(systemName: m.kind == "height" ? "arrow.up.to.line" : "ruler")
-                .foregroundStyle(ForestixPalette.primary)
-                .frame(width: 22)
             VStack(alignment: .leading, spacing: 2) {
                 Text(titleLine(m))
                     .font(ForestixType.bodyBold)

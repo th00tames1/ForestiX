@@ -58,7 +58,6 @@ import androidx.compose.material.icons.filled.Adjust
 import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.GridOn
-import androidx.compose.material.icons.filled.Height
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -1399,23 +1398,10 @@ private fun PlotPeekCard(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Icon(
-                Icons.Filled.Height,
-                contentDescription = null,
-                tint = colors.textTertiary,
-                modifier = Modifier.size(16.dp),
-            )
             Text(
                 "Heights · $heightsCount measured",
                 style = type.bodyBold.copy(fontSize = 13.sp, fontWeight = FontWeight.SemiBold),
                 color = colors.textPrimary,
-            )
-            Spacer(Modifier.weight(1f))
-            Icon(
-                Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                contentDescription = null,
-                tint = colors.textTertiary,
-                modifier = Modifier.size(14.dp),
             )
         }
         HorizontalDivider(color = colors.divider, thickness = 0.5.dp)

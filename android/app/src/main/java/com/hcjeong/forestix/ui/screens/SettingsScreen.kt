@@ -23,7 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Dangerous
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.GridOn
+import androidx.compose.material.icons.filled.Inventory2
 import androidx.compose.material.icons.filled.IosShare
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -124,10 +124,8 @@ fun SettingsScreen(nav: NavController) {
             // MARK: - Country & region (internationalization framework)
             FormSection(
                 header = "Country & region",
-                footer = "Country sets your units, the species presets and the volume " +
-                    "standard — imperial + board-foot log rules for the US, metric + " +
-                    "cubic metres elsewhere. Region further tunes the US species set and " +
-                    "its default log rule. You can still override units below.",
+                footer = "Sets your units, species list, and volume standard. The US " +
+                    "uses board-foot log rules; elsewhere is cubic metres.",
             ) {
                 MenuPickerRow(
                     title = "Country",
@@ -211,9 +209,8 @@ fun SettingsScreen(nav: NavController) {
             if (settings.country.usesLogRule) {
                 FormSection(
                     header = "Log rule",
-                    footer = "Determines board-foot volume from DBH + height. Scribner is " +
-                        "the USFS Western default; Doyle dominates the Eastern US; " +
-                        "International ¼″ is the most accurate but rarely used in practice.",
+                    footer = "Sets board-foot volume from DBH and height. Scribner (West), " +
+                        "Doyle (East), or International ¼″ (most accurate).",
                 ) {
                     MenuPickerRow(
                         title = "Log rule",
@@ -229,7 +226,7 @@ fun SettingsScreen(nav: NavController) {
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text("Developer / research mode", style = type.body, color = colors.textPrimary)
                         Text(
-                            "Show live measurement internals (depth source, intrinsics, points, raw Ø, pitch, distance, σ) on the AR screens for the validation study.",
+                            "Overlay live measurement internals on the AR screens for the validation study.",
                             style = type.caption, color = colors.textSecondary,
                         )
                     }
@@ -256,9 +253,6 @@ fun SettingsScreen(nav: NavController) {
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs),
                     ) {
-                        Icon(
-                            Icons.Filled.GridOn, contentDescription = null,
-                            tint = colors.primary, modifier = Modifier.size(18.dp))
                         Text("Research CSV", style = type.body, color = colors.textPrimary,
                             modifier = Modifier.weight(1f))
                         Text("$rowCount rows", style = type.body, color = colors.textSecondary)
@@ -290,7 +284,7 @@ fun SettingsScreen(nav: NavController) {
                     }
                     FormDivider()
                     SettingsActionRow(
-                        title = "Export event log",
+                        title = "Export diagnostic log",
                         icon = Icons.Filled.IosShare,
                         enabled = hasEvents,
                     ) {
@@ -300,7 +294,7 @@ fun SettingsScreen(nav: NavController) {
                     }
                     FormDivider()
                     SettingsActionRow(
-                        title = "Clear event log",
+                        title = "Clear diagnostic log",
                         icon = Icons.Filled.Delete,
                         enabled = hasEvents,
                         destructive = true,
@@ -336,7 +330,7 @@ fun SettingsScreen(nav: NavController) {
                         horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs),
                     ) {
                         Icon(
-                            Icons.Filled.GridOn, contentDescription = null,
+                            Icons.Filled.Inventory2, contentDescription = null,
                             tint = colors.primary, modifier = Modifier.size(18.dp))
                         Text(
                             "Raw captures — $rawCount · ${rawBytesLabel(rawBytes)}",
@@ -398,12 +392,9 @@ fun SettingsScreen(nav: NavController) {
             // MARK: - Basemap tiles
             FormSection(
                 header = "Basemap tiles",
-                footer = "The map ships with a built-in satellite base layer (Esri World " +
-                    "Imagery) — nothing to set up. A template pasted here draws as an " +
-                    "OVERLAY on top of that imagery (contour or forest-service tiles, " +
-                    "for example). Use an XYZ template that substitutes {z}/{x}/{y}, " +
-                    "and confirm you've reviewed the provider's usage policy before " +
-                    "the overlay will draw.",
+                footer = "Paste an XYZ template ({z}/{x}/{y}) to draw contour or " +
+                    "forest-service tiles over the satellite base. It shows only after " +
+                    "you confirm the provider's usage policy below.",
             ) {
                 var tileTemplate by remember { mutableStateOf(settings.tileURLTemplate ?: "") }
                 var providerLabel by remember { mutableStateOf(settings.tileProviderLabel ?: "") }
@@ -442,7 +433,7 @@ fun SettingsScreen(nav: NavController) {
             // MARK: - Danger zone (iOS dangerZoneSection)
             FormSection(
                 header = "Danger zone",
-                footer = "Two-step confirmation. Used for onboarding a new cruiser on a shared device.",
+                footer = "Permanently erases every project on this device.",
             ) {
                 Row(
                     Modifier.fillMaxWidth().clickableNoRipple { resetStep1 = true },

@@ -66,7 +66,9 @@ fun PlotSummaryCard(
 ) {
     val colors = Forestix.colors
     val type = Forestix.type
-    val stats = remember(plot, entries, logRule) { computeStats(plot, entries, logRule) }
+    val stats = remember(plot, entries, logRule, unitSystem) {
+        computeStats(plot, entries, logRule, unitSystem)
+    }
     val densityFactor = areaUnit.perAcreDensityFactor
 
     Column(
@@ -254,6 +256,7 @@ private fun computeStats(
     plot: QuickMeasurePlot,
     entries: List<QuickMeasureEntry>,
     logRule: LogRule,
+    unitSystem: UnitSystem,
 ): Stats? {
     if (entries.isEmpty()) return null
 
@@ -271,16 +274,24 @@ private fun computeStats(
     val dbhTrees = trees.mapNotNull { it.dbhCm }
     if (dbhTrees.isEmpty()) return null
 
-    // BA per tree (m² → ft²/ac via dbh in inches). The standard
-    // ft²-per-tree formula on each tree. With no plot-acres tied to
-    // these readings yet, "per acre" means "per tree-bin" — useful
-    // as a relative readout, refined in Phase 4 with real acreage.
-    val baFt2 = dbhTrees.map { cm ->
-        val inches = cm / 2.54
-        0.005454 * inches * inches
+    // BA per tree, in the cruiser's unit: ft² (imperial, the classic
+    // 0.005454·dbh_in² rule) or m² (metric, π/4·dbh_m²). Previously always
+    // ft², so a metric cruiser saw ft² under a "BASAL/HA" label — the /ha
+    // denominator was localized but the numerator was not. With no plot-acres
+    // tied to these readings yet, "per acre" means "per tree-bin" — a relative
+    // readout, refined in Phase 4 with real acreage.
+    val metric = unitSystem == UnitSystem.METRIC
+    val baPerTree = dbhTrees.map { cm ->
+        if (metric) {
+            val m = cm / 100.0
+            (Math.PI / 4.0) * m * m
+        } else {
+            val inches = cm / 2.54
+            0.005454 * inches * inches
+        }
     }
     val acres = max(plot.acres ?: 0.1, 0.05)   // sane fallback
-    val baPerAcre = baFt2.sum() / acres
+    val baPerAcre = baPerTree.sum() / acres
     val tpa = dbhTrees.size.toDouble() / acres
     // QMD in cm (display layer converts to inches if needed).
     val qmdSqCm = dbhTrees.sumOf { it * it } / dbhTrees.size.toDouble()

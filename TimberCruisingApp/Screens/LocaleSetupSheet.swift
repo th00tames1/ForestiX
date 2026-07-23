@@ -110,6 +110,10 @@ public struct LocaleSetupSheet: View {
 
     private func choose(_ country: Country) {
         settings.country = country
+        // Selecting a country drives the unit system (US → imperial, metric
+        // countries → metric). The manual Units toggle in Settings can still
+        // override this afterwards.
+        settings.unitSystem = country.defaultUnitSystem
         if country.hasRegions {
             path.append(country)          // → region step
         } else {

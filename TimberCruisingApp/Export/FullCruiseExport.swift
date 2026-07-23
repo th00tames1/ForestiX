@@ -49,6 +49,7 @@ public enum FullCruiseExporter {
         bundle: ExportBundle,
         into baseFolder: URL,
         fileManager: FileManager = .default,
+        localization: PDFLocalization = .imperial,
         progress: ((Int, Int, String) -> Void)? = nil
     ) throws -> FullCruiseExportResult {
 
@@ -84,7 +85,8 @@ public enum FullCruiseExporter {
 
         for (i, step) in steps.enumerated() {
             progress?(i, total, step.0)
-            if let art = try writeOne(step.1, into: folder, bundle: bundle) {
+            if let art = try writeOne(step.1, into: folder, bundle: bundle,
+                                      localization: localization) {
                 artefacts.append(art)
             }
         }
@@ -97,7 +99,8 @@ public enum FullCruiseExporter {
     private static func writeOne(
         _ kind: ExportArtefact.Kind,
         into folder: URL,
-        bundle: ExportBundle
+        bundle: ExportBundle,
+        localization: PDFLocalization = .imperial
     ) throws -> ExportArtefact? {
         switch kind {
         case .csvTrees:
@@ -177,7 +180,8 @@ public enum FullCruiseExporter {
                 tpaStand: bundle.tpaStand,
                 baStand: bundle.baStand,
                 volStand: bundle.volStand,
-                generatedAt: bundle.generatedAt)
+                generatedAt: bundle.generatedAt,
+                localization: localization)
             let url = folder.appendingPathComponent("report.pdf")
             try PDFReportBuilder.write(inputs, to: url)
             return ExportArtefact(

@@ -33,14 +33,68 @@
 //   Appendix — Tree-level raw table, paginated.
 //
 // ## Unit handling
-// Respects Project.units: metric (cm, m, m³/ac) or imperial (in, ft,
-// ft³/ac). Conversions are done once at render time.
+// Diameters and heights are reported in the engine's stored metric base
+// (cm, m). Per-area densities (TPA, basal area, volume) honour the caller's
+// `PDFLocalization`: the US renders per acre, metric countries per hectare
+// with the per-acre values scaled by the hectare density factor. Species
+// codes are resolved to common names through the same localisation. Absent a
+// localisation, the report falls back to the historical US per-acre output.
 
 import Foundation
 import CoreGraphics
 import CoreText
 import Models
 import InventoryEngine
+
+/// Display localisation for the report, computed by the UI layer and handed
+/// down. `AreaUnit`, `Country` and `RegionalSpecies` live in the UI module,
+/// which sits ABOVE Export in the dependency graph, so this value type carries
+/// the already-resolved density factor, area labels and species-name lookup
+/// rather than importing those types here. The default reproduces the
+/// historical US per-acre / imperial output byte for byte, keeping existing
+/// callers and tests unchanged.
+public struct PDFLocalization: Sendable {
+    /// Multiply a canonical per-ACRE density by this to express it per the
+    /// display area unit (1.0 for acres, 2.4710538147 for hectares).
+    public let densityFactor: Double
+    /// Density-label suffix: "/ac" or "/ha".
+    public let areaSuffix: String
+    /// Bare area-unit abbreviation: "ac" or "ha".
+    public let areaAbbr: String
+    /// Singular area-unit word for prose labels: "acre" or "hectare".
+    public let areaWord: String
+    /// Code → resolved common name; codes absent here fall back to the code.
+    public let speciesNames: [String: String]
+
+    public init(densityFactor: Double = 1.0,
+                areaSuffix: String = "/ac",
+                areaAbbr: String = "ac",
+                areaWord: String = "acre",
+                speciesNames: [String: String] = [:]) {
+        self.densityFactor = densityFactor
+        self.areaSuffix = areaSuffix
+        self.areaAbbr = areaAbbr
+        self.areaWord = areaWord
+        self.speciesNames = speciesNames
+    }
+
+    /// Historical US default — per acre, imperial, species codes unresolved.
+    public static let imperial = PDFLocalization()
+
+    /// TRUE when densities are expressed per hectare (metric display basis).
+    public var isMetric: Bool { areaAbbr == "ha" }
+
+    /// Resolved common name for a species code, or the raw code when unknown.
+    public func speciesName(_ code: String) -> String {
+        speciesNames[code] ?? code
+    }
+
+    /// Express a stored area in acres on the display basis (acres → hectares
+    /// divides by the density factor; acres pass through unchanged).
+    public func area(fromAcres acres: Double) -> Double {
+        acres / densityFactor
+    }
+}
 
 public struct PDFReportInputs {
     public let project: Project
@@ -54,6 +108,9 @@ public struct PDFReportInputs {
     public let baStand: StandStat
     public let volStand: StandStat
     public let generatedAt: Date
+    /// Area/species display localisation. Defaults to `.imperial` so existing
+    /// callers and tests keep the historical per-acre / imperial output.
+    public let localization: PDFLocalization
 
     public init(
         project: Project, design: CruiseDesign,
@@ -61,7 +118,8 @@ public struct PDFReportInputs {
         plots: [Plot], trees: [Tree],
         plotStatsByPlot: [UUID: PlotStats],
         tpaStand: StandStat, baStand: StandStat, volStand: StandStat,
-        generatedAt: Date
+        generatedAt: Date,
+        localization: PDFLocalization = .imperial
     ) {
         self.project = project; self.design = design
         self.strata = strata; self.species = species
@@ -69,6 +127,7 @@ public struct PDFReportInputs {
         self.plotStatsByPlot = plotStatsByPlot
         self.tpaStand = tpaStand; self.baStand = baStand; self.volStand = volStand
         self.generatedAt = generatedAt
+        self.localization = localization
     }
 }
 
@@ -187,8 +246,10 @@ public enum PDFReportBuilder {
         kv("Generated",         df.string(from: inputs.generatedAt))
         kv("# plots (closed)",  "\(inputs.plots.filter { $0.closedAt != nil }.count)")
         kv("# plots (total)",   "\(inputs.plots.count)")
+        let loc = inputs.localization
         let totalAreaAc = inputs.strata.reduce(0) { $0 + $1.areaAcres }
-        kv("Total area",        "\(String(format: "%.2f", totalAreaAc)) ac")
+        kv("Total area",
+           "\(String(format: "%.2f", loc.area(fromAcres: Double(totalAreaAc)))) \(loc.areaAbbr)")
         kv("# strata",          "\(inputs.strata.count)")
         kv("# species",         "\(inputs.species.count)")
         kv("# volume equations","\(Set(inputs.species.map { $0.volumeEquationId }).count)")
@@ -206,7 +267,7 @@ public enum PDFReportBuilder {
         } else {
             for (code, ba) in top3 {
                 let name = inputs.species.first(where: { $0.code == code })?.commonName ?? code
-                drawBody("\(code) — \(name): \(String(format: "%.3f", ba)) m²/ac",
+                drawBody("\(code) — \(name): \(String(format: "%.3f", Double(ba) * loc.densityFactor)) m²\(loc.areaSuffix)",
                          at: CGPoint(x: frame.minX + 12, y: y),
                          width: frame.width, in: ctx)
                 y -= 18
@@ -227,10 +288,14 @@ public enum PDFReportBuilder {
         drawHeading("Stratified statistics (§7.5)",
                     at: CGPoint(x: frame.minX, y: y), width: frame.width, in: ctx)
         y -= 22
+        let loc = inputs.localization
         let metricRows: [(String, StandStat, String)] = [
-            ("Trees per acre", inputs.tpaStand, "trees/ac"),
-            ("Basal area",     inputs.baStand,  "m²/ac"),
-            ("Gross volume",   inputs.volStand, "m³/ac")
+            ("Trees per \(loc.areaWord)",
+             inputs.tpaStand.scaledPerArea(by: loc.densityFactor), "trees\(loc.areaSuffix)"),
+            ("Basal area",
+             inputs.baStand.scaledPerArea(by: loc.densityFactor),  "m²\(loc.areaSuffix)"),
+            ("Gross volume",
+             inputs.volStand.scaledPerArea(by: loc.densityFactor), "m³\(loc.areaSuffix)")
         ]
         drawTableRow(cells: ["Metric", "Unit", "Mean", "Std error",
                               "95% conf ±", "Eff. plots", "n"],
@@ -253,10 +318,10 @@ public enum PDFReportBuilder {
 
         // Basal area by stratum bar chart (manual CG drawing).
         y -= 30
-        drawHeading("Basal area by stratum (m²/ac)",
+        drawHeading("Basal area by stratum (m²\(loc.areaSuffix))",
                     at: CGPoint(x: frame.minX, y: y), width: frame.width, in: ctx)
         y -= 18
-        let strataBars = inputs.baStand.byStratum
+        let strataBars = inputs.baStand.scaledPerArea(by: loc.densityFactor).byStratum
             .sorted { $0.key < $1.key }
             .map { ($0.key, $0.value.mean) }
         let chartRect = CGRect(x: frame.minX, y: y - 140,
@@ -272,8 +337,8 @@ public enum PDFReportBuilder {
         y -= 18
         let byCode = Self.speciesBAAcrossStand(plotStats: inputs.plotStatsByPlot)
         let top8 = byCode.sorted { $0.value > $1.value }.prefix(8)
-        let spLabels: [String] = top8.map { "\($0.key)" }
-        let spValues: [Double] = top8.map { Double($0.value) }
+        let spLabels: [String] = top8.map { loc.speciesName($0.key) }
+        let spValues: [Double] = top8.map { Double($0.value) * loc.densityFactor }
         let spRect = CGRect(x: frame.minX, y: y - 120,
                             width: frame.width, height: 110)
         drawBarChart(values: spValues, labels: spLabels, rect: spRect, in: ctx)
@@ -298,7 +363,8 @@ public enum PDFReportBuilder {
         kv("Position tier", String(describing: plot.positionTier))
         kv("Source",        String(describing: plot.positionSource))
         kv("GPS samples",   "\(plot.gpsNSamples) (H_acc med \(String(format: "%.2f", plot.gpsMedianHAccuracyM)) m)")
-        kv("Plot area",     String(format: "%.3f ac", plot.plotAreaAcres))
+        let loc = inputs.localization
+        kv("Plot area",     "\(String(format: "%.3f", loc.area(fromAcres: Double(plot.plotAreaAcres)))) \(loc.areaAbbr)")
         kv("Slope/Aspect",  "\(String(format: "%.1f", plot.slopeDeg))° / \(String(format: "%.0f", plot.aspectDeg))°")
         kv("Started",       df.string(from: plot.startedAt))
         kv("Closed",        plot.closedAt.map(df.string(from:)) ?? "—")
@@ -309,11 +375,15 @@ public enum PDFReportBuilder {
                     width: frame.width, in: ctx); y -= 18
         if let s = inputs.plotStatsByPlot[plot.id] {
             kv("Live trees",          "\(s.liveTreeCount)")
-            kv("Trees per acre",      String(format: "%.2f trees/ac", s.tpa))
-            kv("Basal area",          String(format: "%.4f m²/ac", s.baPerAcreM2))
+            kv("Trees per \(loc.areaWord)",
+               "\(String(format: "%.2f", Double(s.tpa) * loc.densityFactor)) trees\(loc.areaSuffix)")
+            kv("Basal area",
+               "\(String(format: "%.4f", Double(s.baPerAcreM2) * loc.densityFactor)) m²\(loc.areaSuffix)")
             kv("Quadratic mean DBH",  String(format: "%.2f cm", s.qmdCm))
-            kv("Gross volume",        String(format: "%.4f m³/ac", s.grossVolumePerAcreM3))
-            kv("Merchantable volume", String(format: "%.4f m³/ac", s.merchVolumePerAcreM3))
+            kv("Gross volume",
+               "\(String(format: "%.4f", Double(s.grossVolumePerAcreM3) * loc.densityFactor)) m³\(loc.areaSuffix)")
+            kv("Merchantable volume",
+               "\(String(format: "%.4f", Double(s.merchVolumePerAcreM3) * loc.densityFactor)) m³\(loc.areaSuffix)")
         } else {
             drawBody("(no stats available)",
                      at: CGPoint(x: frame.minX, y: y),
@@ -325,8 +395,8 @@ public enum PDFReportBuilder {
         drawHeading("Per-species breakdown",
                     at: CGPoint(x: frame.minX, y: y),
                     width: frame.width, in: ctx); y -= 18
-        drawTableRow(cells: ["Species", "n", "Trees/ac",
-                              "Basal m²/ac", "Volume m³/ac"],
+        drawTableRow(cells: ["Species", "n", "Trees\(loc.areaSuffix)",
+                              "Basal m²\(loc.areaSuffix)", "Volume m³\(loc.areaSuffix)"],
                      bold: true, at: CGPoint(x: frame.minX, y: y),
                      colWidths: [80, 50, 90, 110, 110], in: ctx); y -= 16
         if let s = inputs.plotStatsByPlot[plot.id] {
@@ -334,10 +404,10 @@ public enum PDFReportBuilder {
             for code in sortedCodes {
                 guard let ss = s.bySpecies[code] else { continue }
                 drawTableRow(cells: [
-                    code, "\(ss.count)",
-                    String(format: "%.2f", ss.tpa),
-                    String(format: "%.4f", ss.baPerAcreM2),
-                    String(format: "%.4f", ss.grossVolumePerAcreM3)
+                    loc.speciesName(code), "\(ss.count)",
+                    String(format: "%.2f", Double(ss.tpa) * loc.densityFactor),
+                    String(format: "%.4f", Double(ss.baPerAcreM2) * loc.densityFactor),
+                    String(format: "%.4f", Double(ss.grossVolumePerAcreM3) * loc.densityFactor)
                 ], bold: false, at: CGPoint(x: frame.minX, y: y),
                    colWidths: [80, 50, 90, 110, 110], in: ctx); y -= 16
             }
@@ -355,8 +425,13 @@ public enum PDFReportBuilder {
             drawKeyValue(k, v, at: CGPoint(x: frame.minX, y: y),
                          width: frame.width, in: ctx); y -= 18
         }
+        let loc = inputs.localization
         kv("Plot type",         String(describing: inputs.design.plotType))
-        kv("Plot area",         inputs.design.plotAreaAcres.map { "\($0) ac" } ?? "—")
+        kv("Plot area",         inputs.design.plotAreaAcres.map {
+            loc.isMetric
+                ? "\(String(format: "%.3f", loc.area(fromAcres: Double($0)))) \(loc.areaAbbr)"
+                : "\($0) ac"
+        } ?? "—")
         kv("Basal area factor", inputs.design.baf.map { "\($0)" } ?? "—")
         kv("Sampling scheme",   String(describing: inputs.design.samplingScheme))
         kv("Grid spacing",      inputs.design.gridSpacingMeters.map { "\($0) m" } ?? "—")
@@ -405,9 +480,11 @@ public enum PDFReportBuilder {
                   at: CGPoint(x: frame.minX, y: frame.maxY - 50),
                   width: frame.width, in: ctx)
         var y = frame.maxY - 90
-        let headers = ["Plot", "#", "Sp", "DBH cm", "H m",
+        let headers = ["Plot", "#", "Species", "DBH cm", "H m",
                        "Status", "Conf", "Flag"]
-        let widths: [CGFloat] = [55, 35, 35, 55, 55, 55, 45, 60]
+        // "Species" is wider than the old "Sp" code column so resolved common
+        // names have room; the surplus comes out of the page's right margin.
+        let widths: [CGFloat] = [46, 30, 95, 50, 45, 55, 40, 55]
         drawTableRow(cells: headers, bold: true,
                      at: CGPoint(x: frame.minX, y: y),
                      colWidths: widths, in: ctx); y -= 16
@@ -423,7 +500,7 @@ public enum PDFReportBuilder {
                 t.dbhIsIrregular ? "irr" : nil
             ].compactMap { $0 }
             drawTableRow(cells: [
-                pno, "\(t.treeNumber)", t.speciesCode,
+                pno, "\(t.treeNumber)", inputs.localization.speciesName(t.speciesCode),
                 String(format: "%.1f", t.dbhCm),
                 t.heightM.map { String(format: "%.1f", $0) } ?? "—",
                 String(describing: t.status),

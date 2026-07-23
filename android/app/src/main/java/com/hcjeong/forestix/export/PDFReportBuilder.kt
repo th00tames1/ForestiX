@@ -35,6 +35,8 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.pdf.PdfDocument
+import com.hcjeong.forestix.common.AreaUnit
+import com.hcjeong.forestix.common.RegionalSpecies
 import com.hcjeong.forestix.data.cruise.CruiseDesign
 import com.hcjeong.forestix.data.cruise.HeightSubsampleRule
 import com.hcjeong.forestix.data.cruise.Plot
@@ -42,6 +44,7 @@ import com.hcjeong.forestix.data.cruise.Project
 import com.hcjeong.forestix.data.cruise.SpeciesConfig
 import com.hcjeong.forestix.data.cruise.Stratum
 import com.hcjeong.forestix.data.cruise.Tree
+import com.hcjeong.forestix.data.cruise.UnitSystem
 import com.hcjeong.forestix.inventory.PlotStats
 import com.hcjeong.forestix.inventory.StandStat
 import java.io.ByteArrayOutputStream
@@ -157,6 +160,7 @@ object PDFReportBuilder {
             drawKeyValue(canvas, k, v, frame.left, y, frame.width())
             y += 22f
         }
+        val areaUnit = areaUnitFor(inputs.project)
         val df = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)  // local time zone
         kv("Owner",             inputs.project.owner)
         kv("Units",             inputs.project.units.raw)
@@ -164,7 +168,7 @@ object PDFReportBuilder {
         kv("# plots (closed)",  "${inputs.plots.count { it.closedAt != null }}")
         kv("# plots (total)",   "${inputs.plots.size}")
         val totalAreaAc = inputs.strata.fold(0f) { acc, s -> acc + s.areaAcres }
-        kv("Total area",        "${String.format(Locale.US, "%.2f", totalAreaAc)} ac")
+        kv("Total area",        "${String.format(Locale.US, "%.2f", areaUnit.fromAcres(totalAreaAc.toDouble()))} ${areaUnit.abbreviation}")
         kv("# strata",          "${inputs.strata.size}")
         kv("# species",         "${inputs.species.size}")
         kv("# volume equations", "${inputs.species.map { it.volumeEquationId }.toSet().size}")
@@ -181,7 +185,7 @@ object PDFReportBuilder {
             for ((code, ba) in top3) {
                 val name = inputs.species.firstOrNull { it.code == code }?.commonName ?: code
                 drawBody(canvas,
-                    "$code — $name: ${String.format(Locale.US, "%.3f", ba)} m²/ac",
+                    "$code — $name: ${String.format(Locale.US, "%.3f", ba * areaUnit.perAcreDensityFactor)} ${areaUnit.densityLabel("m²")}",
                     frame.left + 12f, y, frame.width())
                 y += 18f
             }
@@ -195,13 +199,21 @@ object PDFReportBuilder {
 
         var y = frame.top + 100f
 
+        // Per-area basis follows the project's units (US acre, metric hectare).
+        // Engine stats are per acre; scale + relabel at display only.
+        val areaUnit = areaUnitFor(inputs.project)
+        val f = areaUnit.perAcreDensityFactor
+        val suffix = areaUnit.densitySuffix
+        val areaWord = if (areaUnit == AreaUnit.HECTARE) "hectare" else "acre"
+
         // Stratified stats table — three metrics × (mean, SE, CI95, df).
         drawHeading(canvas, "Stratified statistics (§7.5)", frame.left, y, frame.width())
         y += 22f
+        val baStandScaled = inputs.baStand.scaledPerArea(f)
         val metricRows = listOf(
-            Triple("Trees per acre", inputs.tpaStand, "trees/ac"),
-            Triple("Basal area",     inputs.baStand,  "m²/ac"),
-            Triple("Gross volume",   inputs.volStand, "m³/ac"),
+            Triple("Trees per $areaWord", inputs.tpaStand.scaledPerArea(f), "trees$suffix"),
+            Triple("Basal area",          baStandScaled,                    "m²$suffix"),
+            Triple("Gross volume",        inputs.volStand.scaledPerArea(f),  "m³$suffix"),
         )
         val colWidths = listOf(110f, 70f, 80f, 60f, 70f, 45f, 40f)
         drawTableRow(canvas,
@@ -222,9 +234,9 @@ object PDFReportBuilder {
 
         // Basal area by stratum bar chart.
         y += 30f
-        drawHeading(canvas, "Basal area by stratum (m²/ac)", frame.left, y, frame.width())
+        drawHeading(canvas, "Basal area by stratum (m²$suffix)", frame.left, y, frame.width())
         y += 18f
-        val strataBars = inputs.baStand.byStratum.entries
+        val strataBars = baStandScaled.byStratum.entries
             .sortedBy { it.key }
             .map { it.key to it.value.mean }
         val chartRect = RectF(frame.left, y + 10f, frame.left + frame.width(), y + 140f)
@@ -239,8 +251,8 @@ object PDFReportBuilder {
         y += 18f
         val byCode = speciesBAAcrossStand(inputs.plotStatsByPlot)
         val top8 = byCode.entries.sortedByDescending { it.value }.take(8)
-        val spLabels: List<String> = top8.map { it.key }
-        val spValues: List<Double> = top8.map { it.value.toDouble() }
+        val spLabels: List<String> = top8.map { speciesLabel(inputs, it.key) }
+        val spValues: List<Double> = top8.map { it.value.toDouble() * f }
         val spRect = RectF(frame.left, y + 10f, frame.left + frame.width(), y + 120f)
         drawBarChart(canvas, values = spValues, labels = spLabels, rect = spRect)
 
@@ -254,12 +266,17 @@ object PDFReportBuilder {
             drawKeyValue(canvas, k, v, frame.left, y, frame.width())
             y += 18f
         }
+        // Per-area basis follows the project's units (US acre, metric hectare).
+        val areaUnit = areaUnitFor(inputs.project)
+        val f = areaUnit.perAcreDensityFactor
+        val suffix = areaUnit.densitySuffix
+        val areaWord = if (areaUnit == AreaUnit.HECTARE) "hectare" else "acre"
         val df = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US)  // local time zone
         kv("Center",        String.format(Locale.US, "%.6f, %.6f", plot.centerLat, plot.centerLon))
         kv("Position tier", plot.positionTier.raw)
         kv("Source",        plot.positionSource.raw)
         kv("GPS samples",   "${plot.gpsNSamples} (H_acc med ${String.format(Locale.US, "%.2f", plot.gpsMedianHAccuracyM)} m)")
-        kv("Plot area",     String.format(Locale.US, "%.3f ac", plot.plotAreaAcres))
+        kv("Plot area",     "${String.format(Locale.US, "%.3f", areaUnit.fromAcres(plot.plotAreaAcres.toDouble()))} ${areaUnit.abbreviation}")
         kv("Slope/Aspect",  "${String.format(Locale.US, "%.1f", plot.slopeDeg)}° / ${String.format(Locale.US, "%.0f", plot.aspectDeg)}°")
         kv("Started",       df.format(Date(plot.startedAt)))
         kv("Closed",        plot.closedAt?.let { df.format(Date(it)) } ?: "—")
@@ -271,11 +288,11 @@ object PDFReportBuilder {
         val s = inputs.plotStatsByPlot[plot.id]
         if (s != null) {
             kv("Live trees",          "${s.liveTreeCount}")
-            kv("Trees per acre",      String.format(Locale.US, "%.2f trees/ac", s.tpa))
-            kv("Basal area",          String.format(Locale.US, "%.4f m²/ac", s.baPerAcreM2))
+            kv("Trees per $areaWord", String.format(Locale.US, "%.2f trees$suffix", s.tpa * f))
+            kv("Basal area",          String.format(Locale.US, "%.4f m²$suffix", s.baPerAcreM2 * f))
             kv("Quadratic mean DBH",  String.format(Locale.US, "%.2f cm", s.qmdCm))
-            kv("Gross volume",        String.format(Locale.US, "%.4f m³/ac", s.grossVolumePerAcreM3))
-            kv("Merchantable volume", String.format(Locale.US, "%.4f m³/ac", s.merchVolumePerAcreM3))
+            kv("Gross volume",        String.format(Locale.US, "%.4f m³$suffix", s.grossVolumePerAcreM3 * f))
+            kv("Merchantable volume", String.format(Locale.US, "%.4f m³$suffix", s.merchVolumePerAcreM3 * f))
         } else {
             drawBody(canvas, "(no stats available)", frame.left, y, frame.width())
             y += 18f
@@ -287,7 +304,7 @@ object PDFReportBuilder {
         y += 18f
         val colWidths = listOf(80f, 50f, 90f, 110f, 110f)
         drawTableRow(canvas,
-            listOf("Species", "n", "Trees/ac", "Basal m²/ac", "Volume m³/ac"),
+            listOf("Species", "n", "Trees$suffix", "Basal m²$suffix", "Volume m³$suffix"),
             bold = true, frame.left, y, colWidths)
         y += 16f
         if (s != null) {
@@ -295,10 +312,10 @@ object PDFReportBuilder {
             for (code in sortedCodes) {
                 val ss = s.bySpecies[code] ?: continue
                 drawTableRow(canvas, listOf(
-                    code, "${ss.count}",
-                    String.format(Locale.US, "%.2f", ss.tpa),
-                    String.format(Locale.US, "%.4f", ss.baPerAcreM2),
-                    String.format(Locale.US, "%.4f", ss.grossVolumePerAcreM3),
+                    speciesLabel(inputs, code), "${ss.count}",
+                    String.format(Locale.US, "%.2f", ss.tpa * f),
+                    String.format(Locale.US, "%.4f", ss.baPerAcreM2 * f),
+                    String.format(Locale.US, "%.4f", ss.grossVolumePerAcreM3 * f),
                 ), bold = false, frame.left, y, colWidths)
                 y += 16f
             }
@@ -314,8 +331,13 @@ object PDFReportBuilder {
             drawKeyValue(canvas, k, v, frame.left, y, frame.width())
             y += 18f
         }
+        val areaUnit = areaUnitFor(inputs.project)
         kv("Plot type",         inputs.design.plotType.raw)
-        kv("Plot area",         inputs.design.plotAreaAcres?.let { "$it ac" } ?: "—")
+        kv("Plot area",         inputs.design.plotAreaAcres?.let {
+                                    if (areaUnit == AreaUnit.HECTARE)
+                                        String.format(Locale.US, "%.3f ha", areaUnit.fromAcres(it.toDouble()))
+                                    else "$it ac"
+                                } ?: "—")
         kv("Basal area factor", inputs.design.baf?.let { "$it" } ?: "—")
         kv("Sampling scheme",   inputs.design.samplingScheme.raw)
         kv("Grid spacing",      inputs.design.gridSpacingMeters?.let { "$it m" } ?: "—")
@@ -380,7 +402,7 @@ object PDFReportBuilder {
                 if (t.dbhIsIrregular) "irr" else null,
             )
             drawTableRow(canvas, listOf(
-                pno, "${t.treeNumber}", t.speciesCode,
+                pno, "${t.treeNumber}", speciesLabel(inputs, t.speciesCode),
                 String.format(Locale.US, "%.1f", t.dbhCm),
                 t.heightM?.let { String.format(Locale.US, "%.1f", it) } ?: "—",
                 t.status.raw,
@@ -495,6 +517,26 @@ object PDFReportBuilder {
             drawText(canvas, labels.getOrElse(i) { "" },
                 x, barArea.bottom + 2f, barW, fontSize = 8f, bold = false)
         }
+    }
+
+    // MARK: - Localization helpers
+
+    /// The per-area basis the report renders in. Derived from the project's
+    /// stamped unit system (metric projects → hectares, imperial → acres),
+    /// which is itself set from the country at project creation. Keeps the US
+    /// path on ACRE so imperial output stays byte-identical to prior releases.
+    private fun areaUnitFor(project: Project): AreaUnit =
+        if (project.units == UnitSystem.METRIC) AreaUnit.HECTARE else AreaUnit.ACRE
+
+    /// Resolve a species code to a common name for metric reports (their
+    /// country-prefixed codes like "FI-PISY" are opaque). The US report keeps
+    /// the bare FIA code it has always printed so its bytes don't change.
+    /// Prefers the project's own SpeciesConfig name, then the shared resolver.
+    private fun speciesLabel(inputs: PDFReportInputs, code: String): String {
+        if (inputs.project.units != UnitSystem.METRIC) return code
+        inputs.species.firstOrNull { it.code == code }?.commonName
+            ?.takeIf { it.isNotBlank() }?.let { return it }
+        return RegionalSpecies.nameForCode(code)
     }
 
     // MARK: - Utilities

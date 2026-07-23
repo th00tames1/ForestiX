@@ -77,6 +77,12 @@ public struct CruiseSetupSheet: View {
         sqrt(acres * 4046.8564224 / .pi)
     }
 
+    /// Radius of a fixed-area plot given its area in square metres — used for
+    /// the round metric default (0.05 ha) offered to metric-country cruisers.
+    private static func radiusM(fromSquareMeters area: Double) -> Double {
+        sqrt(area / .pi)
+    }
+
     private static func acres(fromRadiusM radius: Double) -> Double {
         .pi * radius * radius / 4046.8564224
     }
@@ -175,7 +181,7 @@ public struct CruiseSetupSheet: View {
         .presentationBackground(ForestixPalette.surface)
         .onAppear {
             refreshStrata()
-            prefillFromExistingDesign()
+            applyInitialDefaults()
         }
         .onChange(of: pushingStratumDraw) { _, pushing in
             if !pushing { refreshStrata() }
@@ -290,16 +296,33 @@ public struct CruiseSetupSheet: View {
             .listByProject(project.id).count) ?? 0
     }
 
-    /// Re-opening setup shows what was generated last time — same
-    /// prefill behaviour the old screen's refresh() had.
-    private func prefillFromExistingDesign() {
+    /// One-time initial defaults: prefill from the last saved design if one
+    /// exists, otherwise fall back to a round default plot size — the imperial
+    /// 0.1-acre default (already baked into `radiusText`) for the US, or a
+    /// round metric 0.05 ha for metric-country projects.
+    private func applyInitialDefaults() {
         guard !loadedExisting else { return }
+        let appliedStoredRadius = prefillFromExistingDesign()
+        if !appliedStoredRadius && project.units == .metric {
+            radiusText = String(format: "%.1f",
+                                Self.radiusM(fromSquareMeters: 500))  // 0.05 ha
+        }
+    }
+
+    /// Re-opening setup shows what was generated last time — same
+    /// prefill behaviour the old screen's refresh() had. Returns true when a
+    /// saved plot size was applied to `radiusText`.
+    @discardableResult
+    private func prefillFromExistingDesign() -> Bool {
+        guard !loadedExisting else { return false }
         loadedExisting = true
         guard let design = (try? environment.cruiseDesignRepository
-            .forProject(project.id))?.first else { return }
+            .forProject(project.id))?.first else { return false }
         plotType = design.plotType
+        var appliedStoredRadius = false
         if let a = design.plotAreaAcres {
             radiusText = String(format: "%.1f", Self.radiusM(fromAcres: Double(a)))
+            appliedStoredRadius = true
         }
         if let b = design.baf {
             bafText = String(format: "%.0f", b)
@@ -315,6 +338,7 @@ public struct CruiseSetupSheet: View {
         case .manual:
             break
         }
+        return appliedStoredRadius
     }
 
     // MARK: Generation (the existing engine)

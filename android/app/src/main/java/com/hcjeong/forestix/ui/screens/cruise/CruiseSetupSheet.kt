@@ -65,8 +65,10 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hcjeong.forestix.AppEnvironment
 import com.hcjeong.forestix.LocalAppEnvironment
+import com.hcjeong.forestix.common.AreaUnit
 import com.hcjeong.forestix.common.Units
 import com.hcjeong.forestix.data.cruise.CruiseDesign
 import com.hcjeong.forestix.data.cruise.PlannedPlot
@@ -109,16 +111,22 @@ fun CruiseSetupSheet(
     onDrawBoundary: () -> Unit,
 ) {
     val env = LocalAppEnvironment.current
+    val settings by env.settings.state.collectAsStateWithLifecycle()
+    val areaUnit = settings.country.areaUnit
     val colors = Forestix.colors
     val type = Forestix.type
     val scope = rememberCoroutineScope()
 
     // Defaults from the existing design model (CruiseDesign record when
     // present; otherwise the long-standing 0.1 ac / BAF 20 / 150 m grid /
-    // 10-count defaults the old screen shipped with).
+    // 10-count defaults the old screen shipped with). Metric countries start
+    // from a round 10 m radius instead of the odd metre value 0.1 ac maps to.
     var fixedRadius by remember { mutableStateOf(true) }
     var radiusText by remember {
-        mutableStateOf(String.format(Locale.US, "%.1f", radiusMFromAcres(0.1)))
+        mutableStateOf(
+            if (areaUnit == AreaUnit.HECTARE) "10.0"
+            else String.format(Locale.US, "%.1f", radiusMFromAcres(0.1)),
+        )
     }
     var bafText by remember { mutableStateOf("20") }
     var bySpacing by remember { mutableStateOf(true) }
@@ -235,10 +243,15 @@ fun CruiseSetupSheet(
                 unit = if (fixedRadius) "m radius" else "BAF",
                 caption = if (fixedRadius) {
                     radiusText.toDoubleOrNull()?.takeIf { it > 0 }?.let { r ->
-                        String.format(
-                            Locale.US, "≈ %.2f ha · %.2f ac",
-                            acresFromRadiusM(r) * 0.404685642,
-                            acresFromRadiusM(r))
+                        val ac = acresFromRadiusM(r)
+                        // Metric countries read hectares only; the US keeps the
+                        // dual ha · ac readout it has always shown.
+                        if (areaUnit == AreaUnit.HECTARE) {
+                            String.format(Locale.US, "≈ %.3f ha", ac * 0.404685642)
+                        } else {
+                            String.format(Locale.US, "≈ %.2f ha · %.2f ac",
+                                ac * 0.404685642, ac)
+                        }
                     } ?: "Circular fixed-area plot"
                 } else {
                     "Prism basal-area factor"

@@ -836,6 +836,10 @@ extension MapHomeScreen {
         let trees = liveTrees(in: plot.id)
         let stats = plotStats(for: plot, trees: trees)
         let isClosed = plot.closedAt != nil
+        // Density basis follows the chosen country (US per acre, metric per
+        // hectare); the engine computes per acre, so scale for display.
+        let areaUnit = settings.country.areaUnit
+        let densityFactor = areaUnit.perAcreDensityFactor
         return VStack(spacing: 0) {
             RoundedRectangle(cornerRadius: 2)
                 .fill(ForestixPalette.divider)
@@ -861,10 +865,10 @@ extension MapHomeScreen {
             // the peek. Per-acre expansion via the InventoryEngine.
             HStack(spacing: 0) {
                 statCell("TREES", "\(stats.liveTreeCount)", nil, divided: true)
-                statCell("BA", String(format: "%.1f", stats.baPerAcreM2),
-                         "m²/ac", divided: true)
-                statCell("TPA", String(format: "%.0f", stats.tpa),
-                         "/ac", divided: true)
+                statCell("BA", String(format: "%.1f", Double(stats.baPerAcreM2) * densityFactor),
+                         areaUnit.densityLabel("m²"), divided: true)
+                statCell("TPA", String(format: "%.0f", Double(stats.tpa) * densityFactor),
+                         areaUnit.densitySuffix, divided: true)
                 statCell("QMD", String(format: "%.1f", stats.qmdCm),
                          "cm", divided: false)
             }
@@ -1849,6 +1853,10 @@ extension MapHomeScreen {
                 let result = try FullCruiseExporter.write(
                     bundle: bundle,
                     into: base,
+                    localization: PDFLocalization.forProject(
+                        units: project.units,
+                        species: bundle.species,
+                        trees: bundle.trees),
                     progress: { done, total, label in
                         exportProgress = total == 0
                             ? 1 : Double(done) / Double(total)
@@ -2098,7 +2106,8 @@ extension MapHomeScreen {
                     treeRepo: environment.treeRepository,
                     speciesRepo: environment.speciesRepository,
                     volRepo: environment.volumeEquationRepository,
-                    hdFitRepo: environment.hdFitRepository))
+                    hdFitRepo: environment.hdFitRepository),
+                    areaUnit: settings.country.areaUnit)
             }
         case .treeDetails(let id):
             if let tree = treesByPlot.values.joined()

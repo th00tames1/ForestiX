@@ -104,6 +104,7 @@ import com.hcjeong.forestix.basemap.MapMarker
 import com.hcjeong.forestix.basemap.MapMarkerShape
 import com.hcjeong.forestix.basemap.MapPolygonOverlay
 import com.hcjeong.forestix.basemap.MapPolylineOverlay
+import com.hcjeong.forestix.common.AreaUnit
 import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.RegionalSpecies
 import com.hcjeong.forestix.common.Units
@@ -1360,7 +1361,13 @@ private fun PlotPeekCard(
             )
         }
         Spacer(Modifier.size(10.dp))
-        // Stats strip (mock `.stats`): TREES / BA / TPA / QMD.
+        // Stats strip (mock `.stats`): TREES / BA / TPA / QMD. Per-area basis
+        // follows the project's units (US per acre, metric per hectare); the
+        // engine computes per acre, so scale + relabel at display only.
+        val metric = project?.units == com.hcjeong.forestix.data.cruise.UnitSystem.METRIC
+        val areaUnit = if (metric) AreaUnit.HECTARE else AreaUnit.ACRE
+        val densityF = areaUnit.perAcreDensityFactor
+        val densitySuffix = areaUnit.densitySuffix
         Row(
             Modifier
                 .fillMaxWidth()
@@ -1370,12 +1377,12 @@ private fun PlotPeekCard(
             StatsCell("TREES", "${stats.liveTreeCount}", null, Modifier.weight(1f))
             StatsDivider()
             StatsCell(
-                "BA", String.format(Locale.US, "%.1f", stats.baPerAcreM2),
-                "m²/ac", Modifier.weight(1f))
+                "BA", String.format(Locale.US, "%.1f", stats.baPerAcreM2 * densityF),
+                "m²$densitySuffix", Modifier.weight(1f))
             StatsDivider()
             StatsCell(
-                "TPA", String.format(Locale.US, "%.0f", stats.tpa),
-                "/ac", Modifier.weight(1f))
+                if (metric) "TPH" else "TPA", String.format(Locale.US, "%.0f", stats.tpa * densityF),
+                densitySuffix, Modifier.weight(1f))
             StatsDivider()
             StatsCell(
                 "QMD", String.format(Locale.US, "%.1f", stats.qmdCm),

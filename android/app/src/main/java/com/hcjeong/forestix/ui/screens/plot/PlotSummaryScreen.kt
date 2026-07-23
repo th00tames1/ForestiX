@@ -43,6 +43,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
+import com.hcjeong.forestix.common.AreaUnit
+import com.hcjeong.forestix.common.RegionalSpecies
 import com.hcjeong.forestix.inventory.PlotStats
 import com.hcjeong.forestix.ui.screens.ForestixScaffold
 import com.hcjeong.forestix.ui.screens.project.FormSection
@@ -69,6 +71,7 @@ fun PlotSummaryScreen(
     onClosed: () -> Unit = { nav.popBackStack() },
 ) {
     val env = LocalAppEnvironment.current
+    val settings by env.settings.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val colors = Forestix.colors
     val type = Forestix.type
@@ -181,18 +184,26 @@ fun PlotSummaryScreen(
                 }
             }
 
+            // Density basis: metric countries read per hectare, US per acre.
+            // The engine computes per acre; scale + relabel at display only
+            // (mirrors StandSummaryScreen). BA/volume are already m²/m³.
+            val areaUnit = settings.country.areaUnit
+            val f = areaUnit.perAcreDensityFactor
+            val suffix = areaUnit.densitySuffix
+            val abbr = areaUnit.abbreviation
+
             // MARK: - Stats
             FormSection(header = "Plot stats") {
                 StatRow("Live trees", "${stats.liveTreeCount}")
-                StatRow("Trees / ac", String.format(Locale.US, "%.1f", stats.tpa))
-                StatRow("Basal area / ac",
-                    String.format(Locale.US, "%.2f m²/ac", stats.baPerAcreM2))
+                StatRow("Trees / $abbr", String.format(Locale.US, "%.1f", stats.tpa * f))
+                StatRow("Basal area / $abbr",
+                    String.format(Locale.US, "%.2f m²$suffix", stats.baPerAcreM2 * f))
                 StatRow("Quadratic mean diameter",
                     String.format(Locale.US, "%.1f cm", stats.qmdCm))
-                StatRow("Gross volume / ac",
-                    String.format(Locale.US, "%.1f m³/ac", stats.grossVolumePerAcreM3))
-                StatRow("Merchantable volume / ac",
-                    String.format(Locale.US, "%.1f m³/ac", stats.merchVolumePerAcreM3))
+                StatRow("Gross volume / $abbr",
+                    String.format(Locale.US, "%.1f m³$suffix", stats.grossVolumePerAcreM3 * f))
+                StatRow("Merchantable volume / $abbr",
+                    String.format(Locale.US, "%.1f m³$suffix", stats.merchVolumePerAcreM3 * f))
             }
 
             // MARK: - Species breakdown
@@ -202,7 +213,7 @@ fun PlotSummaryScreen(
                 } else {
                     stats.bySpecies.keys.sorted().forEach { code ->
                         val stat = stats.bySpecies[code] ?: return@forEach
-                        SpeciesRow(code, stat)
+                        SpeciesRow(code, stat, areaUnit)
                     }
                 }
             }
@@ -213,7 +224,7 @@ fun PlotSummaryScreen(
                     hdFitsByProject.keys.sorted().forEach { code ->
                         val fit = hdFitsByProject[code] ?: return@forEach
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Text(code, style = type.data, color = colors.textPrimary)
+                            Text(RegionalSpecies.nameForCode(code), style = type.data, color = colors.textPrimary)
                             Spacer(Modifier.weight(1f))
                             Text(
                                 String.format(Locale.US, "a=%.3f b=%.3f n=%d RMSE=%.2fm",
@@ -345,26 +356,28 @@ private fun StatRow(label: String, value: String) {
 }
 
 @Composable
-private fun SpeciesRow(code: String, stat: PlotStats.SpeciesStat) {
+private fun SpeciesRow(code: String, stat: PlotStats.SpeciesStat, areaUnit: AreaUnit) {
     val colors = Forestix.colors
     val type = Forestix.type
+    val f = areaUnit.perAcreDensityFactor
+    val suffix = areaUnit.densitySuffix
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(code, style = type.data, color = colors.textPrimary)
+            Text(RegionalSpecies.nameForCode(code), style = type.data, color = colors.textPrimary)
             Spacer(Modifier.weight(1f))
             Text("${stat.count} trees", style = type.dataSmall, color = colors.textSecondary)
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
-                String.format(Locale.US, "%.1f /ac", stat.tpa),
+                String.format(Locale.US, "%.1f $suffix", stat.tpa * f),
                 style = type.dataSmall, color = colors.textSecondary)
             Spacer(Modifier.weight(1f))
             Text(
-                String.format(Locale.US, "%.2f m²/ac", stat.baPerAcreM2),
+                String.format(Locale.US, "%.2f m²$suffix", stat.baPerAcreM2 * f),
                 style = type.dataSmall, color = colors.textSecondary)
             Spacer(Modifier.weight(1f))
             Text(
-                String.format(Locale.US, "%.1f m³/ac", stat.grossVolumePerAcreM3),
+                String.format(Locale.US, "%.1f m³$suffix", stat.grossVolumePerAcreM3 * f),
                 style = type.dataSmall, color = colors.textSecondary)
         }
     }

@@ -123,9 +123,10 @@ fun SettingsScreen(nav: NavController) {
             // MARK: - Country & region (internationalization framework)
             FormSection(
                 header = "Country & region",
-                footer = "Country sets the species presets and the volume standard — " +
-                    "board-foot log rules for the US, cubic metres elsewhere. Region " +
-                    "further tunes the US species set and its default log rule.",
+                footer = "Country sets your units, the species presets and the volume " +
+                    "standard — imperial + board-foot log rules for the US, metric + " +
+                    "cubic metres elsewhere. Region further tunes the US species set and " +
+                    "its default log rule. You can still override units below.",
             ) {
                 MenuPickerRow(
                     title = "Country",
@@ -134,6 +135,10 @@ fun SettingsScreen(nav: NavController) {
                 ) { index ->
                     val c = Country.entries[index]
                     env.settings.setCountry(c)
+                    // Country drives the unit system (US→imperial, metric
+                    // countries→metric); the manual Units toggle below still
+                    // overrides it afterwards. Makes the footer claim true.
+                    env.settings.setUnitSystem(c.defaultUnitSystem)
                     // Metric countries have no region; clear the US region so
                     // the scan picker falls back to the country species preset.
                     if (!c.hasRegions) env.settings.setRegion(null)

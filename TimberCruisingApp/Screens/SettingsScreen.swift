@@ -144,6 +144,12 @@ public struct SettingsScreen: View {
                     set: { newCountry in
                         settings.country = newCountry
                         settings.regionPickerSeen = true
+                        // Selecting a country drives the unit system (makes the
+                        // "Country sets your units" footer true). The manual
+                        // Units toggle below stays an override the cruiser can
+                        // still flip afterwards; keep its control in sync here.
+                        settings.unitSystem = newCountry.defaultUnitSystem
+                        unitSystem = newCountry.defaultUnitSystem
                         // Metric countries use a single implicit region.
                         if !newCountry.hasRegions { settings.region = nil }
                     })

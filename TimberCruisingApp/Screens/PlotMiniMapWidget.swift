@@ -2,8 +2,9 @@
 // plot is active, so the cruiser sees where they've measured without
 // leaving AR.
 //
-// LOCKED design (deliberately differentiated from the competitor's
-// top-centre circular radar with walked-trail dots):
+// LOCKED design — a rounded-square dark-glass card, intentionally with no
+// walked-trail breadcrumb; the card answers "where in THIS plot have I
+// measured", not "where have I walked":
 //   • rounded SQUARE card (ForestixRadius.card), 116 pt, TOP-RIGHT —
 //     trailing 16 / top 22, the same row as the GPS badge on the left;
 //   • AR dark-glass styling (black 0.55, white 0.18 border at 0.5 pt);
@@ -11,7 +12,8 @@
 //     AR cyan scaled to 78 % of the card, a small white centre dot, an
 //     "N" tick at the top inside edge, the cruiser as the map home's
 //     you-dot blue with a heading wedge, and the plot's measured trees
-//     as confidence-tinted dots. NO walked-trail dots (deliberate);
+//     as confidence-tinted dots. Intentionally no walked-trail breadcrumb —
+//     the card is plot-relative, not a track log;
 //   • header "PLOT 2 · 5" (plot number · tree count) top-left inside,
 //     "r 12 m" bottom-right inside. Non-interactive.
 //

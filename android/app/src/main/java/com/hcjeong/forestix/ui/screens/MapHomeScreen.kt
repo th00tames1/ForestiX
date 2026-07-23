@@ -1507,7 +1507,7 @@ private fun PhotoViewerDialog(
                         listOfNotNull(
                             entry.treeNumber?.let { "T$it" },
                             entry.speciesCode?.takeIf { it.isNotEmpty() }
-                                ?.uppercase(Locale.US),
+                                ?.let { RegionalSpecies.nameForCode(it) },
                         ).joinToString(" · ").ifEmpty { "—" },
                     )
                     MetaCell("METHOD", entry.method)

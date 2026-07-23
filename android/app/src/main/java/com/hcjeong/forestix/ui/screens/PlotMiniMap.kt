@@ -1,9 +1,10 @@
 // Plot mini-map — a small NORTH-UP schematic of the ACTIVE plot floating
 // top-right over the AR measurement screens (locked design, matches iOS):
-// a rounded-SQUARE dark-glass card (ForestixRadius.card, deliberately NOT
-// the competitor's circular radar; no walked-trail dots) showing the plot
-// ring in the AR-ring cyan, the cruiser's own position (YOU dot + heading
-// wedge), and the plot's measured trees tinted by confidence.
+// a rounded-SQUARE dark-glass card (ForestixRadius.card) — a static
+// north-up schematic rather than a live circular radar, and with no
+// walked-trail dots — showing the plot ring in the AR-ring cyan, the
+// cruiser's own position (YOU dot + heading wedge), and the plot's
+// measured trees tinted by confidence.
 //
 // POSITION DATA (mirrors iOS PlotMiniMapWidget)
 //  * YOU — camera offset from the plot's AR anchor whenever the shared

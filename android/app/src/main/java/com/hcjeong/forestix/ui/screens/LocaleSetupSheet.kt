@@ -126,6 +126,10 @@ fun LocaleSetupSheet(onDismiss: () -> Unit) {
                         trailingChevron = c.hasRegions,
                     ) {
                         env.settings.setCountry(c)
+                        // Country drives the unit system (US→imperial, metric
+                        // countries→metric). The manual Units toggle in Settings
+                        // still overrides this afterwards.
+                        env.settings.setUnitSystem(c.defaultUnitSystem)
                         if (c.hasRegions) {
                             // Advance to the region step (US).
                             regionStepCountry = c

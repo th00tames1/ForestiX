@@ -693,7 +693,9 @@ public struct HeightScanScreen: View {
 
     private var metadataChipLabel: String {
         var bits: [String] = []
-        if let s = metaSpecies, !s.isEmpty { bits.append(s) }
+        if let s = metaSpecies, !s.isEmpty {
+            bits.append(RegionalSpecies.name(forCode: s))
+        }
         if !metaDamage.isEmpty { bits.append("\(metaDamage.count) tag") }
         if bits.isEmpty { return "Add details" }
         return bits.joined(separator: " · ")

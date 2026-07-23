@@ -167,9 +167,9 @@ public struct StandSummaryScreen: View {
                 HStack {
                     Text("#").frame(width: 28, alignment: .leading)
                     Text("Live").frame(maxWidth: .infinity, alignment: .trailing)
-                    Text("Trees/ac").frame(maxWidth: .infinity, alignment: .trailing)
-                    Text("Basal/ac").frame(maxWidth: .infinity, alignment: .trailing)
-                    Text("Volume/ac").frame(maxWidth: .infinity, alignment: .trailing)
+                    Text("Trees/\(areaUnit.abbreviation)").frame(maxWidth: .infinity, alignment: .trailing)
+                    Text("Basal/\(areaUnit.abbreviation)").frame(maxWidth: .infinity, alignment: .trailing)
+                    Text("Volume/\(areaUnit.abbreviation)").frame(maxWidth: .infinity, alignment: .trailing)
                 }
                 .font(.caption2.bold())
                 .foregroundStyle(.secondary)
@@ -179,11 +179,11 @@ public struct StandSummaryScreen: View {
                             .frame(width: 28, alignment: .leading)
                         Text("\(row.stats.liveTreeCount)")
                             .frame(maxWidth: .infinity, alignment: .trailing)
-                        Text(String(format: "%.1f", row.stats.tpa))
+                        Text(String(format: "%.1f", Double(row.stats.tpa) * densityFactor))
                             .frame(maxWidth: .infinity, alignment: .trailing)
-                        Text(String(format: "%.2f", row.stats.baPerAcreM2))
+                        Text(String(format: "%.2f", Double(row.stats.baPerAcreM2) * densityFactor))
                             .frame(maxWidth: .infinity, alignment: .trailing)
-                        Text(String(format: "%.1f", row.stats.grossVolumePerAcreM3))
+                        Text(String(format: "%.1f", Double(row.stats.grossVolumePerAcreM3) * densityFactor))
                             .frame(maxWidth: .infinity, alignment: .trailing)
                     }
                     .font(.caption.monospacedDigit())

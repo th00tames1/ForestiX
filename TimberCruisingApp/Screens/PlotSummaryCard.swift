@@ -228,16 +228,24 @@ public struct PlotSummaryCard: View {
         let dbhTrees = trees.compactMap { $0.dbhCm }
         guard !dbhTrees.isEmpty else { return nil }
 
-        // BA per tree (m² → ft²/ac via dbh in inches). Use the standard
-        // ft²-per-tree formula on each tree. With no plot-acres tied to
-        // these readings yet, "per acre" means "per tree-bin" — useful
-        // as a relative readout, refined in Phase 4 with real acreage.
-        let baFt2: [Double] = dbhTrees.map { cm in
-            let inches = cm / 2.54
-            return 0.005454 * inches * inches
+        // BA per tree, in the base unit that matches the displayed density
+        // label: ft² for the US "/ac" card, m² for the metric "/ha" card.
+        // Computing ft² and then labelling it "/ha" over-reads BA by ~10.76×
+        // (the ft²→m² factor), so the numerator has to switch with the label.
+        // With no plot-acres tied to these readings yet, "per acre" means
+        // "per tree-bin" — a relative readout, refined in Phase 4 with real
+        // acreage.
+        let baPerTree: [Double] = dbhTrees.map { cm in
+            if areaUnit == .hectare {
+                let m = cm / 100.0
+                return Double.pi / 4.0 * m * m          // m² basal area
+            } else {
+                let inches = cm / 2.54
+                return 0.005454 * inches * inches        // ft² basal area
+            }
         }
         let acres = max(plot.acres ?? 0.1, 0.05)   // sane fallback
-        let baPerAcre = baFt2.reduce(0, +) / acres
+        let baPerAcre = baPerTree.reduce(0, +) / acres
         let tpa = Double(dbhTrees.count) / acres
         // QMD in cm (display layer converts to inches if needed).
         let qmdSqCm = dbhTrees.map { $0 * $0 }.reduce(0, +) / Double(dbhTrees.count)

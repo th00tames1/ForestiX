@@ -206,6 +206,17 @@ object RegionalSpecies {
                 if (!map.containsKey(key)) map[key] = name
             }
         }
+        // Also fold the metric per-country species (FI/DE/KR). Their codes are
+        // country-prefixed (e.g. "FI-PISY") so they never collide with the US
+        // FIA codes above; without this a metric cruiser's tallied code renders
+        // as the raw prefix everywhere nameForCode is called. iOS folds
+        // Country.allNonUSSpecies the same way (RegionalSpecies.swift).
+        Country.entries.forEach { country ->
+            CountrySpecies.defaultSpecies(country).forEach { (code, name) ->
+                val key = code.uppercase(Locale.US)
+                if (!map.containsKey(key)) map[key] = name
+            }
+        }
         map
     }
 }

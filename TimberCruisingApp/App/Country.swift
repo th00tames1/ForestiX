@@ -17,6 +17,7 @@
 // pre-existing install keeps behaving exactly as it did before this landed.
 
 import Foundation
+import Models    // UnitSystem (for Country.defaultUnitSystem)
 import Sensors   // LogRule (for Region.defaultLogRule)
 
 public enum Country: String, CaseIterable, Identifiable, Sendable {
@@ -67,6 +68,16 @@ public enum Country: String, CaseIterable, Identifiable, Sendable {
     /// Board-foot log rules are North-America-only. TRUE for the US alone; the
     /// Settings log-rule picker is hidden for every metric country.
     public var usesLogRule: Bool { self == .unitedStates }
+
+    /// The unit system a country cruises in. Selecting a country DRIVES this:
+    /// the first-run cascade and the Settings country picker both stamp
+    /// `settings.unitSystem = country.defaultUnitSystem`, so a Korean cruiser
+    /// gets metre/centimetre displays without touching the Units toggle. The US
+    /// stays imperial; Finland / Germany / South Korea are metric. The manual
+    /// Units toggle in Settings remains an override the cruiser can flip after.
+    public var defaultUnitSystem: UnitSystem {
+        self == .unitedStates ? .imperial : .metric
+    }
 
     /// Cubic unit the country's volume is expressed in. The US keeps cubic feet
     /// (with the board-foot log-rule overlay on top); metric countries use m³.

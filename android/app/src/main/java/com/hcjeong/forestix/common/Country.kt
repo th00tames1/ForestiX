@@ -95,6 +95,14 @@ enum class Country(val raw: String) {
     val areaUnit: AreaUnit
         get() = if (this == UNITED_STATES) AreaUnit.ACRE else AreaUnit.HECTARE
 
+    /// Selecting a country DRIVES the unit system: the US is imperial, every
+    /// metric country (Finland/Germany/South Korea) defaults to metric. Both
+    /// the first-run LocaleSetupSheet and the Settings country picker apply
+    /// this to `settings.unitSystem`; the manual Units toggle can still
+    /// override it afterwards. A locked cross-platform decision (iOS parity).
+    val defaultUnitSystem: UnitSystem
+        get() = if (this == UNITED_STATES) UnitSystem.IMPERIAL else UnitSystem.METRIC
+
     /// Only the US carries the 11 sub-national timber regions. Metric
     /// countries have a single national species/volume standard, so the
     /// first-run cascade stops at the country step for them.

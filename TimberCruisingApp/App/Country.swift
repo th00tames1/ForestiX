@@ -75,6 +75,15 @@ public enum Country: String, CaseIterable, Identifiable, Sendable {
         self == .unitedStates ? .cubicFeet : .cubicMeters
     }
 
+    /// Areal basis this country expresses per-area densities (TPA, BA/area,
+    /// volume/area) in. The US cruises per acre; metric countries per hectare.
+    /// The engine computes everything per ACRE internally (plot areas persist
+    /// as acres) — this drives the display/export conversion + labels only, so
+    /// a Finnish cruiser reads "m³/ha" while the US stays "per ac" as before.
+    public var areaUnit: AreaUnit {
+        self == .unitedStates ? .acre : .hectare
+    }
+
     /// The stem-volume standard backing this country (drives the read-only
     /// Settings "Volume standard" row + the pending state for Korea).
     public var volumeStandard: VolumeStandard {
@@ -183,6 +192,40 @@ public enum VolumeUnit: String, Sendable {
     public var perAcreLabel: String {
         self == .cubicMeters ? "m³/ac" : "ft³/ac"
     }
+}
+
+// MARK: - Area unit (density basis)
+
+/// The areal basis a country expresses per-area densities in (trees, basal
+/// area, volume per unit land area). The US cruises per acre; metric countries
+/// per hectare. The inventory engine computes everything per ACRE internally
+/// (the canonical stored basis — plot areas persist as acres), so this type
+/// governs the display/export conversion and labels only.
+public enum AreaUnit: String, Sendable {
+    case acre
+    case hectare
+
+    /// Multiply a canonical per-ACRE density by this factor to express it per
+    /// this unit. 1 hectare = 2.4710538147 acres (exact, from 4046.8564224 m²
+    /// per acre and 10 000 m² per hectare), so per-hectare = per-acre × that.
+    public var perAcreDensityFactor: Double {
+        self == .hectare ? 2.4710538147 : 1.0
+    }
+
+    /// Convert a stored area in acres to this unit (acres → hectares).
+    public func fromAcres(_ acres: Double) -> Double {
+        self == .hectare ? acres / 2.4710538147 : acres
+    }
+
+    /// Density-label suffix: "/ha" or "/ac".
+    public var densitySuffix: String { self == .hectare ? "/ha" : "/ac" }
+
+    /// Bare area-unit abbreviation: "ha" or "ac".
+    public var abbreviation: String { self == .hectare ? "ha" : "ac" }
+
+    /// A density label built from a base quantity, e.g. densityLabel("m³") →
+    /// "m³/ha" (metric) or "m³/ac" (US).
+    public func densityLabel(_ base: String) -> String { base + densitySuffix }
 }
 
 // MARK: - Volume standard

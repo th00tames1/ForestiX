@@ -23,16 +23,24 @@ public struct PlotSummaryCard: View {
     public let entries: [QuickMeasureEntry]
     public let unitSystem: UnitSystem
     public let logRule: LogRule
+    /// Areal basis for the density stats (BA, TPA per unit land area). Metric
+    /// countries read per hectare; US per acre. Defaults to `.acre`.
+    public let areaUnit: AreaUnit
 
     public init(plot: QuickMeasurePlot,
                 entries: [QuickMeasureEntry],
                 unitSystem: UnitSystem,
-                logRule: LogRule) {
+                logRule: LogRule,
+                areaUnit: AreaUnit = .acre) {
         self.plot = plot
         self.entries = entries
         self.unitSystem = unitSystem
         self.logRule = logRule
+        self.areaUnit = areaUnit
     }
+
+    /// Per-acre → display-basis multiplier (1.0 US, 2.47105 metric hectares).
+    private var densityFactor: Double { areaUnit.perAcreDensityFactor }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: ForestixSpace.md) {
@@ -80,7 +88,8 @@ public struct PlotSummaryCard: View {
         var parts: [String] = []
         if !plot.unitName.isEmpty { parts.append(plot.unitName) }
         if let ac = plot.acres {
-            parts.append(String(format: "%.2f ac", ac))
+            parts.append(String(format: "%.2f %@",
+                                areaUnit.fromAcres(Double(ac)), areaUnit.abbreviation))
         }
         return parts.joined(separator: " · ")
     }
@@ -92,9 +101,11 @@ public struct PlotSummaryCard: View {
         return HStack(spacing: 0) {
             statsCell("TREES", s?.distinctTrees.description ?? "—")
             divider
-            statsCell("BASAL/AC", s.map { String(format: "%.0f", $0.baPerAcre) } ?? "—")
+            statsCell("BASAL/\(areaUnit.abbreviation.uppercased())",
+                      s.map { String(format: "%.0f", $0.baPerAcre * densityFactor) } ?? "—")
             divider
-            statsCell("TREES/AC",   s.map { String(format: "%.0f", $0.tpa) } ?? "—")
+            statsCell("TREES/\(areaUnit.abbreviation.uppercased())",
+                      s.map { String(format: "%.0f", $0.tpa * densityFactor) } ?? "—")
             divider
             statsCell("MEAN DBH",
                       s.flatMap { $0.qmd.map { qmd in

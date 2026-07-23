@@ -33,6 +33,23 @@ data class StandStat(
         val areaAcres: Double,
     )
 
+    /// Returns a copy with every per-area quantity multiplied by [factor] —
+    /// used to re-express canonical per-acre statistics on another areal basis
+    /// for display (per-acre → per-hectare = × 2.4710538147). Mean, SE and CI
+    /// half-width scale linearly; variance scales by factor²; degrees of
+    /// freedom, plot counts and stratum areas (kept in acres for weighting)
+    /// pass through unchanged. factor == 1 is a no-op.
+    fun scaledPerArea(factor: Double): StandStat {
+        if (factor == 1.0) return this
+        return copy(
+            mean = mean * factor,
+            seMean = seMean * factor,
+            ci95HalfWidth = ci95HalfWidth * factor,
+            byStratum = byStratum.mapValues { (_, s) ->
+                s.copy(mean = s.mean * factor, variance = s.variance * factor * factor)
+            })
+    }
+
     companion object {
         val empty = StandStat(
             mean = 0.0, seMean = 0.0, ci95HalfWidth = 0.0,

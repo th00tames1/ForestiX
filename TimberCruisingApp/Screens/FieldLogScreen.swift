@@ -92,7 +92,8 @@ public struct FieldLogScreen: View {
                             plot: plot,
                             entries: plotEntries,
                             unitSystem: settings.unitSystem,
-                            logRule: settings.logRule)
+                            logRule: settings.logRule,
+                            areaUnit: settings.country.areaUnit)
                             .listRowInsets(EdgeInsets(
                                 top: ForestixSpace.sm,
                                 leading: ForestixSpace.md,

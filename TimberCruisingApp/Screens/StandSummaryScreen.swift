@@ -20,27 +20,40 @@ public struct StandSummaryScreen: View {
     /// previews and tests are unchanged.
     private let volumePending: Bool
 
+    /// Areal basis for the density cards (TPA, BA/area, volume/area). The
+    /// engine computes per acre; metric countries re-express per hectare. The
+    /// caller passes `settings.country.areaUnit`. Defaults to `.acre` so US
+    /// callers, previews and tests are unchanged.
+    private let areaUnit: AreaUnit
+
     public init(viewModel: @autoclosure @escaping () -> StandSummaryViewModel,
-                volumePending: Bool = false) {
+                volumePending: Bool = false,
+                areaUnit: AreaUnit = .acre) {
         _viewModel = StateObject(wrappedValue: viewModel())
         self.volumePending = volumePending
+        self.areaUnit = areaUnit
     }
+
+    /// Per-acre → display-basis multiplier (1.0 for US acres, 2.47105 for
+    /// metric hectares).
+    private var densityFactor: Double { areaUnit.perAcreDensityFactor }
 
     public var body: some View {
         Form {
             headerSection
-            statCardSection(title: "Trees / ac", unit: "/ac",
-                            stat: viewModel.tpaStat,
+            statCardSection(title: "Trees / \(areaUnit.abbreviation)",
+                            unit: areaUnit.densitySuffix,
+                            stat: viewModel.tpaStat.scaledPerArea(by: densityFactor),
                             perPlot: viewModel.perPlotStats.map {
-                                (plot: $0.plot, value: Double($0.stats.tpa)) })
-            statCardSection(title: "Basal area", unit: "m²/ac",
-                            stat: viewModel.baStat,
+                                (plot: $0.plot, value: Double($0.stats.tpa) * densityFactor) })
+            statCardSection(title: "Basal area", unit: areaUnit.densityLabel("m²"),
+                            stat: viewModel.baStat.scaledPerArea(by: densityFactor),
                             perPlot: viewModel.perPlotStats.map {
-                                (plot: $0.plot, value: Double($0.stats.baPerAcreM2)) })
-            statCardSection(title: "Gross volume", unit: "m³/ac",
-                            stat: viewModel.volStat,
+                                (plot: $0.plot, value: Double($0.stats.baPerAcreM2) * densityFactor) })
+            statCardSection(title: "Gross volume", unit: areaUnit.densityLabel("m³"),
+                            stat: viewModel.volStat.scaledPerArea(by: densityFactor),
                             perPlot: viewModel.perPlotStats.map {
-                                (plot: $0.plot, value: Double($0.stats.grossVolumePerAcreM3)) },
+                                (plot: $0.plot, value: Double($0.stats.grossVolumePerAcreM3) * densityFactor) },
                             pending: volumePending)
             perPlotTableSection
         }

@@ -29,6 +29,35 @@ enum class VolumeUnit {
     CUBIC_METERS,
 }
 
+/// The areal basis a country expresses per-area densities in (trees, basal
+/// area, volume per unit land area). The US cruises per acre; metric countries
+/// per hectare. The inventory engine computes everything per ACRE internally
+/// (plot areas persist as acres), so this governs display/export conversion and
+/// labels only.
+enum class AreaUnit {
+    ACRE,
+    HECTARE;
+
+    /// Multiply a canonical per-ACRE density by this to express it per this
+    /// unit. 1 hectare = 2.4710538147 acres, so per-hectare = per-acre × that.
+    val perAcreDensityFactor: Double
+        get() = if (this == HECTARE) 2.4710538147 else 1.0
+
+    /// Convert a stored area in acres to this unit (acres → hectares).
+    fun fromAcres(acres: Double): Double =
+        if (this == HECTARE) acres / 2.4710538147 else acres
+
+    /// Density-label suffix: "/ha" or "/ac".
+    val densitySuffix: String get() = if (this == HECTARE) "/ha" else "/ac"
+
+    /// Bare area-unit abbreviation: "ha" or "ac".
+    val abbreviation: String get() = if (this == HECTARE) "ha" else "ac"
+
+    /// A density label built from a base quantity, e.g. densityLabel("m³") →
+    /// "m³/ha" (metric) or "m³/ac" (US).
+    fun densityLabel(base: String): String = base + densitySuffix
+}
+
 enum class Country(val raw: String) {
     UNITED_STATES("us"),
     FINLAND("fi"),
@@ -60,6 +89,11 @@ enum class Country(val raw: String) {
     /// US renders cubic/board feet; everyone else renders cubic metres.
     val volumeUnit: VolumeUnit
         get() = if (this == UNITED_STATES) VolumeUnit.CUBIC_FEET else VolumeUnit.CUBIC_METERS
+
+    /// US cruises per acre; metric countries per hectare. Drives the
+    /// display/export density conversion + labels (the engine stays per-acre).
+    val areaUnit: AreaUnit
+        get() = if (this == UNITED_STATES) AreaUnit.ACRE else AreaUnit.HECTARE
 
     /// Only the US carries the 11 sub-national timber regions. Metric
     /// countries have a single national species/volume standard, so the

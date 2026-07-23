@@ -2041,7 +2041,8 @@ extension MapHomeScreen {
                     hdFitRepo: environment.hdFitRepository,
                     stratumRepo: environment.stratumRepository,
                     plannedRepo: environment.plannedPlotRepository),
-                    volumePending: settings.country.volumeStandard.isPending)
+                    volumePending: settings.country.volumeStandard.isPending,
+                    areaUnit: settings.country.areaUnit)
             }
         case .export:
             if let project = currentProject {

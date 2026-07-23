@@ -38,6 +38,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.hcjeong.forestix.common.AreaUnit
 import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.RegionalSpecies
 import com.hcjeong.forestix.common.UnitSystem
@@ -61,10 +62,12 @@ fun PlotSummaryCard(
     entries: List<QuickMeasureEntry>,
     unitSystem: UnitSystem,
     logRule: LogRule,
+    areaUnit: AreaUnit = AreaUnit.ACRE,
 ) {
     val colors = Forestix.colors
     val type = Forestix.type
     val stats = remember(plot, entries, logRule) { computeStats(plot, entries, logRule) }
+    val densityFactor = areaUnit.perAcreDensityFactor
 
     Column(
         Modifier
@@ -82,7 +85,7 @@ fun PlotSummaryCard(
                 style = type.sectionHead.copy(letterSpacing = 1.5.sp),
                 color = colors.textTertiary)
             Text(plot.name, style = type.bodyBold, color = colors.textPrimary)
-            val subtitle = plotSubtitle(plot)
+            val subtitle = plotSubtitle(plot, areaUnit)
             if (subtitle.isNotEmpty()) {
                 Text(subtitle, style = type.caption, color = colors.textSecondary)
             }
@@ -98,12 +101,12 @@ fun PlotSummaryCard(
             StatsCell("TREES", stats?.distinctTrees?.toString() ?: "—",
                 Modifier.weight(1f))
             CellDivider()
-            StatsCell("BASAL/AC",
-                stats?.let { String.format(Locale.US, "%.0f", it.baPerAcre) } ?: "—",
+            StatsCell("BASAL/${areaUnit.abbreviation.uppercase(Locale.US)}",
+                stats?.let { String.format(Locale.US, "%.0f", it.baPerAcre * densityFactor) } ?: "—",
                 Modifier.weight(1f))
             CellDivider()
-            StatsCell("TREES/AC",
-                stats?.let { String.format(Locale.US, "%.0f", it.tpa) } ?: "—",
+            StatsCell("TREES/${areaUnit.abbreviation.uppercase(Locale.US)}",
+                stats?.let { String.format(Locale.US, "%.0f", it.tpa * densityFactor) } ?: "—",
                 Modifier.weight(1f))
             CellDivider()
             StatsCell("MEAN DBH",
@@ -215,10 +218,13 @@ private fun CellDivider() {
 
 // MARK: - Header subtitle
 
-private fun plotSubtitle(plot: QuickMeasurePlot): String {
+private fun plotSubtitle(plot: QuickMeasurePlot, areaUnit: AreaUnit): String {
     val parts = mutableListOf<String>()
     if (plot.unitName.isNotEmpty()) parts.add(plot.unitName)
-    plot.acres?.let { parts.add(String.format(Locale.US, "%.2f ac", it)) }
+    plot.acres?.let {
+        parts.add(String.format(Locale.US, "%.2f %s",
+            areaUnit.fromAcres(it.toDouble()), areaUnit.abbreviation))
+    }
     return parts.joinToString(" · ")
 }
 

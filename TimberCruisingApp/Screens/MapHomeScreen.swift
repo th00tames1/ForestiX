@@ -616,13 +616,11 @@ public struct MapHomeScreen: View {
 
     /// THE GPS chip — SlashScan's single-line live fix readout with a
     /// leading freshness dot: green < 5 s, yellow 5–60 s, red past 60 s
-    /// or before the first fix ("GPS: [not available]"). One mono ~11 pt
-    /// line, TRUNCATED at the tail (never wrapped) so it can't collide
-    /// with the round buttons. Field order + decimals match SlashScan
-    /// exactly — longitude, latitude, altitude m, bearing deg, horizontal
-    /// accuracy m, seconds since the fix. Bearing is the compass heading
-    /// (LocationService.headingTrueDeg, 0 until the first heading update)
-    /// — same source Android uses, so the two platforms render identically.
+    /// or before the first fix ("no fix"). Three short labelled rows —
+    /// X = latitude, Y = longitude, Z = altitude (5-decimal mono), the
+    /// axis convention field-requested — with a live age suffix on the
+    /// Z row once the fix goes stale. No bearing / accuracy (freshness
+    /// is the coloured dot).
     private var gpsChip: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             // This screen's live service, else the newest fix any screen
@@ -630,43 +628,54 @@ public struct MapHomeScreen: View {
             // the chip should agree with it.
             let snap = location.latestSnapshot ?? LocationService.lastGlobalFix
             let age = snap.map { max(0, context.date.timeIntervalSince($0.timestamp)) }
+            let stale = (age ?? 0) > Self.staleFixAge
             let dot: Color = {
                 guard snap != nil, let age else { return ForestixPalette.confidenceBad }
                 if age > Self.lostFixAge { return ForestixPalette.confidenceBad }
                 if age > Self.staleFixAge { return ForestixPalette.confidenceWarn }
                 return ForestixPalette.confidenceOk
             }()
-            // SlashScan format string (ios/ViewController.swift):
-            // "GPS: %.2f %.2f %.2fm %ddeg %.0fm [%d sec old]" — lon, lat,
-            // alt m, bearing deg, horizontal accuracy m, seconds old.
-            let text: String = {
-                guard let snap, let age else { return "GPS: [not available]" }
-                return String(format: "GPS: %.2f %.2f %.2fm %ddeg %.0fm [%d sec old]",
-                              snap.longitude,
-                              snap.latitude,
-                              snap.altitudeM ?? 0,
-                              Int(location.headingTrueDeg ?? 0),
-                              snap.horizontalAccuracyM,
-                              Int(age))
-            }()
             let a11y: String = {
-                guard let snap, let age else { return "No GPS fix" }
+                guard let snap else { return "No GPS fix" }
                 var out = String(format: "GPS fix %.5f, %.5f",
                                  snap.latitude, snap.longitude)
                 if let alt = snap.altitudeM {
                     out += String(format: ", altitude %.0f metres", alt)
                 }
-                out += ", " + Self.fixAgeText(age)
+                if stale, let age { out += ", " + Self.fixAgeText(age) }
                 return out
             }()
-            HStack(spacing: 6) {
-                Circle().fill(dot).frame(width: 7, height: 7)
-                Text(text)
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(ForestixPalette.textPrimary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+            Group {
+                if let snap {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Circle().fill(dot).frame(width: 7, height: 7)
+                            coordRow("X", String(format: "%.5f", snap.latitude))
+                        }
+                        coordRow("Y", String(format: "%.5f", snap.longitude))
+                            .padding(.leading, 13)
+                        HStack(spacing: 4) {
+                            coordRow("Z", snap.altitudeM.map {
+                                String(format: "%.0f m", $0)
+                            } ?? "—")
+                            if stale, let age {
+                                Text("· \(Self.fixAgeText(age))")
+                                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(ForestixPalette.textTertiary)
+                            }
+                        }
+                        .padding(.leading, 13)
+                    }
+                } else {
+                    HStack(spacing: 6) {
+                        Circle().fill(dot).frame(width: 7, height: 7)
+                        Text("no fix")
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(ForestixPalette.textTertiary)
+                    }
+                }
             }
+            .lineLimit(1)
             .padding(.horizontal, 11)
             .padding(.vertical, 7)
             .background(
@@ -678,6 +687,19 @@ public struct MapHomeScreen: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(a11y)
             .accessibilityIdentifier("mapHome.gps")
+        }
+    }
+
+    /// One labelled coordinate line — dim mono axis label, semibold
+    /// mono value.
+    private func coordRow(_ label: String, _ value: String) -> some View {
+        HStack(spacing: 4) {
+            Text(label)
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundStyle(ForestixPalette.textTertiary)
+            Text(value)
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(ForestixPalette.textPrimary)
         }
     }
 

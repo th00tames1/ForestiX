@@ -711,21 +711,17 @@ private fun buildTreePins(entries: List<QuickMeasureEntry>): List<TreePin> {
 
 // MARK: - Top chrome pieces ---------------------------------------------------
 
-/// Unified GPS chip — one-line SlashScan live readout of the last known
-/// fix behind a freshness dot: green < 5 s, yellow ≤ 60 s, red past 60 s
-/// or when no fix ever arrived. The 1 s tick keeps the age (and the dot
-/// tier) counting live. Single mono line, byte-identical to the iOS
-/// sibling's format so both platforms render the same string.
+/// GPS chip — labelled coordinate block of the last known fix behind a
+/// freshness dot: green < 5 s, yellow 5–60 s, red past 60 s or when no
+/// fix ever arrived ("no fix"). Three short rows: X = latitude, Y =
+/// longitude, Z = altitude (5-decimal mono, field-requested axis
+/// convention), with a live age suffix on the Z row once stale. No
+/// bearing / accuracy — the coloured dot carries freshness.
 /// Internal: shared by both map modes' top chrome.
 @Composable
 internal fun GpsChip(fix: CLLocationSnapshot?) {
     val colors = Forestix.colors
     val type = Forestix.type
-    val context = LocalContext.current
-    // Bearing: LocationService.headingTrueDeg (the fix carries no course on
-    // Android) — 0 when the compass hasn't reported yet, per the locked spec.
-    val location = remember { LocationService.shared(context) }
-    val heading by location.headingTrueDeg.collectAsStateWithLifecycle()
     // This screen's live service, else the newest fix any screen captured.
     val snap = fix ?: LocationService.lastGlobalFix
     // 1 s clock so the age suffix + dot tier tick while the chip is on screen.
@@ -743,39 +739,83 @@ internal fun GpsChip(fix: CLLocationSnapshot?) {
         ageSec <= 60 -> colors.confidenceWarn
         else -> colors.confidenceBad
     }
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    val stale = ageSec != null && ageSec > 5
+    Column(
+        verticalArrangement = Arrangement.spacedBy(2.dp),
         modifier = Modifier
             .clip(ForestixRadius.control)
             .background(colors.surface)
             .border(1.dp, colors.divider, ForestixRadius.control)
             .padding(horizontal = 11.dp, vertical = 7.dp),
     ) {
-        Box(Modifier.size(7.dp).clip(CircleShape).background(dotColor))
-        Text(
-            text = if (snap != null && ageSec != null) {
-                // SlashScan single-line format (LOCKED, byte-identical to
-                // iOS): lon, lat, altitude m, bearing deg, horizontal
-                // accuracy m, seconds since the fix.
-                String.format(
-                    Locale.US,
-                    "GPS: %.2f %.2f %.2fm %ddeg %.0fm [%d sec old]",
-                    snap.longitude,
-                    snap.latitude,
-                    snap.altitudeM ?: 0.0,
-                    (heading ?: 0.0).toInt(),
-                    snap.horizontalAccuracyM,
-                    ageSec.toInt(),
+        if (snap != null) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Box(Modifier.size(7.dp).clip(CircleShape).background(dotColor))
+                GpsCoordRow("X", String.format(Locale.US, "%.5f", snap.latitude))
+            }
+            Box(Modifier.padding(start = 13.dp)) {
+                GpsCoordRow("Y", String.format(Locale.US, "%.5f", snap.longitude))
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier.padding(start = 13.dp),
+            ) {
+                GpsCoordRow(
+                    "Z",
+                    snap.altitudeM?.let { String.format(Locale.US, "%.0f m", it) } ?: "—",
                 )
-            } else {
-                "GPS: [not available]"
-            },
+                if (stale) {
+                    val age = if (ageSec!! < 60) "$ageSec s ago" else "${ageSec / 60} min ago"
+                    Text(
+                        "· $age",
+                        style = type.dataSmall.copy(fontSize = 11.sp),
+                        color = colors.textTertiary,
+                        maxLines = 1,
+                    )
+                }
+            }
+        } else {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Box(Modifier.size(7.dp).clip(CircleShape).background(dotColor))
+                Text(
+                    "no fix",
+                    style = type.dataSmall.copy(fontSize = 11.sp, fontWeight = FontWeight.SemiBold),
+                    color = colors.textTertiary,
+                    maxLines = 1,
+                )
+            }
+        }
+    }
+}
+
+/// One labelled coordinate line — dim mono axis label, semibold mono
+/// value (iOS `coordRow` 1:1).
+@Composable
+private fun GpsCoordRow(label: String, value: String) {
+    val colors = Forestix.colors
+    val type = Forestix.type
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text(
+            label,
             style = type.dataSmall.copy(fontSize = 11.sp),
+            color = colors.textTertiary,
+            maxLines = 1,
+        )
+        Text(
+            value,
+            style = type.dataSmall.copy(fontSize = 11.sp, fontWeight = FontWeight.SemiBold),
             color = colors.textPrimary,
             maxLines = 1,
-            softWrap = false,
-            overflow = TextOverflow.Ellipsis,
         )
     }
 }

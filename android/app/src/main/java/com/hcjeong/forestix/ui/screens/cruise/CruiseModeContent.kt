@@ -1072,49 +1072,56 @@ private fun CruiseActionCluster(
     onProject: () -> Unit,
 ) {
     val colors = Forestix.colors
-    Row(
+    // The PROJECT STRIP is now its OWN centred row ABOVE the three circles
+    // (not inside the tally zone) so a long "<project> · No active plot"
+    // pill can never overlap the side circles. The cluster Row keeps the
+    // fixed ClusterSlots geometry (empty reserved tally zone in both modes),
+    // so pixel-invariance with measure mode is unchanged.
+    Column(
         modifier,
-        verticalAlignment = Alignment.Bottom,
-        horizontalArrangement = Arrangement.spacedBy(ClusterSlots.gap),
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        SideCircleButton(
-            "Cruise", Icons.Filled.Adjust,
-            tint = colors.cruiseAccent,
-            onClick = onToggleMode,
+        ProjectStrip(
+            projectName = projectName,
+            activePlot = activePlot,
+            treeCount = treeCount,
+            onClick = onProject,
         )
-        // 74 dp primary (+) — LOCKED cruise-accent fill + WHITE glyph;
-        // accent-scoped outline while a plot is active (mock
-        // `.capture.scoped`). Plot status colours untouched. LOCKED strings:
-        // active plot → "Add tree · Plot N"; unvisited plan waiting → "Set
-        // plot centre" (map-peek spec item 5); otherwise → "Start plot". The
-        // reserved tally zone carries the always-on PROJECT STRIP.
-        val captureLabel = when {
-            activePlot != null -> "Add tree · Plot ${activePlot.plotNumber}"
-            hasPlannedUnvisited -> "Set plot centre"
-            else -> "Start plot"
-        }
-        CaptureColumn(
-            caption = captureLabel,
-            contentDescription = when {
-                activePlot != null -> "Add tree"
+        Row(
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(ClusterSlots.gap),
+        ) {
+            SideCircleButton(
+                "Cruise", Icons.Filled.Adjust,
+                tint = colors.cruiseAccent,
+                onClick = onToggleMode,
+            )
+            // 74 dp primary (+) — LOCKED cruise-accent fill + WHITE glyph;
+            // accent-scoped outline while a plot is active (mock
+            // `.capture.scoped`). LOCKED strings: active plot → "Add tree ·
+            // Plot N"; unvisited plan waiting → "Set plot centre" (map-peek
+            // spec item 5); otherwise → "Start plot".
+            val captureLabel = when {
+                activePlot != null -> "Add tree · Plot ${activePlot.plotNumber}"
                 hasPlannedUnvisited -> "Set plot centre"
                 else -> "Start plot"
-            },
-            fill = colors.cruiseAccent,
-            ink = Color.White,
-            haloed = activePlot != null,
-            tallyPill = {
-                ProjectStrip(
-                    projectName = projectName,
-                    activePlot = activePlot,
-                    treeCount = treeCount,
-                    onClick = onProject,
-                )
-            },
-            onClick = onCapture,
-        )
-        // RIGHT circle: PROJECT (measure mode's Log slot) → project sheet.
-        SideCircleButton("Project", Icons.Filled.Folder, onClick = onProject)
+            }
+            CaptureColumn(
+                caption = captureLabel,
+                contentDescription = when {
+                    activePlot != null -> "Add tree"
+                    hasPlannedUnvisited -> "Set plot centre"
+                    else -> "Start plot"
+                },
+                fill = colors.cruiseAccent,
+                ink = Color.White,
+                haloed = activePlot != null,
+                tallyPill = null,
+                onClick = onCapture,
+            )
+            // RIGHT circle: PROJECT (measure mode's Log slot) → project sheet.
+            SideCircleButton("Project", Icons.Filled.Folder, onClick = onProject)
+        }
     }
 }
 

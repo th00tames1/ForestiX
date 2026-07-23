@@ -8,12 +8,12 @@
 // Shown once after install (and re-openable from Settings → Country & region).
 // Dismissing without finishing is allowed — `regionPickerSeen = true` is
 // stamped on any selection / skip / dismiss so the sheet never auto-presents
-// again. Kept under the name `RegionPickerSheet` so the map-home host that
-// presents it is unchanged.
+// again. Named `LocaleSetupSheet` to match the iOS screen of the same name
+// (the persisted `regionPickerSeen` flag keeps its name across both platforms).
 //
 // Host it in a ModalBottomSheet from the caller:
 //   if (!settings.regionPickerSeen) {
-//       ModalBottomSheet(onDismissRequest = { ... }) { RegionPickerSheet(onDismiss = { ... }) }
+//       ModalBottomSheet(onDismissRequest = { ... }) { LocaleSetupSheet(onDismiss = { ... }) }
 //   }
 
 package com.hcjeong.forestix.ui.screens
@@ -66,7 +66,7 @@ import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 
 @Composable
-fun RegionPickerSheet(onDismiss: () -> Unit) {
+fun LocaleSetupSheet(onDismiss: () -> Unit) {
     val env = LocalAppEnvironment.current
     val settings by env.settings.state.collectAsStateWithLifecycle()
     val colors = Forestix.colors

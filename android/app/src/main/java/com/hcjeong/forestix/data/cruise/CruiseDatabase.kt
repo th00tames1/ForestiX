@@ -42,7 +42,7 @@ sealed class CruiseDataError(override val message: String) : Exception(message) 
         VolumeEquationEntity::class,
         HeightDiameterFitEntity::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = false,
 )
 @TypeConverters(CruiseConverters::class)
@@ -68,6 +68,15 @@ abstract class CruiseDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE TreeEntity ADD COLUMN latitude REAL")
                 db.execSQL("ALTER TABLE TreeEntity ADD COLUMN longitude REAL")
+            }
+        }
+
+        /// v2 → v3: PlannedPlot gains `skipped` (inaccessible plots the
+        /// cruiser can't reach). NOT NULL DEFAULT 0 — existing rows are
+        /// pending, not skipped.
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE PlannedPlotEntity ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0")
             }
         }
     }

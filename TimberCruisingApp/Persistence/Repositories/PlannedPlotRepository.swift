@@ -65,7 +65,7 @@ public final class CoreDataPlannedPlotRepository: PlannedPlotRepository {
 
     public func listUnvisited(projectId: UUID) throws -> [PlannedPlot] {
         try performRead(stack: stack) { ctx in
-            let pred = NSPredicate(format: "projectId == %@ AND visited == NO", projectId as CVarArg)
+            let pred = NSPredicate(format: "projectId == %@ AND visited == NO AND skipped == NO", projectId as CVarArg)
             let sort = [NSSortDescriptor(key: "plotNumber", ascending: true)]
             return try fetchMany(PlannedPlotEntity.self, entityName: "PlannedPlotEntity",
                                  predicate: pred, sort: sort, in: ctx)

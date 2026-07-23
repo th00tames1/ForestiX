@@ -1,7 +1,7 @@
 // Post-save continuation sheet — after a DBH or height is recorded, the
 // next logical action (height on the same tree, or the next tree's
 // diameter) is one tap away instead of dumping the cruiser back to the
-// hub. Port of the iOS MeasurementContinuationSheet: bottom sheet with a
+// hub. A bottom sheet with a
 // "Tree #N" title bar, a masthead ("Diameter saved" / "Height saved" +
 // "What's next on tree #N?"), and icon + subtitle action cards.
 

@@ -176,6 +176,7 @@ object PlannedPlotMapper {
         plannedLat = s.plannedLat,
         plannedLon = s.plannedLon,
         visited = s.visited,
+        skipped = s.skipped,
     )
 
     fun toStruct(e: PlannedPlotEntity) = PlannedPlot(
@@ -186,6 +187,7 @@ object PlannedPlotMapper {
         plannedLat = e.plannedLat,
         plannedLon = e.plannedLon,
         visited = e.visited,
+        skipped = e.skipped,
     )
 }
 

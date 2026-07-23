@@ -99,6 +99,7 @@ object GeoJSONExporter {
             "plotNumber" to p.plotNumber,
             "stratumId" to (p.stratumId?.uuidString),
             "visited" to p.visited,
+            "skipped" to p.skipped,
         ),
     )
 

@@ -188,8 +188,8 @@ public final class DBHScanViewModel: ObservableObject {
     private let recentRawDiameterCapacity: Int = 5
     /// Phase 16.2 hysteresis, retuned in Phase 18.2. The earlier
     /// 10 %/3-frame gate left the cruiser staring at "Stabilizing…"
-    /// far longer than peer apps (Single-Shot SAM pipelines
-    /// publish on a single fit). Loosened to 12 %/2-frames — still
+    /// far longer than a single-shot segmentation pipeline (e.g.
+    /// Single-Shot SAM), which publishes on one fit. Loosened to 12 %/2-frames — still
     /// rejects obvious chatter but unlocks the published value almost
     /// as soon as the cruiser steadies the phone.
     ///   • Enter stable when CoV ≤ 0.12 over 2+ frames

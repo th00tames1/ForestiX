@@ -54,6 +54,7 @@ public final class PlannedPlotEntity: NSManagedObject {
     @NSManaged public var plannedLat: Double
     @NSManaged public var plannedLon: Double
     @NSManaged public var visited: Bool
+    @NSManaged public var skipped: Bool
 }
 
 @objc(PlotEntity)

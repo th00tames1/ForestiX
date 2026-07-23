@@ -182,4 +182,11 @@ data class PlannedPlot(
     var plannedLat: Double,
     var plannedLon: Double,
     var visited: Boolean,
+    /// Intentionally skipped by the cruiser (inaccessible — cliff, water,
+    /// private land). Distinct from `visited`: a skipped plot is a documented
+    /// decision, so the (+) "nearest unvisited" navigation passes over it and
+    /// exports mark it skipped rather than merely pending. `= false` default
+    /// mirrors iOS `skipped: Bool = false` so existing PlannedPlot(...) sites
+    /// compile unchanged.
+    var skipped: Boolean = false,
 )

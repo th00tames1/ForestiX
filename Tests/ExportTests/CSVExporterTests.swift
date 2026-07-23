@@ -52,7 +52,7 @@ final class CSVExporterTests: XCTestCase {
         let csv = CSVExporter.plannedPlotsCSV(plannedPlots: plots, strata: strata)
         let lines = csv.components(separatedBy: "\r\n").filter { !$0.isEmpty }
         XCTAssertEqual(lines[0],
-                       "plot_number,stratum_id,stratum_name,planned_lat,planned_lon,visited")
+                       "plot_number,stratum_id,stratum_name,planned_lat,planned_lon,visited,skipped")
         XCTAssertTrue(lines[1].hasPrefix("1,"))
         XCTAssertTrue(lines[2].hasPrefix("2,"))
         XCTAssertTrue(lines[3].hasPrefix("3,"))

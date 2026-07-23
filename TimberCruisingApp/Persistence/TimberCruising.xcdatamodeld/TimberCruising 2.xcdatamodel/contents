@@ -50,6 +50,7 @@
         <attribute name="plannedLat" attributeType="Double" usesScalarValueType="YES"/>
         <attribute name="plannedLon" attributeType="Double" usesScalarValueType="YES"/>
         <attribute name="visited" attributeType="Boolean" usesScalarValueType="YES"/>
+        <attribute name="skipped" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
         <uniquenessConstraints>
             <uniquenessConstraint><constraint value="id"/></uniquenessConstraint>
         </uniquenessConstraints>
@@ -164,7 +165,7 @@
         <element name="ProjectEntity" positionX="-63" positionY="-18" width="128" height="240"/>
         <element name="StratumEntity" positionX="160" positionY="-18" width="128" height="120"/>
         <element name="CruiseDesignEntity" positionX="160" positionY="120" width="128" height="150"/>
-        <element name="PlannedPlotEntity" positionX="-63" positionY="240" width="128" height="150"/>
+        <element name="PlannedPlotEntity" positionX="-63" positionY="240" width="128" height="165"/>
         <element name="PlotEntity" positionX="160" positionY="290" width="128" height="360"/>
         <element name="TreeEntity" positionX="-63" positionY="400" width="128" height="570"/>
         <element name="SpeciesConfigEntity" positionX="380" positionY="-18" width="128" height="195"/>

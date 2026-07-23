@@ -159,6 +159,7 @@ public enum PlannedPlotMapper {
         e.plannedLat = s.plannedLat
         e.plannedLon = s.plannedLon
         e.visited = s.visited
+        e.skipped = s.skipped
     }
 
     public static func toStruct(_ e: PlannedPlotEntity) -> PlannedPlot {
@@ -169,7 +170,8 @@ public enum PlannedPlotMapper {
             plotNumber: Int(e.plotNumber),
             plannedLat: e.plannedLat,
             plannedLon: e.plannedLon,
-            visited: e.visited
+            visited: e.visited,
+            skipped: e.skipped
         )
     }
 }

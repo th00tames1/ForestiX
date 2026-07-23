@@ -148,12 +148,16 @@ extension MapHomeScreen {
     /// one. nil when none exist. (`plannedPlots` is already filtered to
     /// unvisited in `reloadCruise`.)
     func nearestUnvisitedPlannedPlot() -> PlannedPlot? {
-        guard !plannedPlots.isEmpty else { return nil }
+        // Skipped plots (documented as inaccessible) are excluded from the
+        // (+) "nearest unvisited" target — they stay visible on the map but
+        // navigation passes over them.
+        let candidates = plannedPlots.filter { !$0.skipped }
+        guard !candidates.isEmpty else { return nil }
         guard let fix = location.latestSnapshot ?? LocationService.lastGlobalFix
         else {
-            return plannedPlots.min(by: { $0.plotNumber < $1.plotNumber })
+            return candidates.min(by: { $0.plotNumber < $1.plotNumber })
         }
-        return plannedPlots.min(by: { a, b in
+        return candidates.min(by: { a, b in
             GeoMath.distanceM(fromLat: fix.latitude, fromLon: fix.longitude,
                               toLat: a.plannedLat, toLon: a.plannedLon)
             < GeoMath.distanceM(fromLat: fix.latitude, fromLon: fix.longitude,
@@ -213,13 +217,18 @@ extension MapHomeScreen {
                 shape: .ring(dashed: false))
         }
         // Planned plots — the mock's hollow dashed "planned" ring style.
+        // Skipped (inaccessible) plots keep the dashed ring but switch to the
+        // warn tint and carry a "SKIP" badge so they read distinctly from
+        // both plain-planned (grey) and visited (real accent/green rings).
         for planned in plannedPlots {
             out.append(BasemapMarker(
                 id: "pplot-\(planned.id.uuidString)",
                 latitude: planned.plannedLat,
                 longitude: planned.plannedLon,
                 title: "P\(planned.plotNumber)",
-                tint: ForestixPalette.textTertiary,
+                tint: planned.skipped ? ForestixPalette.confidenceWarn
+                                      : ForestixPalette.textTertiary,
+                badge: planned.skipped ? "SKIP" : nil,
                 shape: .ring(dashed: true)))
         }
         for plot in plots {
@@ -271,7 +280,10 @@ extension MapHomeScreen {
         if let plot = activePlot {
             return "Add tree · Plot \(plot.plotNumber)"
         }
-        if !plannedPlots.isEmpty {
+        // Only when a NON-skipped planned plot remains — mirrors the now-nil
+        // nearestUnvisitedPlannedPlot() so the label never promises a target
+        // the (+) can't reach.
+        if plannedPlots.contains(where: { !$0.skipped }) {
             return "Set plot centre"
         }
         return "Start plot"
@@ -1110,6 +1122,18 @@ extension MapHomeScreen {
             gridSpacingMeters: nil)
     }
 
+    /// Toggle a planned plot's `skipped` flag (inaccessible — cliff, water,
+    /// private land). Mirrors RecordCentreSheet's mutate → persist → refresh:
+    /// a skipped plot stays visible (still in `plannedPlots`, since skipped is
+    /// not visited) but is excluded from the (+) nearest-unvisited navigation
+    /// and renders with the warn tint + "SKIP" badge.
+    func setPlannedSkipped(_ planned: PlannedPlot, _ value: Bool) {
+        var p = planned
+        p.skipped = value
+        _ = try? environment.plannedPlotRepository.update(p)
+        reloadCruise()
+    }
+
     /// Stamp closedAt — the ring turns done-green. Validation lives in
     /// Details (PlotSummaryScreen); the peek's close is one confirm.
     func closePlot(id: UUID) {
@@ -1492,7 +1516,7 @@ extension MapHomeScreen {
                     .foregroundStyle(ForestixPalette.textPrimary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
-                plannedChip
+                if planned.skipped { skippedChip } else { plannedChip }
                 Spacer(minLength: 4)
             }
             .padding(.bottom, 6)
@@ -1555,6 +1579,40 @@ extension MapHomeScreen {
                 .accessibilityLabel(navigating ? "Stop navigating"
                                                : "Navigate to plot")
                 .accessibilityIdentifier("cruiseMap.plannedPeek.navigate")
+
+                // Skip toggle — an EXPLICIT cruiser action (unlike `visited`,
+                // which flips implicitly on recording a centre). "Mark
+                // unreachable" documents a cliff/water/private-land plot so
+                // navigation passes over it; "Restore plot" undoes it, mirroring
+                // PlotSummaryScreen's Reopen affordance. "Set plot centre (GPS)"
+                // stays available even when skipped — a cruiser who later
+                // reaches the plot can still record it (which sets visited).
+                Button {
+                    if planned.skipped {
+                        setPlannedSkipped(planned, false)
+                    } else {
+                        setPlannedSkipped(planned, true)
+                        withAnimation(.easeOut(duration: 0.18)) {
+                            selectedPinID = nil
+                        }
+                    }
+                } label: {
+                    Label(planned.skipped ? "Restore plot" : "Mark unreachable",
+                          systemImage: planned.skipped ? "lock.open" : "slash.circle")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(planned.skipped ? ForestixPalette.textPrimary
+                                                         : ForestixPalette.confidenceWarn)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .background(
+                            RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                             style: .continuous)
+                                .stroke(planned.skipped ? ForestixPalette.divider
+                                                        : ForestixPalette.confidenceWarn.opacity(0.5),
+                                        lineWidth: 1))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(CruisePressableStyle())
+                .accessibilityIdentifier("cruiseMap.plannedPeek.skip")
             }
             .padding(.top, ForestixSpace.sm)
         }
@@ -1589,6 +1647,26 @@ extension MapHomeScreen {
         .background(
             RoundedRectangle(cornerRadius: ForestixRadius.chip)
                 .fill(ForestixPalette.surfaceRaised))
+    }
+
+    /// Shared status token, skipped flavour: warn-coloured, mirroring the
+    /// map pin's warn tint + "SKIP" badge for an inaccessible planned plot.
+    var skippedChip: some View {
+        HStack(spacing: 4) {
+            Circle()
+                .stroke(ForestixPalette.confidenceWarn,
+                        style: StrokeStyle(lineWidth: 1.5, dash: [2, 2]))
+                .frame(width: 6, height: 6)
+            Text("SKIPPED")
+                .font(.system(size: 10, weight: .bold))
+                .tracking(0.6)
+        }
+        .foregroundStyle(ForestixPalette.confidenceWarn)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 2)
+        .background(
+            RoundedRectangle(cornerRadius: ForestixRadius.chip)
+                .fill(ForestixPalette.confidenceWarn.opacity(0.12)))
     }
 
     /// LOCKED row format: "X m · bearing Y°" from the current fix.

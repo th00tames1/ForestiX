@@ -91,6 +91,7 @@ public enum ShapefileExporter {
                 ("plot_num", .int(p.plotNumber)),
                 ("stratum",  .string(p.stratumId?.uuidString ?? "", width: 36)),
                 ("visited",  .string(p.visited ? "yes" : "no", width: 3)),
+                ("skipped",  .string(p.skipped ? "yes" : "no", width: 3)),
                 ("planned_id", .string(p.id.uuidString, width: 36))
             ]
         }

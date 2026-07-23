@@ -91,7 +91,7 @@ class AppEnvironment private constructor(
 
             val cruiseDb = Room.databaseBuilder(
                 app, CruiseDatabase::class.java, CruiseDatabase.NAME)
-                .addMigrations(CruiseDatabase.MIGRATION_1_2)
+                .addMigrations(CruiseDatabase.MIGRATION_1_2, CruiseDatabase.MIGRATION_2_3)
                 .build()
             val speciesConfigRepository = RoomSpeciesConfigRepository(cruiseDb.speciesConfigDao())
             val volumeEquationRepository = RoomVolumeEquationRepository(cruiseDb.volumeEquationDao())

@@ -199,6 +199,10 @@ internal class CruiseModeState {
     var startPlot: () -> Unit = {}
     var addTree: (Plot) -> Unit = {}
     var closePlot: (Plot) -> Unit = {}
+    /// Toggle a planned plot's `skipped` flag (planned-peek "Skip plot" /
+    /// "Un-skip"). A skipped plot is inaccessible (cliff/water/private land)
+    /// so it drops out of nearest-unvisited nav while still rendering.
+    var skipPlanned: (PlannedPlot) -> Unit = {}
     /// Hard delete a plot + cascade its trees (plot peek "Delete plot").
     var deletePlot: (Plot) -> Unit = {}
     /// Hard delete a tree + its photo (tree peek "Delete tree").
@@ -341,6 +345,28 @@ internal fun CruiseModeEffects(
             } catch (_: Exception) {
                 plot.closedAt = null
                 plot.closedBy = null
+            }
+            state.selectedId = null
+            state.refresh++
+        }
+    }
+
+    /// Planned peek "Skip plot (can't reach)" / "Un-skip": flip the planned
+    /// plot's `skipped` flag and persist through the SAME
+    /// plannedPlotRepository.update path RecordCentreSheet uses to set
+    /// visited=true. A newly-skipped plot drops out of nearest-unvisited nav,
+    /// so any dashed guide line armed at it is cleared. Reverts the in-memory
+    /// flag on a storage error, mirroring closePlot.
+    state.skipPlanned = { planned ->
+        scope.launch {
+            try {
+                planned.skipped = !planned.skipped
+                env.plannedPlotRepository.update(planned)
+                if (planned.skipped && state.navTargetId == planned.id) {
+                    state.navTargetId = null
+                }
+            } catch (_: Exception) {
+                planned.skipped = !planned.skipped
             }
             state.selectedId = null
             state.refresh++
@@ -544,6 +570,7 @@ internal fun CruiseModeBottomContent(
                     state.navTargetId =
                         if (state.navTargetId == peekPlanned.id) null else peekPlanned.id
                 },
+                onToggleSkip = { state.skipPlanned(peekPlanned) },
             )
 
             peekPlot != null -> PlotPeekCard(
@@ -585,7 +612,9 @@ internal fun CruiseModeBottomContent(
                 // plot's centre (same flow as tapping its dashed pin →
                 // RecordCentreSheet) instead of starting a fresh plot.
                 // Nearest by current fix; no fix → first unvisited planned.
-                val plannedUnvisited = state.data.plannedPlots
+                // Skipped plots are inaccessible (documented), so they are
+                // never nav-eligible even though they still render on the map.
+                val plannedUnvisited = state.data.plannedPlots.filter { !it.skipped }
                 CruiseActionCluster(
                     activePlot = activePlot,
                     hasPlannedUnvisited = plannedUnvisited.isNotEmpty(),
@@ -810,14 +839,16 @@ private fun cruiseMarkers(
 ): List<MapMarker> {
     val markers = mutableListOf<MapMarker>()
     // Unvisited planned plots (mock ⑦ `.plotpin.planned`): dashed hollow
-    // rings in the tertiary ink — visibly "not real yet".
+    // rings in the tertiary ink — visibly "not real yet". A SKIPPED plot
+    // (inaccessible) stays on the map but dims to 40% so it reads as a
+    // documented decision, not a pending target.
     for (planned in data.plannedPlots) {
         val id = "planned-${planned.id}"
         markers += MapMarker(
             coordinate = CoordinateConversions.LatLon(
                 latitude = planned.plannedLat, longitude = planned.plannedLon),
             title = "P${planned.plotNumber}",
-            tint = plannedTint,
+            tint = if (planned.skipped) plannedTint.copy(alpha = 0.4f) else plannedTint,
             id = id,
             shape = MapMarkerShape.RING,
             selected = id == selectedId,
@@ -900,10 +931,14 @@ private fun PlannedPeekCard(
     modifier: Modifier = Modifier,
     onRecordCentre: () -> Unit,
     onToggleNavigate: () -> Unit,
+    onToggleSkip: () -> Unit,
 ) {
     val colors = Forestix.colors
     val type = Forestix.type
     val shape = RoundedCornerShape(14.dp)
+    // A skipped plot is documented inaccessible: the peek swaps the PLANNED
+    // chip for SKIPPED and offers only "Un-skip" (no centre-set / navigate).
+    val skipped = planned.skipped
 
     Column(
         modifier
@@ -933,7 +968,7 @@ private fun PlannedPeekCard(
                 modifier = Modifier.weight(1f, fill = false),
             )
             Spacer(Modifier.size(8.dp))
-            PlannedChip()
+            if (skipped) SkippedChip() else PlannedChip()
             Spacer(Modifier.weight(1f))
         }
         Spacer(Modifier.size(6.dp))
@@ -971,43 +1006,84 @@ private fun PlannedPeekCard(
             )
         }
         Spacer(Modifier.size(ForestixSpace.sm))
-        // 54 dp primary — LOCKED "Set plot centre (GPS)".
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .heightIn(min = 54.dp)
-                .pressableNoRipple(onClick = onRecordCentre)
-                .clip(ForestixRadius.card)
-                .background(colors.primary),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                "Set plot centre (GPS)",
-                style = type.bodyBold.copy(fontSize = 15.sp),
-                color = MaterialTheme.colorScheme.onPrimary,
-            )
-        }
-        Spacer(Modifier.size(8.dp))
-        // LOCKED secondary "Navigate" — toggles the dashed guide line;
-        // the active state reads in the accent outline.
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .heightIn(min = 44.dp)
-                .pressableNoRipple(onClick = onToggleNavigate)
-                .clip(ForestixRadius.control)
-                .border(
-                    if (navigating) 1.5.dp else 1.dp,
-                    if (navigating) colors.accent else colors.divider,
-                    ForestixRadius.control,
-                ),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                "Navigate",
-                style = type.bodyBold.copy(fontSize = 14.sp),
-                color = if (navigating) colors.accent else colors.textPrimary,
-            )
+        if (!skipped) {
+            // 54 dp primary — LOCKED "Set plot centre (GPS)".
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 54.dp)
+                    .pressableNoRipple(onClick = onRecordCentre)
+                    .clip(ForestixRadius.card)
+                    .background(colors.primary),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "Set plot centre (GPS)",
+                    style = type.bodyBold.copy(fontSize = 15.sp),
+                    color = MaterialTheme.colorScheme.onPrimary,
+                )
+            }
+            Spacer(Modifier.size(8.dp))
+            // LOCKED secondary "Navigate" — toggles the dashed guide line;
+            // the active state reads in the accent outline.
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 44.dp)
+                    .pressableNoRipple(onClick = onToggleNavigate)
+                    .clip(ForestixRadius.control)
+                    .border(
+                        if (navigating) 1.5.dp else 1.dp,
+                        if (navigating) colors.accent else colors.divider,
+                        ForestixRadius.control,
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "Navigate",
+                    style = type.bodyBold.copy(fontSize = 14.sp),
+                    color = if (navigating) colors.accent else colors.textPrimary,
+                )
+            }
+            Spacer(Modifier.size(8.dp))
+            // 44 dp outline "Skip plot (can't reach)" — marks the plot
+            // inaccessible so nearest-unvisited nav passes over it. Modeled on
+            // the Navigate outline button above.
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 44.dp)
+                    .pressableNoRipple(onClick = onToggleSkip)
+                    .clip(ForestixRadius.control)
+                    .border(1.dp, colors.divider, ForestixRadius.control),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "Skip plot (can't reach)",
+                    style = type.bodyBold.copy(fontSize = 14.sp),
+                    color = colors.textSecondary,
+                )
+            }
+        } else {
+            // Documented inaccessible: no centre-set / navigate. A single
+            // "Un-skip" outline reverses the decision (mirrors the
+            // reopen-closed-plot affordance) and returns the plot to the
+            // nearest-unvisited nav set.
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 44.dp)
+                    .pressableNoRipple(onClick = onToggleSkip)
+                    .clip(ForestixRadius.control)
+                    .border(1.dp, colors.divider, ForestixRadius.control),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "Un-skip",
+                    style = type.bodyBold.copy(fontSize = 14.sp),
+                    color = colors.textPrimary,
+                )
+            }
         }
     }
 }
@@ -1045,6 +1121,36 @@ private fun PlannedChip() {
             style = Forestix.type.caption.copy(
                 fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.6.sp),
             color = tertiary,
+        )
+    }
+}
+
+/// Status token for a SKIPPED planned plot: a SOLID (not dashed) warn-tinted
+/// dot + "SKIPPED" — reads as a deliberate, documented decision, visibly
+/// distinct from the hollow-dashed PLANNED chip.
+@Composable
+private fun SkippedChip() {
+    val colors = Forestix.colors
+    val warn = colors.confidenceWarn
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = Modifier
+            .clip(ForestixRadius.chip)
+            .background(colors.surfaceRaised)
+            .padding(horizontal = 7.dp, vertical = 2.dp),
+    ) {
+        Box(
+            Modifier
+                .size(6.dp)
+                .clip(CircleShape)
+                .background(warn),
+        )
+        Text(
+            "SKIPPED",
+            style = Forestix.type.caption.copy(
+                fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.6.sp),
+            color = warn,
         )
     }
 }

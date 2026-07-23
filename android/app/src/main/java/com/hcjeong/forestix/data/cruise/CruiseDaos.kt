@@ -87,7 +87,7 @@ interface PlannedPlotDao {
     @Query("SELECT * FROM PlannedPlotEntity WHERE projectId = :projectId ORDER BY plotNumber ASC")
     suspend fun listByProject(projectId: UUID): List<PlannedPlotEntity>
 
-    @Query("SELECT * FROM PlannedPlotEntity WHERE projectId = :projectId AND visited = 0 ORDER BY plotNumber ASC")
+    @Query("SELECT * FROM PlannedPlotEntity WHERE projectId = :projectId AND visited = 0 AND skipped = 0 ORDER BY plotNumber ASC")
     suspend fun listUnvisited(projectId: UUID): List<PlannedPlotEntity>
 
     @Query("SELECT * FROM PlannedPlotEntity WHERE projectId = :projectId ORDER BY plotNumber ASC")

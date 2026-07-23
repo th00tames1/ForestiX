@@ -570,7 +570,7 @@ fun MapHomeScreen(nav: NavController) {
             onDismissRequest = { env.settings.setRegionPickerSeen(true) },
             containerColor = colors.surface,
         ) {
-            RegionPickerSheet(onDismiss = {
+            LocaleSetupSheet(onDismiss = {
                 // Selection/Skip already stamped regionPickerSeen — the
                 // state change hides the sheet.
             })

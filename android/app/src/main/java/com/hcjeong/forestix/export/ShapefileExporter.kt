@@ -84,6 +84,7 @@ object ShapefileExporter {
                 "plot_num" to DBFValue.IntValue(p.plotNumber),
                 "stratum" to DBFValue.StringValue(p.stratumId?.uuidString ?: "", width = 36),
                 "visited" to DBFValue.StringValue(if (p.visited) "yes" else "no", width = 3),
+                "skipped" to DBFValue.StringValue(if (p.skipped) "yes" else "no", width = 3),
                 "planned_id" to DBFValue.StringValue(p.id.uuidString, width = 36),
             )
         }

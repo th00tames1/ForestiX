@@ -63,7 +63,7 @@ object CSVExporter {
     ): String {
         val byId: Map<UUID, Stratum> = strata.associateBy { it.id }
         val lines = mutableListOf(
-            "plot_number,stratum_id,stratum_name,planned_lat,planned_lon,visited"
+            "plot_number,stratum_id,stratum_name,planned_lat,planned_lon,visited,skipped"
         )
         val sorted = plannedPlots.sortedBy { it.plotNumber }
         for (p in sorted) {
@@ -76,6 +76,7 @@ object CSVExporter {
                     format(p.plannedLat, places = 7),
                     format(p.plannedLon, places = 7),
                     if (p.visited) "true" else "false",
+                    if (p.skipped) "true" else "false",
                 ).joinToString(",")
             )
         }

@@ -71,6 +71,7 @@ data class PlannedPlotEntity(
     val plannedLat: Double,
     val plannedLon: Double,
     val visited: Boolean,
+    val skipped: Boolean,
 )
 
 @Entity(tableName = "PlotEntity", indices = [Index("projectId")])

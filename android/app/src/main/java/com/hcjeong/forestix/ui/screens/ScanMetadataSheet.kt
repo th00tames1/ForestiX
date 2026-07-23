@@ -54,6 +54,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hcjeong.forestix.LocalAppEnvironment
+import com.hcjeong.forestix.common.CountrySpecies
 import com.hcjeong.forestix.common.Region
 import com.hcjeong.forestix.common.RegionalSpecies
 import com.hcjeong.forestix.data.StemPosition
@@ -89,9 +90,17 @@ fun ScanMetadataSheet(
     // iOS ScanMetadataSheet.speciesOptions: the curated regional list for
     // settings.region (nil → .all) plus a permanent "OT · Other" escape
     // hatch — cruisers occasionally measure non-regional trees.
-    val speciesOptions = remember(settings.region) {
-        val region = Region.fromRaw(settings.region) ?: Region.ALL
-        RegionalSpecies.defaultSpecies(region) + ("OT" to "Other")
+    val speciesOptions = remember(settings.country, settings.region) {
+        val country = settings.country
+        val base = if (country.hasRegions) {
+            // US: scoped by the selected timber region.
+            val region = Region.fromRaw(settings.region) ?: Region.ALL
+            RegionalSpecies.defaultSpecies(region)
+        } else {
+            // Metric countries (incl. Korea scaffold): single national preset.
+            CountrySpecies.defaultSpecies(country)
+        }
+        base + ("OT" to "Other")
     }
     ModalBottomSheet(
         onDismissRequest = onDismiss,

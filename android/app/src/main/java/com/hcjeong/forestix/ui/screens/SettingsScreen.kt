@@ -50,8 +50,10 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
+import com.hcjeong.forestix.common.Country
 import com.hcjeong.forestix.common.Region
 import com.hcjeong.forestix.common.UnitSystem
+import com.hcjeong.forestix.common.defaultLogRule
 import com.hcjeong.forestix.data.ResearchLog
 import com.hcjeong.forestix.sensors.ChordAlgorithm
 import com.hcjeong.forestix.sensors.LogRule
@@ -118,20 +120,48 @@ fun SettingsScreen(nav: NavController) {
                 .padding(ForestixSpace.md),
             verticalArrangement = Arrangement.spacedBy(ForestixSpace.md),
         ) {
-            // MARK: - Region
+            // MARK: - Country & region (internationalization framework)
             FormSection(
-                header = "Region",
-                footer = "Pre-loads the FIA species set for your timber region — " +
-                    "affects which species appear in scan-time pickers.",
+                header = "Country & region",
+                footer = "Country sets the species presets and the volume standard — " +
+                    "board-foot log rules for the US, cubic metres elsewhere. Region " +
+                    "further tunes the US species set and its default log rule.",
             ) {
-                val selected = Region.fromRaw(settings.region) ?: Region.ALL
                 MenuPickerRow(
-                    title = "Region",
-                    value = selected.displayName,
-                    options = Region.entries.map { it.displayName },
+                    title = "Country",
+                    value = settings.country.displayName,
+                    options = Country.entries.map { it.displayName },
                 ) { index ->
-                    env.settings.setRegion(Region.entries[index].raw)
+                    val c = Country.entries[index]
+                    env.settings.setCountry(c)
+                    // Metric countries have no region; clear the US region so
+                    // the scan picker falls back to the country species preset.
+                    if (!c.hasRegions) env.settings.setRegion(null)
                     env.settings.setRegionPickerSeen(true)
+                }
+                // Region row only for countries that have regions (the US).
+                if (settings.country.hasRegions) {
+                    FormDivider()
+                    val selected = Region.fromRaw(settings.region) ?: Region.ALL
+                    MenuPickerRow(
+                        title = "Region",
+                        value = selected.displayName,
+                        options = Region.entries.map { it.displayName },
+                    ) { index ->
+                        val r = Region.entries[index]
+                        env.settings.setRegion(r.raw)
+                        // Derive the US default log rule (West→Scribner, East→Doyle).
+                        env.settings.setLogRule(r.defaultLogRule)
+                        env.settings.setRegionPickerSeen(true)
+                    }
+                }
+                FormDivider()
+                // Volume standard — read-only, derived from the country.
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Volume standard", style = type.body, color = colors.textPrimary,
+                        modifier = Modifier.weight(1f))
+                    Text(settings.country.volumeStandardLabel, style = type.caption,
+                        color = colors.textSecondary)
                 }
             }
 
@@ -170,18 +200,21 @@ fun SettingsScreen(nav: NavController) {
                 }
             }
 
-            // MARK: - Log rule
-            FormSection(
-                header = "Log rule",
-                footer = "Determines board-foot volume from DBH + height. Scribner is " +
-                    "the USFS Western default; Doyle dominates the Eastern US; " +
-                    "International ¼″ is the most accurate but rarely used in practice.",
-            ) {
-                MenuPickerRow(
-                    title = "Log rule",
-                    value = settings.logRule.displayName,
-                    options = LogRule.entries.map { it.displayName },
-                ) { index -> env.settings.setLogRule(LogRule.entries[index]) }
+            // MARK: - Log rule (US only — board-foot is a North-America concept;
+            // metric countries express volume in m³ and hide this entirely)
+            if (settings.country.usesLogRule) {
+                FormSection(
+                    header = "Log rule",
+                    footer = "Determines board-foot volume from DBH + height. Scribner is " +
+                        "the USFS Western default; Doyle dominates the Eastern US; " +
+                        "International ¼″ is the most accurate but rarely used in practice.",
+                ) {
+                    MenuPickerRow(
+                        title = "Log rule",
+                        value = settings.logRule.displayName,
+                        options = LogRule.entries.map { it.displayName },
+                    ) { index -> env.settings.setLogRule(LogRule.entries[index]) }
+                }
             }
 
             // MARK: - Developer (+ research CSV rows)

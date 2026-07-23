@@ -40,7 +40,12 @@ object SeedDataLoader {
         if (existing.isNotEmpty()) return BootstrapResult(0, 0)
 
         // Volume equations first so the species inserts find their FK.
-        val bundledEqs = SeedData.bundledVolumeEquations(context)
+        // The US PNW starter set plus the internationalization framework's
+        // metric (m³) equations (Laasasenaho + form factor) — both are
+        // seeded so a metric cruiser has real equations to assign. A missing
+        // metric asset must not block the US set, so it is loaded defensively.
+        val bundledEqs = SeedData.bundledVolumeEquations(context) +
+            runCatching { SeedData.bundledMetricVolumeEquations(context) }.getOrDefault(emptyList())
         val existingEqIds = volRepo.list().map { it.id }.toSet()
         var insertedEqs = 0
         for (eq in bundledEqs) {

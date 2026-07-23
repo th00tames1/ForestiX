@@ -30,8 +30,13 @@ public enum SeedDataLoader {
         let existing = try speciesRepo.list()
         guard existing.isEmpty else { return (0, 0) }
 
-        // Volume equations first so the species inserts find their FK.
-        let bundledEqs = try SeedData.bundledVolumeEquations()
+        // Volume equations first so the species inserts find their FK. The US
+        // PNW starter set plus the internationalisation framework's metric (m³)
+        // equations (Laasasenaho + form factor) — both are seeded so a metric
+        // cruiser has real equations to assign. A missing metric asset must not
+        // block the US set, so it is loaded defensively.
+        let metricEqs = (try? SeedData.bundledMetricVolumeEquations()) ?? []
+        let bundledEqs = try SeedData.bundledVolumeEquations() + metricEqs
         let existingEqIds = Set(try volRepo.list().map { $0.id })
         var insertedEqs = 0
         for eq in bundledEqs where !existingEqIds.contains(eq.id) {

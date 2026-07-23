@@ -213,6 +213,13 @@ public enum RegionalSpecies {
                 if map[key] == nil { map[key] = name }
             }
         }
+        // Fold in the non-US country presets (Finland / Germany / Korea) so a
+        // code tallied under a metric country still reads correctly wherever
+        // it's displayed.
+        for (code, name) in Country.allNonUSSpecies {
+            let key = code.uppercased()
+            if map[key] == nil { map[key] = name }
+        }
         return map
     }()
 }

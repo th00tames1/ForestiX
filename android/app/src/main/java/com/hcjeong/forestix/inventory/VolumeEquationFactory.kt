@@ -17,6 +17,9 @@ object VolumeEquationFactory {
             "chambers_foltz" -> ChambersFoltzHemlock(coefficients = record.coefficients)
             "schumacher_hall" -> SchumacherHall(coefficients = record.coefficients)
             "table_lookup" -> TableLookup(coefficients = record.coefficients)
+            // Metric (m³) engine — internationalization framework.
+            "laasasenaho" -> Laasasenaho(coefficients = record.coefficients)
+            "formfactor" -> Formfactor(coefficients = record.coefficients)
             else -> null
         }
 }

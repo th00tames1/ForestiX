@@ -281,7 +281,7 @@ public struct MapHomeScreen: View {
                 // First-launch UX: auto-present the region picker once,
                 // after the splash has settled — but never re-prompt a
                 // cruiser who already has a region.
-                if settings.region == nil && !settings.regionPickerSeen {
+                if !settings.regionPickerSeen {
                     presentingRegionPicker = true
                 }
             }
@@ -351,7 +351,7 @@ public struct MapHomeScreen: View {
             // stamps regionPickerSeen so the picker never nags again.
             .sheet(isPresented: $presentingRegionPicker,
                    onDismiss: { settings.regionPickerSeen = true }) {
-                RegionPickerSheet()
+                LocaleSetupSheet()
                     .environmentObject(settings)
             }
             .sheet(isPresented: $presentingSettings) {

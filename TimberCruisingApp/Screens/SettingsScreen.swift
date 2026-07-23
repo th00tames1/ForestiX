@@ -42,10 +42,14 @@ public struct SettingsScreen: View {
             // no longer drives anything. The `advancedMode` property
             // on AppSettings is preserved for back-compat but the
             // Settings UI doesn't expose it any more.
-            regionSection
+            countryRegionSection
             appearanceSection
             unitsSection
-            logRuleSection
+            // Board-foot log rules are North-America-only — hidden for the
+            // metric countries, which never scale in board feet.
+            if settings.country.usesLogRule {
+                logRuleSection
+            }
             developerSection
             if settings.developerMode {
                 dbhMethodSection
@@ -134,21 +138,57 @@ public struct SettingsScreen: View {
 
     // MARK: - Sections
 
-    private var regionSection: some View {
+    private var countryRegionSection: some View {
         Section(
-            header: Text("Region"),
-            footer: Text("Pre-loads the FIA species set for your timber region — affects which species appear in scan-time pickers.")
+            header: Text("Country & region"),
+            footer: Text("Country sets your volume standard and units; the US adds a board-foot log rule and a timber-region species set, while other countries measure in cubic metres.")
         ) {
-            Picker("Region",
+            Picker("Country",
                    selection: Binding(
-                    get: { settings.region ?? .all },
-                    set: { settings.region = $0; settings.regionPickerSeen = true })
+                    get: { settings.country },
+                    set: { newCountry in
+                        settings.country = newCountry
+                        settings.regionPickerSeen = true
+                        // Metric countries use a single implicit region.
+                        if !newCountry.hasRegions { settings.region = nil }
+                    })
             ) {
-                ForEach(Region.allCases) { r in
-                    Text(r.displayName).tag(r)
+                ForEach(Country.allCases) { c in
+                    Text(c.displayName).tag(c)
                 }
             }
-            .accessibilityIdentifier("settings.region")
+            .accessibilityIdentifier("settings.country")
+
+            // Region row — US only (the country owns the 11-region map).
+            if settings.country.hasRegions {
+                Picker("Region",
+                       selection: Binding(
+                        get: { settings.region ?? .all },
+                        set: { r in
+                            settings.region = r
+                            // Derive the US default log rule (West→Scribner,
+                            // East→Doyle) so the cruiser never sets it by hand.
+                            settings.logRule = r.defaultLogRule
+                            settings.regionPickerSeen = true
+                        })
+                ) {
+                    ForEach(settings.country.regions) { r in
+                        Text(r.displayName).tag(r)
+                    }
+                }
+                .accessibilityIdentifier("settings.region")
+            }
+
+            // Read-only volume standard, derived from the selection.
+            HStack {
+                Text("Volume standard")
+                Spacer()
+                Text(settings.country.volumeStandard.displayName)
+                    .font(ForestixType.caption)
+                    .foregroundStyle(ForestixPalette.textSecondary)
+                    .multilineTextAlignment(.trailing)
+            }
+            .accessibilityIdentifier("settings.volumeStandard")
         }
     }
 

@@ -81,11 +81,12 @@ public struct ScanMetadataSheet: View {
     }
 
     private var speciesOptions: [(String, String)] {
-        let region = settings.region ?? .all
-        let regional = RegionalSpecies.defaultSpecies(for: region)
-        // Always allow "Other" rather than locking to the regional
-        // list — cruisers occasionally measure non-regional trees.
-        return regional + [("OT", "Other")]
+        // Country-scoped: the US resolves its per-region FIA presets; metric
+        // countries carry a flat national list.
+        let preset = settings.country.speciesPresets(region: settings.region)
+        // Always allow "Other" rather than locking to the preset
+        // list — cruisers occasionally measure non-preset trees.
+        return preset + [("OT", "Other")]
     }
 
     /// Name-first option label: the common name reads prominently, the

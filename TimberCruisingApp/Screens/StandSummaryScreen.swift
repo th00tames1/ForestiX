@@ -14,8 +14,16 @@ public struct StandSummaryScreen: View {
 
     @StateObject private var viewModel: StandSummaryViewModel
 
-    public init(viewModel: @autoclosure @escaping () -> StandSummaryViewModel) {
+    /// TRUE when the active country's volume standard is pending official
+    /// coefficients (South Korea) — the gross-volume card then renders "—"
+    /// rather than a fabricated 0. Defaults to false so US / metric callers,
+    /// previews and tests are unchanged.
+    private let volumePending: Bool
+
+    public init(viewModel: @autoclosure @escaping () -> StandSummaryViewModel,
+                volumePending: Bool = false) {
         _viewModel = StateObject(wrappedValue: viewModel())
+        self.volumePending = volumePending
     }
 
     public var body: some View {
@@ -32,7 +40,8 @@ public struct StandSummaryScreen: View {
             statCardSection(title: "Gross volume", unit: "m³/ac",
                             stat: viewModel.volStat,
                             perPlot: viewModel.perPlotStats.map {
-                                (plot: $0.plot, value: Double($0.stats.grossVolumePerAcreM3)) })
+                                (plot: $0.plot, value: Double($0.stats.grossVolumePerAcreM3)) },
+                            pending: volumePending)
             perPlotTableSection
         }
         .navigationTitle("Stand summary")
@@ -71,9 +80,19 @@ public struct StandSummaryScreen: View {
         title: String,
         unit: String,
         stat: StandStat,
-        perPlot: [(plot: Models.Plot, value: Double)]
+        perPlot: [(plot: Models.Plot, value: Double)],
+        pending: Bool = false
     ) -> some View {
         Section(title) {
+            if pending {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("—").font(ForestixType.dataLarge)
+                    Text("Volume for South Korea is pending official NIFoS coefficients. Trees, basal area and stocking are unaffected.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } else {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Text(String(format: "%.2f %@", stat.mean, unit))
@@ -122,6 +141,7 @@ public struct StandSummaryScreen: View {
                         }
                     }
                 }
+            }
             }
         }
     }

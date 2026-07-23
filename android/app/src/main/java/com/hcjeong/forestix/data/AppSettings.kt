@@ -12,6 +12,7 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.hcjeong.forestix.common.Country
 import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.sensors.LogRule
 import kotlinx.coroutines.CoroutineScope
@@ -53,7 +54,15 @@ data class SettingsSnapshot(
     val overlayEnabled: Boolean = true,
     val providerUsageAcknowledged: Boolean = false,
     val advancedMode: Boolean = false,
+    /// Internationalization framework — Country sits above Region and derives
+    /// the volume standard, unit (board-foot vs m³) and whether the Log rule
+    /// applies. Defaults to UNITED_STATES so existing US installs are
+    /// unchanged (mirror of iOS tc.country).
+    val country: Country = Country.UNITED_STATES,
     val region: String? = null,
+    /// Gates the first-run Country → Region cascade (formerly the US-only
+    /// region picker). Stamped once the cascade is picked, skipped or
+    /// dismissed so it never auto-presents again.
     val regionPickerSeen: Boolean = false,
     /// Developer / research mode — surfaces the live measurement internals
     /// (depth source, intrinsics, point counts, raw chord, pitch, σ) on the
@@ -112,6 +121,7 @@ class AppSettings(private val context: Context) {
         val overlayEnabled = booleanPreferencesKey("tc.overlayEnabled")
         val providerUsageAck = booleanPreferencesKey("tc.providerUsageAcknowledged")
         val advancedMode = booleanPreferencesKey("tc.advancedMode")
+        val country = stringPreferencesKey("tc.country")
         val region = stringPreferencesKey("tc.region")
         val regionPickerSeen = booleanPreferencesKey("tc.regionPickerSeen")
         val logRule = stringPreferencesKey("tc.logRule")
@@ -158,6 +168,7 @@ class AppSettings(private val context: Context) {
             overlayEnabled = p[Keys.overlayEnabled] ?: true,
             providerUsageAcknowledged = p[Keys.providerUsageAck] ?: false,
             advancedMode = p[Keys.advancedMode] ?: false,
+            country = Country.fromRaw(p[Keys.country]) ?: Country.default,
             region = p[Keys.region],
             regionPickerSeen = p[Keys.regionPickerSeen] ?: false,
             developerMode = p[Keys.developerMode] ?: false,
@@ -259,6 +270,11 @@ class AppSettings(private val context: Context) {
     fun setAdvancedMode(value: Boolean) = update {
         _state.value = _state.value.copy(advancedMode = value)
         it[Keys.advancedMode] = value
+    }
+
+    fun setCountry(value: Country) = update {
+        _state.value = _state.value.copy(country = value)
+        it[Keys.country] = value.raw
     }
 
     fun setRegion(value: String?) = update {

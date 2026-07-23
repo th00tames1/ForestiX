@@ -2040,7 +2040,8 @@ extension MapHomeScreen {
                     volRepo: environment.volumeEquationRepository,
                     hdFitRepo: environment.hdFitRepository,
                     stratumRepo: environment.stratumRepository,
-                    plannedRepo: environment.plannedPlotRepository))
+                    plannedRepo: environment.plannedPlotRepository),
+                    volumePending: settings.country.volumeStandard.isPending)
             }
         case .export:
             if let project = currentProject {

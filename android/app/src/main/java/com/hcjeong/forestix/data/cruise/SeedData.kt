@@ -105,10 +105,21 @@ object SeedData {
         }
     }
 
-    /// Read + decode the bundled `VolumeEquationsPNW.json`.
+    /// Read + decode the bundled `VolumeEquationsPNW.json` (US starter set).
     @Throws(SeedDataError::class)
-    fun bundledVolumeEquations(context: Context): List<VolumeEquation> {
-        val root = readJson(context, "VolumeEquationsPNW")
+    fun bundledVolumeEquations(context: Context): List<VolumeEquation> =
+        decodeVolumeEquations(context, "VolumeEquationsPNW")
+
+    /// Read + decode `VolumeEquationsMetric.json` — the internationalization
+    /// framework's metric (m³) equations (Laasasenaho + generic form factor).
+    /// Seeded alongside the US set so a metric cruiser has real m³ equations
+    /// to bind their species to.
+    @Throws(SeedDataError::class)
+    fun bundledMetricVolumeEquations(context: Context): List<VolumeEquation> =
+        decodeVolumeEquations(context, "VolumeEquationsMetric")
+
+    private fun decodeVolumeEquations(context: Context, name: String): List<VolumeEquation> {
+        val root = readJson(context, name)
         return try {
             val arr = root.getJSONArray("equations")
             (0 until arr.length()).map { i ->
@@ -130,7 +141,7 @@ object SeedData {
             }
         } catch (e: Exception) {
             if (e is SeedDataError) throw e
-            throw SeedDataError.DecodeFailed("VolumeEquationsPNW", e)
+            throw SeedDataError.DecodeFailed(name, e)
         }
     }
 

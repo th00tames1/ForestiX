@@ -41,6 +41,7 @@ public final class AppSettings: ObservableObject {
         public static let providerUsageAck        = "tc.providerUsageAcknowledged"
         public static let overlayEnabled          = "tc.overlayEnabled"
         public static let advancedMode            = "tc.advancedMode"
+        public static let country                 = "tc.country"
         public static let region                  = "tc.region"
         public static let regionPickerSeen        = "tc.regionPickerSeen"
         public static let logRule                 = "tc.logRule"
@@ -150,6 +151,20 @@ public final class AppSettings: ObservableObject {
     public var mapMode: String {
         get { defaults.string(forKey: Keys.mapMode) ?? "measure" }
         set { defaults.set(newValue, forKey: Keys.mapMode); objectWillChange.send() }
+    }
+
+    /// Country the cruiser is working in — sits above `region` and decides the
+    /// volume standard, the cubic unit, whether a board-foot log rule applies,
+    /// and whether the first-run cascade shows the US region step. Defaults to
+    /// `.unitedStates` so every existing install keeps behaving exactly as it
+    /// did before internationalisation landed. The Android sibling reads the
+    /// same `tc.country` key.
+    public var country: Country {
+        get { Country.fromRaw(defaults.string(forKey: Keys.country)) }
+        set {
+            defaults.set(newValue.rawValue, forKey: Keys.country)
+            objectWillChange.send()
+        }
     }
 
     /// Pre-loaded regional species filter. nil = no region picked yet

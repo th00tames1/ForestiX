@@ -90,10 +90,21 @@ public enum SeedData {
         return file.species.map { $0.toModel() }
     }
 
-    /// Read + decode the bundled `VolumeEquationsPNW.json`.
+    /// Read + decode the bundled `VolumeEquationsPNW.json` (US starter set).
     public static func bundledVolumeEquations() throws -> [VolumeEquation] {
         let file = try decode(VolumeEquationSeedFile.self,
                               named: "VolumeEquationsPNW")
+        return file.equations.map { $0.toModel() }
+    }
+
+    /// Read + decode `VolumeEquationsMetric.json` — the internationalisation
+    /// framework's metric (m³) equations (Laasasenaho + generic form factor).
+    /// Seeded alongside the US set so a metric cruiser has real m³ equations to
+    /// bind their species to. Korea is intentionally absent (coefficients
+    /// pending). Mirrors the Android sibling's metric seed.
+    public static func bundledMetricVolumeEquations() throws -> [VolumeEquation] {
+        let file = try decode(VolumeEquationSeedFile.self,
+                              named: "VolumeEquationsMetric")
         return file.equations.map { $0.toModel() }
     }
 

@@ -18,6 +18,12 @@ public enum VolumeEquationFactory {
         case "chambers_foltz":     return ChambersFoltzHemlock(coefficients: record.coefficients)
         case "schumacher_hall":    return SchumacherHall(coefficients: record.coefficients)
         case "table_lookup":       return TableLookup(coefficients: record.coefficients)
+        // Internationalisation — metric volume forms.
+        case "laasasenaho":        return Laasasenaho(coefficients: record.coefficients)   // Finland, m³ (verified)
+        case "formfactor":         return Formfactor(coefficients: record.coefficients)    // Germany, m³ (approx.)
+        // Korea (KoreaNIFoS) is intentionally NOT registered: its official
+        // NIFoS coefficients are pending, so no Korean equation record is
+        // seeded and no Korean volume is fabricated. See KoreaNIFoS.swift.
         default:                   return nil
         }
     }

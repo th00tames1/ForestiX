@@ -565,7 +565,7 @@ fun MapHomeScreen(nav: NavController) {
     // swipe-dismissing all stamp regionPickerSeen, and it stays reachable
     // later via Settings → Region. Measure mode only — the default mode is
     // measure, so first run always lands here; cruise chrome stays clean.
-    if (!isCruise && settings.region == null && !settings.regionPickerSeen) {
+    if (!isCruise && !settings.regionPickerSeen) {
         ModalBottomSheet(
             onDismissRequest = { env.settings.setRegionPickerSeen(true) },
             containerColor = colors.surface,

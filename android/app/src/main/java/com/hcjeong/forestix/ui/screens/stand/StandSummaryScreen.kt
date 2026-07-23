@@ -57,6 +57,7 @@ import kotlin.math.sqrt
 @Composable
 fun StandSummaryScreen(nav: NavController, projectId: UUID) {
     val env = LocalAppEnvironment.current
+    val settings by env.settings.state.collectAsStateWithLifecycle()
     val colors = Forestix.colors
     val type = Forestix.type
 
@@ -125,9 +126,17 @@ fun StandSummaryScreen(nav: NavController, projectId: UUID) {
             StatCardSection(
                 title = "Basal area", unit = "m²/ac", stat = baStat, vm = vm,
                 perPlot = perPlotStats.map { Pair(it.plot, it.stats.baPerAcreM2.toDouble()) })
-            StatCardSection(
-                title = "Gross volume", unit = "m³/ac", stat = volStat, vm = vm,
-                perPlot = perPlotStats.map { Pair(it.plot, it.stats.grossVolumePerAcreM3.toDouble()) })
+            // Volume unit branches on the country: metric countries render m³
+            // (the engine's native unit); the US keeps m³ here as it does today.
+            // Korea is a scaffold — its official NIFoS coefficients are pending,
+            // so stand volume shows "—" rather than a fabricated figure.
+            if (settings.country.volumeStandardPending) {
+                PendingVolumeCard()
+            } else {
+                StatCardSection(
+                    title = "Gross volume", unit = "m³/ac", stat = volStat, vm = vm,
+                    perPlot = perPlotStats.map { Pair(it.plot, it.stats.grossVolumePerAcreM3.toDouble()) })
+            }
 
             PerPlotTableSection(perPlotStats)
             Spacer(Modifier.height(ForestixSpace.xl))
@@ -170,6 +179,24 @@ private fun SummaryCard(content: @Composable () -> Unit) {
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         content()
+    }
+}
+
+// MARK: - Pending volume (Korea scaffold — coefficients not yet bundled)
+
+@Composable
+private fun PendingVolumeCard() {
+    val colors = Forestix.colors
+    val type = Forestix.type
+    Column(verticalArrangement = Arrangement.spacedBy(ForestixSpace.xs)) {
+        SectionTitle("Gross volume")
+        SummaryCard {
+            Text("—", style = type.dataLarge, color = colors.textPrimary)
+            Text(
+                "Volume coefficients pending — official NIFoS national table not yet " +
+                    "bundled. DBH, height, basal area and trees/ac are unaffected.",
+                style = type.caption, color = colors.textSecondary)
+        }
     }
 }
 

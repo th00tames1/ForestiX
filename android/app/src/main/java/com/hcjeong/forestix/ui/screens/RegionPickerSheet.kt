@@ -2,7 +2,7 @@
 // First-run region picker. Shown once after install (and re-openable from
 // Settings) — picks one of 11 US timber regions and pre-loads the matching
 // FIA species codes into the species selection used across the app.
-// Adopted from SilvaCruise's onboarding pattern.
+// A first-run onboarding pattern.
 //
 // Dismissing without picking is allowed — the cruiser can pick later in
 // Settings → Region. We mark `regionPickerSeen = true` either way so the

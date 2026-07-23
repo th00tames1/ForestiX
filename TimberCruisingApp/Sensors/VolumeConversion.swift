@@ -1,8 +1,8 @@
 // Tree-volume conversion — DBH + height → board feet (Scribner /
-// International ¼" / Doyle). Adopted from SilvaCruise's pitch
-// ("peer-reviewed Wensel & Olsen 1995 for 8 western conifers,
+// International ¼" / Doyle). Uses standard cruise volume models
+// (peer-reviewed Wensel & Olsen 1995 for 8 western conifers,
 // Clark stem profile SE-282 for southern species, Form Class 78
-// fallback") so a Forestix DBH+H reading produces a salable cruise
+// fallback) so a Forestix DBH+H reading produces a salable cruise
 // number, not just a raw measurement.
 //
 // Scope of this first cut:

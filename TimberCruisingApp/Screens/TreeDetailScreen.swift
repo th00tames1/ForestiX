@@ -51,10 +51,29 @@ public struct TreeDetailScreen: View {
             set: { if !$0 { viewModel.clearError() } })
     }
 
+    /// Common name for the currently-typed code, or nil when the field is
+    /// blank or the code is free-typed / unknown (name == code).
+    private var resolvedSpeciesName: String? {
+        let code = viewModel.speciesCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !code.isEmpty else { return nil }
+        let name = RegionalSpecies.name(forCode: code)
+        return name.caseInsensitiveCompare(code) == .orderedSame ? nil : name
+    }
+
     private var identitySection: some View {
         Section("Identity") {
             TextField("Species code", text: $viewModel.speciesCode)
                 .onChange(of: viewModel.speciesCode) { _, _ in viewModel.markDirty() }
+            // Read-only resolution of the typed code → common name, so the
+            // cruiser sees what "DF" maps to. Hidden for blank or free-typed
+            // codes that don't resolve to a preset.
+            if let name = resolvedSpeciesName {
+                HStack {
+                    Text("Name")
+                    Spacer()
+                    Text(name).foregroundStyle(.secondary)
+                }
+            }
             Picker("Status", selection: $viewModel.status) {
                 Text("Live").tag(TreeStatus.live)
                 Text("Dead standing").tag(TreeStatus.deadStanding)

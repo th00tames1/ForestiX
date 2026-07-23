@@ -184,7 +184,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     var continuationTree by remember { mutableStateOf<Int?>(null) }
     // Developer-mode research capture: tape-measured true diameter (cm).
     var researchTrueCm by remember { mutableStateOf("") }
-    // Cruise quick-tally loop (Arboreal batch): the target tree number
+    // Cruise quick-tally loop (field-benchmark batch): the target tree number
     // shown in the top pill, mirrored into Compose state so advance/undo
     // recompose (CruiseCapture.target is a plain @Volatile holder).
     var cruiseTreeNumber by remember { mutableStateOf(CruiseCapture.target?.treeNumber) }

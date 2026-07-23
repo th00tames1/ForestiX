@@ -1,7 +1,7 @@
-// `forestix://` deep-link router — adopted from Arboreal Forest's
-// `arborealforest://log?lat=…&lon=…&name=…` scheme. Lets a crew
-// lead build a plot list in any GIS (QGIS, Avenza, ArcGIS Field
-// Maps) and hand the crew a tappable list instead of typing
+// `forestix://` deep-link router — a deep-link scheme carrying
+// lat/lon/name so a crew tool can hand off a plot. Lets a crew
+// lead build a plot list in any GIS tool and hand the crew a
+// tappable list instead of typing
 // coordinates at every plot.
 //
 // URL grammar:

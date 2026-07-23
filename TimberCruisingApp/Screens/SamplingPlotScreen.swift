@@ -12,7 +12,7 @@
 // reopened. Reset removes the anchor and clears the store; nothing is
 // persisted across app restarts (the AR world map dies with the process).
 //
-// UI matches the shared Measure-app layout: right-centre capture button
+// UI matches the shared camera-style capture layout: right-centre capture button
 // and a compact centred status panel (plus the bottom-right LiDAR/AR
 // toggle in Developer mode).
 

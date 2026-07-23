@@ -44,7 +44,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -120,10 +125,11 @@ fun ScanMetadataSheet(
             // SPECIES ------------------------------------------------------
             MetadataSection(header = "SPECIES") {
                 var speciesMenuOpen by remember { mutableStateOf(false) }
-                val selectedLabel = speciesCode?.let { code ->
+                val selectedLabel: AnnotatedString = speciesCode?.let { code ->
                     speciesOptions.firstOrNull { it.first == code }
-                        ?.let { "${it.first} · ${it.second}" } ?: code
-                } ?: "— Unspecified —"
+                        ?.let { speciesPickerLabel(it.second, it.first, colors.textSecondary) }
+                        ?: AnnotatedString(code)
+                } ?: AnnotatedString("— Unspecified —")
                 Box(Modifier.fillMaxWidth()) {
                     Row(
                         Modifier
@@ -154,7 +160,9 @@ fun ScanMetadataSheet(
                             })
                         speciesOptions.forEach { (code, name) ->
                             DropdownMenuItem(
-                                text = { Text("$code · $name") },
+                                text = {
+                                    Text(speciesPickerLabel(name, code, colors.textSecondary))
+                                },
                                 onClick = {
                                     speciesMenuOpen = false
                                     onSpeciesCode(code)
@@ -269,4 +277,16 @@ private fun MetadataSection(
 private fun capitalizedTag(raw: String): String =
     Regex("\\p{L}+").replace(raw.lowercase(Locale.US)) { match ->
         match.value.replaceFirstChar { it.titlecase(Locale.US) }
+    }
+
+/// Name-first option label: the common name reads prominently, the FIA
+/// code trails as a dim secondary suffix (" · DF"). Selecting the row
+/// still stores the code — this only reshapes what's shown. Mirrors the
+/// iOS ScanMetadataSheet.pickerLabel AttributedString.
+private fun speciesPickerLabel(name: String, code: String, dim: Color): AnnotatedString =
+    buildAnnotatedString {
+        append(name)
+        withStyle(SpanStyle(color = dim, fontSize = 12.sp)) {
+            append(" · $code")
+        }
     }

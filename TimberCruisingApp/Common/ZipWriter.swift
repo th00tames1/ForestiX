@@ -7,7 +7,7 @@
 // care about compression ratio — shapefile binaries are already near-
 // theoretical-minimum dense. So we implement only the PKZIP "stored"
 // method (compression_method = 0), which lets any unzipper (Finder, macOS
-// Archive Utility, `unzip`, Python's zipfile, QGIS's virtual filesystem)
+// Archive Utility, `unzip`, Python's zipfile)
 // open the archive as a regular ZIP.
 //
 // ## Format references

@@ -9,7 +9,7 @@
 // plot, and the quick-measure world never sees it (the two data worlds
 // stay separate; no quick pin is dropped).
 //
-// QUICK-TALLY LOOP (Arboreal-benchmark batch): the cruise DBH screen is a
+// QUICK-TALLY LOOP (field-benchmark batch): the cruise DBH screen is a
 // DIAMETER LOOP — each Accept `recordDbh`s, then `advanceTally()` bumps
 // the target to the plot's next tree number and the screen resets to
 // aiming (no Height leg, no pop). `undoLastTally()` backs the just-saved

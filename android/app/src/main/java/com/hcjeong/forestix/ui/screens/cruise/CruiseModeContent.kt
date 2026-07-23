@@ -105,6 +105,7 @@ import com.hcjeong.forestix.basemap.MapMarkerShape
 import com.hcjeong.forestix.basemap.MapPolygonOverlay
 import com.hcjeong.forestix.basemap.MapPolylineOverlay
 import com.hcjeong.forestix.common.MeasurementFormatter
+import com.hcjeong.forestix.common.RegionalSpecies
 import com.hcjeong.forestix.common.Units
 import com.hcjeong.forestix.data.SettingsSnapshot
 import com.hcjeong.forestix.data.cruise.BreastHeightConvention
@@ -1725,7 +1726,7 @@ private fun TreePeekCard(
             Text(
                 "Tree ${tree.treeNumber}" +
                     (tree.speciesCode.takeIf { it.isNotBlank() }
-                        ?.let { " · ${it.uppercase(Locale.US)}" } ?: ""),
+                        ?.let { " · ${RegionalSpecies.nameForCode(it)}" } ?: ""),
                 style = type.bodyBold.copy(fontSize = 16.sp, fontWeight = FontWeight.Bold),
                 color = colors.textPrimary,
                 modifier = Modifier.weight(1f).alignByBaseline(),
@@ -1773,7 +1774,11 @@ private fun TreePeekCard(
             Modifier.padding(top = 11.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            DetailChip("SPECIES", tree.speciesCode.takeIf { it.isNotBlank() } ?: "—")
+            DetailChip(
+                "SPECIES",
+                tree.speciesCode.takeIf { it.isNotBlank() }
+                    ?.let { RegionalSpecies.nameForCode(it) } ?: "—",
+            )
             DetailChip("STATUS", tree.status.raw.replaceFirstChar { it.titlecase(Locale.US) })
             DetailChip(
                 "DAMAGE",

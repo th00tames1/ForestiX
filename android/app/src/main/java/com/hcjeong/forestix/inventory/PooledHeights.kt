@@ -1,5 +1,5 @@
 // Pooled (species-blind) H–D support for the cruise quick-tally world
-// (Arboreal-benchmark batch, both platforms). Heights are measured on
+// (field-benchmark batch, both platforms). Heights are measured on
 // demand — a handful of (DBH, height) pairs per plot — so plot/stand
 // volume estimates missing heights from a POOLED Näslund curve over those
 // pairs whenever ≥ 3 exist, reusing the EXISTING HDModel Gauss-Newton

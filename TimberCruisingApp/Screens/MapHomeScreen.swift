@@ -614,7 +614,7 @@ public struct MapHomeScreen: View {
     /// Older than this the fix is effectively lost — the dot goes red.
     private static let lostFixAge: TimeInterval = 60
 
-    /// THE GPS chip — SlashScan's single-line live fix readout with a
+    /// THE GPS chip — a single-line live fix readout with a
     /// leading freshness dot: green < 5 s, yellow 5–60 s, red past 60 s
     /// or before the first fix ("no fix"). Three short labelled rows —
     /// X = latitude, Y = longitude, Z = altitude (5-decimal mono), the
@@ -1031,7 +1031,7 @@ public struct MapHomeScreen: View {
             base = kindLabel(pin.entries[0].kind)
         }
         if let species, !species.isEmpty {
-            return "\(base) · \(species.uppercased())"
+            return "\(base) · \(RegionalSpecies.name(forCode: species))"
         }
         return base
     }
@@ -1560,6 +1560,17 @@ private struct QuickEntryEditSheet: View {
                 .background(fieldBackground)
                 .accessibilityIdentifier("mapHome.editSheet.species")
 
+            // Read-only resolution of the typed code → common name, so the
+            // cruiser can confirm what "DF" maps to. Hidden for blank or
+            // unknown (free-typed) codes that don't resolve.
+            if let resolved = resolvedSpeciesName {
+                Text(resolved)
+                    .font(.system(size: 13))
+                    .foregroundStyle(ForestixPalette.textSecondary)
+                    .padding(.horizontal, 12)
+                    .accessibilityIdentifier("mapHome.editSheet.speciesName")
+            }
+
             // Note.
             fieldLabel("NOTE")
             TextField("Optional note", text: $noteText, axis: .vertical)
@@ -1622,6 +1633,15 @@ private struct QuickEntryEditSheet: View {
         } message: {
             Text("This removes the \(kindTitle) reading and its photo. This can't be undone.")
         }
+    }
+
+    /// Common name for the currently-typed code, or nil when the field is
+    /// blank or the code is free-typed / unknown (name == code).
+    private var resolvedSpeciesName: String? {
+        let code = speciesText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !code.isEmpty else { return nil }
+        let name = RegionalSpecies.name(forCode: code)
+        return name.caseInsensitiveCompare(code) == .orderedSame ? nil : name
     }
 
     private func save() {
@@ -1842,7 +1862,7 @@ private struct MeasurePhotoDetailView: View {
         var parts: [String] = []
         if let n = entry.treeNumber { parts.append("T\(n)") }
         if let species = entry.speciesCode, !species.isEmpty {
-            parts.append(species.uppercased())
+            parts.append(RegionalSpecies.name(forCode: species))
         }
         return parts.isEmpty ? "—" : parts.joined(separator: " · ")
     }

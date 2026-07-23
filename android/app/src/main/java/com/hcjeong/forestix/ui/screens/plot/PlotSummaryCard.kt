@@ -1,7 +1,7 @@
 // Port of iOS Screens/PlotSummaryCard.swift.
 // In-app plot summary card — closes the "is this plot reasonable?"
-// loop in the field. Adopted from Arboreal Forest's instant
-// post-plot summary + SilvaCruise's stand stats. Cruiser doesn't
+// loop in the field. An instant post-plot summary with
+// standard stand stats. Cruiser doesn't
 // need a desktop tool to know whether to re-cruise.
 //
 // Renders:
@@ -39,6 +39,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.hcjeong.forestix.common.MeasurementFormatter
+import com.hcjeong.forestix.common.RegionalSpecies
 import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
@@ -141,10 +142,13 @@ fun PlotSummaryCard(
                             horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs),
                         ) {
                             Text(
-                                row.code.ifEmpty { "—" },
+                                if (row.code.isEmpty()) "—"
+                                else RegionalSpecies.nameForCode(row.code),
                                 style = type.dataSmall,
                                 color = colors.textSecondary,
-                                modifier = Modifier.width(56.dp))
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.width(96.dp))
                             // Bar viz of the share, with a numeric label.
                             Box(
                                 Modifier
@@ -261,7 +265,7 @@ private fun computeStats(
     val dbhTrees = trees.mapNotNull { it.dbhCm }
     if (dbhTrees.isEmpty()) return null
 
-    // BA per tree (m² → ft²/ac via dbh in inches). Use SilvaCruise's
+    // BA per tree (m² → ft²/ac via dbh in inches). The standard
     // ft²-per-tree formula on each tree. With no plot-acres tied to
     // these readings yet, "per acre" means "per tree-bin" — useful
     // as a relative readout, refined in Phase 4 with real acreage.

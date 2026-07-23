@@ -3,8 +3,8 @@
 // The single biggest source of DBH bias is a leaning phone — a chord
 // projected through a non-vertical slice of the cylinder reads a
 // systematically wrong diameter. Showing the cruiser the live pitch
-// + roll lets them self-correct before tapping. Arboreal Forest
-// shipped this in v4.98 ("improved visualisation: device inclination").
+// + roll lets them self-correct before tapping. A live device
+// inclination readout is a field-proven aid.
 //
 // Self-contained on purpose: owns its own CMMotionManager so any
 // scan screen can drop one in without plumbing IMU through its

@@ -2,8 +2,8 @@
 // approach (Taubin partial-arc circle fit) was geometrically unstable on
 // the narrow arcs a hand-held LiDAR phone actually sees: the centre was
 // well-constrained but the radius wandered ± 5 cm tick-to-tick even when
-// the cruiser stood still. Peer apps (Arboreal, ForestScanner,
-// Single-Shot SAM) all use the chord/silhouette method instead — read
+// the cruiser stood still. Peer apps and segmentation
+// pipelines (Single-Shot SAM) use the chord/silhouette method instead — read
 // off the projected trunk width in pixels at the guide row, multiply
 // by depth / fx, and you have the diameter directly. We make that the
 // default and demote the partial-arc path to an opt-in legacy choice.

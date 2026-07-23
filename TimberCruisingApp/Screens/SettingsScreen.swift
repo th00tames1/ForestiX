@@ -271,7 +271,7 @@ public struct SettingsScreen: View {
     private var dbhMethodSection: some View {
         Section(
             header: Text("DBH algorithm"),
-            footer: Text("Chord uses the trunk's projected pixel width × depth ÷ focal length — the same method ForestScanner / Arboreal use, stable on the narrow arcs a hand-held LiDAR phone actually sees. Switch to Partial-arc circle fit for irregular trunks where the silhouette under-reads the diameter.")
+            footer: Text("Chord uses the trunk's projected pixel width × depth ÷ focal length — a projected-width method that stays stable on the narrow arcs a hand-held LiDAR phone actually sees. Switch to Partial-arc circle fit for irregular trunks where the silhouette under-reads the diameter.")
         ) {
             Picker("Method",
                    selection: Binding(

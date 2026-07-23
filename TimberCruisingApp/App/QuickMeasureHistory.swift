@@ -40,7 +40,7 @@ public struct QuickMeasurePlot: Codable, Identifiable, Sendable, Equatable {
     /// "Quick measurements" and can't be deleted.
     public var name: String
     /// Optional management unit / stand name — multi-unit cruise
-    /// support per SilvaCruise. Empty string treated as nil.
+    /// support. Empty string treated as nil.
     public var unitName: String
     /// Plot acreage. nil = unknown / unset.
     public var acres: Double?
@@ -52,9 +52,9 @@ public struct QuickMeasurePlot: Codable, Identifiable, Sendable, Equatable {
     public var radiusFt: Double?
     /// Optional parent plot id — when present, this plot is a nested
     /// concentric sub-plot of the parent (typically a smaller radius
-    /// for submerchantable / biomass / regeneration tally). Adopted
-    /// from SilvaCruise's "concentric fixed-radius plots at the same
-    /// plot center". The parent's coordinates are inherited
+    /// for submerchantable / biomass / regeneration tally). Models
+    /// concentric fixed-radius plots at the same
+    /// plot center. The parent's coordinates are inherited
     /// implicitly; only the radius (and any tally-class restriction)
     /// differs.
     public var parentPlotID: UUID?
@@ -685,10 +685,10 @@ public final class QuickMeasureHistory: ObservableObject {
         "\"" + s.replacingOccurrences(of: "\"", with: "\"\"") + "\""
     }
 
-    // MARK: - Multi-table CSV bundle (Arboreal-style 5-file export)
+    // MARK: - Multi-table CSV bundle (5-file export)
 
-    /// Writes a ZIP bundle containing five CSV files modelled on the
-    /// Arboreal Forest export schema:
+    /// Writes a ZIP bundle containing five CSV files following a
+    /// multi-table export schema:
     ///
     ///   • Samples.csv      — one row per plot
     ///   • Trees.csv        — one row per (plot, treeNumber) pair

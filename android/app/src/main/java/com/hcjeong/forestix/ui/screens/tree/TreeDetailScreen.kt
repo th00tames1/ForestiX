@@ -52,6 +52,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
+import com.hcjeong.forestix.common.RegionalSpecies
 import com.hcjeong.forestix.data.cruise.TreeStatus
 import com.hcjeong.forestix.sensors.ConfidenceTier
 import com.hcjeong.forestix.ui.screens.ForestixScaffold
@@ -158,6 +159,15 @@ private fun TreeDetailContent(nav: NavController, viewModel: TreeDetailViewModel
                     keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
                     modifier = Modifier.fillMaxWidth(),
                 )
+                // Read-only resolution of the typed code → common name, so
+                // the cruiser sees what "DF" maps to. Hidden for blank or
+                // free-typed codes that don't resolve to a preset.
+                val resolvedName = RegionalSpecies.nameForCode(speciesCode)
+                if (speciesCode.isNotBlank() &&
+                    !resolvedName.equals(speciesCode.trim(), ignoreCase = true)
+                ) {
+                    Text(resolvedName, style = type.body, color = colors.textSecondary)
+                }
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     TreeStatusOptions.forEach { (label, value) ->
                         FilterChip(

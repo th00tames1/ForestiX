@@ -1,6 +1,6 @@
 // Regional species presets — direct port of iOS App/RegionalSpecies.swift.
-// Adopted from SilvaCruise's "pick your region, get the right species
-// pre-selected" onboarding pattern. Cuts first-run friction: the cruiser
+// A "pick your region, get the right species pre-selected" onboarding
+// pattern. Cuts first-run friction: the cruiser
 // picks once and the rest of the app filters its species pickers to the
 // relevant 8–15 species.
 //
@@ -16,6 +16,8 @@
 // Raw values match the Swift rawValue strings byte-for-byte.
 
 package com.hcjeong.forestix.common
+
+import java.util.Locale
 
 enum class Region(val raw: String) {
     PNW_WEST("pnw_west"),
@@ -179,5 +181,31 @@ object RegionalSpecies {
             "CO" to "Cherrybark oak",
         )
         Region.ALL -> emptyList()   // empty = no filter applied
+    }
+
+    /// Resolves a stored FIA code to its human-readable common name,
+    /// searching across every region's preset list so a code tallied in
+    /// one region still reads correctly anywhere it's displayed. This is
+    /// display-only: stored `speciesCode` values and CSV columns keep the
+    /// code. Free-typed or otherwise unknown codes (not in any region,
+    /// e.g. "OT") fall back to the raw code so nothing is hidden.
+    fun nameForCode(code: String): String {
+        val trimmed = code.trim()
+        if (trimmed.isEmpty()) return code
+        return canonicalNames[trimmed.uppercase(Locale.US)] ?: code
+    }
+
+    /// Code → common name, built once from all regional presets. First
+    /// occurrence wins when a code appears in several regions (a handful
+    /// of FIA codes collide across regions).
+    private val canonicalNames: Map<String, String> by lazy {
+        val map = LinkedHashMap<String, String>()
+        Region.entries.forEach { region ->
+            defaultSpecies(region).forEach { (code, name) ->
+                val key = code.uppercase(Locale.US)
+                if (!map.containsKey(key)) map[key] = name
+            }
+        }
+        map
     }
 }

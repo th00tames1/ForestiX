@@ -1163,7 +1163,7 @@ extension MapHomeScreen {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(tree.speciesCode.isEmpty
                      ? "Tree \(tree.treeNumber)"
-                     : "Tree \(tree.treeNumber) · \(tree.speciesCode.uppercased())")
+                     : "Tree \(tree.treeNumber) · \(RegionalSpecies.name(forCode: tree.speciesCode))")
                     .font(.system(size: 16, weight: .bold))
                     .foregroundStyle(ForestixPalette.textPrimary)
                     .lineLimit(1)
@@ -1184,7 +1184,7 @@ extension MapHomeScreen {
                             photoPath: path,
                             title: tree.speciesCode.isEmpty
                                 ? "Tree \(tree.treeNumber)"
-                                : "Tree \(tree.treeNumber) · \(tree.speciesCode.uppercased())",
+                                : "Tree \(tree.treeNumber) · \(RegionalSpecies.name(forCode: tree.speciesCode))",
                             subtitle: peekTreeSubtitle(tree, plot: plot))
                     }
                 } label: {
@@ -1217,7 +1217,7 @@ extension MapHomeScreen {
             // the editor. Never a gate.
             HStack(spacing: 6) {
                 detailChip("SPECIES", tree.speciesCode.isEmpty
-                           ? "—" : tree.speciesCode.uppercased())
+                           ? "—" : RegionalSpecies.name(forCode: tree.speciesCode))
                 detailChip("STATUS", statusLabel(tree.status))
                 detailChip("DAMAGE", tree.damageCodes.isEmpty
                            ? "None" : tree.damageCodes.joined(separator: ","))

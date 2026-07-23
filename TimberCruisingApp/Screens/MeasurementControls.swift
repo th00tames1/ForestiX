@@ -1,5 +1,5 @@
-// Shared AR-measurement control chrome — visual language aligned with
-// SlashScan: a right-edge vertical stack of floating round buttons with
+// Shared AR-measurement control chrome — visual language built around
+// a right-edge vertical stack of floating round buttons with
 // soft drop shadows (offset .zero, opacity ~0.3, radius 2–4) over the live
 // camera, white-tinted SF Symbols, plus a centred half-width readout.
 //
@@ -17,7 +17,7 @@
 
 import SwiftUI
 
-// MARK: - Shadow token (matches SlashScan's floating buttons)
+// MARK: - Shadow token (for the floating buttons)
 
 private extension View {
     func floatingShadow() -> some View {
@@ -79,7 +79,7 @@ public struct MeasureBackButtonRow: View {
 // MARK: - Capture (+) button
 
 /// Big circular capture button. Aim the centre crosshair, tap this to
-/// record the point — the Measure-app / SlashScan record button.
+/// record the point — the camera-style record button.
 public struct MeasureCaptureButton: View {
     private let systemImage: String
     private let action: () -> Void
@@ -108,7 +108,7 @@ public struct MeasureCaptureButton: View {
 // MARK: - Circular secondary button (icon + optional caption)
 
 /// 52 pt flat-scrim circular icon button with an optional caption beneath,
-/// matching the SlashScan floating control look. Used for mode + source.
+/// matching a floating control look. Used for mode + source.
 public struct MeasureCircleButton: View {
     private let systemImage: String
     private let caption: String?
@@ -168,7 +168,7 @@ public struct MeasurePillButton: View {
 // MARK: - Right-edge control column
 
 /// Capture button vertically centred on the trailing edge, with any extra
-/// controls stacked just below it — the SlashScan right-rail layout.
+/// controls stacked just below it — a floating right-rail layout.
 /// Superseded by `MeasureShutterRow` for the four AR measure screens
 /// (bottom-centre camera-app layout); kept for any remaining callers.
 public struct MeasureControlColumn<Extra: View>: View {

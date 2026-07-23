@@ -1,6 +1,6 @@
 // In-app plot summary card — closes the "is this plot reasonable?"
-// loop in the field. Adopted from Arboreal Forest's instant
-// post-plot summary + SilvaCruise's stand stats. Cruiser doesn't
+// loop in the field. Modelled on an instant
+// post-plot summary + standard stand stats. Cruiser doesn't
 // need a desktop tool to know whether to re-cruise.
 //
 // Renders:
@@ -162,10 +162,11 @@ public struct PlotSummaryCard: View {
                     .foregroundStyle(ForestixPalette.textTertiary)
                 ForEach(s.speciesMix, id: \.code) { row in
                     HStack {
-                        Text(row.code.isEmpty ? "—" : row.code)
+                        Text(row.code.isEmpty ? "—" : RegionalSpecies.name(forCode: row.code))
                             .font(ForestixType.dataSmall)
                             .foregroundStyle(ForestixPalette.textSecondary)
-                            .frame(width: 56, alignment: .leading)
+                            .lineLimit(1)
+                            .frame(width: 96, alignment: .leading)
                         // Bar viz of the share, with a numeric label.
                         GeometryReader { geo in
                             ZStack(alignment: .leading) {
@@ -216,7 +217,7 @@ public struct PlotSummaryCard: View {
         let dbhTrees = trees.compactMap { $0.dbhCm }
         guard !dbhTrees.isEmpty else { return nil }
 
-        // BA per tree (m² → ft²/ac via dbh in inches). Use SilvaCruise's
+        // BA per tree (m² → ft²/ac via dbh in inches). Use the standard
         // ft²-per-tree formula on each tree. With no plot-acres tied to
         // these readings yet, "per acre" means "per tree-bin" — useful
         // as a relative readout, refined in Phase 4 with real acreage.

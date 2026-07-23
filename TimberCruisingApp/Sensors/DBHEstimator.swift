@@ -261,7 +261,7 @@ public enum DBHEstimator {
         // Step 9: sanity tree.
         // Phase 18.2 — gate relaxation. The earlier thresholds were
         // borrowed from §7.1 verbatim and rejected most field captures
-        // taken handheld at 1.5–3 m. ForestScanner / Single-Shot SAM
+        // taken handheld at 1.5–3 m. Single-Shot SAM
         // papers report usable fits at 30°+ arc / 10+ inliers / 7%
         // RMSE — we now match that and demote borderline fits to warn
         // (yellow) instead of red.
@@ -1115,8 +1115,8 @@ public enum DBHEstimator {
     /// straightforward sanity gate.
     ///
     /// Why this replaces the partial-arc Taubin fit as the default:
-    /// every peer LiDAR forestry app (Arboreal, ForestScanner /
-    /// YOLACT++, Single-Shot SAM) uses essentially this method.
+    /// every peer LiDAR forestry app (with segmentation models
+    /// like YOLACT++ or Single-Shot SAM) uses essentially this method.
     /// Geometrically the chord is what LiDAR can actually see — the
     /// Taubin radius depends on observing curvature across an arc, but
     /// a hand-held phone at 1.5 m only ever sees ≈ 60–90° of a small

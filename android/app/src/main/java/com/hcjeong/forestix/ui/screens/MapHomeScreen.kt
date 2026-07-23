@@ -118,6 +118,7 @@ import com.hcjeong.forestix.basemap.MapMarkerShape
 import com.hcjeong.forestix.basemap.MapView
 import com.hcjeong.forestix.basemap.rememberMapCameraState
 import com.hcjeong.forestix.common.MeasurementFormatter
+import com.hcjeong.forestix.common.RegionalSpecies
 import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
@@ -354,7 +355,7 @@ fun MapHomeScreen(nav: NavController) {
                 horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs),
             ) {
                 // GPS chip leads, bounded by a flexible slot so its
-                // single-line SlashScan readout truncates instead of shoving
+                // single-line GPS readout truncates instead of shoving
                 // the trailing round buttons off-screen. Shared by both modes
                 // (the cruise project chip is gone — the project lives in the
                 // bottom cluster's PROJECT circle + strip now).
@@ -1045,7 +1046,8 @@ private fun PeekCard(
     val newest = pin.entries.first()
     val species = pin.entries.firstNotNullOfOrNull { it.speciesCode }
     val title = (pin.treeNumber?.let { "Tree $it" } ?: rowLabel(newest)) +
-        (species?.let { " · ${it.uppercase(Locale.US)}" } ?: "")
+        (species?.takeIf { it.isNotBlank() }
+            ?.let { " · ${RegionalSpecies.nameForCode(it)}" } ?: "")
     // Date, plus the plot name when the reading isn't on the default plot
     // (iOS peekSubtitle: "7 Jul · 09:41 · Plot 2").
     val subtitle = listOfNotNull(dateLine(newest.createdAt), plotName).joinToString(" · ")
@@ -1613,6 +1615,17 @@ private fun QuickEntryEditSheet(
                     capitalization = KeyboardCapitalization.Characters),
                 modifier = Modifier.fillMaxWidth(),
             )
+            // Read-only resolution of the typed code → common name, so the
+            // cruiser can confirm what "DF" maps to. Hidden for blank or
+            // free-typed codes that don't resolve to a preset.
+            val resolvedSpecies = RegionalSpecies.nameForCode(species)
+            if (species.isNotBlank() && !resolvedSpecies.equals(species.trim(), ignoreCase = true)) {
+                Text(
+                    resolvedSpecies,
+                    style = type.body.copy(fontSize = 13.sp),
+                    color = colors.textSecondary,
+                )
+            }
             OutlinedTextField(
                 value = note,
                 onValueChange = { note = it },

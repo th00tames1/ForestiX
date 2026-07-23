@@ -41,7 +41,7 @@ struct VoiceSpeciesPicker: View {
                             .lineLimit(2)
                     }
                     if let code = lastMatchCode {
-                        Text("Matched: \(code)")
+                        Text("Matched: \(RegionalSpecies.name(forCode: code))")
                             .font(.caption.bold())
                             .foregroundStyle(.green)
                     }

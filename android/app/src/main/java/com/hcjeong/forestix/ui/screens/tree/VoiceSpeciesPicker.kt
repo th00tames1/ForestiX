@@ -62,6 +62,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.unit.dp
+import com.hcjeong.forestix.common.RegionalSpecies
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixRadius
 import java.util.Locale
@@ -346,7 +347,7 @@ fun VoiceSpeciesPicker(
                 }
                 lastMatchCode?.let { code ->
                     Text(
-                        "Matched: $code",
+                        "Matched: ${RegionalSpecies.nameForCode(code)}",
                         style = type.caption,
                         color = colors.confidenceOk,
                     )

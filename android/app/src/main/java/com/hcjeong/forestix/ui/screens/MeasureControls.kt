@@ -1,5 +1,5 @@
 // Shared AR-measurement control chrome — Android mirror of iOS
-// MeasurementControls.swift. Camera-style layout (Arboreal-benchmark
+// MeasurementControls.swift. Camera-style layout (field-benchmark
 // batch, locked on both platforms): stage guidance in a top-centre banner
 // (U1), a bottom-centre 70 dp shutter flanked by 52 dp secondaries with a
 // live-value strip above (U2), plus the floating back button and the
@@ -220,7 +220,7 @@ fun CaptureButton(onClick: () -> Unit) {
 }
 
 /// 52 dp translucent circular icon button with an optional caption beneath
-/// — the SlashScan floating-control look. Used for the Distance mode toggle.
+/// — a floating-control look. Used for the Distance mode toggle.
 @Composable
 fun MeasureCircleButton(
     icon: ImageVector,

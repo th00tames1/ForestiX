@@ -17,24 +17,27 @@ import Models
 
 public enum SeedDataLoader {
 
-    /// Load the PNW starter set if (and only if) the species table is
-    /// currently empty. Idempotent — safe to call on every launch.
-    /// Returns the (newly inserted, skipped) counts so the caller can
-    /// log / surface the result.
+    /// Seed the bundled starter sets, additively and idempotently — safe to
+    /// call on every launch. Never overwrites a record the cruiser already has
+    /// (production cruisers calibrate their own coefficients); only inserts
+    /// bundled defaults whose id / code is still missing. This is what lets a
+    /// NEW bundled set — e.g. the internationalisation framework's metric
+    /// species + m³ equations — land on an already-seeded install instead of
+    /// being gated out by a non-empty table (the old fast-path early-returned
+    /// the moment any species existed, which silently stranded the metric
+    /// equations no species was bound to).
+    /// Returns the newly-inserted (species, equations) counts.
     @discardableResult
     public static func bootstrapIfNeeded(
         speciesRepo: any SpeciesConfigRepository,
         volRepo: any VolumeEquationRepository
     ) throws -> (speciesInserted: Int, equationsInserted: Int) {
-        // Fast-path: skip everything if the cruiser already has species.
-        let existing = try speciesRepo.list()
-        guard existing.isEmpty else { return (0, 0) }
+        let existingSpecies = try speciesRepo.list()
 
         // Volume equations first so the species inserts find their FK. The US
         // PNW starter set plus the internationalisation framework's metric (m³)
-        // equations (Laasasenaho + form factor) — both are seeded so a metric
-        // cruiser has real equations to assign. A missing metric asset must not
-        // block the US set, so it is loaded defensively.
+        // equations (Laasasenaho + form factor). A missing metric asset must
+        // not block the US set, so it is loaded defensively.
         let metricEqs = (try? SeedData.bundledMetricVolumeEquations()) ?? []
         let bundledEqs = try SeedData.bundledVolumeEquations() + metricEqs
         let existingEqIds = Set(try volRepo.list().map { $0.id })
@@ -44,10 +47,14 @@ public enum SeedDataLoader {
             insertedEqs += 1
         }
 
-        // Species.
-        let bundledSpecies = try SeedData.bundledSpecies()
+        // Species — the US set plus the metric-country species, each already
+        // bound to a seeded equation id so metric stem volume resolves. Metric
+        // asset loaded defensively.
+        let metricSpecies = (try? SeedData.bundledMetricSpecies()) ?? []
+        let bundledSpecies = try SeedData.bundledSpecies() + metricSpecies
+        let existingCodes = Set(existingSpecies.map { $0.code })
         var insertedSpecies = 0
-        for sp in bundledSpecies {
+        for sp in bundledSpecies where !existingCodes.contains(sp.code) {
             _ = try speciesRepo.create(sp)
             insertedSpecies += 1
         }

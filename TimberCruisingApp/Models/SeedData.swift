@@ -90,6 +90,18 @@ public enum SeedData {
         return file.species.map { $0.toModel() }
     }
 
+    /// Read + decode `SpeciesDefaultsMetric.json` — the internationalisation
+    /// framework's metric-country species (Finland / Germany), each already
+    /// bound to its m³ volume equation id. This is the link that makes metric
+    /// stem volume compute: the scan pickers offer these codes and the engine
+    /// resolves code → SpeciesConfig → volumeEquationId → the seeded equation,
+    /// exactly as the US set does. Korea is intentionally absent (coefficients
+    /// pending). Mirrors the Android sibling's metric species seed.
+    public static func bundledMetricSpecies() throws -> [SpeciesConfig] {
+        let file = try decode(SpeciesSeedFile.self, named: "SpeciesDefaultsMetric")
+        return file.species.map { $0.toModel() }
+    }
+
     /// Read + decode the bundled `VolumeEquationsPNW.json` (US starter set).
     public static func bundledVolumeEquations() throws -> [VolumeEquation] {
         let file = try decode(VolumeEquationSeedFile.self,

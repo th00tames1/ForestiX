@@ -199,6 +199,51 @@ extension MapHomeScreen {
         treesByPlot = byPlot
     }
 
+    // MARK: Crash recovery (resume an in-progress plot)
+
+    /// Once-per-launch scan for OPEN plots (closedAt == nil) across every
+    /// project whose last activity falls inside the last 24 h. Populates the
+    /// resume-prompt candidate list and emits `crashRecoveryPrompted` for the
+    /// most-recent one when the prompt is about to appear. Guarded so a
+    /// dismiss/Discard never re-prompts within the same launch.
+    func scanForCrashRecovery() {
+        guard !didScanForCrashRecovery else { return }
+        didScanForCrashRecovery = true
+        let candidates = (try? CrashRecoveryService.openPlotsWithinLast(
+            86400,
+            projectRepo: environment.projectRepository,
+            plotRepo: environment.plotRepository,
+            treeRepo: environment.treeRepository)) ?? []
+        guard let first = candidates.first else { return }
+        crashRecoveryCandidates = candidates
+        ForestixLogger.log(.crashRecoveryPrompted(
+            projectId: first.plot.projectId, plotId: first.plot.id))
+    }
+
+    /// Confirmation-dialog title — names the plot when there is a single
+    /// candidate, else a generic prompt covering the surfaced set.
+    var crashRecoveryTitle: String {
+        guard let first = crashRecoveryCandidates.first else { return "" }
+        return crashRecoveryCandidates.count == 1
+            ? "Resume plot \(first.plot.plotNumber)?"
+            : "Resume an in-progress plot?"
+    }
+
+    /// Resume a crash-recovery candidate: scope the cruise to the plot's
+    /// project, flip to cruise mode, and enter the plot's active tally loop
+    /// via the SAME route the (+) and plot-peek "Add tree" use
+    /// (`startAddTree`). Emits `plotOpened` on entry. Discards NOTHING.
+    func resumeCrashRecovery(_ candidate: ResumeCandidate) {
+        let plot = candidate.plot
+        crashRecoveryCandidates = []            // dismiss the prompt
+        settings.currentCruiseProjectID = plot.projectId
+        if settings.mapMode != "cruise" { settings.mapMode = "cruise" }
+        reloadCruise()
+        ForestixLogger.log(.plotOpened(plotId: plot.id,
+                                       projectId: plot.projectId))
+        startAddTree(in: plot)
+    }
+
     // MARK: Markers
 
     /// Plot ring markers + cruise tree teardrops. Quick-measure entries
@@ -521,7 +566,7 @@ extension MapHomeScreen {
         let fix = location.latestSnapshot ?? LocationService.lastGlobalFix
         let number = ((try? environment.plotRepository
             .listByProject(project.id))?.map(\.plotNumber).max() ?? 0) + 1
-        let areaAcres = Float(.pi * radiusM * radiusM / 4046.8564224)
+        let areaAcres = Float(.pi * radiusM * radiusM / Units.squareMetersPerAcre)
         let tier: PositionTier = fix.map {
             GPSAveraging.classify(medianHAccuracyM: Float($0.horizontalAccuracyM),
                                   sampleStdXyM: 0)
@@ -829,16 +874,17 @@ extension MapHomeScreen {
     }()
 
     func plotRadiusM(_ plot: Plot) -> Double {
-        sqrt(Double(plot.plotAreaAcres) * 4046.8564224 / .pi)
+        sqrt(Double(plot.plotAreaAcres) * Units.squareMetersPerAcre / .pi)
     }
 
     func plotPeekCard(for plot: Plot) -> some View {
         let trees = liveTrees(in: plot.id)
         let stats = plotStats(for: plot, trees: trees)
         let isClosed = plot.closedAt != nil
-        // Density basis follows the chosen country (US per acre, metric per
-        // hectare); the engine computes per acre, so scale for display.
-        let areaUnit = settings.country.areaUnit
+        // Density basis follows the active unit system (imperial per acre,
+        // metric per hectare) so the manual Units toggle wins; the engine
+        // computes per acre, so scale for display.
+        let areaUnit = settings.unitSystem.areaUnit
         let densityFactor = areaUnit.perAcreDensityFactor
         return VStack(spacing: 0) {
             RoundedRectangle(cornerRadius: 2)
@@ -2107,7 +2153,7 @@ extension MapHomeScreen {
                     speciesRepo: environment.speciesRepository,
                     volRepo: environment.volumeEquationRepository,
                     hdFitRepo: environment.hdFitRepository),
-                    areaUnit: settings.country.areaUnit)
+                    areaUnit: settings.unitSystem.areaUnit)
             }
         case .treeDetails(let id):
             if let tree = treesByPlot.values.joined()
@@ -2129,7 +2175,7 @@ extension MapHomeScreen {
                     stratumRepo: environment.stratumRepository,
                     plannedRepo: environment.plannedPlotRepository),
                     volumePending: settings.country.volumeStandard.isPending,
-                    areaUnit: settings.country.areaUnit)
+                    areaUnit: settings.unitSystem.areaUnit)
             }
         case .export:
             if let project = currentProject {

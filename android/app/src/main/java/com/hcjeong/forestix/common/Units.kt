@@ -25,6 +25,12 @@ object Units {
     fun acresToSquareMeters(ac: Double) = ac * SQUARE_METERS_PER_ACRE
     fun squareMetersToAcres(m2: Double) = m2 / SQUARE_METERS_PER_ACRE
 
+    /// 1 hectare = 2.4710538147 acres (from the exact international-foot acre).
+    /// Canonical single source for per-acre → per-hectare density conversion —
+    /// AreaUnit multiplies a canonical per-acre figure by this to express it
+    /// per hectare, and divides an area in acres by it to get hectares.
+    const val ACRES_PER_HECTARE = 2.4710538147
+
     fun cubicMetersToCubicFeet(m3: Double) =
         m3 * (1.0 / METERS_PER_FOOT) * (1.0 / METERS_PER_FOOT) * (1.0 / METERS_PER_FOOT)
 

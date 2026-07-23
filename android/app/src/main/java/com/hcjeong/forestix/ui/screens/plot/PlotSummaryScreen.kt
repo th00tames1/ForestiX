@@ -45,6 +45,7 @@ import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.common.AreaUnit
 import com.hcjeong.forestix.common.RegionalSpecies
+import com.hcjeong.forestix.common.areaUnit
 import com.hcjeong.forestix.inventory.PlotStats
 import com.hcjeong.forestix.ui.screens.ForestixScaffold
 import com.hcjeong.forestix.ui.screens.project.FormSection
@@ -184,10 +185,11 @@ fun PlotSummaryScreen(
                 }
             }
 
-            // Density basis: metric countries read per hectare, US per acre.
-            // The engine computes per acre; scale + relabel at display only
-            // (mirrors StandSummaryScreen). BA/volume are already m²/m³.
-            val areaUnit = settings.country.areaUnit
+            // Density basis: a metric unit system reads per hectare, imperial
+            // per acre. Derived from the (manually-overridable) Units setting,
+            // not the country, so a manual toggle wins. The engine computes per
+            // acre; scale + relabel at display only (mirrors StandSummaryScreen).
+            val areaUnit = settings.unitSystem.areaUnit
             val f = areaUnit.perAcreDensityFactor
             val suffix = areaUnit.densitySuffix
             val abbr = areaUnit.abbreviation

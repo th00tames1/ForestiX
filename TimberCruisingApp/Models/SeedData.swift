@@ -120,6 +120,23 @@ public enum SeedData {
         return file.equations.map { $0.toModel() }
     }
 
+    /// (code, commonName) pairs for the bundled metric species, in file order.
+    /// This is the single source of truth for the metric-country scan-picker
+    /// names: `Country.finlandSpecies` / `.germanySpecies` derive from here
+    /// (filtered by code prefix) rather than re-declaring the names. Decoded
+    /// once and cached. Empty only if the bundled resource is unreadable — a
+    /// packaging error the seed path trips on too.
+    public static func metricSpeciesNamePairs(
+        prefixedBy prefix: String
+    ) -> [(String, String)] {
+        cachedMetricNamePairs
+            .filter { $0.0.hasPrefix(prefix) }
+    }
+
+    /// All bundled metric (code, commonName) pairs, decoded once.
+    private static let cachedMetricNamePairs: [(String, String)] =
+        ((try? bundledMetricSpecies()) ?? []).map { ($0.code, $0.commonName) }
+
     private static func decode<T: Decodable>(
         _ type: T.Type, named name: String
     ) throws -> T {

@@ -55,6 +55,7 @@ import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.UnitSystem
+import com.hcjeong.forestix.common.areaUnit
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
 import com.hcjeong.forestix.ui.screens.plot.PlotSummaryCard
@@ -135,7 +136,7 @@ fun FieldLogScreen(nav: NavController) {
                                     entries = plotEntries,
                                     unitSystem = settings.unitSystem,
                                     logRule = settings.logRule,
-                                    areaUnit = settings.country.areaUnit)
+                                    areaUnit = settings.unitSystem.areaUnit)
                             }
                         }
                     }

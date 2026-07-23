@@ -130,7 +130,10 @@ class AppSettings(private val context: Context) {
         val researchTreeId = stringPreferencesKey("tc.researchTreeId")
         val rawCaptureEnabled = booleanPreferencesKey("tc.rawCaptureEnabled")
         val appearance = stringPreferencesKey("tc.appearance")
-        val cruiseProjectId = stringPreferencesKey("tc.cruiseProjectId")
+        // Unified with the iOS sibling's key (was "tc.cruiseProjectId"); the
+        // one-time reset of this transient current-project pointer is
+        // acceptable. iOS: AppSettings.Keys.currentCruiseProjectID.
+        val cruiseProjectId = stringPreferencesKey("tc.currentCruiseProjectID")
         val cruisePlotId = stringPreferencesKey("tc.cruisePlotId")
         val mapMode = stringPreferencesKey("tc.mapMode")
         val depthUnsupported = booleanPreferencesKey("tc.depthUnsupported")

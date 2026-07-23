@@ -67,6 +67,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import com.hcjeong.forestix.AppEnvironment
 import com.hcjeong.forestix.LocalAppEnvironment
+import com.hcjeong.forestix.common.ForestixLogger
 import com.hcjeong.forestix.data.cruise.PlannedPlot
 import com.hcjeong.forestix.data.cruise.Plot
 import com.hcjeong.forestix.data.cruise.PlotCenterResult
@@ -453,6 +454,7 @@ internal suspend fun convertPlannedToActivePlot(
     env.plannedPlotRepository.update(planned)
     env.settings.setCruiseProjectId(project.id.toString())
     env.settings.setCruisePlotId(plot.id.toString())
+    ForestixLogger.plotOpened(plot.id, plot.projectId)
     return plot
 }
 

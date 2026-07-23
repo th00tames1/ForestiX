@@ -17,6 +17,7 @@
 // pre-existing install keeps behaving exactly as it did before this landed.
 
 import Foundation
+import Common    // Units (canonical acres/hectare + m²/acre constants)
 import Models    // UnitSystem (for Country.defaultUnitSystem)
 import Sensors   // LogRule (for Region.defaultLogRule)
 
@@ -86,15 +87,6 @@ public enum Country: String, CaseIterable, Identifiable, Sendable {
         self == .unitedStates ? .cubicFeet : .cubicMeters
     }
 
-    /// Areal basis this country expresses per-area densities (TPA, BA/area,
-    /// volume/area) in. The US cruises per acre; metric countries per hectare.
-    /// The engine computes everything per ACRE internally (plot areas persist
-    /// as acres) — this drives the display/export conversion + labels only, so
-    /// a Finnish cruiser reads "m³/ha" while the US stays "per ac" as before.
-    public var areaUnit: AreaUnit {
-        self == .unitedStates ? .acre : .hectare
-    }
-
     /// The stem-volume standard backing this country (drives the read-only
     /// Settings "Volume standard" row + the pending state for Korea).
     public var volumeStandard: VolumeStandard {
@@ -134,22 +126,22 @@ public enum Country: String, CaseIterable, Identifiable, Sendable {
     // 2-letter US FIA codes and read back unambiguously across platforms. These
     // lists match the Android sibling's CountrySpecies byte-for-byte.
 
+    // Finnish + German (code → common name) pairs are NOT declared here: the
+    // authoritative source is `SpeciesDefaultsMetric.json` (which also carries
+    // each pair's scientific name + m³ volume-equation binding). The scan-time
+    // picker reads the names from there via `SeedData`, so a name is maintained
+    // in exactly one place. Both lists preserve the JSON's file order.
+
     // Finnish set — bound (via the seeded VolumeEquation records) onto the
     // Laasasenaho pine / spruce / birch volume functions.
-    static let finlandSpecies: [(String, String)] = [
-        ("FI-PISY", "Scots pine"),
-        ("FI-PIAB", "Norway spruce"),
-        ("FI-BEPE", "Silver birch"),
-        ("FI-BEPU", "Downy birch"),
-    ]
+    static var finlandSpecies: [(String, String)] {
+        SeedData.metricSpeciesNamePairs(prefixedBy: "FI-")
+    }
 
     // German set — backed by the generic form-factor volume.
-    static let germanySpecies: [(String, String)] = [
-        ("DE-PIAB", "Norway spruce (Fichte)"),
-        ("DE-PISY", "Scots pine (Kiefer)"),
-        ("DE-FASY", "European beech (Buche)"),
-        ("DE-QURO", "Pedunculate oak (Eiche)"),
-    ]
+    static var germanySpecies: [(String, String)] {
+        SeedData.metricSpeciesNamePairs(prefixedBy: "DE-")
+    }
 
     // Korean set — SCAFFOLD ONLY. Volume is pending official NIFoS
     // coefficients; the species are real so tally / DBH / height / BA / TPA all
@@ -217,15 +209,15 @@ public enum AreaUnit: String, Sendable {
     case hectare
 
     /// Multiply a canonical per-ACRE density by this factor to express it per
-    /// this unit. 1 hectare = 2.4710538147 acres (exact, from 4046.8564224 m²
-    /// per acre and 10 000 m² per hectare), so per-hectare = per-acre × that.
+    /// this unit. 1 hectare = `Units.acresPerHectare` acres, so per-hectare =
+    /// per-acre × that. The constant lives once in `Common/Units.swift`.
     public var perAcreDensityFactor: Double {
-        self == .hectare ? 2.4710538147 : 1.0
+        self == .hectare ? Units.acresPerHectare : 1.0
     }
 
     /// Convert a stored area in acres to this unit (acres → hectares).
     public func fromAcres(_ acres: Double) -> Double {
-        self == .hectare ? acres / 2.4710538147 : acres
+        self == .hectare ? acres / Units.acresPerHectare : acres
     }
 
     /// Density-label suffix: "/ha" or "/ac".
@@ -237,6 +229,21 @@ public enum AreaUnit: String, Sendable {
     /// A density label built from a base quantity, e.g. densityLabel("m³") →
     /// "m³/ha" (metric) or "m³/ac" (US).
     public func densityLabel(_ base: String) -> String { base + densitySuffix }
+}
+
+// MARK: - Area unit derived from the unit system (manual-override precedence)
+
+public extension UnitSystem {
+    /// The areal basis this unit system expresses per-area densities in —
+    /// imperial cruises per acre, metric per hectare. Density/area displays
+    /// read THIS (not `Country.areaUnit`) so the manually-flippable Units
+    /// toggle in Settings wins: a cruiser who flips Units to metric gets
+    /// per-hectare density (and cm/m linear) even if the country stayed US.
+    /// Country still stamps the DEFAULT unit system on selection; it no longer
+    /// independently controls the area basis.
+    var areaUnit: AreaUnit {
+        self == .imperial ? .acre : .hectare
+    }
 }
 
 // MARK: - Volume standard

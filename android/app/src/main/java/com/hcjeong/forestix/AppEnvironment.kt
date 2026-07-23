@@ -81,6 +81,11 @@ class AppEnvironment private constructor(
         }
 
         private suspend fun build(app: Context): AppEnvironment {
+            // Bind the local-only event logger to the app context once, so its
+            // emit sites (plot open, backup create/restore, crash-recovery
+            // prompt) stay Context-free like the iOS static logger.
+            com.hcjeong.forestix.common.ForestixLogger.init(app)
+
             val db = Room.databaseBuilder(app, ForestixDatabase::class.java, "forestix.db")
                 .addMigrations(
                     com.hcjeong.forestix.data.QUICK_MEASURE_MIGRATION_1_2,

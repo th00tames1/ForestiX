@@ -53,6 +53,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import com.hcjeong.forestix.AppEnvironment
 import com.hcjeong.forestix.LocalAppEnvironment
+import com.hcjeong.forestix.common.ForestixLogger
 import com.hcjeong.forestix.data.cruise.CruiseDesign
 import com.hcjeong.forestix.data.cruise.HeightDiameterFit
 import com.hcjeong.forestix.data.cruise.PlannedPlot
@@ -188,6 +189,10 @@ class ExportViewModel(val project: Project) {
                 }
             }
             _lastSessionFolder.value = result.folder
+            // A full-cruise export is Android's per-project backup analogue
+            // (whole project written to disk): log it like iOS backupCreated.
+            ForestixLogger.backupCreated(
+                project.id, result.artefacts.sumOf { it.url.length() })
             var files = _exportedFiles.value
             for (art in result.artefacts) {
                 files = listOf(ExportedFile(url = art.url, displayName = art.displayName)) + files

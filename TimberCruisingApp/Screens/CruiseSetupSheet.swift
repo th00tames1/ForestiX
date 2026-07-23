@@ -74,7 +74,7 @@ public struct CruiseSetupSheet: View {
     }
 
     private static func radiusM(fromAcres acres: Double) -> Double {
-        sqrt(acres * 4046.8564224 / .pi)
+        sqrt(acres * Units.squareMetersPerAcre / .pi)
     }
 
     /// Radius of a fixed-area plot given its area in square metres — used for
@@ -84,7 +84,7 @@ public struct CruiseSetupSheet: View {
     }
 
     private static func acres(fromRadiusM radius: Double) -> Double {
-        .pi * radius * radius / 4046.8564224
+        .pi * radius * radius / Units.squareMetersPerAcre
     }
 
     public var body: some View {

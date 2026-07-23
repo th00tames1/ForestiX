@@ -22,6 +22,7 @@ package com.hcjeong.forestix.ui.screens
 
 import android.app.Activity
 import android.graphics.Bitmap
+import android.text.format.DateUtils
 import android.graphics.BitmapFactory
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -117,12 +118,14 @@ import com.hcjeong.forestix.basemap.MapMarker
 import com.hcjeong.forestix.basemap.MapMarkerShape
 import com.hcjeong.forestix.basemap.MapView
 import com.hcjeong.forestix.basemap.rememberMapCameraState
+import com.hcjeong.forestix.common.ForestixLogger
 import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.RegionalSpecies
 import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
 import com.hcjeong.forestix.data.SettingsSnapshot
+import com.hcjeong.forestix.data.cruise.CrashRecoveryService
 import com.hcjeong.forestix.geo.CoordinateConversions
 import com.hcjeong.forestix.positioning.CLLocationSnapshot
 import com.hcjeong.forestix.positioning.GeoMath
@@ -246,6 +249,12 @@ fun MapHomeScreen(nav: NavController) {
     // Quick peek "Edit this tree" → compact edit sheet for one reading.
     var editEntry by remember { mutableStateOf<QuickMeasureEntry?>(null) }
 
+    // Crash-recovery resume prompt: open plots (closedAt == null) edited within
+    // the last 24h, most-recent first. Non-null + non-empty shows the prompt.
+    var recoveryPrompt by remember {
+        mutableStateOf<List<CrashRecoveryService.ResumeCandidate>?>(null)
+    }
+
     // MARK: - Cruise mode state + effects (data load / navigate guide /
     // actions run only while the mode is on; the holder survives toggles so
     // the 180 ms exit crossfade renders from live data)
@@ -263,6 +272,31 @@ fun MapHomeScreen(nav: NavController) {
                 mapCenter = it
             },
         )
+    }
+
+    // Crash recovery: on the home's FIRST appearance per launch, scan for open
+    // plots edited within the last 24h and surface the most-recent as a
+    // Resume / View / Discard prompt. The process-static guard makes this run
+    // AT MOST once per launch (the home recomposes / is re-entered on every
+    // Settings round-trip and mode toggle); a dismiss / Discard never re-prompts.
+    LaunchedEffect(Unit) {
+        if (!CrashRecoveryService.checkedThisLaunch) {
+            CrashRecoveryService.checkedThisLaunch = true
+            val found = try {
+                CrashRecoveryService.openPlotsWithinLast(
+                    projectRepo = env.projectRepository,
+                    plotRepo = env.plotRepository,
+                    treeRepo = env.treeRepository,
+                )
+            } catch (_: Exception) {
+                emptyList()
+            }
+            if (found.isNotEmpty()) {
+                recoveryPrompt = found
+                val top = found.first()
+                ForestixLogger.crashRecoveryPrompted(top.plot.projectId, top.plot.id)
+            }
+        }
     }
 
     /// The toggle circle + system back both land here. Leaving a mode drops
@@ -587,6 +621,70 @@ fun MapHomeScreen(nav: NavController) {
             fallbackCentre = mapCenter,
         )
     }
+
+    // Crash-recovery resume prompt. Resume reuses the SAME enter-open-plot
+    // mechanism the cruise map uses (current project + active plot pointer +
+    // cruise mode), so it lands on that plot's active cruise/tally surface;
+    // Discard dismisses without deleting anything (the plot stays open).
+    recoveryPrompt?.let { candidates ->
+        CrashRecoveryDialog(
+            candidates = candidates,
+            onResume = {
+                val c = candidates.first()
+                env.settings.setCruiseProjectId(c.plot.projectId.toString())
+                env.settings.setCruisePlotId(c.plot.id.toString())
+                env.settings.setMapMode("cruise")
+                ForestixLogger.plotOpened(c.plot.id, c.plot.projectId)
+                recoveryPrompt = null
+            },
+            onDiscard = { recoveryPrompt = null },
+        )
+    }
+}
+
+// MARK: - Crash-recovery resume prompt ---------------------------------------
+
+/// Three-option resume prompt (mock: Resume / View / Discard). "View" is
+/// folded into the card — the top candidate's plot #, project, live-tree count
+/// and relative last-edited time are shown inline so the cruiser can decide
+/// before acting. Resume targets the most-recent candidate; when several open
+/// plots qualify the rest are summarised so nothing is hidden. Discard deletes
+/// nothing — the plot stays open and reachable from the cruise map.
+@Composable
+private fun CrashRecoveryDialog(
+    candidates: List<CrashRecoveryService.ResumeCandidate>,
+    onResume: () -> Unit,
+    onDiscard: () -> Unit,
+) {
+    val top = candidates.firstOrNull() ?: return
+    val edited = DateUtils.getRelativeTimeSpanString(
+        top.lastEditedAt,
+        System.currentTimeMillis(),
+        DateUtils.MINUTE_IN_MILLIS,
+    )
+    val treeWord = if (top.liveTreeCount == 1) "tree" else "trees"
+    AlertDialog(
+        onDismissRequest = onDiscard,
+        title = { Text("Resume plot ${top.plot.plotNumber}?") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(ForestixSpace.xs)) {
+                Text(
+                    "Plot ${top.plot.plotNumber} · ${top.projectName}\n" +
+                        "${top.liveTreeCount} $treeWord · edited $edited",
+                )
+                if (candidates.size > 1) {
+                    val moreWord = if (candidates.size - 1 == 1) "plot" else "plots"
+                    Text(
+                        "+ ${candidates.size - 1} more open $moreWord from the last 24 hours.",
+                        color = Forestix.colors.textSecondary,
+                        style = Forestix.type.caption,
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onResume) { Text("Resume") } },
+        dismissButton = { TextButton(onClick = onDiscard) { Text("Discard") } },
+    )
 }
 
 // MARK: - Measure-mode bottom region -----------------------------------------

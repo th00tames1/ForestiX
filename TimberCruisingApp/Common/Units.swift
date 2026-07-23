@@ -29,6 +29,13 @@ public enum Units {
     public static func acresToSquareMeters(_ ac: Double) -> Double { ac * squareMetersPerAcre }
     public static func squareMetersToAcres(_ m2: Double) -> Double { m2 / squareMetersPerAcre }
 
+    // MARK: Area — hectares ↔ acres
+    // 1 hectare = 10 000 m² = 2.4710538147 acres (exact, from the m²/acre above).
+    // The canonical per-hectare density factor: a per-ACRE quantity times this
+    // is the same quantity per hectare. Declared once here; every metric
+    // density/area display references it rather than re-hardcoding the number.
+    public static let acresPerHectare: Double = 2.4710538147
+
     // MARK: Volume — m³ ↔ ft³
     public static func cubicMetersToCubicFeet(_ m3: Double) -> Double {
         m3 * (1.0 / metersPerFoot) * (1.0 / metersPerFoot) * (1.0 / metersPerFoot)
@@ -40,10 +47,10 @@ public enum Units {
     // MARK: Per-acre basal area m²/ha ↔ ft²/ac (useful convenience)
     // 1 m²/ha = 4.35600 ft²/ac (derived from 1 ha = 2.47105 ac, 1 m² = 10.7639 ft²)
     public static func baPerHaToBaPerAcre(_ m2PerHa: Double) -> Double {
-        m2PerHa * (squareMetersToSquareFeet(1.0) / 2.4710538147)
+        m2PerHa * (squareMetersToSquareFeet(1.0) / acresPerHectare)
     }
     public static func baPerAcreToBaPerHa(_ ft2PerAc: Double) -> Double {
-        ft2PerAc * (2.4710538147 / squareMetersToSquareFeet(1.0))
+        ft2PerAc * (acresPerHectare / squareMetersToSquareFeet(1.0))
     }
 }
 

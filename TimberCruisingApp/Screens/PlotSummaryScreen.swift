@@ -17,7 +17,7 @@ public struct PlotSummaryScreen: View {
 
     /// Areal basis for the density rows (TPA, BA/area, volume/area). The engine
     /// computes per acre; metric countries re-express per hectare. The caller
-    /// passes `settings.country.areaUnit`. Defaults to `.acre` so US callers,
+    /// passes `settings.unitSystem.areaUnit`. Defaults to `.acre` so US callers,
     /// previews and tests are unchanged.
     private let areaUnit: AreaUnit
 

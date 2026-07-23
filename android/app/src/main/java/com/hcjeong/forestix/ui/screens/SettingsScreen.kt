@@ -51,6 +51,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.common.Country
+import com.hcjeong.forestix.common.ForestixLogger
 import com.hcjeong.forestix.common.Region
 import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.common.defaultLogRule
@@ -278,6 +279,33 @@ fun SettingsScreen(nav: NavController) {
                         destructive = true,
                     ) {
                         ResearchLog.clear(context)
+                        storeRefresh++
+                    }
+
+                    // Event log — local-only structured analytics (plot open,
+                    // backup create/restore, crash-recovery prompt). JSONL,
+                    // never uploaded; share/clear mirror the iOS Settings rows.
+                    val hasEvents = remember(storeRefresh, settings.developerMode) {
+                        ForestixLogger.hasEvents()
+                    }
+                    FormDivider()
+                    SettingsActionRow(
+                        title = "Export event log",
+                        icon = Icons.Filled.IosShare,
+                        enabled = hasEvents,
+                    ) {
+                        ForestixLogger.exportUri(context)?.let {
+                            shareFile(context, it, "application/json")
+                        }
+                    }
+                    FormDivider()
+                    SettingsActionRow(
+                        title = "Clear event log",
+                        icon = Icons.Filled.Delete,
+                        enabled = hasEvents,
+                        destructive = true,
+                    ) {
+                        ForestixLogger.clear()
                         storeRefresh++
                     }
 

@@ -167,6 +167,13 @@ public struct MapHomeScreen: View {
     @State var pendingDestination: CruiseDestination?
     @State var closePlotCandidateID: UUID?
 
+    // Crash-recovery resume prompt — open plots (closedAt == nil) whose last
+    // activity is within the last 24 h, surfaced ONCE per launch on the home's
+    // first appear. `didScanForCrashRecovery` enforces once-per-launch (and so
+    // a dismiss/Discard never re-prompts); a non-empty list drives the dialog.
+    @State var crashRecoveryCandidates: [ResumeCandidate] = []
+    @State var didScanForCrashRecovery = false
+
     // Map-peek destructive-delete targets (confirmed via .alert) and the
     // cruise tree photo viewer opened from the tree-peek thumbnail.
     @State var deletePlotCandidateID: UUID?
@@ -280,9 +287,13 @@ public struct MapHomeScreen: View {
             .task {
                 // First-launch UX: auto-present the region picker once,
                 // after the splash has settled — but never re-prompt a
-                // cruiser who already has a region.
+                // cruiser who already has a region. A returning cruiser
+                // (region already seen) instead gets the crash-recovery
+                // scan, so the two never present over each other.
                 if !settings.regionPickerSeen {
                     presentingRegionPicker = true
+                } else {
+                    scanForCrashRecovery()
                 }
             }
             #if os(iOS)
@@ -365,6 +376,32 @@ public struct MapHomeScreen: View {
                 }
                 .environmentObject(environment)
                 .environmentObject(settings)
+            }
+            // CRASH RECOVERY — resume an in-progress plot from a recent
+            // session. The summary (plot #, tree count, last-edited) is folded
+            // into each Resume row, so tapping shows the "View" detail inline
+            // before committing. Discard just dismisses — nothing is deleted
+            // and the plot stays reachable from the project dashboard.
+            .confirmationDialog(
+                crashRecoveryTitle,
+                isPresented: Binding(
+                    get: { !crashRecoveryCandidates.isEmpty },
+                    set: { if !$0 { crashRecoveryCandidates = [] } }),
+                titleVisibility: .visible,
+                presenting: crashRecoveryCandidates
+            ) { candidates in
+                ForEach(candidates.prefix(3)) { candidate in
+                    Button("Resume \(candidate.summary)") {
+                        resumeCrashRecovery(candidate)
+                    }
+                }
+                Button("Discard", role: .cancel) {
+                    crashRecoveryCandidates = []
+                }
+            } message: { candidates in
+                Text(candidates.count == 1
+                     ? "An in-progress plot from a recent session is still open. Resume where you left off, or discard this reminder — nothing is deleted."
+                     : "\(candidates.count) in-progress plots from recent sessions are still open. Resume one, or discard — nothing is deleted.")
             }
         }
     }

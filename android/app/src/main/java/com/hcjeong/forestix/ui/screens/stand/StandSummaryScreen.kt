@@ -48,6 +48,7 @@ import com.hcjeong.forestix.ui.screens.ForestixScaffold
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.common.AreaUnit
+import com.hcjeong.forestix.common.areaUnit
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import java.util.Locale
 import java.util.UUID
@@ -121,9 +122,11 @@ fun StandSummaryScreen(nav: NavController, projectId: UUID) {
                     style = type.caption, color = colors.textSecondary)
             }
 
-            // Density basis: metric countries read per hectare, US per acre.
-            // The engine computes per acre; scale + relabel at display only.
-            val areaUnit = settings.country.areaUnit
+            // Density basis: a metric unit system reads per hectare, imperial
+            // per acre. Derived from the (manually-overridable) Units setting,
+            // not the country, so a manual toggle wins. The engine computes per
+            // acre; scale + relabel at display only.
+            val areaUnit = settings.unitSystem.areaUnit
             val densityFactor = areaUnit.perAcreDensityFactor
 
             StatCardSection(

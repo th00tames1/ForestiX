@@ -70,6 +70,7 @@ import com.hcjeong.forestix.AppEnvironment
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.common.AreaUnit
 import com.hcjeong.forestix.common.Units
+import com.hcjeong.forestix.common.areaUnit
 import com.hcjeong.forestix.data.cruise.CruiseDesign
 import com.hcjeong.forestix.data.cruise.PlannedPlot
 import com.hcjeong.forestix.data.cruise.PlotType
@@ -112,7 +113,7 @@ fun CruiseSetupSheet(
 ) {
     val env = LocalAppEnvironment.current
     val settings by env.settings.state.collectAsStateWithLifecycle()
-    val areaUnit = settings.country.areaUnit
+    val areaUnit = settings.unitSystem.areaUnit
     val colors = Forestix.colors
     val type = Forestix.type
     val scope = rememberCoroutineScope()

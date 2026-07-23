@@ -39,13 +39,14 @@ enum class AreaUnit {
     HECTARE;
 
     /// Multiply a canonical per-ACRE density by this to express it per this
-    /// unit. 1 hectare = 2.4710538147 acres, so per-hectare = per-acre × that.
+    /// unit. 1 hectare = Units.ACRES_PER_HECTARE acres, so per-hectare =
+    /// per-acre × that.
     val perAcreDensityFactor: Double
-        get() = if (this == HECTARE) 2.4710538147 else 1.0
+        get() = if (this == HECTARE) Units.ACRES_PER_HECTARE else 1.0
 
     /// Convert a stored area in acres to this unit (acres → hectares).
     fun fromAcres(acres: Double): Double =
-        if (this == HECTARE) acres / 2.4710538147 else acres
+        if (this == HECTARE) acres / Units.ACRES_PER_HECTARE else acres
 
     /// Density-label suffix: "/ha" or "/ac".
     val densitySuffix: String get() = if (this == HECTARE) "/ha" else "/ac"
@@ -57,6 +58,16 @@ enum class AreaUnit {
     /// "m³/ha" (metric) or "m³/ac" (US).
     fun densityLabel(base: String): String = base + densitySuffix
 }
+
+/// The area/density basis derived from the UNIT SYSTEM — imperial cruises per
+/// acre, metric per hectare. This is the precedence-correct source every
+/// density/area display reads: the manually-set Units toggle wins. (Previously
+/// area was tied to `Country.areaUnit`, which ignored a manual override so a
+/// US cruiser who flipped Units to metric still saw per-acre densities.)
+/// Country still sets the DEFAULT unit system on selection; it no longer
+/// independently controls area.
+val UnitSystem.areaUnit: AreaUnit
+    get() = if (this == UnitSystem.IMPERIAL) AreaUnit.ACRE else AreaUnit.HECTARE
 
 enum class Country(val raw: String) {
     UNITED_STATES("us"),
@@ -89,11 +100,6 @@ enum class Country(val raw: String) {
     /// US renders cubic/board feet; everyone else renders cubic metres.
     val volumeUnit: VolumeUnit
         get() = if (this == UNITED_STATES) VolumeUnit.CUBIC_FEET else VolumeUnit.CUBIC_METERS
-
-    /// US cruises per acre; metric countries per hectare. Drives the
-    /// display/export density conversion + labels (the engine stays per-acre).
-    val areaUnit: AreaUnit
-        get() = if (this == UNITED_STATES) AreaUnit.ACRE else AreaUnit.HECTARE
 
     /// Selecting a country DRIVES the unit system: the US is imperial, every
     /// metric country (Finland/Germany/South Korea) defaults to metric. Both

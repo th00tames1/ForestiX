@@ -53,6 +53,7 @@ import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.ar.ArCameraView
 import com.hcjeong.forestix.ar.ArSceneMarker
 import com.hcjeong.forestix.ar.ArSessionHub
+import com.hcjeong.forestix.common.ForestixLogger
 import com.hcjeong.forestix.common.Units
 import com.hcjeong.forestix.data.cruise.Plot
 import com.hcjeong.forestix.data.cruise.PositionSource
@@ -194,6 +195,7 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String) {
                 env.plotRepository.create(newPlot)
                 env.settings.setCruiseProjectId(projectId)
                 env.settings.setCruisePlotId(newPlot.id.toString())
+                ForestixLogger.plotOpened(newPlot.id, newPlot.projectId)
                 // Keep ArSessionHub.activePlot: the ring overlays the
                 // DBH/Height screens while this plot is tallied. Stamp
                 // the anchor as THIS cruise plot's centre so the scan

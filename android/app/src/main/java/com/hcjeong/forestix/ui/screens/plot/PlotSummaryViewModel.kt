@@ -220,6 +220,27 @@ class PlotSummaryViewModel(
         }
     }
 
+    /// Reopen a closed plot: clear closedAt/closedBy and persist so the cruiser
+    /// can add or edit trees again (closed early, or spotted a missed tree).
+    /// The H–D fits written at close time are left in place — re-closing re-runs
+    /// the rollup. Mirrors iOS reopen() and the "you can reopen from Details"
+    /// affordance the close dialog promises.
+    suspend fun reopen() {
+        if (_closedAt.value == null || _isClosing.value) return
+        withContext(NonCancellable) {
+            val p = plot.copy(closedAt = null, closedBy = null)
+            try {
+                plot = plotRepo.update(p)
+                _closedAt.value = plot.closedAt
+                _errorMessage.value = null
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                _errorMessage.value = "Reopen failed: ${e.message ?: e.javaClass.simpleName}. " +
+                    "Try again when you have signal."
+            }
+        }
+    }
+
     /// External reset for the error alert.
     fun clearError() {
         _errorMessage.value = null

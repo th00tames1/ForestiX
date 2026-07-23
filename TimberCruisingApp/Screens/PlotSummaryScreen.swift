@@ -66,6 +66,12 @@ public struct PlotSummaryScreen: View {
             Label("Plot closed \(viewModel.closedAt?.formatted(date: .abbreviated, time: .shortened) ?? "")",
                   systemImage: "lock.circle.fill")
                 .foregroundStyle(.secondary)
+            Button {
+                viewModel.reopen()
+            } label: {
+                Label("Reopen plot", systemImage: "lock.open")
+            }
+            .accessibilityIdentifier("plotSummary.reopen")
         }
     }
 

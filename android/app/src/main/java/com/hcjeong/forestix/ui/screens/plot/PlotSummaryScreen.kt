@@ -152,6 +152,9 @@ fun PlotSummaryScreen(
                             style = type.body,
                             color = colors.textSecondary)
                     }
+                    TextButton(onClick = { scope.launch { vm.reopen() } }) {
+                        Text("Reopen plot")
+                    }
                 }
             }
 

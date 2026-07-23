@@ -218,6 +218,27 @@ public final class PlotSummaryViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Reopen
+
+    /// Reopen a closed plot: clear closedAt/closedBy and persist so the cruiser
+    /// can add or edit trees again (they closed early, or spotted a missed
+    /// tree). The H–D fits written at close time are left in place — re-closing
+    /// re-runs the rollup. This is the affordance the close-plot dialog already
+    /// promises ("you can reopen from Details").
+    public func reopen() {
+        guard closedAt != nil, !isClosing else { return }
+        var p = plot
+        p.closedAt = nil
+        p.closedBy = nil
+        do {
+            plot = try plotRepo.update(p)
+            closedAt = plot.closedAt
+            errorMessage = nil
+        } catch {
+            errorMessage = "Reopen failed: \(error.localizedDescription). Try again when you have signal."
+        }
+    }
+
     // MARK: - Delete
 
     /// Hard-remove this plot AND its trees (summary "Delete plot", mirrors

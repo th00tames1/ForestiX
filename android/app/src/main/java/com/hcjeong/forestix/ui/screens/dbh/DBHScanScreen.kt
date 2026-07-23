@@ -93,9 +93,6 @@ import com.hcjeong.forestix.ui.MeasurePhotoStore
 import com.hcjeong.forestix.ui.PendingTreeNumber
 import com.hcjeong.forestix.ui.Routes
 import com.hcjeong.forestix.ui.screens.cruise.CruiseCapture
-import com.hcjeong.forestix.ui.screens.ContinuationAction
-import com.hcjeong.forestix.ui.screens.ContinuationOrigin
-import com.hcjeong.forestix.ui.screens.MeasurementContinuationSheet
 import com.hcjeong.forestix.ui.screens.ScanMetadataSheet
 import com.hcjeong.forestix.ui.screens.DevHud
 import com.hcjeong.forestix.ui.screens.GPSAccuracyBadge
@@ -179,9 +176,6 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     var metaDamage by remember { mutableStateOf<List<String>>(emptyList()) }
     var metaNote by remember { mutableStateOf("") }
     var showMetadata by remember { mutableStateOf(false) }
-    // Post-save continuation (height same tree / next tree / done) —
-    // quick-measure world only; the cruise tally loop never shows it.
-    var continuationTree by remember { mutableStateOf<Int?>(null) }
     // Developer-mode research capture: tape-measured true diameter (cm).
     var researchTrueCm by remember { mutableStateOf("") }
     // Cruise quick-tally loop (field-benchmark batch): the target tree number
@@ -986,10 +980,13 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     nav.navigate("height?tree=$pendingTree") {
                         popUpTo(Routes.DBH_PATTERN) { inclusive = true }
                     }
+                } else {
+                    // Quick measure saved — no continuation prompt (iOS
+                    // parity); return to the map once the save completes.
+                    nav.popBackStack()
                 }
             }
         }
-        if (cruise == null && !chainToHeight) continuationTree = pendingTree
         if (settings.developerMode) {
             val fields = mutableMapOf(
                 "measure_type" to "dbh",
@@ -1711,35 +1708,6 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             )
         }
 
-        // Post-save continuation — height same tree / next tree / done.
-        continuationTree?.let { savedTree ->
-            MeasurementContinuationSheet(
-                origin = ContinuationOrigin.AFTER_DIAMETER,
-                treeNumber = savedTree,
-                treeAlreadyHasHeight = env.history.entries.value.any {
-                    it.treeNumber == savedTree && it.kind == MeasureKind.HEIGHT
-                },
-                onAction = { action ->
-                    continuationTree = null
-                    when (action) {
-                        ContinuationAction.MEASURE_HEIGHT_SAME_TREE -> {
-                            // (The old popUpTo(treeHub) was a no-op from the
-                            // map home — the hub retired with Phase B.)
-                            nav.navigate("height?tree=$savedTree")
-                        }
-                        ContinuationAction.START_NEW_TREE_DIAMETER -> {
-                            // Reset in place for the next tree.
-                            result = null; failure = null
-                            metaSpecies = null; metaPosition = StemPosition.DBH
-                            metaDamage = emptyList(); metaNote = ""
-                            pendingTree = env.history.suggestedNextTreeNumber
-                            stage = Stage.AIMING
-                        }
-                        ContinuationAction.DONE -> nav.popBackStack()
-                    }
-                },
-            )
-        }
     }
 }
 

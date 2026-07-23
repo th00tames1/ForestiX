@@ -62,9 +62,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hcjeong.forestix.ui.PendingTreeNumber
 import com.hcjeong.forestix.ui.Routes
 import com.hcjeong.forestix.ui.screens.cruise.CruiseCapture
-import com.hcjeong.forestix.ui.screens.ContinuationAction
-import com.hcjeong.forestix.ui.screens.ContinuationOrigin
-import com.hcjeong.forestix.ui.screens.MeasurementContinuationSheet
 import com.hcjeong.forestix.ui.screens.ScanMetadataSheet
 import com.hcjeong.forestix.ui.screens.DevHud
 import com.hcjeong.forestix.ui.screens.GPSAccuracyBadge
@@ -116,7 +113,6 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
             },
         )
     }
-    var continuationTree by remember { mutableStateOf<Int?>(null) }
     // Developer-mode research capture: true height (m) from a clinometer.
     var researchTrueM by remember { mutableStateOf("") }
     val settings by env.settings.state.collectAsStateWithLifecycle()
@@ -450,6 +446,9 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                         photoPath = photo,
                     )
                 )
+                // Quick measure saved — no continuation prompt (iOS parity);
+                // return to the map once the save completes.
+                nav.popBackStack()
             }
         }
         if (cruise == null && crownStep == CrownStep.DONE) {
@@ -464,7 +463,6 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 )
             }
         }
-        if (cruise == null) continuationTree = pendingTree
         if (settings.developerMode) {
             val fields = mutableMapOf(
                 "measure_type" to "height",
@@ -817,28 +815,6 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
             )
         }
 
-        // Post-save continuation — next tree's diameter or done.
-        continuationTree?.let { savedTree ->
-            MeasurementContinuationSheet(
-                origin = ContinuationOrigin.AFTER_HEIGHT,
-                treeNumber = savedTree,
-                treeAlreadyHasHeight = env.history.entries.value.any {
-                    it.treeNumber == savedTree && it.kind == MeasureKind.HEIGHT
-                },
-                onAction = { action ->
-                    continuationTree = null
-                    when (action) {
-                        ContinuationAction.START_NEW_TREE_DIAMETER,
-                        ContinuationAction.MEASURE_HEIGHT_SAME_TREE -> {
-                            // (The old popUpTo(treeHub) was a no-op from the
-                            // map home — the hub retired with Phase B.)
-                            nav.navigate(Routes.DBH)
-                        }
-                        ContinuationAction.DONE -> nav.popBackStack()
-                    }
-                },
-            )
-        }
     }
 }
 

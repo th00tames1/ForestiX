@@ -40,7 +40,6 @@ public final class AppSettings: ObservableObject {
         public static let tileProviderLabel       = "tc.tileProviderLabel"
         public static let providerUsageAck        = "tc.providerUsageAcknowledged"
         public static let overlayEnabled          = "tc.overlayEnabled"
-        public static let advancedMode            = "tc.advancedMode"
         public static let country                 = "tc.country"
         public static let region                  = "tc.region"
         public static let regionPickerSeen        = "tc.regionPickerSeen"
@@ -114,16 +113,6 @@ public final class AppSettings: ObservableObject {
         set { defaults.set(newValue, forKey: Keys.overlayEnabled); objectWillChange.send() }
     }
 
-    /// When `true`, the full project/plot/cruise workflow is shown at
-    /// app launch. When `false` (the default for new users), Forestix
-    /// boots straight into Quick Measure — just DBH + Height — so
-    /// cruisers who only want a one-off measurement aren't forced
-    /// through project setup.
-    public var advancedMode: Bool {
-        get { defaults.bool(forKey: Keys.advancedMode) }
-        set { defaults.set(newValue, forKey: Keys.advancedMode); objectWillChange.send() }
-    }
-
     /// CRUISE MODE — id of the project the cruise map is currently
     /// scoped to (the project chip). nil until the cruiser has picked
     /// or created one; the map home's cruise mode falls back to the
@@ -168,7 +157,7 @@ public final class AppSettings: ObservableObject {
     }
 
     /// Pre-loaded regional species filter. nil = no region picked yet
-    /// (RegionPickerSheet hasn't been shown / has been dismissed).
+    /// (the first-run locale cascade hasn't been shown / has been dismissed).
     /// "all" = explicit "show every species" choice.
     public var region: Region? {
         get {

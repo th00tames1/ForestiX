@@ -12,7 +12,7 @@
 // iOS runs the ARKit session headless behind a plain stepper; ARCore
 // needs a rendered surface for the session to produce poses, so the
 // Android screen hosts the shared ArCameraView full-bleed with the
-// stepper overlaid on a bottom panel (the ARBoundaryScreen pattern).
+// stepper overlaid on a bottom panel.
 // The walk-back distance is pumped from the camera pose at 4 Hz — the
 // Android analogue of the iOS $currentCameraWorldPosition sink.
 

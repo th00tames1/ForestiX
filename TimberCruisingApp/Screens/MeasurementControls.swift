@@ -148,54 +148,6 @@ public struct MeasureCircleButton: View {
     }
 }
 
-/// Back-compat alias — older call sites pass a title + optional symbol.
-public struct MeasurePillButton: View {
-    private let title: String
-    private let systemImage: String?
-    private let action: () -> Void
-
-    public init(_ title: String, systemImage: String? = nil, action: @escaping () -> Void) {
-        self.title = title
-        self.systemImage = systemImage
-        self.action = action
-    }
-
-    public var body: some View {
-        MeasureCircleButton(systemImage: systemImage ?? "circle", caption: title, action: action)
-    }
-}
-
-// MARK: - Right-edge control column
-
-/// Capture button vertically centred on the trailing edge, with any extra
-/// controls stacked just below it — a floating right-rail layout.
-/// Superseded by `MeasureShutterRow` for the four AR measure screens
-/// (bottom-centre camera-app layout); kept for any remaining callers.
-public struct MeasureControlColumn<Extra: View>: View {
-    private let capture: () -> Void
-    private let captureSymbol: String
-    private let extra: Extra
-
-    public init(captureSymbol: String = "plus",
-                capture: @escaping () -> Void,
-                @ViewBuilder extra: () -> Extra = { EmptyView() }) {
-        self.captureSymbol = captureSymbol
-        self.capture = capture
-        self.extra = extra()
-    }
-
-    public var body: some View {
-        HStack {
-            Spacer()
-            VStack(spacing: 14) {
-                MeasureCaptureButton(systemImage: captureSymbol, action: capture)
-                extra
-            }
-            .padding(.trailing, 18)
-        }
-    }
-}
-
 // MARK: - Top instruction banner (U1)
 
 /// Stage-guidance banner pinned top-centre on every AR measure screen —

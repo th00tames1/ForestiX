@@ -53,7 +53,6 @@ data class SettingsSnapshot(
     /// stays in tileURLTemplate; this only toggles its visibility.
     val overlayEnabled: Boolean = true,
     val providerUsageAcknowledged: Boolean = false,
-    val advancedMode: Boolean = false,
     /// Internationalization framework — Country sits above Region and derives
     /// the volume standard, unit (board-foot vs m³) and whether the Log rule
     /// applies. Defaults to UNITED_STATES so existing US installs are
@@ -120,7 +119,6 @@ class AppSettings(private val context: Context) {
         val tileProviderLabel = stringPreferencesKey("tc.tileProviderLabel")
         val overlayEnabled = booleanPreferencesKey("tc.overlayEnabled")
         val providerUsageAck = booleanPreferencesKey("tc.providerUsageAcknowledged")
-        val advancedMode = booleanPreferencesKey("tc.advancedMode")
         val country = stringPreferencesKey("tc.country")
         val region = stringPreferencesKey("tc.region")
         val regionPickerSeen = booleanPreferencesKey("tc.regionPickerSeen")
@@ -167,7 +165,6 @@ class AppSettings(private val context: Context) {
             tileProviderLabel = p[Keys.tileProviderLabel],
             overlayEnabled = p[Keys.overlayEnabled] ?: true,
             providerUsageAcknowledged = p[Keys.providerUsageAck] ?: false,
-            advancedMode = p[Keys.advancedMode] ?: false,
             country = Country.fromRaw(p[Keys.country]) ?: Country.default,
             region = p[Keys.region],
             regionPickerSeen = p[Keys.regionPickerSeen] ?: false,
@@ -267,10 +264,6 @@ class AppSettings(private val context: Context) {
         it[Keys.providerUsageAck] = value
     }
 
-    fun setAdvancedMode(value: Boolean) = update {
-        _state.value = _state.value.copy(advancedMode = value)
-        it[Keys.advancedMode] = value
-    }
 
     fun setCountry(value: Country) = update {
         _state.value = _state.value.copy(country = value)

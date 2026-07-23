@@ -37,11 +37,6 @@ public struct SettingsScreen: View {
 
     public var body: some View {
         Form {
-            // modeSection (Advanced mode toggle) intentionally
-            // hidden — Phase 7 unified the two homes so the toggle
-            // no longer drives anything. The `advancedMode` property
-            // on AppSettings is preserved for back-compat but the
-            // Settings UI doesn't expose it any more.
             countryRegionSection
             appearanceSection
             unitsSection
@@ -288,21 +283,6 @@ public struct SettingsScreen: View {
         let bytes = RawCaptureStore.totalSizeBytes()
         let size = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
         return "\(n) · \(size)"
-    }
-
-    private var modeSection: some View {
-        Section(
-            header: Text("Mode"),
-            footer: Text("Advanced mode unlocks the full Forestix workflow — projects, stratum drawing, cruise design, and plot-level stand summaries. Leave it off to keep the app focused on one-off DBH / Height measurements.")
-        ) {
-            Toggle(isOn: Binding(
-                get: { settings.advancedMode },
-                set: { settings.advancedMode = $0 })
-            ) {
-                Label("Advanced mode", systemImage: "gear.badge")
-            }
-            .accessibilityIdentifier("settings.advancedMode")
-        }
     }
 
     // Developer-only — normal users get the single blessed DBH path;

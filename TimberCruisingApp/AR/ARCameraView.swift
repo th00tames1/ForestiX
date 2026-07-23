@@ -1,7 +1,7 @@
 // Phase 7.2 hardening — SwiftUI wrapper around RealityKit's ARView.
 //
-// The Phase 2 / 3 / 5 audit found that DBHScanScreen, HeightScanScreen,
-// and ARBoundaryScreen were rendering only their overlay chrome over a
+// The Phase 2 / 3 / 5 audit found that DBHScanScreen and HeightScanScreen
+// were rendering only their overlay chrome over a
 // black `Color.black.ignoresSafeArea()` placeholder — the actual camera
 // feed never made it onto the screen. A real cruiser pointing the phone
 // at a tree would just see a black rectangle with a guide line floating

@@ -291,12 +291,38 @@ public struct RawCaptureManifest: Codable, Sendable {
         public struct Aim: Codable, Sendable {
             public var pitchDeg: Double
             public var cameraPose: [Double] // 16
+            // Schema 2 (LOCKED, key-identical to Android): the depth frame +
+            // reference RGB grabbed at THIS aim (base or top) tap, so a height
+            // bundle can re-run depth-based height algorithms — not just the
+            // tangent method. All optional: an old (schema 1) height capture
+            // has none of these and still re-runs the tangent method exactly
+            // as before. `format` is platform-specific ("f32m" iOS / "u16mm"
+            // Android); every other key is byte-identical across platforms.
+            public var depthFile: String?   // "depth_base.bin" / "depth_top.bin"
+            public var rgbFile: String?     // "rgb_base.jpg" / "rgb_top.jpg"
+            public var width: Int?
+            public var height: Int?
+            public var format: String?      // "f32m"
+            public var fx: Double?
+            public var fy: Double?
+            public var cx: Double?
+            public var cy: Double?
             enum CodingKeys: String, CodingKey {
                 case pitchDeg = "pitch_deg"
                 case cameraPose = "camera_pose"
+                case depthFile = "depth_file"
+                case rgbFile = "rgb_file"
+                case width, height, format, fx, fy, cx, cy
             }
-            public init(pitchDeg: Double, cameraPose: [Double]) {
+            public init(pitchDeg: Double, cameraPose: [Double],
+                        depthFile: String? = nil, rgbFile: String? = nil,
+                        width: Int? = nil, height: Int? = nil, format: String? = nil,
+                        fx: Double? = nil, fy: Double? = nil,
+                        cx: Double? = nil, cy: Double? = nil) {
                 self.pitchDeg = pitchDeg; self.cameraPose = cameraPose
+                self.depthFile = depthFile; self.rgbFile = rgbFile
+                self.width = width; self.height = height; self.format = format
+                self.fx = fx; self.fy = fy; self.cx = cx; self.cy = cy
             }
         }
 

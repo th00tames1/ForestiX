@@ -158,6 +158,14 @@ public final class HeightScanViewModel: ObservableObject {
     private var recordPoseSamples: [(tMs: Int, pose: simd_float4x4)] = []
     private var lastPoseSampleTime: TimeInterval = 0
 
+    // Schema-2 aim frames: the depth frame + reference RGB retained at the
+    // base-aim and top-aim taps (developer mode only), so a height bundle can
+    // later re-run depth-based height algorithms, not just tangent.
+    private var recordBaseFrame: ARDepthFrame?
+    private var recordBaseJPEG: Data?
+    private var recordTopFrame: ARDepthFrame?
+    private var recordTopJPEG: Data?
+
     // MARK: - Construction
 
     /// Shared-session client token — one per view-model instance so a
@@ -230,6 +238,22 @@ public final class HeightScanViewModel: ObservableObject {
         recordPoseSamples.append((tMs: tMs, pose: frame.cameraPoseWorld))
     }
 
+    /// Retain the base-aim depth frame + reference RGB for the raw-capture
+    /// bundle (developer mode only). Grabbed at the base tap so the stored
+    /// aim frame matches the pitch the tangent method used.
+    private func retainBaseAimFrame() {
+        guard rawCaptureEnabled else { return }
+        recordBaseFrame = session.latestDepthFrame
+        recordBaseJPEG = session.currentCameraImageJPEG()
+    }
+
+    /// Retain the top-aim depth frame + reference RGB (developer mode only).
+    private func retainTopAimFrame() {
+        guard rawCaptureEnabled else { return }
+        recordTopFrame = session.latestDepthFrame
+        recordTopJPEG = session.currentCameraImageJPEG()
+    }
+
     /// Read the current ARKit camera translation in world space. Falls
     /// back through two sources in order:
     ///   1. `session.currentCameraWorldPosition` — published on every
@@ -283,6 +307,8 @@ public final class HeightScanViewModel: ObservableObject {
         // clock reference (developer mode only).
         recordPoseSamples.removeAll(keepingCapacity: true)
         lastPoseSampleTime = 0
+        recordBaseFrame = nil; recordBaseJPEG = nil
+        recordTopFrame = nil; recordTopJPEG = nil
         recordAnchorPose = session.latestDepthFrame?.cameraPoseWorld ?? matrix_identity_float4x4
         recordAnchorTime = session.latestDepthFrame?.timestamp ?? 0
         state = .anchorSet
@@ -331,6 +357,7 @@ public final class HeightScanViewModel: ObservableObject {
         standingPointWorldAtAimTop = standingPointWorld
         baseAimedWorld = aimedAtWorld
         recordBasePose = session.latestDepthFrame?.cameraPoseWorld ?? matrix_identity_float4x4
+        retainBaseAimFrame()
         state = .aimTopArmed
         rebuildSceneMarkers()
     }
@@ -347,6 +374,7 @@ public final class HeightScanViewModel: ObservableObject {
         alphaTopSampleCount = pitchBuffer.sampleCount(centeredOn: tapTime)
         topAimedWorld = aimedAtWorld
         recordTopPose = session.latestDepthFrame?.cameraPoseWorld ?? matrix_identity_float4x4
+        retainTopAimFrame()
         compute()
         rebuildSceneMarkers()
     }
@@ -464,6 +492,7 @@ public final class HeightScanViewModel: ObservableObject {
         self.alphaBaseRad = alphaBaseRad
         standingPointWorldAtAimTop = standingPointWorld
         recordBasePose = session.latestDepthFrame?.cameraPoseWorld ?? matrix_identity_float4x4
+        retainBaseAimFrame()
         state = .aimTopArmed
         rebuildSceneMarkers()
     }
@@ -475,6 +504,7 @@ public final class HeightScanViewModel: ObservableObject {
         else { return }
         self.alphaTopRad = alphaTopRad
         recordTopPose = session.latestDepthFrame?.cameraPoseWorld ?? matrix_identity_float4x4
+        retainTopAimFrame()
         compute()
         rebuildSceneMarkers()
     }
@@ -497,6 +527,8 @@ public final class HeightScanViewModel: ObservableObject {
         anchorFailureReason = nil
         recordPoseSamples.removeAll(keepingCapacity: true)
         lastPoseSampleTime = 0
+        recordBaseFrame = nil; recordBaseJPEG = nil
+        recordTopFrame = nil; recordTopJPEG = nil
         state = .idle
         rebuildSceneMarkers()
     }
@@ -571,6 +603,10 @@ public final class HeightScanViewModel: ObservableObject {
         let cal = calibration
         let ctx = rawCaptureContext
         let gps = rawCaptureGPS
+        let baseFrame = recordBaseFrame
+        let baseJPEG = recordBaseJPEG
+        let topFrame = recordTopFrame
+        let topJPEG = recordTopJPEG
         Task.detached(priority: .utility) { [weak self] in
             let id = RawCaptureRecorder.recordHeight(
                 anchorWorld: anchor, anchorHitType: hitType,
@@ -579,7 +615,9 @@ public final class HeightScanViewModel: ObservableObject {
                 baseRotationPose: basePose,
                 topPitchRad: alphaTop, topPose: topPose,
                 dHM: dh, poseSamples: samples,
-                calibration: cal, context: ctx, gps: gps)
+                calibration: cal, context: ctx, gps: gps,
+                baseFrame: baseFrame, baseJPEG: baseJPEG,
+                topFrame: topFrame, topJPEG: topJPEG)
             await MainActor.run { self?.lastRecordedBundleID = id }
         }
     }

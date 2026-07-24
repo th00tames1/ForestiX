@@ -139,6 +139,115 @@ object RawCaptureReplay {
         )
     }
 
+    // MARK: - DBH multi-algorithm sweep + candidate registry
+
+    /// Reconstructed replay inputs shared by every candidate geometry — the
+    /// SAME depth+intrinsics+pose frames plus the stored tap / guide axis /
+    /// calibration / manual bracket. Built ONCE per capture so a sweep runs
+    /// all candidates over identical bytes.
+    data class DbhSweepInput(
+        val frames: List<ArDepthFrame>,
+        val tapX: Double,
+        val tapY: Double,
+        val axis: GuideAxis,
+        val cal: ProjectCalibration,
+        /// Guide-axis fractions of the manual ADJUST bracket, or null when the
+        /// capture is an auto burst (no bracket) — the bracket-chord candidate
+        /// is N/A for those.
+        val bracket: Pair<Double, Double>?,
+    )
+
+    /// One candidate DBH geometry the sweep runs. `id` is a stable slug (also
+    /// the manifest `settings.algorithm` tag where one exists); `run` produces
+    /// an estimated diameter (cm) from the shared inputs, or null when this
+    /// capture lacks what the algorithm needs (e.g. bracket-chord on an auto
+    /// capture) or the fit didn't lock. ADD A NEW ALGORITHM by adding ONE
+    /// entry here — the sweep, ranking, and UI pick it up automatically.
+    class DbhCandidate(
+        val id: String,
+        val label: String,
+        val run: (DbhSweepInput) -> Double?,
+    )
+
+    /// THE candidate registry (cross-platform seed set: the four existing
+    /// geometries). Order is the table's default/tie-break order.
+    val DBH_CANDIDATES: List<DbhCandidate> = listOf(
+        DbhCandidate("silhouette", "Chord / silhouette") { i ->
+            DBHEstimator.estimateChord(
+                i.frames, i.tapX, i.tapY, i.axis, i.cal, ChordAlgorithm.SILHOUETTE,
+            )?.diameterCm?.toDouble()
+        },
+        DbhCandidate("arc", "Partial-arc circle fit") { i ->
+            DBHEstimator.estimate(
+                DbhScanInput(i.frames, i.tapX, i.tapY, i.axis, i.cal),
+            )?.diameterCm?.toDouble()
+        },
+        DbhCandidate("depthBand", "Depth-band") { i ->
+            DBHEstimator.estimateChord(
+                i.frames, i.tapX, i.tapY, i.axis, i.cal, ChordAlgorithm.DEPTH_BAND,
+            )?.diameterCm?.toDouble()
+        },
+        DbhCandidate("bracketChord", "Manual bracket-chord") { i ->
+            val (left, right) = i.bracket ?: return@DbhCandidate null   // N/A: no manual bracket
+            DBHEstimator.bracketChordEstimate(i.frames, i.axis, left, right, i.cal)
+                ?.diameterCm?.toDouble()
+        },
+    )
+
+    /// Per-capture sweep result: every candidate's estimate over one bundle's
+    /// stored bytes. `estimates[id]` is null when that algorithm is N/A for
+    /// this capture (missing input or no usable fit — a non-finite / ≤0
+    /// diameter is treated as no fit, not a wildly-wrong estimate).
+    data class DbhSweep(
+        val truth: Double?,
+        val liveValue: Double?,
+        val estimates: Map<String, Double?>,
+    )
+
+    /// Rebuild the shared sweep inputs from a DBH bundle (frames + tap + axis
+    /// + calibration + optional bracket). Null when the bundle can't be
+    /// reconstructed. Mirrors rerunDbh's reconstruction WITHOUT dispatching on
+    /// a single stored algorithm — that is what lets one capture feed every
+    /// candidate. rerunDbh (and its self-check) is left untouched.
+    private fun dbhSweepInput(dir: File, manifest: JSONObject): DbhSweepInput? {
+        val frames = reconstructDbhFrames(dir, manifest)
+        if (frames.isEmpty()) return null
+        val dbh = manifest.optJSONObject("dbh") ?: return null
+        val cal = calibrationFrom(manifest.optJSONObject("settings"))
+        val f0 = dbh.optJSONArray("frames")?.optJSONObject(0)
+        val tapX = f0?.optJSONArray("tap_px")?.optDouble(0) ?: (frames.first().width / 2.0)
+        val tapY = f0?.optJSONArray("tap_px")?.optDouble(1) ?: (frames.first().height / 2.0)
+        val axis: GuideAxis = if (f0?.optString("axis") == "col") {
+            GuideAxis.Col(Math.round(tapX).toInt())
+        } else {
+            GuideAxis.Row(Math.round(tapY).toInt())
+        }
+        val bracketJson = dbh.optJSONObject("bracket")
+        val bracket = if (bracketJson != null && bracketJson.optBoolean("enabled")) {
+            bracketJson.optDouble("left") to bracketJson.optDouble("right")
+        } else {
+            null
+        }
+        return DbhSweepInput(frames, tapX, tapY, axis, cal, bracket)
+    }
+
+    /// Run EVERY candidate geometry over a single DBH capture's stored
+    /// depth+intrinsics+pose bytes and return {algorithmId -> estimate (cm)}.
+    /// A candidate that can't run on this capture is null (N/A), never a
+    /// failure that aborts the sweep. Non-DBH bundles return null.
+    fun sweepDbh(dir: File, manifest: JSONObject): DbhSweep? {
+        if (manifest.optString("kind") != "dbh") return null
+        val input = dbhSweepInput(dir, manifest) ?: return null
+        val estimates = LinkedHashMap<String, Double?>(DBH_CANDIDATES.size)
+        for (c in DBH_CANDIDATES) {
+            val v = try { c.run(input) } catch (_: Throwable) { null }
+            estimates[c.id] = v?.takeIf { it.isFinite() && it > 0.0 }
+        }
+        val truth = manifest.optJSONObject("truth")?.optDouble("value")?.takeIf { !it.isNaN() }
+        val live = manifest.optJSONObject("result_live")?.optDouble("value")?.takeIf { !it.isNaN() }
+        return DbhSweep(truth, live, estimates)
+    }
+
     // MARK: - Height re-run (shared production entry point)
 
     fun rerunHeight(manifest: JSONObject): HeightReplay? {

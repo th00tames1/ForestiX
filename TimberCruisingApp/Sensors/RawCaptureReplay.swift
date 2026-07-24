@@ -28,11 +28,23 @@ public enum RawCaptureReplay {
 
     // MARK: DBH
 
-    /// Reconstruct the DBH estimator input from the bundle and run the SAME
-    /// production entry point the live capture used (chord / partial-arc /
-    /// manual bracket). Returns nil only when the bundle can't be
-    /// reconstructed (missing depth files, empty frame list).
-    public static func rerunDBH(manifest m: RawCaptureManifest, id: String) -> DBHResult? {
+    /// The estimator inputs reconstructed once from a DBH bundle's stored
+    /// bytes — depth frames + tap + axis + calibration + the manual bracket.
+    /// Every candidate geometry in the sweep runs from this SAME object, so
+    /// the algorithms are compared on identical inputs.
+    public struct DBHReplayInputs: Sendable {
+        public let frames: [ARDepthFrame]
+        public let tap: SIMD2<Double>
+        public let axis: GuideAxis
+        public let cal: ProjectCalibration
+        public let bracket: RawCaptureManifest.DBHBundle.Bracket
+    }
+
+    /// Rebuild the canonical estimator inputs from a DBH bundle's stored
+    /// depth+intrinsics+pose bytes. Returns nil only when the bundle can't
+    /// be reconstructed (missing depth files, empty frame list).
+    public static func reconstructDBHInputs(
+        manifest m: RawCaptureManifest, id: String) -> DBHReplayInputs? {
         guard let dbh = m.dbh, !dbh.frames.isEmpty else { return nil }
         let dir = RawCaptureStore.bundleDirectory(id: id)
 
@@ -53,21 +65,181 @@ public enum RawCaptureReplay {
         let tap = SIMD2<Double>(tapArr.first ?? 0, tapArr.count > 1 ? tapArr[1] : 0)
         let axis = guideAxis(from: dbh.frames[0].axis, tap: tap)
         let cal = calibration(from: m.settings.calibration)
+        return DBHReplayInputs(
+            frames: frames, tap: tap, axis: axis, cal: cal, bracket: dbh.bracket)
+    }
 
-        if dbh.bracket.enabled {
+    /// Reconstruct the DBH estimator input from the bundle and run the SAME
+    /// production entry point the live capture used (chord / partial-arc /
+    /// manual bracket). This is the reproducibility-self-check path — it
+    /// re-runs ONLY the algorithm recorded in the manifest, unchanged.
+    /// Returns nil only when the bundle can't be reconstructed.
+    public static func rerunDBH(manifest m: RawCaptureManifest, id: String) -> DBHResult? {
+        guard let inp = reconstructDBHInputs(manifest: m, id: id) else { return nil }
+
+        if inp.bracket.enabled {
             return DBHEstimator.bracketChordEstimate(
-                frames: frames,
-                guideAxis: axis,
-                leftFraction: dbh.bracket.left,
-                rightFraction: dbh.bracket.right,
-                calibration: cal)
+                frames: inp.frames,
+                guideAxis: inp.axis,
+                leftFraction: inp.bracket.left,
+                rightFraction: inp.bracket.right,
+                calibration: inp.cal)
         }
         let input = DBHScanInput(
-            frames: frames, tapPixel: tap, guideAxis: axis, projectCalibration: cal)
+            frames: inp.frames, tapPixel: inp.tap, guideAxis: inp.axis,
+            projectCalibration: inp.cal)
         switch m.settings.algorithm {
         case "arc": return DBHEstimator.estimate(input: input)
         default:    return DBHEstimator.chordEstimate(input: input)   // "silhouette"
         }
+    }
+
+    // MARK: DBH multi-algorithm sweep (accuracy validation)
+
+    /// One candidate DBH geometry in the accuracy-validation sweep. `run`
+    /// returns the estimated diameter (cm) from the shared inputs, or nil
+    /// when the algorithm cannot be applied to a given capture (e.g. the
+    /// manual bracket-chord on an auto capture that has no bracket) — that
+    /// capture is then N/A for this algorithm rather than a sweep failure.
+    public struct DBHCandidate: Sendable {
+        public let id: String            // stable tag, pooled with Android
+        public let name: String          // display label
+        public let run: @Sendable (DBHReplayInputs) -> Double?
+    }
+
+    /// THE REGISTRY. Adding a new candidate algorithm to the sweep is one
+    /// entry here — nothing else changes. Seeded with the four existing
+    /// geometries. A `.red` (rejected) fit is treated as N/A, not a 0 cm
+    /// estimate, so a failed fit never pollutes the error metrics.
+    public static let dbhCandidates: [DBHCandidate] = [
+        DBHCandidate(id: "silhouette", name: "Chord (silhouette)") { inp in
+            let input = DBHScanInput(
+                frames: inp.frames, tapPixel: inp.tap, guideAxis: inp.axis,
+                projectCalibration: inp.cal)
+            return acceptedDiameterCm(DBHEstimator.chordEstimate(input: input))
+        },
+        DBHCandidate(id: "arc", name: "Partial-arc circle fit") { inp in
+            let input = DBHScanInput(
+                frames: inp.frames, tapPixel: inp.tap, guideAxis: inp.axis,
+                projectCalibration: inp.cal)
+            return acceptedDiameterCm(DBHEstimator.estimate(input: input))
+        },
+        DBHCandidate(id: "depthBand", name: "Depth-band chord") { inp in
+            acceptedDiameterCm(DBHEstimator.depthBandChordEstimate(
+                frames: inp.frames, tapPixel: inp.tap, guideAxis: inp.axis,
+                calibration: inp.cal))
+        },
+        DBHCandidate(id: "bracket", name: "Manual bracket-chord") { inp in
+            guard inp.bracket.enabled else { return nil }   // N/A: no bracket
+            return acceptedDiameterCm(DBHEstimator.bracketChordEstimate(
+                frames: inp.frames, guideAxis: inp.axis,
+                leftFraction: inp.bracket.left, rightFraction: inp.bracket.right,
+                calibration: inp.cal))
+        },
+    ]
+
+    /// A fit is usable only if it exists and wasn't rejected (`.red` → 0 cm).
+    static func acceptedDiameterCm(_ r: DBHResult?) -> Double? {
+        guard let r, r.confidence != .red else { return nil }
+        return Double(r.diameterCm)
+    }
+
+    /// One capture's value under every registered algorithm.
+    public struct DBHSweepEntry: Sendable {
+        public let algorithmId: String
+        public let name: String
+        public let value: Double?        // nil = N/A for this capture
+    }
+
+    /// Run a DBH capture through ALL candidate geometries from the SAME
+    /// stored bytes. Returns one entry per registered algorithm (in registry
+    /// order), or nil when the bundle can't be reconstructed at all.
+    public static func sweepDBH(manifest m: RawCaptureManifest, id: String) -> [DBHSweepEntry]? {
+        guard let inp = reconstructDBHInputs(manifest: m, id: id) else { return nil }
+        return dbhCandidates.map {
+            DBHSweepEntry(algorithmId: $0.id, name: $0.name, value: $0.run(inp))
+        }
+    }
+
+    // MARK: Corpus aggregation + ranking
+
+    /// Per-algorithm accuracy over the captures that have a truth value.
+    public struct AlgorithmRanking: Sendable {
+        public let algorithmId: String
+        public let name: String
+        public let n: Int              // captures scored (had truth + a value)
+        public let bias: Double        // mean(estimate − truth), signed
+        public let rmse: Double        // root-mean-square error
+        public let mae: Double         // mean absolute error
+    }
+
+    /// One capture's sweep alongside its truth, with the closest algorithm.
+    public struct DBHSweepCapture: Sendable {
+        public let id: String
+        public let treeNumber: Int?
+        public let truth: Double
+        public let entries: [DBHSweepEntry]
+        public let winnerId: String?   // algorithm closest to truth
+    }
+
+    /// The full ranked report the "Compare algorithms" view renders.
+    public struct DBHSweepReport: Sendable {
+        public let rankings: [AlgorithmRanking]   // best-first (lowest RMSE)
+        public let perCapture: [DBHSweepCapture]  // only truthed captures
+        public let totalDBH: Int
+        public let scored: Int                    // truthed & reconstructable
+        public let skippedNoTruth: Int
+    }
+
+    /// Sweep every DBH capture and rank the algorithms best-first by RMSE
+    /// against the hand-measured truth. Captures with no truth are skipped
+    /// (counted). Pure + Sendable — the caller runs it off the main actor.
+    public static func rankDBH(_ summaries: [RawCaptureSummary]) -> DBHSweepReport {
+        var totalDBH = 0
+        var skipped = 0
+        var scored = 0
+        // Per-algorithm error accumulators, keyed by registry id.
+        var errors: [String: [Double]] = [:]
+        var perCapture: [DBHSweepCapture] = []
+
+        for sum in summaries where sum.manifest.kind == "dbh" {
+            totalDBH += 1
+            guard let truth = sum.manifest.truth.value else { skipped += 1; continue }
+            guard let entries = sweepDBH(manifest: sum.manifest, id: sum.id) else {
+                skipped += 1; continue
+            }
+            scored += 1
+            var winnerId: String?
+            var winnerErr = Double.infinity
+            for e in entries {
+                guard let v = e.value else { continue }
+                let err = v - truth
+                errors[e.algorithmId, default: []].append(err)
+                if abs(err) < winnerErr { winnerErr = abs(err); winnerId = e.algorithmId }
+            }
+            perCapture.append(DBHSweepCapture(
+                id: sum.id, treeNumber: sum.manifest.context.treeNumber,
+                truth: truth, entries: entries, winnerId: winnerId))
+        }
+
+        var rankings: [AlgorithmRanking] = dbhCandidates.map { c in
+            let errs = errors[c.id] ?? []
+            let n = errs.count
+            let bias = n > 0 ? errs.reduce(0, +) / Double(n) : 0
+            let mae = n > 0 ? errs.map { abs($0) }.reduce(0, +) / Double(n) : 0
+            let rmse = n > 0 ? (errs.map { $0 * $0 }.reduce(0, +) / Double(n)).squareRoot() : 0
+            return AlgorithmRanking(
+                algorithmId: c.id, name: c.name, n: n, bias: bias, rmse: rmse, mae: mae)
+        }
+        // Best-first by RMSE; algorithms with no scored captures sink last.
+        rankings.sort { a, b in
+            if (a.n == 0) != (b.n == 0) { return b.n == 0 }
+            return a.rmse < b.rmse
+        }
+
+        return DBHSweepReport(
+            rankings: rankings, perCapture: perCapture,
+            totalDBH: totalDBH, scored: scored, skippedNoTruth: skipped)
     }
 
     // MARK: Height
@@ -308,7 +480,15 @@ public enum RawCaptureRecorder {
         poseSamples: [(tMs: Int, pose: simd_float4x4)],
         calibration: ProjectCalibration,
         context: RawCaptureContext,
-        gps: RawCaptureGPS?
+        gps: RawCaptureGPS?,
+        // Schema 2: the depth frame + reference RGB grabbed at the base-aim
+        // and top-aim taps. Optional — when nil (non-LiDAR device, or the
+        // frame wasn't available at tap time) the bundle stays a schema-1-
+        // shaped tangent-only height capture and still self-checks.
+        baseFrame: ARDepthFrame? = nil,
+        baseJPEG: Data? = nil,
+        topFrame: ARDepthFrame? = nil,
+        topJPEG: Data? = nil
     ) -> String? {
         let id = UUID().uuidString
         let dir = RawCaptureStore.bundleDirectory(id: id)
@@ -319,6 +499,14 @@ public enum RawCaptureRecorder {
         // replay's standing pose == live and the self-check is exact.
         var basePose = baseRotationPose
         basePose.columns.3 = SIMD4<Float>(baseStanding.x, baseStanding.y, baseStanding.z, 1)
+
+        // Aim frames (schema 2). Same canonicalization + f32m depth format +
+        // ~80% reference JPEG the DBH path uses, so a pooled depth-height
+        // algorithm sees byte-consistent inputs across both capture kinds.
+        let baseAimExtra = writeAimFrame(prefix: "base", frame: baseFrame,
+                                         jpeg: baseJPEG, dir: dir)
+        let topAimExtra = writeAimFrame(prefix: "top", frame: topFrame,
+                                        jpeg: topJPEG, dir: dir)
 
         let liveResult = HeightEstimator.estimate(input: HeightMeasureInput(
             anchorPointWorld: anchorWorld,
@@ -349,10 +537,12 @@ public enum RawCaptureRecorder {
                 hitType: anchorHitType,
                 distanceM: Double(anchorDistanceM),
                 cameraPose: RawCaptureMatrix.flat(anchorPose)),
-            base: .init(pitchDeg: Double(basePitchRad * 180 / .pi),
-                        cameraPose: RawCaptureMatrix.flat(basePose)),
-            top: .init(pitchDeg: Double(topPitchRad * 180 / .pi),
-                       cameraPose: RawCaptureMatrix.flat(topPose)),
+            base: aim(pitchDeg: Double(basePitchRad * 180 / .pi),
+                      cameraPose: RawCaptureMatrix.flat(basePose),
+                      extra: baseAimExtra),
+            top: aim(pitchDeg: Double(topPitchRad * 180 / .pi),
+                     cameraPose: RawCaptureMatrix.flat(topPose),
+                     extra: topAimExtra),
             dHM: Double(dHM),
             poseSamples: poseSamples.map {
                 .init(tMs: $0.tMs, pose: RawCaptureMatrix.flat($0.pose))
@@ -385,7 +575,10 @@ public enum RawCaptureRecorder {
         gps: RawCaptureGPS?
     ) -> RawCaptureManifest {
         RawCaptureManifest(
-            schema: 1,
+            // Schema 2 (bumped from 1 on BOTH platforms together): height
+            // bundles may now carry base/top depth+rgb aim frames. DBH bundles
+            // are unchanged; old captures of either kind still load & replay.
+            schema: 2,
             platform: "ios",
             device: RawCaptureStore.deviceModel(),
             appCommit: RawCaptureStore.appCommit(),
@@ -422,5 +615,51 @@ public enum RawCaptureRecorder {
         case .chord:               return "silhouette"
         case .partialArcCircleFit: return "arc"
         }
+    }
+
+    // MARK: Height aim-frame serialization (schema 2)
+
+    /// Metadata for one written aim frame — mirrors the DBH frame keys.
+    struct AimFrameExtra {
+        let depthFile: String
+        let rgbFile: String?
+        let width: Int
+        let height: Int
+        let fx: Double
+        let fy: Double
+        let cx: Double
+        let cy: Double
+    }
+
+    /// Write `depth_<prefix>.bin` (row-major f32 metres, same format the DBH
+    /// path uses) and, when present, `rgb_<prefix>.jpg`. Returns nil when no
+    /// frame was captured, which keeps the aim schema-1-shaped (tangent only).
+    static func writeAimFrame(prefix: String, frame: ARDepthFrame?,
+                              jpeg: Data?, dir: URL) -> AimFrameExtra? {
+        guard let f = frame else { return nil }
+        let depthName = "depth_\(prefix).bin"
+        RawCaptureStore.writeDepth(f.depth, to: dir.appendingPathComponent(depthName))
+        var rgbName: String?
+        if let jpeg {
+            let name = "rgb_\(prefix).jpg"
+            if (try? jpeg.write(to: dir.appendingPathComponent(name))) != nil { rgbName = name }
+        }
+        return AimFrameExtra(
+            depthFile: depthName, rgbFile: rgbName,
+            width: f.width, height: f.height,
+            fx: Double(f.intrinsics[0, 0]), fy: Double(f.intrinsics[1, 1]),
+            cx: Double(f.intrinsics[2, 0]), cy: Double(f.intrinsics[2, 1]))
+    }
+
+    /// Build a height `Aim` with the schema-2 aim-frame keys populated from
+    /// `extra` (all nil ⇒ a tangent-only aim identical to schema 1).
+    static func aim(pitchDeg: Double, cameraPose: [Double],
+                    extra: AimFrameExtra?) -> RawCaptureManifest.HeightBundle.Aim {
+        RawCaptureManifest.HeightBundle.Aim(
+            pitchDeg: pitchDeg, cameraPose: cameraPose,
+            depthFile: extra?.depthFile, rgbFile: extra?.rgbFile,
+            width: extra?.width, height: extra?.height,
+            format: extra == nil ? nil : "f32m",
+            fx: extra?.fx, fy: extra?.fy, cx: extra?.cx, cy: extra?.cy)
     }
 }

@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -53,6 +54,7 @@ import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
 import com.hcjeong.forestix.data.ResearchLog
+import com.hcjeong.forestix.sensors.ArDepthFrame
 import com.hcjeong.forestix.sensors.ConfidenceTier
 import com.hcjeong.forestix.sensors.HeightEstimator
 import com.hcjeong.forestix.sensors.HeightMethod
@@ -78,6 +80,7 @@ import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixProminentButton
 import com.hcjeong.forestix.ui.theme.ForestixWhiteButton
 import kotlinx.coroutines.delay
+import java.io.File
 import java.util.Locale
 import kotlin.math.abs
 
@@ -166,6 +169,39 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     var anchorHitType by remember { mutableStateOf("unknown") }
     var basePose by remember { mutableStateOf<FloatArray?>(null) }
     var topPose by remember { mutableStateOf<FloatArray?>(null) }
+    // Schema-2 height capture: the AR depth frame + a reference RGB JPEG
+    // grabbed AT the base tap and the top tap (same u16-mm depth + ~80% JPEG
+    // the DBH path stores), so future height algorithms can be re-run over the
+    // aim pixels. Populated only while armed; the tangent replay never reads
+    // them, so an old bundle without them still re-runs unchanged.
+    var baseAimFrame by remember { mutableStateOf<ArDepthFrame?>(null) }
+    var topAimFrame by remember { mutableStateOf<ArDepthFrame?>(null) }
+    var baseAimRgb by remember { mutableStateOf<ByteArray?>(null) }
+    var topAimRgb by remember { mutableStateOf<ByteArray?>(null) }
+    // Keep the shared controller's raw-depth arm on for the whole height
+    // session while recording, so acquireDepthFrame() at the base/top tap
+    // carries the native u16 grid to serialize. Nothing else in the height
+    // flow calls acquireDepthFrame, so there is no per-frame cost.
+    DisposableEffect(rawCaptureArmed) {
+        controller.captureRawDepth = rawCaptureArmed
+        onDispose { controller.captureRawDepth = false }
+    }
+    // Grab the current AR depth frame + reference RGB JPEG bytes at an aim
+    // moment. Returns (frame, jpegBytes) — either may be null; recordHeight
+    // degrades gracefully. The JPEG is written to a throwaway cache file (the
+    // only sink captureCameraJpeg offers), read into memory, then deleted — so
+    // nothing lingers and there is no temp-file lifecycle to race.
+    fun captureAim(): Pair<ArDepthFrame?, ByteArray?> {
+        if (!rawCaptureArmed) return null to null
+        val frame = controller.acquireDepthFrame()
+        val rgb = try {
+            val tmp = File.createTempFile("height_aim_", ".jpg", context.cacheDir)
+            val bytes = if (controller.captureCameraJpeg(tmp)) tmp.readBytes() else null
+            tmp.delete()
+            bytes
+        } catch (_: Throwable) { null }
+        return frame to rgb
+    }
     val poseSamples = remember { mutableListOf<RawCaptureStore.PoseSample>() }
     var anchorTimeMs by remember { mutableStateOf(0L) }
     // The most-recent compute's stored bundle id — flipped to accepted when
@@ -300,6 +336,10 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
         val samples = poseSamples.toList()
         val hitType = anchorHitType
         val dist = anchorInitialDistM ?: 0f
+        // Schema-2 aim captures (base/top depth + RGB). Snapshot the temp files
+        // now and hand them off; recordHeight copies them into the bundle.
+        val baseAim = RawCaptureStore.HeightAim(baseAimFrame, baseAimRgb)
+        val topAim = RawCaptureStore.HeightAim(topAimFrame, topAimRgb)
         scope.launch {
             val id = RawCaptureStore.recordHeight(
                 context = context,
@@ -311,6 +351,8 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 poseSamples = samples,
                 unitSystem = if (settings.unitSystem == UnitSystem.METRIC) "metric" else "imperial",
                 ctx = ctx,
+                baseAim = baseAim,
+                topAim = topAim,
             )
             if (id != null) lastRawCaptureId = id
         }
@@ -349,7 +391,11 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 // Lock the standing pose on the first aim; both angles must
                 // come from the same spot (the §7.2 formula assumes it).
                 failure = null; alphaBase = a; standingLocked = s
-                if (rawCaptureArmed) basePose = controller.currentCameraPose()
+                if (rawCaptureArmed) {
+                    basePose = controller.currentCameraPose()
+                    val (fr, rgb) = captureAim()
+                    baseAimFrame = fr; baseAimRgb = rgb
+                }
                 val dh = kotlin.math.sqrt((s.x - anchor.x) * (s.x - anchor.x) + (s.z - anchor.z) * (s.z - anchor.z))
                 baseMarker = Vec3(anchor.x, s.y + dh * kotlin.math.tan(a), anchor.z)
                 stage = Stage.AIM_TOP
@@ -361,7 +407,11 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                     failure = "AR tracking not ready — try again."; return
                 }
                 failure = null; alphaTop = aTop
-                if (rawCaptureArmed) topPose = controller.currentCameraPose()
+                if (rawCaptureArmed) {
+                    topPose = controller.currentCameraPose()
+                    val (fr, rgb) = captureAim()
+                    topAimFrame = fr; topAimRgb = rgb
+                }
                 val dh = kotlin.math.sqrt((standing.x - anchor.x) * (standing.x - anchor.x) + (standing.z - anchor.z) * (standing.z - anchor.z))
                 topMarker = Vec3(anchor.x, standing.y + dh * kotlin.math.tan(aTop), anchor.z)
                 val r = HeightEstimator.estimate(
@@ -390,6 +440,7 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
         // Drop the raw-capture geometry so a fresh measurement starts clean.
         anchorPose = null; basePose = null; topPose = null
         anchorHitType = "unknown"; poseSamples.clear()
+        baseAimFrame = null; topAimFrame = null; baseAimRgb = null; topAimRgb = null
     }
 
     // Accept the result: record the entry (photo + GPS + metadata), fold in

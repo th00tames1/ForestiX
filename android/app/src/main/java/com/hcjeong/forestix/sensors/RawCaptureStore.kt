@@ -39,7 +39,14 @@ import kotlin.math.abs
 
 object RawCaptureStore {
 
-    const val SCHEMA = 1
+    // Schema 2 (was 1): a Height bundle now ALSO stores the depth frame + a
+    // reference RGB at the base aim and the top aim (depth_base/top.bin,
+    // rgb_base/top.jpg) with new per-aim keys under height.base / height.top
+    // (depth_file, rgb_file, width, height, format, fx, fy, cx, cy). The bump
+    // is IDENTICAL on iOS. Old schema-1 bundles (and schema-2 height bundles
+    // whose aim frames failed to capture) omit those keys and still replay the
+    // tangent method exactly — replay is tolerant of their absence.
+    const val SCHEMA = 2
     private const val MAX_FRAMES = 5
     private const val SELF_CHECK_REL_TOL = 1e-3
 
@@ -60,6 +67,14 @@ object RawCaptureStore {
     /// One height 5 Hz pose sample: milliseconds since anchoring + the raw
     /// ARCore camera pose (16, column-major).
     data class PoseSample(val tMs: Long, val pose: FloatArray)
+
+    /// Optional per-aim capture for a schema-2 height bundle: the AR depth
+    /// frame grabbed AT the base/top tap (its rawDepthMm u16 grid + intrinsics
+    /// are what get serialized) and the reference RGB JPEG bytes captured at
+    /// the same instant. Either half may be null — a null frame (or a frame
+    /// with no armed raw depth) leaves the aim block schema-1-shaped, and
+    /// replay falls back to the tangent method exactly as before.
+    data class HeightAim(val frame: ArDepthFrame?, val rgb: ByteArray?)
 
     // MARK: - Directory
 
@@ -224,6 +239,8 @@ object RawCaptureStore {
         poseSamples: List<PoseSample>,
         unitSystem: String,
         ctx: CaptureContext,
+        baseAim: HeightAim? = null,
+        topAim: HeightAim? = null,
     ): String? = withContext(Dispatchers.IO) {
         val id = UUID.randomUUID().toString()
         val dir = bundleDir(context, id)
@@ -267,10 +284,14 @@ object RawCaptureStore {
             val baseJson = JSONObject()
             baseJson.put("pitch_deg", basePitchDeg.toDouble())
             baseJson.put("camera_pose", floatArr(basePose))
+            // Schema 2: base-aim depth + RGB (keys omitted when unavailable).
+            attachAimFrame(dir, baseAim, "depth_base.bin", "rgb_base.jpg", baseJson)
             heightBlock.put("base", baseJson)
             val topJson = JSONObject()
             topJson.put("pitch_deg", topPitchDeg.toDouble())
             topJson.put("camera_pose", floatArr(topPose))
+            // Schema 2: top-aim depth + RGB (keys omitted when unavailable).
+            attachAimFrame(dir, topAim, "depth_top.bin", "rgb_top.jpg", topJson)
             heightBlock.put("top", topJson)
             heightBlock.put("d_h_m", dHm.toDouble())
             val samplesArr = JSONArray()
@@ -507,6 +528,38 @@ object RawCaptureStore {
                 GuideAxis.Col(Math.round(midX).toInt()), "col", midX, midY,
             )
         }
+    }
+
+    /// Serialize a height aim's depth grid (native u16-mm, little-endian,
+    /// row-major — identical byte layout to the DBH depth grids) + reference
+    /// RGB into the bundle, and add the schema-2 aim keys to `json`:
+    /// depth_file, rgb_file, width, height, format, fx, fy, cx, cy — the SAME
+    /// key names iOS writes (the depth FORMAT string stays platform-specific,
+    /// "u16mm"). No-op (no keys added) when the frame or its armed raw depth is
+    /// absent, so the aim block stays schema-1-shaped and tangent replay is
+    /// unaffected.
+    private fun attachAimFrame(
+        dir: File, aim: HeightAim?, depthName: String, rgbName: String, json: JSONObject,
+    ) {
+        val frame = aim?.frame ?: return
+        val raw = frame.rawDepthMm ?: return
+        if (raw.size != frame.width * frame.height) return
+        writeU16Le(File(dir, depthName), raw)
+        var haveRgb = false
+        aim.rgb?.let { bytes ->
+            haveRgb = try {
+                if (bytes.isNotEmpty()) { File(dir, rgbName).writeBytes(bytes); true } else false
+            } catch (_: Throwable) { false }
+        }
+        json.put("depth_file", depthName)
+        json.put("rgb_file", if (haveRgb) rgbName else JSONObject.NULL)
+        json.put("width", frame.width)
+        json.put("height", frame.height)
+        json.put("format", "u16mm")
+        json.put("fx", frame.fx)
+        json.put("fy", frame.fy)
+        json.put("cx", frame.cx)
+        json.put("cy", frame.cy)
     }
 
     private val IDENTITY_AFFINE = floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f)

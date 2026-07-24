@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -44,6 +45,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.hcjeong.forestix.sensors.RawCaptureReplay
@@ -59,6 +61,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.sqrt
 
 private const val REL_TOL = 1e-3
 
@@ -76,6 +79,8 @@ fun RawCapturesScreen(nav: NavController) {
     var detailId by remember { mutableStateOf<String?>(null) }
     var rerunSummary by remember { mutableStateOf<RerunSummary?>(null) }
     var rerunning by remember { mutableStateOf(false) }
+    var sweepReport by remember { mutableStateOf<SweepReport?>(null) }
+    var sweeping by remember { mutableStateOf(false) }
     var clearConfirm by remember { mutableStateOf(false) }
 
     // Detail overrides the list in-place (single scaffold, iOS push feel).
@@ -130,6 +135,20 @@ fun RawCapturesScreen(nav: NavController) {
                 }
                 FormDivider()
                 SettingsActionRowLocal(
+                    title = if (sweeping) "Comparing…" else "Compare algorithms (DBH sweep)",
+                    icon = Icons.Filled.Replay,
+                    enabled = summaries.any { it.kind == "dbh" } && !sweeping,
+                    tint = colors.primary,
+                ) {
+                    sweeping = true
+                    scope.launch {
+                        val s = withContext(Dispatchers.Default) { runSweep(context) }
+                        sweepReport = s
+                        sweeping = false
+                    }
+                }
+                FormDivider()
+                SettingsActionRowLocal(
                     title = "Export ZIP",
                     icon = Icons.Filled.IosShare,
                     enabled = summaries.isNotEmpty(),
@@ -162,6 +181,9 @@ fun RawCapturesScreen(nav: NavController) {
                     }
                 }
             }
+
+            // Algorithm sweep: ranked table + per-capture value-vs-truth.
+            sweepReport?.let { rep -> SweepView(rep) }
 
             // The list.
             if (summaries.isEmpty()) {
@@ -482,6 +504,171 @@ private fun runReRunAll(context: android.content.Context): RerunSummary {
     }
     return RerunSummary(summaries.size, replayed, changed, signedErrors.size, mean, median)
 }
+
+// MARK: - Algorithm sweep (multi-candidate DBH comparison vs truth)
+
+/// Per-algorithm corpus aggregate over the captures that HAVE a truth value.
+private data class AlgoRank(
+    val id: String,
+    val label: String,
+    val n: Int,          // captures with truth where this algorithm produced a fit
+    val bias: Double,    // mean signed error (estimate − truth), cm
+    val rmse: Double,    // cm
+    val mae: Double,     // cm
+)
+
+/// One capture's row in the per-capture comparison: truth + every candidate's
+/// estimate (null = N/A for this capture) + which algorithm won (closest).
+private data class SweepCaptureRow(
+    val id: String,
+    val treeNumber: Int?,
+    val truth: Double,
+    val values: Map<String, Double?>,
+    val winnerId: String?,
+)
+
+private data class SweepReport(
+    val ranks: List<AlgoRank>,   // best-first (lowest RMSE; N/A-only algorithms last)
+    val rows: List<SweepCaptureRow>,
+    val dbhTotal: Int,
+    val withTruth: Int,
+    val skipped: Int,
+)
+
+/// Run every candidate DBH geometry over the whole corpus and aggregate the
+/// error statistics against the hand-measured truth. Pure/off-main (called on
+/// Dispatchers.Default, like Re-run all). Skips captures with no truth and
+/// reports how many were skipped.
+private fun runSweep(context: android.content.Context): SweepReport {
+    val summaries = RawCaptureStore.list(context).filter { it.kind == "dbh" }
+    val candidates = RawCaptureReplay.DBH_CANDIDATES
+    val errs = LinkedHashMap<String, MutableList<Double>>()
+    candidates.forEach { errs[it.id] = ArrayList() }
+
+    val rows = ArrayList<SweepCaptureRow>()
+    var withTruth = 0
+    var skipped = 0
+    for (s in summaries) {
+        val m = RawCaptureStore.manifestOf(context, s.id) ?: continue
+        val dir = RawCaptureStore.dirOf(context, s.id)
+        val sweep = try { RawCaptureReplay.sweepDbh(dir, m) } catch (_: Throwable) { null } ?: continue
+        val truth = sweep.truth
+        if (truth == null) { skipped++; continue }
+        withTruth++
+        var winnerId: String? = null
+        var bestAbs = Double.MAX_VALUE
+        for (c in candidates) {
+            val est = sweep.estimates[c.id] ?: continue
+            val e = est - truth
+            errs[c.id]!!.add(e)
+            val ae = abs(e)
+            if (ae < bestAbs) { bestAbs = ae; winnerId = c.id }
+        }
+        rows.add(SweepCaptureRow(s.id, s.treeNumber, truth, sweep.estimates, winnerId))
+    }
+
+    val ranks = candidates.map { c ->
+        val es = errs[c.id]!!
+        val n = es.size
+        val bias = if (n == 0) 0.0 else es.average()
+        val mae = if (n == 0) 0.0 else es.sumOf { abs(it) } / n
+        val rmse = if (n == 0) 0.0 else sqrt(es.sumOf { it * it } / n)
+        AlgoRank(c.id, c.label, n, bias, rmse, mae)
+    }.sortedWith(compareByDescending<AlgoRank> { it.n > 0 }.thenBy { it.rmse })
+
+    return SweepReport(ranks, rows, summaries.size, withTruth, skipped)
+}
+
+@Composable
+private fun SweepView(rep: SweepReport) {
+    FormSection(
+        header = "Algorithm ranking (DBH, vs truth)",
+        footer = "Every candidate geometry re-run over each capture's stored " +
+            "depth + pose bytes. Ranked best-first by RMSE (cm). n = captures with " +
+            "truth where the algorithm produced a fit; N/A = not applicable to that " +
+            "capture (e.g. bracket-chord needs a manual bracket).",
+    ) {
+        SummaryLine("DBH captures", "${rep.withTruth}/${rep.dbhTotal} with truth")
+        if (rep.skipped > 0) SummaryLine("Skipped (no truth)", "${rep.skipped}")
+        FormDivider()
+        SweepRankRow("algorithm", "n", "bias", "RMSE", "MAE", header = true, best = false)
+        rep.ranks.forEachIndexed { i, r ->
+            SweepRankRow(
+                r.label,
+                if (r.n == 0) "—" else "${r.n}",
+                if (r.n == 0) "—" else fmtSigned(r.bias),
+                if (r.n == 0) "—" else fmt(r.rmse),
+                if (r.n == 0) "—" else fmt(r.mae),
+                header = false,
+                best = i == 0 && r.n > 0,
+            )
+        }
+    }
+    if (rep.rows.isNotEmpty()) {
+        FormSection(header = "Per capture (★ = closest to truth)") {
+            rep.rows.forEachIndexed { i, row ->
+                if (i > 0) FormDivider()
+                SweepCaptureRowView(row, rep.ranks)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SweepRankRow(
+    label: String, n: String, bias: String, rmse: String, mae: String,
+    header: Boolean, best: Boolean,
+) {
+    val colors = Forestix.colors
+    val type = Forestix.type
+    val color = when {
+        header -> colors.textSecondary
+        best -> colors.confidenceOk
+        else -> colors.textPrimary
+    }
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, style = type.caption, color = color,
+            fontFamily = FontFamily.Monospace, modifier = Modifier.weight(1f))
+        Text(n, style = type.caption, color = color, fontFamily = FontFamily.Monospace,
+            textAlign = TextAlign.End, modifier = Modifier.width(26.dp))
+        Text(bias, style = type.caption, color = color, fontFamily = FontFamily.Monospace,
+            textAlign = TextAlign.End, modifier = Modifier.width(52.dp))
+        Text(rmse, style = type.caption, color = color, fontFamily = FontFamily.Monospace,
+            textAlign = TextAlign.End, modifier = Modifier.width(46.dp))
+        Text(mae, style = type.caption, color = color, fontFamily = FontFamily.Monospace,
+            textAlign = TextAlign.End, modifier = Modifier.width(46.dp))
+    }
+}
+
+@Composable
+private fun SweepCaptureRowView(row: SweepCaptureRow, ranks: List<AlgoRank>) {
+    val colors = Forestix.colors
+    val type = Forestix.type
+    Column(Modifier.fillMaxWidth()) {
+        val head = buildString {
+            row.treeNumber?.let { append("Tree ").append(it).append(" · ") }
+            append("truth ").append(fmt(row.truth)).append(" cm")
+        }
+        Text(head, style = type.body, color = colors.textPrimary)
+        ranks.forEach { r ->
+            val v = row.values[r.id]
+            val isWinner = r.id == row.winnerId && v != null
+            val tint = if (isWinner) colors.confidenceOk else colors.textSecondary
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    (if (isWinner) "★ " else "  ") + r.label,
+                    style = type.caption, color = tint,
+                    fontFamily = FontFamily.Monospace, modifier = Modifier.weight(1f),
+                )
+                val cell = if (v == null) "N/A"
+                else "${fmt(v)} (${fmtSigned(v - row.truth)})"
+                Text(cell, style = type.caption, color = tint, fontFamily = FontFamily.Monospace)
+            }
+        }
+    }
+}
+
+private fun fmtSigned(v: Double): String = String.format(Locale.US, "%+.2f", v)
 
 private fun fmt(v: Double): String = String.format(Locale.US, "%.2f", v)
 

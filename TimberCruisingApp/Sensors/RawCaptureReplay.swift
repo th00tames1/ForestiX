@@ -164,13 +164,96 @@ public enum RawCaptureReplay {
     // MARK: Corpus aggregation + ranking
 
     /// Per-algorithm accuracy over the captures that have a truth value.
+    /// Carries BOTH the raw error stats and an in-sample linear-correction
+    /// fit `truth ≈ a + b·estimate` (OLS). `rmseCorrected` is the RMSE after
+    /// applying that fit to the same captures — a CALIBRATION-fit number, not
+    /// held-out, so it tells you the bias/slope to bake in, not out-of-sample
+    /// accuracy. When the fit is degenerate (`fitted == false`) a/b are the
+    /// identity (0, 1) and `rmseCorrected == rmse`.
     public struct AlgorithmRanking: Sendable {
         public let algorithmId: String
         public let name: String
         public let n: Int              // captures scored (had truth + a value)
         public let bias: Double        // mean(estimate − truth), signed
-        public let rmse: Double        // root-mean-square error
+        public let rmse: Double        // raw root-mean-square error
         public let mae: Double         // mean absolute error
+        public let fitted: Bool        // OLS correction fit succeeded
+        public let a: Double           // fitted intercept  (truth ≈ a + b·est)
+        public let b: Double           // fitted slope
+        public let rmseCorrected: Double  // in-sample RMSE after the fit
+    }
+
+    /// In-sample ordinary-least-squares fit of `truth ≈ a + b·estimate` over
+    /// one algorithm's (estimate, truth) pairs, plus the resulting corrected
+    /// RMSE. Degenerate cases — fewer than two pairs, or zero variance in the
+    /// estimates — yield NO fit: identity (a=0, b=1) and corrected = raw, with
+    /// `fitted == false` so the UI can mark it. Guards against NaN/inf slopes.
+    public struct CorrectionFit: Sendable {
+        public let fitted: Bool
+        public let a: Double
+        public let b: Double
+        public let rmseCorrected: Double
+    }
+
+    static func fitCorrection(
+        pairs: [(est: Double, truth: Double)], rawRmse: Double) -> CorrectionFit {
+        let n = pairs.count
+        guard n >= 2 else {
+            return CorrectionFit(fitted: false, a: 0, b: 1, rmseCorrected: rawRmse)
+        }
+        let meanX = pairs.reduce(0) { $0 + $1.est } / Double(n)
+        let meanY = pairs.reduce(0) { $0 + $1.truth } / Double(n)
+        var sxx = 0.0, sxy = 0.0
+        for p in pairs {
+            let dx = p.est - meanX
+            sxx += dx * dx
+            sxy += dx * (p.truth - meanY)
+        }
+        guard sxx > 0, sxy.isFinite else {
+            return CorrectionFit(fitted: false, a: 0, b: 1, rmseCorrected: rawRmse)
+        }
+        let b = sxy / sxx
+        let a = meanY - b * meanX
+        guard a.isFinite, b.isFinite else {
+            return CorrectionFit(fitted: false, a: 0, b: 1, rmseCorrected: rawRmse)
+        }
+        let sse = pairs.reduce(0.0) { acc, p in
+            let r = p.truth - (a + b * p.est)
+            return acc + r * r
+        }
+        return CorrectionFit(fitted: true, a: a, b: b,
+                             rmseCorrected: (sse / Double(n)).squareRoot())
+    }
+
+    /// Build the ranking rows shared by the DBH and height sweeps: raw
+    /// {n, bias, RMSE, MAE} plus the OLS correction fit, sorted best-first by
+    /// RAW RMSE (algorithms with no scored captures sink last). `order` is the
+    /// registry order (id, name); `pairsById` the (estimate, truth) pairs
+    /// collected per algorithm id.
+    static func buildRankings(
+        order: [(id: String, name: String)],
+        pairsById: [String: [(est: Double, truth: Double)]]
+    ) -> [AlgorithmRanking] {
+        var rankings: [AlgorithmRanking] = order.map { c in
+            let ps = pairsById[c.id] ?? []
+            let n = ps.count
+            let errs = ps.map { $0.est - $0.truth }
+            let bias = n > 0 ? errs.reduce(0, +) / Double(n) : 0
+            let mae = n > 0 ? errs.map { abs($0) }.reduce(0, +) / Double(n) : 0
+            let rmse = n > 0 ? (errs.map { $0 * $0 }.reduce(0, +) / Double(n)).squareRoot() : 0
+            let fit = fitCorrection(pairs: ps, rawRmse: rmse)
+            return AlgorithmRanking(
+                algorithmId: c.id, name: c.name, n: n, bias: bias, rmse: rmse, mae: mae,
+                fitted: fit.fitted, a: fit.a, b: fit.b, rmseCorrected: fit.rmseCorrected)
+        }
+        // Best-first by RAW RMSE; algorithms with no scored captures sink last.
+        // (Corrected RMSE is surfaced in the table but does NOT reorder the
+        // ranking — it's an in-sample calibration number, not held-out.)
+        rankings.sort { a, b in
+            if (a.n == 0) != (b.n == 0) { return b.n == 0 }
+            return a.rmse < b.rmse
+        }
+        return rankings
     }
 
     /// One capture's sweep alongside its truth, with the closest algorithm.
@@ -198,8 +281,9 @@ public enum RawCaptureReplay {
         var totalDBH = 0
         var skipped = 0
         var scored = 0
-        // Per-algorithm error accumulators, keyed by registry id.
-        var errors: [String: [Double]] = [:]
+        // Per-algorithm (estimate, truth) pairs, keyed by registry id — feeds
+        // both the raw error stats and the OLS correction fit.
+        var pairs: [String: [(est: Double, truth: Double)]] = [:]
         var perCapture: [DBHSweepCapture] = []
 
         for sum in summaries where sum.manifest.kind == "dbh" {
@@ -213,29 +297,17 @@ public enum RawCaptureReplay {
             var winnerErr = Double.infinity
             for e in entries {
                 guard let v = e.value else { continue }
-                let err = v - truth
-                errors[e.algorithmId, default: []].append(err)
-                if abs(err) < winnerErr { winnerErr = abs(err); winnerId = e.algorithmId }
+                pairs[e.algorithmId, default: []].append((est: v, truth: truth))
+                let err = abs(v - truth)
+                if err < winnerErr { winnerErr = err; winnerId = e.algorithmId }
             }
             perCapture.append(DBHSweepCapture(
                 id: sum.id, treeNumber: sum.manifest.context.treeNumber,
                 truth: truth, entries: entries, winnerId: winnerId))
         }
 
-        var rankings: [AlgorithmRanking] = dbhCandidates.map { c in
-            let errs = errors[c.id] ?? []
-            let n = errs.count
-            let bias = n > 0 ? errs.reduce(0, +) / Double(n) : 0
-            let mae = n > 0 ? errs.map { abs($0) }.reduce(0, +) / Double(n) : 0
-            let rmse = n > 0 ? (errs.map { $0 * $0 }.reduce(0, +) / Double(n)).squareRoot() : 0
-            return AlgorithmRanking(
-                algorithmId: c.id, name: c.name, n: n, bias: bias, rmse: rmse, mae: mae)
-        }
-        // Best-first by RMSE; algorithms with no scored captures sink last.
-        rankings.sort { a, b in
-            if (a.n == 0) != (b.n == 0) { return b.n == 0 }
-            return a.rmse < b.rmse
-        }
+        let rankings = buildRankings(
+            order: dbhCandidates.map { ($0.id, $0.name) }, pairsById: pairs)
 
         return DBHSweepReport(
             rankings: rankings, perCapture: perCapture,
@@ -284,6 +356,167 @@ public enum RawCaptureReplay {
             reposed = HeightEstimator.estimate(input: input2)
         }
         return HeightRerun(result: primary, reposed: reposed)
+    }
+
+    // MARK: Height multi-algorithm sweep (accuracy validation)
+
+    /// The height estimator inputs reconstructed once from a height bundle's
+    /// STORED tangent geometry — anchor, standing point (base-aim camera pose
+    /// translation), the two aim pitches, d_h, and calibration. Every height
+    /// candidate runs from this SAME object, so the algorithms are compared on
+    /// identical stored inputs (no re-collection, no new geometry).
+    public struct HeightReplayInputs: Sendable {
+        public let anchor: SIMD3<Float>
+        public let standing: SIMD3<Float>
+        public let alphaTopRad: Float
+        public let alphaBaseRad: Float
+        public let dHM: Double
+        public let cal: ProjectCalibration
+    }
+
+    /// Rebuild the canonical height estimator inputs from the stored bundle
+    /// (mirrors `rerunHeight`'s stored-geometry path). Returns nil only when
+    /// the bundle has no reconstructable height geometry.
+    public static func reconstructHeightInputs(
+        manifest m: RawCaptureManifest) -> HeightReplayInputs? {
+        guard let h = m.height, h.anchor.world.count == 3 else { return nil }
+        let anchor = SIMD3<Float>(Float(h.anchor.world[0]),
+                                  Float(h.anchor.world[1]),
+                                  Float(h.anchor.world[2]))
+        let standing = RawCaptureMatrix.translation(h.base.cameraPose)
+        let alphaTop = Float(h.top.pitchDeg * .pi / 180)
+        let alphaBase = Float(h.base.pitchDeg * .pi / 180)
+        let cal = calibration(from: m.settings.calibration)
+        return HeightReplayInputs(
+            anchor: anchor, standing: standing,
+            alphaTopRad: alphaTop, alphaBaseRad: alphaBase,
+            dHM: h.dHM, cal: cal)
+    }
+
+    /// One candidate height algorithm in the sweep. Same shape as
+    /// `DBHCandidate`: `run` returns the estimated height (m) from the shared
+    /// stored inputs, or nil when the algorithm is N/A for that capture.
+    public struct HeightCandidate: Sendable {
+        public let id: String            // stable tag, pooled with Android
+        public let name: String          // display label
+        public let run: @Sendable (HeightReplayInputs) -> Double?
+    }
+
+    /// Illustrative fixed-bias correction (metres) baked onto the tangent
+    /// height by the example corrected candidate below. NOT a tuned value — it
+    /// exists only to demonstrate the preprocess → estimator → CORRECTION
+    /// registry shape (a candidate may post-process the estimate). The OLS
+    /// fit in the ranking finds the real bias/slope; delete or replace this
+    /// once a genuine correction / alternate method lands.
+    public static let exampleHeightBiasM: Double = 0.5
+
+    /// THE HEIGHT REGISTRY — mirror of `dbhCandidates`. Seeded with the
+    /// production walk-off tangent method as the base candidate; adding a
+    /// slope/terrain-corrected tangent or a future depth-based method is ONE
+    /// entry here. The second entry demonstrates the correction step.
+    public static let heightCandidates: [HeightCandidate] = [
+        HeightCandidate(id: "tangent", name: "Walk-off tangent") { inp in
+            acceptedHeightM(HeightEstimator.estimate(input: heightInput(inp)))
+        },
+        // EXAMPLE corrected candidate: base tangent estimator, then a plain
+        // post-correction (here a fixed bias). Shows the registry supports
+        // preprocess → estimator → correction with one line each.
+        HeightCandidate(id: "tangentBias", name: "Tangent + fixed bias") { inp in
+            guard let h = acceptedHeightM(HeightEstimator.estimate(input: heightInput(inp)))
+            else { return nil }   // N/A: base estimator rejected this capture
+            return h + exampleHeightBiasM
+        },
+    ]
+
+    /// Build the shared height estimator input from the reconstructed geometry.
+    static func heightInput(_ inp: HeightReplayInputs) -> HeightMeasureInput {
+        HeightMeasureInput(
+            anchorPointWorld: inp.anchor,
+            standingPointWorld: inp.standing,
+            alphaTopRad: inp.alphaTopRad,
+            alphaBaseRad: inp.alphaBaseRad,
+            trackingStateWasNormalThroughout: true,
+            projectCalibration: inp.cal)
+    }
+
+    /// A height result is usable only if it wasn't rejected (red tier).
+    static func acceptedHeightM(_ r: HeightResult) -> Double? {
+        guard r.confidence != .red else { return nil }
+        return Double(r.heightM)
+    }
+
+    /// One height capture's value under every registered algorithm.
+    public struct HeightSweepEntry: Sendable {
+        public let algorithmId: String
+        public let name: String
+        public let value: Double?        // nil = N/A for this capture
+    }
+
+    /// Run a height capture through ALL candidate algorithms from the SAME
+    /// stored tangent geometry. Returns one entry per registered algorithm,
+    /// or nil when the bundle can't be reconstructed.
+    public static func sweepHeight(manifest m: RawCaptureManifest) -> [HeightSweepEntry]? {
+        guard let inp = reconstructHeightInputs(manifest: m) else { return nil }
+        return heightCandidates.map {
+            HeightSweepEntry(algorithmId: $0.id, name: $0.name, value: $0.run(inp))
+        }
+    }
+
+    /// One height capture's sweep alongside its truth, with the closest algo.
+    public struct HeightSweepCapture: Sendable {
+        public let id: String
+        public let treeNumber: Int?
+        public let truth: Double
+        public let entries: [HeightSweepEntry]
+        public let winnerId: String?
+    }
+
+    /// The full ranked height report the "Compare algorithms (height)" view
+    /// renders. Same shape as `DBHSweepReport`.
+    public struct HeightSweepReport: Sendable {
+        public let rankings: [AlgorithmRanking]      // best-first (lowest raw RMSE)
+        public let perCapture: [HeightSweepCapture]  // only truthed captures
+        public let totalHeight: Int
+        public let scored: Int
+        public let skippedNoTruth: Int
+    }
+
+    /// Sweep every height capture and rank the algorithms best-first by raw
+    /// RMSE against the hand-measured truth (m), with the same OLS correction
+    /// fit as DBH. Pure + Sendable — the caller runs it off the main actor.
+    public static func rankHeight(_ summaries: [RawCaptureSummary]) -> HeightSweepReport {
+        var totalHeight = 0
+        var skipped = 0
+        var scored = 0
+        var pairs: [String: [(est: Double, truth: Double)]] = [:]
+        var perCapture: [HeightSweepCapture] = []
+
+        for sum in summaries where sum.manifest.kind == "height" {
+            totalHeight += 1
+            guard let truth = sum.manifest.truth.value else { skipped += 1; continue }
+            guard let entries = sweepHeight(manifest: sum.manifest) else {
+                skipped += 1; continue
+            }
+            scored += 1
+            var winnerId: String?
+            var winnerErr = Double.infinity
+            for e in entries {
+                guard let v = e.value else { continue }
+                pairs[e.algorithmId, default: []].append((est: v, truth: truth))
+                let err = abs(v - truth)
+                if err < winnerErr { winnerErr = err; winnerId = e.algorithmId }
+            }
+            perCapture.append(HeightSweepCapture(
+                id: sum.id, treeNumber: sum.manifest.context.treeNumber,
+                truth: truth, entries: entries, winnerId: winnerId))
+        }
+
+        let rankings = buildRankings(
+            order: heightCandidates.map { ($0.id, $0.name) }, pairsById: pairs)
+
+        return HeightSweepReport(
+            rankings: rankings, perCapture: perCapture,
+            totalHeight: totalHeight, scored: scored, skippedNoTruth: skipped)
     }
 
     // MARK: Shared reconstruction helpers

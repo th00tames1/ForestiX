@@ -248,6 +248,116 @@ object RawCaptureReplay {
         return DbhSweep(truth, live, estimates)
     }
 
+    // MARK: - Height multi-algorithm sweep + candidate registry
+
+    /// Reconstructed replay inputs shared by every HEIGHT candidate — the
+    /// stored tangent geometry (anchor + standing X/Z + base/top pitch) plus
+    /// the calibration's VIO-drift fraction. Built ONCE per capture from the
+    /// SAME scalars rerunHeight consumes, so a sweep runs all candidates over
+    /// identical stored bytes (no new geometry, no re-collection).
+    data class HeightSweepInput(
+        val anchorX: Float,
+        val anchorZ: Float,
+        val standingX: Float,
+        val standingZ: Float,
+        val alphaTopRad: Float,
+        val alphaBaseRad: Float,
+        val vioDriftFraction: Float,
+    )
+
+    /// One candidate HEIGHT method the sweep runs. Shaped exactly like
+    /// DbhCandidate (preprocess -> estimator -> correction, all inside `run`):
+    /// `id` is a stable slug pooled with iOS; `run` returns an estimated height
+    /// (m) from the shared stored inputs, or null when N/A / no usable value.
+    /// ADD A NEW METHOD (slope/terrain-corrected tangent, future depth-based
+    /// height, …) by adding ONE entry here — sweep, ranking, and UI follow.
+    class HeightCandidate(
+        val id: String,
+        val label: String,
+        val run: (HeightSweepInput) -> Double?,
+    )
+
+    /// THE height candidate registry. Base candidate = the production two-
+    /// tangent estimator over the stored inputs (parity with rerunHeight's
+    /// `value`). The second entry demonstrates the preprocess->estimator->
+    /// correction shape: it runs the SAME estimator then applies a fixed bias
+    /// offset — a stand-in showing exactly where a real correction (e.g. a
+    /// slope-corrected standing distance, or a fitted bias) would live.
+    val HEIGHT_CANDIDATES: List<HeightCandidate> = listOf(
+        HeightCandidate("tangent", "Two-tangent (base)") { i ->
+            HeightEstimator.estimate(
+                anchorX = i.anchorX, anchorZ = i.anchorZ,
+                standingX = i.standingX, standingZ = i.standingZ,
+                alphaTopRad = i.alphaTopRad, alphaBaseRad = i.alphaBaseRad,
+                vioDriftFraction = i.vioDriftFraction,
+            ).heightM.toDouble().takeIf { it.isFinite() && it > 0.0 }
+        },
+        // Example corrected candidate: estimator output + a fixed bias offset.
+        // Purely illustrative of the correction hook — the sweep's OLS fit is
+        // the real per-algorithm bias/slope calibration the user bakes in.
+        HeightCandidate("tangentBias", "Two-tangent + fixed bias") { i ->
+            val base = HeightEstimator.estimate(
+                anchorX = i.anchorX, anchorZ = i.anchorZ,
+                standingX = i.standingX, standingZ = i.standingZ,
+                alphaTopRad = i.alphaTopRad, alphaBaseRad = i.alphaBaseRad,
+                vioDriftFraction = i.vioDriftFraction,
+            ).heightM.toDouble()
+            (base + HEIGHT_FIXED_BIAS_M).takeIf { it.isFinite() && it > 0.0 }
+        },
+    )
+
+    /// Illustrative fixed bias for the "tangent + fixed bias" example
+    /// candidate (m). Not a tuned constant — it exists to show the shape.
+    private const val HEIGHT_FIXED_BIAS_M = 0.0
+
+    /// Per-capture height sweep result: every candidate's estimate over one
+    /// bundle's stored scalars, plus the stored truth / live value. Mirrors
+    /// DbhSweep. `estimates[id]` null = N/A / no usable value for this capture.
+    data class HeightSweep(
+        val truth: Double?,
+        val liveValue: Double?,
+        val estimates: Map<String, Double?>,
+    )
+
+    /// Rebuild the shared height sweep inputs from a height bundle (the same
+    /// scalars rerunHeight reads: anchor world X/Z, base camera pose -> standing
+    /// X/Z, base/top pitch, calibration VIO drift). Null when the bundle lacks
+    /// what the tangent method needs. rerunHeight is left untouched.
+    private fun heightSweepInput(manifest: JSONObject): HeightSweepInput? {
+        val height = manifest.optJSONObject("height") ?: return null
+        val anchor = height.optJSONObject("anchor") ?: return null
+        val base = height.optJSONObject("base") ?: return null
+        val top = height.optJSONObject("top") ?: return null
+        val anchorWorld = anchor.optJSONArray("world") ?: return null
+        val basePose = jsonToFloatArray(base.optJSONArray("camera_pose"), 16) ?: return null
+        val cal = calibrationFrom(manifest.optJSONObject("settings"))
+        return HeightSweepInput(
+            anchorX = anchorWorld.optDouble(0).toFloat(),
+            anchorZ = anchorWorld.optDouble(2).toFloat(),
+            standingX = basePose[12],
+            standingZ = basePose[14],
+            alphaTopRad = Math.toRadians(top.optDouble("pitch_deg")).toFloat(),
+            alphaBaseRad = Math.toRadians(base.optDouble("pitch_deg")).toFloat(),
+            vioDriftFraction = cal.vioDriftFraction,
+        )
+    }
+
+    /// Run EVERY height candidate over a single height capture's stored scalars
+    /// and return {methodId -> estimate (m)}. A candidate that can't run is null
+    /// (N/A), never a failure that aborts the sweep. Non-height bundles -> null.
+    fun sweepHeight(manifest: JSONObject): HeightSweep? {
+        if (manifest.optString("kind") != "height") return null
+        val input = heightSweepInput(manifest) ?: return null
+        val estimates = LinkedHashMap<String, Double?>(HEIGHT_CANDIDATES.size)
+        for (c in HEIGHT_CANDIDATES) {
+            val v = try { c.run(input) } catch (_: Throwable) { null }
+            estimates[c.id] = v?.takeIf { it.isFinite() && it > 0.0 }
+        }
+        val truth = manifest.optJSONObject("truth")?.optDouble("value")?.takeIf { !it.isNaN() }
+        val live = manifest.optJSONObject("result_live")?.optDouble("value")?.takeIf { !it.isNaN() }
+        return HeightSweep(truth, live, estimates)
+    }
+
     // MARK: - Height re-run (shared production entry point)
 
     fun rerunHeight(manifest: JSONObject): HeightReplay? {

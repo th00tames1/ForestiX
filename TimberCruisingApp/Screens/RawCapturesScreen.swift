@@ -61,10 +61,16 @@ public struct RawCapturesScreen: View {
                         Label("Compare algorithms (DBH)", systemImage: "list.number")
                     }
                     .accessibilityIdentifier("rawCaptures.compareAlgorithms")
+                    NavigationLink {
+                        HeightAlgorithmSweepView()
+                    } label: {
+                        Label("Compare algorithms (height)", systemImage: "list.number")
+                    }
+                    .accessibilityIdentifier("rawCaptures.compareAlgorithmsHeight")
                 } header: {
                     Text("Accuracy validation")
                 } footer: {
-                    Text("Runs every candidate DBH algorithm over the stored captures from the same depth bytes and ranks them by error vs your entered ground truth.")
+                    Text("Runs every candidate algorithm over the stored captures from the same recorded inputs and ranks them by error vs your entered ground truth — raw, plus an in-sample fitted bias/slope correction.")
                 }
 
                 Section {
@@ -486,48 +492,12 @@ struct DBHAlgorithmSweepView: View {
     @ViewBuilder
     private func rankingSection(_ r: RawCaptureReplay.DBHSweepReport) -> some View {
         Section {
-            rankHeaderRow
-            ForEach(Array(r.rankings.enumerated()), id: \.element.algorithmId) { idx, rank in
-                rankRow(rank, isWinner: idx == 0 && rank.n > 0)
-            }
+            AlgorithmRankingTable(rankings: r.rankings, unit: "cm")
         } header: {
             Text("Ranking (best first)")
         } footer: {
-            Text("bias = mean(estimate − truth); RMSE / MAE in cm. Lower RMSE is better; bias shows systematic over/under-estimation.")
+            Text("bias = mean(estimate − truth); RMSE / MAE in cm. Sorted by RMSE(raw). RMSE(corr), a, b come from an in-sample fit truth ≈ a + b·estimate — a calibration fit (not held-out); a biased algorithm can win after correction.")
         }
-    }
-
-    private var rankHeaderRow: some View {
-        HStack(spacing: 4) {
-            Text("Algorithm").frame(maxWidth: .infinity, alignment: .leading)
-            Text("n").frame(width: 28, alignment: .trailing)
-            Text("bias").frame(width: 52, alignment: .trailing)
-            Text("RMSE").frame(width: 52, alignment: .trailing)
-            Text("MAE").frame(width: 52, alignment: .trailing)
-        }
-        .font(.system(size: 11, weight: .semibold, design: .monospaced))
-        .foregroundStyle(ForestixPalette.textSecondary)
-    }
-
-    private func rankRow(_ rank: RawCaptureReplay.AlgorithmRanking, isWinner: Bool) -> some View {
-        HStack(spacing: 4) {
-            Text(rank.name)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .lineLimit(1)
-            Text("\(rank.n)").frame(width: 28, alignment: .trailing)
-            if rank.n > 0 {
-                Text(String(format: "%+.2f", rank.bias)).frame(width: 52, alignment: .trailing)
-                Text(String(format: "%.2f", rank.rmse)).frame(width: 52, alignment: .trailing)
-                Text(String(format: "%.2f", rank.mae)).frame(width: 52, alignment: .trailing)
-            } else {
-                Text("—").frame(width: 52, alignment: .trailing)
-                Text("—").frame(width: 52, alignment: .trailing)
-                Text("—").frame(width: 52, alignment: .trailing)
-            }
-        }
-        .font(.system(size: 12, weight: isWinner ? .bold : .regular, design: .monospaced))
-        .foregroundStyle(isWinner ? ForestixPalette.confidenceOk : ForestixPalette.textPrimary)
-        .accessibilityIdentifier("rawCaptures.sweep.rankRow")
     }
 
     // MARK: Per-capture breakdown
@@ -596,6 +566,228 @@ struct DBHAlgorithmSweepView: View {
         Task.detached(priority: .userInitiated) {
             let items = RawCaptureStore.list()
             let out = RawCaptureReplay.rankDBH(items)
+            await MainActor.run {
+                report = out
+                isRunning = false
+            }
+        }
+    }
+}
+
+// MARK: - Shared ranking table (DBH + height)
+
+/// The best-first ranking rendered as a horizontally-scrollable column table:
+/// n · bias · RMSE(raw) · RMSE(corrected) · a · b. Shared by both sweep views
+/// so DBH and height stay structurally identical. The raw winner (row 0) is
+/// bold-green; the algorithm with the lowest CORRECTED RMSE has its RMSE(corr)
+/// cell highlighted, so a systematically-biased algorithm that only wins after
+/// correction is visible without reordering the (raw) ranking.
+struct AlgorithmRankingTable: View {
+
+    let rankings: [RawCaptureReplay.AlgorithmRanking]
+    let unit: String
+
+    private var bestCorrectedId: String? {
+        rankings.filter { $0.n > 0 }
+            .min { $0.rmseCorrected < $1.rmseCorrected }?.algorithmId
+    }
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 5) {
+                header
+                ForEach(Array(rankings.enumerated()), id: \.element.algorithmId) { idx, rank in
+                    row(rank, isWinner: idx == 0 && rank.n > 0,
+                        isBestCorrected: rank.algorithmId == bestCorrectedId)
+                }
+            }
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 6) {
+            Text("Algorithm").frame(width: 132, alignment: .leading)
+            Text("n").frame(width: 24, alignment: .trailing)
+            Text("bias").frame(width: 48, alignment: .trailing)
+            Text("RMSE").frame(width: 48, alignment: .trailing)
+            Text("RMSE✎").frame(width: 52, alignment: .trailing)
+            Text("a").frame(width: 48, alignment: .trailing)
+            Text("b").frame(width: 44, alignment: .trailing)
+        }
+        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+        .foregroundStyle(ForestixPalette.textSecondary)
+    }
+
+    private func row(_ rank: RawCaptureReplay.AlgorithmRanking,
+                     isWinner: Bool, isBestCorrected: Bool) -> some View {
+        HStack(spacing: 6) {
+            Text(rank.name).frame(width: 132, alignment: .leading).lineLimit(1)
+            Text("\(rank.n)").frame(width: 24, alignment: .trailing)
+            if rank.n > 0 {
+                Text(String(format: "%+.2f", rank.bias)).frame(width: 48, alignment: .trailing)
+                Text(String(format: "%.2f", rank.rmse)).frame(width: 48, alignment: .trailing)
+                Text(String(format: "%.2f", rank.rmseCorrected))
+                    .frame(width: 52, alignment: .trailing)
+                    .foregroundStyle(isBestCorrected ? ForestixPalette.confidenceOk
+                                                     : ForestixPalette.textPrimary)
+                if rank.fitted {
+                    Text(String(format: "%+.2f", rank.a)).frame(width: 48, alignment: .trailing)
+                    Text(String(format: "%.3f", rank.b)).frame(width: 44, alignment: .trailing)
+                } else {
+                    Text("—").frame(width: 48, alignment: .trailing)
+                    Text("—").frame(width: 44, alignment: .trailing)
+                }
+            } else {
+                Text("—").frame(width: 48, alignment: .trailing)
+                Text("—").frame(width: 48, alignment: .trailing)
+                Text("—").frame(width: 52, alignment: .trailing)
+                Text("—").frame(width: 48, alignment: .trailing)
+                Text("—").frame(width: 44, alignment: .trailing)
+            }
+        }
+        .font(.system(size: 12, weight: isWinner ? .bold : .regular, design: .monospaced))
+        .foregroundStyle(isWinner ? ForestixPalette.confidenceOk : ForestixPalette.textPrimary)
+        .accessibilityIdentifier("rawCaptures.sweep.rankRow")
+    }
+}
+
+// MARK: - Height multi-algorithm sweep (accuracy validation)
+
+/// Mirror of `DBHAlgorithmSweepView` over stored HEIGHT captures. Read/replay
+/// only — all math is `RawCaptureReplay.rankHeight`, which runs the production
+/// tangent estimator (and any registered height candidate) over the stored
+/// tangent geometry. Runs off the main actor.
+struct HeightAlgorithmSweepView: View {
+
+    @State private var report: RawCaptureReplay.HeightSweepReport?
+    @State private var isRunning = false
+
+    var body: some View {
+        List {
+            if isRunning {
+                Section {
+                    HStack {
+                        ProgressView()
+                        Text("Sweeping…").foregroundStyle(ForestixPalette.textSecondary)
+                    }
+                }
+            }
+            if let r = report {
+                summarySection(r)
+                if r.rankings.contains(where: { $0.n > 0 }) {
+                    rankingSection(r)
+                    perCaptureSection(r)
+                }
+            }
+        }
+        .navigationTitle("Compare (height)")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .onAppear(perform: runIfNeeded)
+    }
+
+    // MARK: Summary
+
+    @ViewBuilder
+    private func summarySection(_ r: RawCaptureReplay.HeightSweepReport) -> some View {
+        Section {
+            labeled("Height captures", "\(r.totalHeight)")
+            labeled("Scored (with truth)", "\(r.scored)")
+            labeled("Skipped (no truth)", "\(r.skippedNoTruth)")
+            if let best = r.rankings.first(where: { $0.n > 0 }) {
+                labeled("Best (lowest RMSE)", best.name)
+            }
+        } header: {
+            Text("Corpus")
+        } footer: {
+            if r.scored == 0 {
+                Text("No captures have a truth value yet. Enter true heights on individual captures, then return here.")
+            } else {
+                Text("Ranked over the \(r.scored) capture\(r.scored == 1 ? "" : "s") that have a ground-truth height.")
+            }
+        }
+    }
+
+    // MARK: Ranking table
+
+    @ViewBuilder
+    private func rankingSection(_ r: RawCaptureReplay.HeightSweepReport) -> some View {
+        Section {
+            AlgorithmRankingTable(rankings: r.rankings, unit: "m")
+        } header: {
+            Text("Ranking (best first)")
+        } footer: {
+            Text("bias = mean(estimate − truth); RMSE / MAE in m. Sorted by RMSE(raw). RMSE(corr), a, b come from an in-sample fit truth ≈ a + b·estimate — a calibration fit (not held-out). With one method today its value is the fitted bias/slope correction to bake in.")
+        }
+    }
+
+    // MARK: Per-capture breakdown
+
+    @ViewBuilder
+    private func perCaptureSection(_ r: RawCaptureReplay.HeightSweepReport) -> some View {
+        Section {
+            ForEach(r.perCapture, id: \.id) { cap in
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        Text(cap.treeNumber.map { "Tree \($0)" } ?? "Capture")
+                            .font(ForestixType.bodyBold)
+                        Spacer()
+                        Text(String(format: "truth %.1f m", cap.truth))
+                            .font(ForestixType.dataSmall)
+                            .foregroundStyle(ForestixPalette.textSecondary)
+                    }
+                    ForEach(cap.entries, id: \.algorithmId) { e in
+                        captureAlgoRow(e, truth: cap.truth, isWinner: e.algorithmId == cap.winnerId)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+        } header: {
+            Text("Per capture (winner highlighted)")
+        }
+    }
+
+    private func captureAlgoRow(_ e: RawCaptureReplay.HeightSweepEntry,
+                                truth: Double, isWinner: Bool) -> some View {
+        HStack(spacing: 4) {
+            Text(isWinner ? "▶ \(e.name)" : e.name)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .lineLimit(1)
+            if let v = e.value {
+                Text(String(format: "%.2f", v)).frame(width: 56, alignment: .trailing)
+                Text(String(format: "%+.2f", v - truth)).frame(width: 56, alignment: .trailing)
+            } else {
+                Text("N/A").frame(width: 56, alignment: .trailing)
+                Text("—").frame(width: 56, alignment: .trailing)
+            }
+        }
+        .font(.system(size: 11, weight: isWinner ? .bold : .regular, design: .monospaced))
+        .foregroundStyle(isWinner ? ForestixPalette.confidenceOk
+                                  : (e.value == nil ? ForestixPalette.textSecondary
+                                                    : ForestixPalette.textPrimary))
+    }
+
+    // MARK: Layout helper
+
+    private func labeled(_ k: String, _ v: String) -> some View {
+        HStack {
+            Text(k).foregroundStyle(ForestixPalette.textSecondary)
+            Spacer()
+            Text(v)
+                .font(ForestixType.dataSmall)
+                .foregroundStyle(ForestixPalette.textPrimary)
+        }
+    }
+
+    // MARK: Run
+
+    private func runIfNeeded() {
+        guard report == nil, !isRunning else { return }
+        isRunning = true
+        Task.detached(priority: .userInitiated) {
+            let items = RawCaptureStore.list()
+            let out = RawCaptureReplay.rankHeight(items)
             await MainActor.run {
                 report = out
                 isRunning = false

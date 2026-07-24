@@ -1,12 +1,24 @@
-// Settings — grouped-card sections mirroring the iOS inset-grouped Form:
-// Region, Units, Log rule, Developer (+research CSV rows and, in developer
-// mode, the DBH-algorithm picker), Calibration, Basemap tiles, Danger zone.
-// When developer mode is on, the AR measurement screens overlay a live
-// internals HUD (depth source, intrinsics, point counts, raw chord, pitch,
-// distance, σ) for the validation study and unlock the experiment tooling.
+// Settings — grouped-card sections in the shared cross-platform order (iOS
+// parity), REGROUPED from the old per-control sections:
+//   1. Region & units   — Country/Region → Volume standard → Units → Log rule
+//   2. Display          — Appearance (Light/Dark)
+//   3. Calibration      — wall/cylinder fit wizard
+//   4. Data & backup    — .tcproj export + restore; pointer to per-project exports
+//   5. Developer & research — GATED behind the developer-mode toggle: DBH
+//                          algorithm, research CSV, diagnostic log, raw captures
+//   6. Advanced         — Basemap tiles behind a disclosure
+//   7. Danger zone      — erase-all, always last
+//
+// This is a re-grouping + reorder + gating change only; every control keeps
+// its exact binding/action and its committed copy. When developer mode is on,
+// the AR measurement screens also overlay a live internals HUD (depth source,
+// intrinsics, point counts, raw chord, pitch, distance, σ) for the validation
+// study and unlock the experiment tooling.
 
 package com.hcjeong.forestix.ui.screens
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -23,8 +35,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Dangerous
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Inventory2
 import androidx.compose.material.icons.filled.IosShare
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -50,6 +64,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
+import com.hcjeong.forestix.backup.BackupViewModel
 import com.hcjeong.forestix.common.Country
 import com.hcjeong.forestix.common.ForestixLogger
 import com.hcjeong.forestix.common.Region
@@ -89,6 +104,49 @@ fun SettingsScreen(nav: NavController) {
     var resetStep2 by remember { mutableStateOf(false) }
     var resetError by remember { mutableStateOf<String?>(null) }
 
+    // Backup / restore (Data & backup group).
+    val backup = remember(env) { BackupViewModel(env) }
+    var backupBusy by remember { mutableStateOf(false) }
+    var backupError by remember { mutableStateOf<String?>(null) }
+    var restoreSummary by remember { mutableStateOf<String?>(null) }
+
+    val restoreLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        backupBusy = true
+        scope.launch {
+            try {
+                val result = backup.restore(context, uri)
+                restoreSummary = "Restored ${result.importedProjectIds.size} project" +
+                    (if (result.importedProjectIds.size == 1) "" else "s") +
+                    " — ${result.plotCount} plots, ${result.treeCount} trees."
+                storeRefresh++
+            } catch (e: Exception) {
+                backupError = e.message
+                    ?: "Restore failed. Check the file is a valid .tcproj, then try again."
+            } finally {
+                backupBusy = false
+            }
+        }
+    }
+
+    fun runExport() {
+        if (backupBusy) return
+        backupBusy = true
+        scope.launch {
+            try {
+                val outcome = backup.exportAllProjects(context)
+                shareFile(context, outcome.shareUri, "application/zip")
+            } catch (e: Exception) {
+                backupError = e.message
+                    ?: "Backup failed. Free up some storage, then try again."
+            } finally {
+                backupBusy = false
+            }
+        }
+    }
+
     fun performFullReset() {
         scope.launch {
             try {
@@ -102,6 +160,7 @@ fun SettingsScreen(nav: NavController) {
                 // Attachments / Exports / Backups wipe.
                 env.history.clearAll()
                 File(context.filesDir, "measure-photos").deleteRecursively()
+                File(context.filesDir, "restored-media").deleteRecursively()
                 File(context.cacheDir, "Exports").deleteRecursively()
                 ResearchLog.clear(context)
                 storeRefresh++
@@ -121,9 +180,11 @@ fun SettingsScreen(nav: NavController) {
                 .padding(ForestixSpace.md),
             verticalArrangement = Arrangement.spacedBy(ForestixSpace.md),
         ) {
-            // MARK: - Country & region (internationalization framework)
+            // MARK: - 1. Region & units (internationalization framework —
+            // Country/Region, the derived Volume standard, the Units override,
+            // and the US-only Log-rule override, in dependency order).
             FormSection(
-                header = "Country & region",
+                header = "Region & units",
                 footer = "Sets your units, species list, and volume standard. The US " +
                     "uses board-foot log rules; elsewhere is cubic metres.",
             ) {
@@ -167,61 +228,114 @@ fun SettingsScreen(nav: NavController) {
                     Text(settings.country.volumeStandardLabel, style = type.caption,
                         color = colors.textSecondary)
                 }
-            }
-
-            // MARK: - Appearance (segmented, Light → Dark — the map home's
-            // retired sun/moon chrome button, relocated; LOCKED strings +
-            // placement, iOS parity)
-            FormSection(header = "Appearance") {
-                val appearanceOptions = listOf("light" to "Light", "dark" to "Dark")
-                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                    appearanceOptions.forEachIndexed { index, (value, label) ->
-                        SegmentedButton(
-                            selected = settings.appearance == value,
-                            onClick = { env.settings.setAppearance(value) },
-                            shape = SegmentedButtonDefaults.itemShape(
-                                index = index, count = appearanceOptions.size),
-                        ) { Text(label, style = type.caption, maxLines = 1) }
+                FormDivider()
+                // Units override (Imperial → Metric). Committed footer kept as
+                // an inline caption now that this is no longer its own section.
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Units", style = type.body, color = colors.textPrimary)
+                    val unitOptions = listOf(
+                        UnitSystem.IMPERIAL to "Imperial",
+                        UnitSystem.METRIC to "Metric")
+                    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                        unitOptions.forEachIndexed { index, (value, label) ->
+                            SegmentedButton(
+                                selected = settings.unitSystem == value,
+                                onClick = { env.settings.setUnitSystem(value) },
+                                shape = SegmentedButtonDefaults.itemShape(
+                                    index = index, count = unitOptions.size),
+                            ) { Text(label, style = type.caption, maxLines = 1) }
+                        }
+                    }
+                    Text(
+                        "Display DBH, height and distance in metric or imperial.",
+                        style = type.caption, color = colors.textSecondary,
+                    )
+                }
+                // Log rule — US only (board-foot is a North-America concept;
+                // metric countries express volume in m³ and hide this). Placed
+                // last so it reads as an override of the region-derived default.
+                if (settings.country.usesLogRule) {
+                    FormDivider()
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        MenuPickerRow(
+                            title = "Log rule",
+                            value = settings.logRule.displayName,
+                            options = LogRule.entries.map { it.displayName },
+                        ) { index -> env.settings.setLogRule(LogRule.entries[index]) }
+                        Text(
+                            "Sets board-foot volume from DBH and height. Scribner (West), " +
+                                "Doyle (East), or International ¼″ (most accurate).",
+                            style = type.caption, color = colors.textSecondary,
+                        )
                     }
                 }
             }
 
-            // MARK: - Units (segmented, Imperial → Metric)
+            // MARK: - 2. Display (Appearance segmented, Light → Dark — the map
+            // home's retired sun/moon chrome button, relocated; LOCKED strings,
+            // iOS parity).
+            FormSection(header = "Display") {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Appearance", style = type.body, color = colors.textPrimary)
+                    val appearanceOptions = listOf("light" to "Light", "dark" to "Dark")
+                    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                        appearanceOptions.forEachIndexed { index, (value, label) ->
+                            SegmentedButton(
+                                selected = settings.appearance == value,
+                                onClick = { env.settings.setAppearance(value) },
+                                shape = SegmentedButtonDefaults.itemShape(
+                                    index = index, count = appearanceOptions.size),
+                            ) { Text(label, style = type.caption, maxLines = 1) }
+                        }
+                    }
+                }
+            }
+
+            // MARK: - 3. Calibration (navigation row, iOS NavigationLink)
             FormSection(
-                header = "Units",
-                footer = "Display DBH, height and distance in metric or imperial.",
+                header = "Calibration",
+                footer = "Wall fit captures the LiDAR depth noise and bias; " +
+                    "cylinder fit estimates a linear DBH correction. " +
+                    "Run both before your first field pilot.",
             ) {
-                val unitOptions = listOf(UnitSystem.IMPERIAL to "Imperial", UnitSystem.METRIC to "Metric")
-                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                    unitOptions.forEachIndexed { index, (value, label) ->
-                        SegmentedButton(
-                            selected = settings.unitSystem == value,
-                            onClick = { env.settings.setUnitSystem(value) },
-                            shape = SegmentedButtonDefaults.itemShape(
-                                index = index, count = unitOptions.size),
-                        ) { Text(label, style = type.caption, maxLines = 1) }
-                    }
-                }
-            }
-
-            // MARK: - Log rule (US only — board-foot is a North-America concept;
-            // metric countries express volume in m³ and hide this entirely)
-            if (settings.country.usesLogRule) {
-                FormSection(
-                    header = "Log rule",
-                    footer = "Sets board-foot volume from DBH and height. Scribner (West), " +
-                        "Doyle (East), or International ¼″ (most accurate).",
+                Row(
+                    Modifier.fillMaxWidth().clickableNoRipple { nav.navigate(Routes.CALIBRATION) },
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    MenuPickerRow(
-                        title = "Log rule",
-                        value = settings.logRule.displayName,
-                        options = LogRule.entries.map { it.displayName },
-                    ) { index -> env.settings.setLogRule(LogRule.entries[index]) }
+                    Text("Run Calibration", style = type.body, color = colors.textPrimary,
+                        modifier = Modifier.weight(1f))
+                    Icon(
+                        Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null,
+                        tint = colors.textTertiary, modifier = Modifier.size(14.dp))
                 }
             }
 
-            // MARK: - Developer (+ research CSV rows)
-            FormSection(header = "Developer") {
+            // MARK: - 4. Data & backup (.tcproj export/restore; per-project
+            // PDF/CSV/GeoJSON exports live on each project's own screen).
+            FormSection(
+                header = "Data & backup",
+                footer = "Saves every project, photo, and scan to a .tcproj file you can " +
+                    "restore on this device. Per-project PDF, CSV and GeoJSON exports live " +
+                    "on each project's screen.",
+            ) {
+                SettingsActionRow(
+                    title = if (backupBusy) "Working…" else "Export backup",
+                    icon = Icons.Filled.IosShare,
+                    enabled = !backupBusy,
+                ) { runExport() }
+                FormDivider()
+                SettingsActionRow(
+                    title = "Restore from .tcproj…",
+                    icon = Icons.Filled.Download,
+                    enabled = !backupBusy,
+                ) { restoreLauncher.launch(arrayOf("*/*")) }
+            }
+
+            // MARK: - 5. Developer & research (GATED — the developer-mode
+            // toggle is the only always-visible row; when on it holds ALL dev /
+            // study tooling: DBH algorithm, research CSV, diagnostic log, and
+            // the raw-capture recorder).
+            FormSection(header = "Developer & research") {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text("Developer / research mode", style = type.body, color = colors.textPrimary)
@@ -236,6 +350,34 @@ fun SettingsScreen(nav: NavController) {
                     )
                 }
                 if (settings.developerMode) {
+                    // DBH algorithm — depth-method diameter fit. Moved in from
+                    // its own former section; developer-only, since normal
+                    // users get the single blessed path (iOS gates it the same).
+                    FormDivider()
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("DBH algorithm", style = type.body, color = colors.textPrimary)
+                        val algoOptions = listOf(
+                            ChordAlgorithm.SILHOUETTE to "Silhouette",
+                            ChordAlgorithm.DEPTH_BAND to "Depth-band",
+                        )
+                        val current = ChordAlgorithm.fromRaw(settings.dbhChordAlgorithm)
+                        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                            algoOptions.forEachIndexed { index, (value, label) ->
+                                SegmentedButton(
+                                    selected = current == value,
+                                    onClick = { env.settings.setDbhChordAlgorithm(value.raw) },
+                                    shape = SegmentedButtonDefaults.itemShape(
+                                        index = index, count = algoOptions.size),
+                                ) { Text(label, style = type.caption, maxLines = 1) }
+                            }
+                        }
+                        Text(
+                            "Depth-method diameter fit. Silhouette matches iOS " +
+                                "(pixel-width); Depth-band is the point-cloud diagonal.",
+                            style = type.caption, color = colors.textSecondary,
+                        )
+                    }
+
                     // Research CSV — per-measurement diagnostic rows (value,
                     // true value, error, distance, pitch/α, n, σ, tier)
                     // appended by the scan/distance screens while developer
@@ -344,93 +486,66 @@ fun SettingsScreen(nav: NavController) {
                 }
             }
 
-            // MARK: - DBH algorithm (developer-only; normal users get the
-            // single blessed path — same gating as iOS)
-            if (settings.developerMode) {
-                FormSection(
-                    header = "DBH algorithm",
-                    footer = "Depth-method diameter fit. Silhouette matches iOS " +
-                        "(pixel-width); Depth-band is the point-cloud diagonal.",
-                ) {
-                    val algoOptions = listOf(
-                        ChordAlgorithm.SILHOUETTE to "Silhouette",
-                        ChordAlgorithm.DEPTH_BAND to "Depth-band",
-                    )
-                    val current = ChordAlgorithm.fromRaw(settings.dbhChordAlgorithm)
-                    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                        algoOptions.forEachIndexed { index, (value, label) ->
-                            SegmentedButton(
-                                selected = current == value,
-                                onClick = { env.settings.setDbhChordAlgorithm(value.raw) },
-                                shape = SegmentedButtonDefaults.itemShape(
-                                    index = index, count = algoOptions.size),
-                            ) { Text(label, style = type.caption, maxLines = 1) }
-                        }
-                    }
-                }
-            }
-
-            // MARK: - Calibration (navigation row, iOS NavigationLink)
-            FormSection(
-                header = "Calibration",
-                footer = "Wall fit captures the LiDAR depth noise and bias; " +
-                    "cylinder fit estimates a linear DBH correction. " +
-                    "Run both before your first field pilot.",
-            ) {
+            // MARK: - 6. Advanced (Basemap tiles behind a disclosure — the
+            // default satellite base works with nothing set, so it stays folded).
+            FormSection(header = "Advanced") {
+                var basemapExpanded by remember { mutableStateOf(false) }
                 Row(
-                    Modifier.fillMaxWidth().clickableNoRipple { nav.navigate(Routes.CALIBRATION) },
+                    Modifier.fillMaxWidth().clickableNoRipple { basemapExpanded = !basemapExpanded },
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("Run Calibration", style = type.body, color = colors.textPrimary,
+                    Text("Basemap tiles", style = type.body, color = colors.textPrimary,
                         modifier = Modifier.weight(1f))
                     Icon(
-                        Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null,
+                        if (basemapExpanded) Icons.Filled.KeyboardArrowDown
+                        else Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = null,
                         tint = colors.textTertiary, modifier = Modifier.size(14.dp))
                 }
-            }
-
-            // MARK: - Basemap tiles
-            FormSection(
-                header = "Basemap tiles",
-                footer = "Paste an XYZ template ({z}/{x}/{y}) to draw contour or " +
-                    "forest-service tiles over the satellite base. It shows only after " +
-                    "you confirm the provider's usage policy below.",
-            ) {
-                var tileTemplate by remember { mutableStateOf(settings.tileURLTemplate ?: "") }
-                var providerLabel by remember { mutableStateOf(settings.tileProviderLabel ?: "") }
-                FormTextField(
-                    value = tileTemplate,
-                    onValueChange = { new ->
-                        tileTemplate = new
-                        env.settings.setTileURLTemplate(new.ifEmpty { null })
-                    },
-                    placeholder = "https://tile.example.com/{z}/{x}/{y}.png",
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                )
-                FormDivider()
-                FormTextField(
-                    value = providerLabel,
-                    onValueChange = { new ->
-                        providerLabel = new
-                        env.settings.setTileProviderLabel(new.ifEmpty { null })
-                    },
-                    placeholder = "Provider name (optional)",
-                )
-                FormDivider()
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "I have reviewed this provider's usage policy",
-                        style = type.body, color = colors.textPrimary,
-                        modifier = Modifier.weight(1f),
+                if (basemapExpanded) {
+                    var tileTemplate by remember { mutableStateOf(settings.tileURLTemplate ?: "") }
+                    var providerLabel by remember { mutableStateOf(settings.tileProviderLabel ?: "") }
+                    FormDivider()
+                    FormTextField(
+                        value = tileTemplate,
+                        onValueChange = { new ->
+                            tileTemplate = new
+                            env.settings.setTileURLTemplate(new.ifEmpty { null })
+                        },
+                        placeholder = "https://tile.example.com/{z}/{x}/{y}.png",
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                     )
-                    Switch(
-                        checked = settings.providerUsageAcknowledged,
-                        onCheckedChange = { env.settings.setProviderUsageAcknowledged(it) },
+                    FormDivider()
+                    FormTextField(
+                        value = providerLabel,
+                        onValueChange = { new ->
+                            providerLabel = new
+                            env.settings.setTileProviderLabel(new.ifEmpty { null })
+                        },
+                        placeholder = "Provider name (optional)",
+                    )
+                    FormDivider()
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "I have reviewed this provider's usage policy",
+                            style = type.body, color = colors.textPrimary,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Switch(
+                            checked = settings.providerUsageAcknowledged,
+                            onCheckedChange = { env.settings.setProviderUsageAcknowledged(it) },
+                        )
+                    }
+                    Text(
+                        "Paste an XYZ template ({z}/{x}/{y}) to draw contour or " +
+                            "forest-service tiles over the satellite base. It shows only after " +
+                            "you confirm the provider's usage policy above.",
+                        style = type.caption, color = colors.textSecondary,
                     )
                 }
             }
 
-            // MARK: - Danger zone (iOS dangerZoneSection)
+            // MARK: - 7. Danger zone (iOS dangerZoneSection — ALWAYS last)
             FormSection(
                 header = "Danger zone",
                 footer = "Permanently erases every project on this device.",
@@ -449,6 +564,28 @@ fun SettingsScreen(nav: NavController) {
 
             Spacer(Modifier.height(ForestixSpace.lg))
         }
+    }
+
+    // MARK: - Backup / restore result dialogs
+    if (backupError != null) {
+        AlertDialog(
+            onDismissRequest = { backupError = null },
+            title = { Text("Something went wrong") },
+            text = { Text(backupError ?: "") },
+            confirmButton = {
+                TextButton(onClick = { backupError = null }) { Text("OK") }
+            },
+        )
+    }
+    if (restoreSummary != null) {
+        AlertDialog(
+            onDismissRequest = { restoreSummary = null },
+            title = { Text("Restore complete") },
+            text = { Text(restoreSummary ?: "") },
+            confirmButton = {
+                TextButton(onClick = { restoreSummary = null }) { Text("OK") }
+            },
+        )
     }
 
     // MARK: - Destructive reset dialogs (iOS confirmationDialog chain)

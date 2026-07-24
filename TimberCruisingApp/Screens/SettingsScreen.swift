@@ -1,9 +1,14 @@
-// Phase 1 settings surface. Phase 7 extends with:
-//   • Pre-field check shortcut (per project)
-//   • Calibration wizard entry (existing CalibrationScreen)
-//   • Backup + restore (.tcproj)
-//   • Analytics log export
-//   • Data reset with 2-step confirmation
+// Settings surface — reorganized into seven ordered groups (iOS/Android parity):
+//   1. Region & units       — Country, Region (US), Volume standard, Units, Log rule (US)
+//   2. Display              — Light/Dark appearance
+//   3. Calibration          — wall + cylinder fit wizard
+//   4. Data & backup        — .tcproj backup/restore (per-project exports live on the project screen)
+//   5. Developer & research — gated by developer mode: DBH algorithm, Research CSV,
+//                             diagnostic log, raw-capture recorder + Raw captures
+//   6. Advanced             — Basemap tiles overlay, behind a navigation row
+//   7. Danger zone          — erase all data (always last)
+// This is a re-grouping + gating pass: every binding, action, and string is the
+// same one committed before; only where it lives changed.
 
 import SwiftUI
 #if canImport(UniformTypeIdentifiers)
@@ -37,22 +42,12 @@ public struct SettingsScreen: View {
 
     public var body: some View {
         Form {
-            countryRegionSection
-            appearanceSection
-            unitsSection
-            // Board-foot log rules are North-America-only — hidden for the
-            // metric countries, which never scale in board feet.
-            if settings.country.usesLogRule {
-                logRuleSection
-            }
-            developerSection
-            if settings.developerMode {
-                dbhMethodSection
-            }
+            regionAndUnitsSection
+            displaySection
             calibrationSection
-            basemapSection
-            backupSection
-            analyticsSection
+            dataBackupSection
+            developerSection
+            advancedSection
             dangerZoneSection
         }
         .navigationTitle("Settings")
@@ -131,11 +126,13 @@ public struct SettingsScreen: View {
         }
     }
 
-    // MARK: - Sections
-
-    private var countryRegionSection: some View {
+    // MARK: - 1. Region & units
+    // Merges the former Country/Region, Units, and Log-rule sections into one
+    // dependency-ordered group: the country drives units, species and the
+    // volume standard; Units and the US-only Log rule are overrides below it.
+    private var regionAndUnitsSection: some View {
         Section(
-            header: Text("Country & region"),
+            header: Text("Region & units"),
             footer: Text("Sets your units, species list, and volume standard. The US uses board-foot log rules; elsewhere is cubic metres.")
         ) {
             Picker("Country",
@@ -190,14 +187,42 @@ public struct SettingsScreen: View {
                     .multilineTextAlignment(.trailing)
             }
             .accessibilityIdentifier("settings.volumeStandard")
+
+            // Units override — display DBH, height and distance in metric or
+            // imperial regardless of the country default above.
+            Picker("Default units", selection: $unitSystem) {
+                Text("Imperial").tag(UnitSystem.imperial)
+                Text("Metric").tag(UnitSystem.metric)
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: unitSystem) { _, new in settings.unitSystem = new }
+
+            // Log rule — US only, and an override of the region default derived
+            // above (West→Scribner, East→Doyle). Board-foot is North-America
+            // only, so the metric countries never show this row.
+            if settings.country.usesLogRule {
+                Picker("Log rule",
+                       selection: Binding(
+                        get: { settings.logRule },
+                        set: { settings.logRule = $0 })
+                ) {
+                    ForEach(LogRule.allCases, id: \.self) { r in
+                        Text(r.displayName).tag(r)
+                    }
+                }
+                .accessibilityIdentifier("settings.logRule")
+                Text("Scribner (West), Doyle (East), or International ¼″ (most accurate).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
-    // LOCKED strings/placement (Android matches): "Light" | "Dark"
-    // segmented control, right after Region, no footer. Replaces the
-    // retired sun/moon button on the map's top row.
-    private var appearanceSection: some View {
-        Section(header: Text("Appearance")) {
+    // MARK: - 2. Display
+    // LOCKED strings/placement (Android matches): "Light" | "Dark" segmented
+    // control. Pulled out of the region block into its own small group.
+    private var displaySection: some View {
+        Section(header: Text("Display")) {
             Picker("Appearance",
                    selection: Binding(
                     get: { settings.appearance },
@@ -211,139 +236,7 @@ public struct SettingsScreen: View {
         }
     }
 
-    private var developerSection: some View {
-        Section {
-            Toggle(isOn: Binding(
-                get: { settings.developerMode },
-                set: { settings.developerMode = $0 })
-            ) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Developer / research mode")
-                    Text("Overlay live measurement internals on the AR screens for the validation study.")
-                        .font(ForestixType.caption)
-                        .foregroundStyle(ForestixPalette.textSecondary)
-                }
-            }
-            .accessibilityIdentifier("settings.developerMode")
-            if settings.developerMode {
-                // Research CSV — the per-measurement diagnostic rows
-                // (value, true value, error, distance, pitch/α, n, σ, tier)
-                // the accuracy study analyses. Rows are appended by the
-                // scan/distance screens whenever developer mode is on.
-                HStack {
-                    Text("Research CSV")
-                    Spacer()
-                    Text("\(ResearchLog.shared.rowCount()) rows")
-                        .foregroundStyle(ForestixPalette.textSecondary)
-                }
-                Button {
-                    backup.shareURL = ResearchLog.shared.fileURL
-                } label: {
-                    Label("Export research CSV", systemImage: "square.and.arrow.up")
-                }
-                .disabled(!ResearchLog.shared.hasData)
-                .accessibilityIdentifier("settings.exportResearch")
-                Button(role: .destructive) {
-                    ResearchLog.shared.clear()
-                } label: {
-                    Label("Clear research CSV", systemImage: "trash")
-                }
-                .disabled(!ResearchLog.shared.hasData)
-
-                // RAW-CAPTURE REPLAY — record the exact raw inputs each
-                // measurement consumes so estimator code can be re-run on
-                // stored field data offline. Off by default.
-                Toggle(isOn: Binding(
-                    get: { settings.rawCaptureEnabled },
-                    set: { settings.rawCaptureEnabled = $0 })
-                ) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Record raw captures")
-                        Text("Save each scan's raw depth and pose data so measurements can be re-run offline. Off by default.")
-                            .font(ForestixType.caption)
-                            .foregroundStyle(ForestixPalette.textSecondary)
-                    }
-                }
-                .accessibilityIdentifier("settings.rawCaptureEnabled")
-                NavigationLink {
-                    RawCapturesScreen()
-                } label: {
-                    HStack {
-                        Label("Raw captures", systemImage: "shippingbox")
-                        Spacer()
-                        Text(rawCaptureSummaryText)
-                            .font(ForestixType.dataSmall)
-                            .foregroundStyle(ForestixPalette.textSecondary)
-                    }
-                }
-                .accessibilityIdentifier("settings.rawCaptures")
-            }
-        } header: {
-            Text("Developer")
-        }
-    }
-
-    /// "N · X MB" summary for the raw-captures row.
-    private var rawCaptureSummaryText: String {
-        let n = RawCaptureStore.count()
-        let bytes = RawCaptureStore.totalSizeBytes()
-        let size = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
-        return "\(n) · \(size)"
-    }
-
-    // Developer-only — normal users get the single blessed DBH path;
-    // the algorithm picker rides below the Developer section and is
-    // visible only while developer mode is on (same gating on Android).
-    private var dbhMethodSection: some View {
-        Section(
-            header: Text("DBH algorithm"),
-            footer: Text("Chord is the stable default for hand-held scans. Switch to Partial-arc circle fit for irregular trunks the silhouette under-reads.")
-        ) {
-            Picker("Method",
-                   selection: Binding(
-                    get: { settings.dbhMeasurementMethod },
-                    set: { settings.dbhMeasurementMethod = $0 })
-            ) {
-                ForEach(DBHMeasurementMethod.allCases, id: \.self) { m in
-                    Text(m.displayName).tag(m)
-                }
-            }
-            .accessibilityIdentifier("settings.dbhMethod")
-        }
-    }
-
-    private var logRuleSection: some View {
-        Section(
-            header: Text("Log rule"),
-            footer: Text("Sets board-foot volume from DBH and height. Scribner (West), Doyle (East), or International ¼″ (most accurate).")
-        ) {
-            Picker("Log rule",
-                   selection: Binding(
-                    get: { settings.logRule },
-                    set: { settings.logRule = $0 })
-            ) {
-                ForEach(LogRule.allCases, id: \.self) { r in
-                    Text(r.displayName).tag(r)
-                }
-            }
-            .accessibilityIdentifier("settings.logRule")
-        }
-    }
-
-    private var unitsSection: some View {
-        Section(
-            header: Text("Units"),
-            footer: Text("Display DBH, height and distance in metric or imperial.")
-        ) {
-            Picker("Default units", selection: $unitSystem) {
-                Text("Imperial").tag(UnitSystem.imperial)
-                Text("Metric").tag(UnitSystem.metric)
-            }
-            .pickerStyle(.segmented)
-            .onChange(of: unitSystem) { _, new in settings.unitSystem = new }
-        }
-    }
-
+    // MARK: - 3. Calibration
     private var calibrationSection: some View {
         Section(
             header: Text("Calibration"),
@@ -356,39 +249,13 @@ public struct SettingsScreen: View {
         }
     }
 
-    private var basemapSection: some View {
+    // MARK: - 4. Data & backup
+    // The existing backup/restore surface, relocated here. Per-project exports
+    // (PDF/CSV/GeoJSON) live on each project's screen.
+    private var dataBackupSection: some View {
         Section(
-            header: Text("Basemap tiles"),
-            footer: Text("Paste an XYZ template ({z}/{x}/{y}) to draw contour or forest-service tiles over the satellite base. It shows only after you confirm the provider's usage policy below.")
-        ) {
-            TextField("https://tile.example.com/{z}/{x}/{y}.png", text: $tileTemplate)
-                #if os(iOS)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .keyboardType(.URL)
-                #endif
-                .accessibilityIdentifier("settings.tileTemplate")
-                .onChange(of: tileTemplate) { _, new in
-                    settings.tileURLTemplate = new.isEmpty ? nil : new
-                }
-            TextField("Provider name (optional)", text: $providerLabel)
-                .accessibilityIdentifier("settings.providerLabel")
-                .onChange(of: providerLabel) { _, new in
-                    settings.tileProviderLabel = new.isEmpty ? nil : new
-                }
-            Toggle("I have reviewed this provider's usage policy",
-                   isOn: $providerAck)
-                .accessibilityIdentifier("settings.providerAck")
-                .onChange(of: providerAck) { _, new in
-                    settings.providerUsageAcknowledged = new
-                }
-        }
-    }
-
-    private var backupSection: some View {
-        Section(
-            header: Text("Backup & Restore"),
-            footer: Text("Saves every project, photo, and scan to a .tcproj file you can restore on any device.")
+            header: Text("Data & backup"),
+            footer: Text("Saves every project, photo, and scan to a .tcproj file you can restore on any device. Per-project exports (PDF, CSV, GeoJSON) live on each project's screen.")
         ) {
             Button {
                 backup.backupAllProjects()
@@ -424,26 +291,176 @@ public struct SettingsScreen: View {
         }
     }
 
-    private var analyticsSection: some View {
-        Section(
-            header: Text("Diagnostics"),
-            footer: Text("All logs stay on this device. Export here if Forestix support asks you to.")
-        ) {
-            Button {
-                backup.shareURL = ForestixLogger.currentLogURL
-            } label: {
-                Label("Export diagnostic log", systemImage: "square.and.arrow.up")
+    // MARK: - 5. Developer & research
+    // Gated behind developer mode: the toggle is the only always-visible row.
+    // When on, this is the single home for every dev/study tool — the DBH
+    // algorithm picker (moved in from its own section), Research CSV, the
+    // diagnostic log (gated here too, matching Android), and the raw-capture
+    // recorder + Raw captures browser.
+    private var developerSection: some View {
+        Section {
+            Toggle(isOn: Binding(
+                get: { settings.developerMode },
+                set: { settings.developerMode = $0 })
+            ) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Developer / research mode")
+                    Text("Overlay live measurement internals on the AR screens for the validation study.")
+                        .font(ForestixType.caption)
+                        .foregroundStyle(ForestixPalette.textSecondary)
+                }
             }
-            .accessibilityIdentifier("settings.exportLog")
-            Button(role: .destructive) {
-                ForestixLogger.clear()
-            } label: {
-                Label("Clear diagnostic log", systemImage: "trash")
+            .accessibilityIdentifier("settings.developerMode")
+
+            if settings.developerMode {
+                // DBH algorithm — developer-only; normal users get the single
+                // blessed DBH path. Moved in from its former standalone section.
+                Picker("DBH algorithm",
+                       selection: Binding(
+                        get: { settings.dbhMeasurementMethod },
+                        set: { settings.dbhMeasurementMethod = $0 })
+                ) {
+                    ForEach(DBHMeasurementMethod.allCases, id: \.self) { m in
+                        Text(m.displayName).tag(m)
+                    }
+                }
+                .accessibilityIdentifier("settings.dbhMethod")
+                Text("Chord is the stable default for hand-held scans. Switch to Partial-arc circle fit for irregular trunks the silhouette under-reads.")
+                    .font(ForestixType.caption)
+                    .foregroundStyle(ForestixPalette.textSecondary)
+
+                // Research CSV — the per-measurement diagnostic rows
+                // (value, true value, error, distance, pitch/α, n, σ, tier)
+                // the accuracy study analyses. Rows are appended by the
+                // scan/distance screens whenever developer mode is on.
+                HStack {
+                    Text("Research CSV")
+                    Spacer()
+                    Text("\(ResearchLog.shared.rowCount()) rows")
+                        .foregroundStyle(ForestixPalette.textSecondary)
+                }
+                Button {
+                    backup.shareURL = ResearchLog.shared.fileURL
+                } label: {
+                    Label("Export research CSV", systemImage: "square.and.arrow.up")
+                }
+                .disabled(!ResearchLog.shared.hasData)
+                .accessibilityIdentifier("settings.exportResearch")
+                Button(role: .destructive) {
+                    ResearchLog.shared.clear()
+                } label: {
+                    Label("Clear research CSV", systemImage: "trash")
+                }
+                .disabled(!ResearchLog.shared.hasData)
+
+                // Diagnostic log — gated here to match Android (it used to be a
+                // standalone, always-visible section).
+                Button {
+                    backup.shareURL = ForestixLogger.currentLogURL
+                } label: {
+                    Label("Export diagnostic log", systemImage: "square.and.arrow.up")
+                }
+                .accessibilityIdentifier("settings.exportLog")
+                Button(role: .destructive) {
+                    ForestixLogger.clear()
+                } label: {
+                    Label("Clear diagnostic log", systemImage: "trash")
+                }
+                .accessibilityIdentifier("settings.clearLog")
+                Text("All logs stay on this device. Export here if Forestix support asks you to.")
+                    .font(ForestixType.caption)
+                    .foregroundStyle(ForestixPalette.textSecondary)
+
+                // RAW-CAPTURE REPLAY — record the exact raw inputs each
+                // measurement consumes so estimator code can be re-run on
+                // stored field data offline. Off by default.
+                Toggle(isOn: Binding(
+                    get: { settings.rawCaptureEnabled },
+                    set: { settings.rawCaptureEnabled = $0 })
+                ) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Record raw captures")
+                        Text("Save each scan's raw depth and pose data so measurements can be re-run offline. Off by default.")
+                            .font(ForestixType.caption)
+                            .foregroundStyle(ForestixPalette.textSecondary)
+                    }
+                }
+                .accessibilityIdentifier("settings.rawCaptureEnabled")
+                NavigationLink {
+                    RawCapturesScreen()
+                } label: {
+                    HStack {
+                        Label("Raw captures", systemImage: "shippingbox")
+                        Spacer()
+                        Text(rawCaptureSummaryText)
+                            .font(ForestixType.dataSmall)
+                            .foregroundStyle(ForestixPalette.textSecondary)
+                    }
+                }
+                .accessibilityIdentifier("settings.rawCaptures")
             }
-            .accessibilityIdentifier("settings.clearLog")
+        } header: {
+            Text("Developer & research")
         }
     }
 
+    /// "N · X MB" summary for the raw-captures row.
+    private var rawCaptureSummaryText: String {
+        let n = RawCaptureStore.count()
+        let bytes = RawCaptureStore.totalSizeBytes()
+        let size = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+        return "\(n) · \(size)"
+    }
+
+    // MARK: - 6. Advanced
+    // The default satellite basemap works with nothing set, so the custom XYZ
+    // overlay controls sit behind a navigation row here rather than on the
+    // main list.
+    private var advancedSection: some View {
+        Section(header: Text("Advanced")) {
+            NavigationLink {
+                Form { basemapSection }
+                    .navigationTitle("Basemap tiles")
+                    #if os(iOS)
+                    .navigationBarTitleDisplayMode(.inline)
+                    #endif
+            } label: {
+                Text("Basemap tiles")
+            }
+            .accessibilityIdentifier("settings.basemapLink")
+        }
+    }
+
+    private var basemapSection: some View {
+        Section(
+            header: Text("Basemap tiles"),
+            footer: Text("Paste an XYZ template ({z}/{x}/{y}) to draw contour or forest-service tiles over the satellite base. It shows only after you confirm the provider's usage policy below.")
+        ) {
+            TextField("https://tile.example.com/{z}/{x}/{y}.png", text: $tileTemplate)
+                #if os(iOS)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .keyboardType(.URL)
+                #endif
+                .accessibilityIdentifier("settings.tileTemplate")
+                .onChange(of: tileTemplate) { _, new in
+                    settings.tileURLTemplate = new.isEmpty ? nil : new
+                }
+            TextField("Provider name (optional)", text: $providerLabel)
+                .accessibilityIdentifier("settings.providerLabel")
+                .onChange(of: providerLabel) { _, new in
+                    settings.tileProviderLabel = new.isEmpty ? nil : new
+                }
+            Toggle("I have reviewed this provider's usage policy",
+                   isOn: $providerAck)
+                .accessibilityIdentifier("settings.providerAck")
+                .onChange(of: providerAck) { _, new in
+                    settings.providerUsageAcknowledged = new
+                }
+        }
+    }
+
+    // MARK: - 7. Danger zone (always last)
     private var dangerZoneSection: some View {
         Section(
             header: Text("Danger zone"),

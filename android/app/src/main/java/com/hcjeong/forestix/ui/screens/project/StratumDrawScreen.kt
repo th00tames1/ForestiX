@@ -143,7 +143,7 @@ private fun StratumDrawContent(nav: NavController, project: Project) {
     }
     var camZoom by remember { mutableDoubleStateOf(4.0) }
     var centeredOnFix by remember { mutableStateOf(false) }
-    val location = remember { LocationService(context) }
+    val location = remember { LocationService.shared(context) }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { results ->
@@ -154,26 +154,34 @@ private fun StratumDrawContent(nav: NavController, project: Project) {
         if (granted) location.start()
     }
     LaunchedEffect(Unit) {
-        if (LocationService.hasLocationPermission(context)) {
-            location.start()
-        } else {
+        if (!LocationService.hasLocationPermission(context)) {
             permissionLauncher.launch(LocationService.PERMISSIONS)
         }
     }
-    // Release GPS on every exit path — the early stop() after the first
-    // auto-centre fix never runs when the user pans first or leaves before
-    // a fix arrives (same pattern as NavigationScreen/PlotCenterScreen).
+    // Release the shared GPS subscription on every exit path — the EARLY
+    // release after the first auto-centre fix never runs when the user pans
+    // first or leaves before a fix arrives. `centeredOnFix` doubles as the
+    // released-early marker so acquire()/release() stay exactly balanced
+    // (a double release could stop another screen's live subscription).
     DisposableEffect(Unit) {
-        onDispose { location.stop() }
+        location.acquire()
+        onDispose { if (!centeredOnFix) location.release() }
     }
     val latestSnapshot by location.latestSnapshot.collectAsStateWithLifecycle()
+    // The shared service retains the previous screen's last fix, and
+    // LaunchedEffect(key) fires for the CURRENT value on entry — skip that
+    // pre-entry snapshot so the one-shot auto-centre keeps waiting for a
+    // FRESH fix (the per-screen instance always started from null; iOS
+    // .onChange likewise ignores the initial value).
+    val entrySnapshot = remember { location.latestSnapshot.value }
     LaunchedEffect(latestSnapshot) {
         val s = latestSnapshot ?: return@LaunchedEffect
+        if (s === entrySnapshot) return@LaunchedEffect
         if (!centeredOnFix && vertices.isEmpty()) {
             camCenter = CoordinateConversions.LatLon(latitude = s.latitude, longitude = s.longitude)
             camZoom = 15.0
             centeredOnFix = true
-            location.stop()
+            location.release()
         }
     }
 

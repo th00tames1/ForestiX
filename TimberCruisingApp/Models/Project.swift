@@ -154,6 +154,11 @@ public struct PlannedPlot: Identifiable, Codable, Sendable {
     public var plannedLat: Double
     public var plannedLon: Double
     public var visited: Bool
+    /// Intentionally skipped by the cruiser (inaccessible — cliff, water,
+    /// private land). Distinct from `visited`: a skipped plot is a documented
+    /// decision, so the (+) "nearest unvisited" navigation passes over it and
+    /// exports mark it skipped rather than merely pending.
+    public var skipped: Bool
 
     public init(
         id: UUID,
@@ -162,7 +167,8 @@ public struct PlannedPlot: Identifiable, Codable, Sendable {
         plotNumber: Int,
         plannedLat: Double,
         plannedLon: Double,
-        visited: Bool
+        visited: Bool,
+        skipped: Bool = false
     ) {
         self.id = id
         self.projectId = projectId
@@ -171,5 +177,6 @@ public struct PlannedPlot: Identifiable, Codable, Sendable {
         self.plannedLat = plannedLat
         self.plannedLon = plannedLon
         self.visited = visited
+        self.skipped = skipped
     }
 }

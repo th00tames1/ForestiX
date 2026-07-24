@@ -1,6 +1,6 @@
 // Sampling-statistics engine — pure functions for cruise design and
-// post-cruise reporting. Adopted from SilvaCruise's "full sampling-
-// statistics engine" pitch (CV / SE / CI / SDI / Reineke / Curtis /
+// post-cruise reporting. Implements a full sampling-statistics
+// engine (CV / SE / CI / SDI / Reineke / Curtis /
 // VBAR / Neyman). All inputs are plain Swift arrays of plot-level
 // metrics; nothing here touches Core Data, AR, or persistence.
 //
@@ -157,8 +157,8 @@ public enum SamplingStats {
     // MARK: - Cruise rating
 
     /// Three-band cruise rating off the standard sampling-error
-    /// percentage. These thresholds match the ones SilvaCruise uses
-    /// for its "Acceptable / Marginal / Poor" verdict.
+    /// percentage. These thresholds are standard cruising thresholds
+    /// for an "Acceptable / Marginal / Poor" verdict.
     public enum CruiseRating: String, Sendable {
         case acceptable, marginal, poor
     }

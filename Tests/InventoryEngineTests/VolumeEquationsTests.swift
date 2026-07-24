@@ -142,4 +142,110 @@ final class VolumeEquationsTests: XCTestCase {
         )
         XCTAssertNil(VolumeEquationFactory.make(from: junk))
     }
+
+    // MARK: - Laasasenaho (Finland, verified coefficients)
+
+    // Verified Scots-pine coefficient set (docs/volume-standards-research.md §B
+    // / VolumeEquationsMetric.json "laasasenaho-pine-fi").
+    private static let pineCoeffs: [String: Float] = [
+        "c1": 0.036089, "c2": 2.01395, "c3": 0.99676, "c4": 2.07025, "c5": -1.07209,
+        "a1": -5.39417, "a2": 3.48060, "a3": 0.039884
+    ]
+
+    func testLaasasenahoPineWorkedValue() {
+        // Verified check from §B.1: pine d=20 cm, h=18 m ⇒ ≈ 0.274 m³.
+        let eq = Laasasenaho(coefficients: Self.pineCoeffs)
+        XCTAssertEqual(eq.totalVolumeM3(dbhCm: 20, heightM: 18),
+                       0.274, accuracy: 0.01)
+    }
+
+    func testLaasasenahoDOnlyFallback() {
+        // With height unusable (h ≤ 1.3 m) the d-only model engages when a1..a3
+        // are present, yielding a positive volume.
+        let eq = Laasasenaho(coefficients: Self.pineCoeffs)
+        XCTAssertGreaterThan(eq.totalVolumeM3(dbhCm: 25, heightM: 0), 0)
+        // Without the a-coefficients, no fallback ⇒ 0.
+        var noFallback = Self.pineCoeffs
+        noFallback["a1"] = nil; noFallback["a2"] = nil; noFallback["a3"] = nil
+        XCTAssertEqual(Laasasenaho(coefficients: noFallback)
+                        .totalVolumeM3(dbhCm: 25, heightM: 0), 0)
+    }
+
+    // MARK: - Formfactor (Germany, generic approximation)
+
+    func testFormfactorMatchesGHF() {
+        // V = g·h·f, g = π·(d/100)²/4. d=100 cm ⇒ g = π/4 ≈ 0.785398 m².
+        // h=10, f=0.5 ⇒ V ≈ 3.92699 m³.
+        let eq = Formfactor(formFactor: 0.5)
+        XCTAssertEqual(eq.totalVolumeM3(dbhCm: 100, heightM: 10),
+                       3.92699, accuracy: 1e-3)
+    }
+
+    // MARK: - Korea (scaffold — pending coefficients)
+
+    func testKoreaNIFoSIsPendingAndYieldsNoVolume() {
+        XCTAssertTrue(KoreaNIFoS.coefficientsPending)
+        let eq = KoreaNIFoS()
+        XCTAssertEqual(eq.totalVolumeM3(dbhCm: 30, heightM: 20), 0)
+    }
+
+    // MARK: - Factory recognises the metric forms
+
+    func testFactoryRecognizesMetricForms() {
+        let laasasenaho = Models.VolumeEquation(
+            id: "laasasenaho-pine-fi", form: "laasasenaho",
+            coefficients: Self.pineCoeffs,
+            unitsIn: "cm,m", unitsOut: "m3", sourceCitation: "test")
+        XCTAssertNotNil(VolumeEquationFactory.make(from: laasasenaho))
+
+        let formfactor = Models.VolumeEquation(
+            id: "formfactor-generic-de", form: "formfactor",
+            coefficients: ["f": 0.5],
+            unitsIn: "cm,m", unitsOut: "m3", sourceCitation: "test")
+        XCTAssertNotNil(VolumeEquationFactory.make(from: formfactor))
+    }
+
+    // MARK: - Metric species → equation binding (integration)
+
+    /// The check the unit tests above could not make: the metric equations are
+    /// only useful if a seeded SpeciesConfig actually binds a scan-time species
+    /// code to them. Before this seed wiring the equations existed but no
+    /// species referenced them, so every metric tree resolved to *no* equation
+    /// and stand volume came out 0. This walks the real bundled JSON exactly as
+    /// StandSummaryViewModel does: species code → volumeEquationId → equation →
+    /// positive m³.
+    func testMetricSpeciesAreBoundToComputableEquations() throws {
+        let species = try SeedData.bundledMetricSpecies()
+        let equations = try SeedData.bundledMetricVolumeEquations()
+        let eqById = Dictionary(uniqueKeysWithValues: equations.map { ($0.id, $0) })
+
+        XCTAssertFalse(species.isEmpty, "metric species seed must not be empty")
+
+        for sp in species {
+            let record = try XCTUnwrap(
+                eqById[sp.volumeEquationId],
+                "\(sp.code) points at unseeded equation id \(sp.volumeEquationId)")
+            let eq = try XCTUnwrap(
+                VolumeEquationFactory.make(from: record),
+                "factory could not build \(record.form) for \(sp.code)")
+            // A realistic 25 cm / 20 m stem must produce positive volume — the
+            // 0 the disconnected path used to return would fail here.
+            XCTAssertGreaterThan(
+                eq.totalVolumeM3(dbhCm: 25, heightM: 20), 0,
+                "\(sp.code) resolved but computed 0 m³")
+        }
+
+        // Scots pine round-trips to the verified worked value through the seed.
+        let pine = try XCTUnwrap(species.first { $0.code == "FI-PISY" })
+        let pineEq = try XCTUnwrap(VolumeEquationFactory.make(from: eqById[pine.volumeEquationId]!))
+        XCTAssertEqual(pineEq.totalVolumeM3(dbhCm: 20, heightM: 18), 0.274, accuracy: 0.01)
+
+        // Finland + Germany are seeded; Korea is intentionally absent (pending).
+        XCTAssertEqual(
+            Set(species.map { $0.code }),
+            ["FI-PISY", "FI-PIAB", "FI-BEPE", "FI-BEPU",
+             "DE-PIAB", "DE-PISY", "DE-FASY", "DE-QURO"])
+        XCTAssertFalse(species.contains { $0.code.hasPrefix("KR-") },
+                       "Korea must stay pending — no fabricated volume binding")
+    }
 }

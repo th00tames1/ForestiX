@@ -18,7 +18,7 @@
 //
 // ## Character encoding
 // The .dbf string fields are UTF-8; a sibling `.cpg` file declares this
-// explicitly so GIS readers (QGIS, ArcGIS, OGR) pick it up.
+// explicitly so standard GIS readers pick it up.
 
 package com.hcjeong.forestix.export
 
@@ -84,6 +84,7 @@ object ShapefileExporter {
                 "plot_num" to DBFValue.IntValue(p.plotNumber),
                 "stratum" to DBFValue.StringValue(p.stratumId?.uuidString ?: "", width = 36),
                 "visited" to DBFValue.StringValue(if (p.visited) "yes" else "no", width = 3),
+                "skipped" to DBFValue.StringValue(if (p.skipped) "yes" else "no", width = 3),
                 "planned_id" to DBFValue.StringValue(p.id.uuidString, width = 36),
             )
         }
@@ -448,6 +449,6 @@ private fun rightAlignedAscii(s: String, width: Int): ByteArray {
 
 // MARK: - PRJ content
 
-/// Esri-style WKT for WGS 84, compatible with QGIS / ArcGIS / OGR readers.
+/// Standard WKT for WGS 84, compatible with standard GIS readers.
 internal val wgs84PRJ: String =
     """GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",SPHEROID["WGS_1984",6378137.0,298.257223563]],PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]]"""

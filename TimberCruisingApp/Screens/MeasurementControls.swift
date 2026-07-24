@@ -1,5 +1,5 @@
-// Shared AR-measurement control chrome — visual language aligned with
-// SlashScan: a right-edge vertical stack of floating round buttons with
+// Shared AR-measurement control chrome — visual language built around
+// a right-edge vertical stack of floating round buttons with
 // soft drop shadows (offset .zero, opacity ~0.3, radius 2–4) over the live
 // camera, white-tinted SF Symbols, plus a centred half-width readout.
 //
@@ -17,7 +17,7 @@
 
 import SwiftUI
 
-// MARK: - Shadow token (matches SlashScan's floating buttons)
+// MARK: - Shadow token (for the floating buttons)
 
 private extension View {
     func floatingShadow() -> some View {
@@ -79,7 +79,7 @@ public struct MeasureBackButtonRow: View {
 // MARK: - Capture (+) button
 
 /// Big circular capture button. Aim the centre crosshair, tap this to
-/// record the point — the Measure-app / SlashScan record button.
+/// record the point — the camera-style record button.
 public struct MeasureCaptureButton: View {
     private let systemImage: String
     private let action: () -> Void
@@ -108,7 +108,7 @@ public struct MeasureCaptureButton: View {
 // MARK: - Circular secondary button (icon + optional caption)
 
 /// 52 pt flat-scrim circular icon button with an optional caption beneath,
-/// matching the SlashScan floating control look. Used for mode + source.
+/// matching a floating control look. Used for mode + source.
 public struct MeasureCircleButton: View {
     private let systemImage: String
     private let caption: String?
@@ -148,49 +148,165 @@ public struct MeasureCircleButton: View {
     }
 }
 
-/// Back-compat alias — older call sites pass a title + optional symbol.
-public struct MeasurePillButton: View {
-    private let title: String
-    private let systemImage: String?
-    private let action: () -> Void
+// MARK: - Top instruction banner (U1)
 
-    public init(_ title: String, systemImage: String? = nil, action: @escaping () -> Void) {
-        self.title = title
-        self.systemImage = systemImage
-        self.action = action
-    }
-
-    public var body: some View {
-        MeasureCircleButton(systemImage: systemImage ?? "circle", caption: title, action: action)
-    }
-}
-
-// MARK: - Right-edge control column
-
-/// Capture button vertically centred on the trailing edge, with any extra
-/// controls stacked just below it — the SlashScan right-rail layout.
-public struct MeasureControlColumn<Extra: View>: View {
-    private let capture: () -> Void
-    private let captureSymbol: String
+/// Stage-guidance banner pinned top-centre on every AR measure screen —
+/// the instruction strings moved OUT of the bottom status panel so the
+/// bottom edge is free for the camera-app shutter row. Locked geometry
+/// (identical on Android): black 0.65 fill, white 14 medium text,
+/// corner radius 10, max width 340, horizontally centred at 150 below
+/// the safe area (clears the GPS-badge / mini-map row).
+///
+/// `extra` renders below the banner inside the same 340 pt column —
+/// used for the orange failure/unsupported banners so warnings travel
+/// with the guidance instead of the value panel.
+public struct MeasureTopBanner<Extra: View>: View {
+    private let text: String?
     private let extra: Extra
 
-    public init(captureSymbol: String = "plus",
-                capture: @escaping () -> Void,
+    public init(_ text: String?,
                 @ViewBuilder extra: () -> Extra = { EmptyView() }) {
-        self.captureSymbol = captureSymbol
-        self.capture = capture
+        self.text = text
         self.extra = extra()
     }
 
     public var body: some View {
-        HStack {
-            Spacer()
-            VStack(spacing: 14) {
-                MeasureCaptureButton(systemImage: captureSymbol, action: capture)
+        VStack(spacing: 0) {
+            VStack(spacing: 8) {
+                if let text, !text.isEmpty {
+                    Text(text)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.white)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(Color.black.opacity(0.65),
+                                    in: RoundedRectangle(cornerRadius: 10,
+                                                         style: .continuous))
+                        .floatingShadow()
+                        // Guidance text must never swallow taps meant
+                        // for the AR view (caliper edge taps); the
+                        // `extra` warnings stay interactive (Height's
+                        // anchor-failure banner clears on tap).
+                        .allowsHitTesting(false)
+                        .accessibilityIdentifier("measure.topBanner")
+                }
                 extra
             }
-            .padding(.trailing, 18)
+            .frame(maxWidth: 340)
+            .padding(.top, 150)
+            .padding(.horizontal, ForestixSpace.md)
+            Spacer()
         }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+// MARK: - Bottom-centre shutter row (U2)
+
+/// Camera-app capture layout: the 70 pt white shutter bottom-centre
+/// (16 above the safe area), flanked left/right by the screens' 52 pt
+/// secondary rail buttons in fixed-width slots so the shutter stays
+/// exactly centred whether zero, one, or two flanks are present.
+public struct MeasureShutterRow: View {
+
+    /// One 52 pt flank button (icon + caption) beside the shutter.
+    /// `dim` renders it at reduced opacity (e.g. the two-point Save
+    /// before both points exist) without removing the slot.
+    public struct Flank {
+        let systemImage: String
+        let caption: String
+        let dim: Bool
+        let action: () -> Void
+
+        public init(systemImage: String, caption: String,
+                    dim: Bool = false,
+                    action: @escaping () -> Void) {
+            self.systemImage = systemImage
+            self.caption = caption
+            self.dim = dim
+            self.action = action
+        }
+    }
+
+    private let showsShutter: Bool
+    private let captureSymbol: String
+    private let capture: () -> Void
+    private let leading: Flank?
+    private let trailing: Flank?
+
+    public init(showsShutter: Bool = true,
+                captureSymbol: String = "plus",
+                capture: @escaping () -> Void,
+                leading: Flank? = nil,
+                trailing: Flank? = nil) {
+        self.showsShutter = showsShutter
+        self.captureSymbol = captureSymbol
+        self.capture = capture
+        self.leading = leading
+        self.trailing = trailing
+    }
+
+    public var body: some View {
+        // Fixed 52 pt side slots, 28 pt gaps (Android parity): the
+        // shutter stays exactly centred whether zero, one, or two flanks
+        // are present, and flank circles centre against the shutter.
+        HStack(spacing: 28) {
+            flankSlot(leading)
+            if showsShutter {
+                MeasureCaptureButton(systemImage: captureSymbol,
+                                     action: capture)
+            } else {
+                // Caliper-style flows capture by tapping the AR view —
+                // keep the slot so the flanks hold their positions.
+                Color.clear.frame(width: 70, height: 70)
+            }
+            flankSlot(trailing)
+        }
+        .padding(.bottom, 16)
+        .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private func flankSlot(_ flank: Flank?) -> some View {
+        ZStack {
+            Color.clear.frame(width: 52, height: 70)
+            if let flank {
+                MeasureCircleButton(systemImage: flank.systemImage,
+                                    caption: flank.caption,
+                                    dim: flank.dim,
+                                    action: flank.action)
+            }
+        }
+    }
+}
+
+// MARK: - Live-value pill (U2 value strip)
+
+/// One line of the compact live-value strip directly above the shutter
+/// row — the dark-glass capsule language of the under-crosshair pills.
+/// `large` renders `ForestixType.dataLarge` (the primary value line);
+/// default lines are `dataSmall`; `dimmed` drops to 0.85 white on a
+/// lighter 0.45 scrim. Identical to Android's MeasureValuePill.
+public struct MeasureValuePill: View {
+    private let text: String
+    private let large: Bool
+    private let dimmed: Bool
+
+    public init(_ text: String, large: Bool = false, dimmed: Bool = false) {
+        self.text = text
+        self.large = large
+        self.dimmed = dimmed
+    }
+
+    public var body: some View {
+        Text(text)
+            .font(large ? ForestixType.dataLarge : ForestixType.dataSmall)
+            .foregroundStyle(.white.opacity(dimmed ? 0.85 : 1))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(Color.black.opacity(dimmed ? 0.45 : 0.65),
+                        in: Capsule())
     }
 }
 

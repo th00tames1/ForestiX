@@ -85,5 +85,5 @@ enum Golden {
     static let treesCSV: String = "a03f1117f96a31a60c767938f06cb56151169d2e95d9e56bf19b71020db8db3f"
     static let plotsCSV: String = "c2dd5e1ff6330ace9fb4b9ffe7ac605b1f51ce76368b4966ff06775bd712340c"
     static let standSummaryCSV: String = "5fbb5dbbeb1c36a7df3b12ec89c3c9741396d9b8514fc7b22b42f91774b2ff12"
-    static let cruiseGeoJSON: String = "f5c46d7a18f34b65a36f050c6093c1b9adf29c066c0b9edbd3d95d29e4112c56"
+    static let cruiseGeoJSON: String = "e275756156b3c9ed87d373e163398c9187d653ed26ae32ca1fb8028001f65ce4"
 }

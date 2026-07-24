@@ -32,6 +32,28 @@ public struct StandStat: Sendable, Equatable {
     public static let empty = StandStat(
         mean: 0, seMean: 0, ci95HalfWidth: 0,
         dfSatterthwaite: 0, nPlots: 0, byStratum: [:])
+
+    /// Returns a copy with every per-area quantity multiplied by `factor` —
+    /// used to re-express canonical per-acre statistics on another areal basis
+    /// for display/export (per-acre → per-hectare = × 2.4710538147). Mean, SE
+    /// and CI half-width scale linearly; variance scales by factor²; degrees of
+    /// freedom, plot counts and the stratum areas (kept in acres for weighting)
+    /// are unit-agnostic and pass through unchanged. `factor == 1` is a no-op.
+    public func scaledPerArea(by factor: Double) -> StandStat {
+        guard factor != 1 else { return self }
+        return StandStat(
+            mean: mean * factor,
+            seMean: seMean * factor,
+            ci95HalfWidth: ci95HalfWidth * factor,
+            dfSatterthwaite: dfSatterthwaite,
+            nPlots: nPlots,
+            byStratum: byStratum.mapValues { s in
+                StratumStat(nPlots: s.nPlots,
+                            mean: s.mean * factor,
+                            variance: s.variance * factor * factor,
+                            areaAcres: s.areaAcres)
+            })
+    }
 }
 
 public enum StandStatsCalculator {

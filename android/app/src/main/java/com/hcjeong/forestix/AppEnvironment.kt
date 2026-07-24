@@ -55,8 +55,7 @@ class AppEnvironment private constructor(
 ) {
     /// Calibration the shared quick-measure scan screens apply. iOS injects
     /// the project's ProjectCalibration into the scan view models when they
-    /// are launched from the Add-Tree flow (AddTreeFlowScreen.swift
-    /// `calibration(from:)`); Android's DBH/Height scan screens are shared
+    /// are launched from the cruise add-tree chain; Android's DBH/Height scan screens are shared
     /// nav routes, so the flow publishes the active project's calibration
     /// here on entry and restores identity when it leaves. Outside the flow
     /// this stays identity — matching the iOS quick-measure screens, which
@@ -82,13 +81,23 @@ class AppEnvironment private constructor(
         }
 
         private suspend fun build(app: Context): AppEnvironment {
+            // Bind the local-only event logger to the app context once, so its
+            // emit sites (plot open, backup create/restore, crash-recovery
+            // prompt) stay Context-free like the iOS static logger.
+            com.hcjeong.forestix.common.ForestixLogger.init(app)
+
             val db = Room.databaseBuilder(app, ForestixDatabase::class.java, "forestix.db")
-                .addMigrations(com.hcjeong.forestix.data.QUICK_MEASURE_MIGRATION_1_2)
+                .addMigrations(
+                    com.hcjeong.forestix.data.QUICK_MEASURE_MIGRATION_1_2,
+                    com.hcjeong.forestix.data.QUICK_MEASURE_MIGRATION_2_3,
+                )
                 .build()
             val history = QuickMeasureHistory.get(app, db.dao())
 
             val cruiseDb = Room.databaseBuilder(
-                app, CruiseDatabase::class.java, CruiseDatabase.NAME).build()
+                app, CruiseDatabase::class.java, CruiseDatabase.NAME)
+                .addMigrations(CruiseDatabase.MIGRATION_1_2, CruiseDatabase.MIGRATION_2_3)
+                .build()
             val speciesConfigRepository = RoomSpeciesConfigRepository(cruiseDb.speciesConfigDao())
             val volumeEquationRepository = RoomVolumeEquationRepository(cruiseDb.volumeEquationDao())
 
@@ -102,8 +111,22 @@ class AppEnvironment private constructor(
                 Log.w(TAG, "Seed data bootstrap failed", e)
             }
 
+            val settings = AppSettings(app)
+            // Depth-capability cache (both process singletons, so wiring
+            // here is leak-free): persist the AR session's definitive
+            // Depth-API verdict. Only a NEGATIVE gates anything —
+            // DBHScanScreen shows its unsupported blocker without probing
+            // — and any later positive report clears a stale negative, so
+            // the cache can never block a supported device.
+            com.hcjeong.forestix.ar.ArSessionHub.onDepthVerdict = { supported ->
+                val unsupported = !supported
+                if (settings.state.value.depthUnsupported != unsupported) {
+                    settings.setDepthUnsupported(unsupported)
+                }
+            }
+
             return AppEnvironment(
-                settings = AppSettings(app),
+                settings = settings,
                 history = history,
                 cruiseDatabase = cruiseDb,
                 projectRepository = RoomProjectRepository(cruiseDb.projectDao()),

@@ -2,12 +2,25 @@
 // design/forestix-redesign-v2-maphome.html (screens ① map home,
 // ② pin selected, ③ measure sheet, ⑤ photo detail).
 //
-// The map is the home because a cruiser's data IS spatial: every quick-
-// measure entry with a GPS fix appears as a tree pin (one tree = one pin,
-// D/H/C badges say what's been measured), the pulsing blue dot is you,
-// and the single primary action is the big (+) capture button. Cruise
-// and Log are the side circles. Tapping a pin slides up a peek card —
-// the map never disappears under the cruiser.
+// ONE MAP, TWO MODES. The screen owns a single BasemapMapView and
+// renders one of two modes over it, flipped by the left side-circle
+// and persisted as `tc.mapMode`:
+//   • MEASURE (default) — quick measure, exactly as always: every
+//     located quick-measure entry is a tree pin (D/H/C badges), the
+//     green (+) opens the measure chooser, peek cards slide up.
+//   • CRUISE — the map IS the cruise (the retired CruiseMapScreen's
+//     content, hosted here from MapHomeScreen+Cruise.swift): plot
+//     rings + cruise tree pins, the (+) turns cruiseAccent-blue and
+//     morphs Start plot / Add tree, a tappable project strip rides
+//     above the (+), planned-plot navigation draws the guide line.
+// Camera and zoom are SHARED across the toggle — switching modes never
+// snaps the map. Mode content stays separate: quick pins only in
+// measure, cruise pins only in cruise.
+//
+// The map is the home because a cruiser's data IS spatial: the pulsing
+// blue dot is you, and the single primary action is the big (+)
+// capture button. Tapping a pin slides up a peek card — the map never
+// disappears under the cruiser.
 //
 // Tiles come in two layers: a built-in satellite base (Esri World
 // Imagery — imagery out of the box whenever online, attribution label
@@ -18,8 +31,7 @@
 // toggle, "download visible area" (OfflineBasemap.planJob per layer →
 // sequential fetch into TileCache) and cache stats/clearing.
 //
-// Measurement flows are the SAME fullScreenCover wiring as
-// TreeMeasurementHubScreen — Accept persists into QuickMeasureHistory
+// Measurement flows are fullScreenCovers — Accept persists into QuickMeasureHistory
 // with the ScanMetadata GPS fix + auto-photo, which is exactly what
 // feeds the pins and peek cards here.
 
@@ -60,26 +72,35 @@ fileprivate func makeOverlayTileCache(settings: AppSettings) -> TileCache? {
 
 public struct MapHomeScreen: View {
 
-    @EnvironmentObject private var environment: AppEnvironment
-    @EnvironmentObject private var settings: AppSettings
-    @EnvironmentObject private var history: QuickMeasureHistory
+    // Shared with the cruise-mode extension (MapHomeScreen+Cruise.swift),
+    // so internal rather than private.
+    @EnvironmentObject var environment: AppEnvironment
+    @EnvironmentObject var settings: AppSettings
+    @EnvironmentObject var history: QuickMeasureHistory
 
-    /// The home owns its LocationService: the GPS chip must be live from
-    /// the moment the screen appears, independent of any scan screen.
-    @StateObject private var location = LocationService()
+    /// The app-shared LocationService (subscriber-refcounted): the GPS
+    /// chip is live from the moment the screen appears — acquired in
+    /// `startUp()`, released in `onDisappear`. Shared by both modes —
+    /// cruise plot-centre stamping uses it too.
+    @ObservedObject var location = LocationService.shared
 
-    /// Seoul-ish fallback — used only when there is no fix and no
-    /// located entry (fresh install, indoors).
+    /// Peavy Hall (OSU College of Forestry) fallback — used only when
+    /// there is no fix and no located reading.
     private static let fallbackCamera = BasemapCamera(
-        latitude: 37.5665, longitude: 126.9780, zoom: 16)
+        latitude: 44.56417, longitude: -123.28556, zoom: 16)
 
-    @State private var camera = MapHomeScreen.fallbackCamera
+    /// SHARED camera — one map serves both modes, so flipping the mode
+    /// toggle never snaps position or zoom.
+    @State var camera = MapHomeScreen.fallbackCamera
     @State private var cameraInitialised = false
     /// True while the camera still sits on the hardcoded fallback — the
     /// first real GPS fix recenters exactly once.
     @State private var awaitingFirstFix = false
     @State private var visibleRegion: BasemapRegion?
-    @State private var selectedPinID: String?
+    /// Shared selection — measure ids ("tree-…"/"entry-…") and cruise
+    /// ids ("plot-…"/"pplot-…"/"ctree-…") are prefix-disjoint, and the
+    /// toggle clears it, so a selection never leaks across modes.
+    @State var selectedPinID: String?
 
     // Sheets / covers.
     @State private var presentingChooser = false
@@ -93,11 +114,14 @@ public struct MapHomeScreen: View {
     @State private var presentingSettings = false
     @State private var pendingOpenSettings = false
     @State private var photoViewer: PhotoViewerContext?
+    /// Quick-peek "Edit this tree" — the entry the compact edit sheet is
+    /// editing (the pin's primary reading). nil = sheet closed.
+    @State private var editingEntry: QuickMeasureEntry?
     /// Chooser row picked — launched from the sheet's onDismiss so the
     /// fullScreenCover doesn't fight the sheet dismissal animation.
     @State private var pendingChoice: MeasureChoice?
 
-    // Measurement covers — same state layout as TreeMeasurementHubScreen.
+    // Measurement covers.
     @State private var presentingDBHScan = false
     @State private var presentingHeightScan = false
     @State private var presentingDistance = false
@@ -120,7 +144,89 @@ public struct MapHomeScreen: View {
     /// scoped chooser opens.
     @State private var farTreeWarning: FarTreeWarning?
 
+    // MARK: Cruise-mode state
+    //
+    // Stored here because SwiftUI state can't live in extensions; every
+    // view/function that touches it is in MapHomeScreen+Cruise.swift
+    // (the extracted CruiseMapScreen content). Internal, not private,
+    // so the cross-file extension can reach it.
+
+    // Cruise data snapshot (reloaded from the repositories).
+    @State var projects: [Project] = []
+    @State var plots: [Plot] = []
+    @State var plannedPlots: [PlannedPlot] = []
+    @State var treesByPlot: [UUID: [Tree]] = [:]
+    @State var speciesByCode: [String: SpeciesConfig] = [:]
+
+    // Cruise sheets / covers / pushes.
+    @State var presentingProjectSheet = false
+    @State var presentingPlotSetup = false
+    @State var presentingCruiseDBH = false
+    @State var presentingCruiseHeight = false
+    @State var pushed: CruiseDestination?
+    @State var pendingDestination: CruiseDestination?
+    @State var closePlotCandidateID: UUID?
+
+    // Crash-recovery resume prompt — open plots (closedAt == nil) whose last
+    // activity is within the last 24 h, surfaced ONCE per launch on the home's
+    // first appear. `didScanForCrashRecovery` enforces once-per-launch (and so
+    // a dismiss/Discard never re-prompts); a non-empty list drives the dialog.
+    @State var crashRecoveryCandidates: [ResumeCandidate] = []
+    @State var didScanForCrashRecovery = false
+
+    // Map-peek destructive-delete targets (confirmed via .alert) and the
+    // cruise tree photo viewer opened from the tree-peek thumbnail.
+    @State var deletePlotCandidateID: UUID?
+    @State var deleteTreeCandidateID: UUID?
+    @State var cruisePhotoContext: CruisePhotoContext?
+
+    // Planned-plot navigation + centre recording + setup.
+    @State var navTargetPlannedID: UUID?
+    @State var recordingTarget: PlannedPlot?
+    @State var presentingCruiseSetup = false
+    @State var pendingCruiseSetup = false
+
+    // One-button Export all, run inline in the project sheet.
+    @State var isExportingAll = false
+    @State var exportProgress: Double = 0
+    @State var exportLabel = ""
+    @State var exportShareURL: ExportShareURL?
+    @State var exportErrorMessage: String?
+
+    // Cruise tally-loop scope: the plot being tallied, the tree number
+    // being aimed at (auto-increments per save), and the LAST saved /
+    // scoped tree — the Undo target and the scoped-height target.
+    @State var chainPlotID: UUID?
+    @State var chainTreeNumber: Int = 1
+    @State var chainTreeID: UUID?
+
+    // Heights sheet (plot peek → "Heights · N measured") + the scoped
+    // Height request staged across its dismissal.
+    @State var heightsSheetTarget: HeightsSheetTarget?
+    @State var pendingScopedHeight: ScopedHeightRequest?
+
+    // Project sheet "New project" one-time naming.
+    @State var namingNewProject = false
+    @State var newProjectName = ""
+
     public init() {}
+
+    // MARK: Mode toggle
+
+    /// `tc.mapMode` — the persisted mode the screen renders.
+    private var isCruiseMode: Bool { settings.mapMode == "cruise" }
+
+    /// Flip modes (the left side-circle). Camera stays put — the map is
+    /// shared — and the selection clears so a peek never leaks across
+    /// the mode boundary. Same easeOut 0.18 as the peek transitions.
+    private func toggleMapMode() {
+        let enteringCruise = !isCruiseMode
+        withAnimation(.easeOut(duration: 0.18)) {
+            selectedPinID = nil
+            settings.mapMode = enteringCruise ? "cruise" : "measure"
+        }
+        if enteringCruise { reloadCruise() }
+    }
 
     private enum MeasureChoice {
         case fullMeasurement, dbh, height, distance, sampling
@@ -140,8 +246,9 @@ public struct MapHomeScreen: View {
 
     public var body: some View {
         NavigationStack {
-            ZStack {
+            cruisePresentations(over: ZStack {
                 map
+                if isCruiseMode, navGuide != nil { distanceChipOverlay }
                 attributionBadge
                 VStack(spacing: ForestixSpace.xs) {
                     topChrome
@@ -149,25 +256,44 @@ public struct MapHomeScreen: View {
                 }
                 VStack {
                     Spacer()
-                    if let pin = selectedPin {
+                    if isCruiseMode {
+                        // Cruise peeks — plot ring, planned ring, tree pin.
+                        if let plot = selectedPlot {
+                            plotPeekCard(for: plot)
+                        } else if let planned = selectedPlannedPlot {
+                            plannedPeekCard(for: planned)
+                        } else if let tree = selectedTree {
+                            treePeekCard(for: tree)
+                        } else {
+                            actionCluster
+                        }
+                    } else if let pin = selectedPin {
                         peekCard(for: pin)
                     } else {
                         actionCluster
                     }
                 }
-            }
+            })
             .background(ForestixPalette.canvas.ignoresSafeArea())
-            .onAppear { startUp() }
-            .onDisappear { location.stop() }
+            .onAppear {
+                startUp()
+                if isCruiseMode { reloadCruise() }
+            }
+            .onDisappear { location.release() }
             .onChange(of: location.latestSnapshot) { _, snap in
                 recenterOnFirstFix(snap)
+                if isCruiseMode { checkNavArrival(snap) }
             }
             .task {
                 // First-launch UX: auto-present the region picker once,
                 // after the splash has settled — but never re-prompt a
-                // cruiser who already has a region.
-                if settings.region == nil && !settings.regionPickerSeen {
+                // cruiser who already has a region. A returning cruiser
+                // (region already seen) instead gets the crash-recovery
+                // scan, so the two never present over each other.
+                if !settings.regionPickerSeen {
                     presentingRegionPicker = true
+                } else {
+                    scanForCrashRecovery()
                 }
             }
             #if os(iOS)
@@ -197,6 +323,11 @@ public struct MapHomeScreen: View {
             #endif
             .sheet(isPresented: $presentingChooser,
                    onDismiss: launchPendingChoice) { measureChooser }
+            // Quick-peek "Edit this tree" — the compact per-entry editor
+            // (value / species / note + confirmed delete).
+            .sheet(item: $editingEntry) { entry in
+                QuickEntryEditSheet(entry: entry, history: history)
+            }
             // Far-GPS guard — confirm before measuring a tree whose pin
             // is > 30 m from the current fix (usually a wrong-pin tap).
             .alert(farTreeWarning.map {
@@ -231,7 +362,7 @@ public struct MapHomeScreen: View {
             // stamps regionPickerSeen so the picker never nags again.
             .sheet(isPresented: $presentingRegionPicker,
                    onDismiss: { settings.regionPickerSeen = true }) {
-                RegionPickerSheet()
+                LocaleSetupSheet()
                     .environmentObject(settings)
             }
             .sheet(isPresented: $presentingSettings) {
@@ -246,6 +377,32 @@ public struct MapHomeScreen: View {
                 .environmentObject(environment)
                 .environmentObject(settings)
             }
+            // CRASH RECOVERY — resume an in-progress plot from a recent
+            // session. The summary (plot #, tree count, last-edited) is folded
+            // into each Resume row, so tapping shows the "View" detail inline
+            // before committing. Discard just dismisses — nothing is deleted
+            // and the plot stays reachable from the project dashboard.
+            .confirmationDialog(
+                crashRecoveryTitle,
+                isPresented: Binding(
+                    get: { !crashRecoveryCandidates.isEmpty },
+                    set: { if !$0 { crashRecoveryCandidates = [] } }),
+                titleVisibility: .visible,
+                presenting: crashRecoveryCandidates
+            ) { candidates in
+                ForEach(candidates.prefix(3)) { candidate in
+                    Button("Resume \(candidate.summary)") {
+                        resumeCrashRecovery(candidate)
+                    }
+                }
+                Button("Discard", role: .cancel) {
+                    crashRecoveryCandidates = []
+                }
+            } message: { candidates in
+                Text(candidates.count == 1
+                     ? "A plot from an earlier session is still open. Resume it, or dismiss this reminder. Nothing is deleted."
+                     : "\(candidates.count) plots from earlier sessions are still open. Resume one, or dismiss this reminder. Nothing is deleted.")
+            }
         }
     }
 
@@ -259,17 +416,21 @@ public struct MapHomeScreen: View {
         settings.overlayEnabled ? makeOverlayTileCache(settings: settings) : nil
     }
 
+    /// ONE map for both modes — the pins swap with the mode (quick pins
+    /// in measure, plot rings + cruise trees in cruise) but the camera,
+    /// tiles and gestures are the same view all along.
     private var map: some View {
         BasemapMapView(
             camera: $camera,
             baseTileCache: baseTileCache,
             overlayTileCache: overlayTileCache,
-            markers: markers,
+            markers: isCruiseMode ? cruiseMarkers : markers,
             selectedMarkerID: selectedPinID,
             youLocation: location.latestSnapshot.map {
                 CoordinateConversions.LatLon(latitude: $0.latitude,
                                              longitude: $0.longitude)
             },
+            guideLine: isCruiseMode ? navGuide : nil,
             style: BasemapStyle(
                 canvas: ForestixPalette.canvas,
                 grid: ForestixPalette.divider.opacity(0.55),
@@ -389,7 +550,7 @@ public struct MapHomeScreen: View {
 
     private func startUp() {
         location.requestAuthorization()
-        location.start()
+        location.acquire()
         guard !cameraInitialised else { return }
         cameraInitialised = true
         if let fix = LocationService.lastGlobalFix ?? location.latestSnapshot {
@@ -420,40 +581,66 @@ public struct MapHomeScreen: View {
 
     private var topChrome: some View {
         HStack(spacing: ForestixSpace.xs) {
+            // The GPS status line takes the leading width and TRUNCATES
+            // (never wraps) when the fix string runs long — the fixed
+            // round buttons on the right always stay on screen. Shared by
+            // both modes; cruise carries no separate project chip here
+            // anymore (the project lives on the bottom cluster now).
             gpsChip
-            Spacer()
+            Spacer(minLength: ForestixSpace.xs)
+            // My-location — jump the camera back to the newest fix (this
+            // screen's live service, else the last fix any screen saved).
+            // No fix yet: the button dims and the tap is a no-op.
+            let locateFix = location.latestSnapshot ?? LocationService.lastGlobalFix
+            Button {
+                guard let fix = locateFix else { return }
+                withAnimation(.easeOut(duration: 0.3)) {
+                    camera = BasemapCamera(latitude: fix.latitude,
+                                           longitude: fix.longitude,
+                                           zoom: max(camera.zoom, 16))
+                }
+            } label: {
+                chromeButtonGlyph("location.fill")
+            }
+            .buttonStyle(MapPressableStyle())
+            .opacity(locateFix == nil ? 0.45 : 1)
+            .accessibilityLabel("My location")
+            .accessibilityIdentifier("mapHome.locate")
+
             Button {
                 presentingLayers = true
             } label: {
-                Image(systemName: "square.stack.3d.up")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(ForestixPalette.textSecondary)
-                    .frame(width: 44, height: 44)
-                    .background(Circle().fill(ForestixPalette.surfaceRaised))
-                    .overlay(Circle().stroke(ForestixPalette.divider, lineWidth: 1))
+                chromeButtonGlyph("square.stack.3d.up")
             }
             .buttonStyle(MapPressableStyle())
             .accessibilityLabel("Basemap layers")
             .accessibilityIdentifier("mapHome.layers")
 
-            // Appearance toggle — flips the saved appearance setting.
+            // Settings — rightmost of the top-right group, both modes.
+            // Reuses the existing SettingsScreen sheet.
             Button {
-                settings.appearance = settings.appearance == "dark" ? "light" : "dark"
+                presentingSettings = true
             } label: {
-                Image(systemName: settings.appearance == "dark" ? "sun.max.fill" : "moon.fill")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(ForestixPalette.textSecondary)
-                    .frame(width: 44, height: 44)
-                    .background(Circle().fill(ForestixPalette.surfaceRaised))
-                    .overlay(Circle().stroke(ForestixPalette.divider, lineWidth: 1))
+                chromeButtonGlyph("gearshape")
             }
             .buttonStyle(MapPressableStyle())
-            .accessibilityLabel(settings.appearance == "dark"
-                ? "Switch to light appearance" : "Switch to dark appearance")
-            .accessibilityIdentifier("mapHome.appearanceToggle")
+            .accessibilityLabel("Settings")
+            .accessibilityIdentifier("mapHome.settings")
         }
         .padding(.horizontal, 14)
         .padding(.top, ForestixSpace.xs)
+    }
+
+    /// Shared 44 pt round chrome button glyph — surfaceRaised circle,
+    /// divider ring, 18 pt semibold textSecondary icon (locate / layers /
+    /// settings all render identically).
+    private func chromeButtonGlyph(_ icon: String) -> some View {
+        Image(systemName: icon)
+            .font(.system(size: 18, weight: .semibold))
+            .foregroundStyle(ForestixPalette.textSecondary)
+            .frame(width: 44, height: 44)
+            .background(Circle().fill(ForestixPalette.surfaceRaised))
+            .overlay(Circle().stroke(ForestixPalette.divider, lineWidth: 1))
     }
 
     /// A fix older than this reads as stale (dense canopy, canyon
@@ -464,13 +651,13 @@ public struct MapHomeScreen: View {
     /// Older than this the fix is effectively lost — the dot goes red.
     private static let lostFixAge: TimeInterval = 60
 
-    /// THE GPS chip — labelled coordinate block of the last known fix
-    /// with a freshness dot: green < 5 s, yellow 5–60 s, red past 60 s
-    /// or before the first fix ever lands ("no fix", no coords). Once
-    /// the fix goes stale the age counts up live (1 s tick, minutes
-    /// past 60 s). Three short rows (X lat / Y lon / Z alt — Korean
-    /// surveying axis convention, per field feedback) keep the chip
-    /// narrow so it can never collide with the round buttons beside it.
+    /// THE GPS chip — a single-line live fix readout with a
+    /// leading freshness dot: green < 5 s, yellow 5–60 s, red past 60 s
+    /// or before the first fix ("no fix"). Three short labelled rows —
+    /// X = latitude, Y = longitude, Z = altitude (5-decimal mono), the
+    /// axis convention field-requested — with a live age suffix on the
+    /// Z row once the fix goes stale. No bearing / accuracy (freshness
+    /// is the coloured dot).
     private var gpsChip: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             // This screen's live service, else the newest fix any screen
@@ -582,64 +769,167 @@ public struct MapHomeScreen: View {
 
     private var actionCluster: some View {
         HStack(alignment: .bottom, spacing: 26) {
-            sideCircle(label: "Cruise", icon: "map",
-                       accessibilityID: "mapHome.cruise") {
-                TimberCruisingHubScreen()
-            }
+            // Mode toggle (left circle, where CRUISE used to push) —
+            // shows the CURRENT mode; tapping flips it. Everything else
+            // in the cluster keeps its exact position: the caption slots
+            // are fixed-width and the cruise-only tally pill is a
+            // non-layout overlay, so flipping the mode can never change
+            // the cluster's measured size — the (+), side circle and LOG
+            // circle sit on identical pixels in both modes.
+            modeToggleCircle
 
             VStack(spacing: 6) {
                 Button {
-                    presentingChooser = true
+                    if isCruiseMode {
+                        cruisePrimaryAction()
+                    } else {
+                        presentingChooser = true
+                    }
                 } label: {
                     ZStack {
-                        Circle().fill(ForestixPalette.primary)
+                        Circle().fill(isCruiseMode ? ForestixPalette.cruiseAccent
+                                                   : ForestixPalette.primary)
                         Image(systemName: "plus")
                             .font(.system(size: 30, weight: .semibold))
-                            .foregroundStyle(ForestixPalette.primaryInk)
+                            .foregroundStyle(isCruiseMode ? ForestixPalette.cruiseAccentInk
+                                                          : ForestixPalette.primaryInk)
                     }
                     .frame(width: 74, height: 74)
                     .overlay(Circle().stroke(ForestixPalette.surface, lineWidth: 4))
+                    // Cruise scoped state (active plot): accent halo like
+                    // the mock's `.capture.scoped` — status colour, so it
+                    // matches the active plot ring.
+                    .overlay {
+                        if isCruiseMode && activePlot != nil {
+                            Circle()
+                                .inset(by: -5)
+                                .stroke(ForestixPalette.accent.opacity(0.35),
+                                        lineWidth: 4)
+                            Circle()
+                                .inset(by: -1)
+                                .stroke(ForestixPalette.accent, lineWidth: 1.5)
+                        }
+                    }
                     .shadow(color: Color.black.opacity(0.28), radius: 10, y: 6)
                 }
                 .buttonStyle(MapPressableStyle())
-                .accessibilityLabel("New measurement")
-                .accessibilityIdentifier("mapHome.measure")
-                clusterLabel("Measure")
+                .accessibilityLabel(isCruiseMode ? cruisePrimaryLabel
+                                                 : "New measurement")
+                .accessibilityIdentifier(isCruiseMode ? "cruiseMap.primary"
+                                                      : "mapHome.measure")
+                clusterCaption(isCruiseMode ? cruisePrimaryLabel : "Measure",
+                               slots: ["Measure"])
+            }
+            // CRUISE PROJECT STRIP — a tappable dark pill floating ABOVE
+            // the (+) as a layout-NEUTRAL overlay so it never participates
+            // in the cluster's measurement (pixel-invariant geometry is
+            // preserved). It opens the project sheet and folds in the live
+            // tree count, replacing measure's standalone tally pill.
+            .overlay(alignment: .top) {
+                if isCruiseMode {
+                    projectStrip
+                        .fixedSize()
+                        // Pill bottom 12 pt above the circle — the gap the
+                        // old in-column tally pill had (6 pt padding + 6 pt
+                        // VStack spacing).
+                        .alignmentGuide(.top) { $0[.bottom] + 12 }
+                }
             }
 
-            sideCircle(label: "Log", icon: "list.bullet",
-                       accessibilityID: "mapHome.log") {
-                FieldLogScreen()
-            }
+            rightClusterCircle
         }
         .padding(.bottom, ForestixSpace.sm)
         .transition(.move(edge: .bottom).combined(with: .opacity))
     }
 
-    private func sideCircle<Destination: View>(
-        label: String,
-        icon: String,
-        accessibilityID: String,
-        @ViewBuilder destination: @escaping () -> Destination
-    ) -> some View {
+    /// The left side-circle — same size and position the CRUISE push
+    /// circle had, now the mode toggle. Shows the CURRENT mode: tree
+    /// glyph + MEASURE, target-reticle glyph + CRUISE (matches Android's
+    /// Adjust icon; tinted with the cruise accent while cruising).
+    private var modeToggleCircle: some View {
         VStack(spacing: 5) {
-            NavigationLink {
-                destination()
+            Button {
+                toggleMapMode()
             } label: {
                 ZStack {
                     Circle().fill(ForestixPalette.surface)
-                    Image(systemName: icon)
+                    Image(systemName: isCruiseMode ? "target" : "tree")
                         .font(.system(size: 22, weight: .medium))
-                        .foregroundStyle(ForestixPalette.textPrimary)
+                        .foregroundStyle(isCruiseMode ? ForestixPalette.cruiseAccent
+                                                      : ForestixPalette.textPrimary)
                 }
                 .frame(width: 54, height: 54)
                 .overlay(Circle().stroke(ForestixPalette.divider, lineWidth: 1))
                 .shadow(color: Color.black.opacity(0.18), radius: 6, y: 3)
             }
             .buttonStyle(MapPressableStyle())
-            .accessibilityLabel(label)
-            .accessibilityIdentifier(accessibilityID)
-            clusterLabel(label)
+            .accessibilityLabel(isCruiseMode ? "Switch to measure mode"
+                                             : "Switch to cruise mode")
+            .accessibilityIdentifier("mapHome.modeToggle")
+            clusterCaption(isCruiseMode ? "Cruise" : "Measure",
+                           slots: ["Measure", "Cruise"])
+        }
+    }
+
+    /// The RIGHT cluster circle — mode-dependent, same size/position the
+    /// "Log" circle always had. MEASURE: "Log" pushes FieldLog
+    /// (list.bullet). CRUISE: "Project" opens the project sheet (folder).
+    /// The caption slot carries BOTH captions so its width is identical
+    /// across the mode flip — only the glyph, caption and action differ,
+    /// keeping the cluster pixel-invariant.
+    private var rightClusterCircle: some View {
+        VStack(spacing: 5) {
+            if isCruiseMode {
+                Button {
+                    presentingProjectSheet = true
+                } label: {
+                    clusterCircleGlyph("folder")
+                }
+                .buttonStyle(MapPressableStyle())
+                .accessibilityLabel("Project")
+                .accessibilityIdentifier("cruiseMap.projectCircle")
+            } else {
+                NavigationLink {
+                    FieldLogScreen()
+                } label: {
+                    clusterCircleGlyph("list.bullet")
+                }
+                .buttonStyle(MapPressableStyle())
+                .accessibilityLabel("Log")
+                .accessibilityIdentifier("mapHome.log")
+            }
+            clusterCaption(isCruiseMode ? "Project" : "Log",
+                           slots: ["Log", "Project"])
+        }
+    }
+
+    /// The 54 pt surface circle shared by the right cluster circle —
+    /// icon centred, divider ring, soft drop shadow.
+    private func clusterCircleGlyph(_ icon: String) -> some View {
+        ZStack {
+            Circle().fill(ForestixPalette.surface)
+            Image(systemName: icon)
+                .font(.system(size: 22, weight: .medium))
+                .foregroundStyle(ForestixPalette.textPrimary)
+        }
+        .frame(width: 54, height: 54)
+        .overlay(Circle().stroke(ForestixPalette.divider, lineWidth: 1))
+        .shadow(color: Color.black.opacity(0.18), radius: 6, y: 3)
+    }
+
+    /// Fixed-width caption slot under a cluster circle — the live
+    /// caption draws centred over hidden sizing copies of every caption
+    /// the slot can show, so swapping captions on the mode toggle never
+    /// changes the column's measured width (mode-toggle layout
+    /// invariance). Captions longer than the slot — the cruise (+)
+    /// captions, "Add tree · Plot N" — overflow it symmetrically
+    /// instead of pushing the circles apart.
+    private func clusterCaption(_ active: String, slots: [String]) -> some View {
+        ZStack {
+            ForEach(slots, id: \.self) { clusterLabel($0).hidden() }
+            clusterLabel(active)
+                .fixedSize()
+                .frame(width: 0)
         }
     }
 
@@ -684,7 +974,18 @@ public struct MapHomeScreen: View {
             .padding(.bottom, 10)
 
             HStack(alignment: .top, spacing: ForestixSpace.sm) {
-                photoThumb(photos: photos)
+                // The thumbnail itself is now the photo affordance —
+                // tapping it opens the full-screen viewer (the old
+                // "View photo" button is replaced by "Edit this tree").
+                Button {
+                    openPhotoViewer(pin)
+                } label: {
+                    photoThumb(photos: photos)
+                }
+                .buttonStyle(MapPressableStyle())
+                .disabled(photos.isEmpty)
+                .accessibilityLabel("View photo")
+                .accessibilityIdentifier("mapHome.peek.photoThumb")
                 VStack(spacing: 0) {
                     let rows = peekRows(pin)
                     ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
@@ -703,9 +1004,9 @@ public struct MapHomeScreen: View {
 
             HStack(spacing: ForestixSpace.xs) {
                 Button {
-                    openPhotoViewer(pin)
+                    editingEntry = primaryEntry(for: pin)
                 } label: {
-                    Text("View photo")
+                    Text("Edit this tree")
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(ForestixPalette.textPrimary)
                         .frame(maxWidth: .infinity, minHeight: 44)
@@ -716,9 +1017,7 @@ public struct MapHomeScreen: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(MapPressableStyle())
-                .disabled(photos.isEmpty)
-                .opacity(photos.isEmpty ? 0.45 : 1)
-                .accessibilityIdentifier("mapHome.peek.viewPhoto")
+                .accessibilityIdentifier("mapHome.peek.edit")
 
                 Button {
                     measureAgain(pin)
@@ -769,7 +1068,7 @@ public struct MapHomeScreen: View {
             base = kindLabel(pin.entries[0].kind)
         }
         if let species, !species.isEmpty {
-            return "\(base) · \(species.uppercased())"
+            return "\(base) · \(RegionalSpecies.name(forCode: species))"
         }
         return base
     }
@@ -796,11 +1095,12 @@ public struct MapHomeScreen: View {
     }
 
     // One row per measurement kind — the LATEST entry of that kind.
+    // Peek display carries the value only; ±σ is deliberately NOT shown
+    // here (internal storage / CSV / FieldLog keep it).
     private struct PeekRow: Identifiable {
         let id: String
         let label: String
         let value: String
-        let sigma: String?
         let confidenceRaw: String
     }
 
@@ -812,20 +1112,16 @@ public struct MapHomeScreen: View {
             guard let entry = pin.entries.first(where: { $0.kind == kind })
             else { return nil }
             let value: String
-            var sigma: String?
             switch kind {
             case .dbh:
                 value = MeasurementFormatter.diameter(cm: entry.value, in: system)
-                sigma = entry.sigma.map { MeasurementFormatter.diameterSigma(mm: $0, in: system) }
             case .height:
                 value = MeasurementFormatter.height(m: entry.value, in: system)
-                sigma = entry.sigma.map { MeasurementFormatter.heightSigma(m: $0, in: system) }
             case .crown:
                 value = String(format: "%.1f × %.1f m",
                                entry.value, entry.secondaryValue ?? 0)
             case .distance:
                 value = MeasurementFormatter.distance(m: entry.value, in: system)
-                sigma = entry.sigma.map { String(format: "±%.2f m", $0) }
             case .samplingPlot:
                 let area = entry.secondaryValue
                     ?? (.pi * entry.value * entry.value)
@@ -834,7 +1130,6 @@ public struct MapHomeScreen: View {
             return PeekRow(id: kind.rawValue,
                            label: peekRowLabel(kind),
                            value: value,
-                           sigma: sigma,
                            confidenceRaw: entry.confidenceRaw)
         }
     }
@@ -856,21 +1151,11 @@ public struct MapHomeScreen: View {
                 .tracking(0.7)
                 .foregroundStyle(ForestixPalette.textTertiary)
                 .frame(width: 52, alignment: .leading)
-            HStack(spacing: 0) {
-                Text(row.value)
-                    .font(.system(size: 14.5, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(ForestixPalette.textPrimary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                if let sigma = row.sigma {
-                    // Sigma trails the value after a single space —
-                    // the mock's inline <small>.
-                    Text(" " + sigma)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(ForestixPalette.textTertiary)
-                        .lineLimit(1)
-                }
-            }
+            Text(row.value)
+                .font(.system(size: 14.5, weight: .semibold, design: .monospaced))
+                .foregroundStyle(ForestixPalette.textPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
             Spacer(minLength: 4)
             tierChip(row.confidenceRaw)
         }
@@ -931,6 +1216,20 @@ public struct MapHomeScreen: View {
         guard let entry = pin.entries.first(where: { $0.photoPath != nil })
         else { return }
         photoViewer = PhotoViewerContext(entry: entry, title: peekTitle(pin))
+    }
+
+    /// The pin's representative reading for "Edit this tree" — DBH first,
+    /// then height / crown / distance / plot, matching the peek row
+    /// order. Single-entry pins just return their one reading.
+    private func primaryEntry(for pin: MapPin) -> QuickMeasureEntry {
+        let order: [QuickMeasureEntry.Kind] = [.dbh, .height, .crown,
+                                               .distance, .samplingPlot]
+        for kind in order {
+            if let entry = pin.entries.first(where: { $0.kind == kind }) {
+                return entry
+            }
+        }
+        return pin.entries[0]
     }
 
     /// Peek primary button. "Measure this tree" opens the measure
@@ -1111,7 +1410,7 @@ public struct MapHomeScreen: View {
         }
     }
 
-    // MARK: Measurement covers — same wiring as TreeMeasurementHubScreen
+    // MARK: Measurement covers
 
     #if os(iOS)
     private var dbhCover: some View {
@@ -1133,7 +1432,8 @@ public struct MapHomeScreen: View {
                         note: meta.note.isEmpty ? nil : meta.note,
                         latitude: meta.latitude,
                         longitude: meta.longitude,
-                        photoPath: meta.photoPath))
+                        photoPath: meta.photoPath,
+                        captureMode: meta.captureMode))
                     // Full-measurement chain: an accepted DBH arms the
                     // Height cover; onDismiss presents it for the same
                     // tree number.
@@ -1228,6 +1528,222 @@ private struct MeasurePhotoThumbnail: View {
     #else
     var body: some View { Color.clear }
     #endif
+}
+
+// MARK: - Quick entry edit sheet (map peek → "Edit this tree")
+
+/// Compact editor for one QuickMeasureEntry reached from the quick peek.
+/// Edits the measured value (native unit — cm for DBH, m otherwise), the
+/// species code and the note, then persists via QuickMeasureHistory
+/// `update`. A confirmed destructive Delete removes the entry AND its
+/// photo (through `delete`, which calls MeasurePhotoStore). The measure
+/// math is untouched — only the primary value the cruiser typed changes.
+private struct QuickEntryEditSheet: View {
+    let entry: QuickMeasureEntry
+    @ObservedObject var history: QuickMeasureHistory
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var valueText: String
+    @State private var speciesText: String
+    @State private var noteText: String
+    @State private var confirmingDelete = false
+
+    init(entry: QuickMeasureEntry, history: QuickMeasureHistory) {
+        self.entry = entry
+        _history = ObservedObject(wrappedValue: history)
+        _valueText = State(initialValue: Self.formatValue(entry.value))
+        _speciesText = State(initialValue: entry.speciesCode ?? "")
+        _noteText = State(initialValue: entry.note ?? "")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: ForestixSpace.sm) {
+            Text(headerText)
+                .font(.system(size: 13, weight: .heavy))
+                .tracking(1.0)
+                .foregroundStyle(ForestixPalette.textTertiary)
+                .padding(.top, ForestixSpace.md)
+
+            // Measured value — native unit (cm for DBH, m otherwise).
+            fieldLabel(kindTitle.uppercased())
+            HStack(spacing: ForestixSpace.xs) {
+                TextField("0.0", text: $valueText)
+                    .font(.system(size: 16, weight: .semibold, design: .monospaced))
+                    .textFieldStyle(.plain)
+                    #if os(iOS)
+                    .keyboardType(.decimalPad)
+                    #endif
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 44)
+                    .background(fieldBackground)
+                    .accessibilityIdentifier("mapHome.editSheet.value")
+                Text(entry.valueUnit)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(ForestixPalette.textSecondary)
+                    .frame(width: 32, alignment: .leading)
+            }
+
+            // Species — the short FIA code (free text; uppercased on save).
+            fieldLabel("SPECIES")
+            TextField("e.g. DF", text: $speciesText)
+                .font(.system(size: 15, weight: .semibold))
+                .textFieldStyle(.plain)
+                #if os(iOS)
+                .textInputAutocapitalization(.characters)
+                .autocorrectionDisabled(true)
+                #endif
+                .padding(.horizontal, 12)
+                .frame(minHeight: 44)
+                .background(fieldBackground)
+                .accessibilityIdentifier("mapHome.editSheet.species")
+
+            // Read-only resolution of the typed code → common name, so the
+            // cruiser can confirm what "DF" maps to. Hidden for blank or
+            // unknown (free-typed) codes that don't resolve.
+            if let resolved = resolvedSpeciesName {
+                Text(resolved)
+                    .font(.system(size: 13))
+                    .foregroundStyle(ForestixPalette.textSecondary)
+                    .padding(.horizontal, 12)
+                    .accessibilityIdentifier("mapHome.editSheet.speciesName")
+            }
+
+            // Note.
+            fieldLabel("NOTE")
+            TextField("Optional note", text: $noteText, axis: .vertical)
+                .font(.system(size: 15))
+                .textFieldStyle(.plain)
+                .lineLimit(1...4)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .frame(minHeight: 44, alignment: .top)
+                .background(fieldBackground)
+                .accessibilityIdentifier("mapHome.editSheet.note")
+
+            Spacer(minLength: ForestixSpace.xs)
+
+            Button {
+                save()
+            } label: {
+                Text("Save changes")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(ForestixPalette.primaryInk)
+                    .frame(maxWidth: .infinity, minHeight: 54)
+                    .background(
+                        RoundedRectangle(cornerRadius: ForestixRadius.card,
+                                         style: .continuous)
+                            .fill(ForestixPalette.primary))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(MapPressableStyle())
+            .accessibilityIdentifier("mapHome.editSheet.save")
+
+            Button(role: .destructive) {
+                confirmingDelete = true
+            } label: {
+                Text("Delete")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(ForestixPalette.confidenceBad)
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .background(
+                        RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                         style: .continuous)
+                            .stroke(ForestixPalette.confidenceBad.opacity(0.5),
+                                    lineWidth: 1))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(MapPressableStyle())
+            .accessibilityIdentifier("mapHome.editSheet.delete")
+        }
+        .padding(.horizontal, ForestixSpace.md)
+        .padding(.bottom, ForestixSpace.md)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .presentationDetents([.height(430)])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(ForestixPalette.surface)
+        .alert("Delete this reading?", isPresented: $confirmingDelete) {
+            Button("Delete", role: .destructive) {
+                history.delete(id: entry.id)
+                dismiss()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes the \(kindTitle) reading and its photo. This can't be undone.")
+        }
+    }
+
+    /// Common name for the currently-typed code, or nil when the field is
+    /// blank or the code is free-typed / unknown (name == code).
+    private var resolvedSpeciesName: String? {
+        let code = speciesText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !code.isEmpty else { return nil }
+        let name = RegionalSpecies.name(forCode: code)
+        return name.caseInsensitiveCompare(code) == .orderedSame ? nil : name
+    }
+
+    private func save() {
+        let trimmedSpecies = speciesText
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedNote = noteText
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let newValue = Double(valueText.replacingOccurrences(of: ",", with: "."))
+            ?? entry.value
+        history.update(QuickMeasureEntry(
+            id: entry.id,
+            kind: entry.kind,
+            value: newValue,
+            secondaryValue: entry.secondaryValue,
+            sigma: entry.sigma,
+            confidenceRaw: entry.confidenceRaw,
+            method: entry.method,
+            createdAt: entry.createdAt,
+            treeNumber: entry.treeNumber,
+            plotID: entry.plotID,
+            speciesCode: trimmedSpecies.isEmpty ? nil : trimmedSpecies.uppercased(),
+            position: entry.position,
+            damageCodes: entry.damageCodes,
+            note: trimmedNote.isEmpty ? nil : trimmedNote,
+            latitude: entry.latitude,
+            longitude: entry.longitude,
+            photoPath: entry.photoPath,
+            captureMode: entry.captureMode))
+        dismiss()
+    }
+
+    private var headerText: String {
+        if let n = entry.treeNumber { return "EDIT · TREE \(n)" }
+        return "EDIT · \(kindTitle.uppercased())"
+    }
+
+    private var kindTitle: String {
+        switch entry.kind {
+        case .dbh:          return "DBH"
+        case .height:       return "Height"
+        case .crown:        return "Crown"
+        case .distance:     return "Distance"
+        case .samplingPlot: return "Plot radius"
+        }
+    }
+
+    private func fieldLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 10, weight: .bold))
+            .tracking(0.7)
+            .foregroundStyle(ForestixPalette.textTertiary)
+    }
+
+    private var fieldBackground: some View {
+        RoundedRectangle(cornerRadius: ForestixRadius.control, style: .continuous)
+            .fill(ForestixPalette.surfaceRaised)
+    }
+
+    /// Show the stored value compactly: integers with no decimals, else
+    /// up to two decimals with a lone trailing zero trimmed.
+    private static func formatValue(_ v: Double) -> String {
+        if v == v.rounded() { return String(format: "%.0f", v) }
+        return String(format: "%.2f", v)
+            .replacingOccurrences(of: "0$", with: "", options: .regularExpression)
+    }
 }
 
 // MARK: - Photo detail (mock ⑤)
@@ -1383,7 +1899,7 @@ private struct MeasurePhotoDetailView: View {
         var parts: [String] = []
         if let n = entry.treeNumber { parts.append("T\(n)") }
         if let species = entry.speciesCode, !species.isEmpty {
-            parts.append(species.uppercased())
+            parts.append(RegionalSpecies.name(forCode: species))
         }
         return parts.isEmpty ? "—" : parts.joined(separator: " · ")
     }
@@ -1567,7 +2083,7 @@ private struct BasemapLayersSheet: View {
         } header: {
             Text("Offline download")
         } footer: {
-            Text("Fetches zoom \(OfflineBasemap.defaultZoomRange.lowerBound)–\(OfflineBasemap.defaultZoomRange.upperBound) tiles for the area the map is showing — satellite base plus the overlay when one is set — so the map keeps working with no signal. Downloads cap at \(OfflineTileDownloader.maxPlannedTiles) tiles — zoom in if the area is too large.")
+            Text("Downloads the visible area (base plus any overlay) for offline use. Max \(OfflineTileDownloader.maxPlannedTiles) tiles — zoom in if the area is too large.")
         }
     }
 

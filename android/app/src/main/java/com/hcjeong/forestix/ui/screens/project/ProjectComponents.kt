@@ -1,7 +1,7 @@
-// Shared list chrome for the project flow cluster — Compose stand-ins for
-// the iOS `List { Section(header:footer:) }` styling used across
-// ProjectDashboardScreen / CruiseDesignScreen / PreFieldChecklistScreen,
-// and (post parity pass) SettingsScreen / ExportScreen.
+// Shared list chrome — Compose stand-ins for the iOS
+// `List { Section(header:footer:) }` styling used across
+// SettingsScreen / ExportScreen / PlotSummaryScreen (the project-flow
+// screens that originated it retired in the v3 cruise redesign).
 
 package com.hcjeong.forestix.ui.screens.project
 
@@ -101,17 +101,6 @@ fun FormDivider(startIndent: Dp = 0.dp) {
         thickness = 0.5.dp,
         modifier = Modifier.padding(start = startIndent),
     )
-}
-
-/// iOS `LabeledContent(title, value:)` — label left, value right.
-@Composable
-fun LabeledContentRow(title: String, value: String) {
-    val colors = Forestix.colors
-    val type = Forestix.type
-    Row(Modifier.fillMaxWidth()) {
-        Text(title, style = type.body, color = colors.textPrimary, modifier = Modifier.weight(1f))
-        Text(value, style = type.body, color = colors.textSecondary)
-    }
 }
 
 /// iOS default Form `Picker` — a row showing the selected value with an

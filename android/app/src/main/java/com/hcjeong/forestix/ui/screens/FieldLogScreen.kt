@@ -55,6 +55,7 @@ import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.UnitSystem
+import com.hcjeong.forestix.common.areaUnit
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
 import com.hcjeong.forestix.ui.screens.plot.PlotSummaryCard
@@ -134,7 +135,8 @@ fun FieldLogScreen(nav: NavController) {
                                     plot = plot,
                                     entries = plotEntries,
                                     unitSystem = settings.unitSystem,
-                                    logRule = settings.logRule)
+                                    logRule = settings.logRule,
+                                    areaUnit = settings.unitSystem.areaUnit)
                             }
                         }
                     }
@@ -236,7 +238,7 @@ private fun CapacityBanner() {
             horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs),
         ) {
             Icon(Icons.Filled.Warning, contentDescription = null, tint = colors.confidenceWarn, modifier = Modifier.size(16.dp))
-            Text("Log nearing capacity — export soon to archive older readings.", style = type.caption, color = colors.textSecondary)
+            Text("Log nearly full. Export soon to free space.", style = type.caption, color = colors.textSecondary)
         }
     }
 }

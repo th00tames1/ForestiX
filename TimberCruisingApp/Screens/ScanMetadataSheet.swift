@@ -1,7 +1,7 @@
 // Post-scan metadata sheet — attaches species + position + damage
 // + note to a freshly-fitted scan before the cruiser hits Accept.
 //
-// Pragmatic compromise: the ideal Arboreal-style UX is to long-press
+// Pragmatic compromise: the ideal in-scene UX is to long-press
 // the world-anchored AR cylinder/sphere to edit, keeping the cruiser
 // in the AR scene. That's a significant refactor of ARSceneMarker
 // gesture handling. This sheet is the 70 % solution — reachable from
@@ -74,18 +74,31 @@ public struct ScanMetadataSheet: View {
             ) {
                 Text("— Unspecified —").tag("")
                 ForEach(speciesOptions, id: \.0) { code, name in
-                    Text("\(code) · \(name)").tag(code)
+                    Text(Self.pickerLabel(name: name, code: code)).tag(code)
                 }
             }
         }
     }
 
     private var speciesOptions: [(String, String)] {
-        let region = settings.region ?? .all
-        let regional = RegionalSpecies.defaultSpecies(for: region)
-        // Always allow "Other" rather than locking to the regional
-        // list — cruisers occasionally measure non-regional trees.
-        return regional + [("OT", "Other")]
+        // Country-scoped: the US resolves its per-region FIA presets; metric
+        // countries carry a flat national list.
+        let preset = settings.country.speciesPresets(region: settings.region)
+        // Always allow "Other" rather than locking to the preset
+        // list — cruisers occasionally measure non-preset trees.
+        return preset + [("OT", "Other")]
+    }
+
+    /// Name-first option label: the common name reads prominently, the
+    /// FIA code trails as a dim secondary suffix (" · DF"). Selecting the
+    /// row still stores the code — this only reshapes what's shown.
+    private static func pickerLabel(name: String, code: String) -> AttributedString {
+        var label = AttributedString(name)
+        var suffix = AttributedString(" · \(code)")
+        suffix.foregroundColor = ForestixPalette.textSecondary
+        suffix.font = .caption
+        label.append(suffix)
+        return label
     }
 
     // MARK: - Position

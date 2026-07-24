@@ -39,7 +39,7 @@ public enum CSVExporter {
     ) -> String {
         let byId: [UUID: Stratum] = Dictionary(uniqueKeysWithValues: strata.map { ($0.id, $0) })
         var lines: [String] = [
-            "plot_number,stratum_id,stratum_name,planned_lat,planned_lon,visited"
+            "plot_number,stratum_id,stratum_name,planned_lat,planned_lon,visited,skipped"
         ]
         let sorted = plannedPlots.sorted { $0.plotNumber < $1.plotNumber }
         for p in sorted {
@@ -50,7 +50,8 @@ public enum CSVExporter {
                 quote(stratumName),
                 format(p.plannedLat, places: 7),
                 format(p.plannedLon, places: 7),
-                p.visited ? "true" : "false"
+                p.visited ? "true" : "false",
+                p.skipped ? "true" : "false"
             ].joined(separator: ","))
         }
         return join(lines)

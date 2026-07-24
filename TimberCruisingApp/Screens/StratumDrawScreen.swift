@@ -58,7 +58,7 @@ public struct StratumDrawScreen: View {
         VStack(alignment: .leading, spacing: 4) {
             Label("How to use", systemImage: "hand.tap.fill")
                 .font(.subheadline.bold())
-            Text("**Tap the corners of the cutting block in order** on the map. Area is computed once you've placed at least 3 points. Tap **Undo** to remove the last point if you mis-tapped.")
+            Text("Tap the block's corners in order. Area appears after 3 points. Undo removes the last.")
                 .font(.caption)
                 .fixedSize(horizontal: false, vertical: true)
         }

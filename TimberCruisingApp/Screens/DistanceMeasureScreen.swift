@@ -29,9 +29,16 @@ public struct DistanceMeasureScreen: View {
 
     @EnvironmentObject private var history: QuickMeasureHistory
     @EnvironmentObject private var settings: AppSettings
-    @StateObject private var session = ARKitSessionManager()
+    /// App-shared AR session. Deliberately NOT observed — the manager
+    /// publishes camera pose at 60 Hz and observing it re-evaluated this
+    /// whole body every ARKit frame; the 20 Hz live timer below is the
+    /// screen's only clock. (No sampling-plot overlay here by design.)
+    private var session: ARKitSessionManager { .shared }
     @StateObject private var raycaster = ARCenterRaycaster()
     @Environment(\.scenePhase) private var scenePhase
+
+    /// Shared-session client token for this screen.
+    private static let arClientID = UUID()
 
     public enum Mode: String, CaseIterable, Identifiable {
         case live = "Live"
@@ -86,14 +93,10 @@ public struct DistanceMeasureScreen: View {
                 // Two-point overlay (line + endpoints + label).
                 twoPointOverlay(in: proxy.size)
 
-                // Right-centre capture button + Live/Two-point toggle beneath.
-                MeasureControlColumn(capture: { capture(in: proxy.size) }) {
-                    MeasurePillButton(mode == .live ? "Live" : "2-Pt",
-                                      systemImage: "arrow.left.and.right") {
-                        mode = (mode == .live) ? .twoPoint : .live
-                        resetTwoPoint()
-                    }
-                }
+                // Top-centre instruction banner (U1) — capture-failure
+                // hints and the two-point placement hints; Live mode has
+                // no stage guidance (the readout strip carries the state).
+                MeasureTopBanner(topBannerText)
 
                 // Bottom-right LiDAR/AR toggle — Developer-mode research
                 // control only; field mode pins LiDAR devices to the mesh
@@ -114,10 +117,29 @@ public struct DistanceMeasureScreen: View {
                 // system nav bar is hidden on the AR screens).
                 MeasureBackButtonRow()
 
-                // Bottom-centre status / value panel.
-                VStack {
+                // Bottom block (U2): while measuring, the camera-app
+                // shutter sits bottom-centre with the Live/2-Pt mode
+                // toggle as its left flank and the live readout as the
+                // value strip above (the shutter saves in Live mode and
+                // drops points in Two-point; dev research fields ride
+                // their own scrim in the strip — typed BEFORE the
+                // shutter logs the reading). A completed two-point pair
+                // is the RESULT state: the shutter yields to the value
+                // panel with Reset / Save.
+                VStack(spacing: 12) {
                     Spacer()
-                    bottomPanel(in: proxy.size)
+                    if isTwoPointResult {
+                        bottomPanel
+                    } else {
+                        valueStrip
+                        MeasureShutterRow(
+                            capture: { capture(in: proxy.size) },
+                            leading: .init(systemImage: "arrow.left.and.right",
+                                           caption: mode == .live ? "Live" : "2-Pt") {
+                                mode = (mode == .live) ? .twoPoint : .live
+                                resetTwoPoint()
+                            })
+                    }
                 }
             }
         }
@@ -125,18 +147,25 @@ public struct DistanceMeasureScreen: View {
         .toolbar(.hidden, for: .navigationBar)
         #endif
         .onAppear {
-            session.run()
+            session.attach(client: Self.arClientID,
+                           configuration: .distanceMeasure)
             startLiveTimer()
         }
         .onDisappear {
-            session.pause()
+            session.detach(client: Self.arClientID)
             stopLiveTimer()
         }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
-            case .active:                session.run(); startLiveTimer()
-            case .inactive, .background: session.pause(); stopLiveTimer()
-            @unknown default:            break
+            case .active:
+                session.attach(client: Self.arClientID,
+                               configuration: .distanceMeasure)
+                startLiveTimer()
+            case .inactive, .background:
+                session.detach(client: Self.arClientID)
+                stopLiveTimer()
+            @unknown default:
+                break
             }
         }
     }
@@ -261,51 +290,90 @@ public struct DistanceMeasureScreen: View {
         return screen
     }
 
-    // MARK: - Bottom panel
+    // MARK: - Bottom block (U2)
 
-    @ViewBuilder
-    private func bottomPanel(in size: CGSize) -> some View {
-        MeasureStatusPanel {
-            if let reason = captureFailureReason {
-                Text(reason)
-                    .font(ForestixType.caption)
-                    .foregroundStyle(.white)
+    /// A completed A→B pair is this screen's RESULT state — the value
+    /// panel with Reset / Save replaces the shutter. Live mode never has
+    /// a result state (the shutter itself logs the reading).
+    private var isTwoPointResult: Bool {
+        mode == .twoPoint && pointA != nil && pointB != nil
+    }
+
+    /// Guidance for the top banner: capture failures first, else the
+    /// two-point placement/save hints.
+    private var topBannerText: String? {
+        if let reason = captureFailureReason { return reason }
+        return mode == .twoPoint ? twoPointHint : nil
+    }
+
+    /// Live readout strip directly above the shutter: mode label +
+    /// current distance pills, with the Developer-mode research fields
+    /// on their own dark scrim at the top.
+    private var valueStrip: some View {
+        VStack(spacing: 4) {
+            if settings.developerMode {
+                researchFieldsRow
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.black.opacity(0.55),
+                                in: RoundedRectangle(cornerRadius: 12,
+                                                     style: .continuous))
             }
-            Text(mode == .live ? "DEVICE → TARGET" : "POINT A → POINT B")
+            MeasureValuePill(mode == .live ? "DEVICE → TARGET"
+                                           : "POINT A → POINT B",
+                             dimmed: true)
+            MeasureValuePill(currentDistanceString, large: true)
+        }
+    }
+
+    /// Developer-mode research capture fields (Target / True value).
+    private var researchFieldsRow: some View {
+        HStack(spacing: 6) {
+            Text("Target")
+                .font(ForestixType.caption)
+                .foregroundStyle(.white.opacity(0.8))
+            TextField("D1", text: Binding(
+                get: { settings.researchTreeId },
+                set: { settings.researchTreeId = $0 }))
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 70)
+                .accessibilityIdentifier("distance.researchTarget")
+            Text("True (m)")
+                .font(ForestixType.caption)
+                .foregroundStyle(.white.opacity(0.8))
+            TextField("tape", text: $researchTrueM)
+                .keyboardType(.decimalPad)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 90)
+                .accessibilityIdentifier("distance.researchTrue")
+        }
+    }
+
+    /// RESULT panel — a completed A→B pair: label + value + dev fields +
+    /// Reset / Save, in the shared status panel.
+    private var bottomPanel: some View {
+        MeasureStatusPanel {
+            Text("POINT A → POINT B")
                 .font(ForestixType.sectionHead)
                 .tracking(1.2)
                 .foregroundStyle(.white.opacity(0.75))
             Text(currentDistanceString)
                 .font(ForestixType.dataLarge)
                 .foregroundStyle(.white)
-            if mode == .twoPoint {
-                Text(twoPointHint)
-                    .font(ForestixType.caption)
-                    .foregroundStyle(.white.opacity(0.85))
-            }
             if settings.developerMode {
-                HStack(spacing: 6) {
-                    Text("Target")
-                        .font(ForestixType.caption)
-                        .foregroundStyle(.white.opacity(0.8))
-                    TextField("D1", text: Binding(
-                        get: { settings.researchTreeId },
-                        set: { settings.researchTreeId = $0 }))
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 70)
-                        .accessibilityIdentifier("distance.researchTarget")
-                    Text("True (m)")
-                        .font(ForestixType.caption)
-                        .foregroundStyle(.white.opacity(0.8))
-                    TextField("tape", text: $researchTrueM)
-                        .keyboardType(.decimalPad)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 90)
-                        .accessibilityIdentifier("distance.researchTrue")
-                }
+                researchFieldsRow
             }
-            actionRow
-                .padding(.top, 2)
+            HStack(spacing: 12) {
+                Button("Reset") { resetTwoPoint() }
+                    .buttonStyle(.forestixARSecondary)
+                    .frame(maxWidth: .infinity)
+                Button("Save") { saveTwoPointReading() }
+                    .buttonStyle(.forestixProminent)
+                    .frame(maxWidth: .infinity)
+                    .disabled(twoPointDistanceM == nil)
+                    .accessibilityIdentifier("distance.saveTwoPoint")
+            }
+            .padding(.top, 2)
         }
     }
 
@@ -320,29 +388,6 @@ public struct DistanceMeasureScreen: View {
         case (nil, _):       return "Aim, tap + to place point A"
         case (_, nil):       return "Aim, tap + to place point B"
         default:             return "Tap Save to log this reading"
-        }
-    }
-
-    @ViewBuilder
-    private var actionRow: some View {
-        switch mode {
-        case .live:
-            Button("Save") { saveLiveReading() }
-                .buttonStyle(.forestixProminent)
-                .frame(maxWidth: .infinity)
-                .disabled(liveDistanceM == nil)
-                .accessibilityIdentifier("distance.saveLive")
-        case .twoPoint:
-            HStack(spacing: 12) {
-                Button("Reset") { resetTwoPoint() }
-                    .buttonStyle(.bordered)
-                    .frame(maxWidth: .infinity)
-                Button("Save") { saveTwoPointReading() }
-                    .buttonStyle(.forestixProminent)
-                    .frame(maxWidth: .infinity)
-                    .disabled(twoPointDistanceM == nil)
-                    .accessibilityIdentifier("distance.saveTwoPoint")
-            }
         }
     }
 

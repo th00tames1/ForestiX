@@ -47,6 +47,8 @@ import com.hcjeong.forestix.inventory.StandStat
 import com.hcjeong.forestix.ui.screens.ForestixScaffold
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixRadius
+import com.hcjeong.forestix.common.AreaUnit
+import com.hcjeong.forestix.common.areaUnit
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import java.util.Locale
 import java.util.UUID
@@ -57,6 +59,7 @@ import kotlin.math.sqrt
 @Composable
 fun StandSummaryScreen(nav: NavController, projectId: UUID) {
     val env = LocalAppEnvironment.current
+    val settings by env.settings.state.collectAsStateWithLifecycle()
     val colors = Forestix.colors
     val type = Forestix.type
 
@@ -119,17 +122,35 @@ fun StandSummaryScreen(nav: NavController, projectId: UUID) {
                     style = type.caption, color = colors.textSecondary)
             }
 
-            StatCardSection(
-                title = "Trees / ac", unit = "/ac", stat = tpaStat, vm = vm,
-                perPlot = perPlotStats.map { Pair(it.plot, it.stats.tpa.toDouble()) })
-            StatCardSection(
-                title = "Basal area", unit = "m²/ac", stat = baStat, vm = vm,
-                perPlot = perPlotStats.map { Pair(it.plot, it.stats.baPerAcreM2.toDouble()) })
-            StatCardSection(
-                title = "Gross volume", unit = "m³/ac", stat = volStat, vm = vm,
-                perPlot = perPlotStats.map { Pair(it.plot, it.stats.grossVolumePerAcreM3.toDouble()) })
+            // Density basis: a metric unit system reads per hectare, imperial
+            // per acre. Derived from the (manually-overridable) Units setting,
+            // not the country, so a manual toggle wins. The engine computes per
+            // acre; scale + relabel at display only.
+            val areaUnit = settings.unitSystem.areaUnit
+            val densityFactor = areaUnit.perAcreDensityFactor
 
-            PerPlotTableSection(perPlotStats)
+            StatCardSection(
+                title = "Trees / ${areaUnit.abbreviation}", unit = areaUnit.densitySuffix,
+                stat = tpaStat.scaledPerArea(densityFactor), vm = vm,
+                perPlot = perPlotStats.map { Pair(it.plot, it.stats.tpa.toDouble() * densityFactor) })
+            StatCardSection(
+                title = "Basal area", unit = areaUnit.densityLabel("m²"),
+                stat = baStat.scaledPerArea(densityFactor), vm = vm,
+                perPlot = perPlotStats.map { Pair(it.plot, it.stats.baPerAcreM2.toDouble() * densityFactor) })
+            // Volume unit branches on the country: metric countries render m³
+            // (the engine's native unit); the US keeps m³ here as it does today.
+            // Korea is a scaffold — its official NIFoS coefficients are pending,
+            // so stand volume shows "—" rather than a fabricated figure.
+            if (settings.country.volumeStandardPending) {
+                PendingVolumeCard()
+            } else {
+                StatCardSection(
+                    title = "Gross volume", unit = areaUnit.densityLabel("m³"),
+                    stat = volStat.scaledPerArea(densityFactor), vm = vm,
+                    perPlot = perPlotStats.map { Pair(it.plot, it.stats.grossVolumePerAcreM3.toDouble() * densityFactor) })
+            }
+
+            PerPlotTableSection(perPlotStats, areaUnit)
             Spacer(Modifier.height(ForestixSpace.xl))
         }
 
@@ -170,6 +191,24 @@ private fun SummaryCard(content: @Composable () -> Unit) {
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         content()
+    }
+}
+
+// MARK: - Pending volume (Korea scaffold — coefficients not yet bundled)
+
+@Composable
+private fun PendingVolumeCard() {
+    val colors = Forestix.colors
+    val type = Forestix.type
+    Column(verticalArrangement = Arrangement.spacedBy(ForestixSpace.xs)) {
+        SectionTitle("Gross volume")
+        SummaryCard {
+            Text("—", style = type.dataLarge, color = colors.textPrimary)
+            Text(
+                "Volume isn't available for this region yet. Every other metric is " +
+                    "unaffected.",
+                style = type.caption, color = colors.textSecondary)
+        }
     }
 }
 
@@ -286,9 +325,14 @@ private fun PerPlotBarChart(perPlot: List<Pair<Plot, Double>>, mean: Double) {
 // MARK: - Per-plot table
 
 @Composable
-private fun PerPlotTableSection(perPlotStats: List<StandSummaryViewModel.PerPlotStat>) {
+private fun PerPlotTableSection(
+    perPlotStats: List<StandSummaryViewModel.PerPlotStat>,
+    areaUnit: AreaUnit,
+) {
     val colors = Forestix.colors
     val type = Forestix.type
+    val f = areaUnit.perAcreDensityFactor
+    val suffix = areaUnit.densitySuffix
     Column(verticalArrangement = Arrangement.spacedBy(ForestixSpace.xs)) {
         SectionTitle("Per-plot")
         SummaryCard {
@@ -301,17 +345,17 @@ private fun PerPlotTableSection(perPlotStats: List<StandSummaryViewModel.PerPlot
                 Row(Modifier.fillMaxWidth()) {
                     Text("#", style = headStyle, color = colors.textSecondary, modifier = Modifier.width(28.dp))
                     Text("Live", style = headStyle, color = colors.textSecondary, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
-                    Text("Trees/ac", style = headStyle, color = colors.textSecondary, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
-                    Text("Basal/ac", style = headStyle, color = colors.textSecondary, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
-                    Text("Volume/ac", style = headStyle, color = colors.textSecondary, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
+                    Text("Trees$suffix", style = headStyle, color = colors.textSecondary, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
+                    Text("Basal$suffix", style = headStyle, color = colors.textSecondary, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
+                    Text("Volume$suffix", style = headStyle, color = colors.textSecondary, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
                 }
                 for (row in perPlotStats) {
                     Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
                         Text("${row.plot.plotNumber}", style = type.dataSmall, color = colors.textPrimary, modifier = Modifier.width(28.dp))
                         Text("${row.stats.liveTreeCount}", style = type.dataSmall, color = colors.textPrimary, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
-                        Text(String.format(Locale.US, "%.1f", row.stats.tpa), style = type.dataSmall, color = colors.textPrimary, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
-                        Text(String.format(Locale.US, "%.2f", row.stats.baPerAcreM2), style = type.dataSmall, color = colors.textPrimary, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
-                        Text(String.format(Locale.US, "%.1f", row.stats.grossVolumePerAcreM3), style = type.dataSmall, color = colors.textPrimary, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
+                        Text(String.format(Locale.US, "%.1f", row.stats.tpa * f), style = type.dataSmall, color = colors.textPrimary, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
+                        Text(String.format(Locale.US, "%.2f", row.stats.baPerAcreM2 * f), style = type.dataSmall, color = colors.textPrimary, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
+                        Text(String.format(Locale.US, "%.1f", row.stats.grossVolumePerAcreM3 * f), style = type.dataSmall, color = colors.textPrimary, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
                     }
                 }
             }

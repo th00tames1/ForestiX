@@ -321,7 +321,7 @@ public enum BackupArchive {
                 stratumId: p.stratumId.map { stratumIdMap[$0] ?? $0 },
                 plotNumber: p.plotNumber,
                 plannedLat: p.plannedLat, plannedLon: p.plannedLon,
-                visited: p.visited)
+                visited: p.visited, skipped: p.skipped)
             _ = try dstPlannedRepo.create(copy)
         }
 

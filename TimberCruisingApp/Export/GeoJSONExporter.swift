@@ -84,7 +84,8 @@ public enum GeoJSONExporter {
                 "id": p.id.uuidString,
                 "plotNumber": p.plotNumber,
                 "stratumId": p.stratumId?.uuidString ?? NSNull(),
-                "visited": p.visited
+                "visited": p.visited,
+                "skipped": p.skipped
             ]
         ]
     }

@@ -1,0 +1,52 @@
+{
+  "_comment": "Internationalization framework — metric (m³) stem-volume equations for the European paradigm. Laasasenaho (1982) Nordic coefficients are VERIFIED against the R package lmfor (predvol); see docs/volume-standards-research.md §B. The German form-factor record is a labelled APPROXIMATION (§C). Seeded alongside the US PNW set; referenced by country-prefixed species a metric cruiser assigns. Korea is intentionally absent — its official NIFoS coefficients are pending, so no Korean equation is fabricated.",
+  "equations": [
+    {
+      "id": "laasasenaho-pine-fi",
+      "form": "laasasenaho",
+      "coefficients": {
+        "c1": 0.036089, "c2": 2.01395, "c3": 0.99676, "c4": 2.07025, "c5": -1.07209,
+        "a1": -5.39417, "a2": 3.48060, "a3": 0.039884,
+        "merchFraction": 0.85
+      },
+      "unitsIn": "cm,m",
+      "unitsOut": "m3",
+      "sourceCitation": "Laasasenaho, J. 1982. Taper curve and volume functions for pine, spruce and birch. Comm. Inst. For. Fenn. 108. Scots pine (Pinus sylvestris). Coefficients verified via R lmfor::predvol."
+    },
+    {
+      "id": "laasasenaho-spruce-fi",
+      "form": "laasasenaho",
+      "coefficients": {
+        "c1": 0.022927, "c2": 1.91505, "c3": 0.99146, "c4": 2.82541, "c5": -1.53547,
+        "a1": -5.39934, "a2": 3.46468, "a3": 0.0273199,
+        "merchFraction": 0.85
+      },
+      "unitsIn": "cm,m",
+      "unitsOut": "m3",
+      "sourceCitation": "Laasasenaho (1982). Norway spruce (Picea abies). Coefficients verified via R lmfor::predvol."
+    },
+    {
+      "id": "laasasenaho-birch-fi",
+      "form": "laasasenaho",
+      "coefficients": {
+        "c1": 0.011197, "c2": 2.10253, "c3": 0.98600, "c4": 3.98519, "c5": -2.65900,
+        "a1": -5.41948, "a2": 3.57630, "a3": 0.0395855,
+        "merchFraction": 0.85
+      },
+      "unitsIn": "cm,m",
+      "unitsOut": "m3",
+      "sourceCitation": "Laasasenaho (1982). Silver birch (Betula pendula); downy birch (B. pubescens) shares these coefficients in the lmfor implementation. Verified via R lmfor::predvol."
+    },
+    {
+      "id": "formfactor-generic-de",
+      "form": "formfactor",
+      "coefficients": {
+        "f": 0.50,
+        "merchFraction": 0.85
+      },
+      "unitsIn": "cm,m",
+      "unitsOut": "m3",
+      "sourceCitation": "Generic whole-tree form factor V=g·h·f, f≈0.50 (0.45–0.55). APPROXIMATION — Germany's production standard is the BDAT taper program (no short closed form). AWF-Wiki, Univ. Göttingen, 'Stem shape'."
+    }
+  ]
+}

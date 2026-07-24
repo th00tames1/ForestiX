@@ -26,23 +26,7 @@ public enum ForestixLogger {
     // MARK: - Public event surface
 
     public enum Event: Sendable {
-        case appLaunched(version: String)
         case plotOpened(plotId: UUID, projectId: UUID)
-        case plotClosed(plotId: UUID, projectId: UUID,
-                        durationSec: TimeInterval, treeCount: Int)
-        case dbhScanStarted(treeId: UUID?, method: String)
-        case dbhScanCompleted(treeId: UUID?, dbhCm: Float,
-                              confidence: String, durationMs: Int)
-        case dbhScanFailed(reason: String)
-        case heightScanStarted(treeId: UUID?, method: String)
-        case heightScanCompleted(treeId: UUID?, heightM: Float,
-                                 confidence: String, durationMs: Int)
-        case heightScanFailed(reason: String)
-        case gpsFixAchieved(tier: String, nSamples: Int,
-                            medianHAccuracyM: Float)
-        case saveFailed(entity: String, error: String)
-        case lowBattery(level: Float)
-        case trackingLimited(durationSec: TimeInterval)
         case backupCreated(projectId: UUID, bytes: Int64)
         case backupRestored(projectId: UUID, fromPath: String)
         case crashRecoveryPrompted(projectId: UUID, plotId: UUID)
@@ -72,55 +56,10 @@ public enum ForestixLogger {
         let now = ISO8601DateFormatter().string(from: Date())
         var base: [String: Any] = ["t": now]
         switch event {
-        case .appLaunched(let v):
-            base["event"] = "app.launched"; base["version"] = v
         case .plotOpened(let pid, let proj):
             base["event"] = "plot.opened"
             base["plotId"] = pid.uuidString
             base["projectId"] = proj.uuidString
-        case .plotClosed(let pid, let proj, let dur, let n):
-            base["event"] = "plot.closed"
-            base["plotId"] = pid.uuidString
-            base["projectId"] = proj.uuidString
-            base["durationSec"] = Int(dur)
-            base["treeCount"] = n
-        case .dbhScanStarted(let tid, let m):
-            base["event"] = "dbh.scan.started"
-            base["treeId"] = tid?.uuidString ?? NSNull()
-            base["method"] = m
-        case .dbhScanCompleted(let tid, let dbh, let c, let ms):
-            base["event"] = "dbh.scan.completed"
-            base["treeId"] = tid?.uuidString ?? NSNull()
-            base["dbhCm"] = dbh
-            base["confidence"] = c
-            base["durationMs"] = ms
-        case .dbhScanFailed(let r):
-            base["event"] = "dbh.scan.failed"; base["reason"] = r
-        case .heightScanStarted(let tid, let m):
-            base["event"] = "height.scan.started"
-            base["treeId"] = tid?.uuidString ?? NSNull()
-            base["method"] = m
-        case .heightScanCompleted(let tid, let h, let c, let ms):
-            base["event"] = "height.scan.completed"
-            base["treeId"] = tid?.uuidString ?? NSNull()
-            base["heightM"] = h
-            base["confidence"] = c
-            base["durationMs"] = ms
-        case .heightScanFailed(let r):
-            base["event"] = "height.scan.failed"; base["reason"] = r
-        case .gpsFixAchieved(let tier, let n, let acc):
-            base["event"] = "gps.fix"
-            base["tier"] = tier
-            base["nSamples"] = n
-            base["medianHAccuracyM"] = acc
-        case .saveFailed(let entity, let err):
-            base["event"] = "save.failed"
-            base["entity"] = entity
-            base["error"] = err
-        case .lowBattery(let lvl):
-            base["event"] = "battery.low"; base["level"] = lvl
-        case .trackingLimited(let dur):
-            base["event"] = "ar.trackingLimited"; base["durationSec"] = dur
         case .backupCreated(let pid, let bytes):
             base["event"] = "backup.created"
             base["projectId"] = pid.uuidString

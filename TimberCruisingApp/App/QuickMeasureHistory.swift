@@ -40,7 +40,7 @@ public struct QuickMeasurePlot: Codable, Identifiable, Sendable, Equatable {
     /// "Quick measurements" and can't be deleted.
     public var name: String
     /// Optional management unit / stand name — multi-unit cruise
-    /// support per SilvaCruise. Empty string treated as nil.
+    /// support. Empty string treated as nil.
     public var unitName: String
     /// Plot acreage. nil = unknown / unset.
     public var acres: Double?
@@ -52,9 +52,9 @@ public struct QuickMeasurePlot: Codable, Identifiable, Sendable, Equatable {
     public var radiusFt: Double?
     /// Optional parent plot id — when present, this plot is a nested
     /// concentric sub-plot of the parent (typically a smaller radius
-    /// for submerchantable / biomass / regeneration tally). Adopted
-    /// from SilvaCruise's "concentric fixed-radius plots at the same
-    /// plot center". The parent's coordinates are inherited
+    /// for submerchantable / biomass / regeneration tally). Models
+    /// concentric fixed-radius plots at the same
+    /// plot center. The parent's coordinates are inherited
     /// implicitly; only the radius (and any tally-class restriction)
     /// differs.
     public var parentPlotID: UUID?
@@ -181,6 +181,10 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
     /// Filename inside MeasurePhotoStore.directory (not a full path, so
     /// container moves between installs don't break it).
     public let photoPath: String?
+    /// How the reading was captured: "auto" (automatic edge-finding) or
+    /// "manual" (DBH ADJUST edge-bracket mode). nil for height / other
+    /// kinds and for entries recorded before this field existed.
+    public let captureMode: String?
 
     public init(
         id: UUID = UUID(),
@@ -199,7 +203,8 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         note: String? = nil,
         latitude: Double? = nil,
         longitude: Double? = nil,
-        photoPath: String? = nil
+        photoPath: String? = nil,
+        captureMode: String? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -218,6 +223,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         self.latitude = latitude
         self.longitude = longitude
         self.photoPath = photoPath
+        self.captureMode = captureMode
     }
 
     // Custom decoding so entries written before any new field existed
@@ -242,6 +248,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         self.latitude      = try c.decodeIfPresent(Double.self, forKey: .latitude)
         self.longitude     = try c.decodeIfPresent(Double.self, forKey: .longitude)
         self.photoPath     = try c.decodeIfPresent(String.self, forKey: .photoPath)
+        self.captureMode   = try c.decodeIfPresent(String.self, forKey: .captureMode)
     }
 
     /// Unit string for `value`. cm for diameter, m elsewhere.
@@ -355,6 +362,19 @@ public final class QuickMeasureHistory: ObservableObject {
         }
         entries = next
         appendToSidecar(entry)
+        persistCache()
+        recomputeCapacityFlag()
+    }
+
+    /// Replace an existing entry in place, matched by id, and persist —
+    /// the quick-peek "Edit this tree" mutator. No-op if the id is gone.
+    /// Mirrors `delete`'s persistence (rewrite the sidecar + cache); the
+    /// caller supplies a fully-formed entry carrying the same id.
+    public func update(_ entry: QuickMeasureEntry) {
+        guard let idx = entries.firstIndex(where: { $0.id == entry.id })
+        else { return }
+        entries[idx] = entry
+        rewriteSidecar()
         persistCache()
         recomputeCapacityFlag()
     }
@@ -592,13 +612,15 @@ public final class QuickMeasureHistory: ObservableObject {
             .replacingOccurrences(of: ":", with: "-")
         let url = dir.appendingPathComponent("quick-measure-\(stamp).csv")
 
+        // "capture_mode" is deliberately the LAST column — same order
+        // as the Android exporter so the two platforms' CSVs diff clean.
         let headers = ["id", "timestamp", "plot", "tree", "kind",
                        "value", "value_unit",
                        "secondary_value", "secondary_unit",
                        "sigma", "sigma_unit",
                        "species", "position", "damage", "note",
                        "confidence", "method",
-                       "latitude", "longitude", "photo"]
+                       "latitude", "longitude", "photo", "capture_mode"]
         var out = headers.map(Self.csvField).joined(separator: ",")
         out += "\r\n"
 
@@ -636,7 +658,8 @@ public final class QuickMeasureHistory: ObservableObject {
                 e.method,
                 lat,
                 lon,
-                e.photoPath ?? ""
+                e.photoPath ?? "",
+                e.captureMode ?? ""
             ]
             let row = cols.map(Self.csvField).joined(separator: ",")
             out += row + "\r\n"
@@ -662,10 +685,10 @@ public final class QuickMeasureHistory: ObservableObject {
         "\"" + s.replacingOccurrences(of: "\"", with: "\"\"") + "\""
     }
 
-    // MARK: - Multi-table CSV bundle (Arboreal-style 5-file export)
+    // MARK: - Multi-table CSV bundle (5-file export)
 
-    /// Writes a ZIP bundle containing five CSV files modelled on the
-    /// Arboreal Forest export schema:
+    /// Writes a ZIP bundle containing five CSV files following a
+    /// multi-table export schema:
     ///
     ///   • Samples.csv      — one row per plot
     ///   • Trees.csv        — one row per (plot, treeNumber) pair
@@ -720,7 +743,8 @@ public final class QuickMeasureHistory: ObservableObject {
         }
 
         // -- Stems.csv (one per DBH measurement) --
-        var stems = "id,plot_id,tree_number,timestamp,dbh_cm,sigma_mm,position,confidence,method\r\n"
+        // "capture_mode" appended as the LAST column (Android parity).
+        var stems = "id,plot_id,tree_number,timestamp,dbh_cm,sigma_mm,position,confidence,method,capture_mode\r\n"
         for e in entries where e.kind == .dbh {
             let row = [
                 e.id.uuidString,
@@ -730,7 +754,8 @@ public final class QuickMeasureHistory: ObservableObject {
                 String(format: "%.3f", e.value),
                 e.sigma.map { String(format: "%.3f", $0) } ?? "",
                 e.position?.rawValue ?? "",
-                e.confidenceRaw, e.method
+                e.confidenceRaw, e.method,
+                e.captureMode ?? ""
             ].map(Self.csvField).joined(separator: ",")
             stems += row + "\r\n"
         }

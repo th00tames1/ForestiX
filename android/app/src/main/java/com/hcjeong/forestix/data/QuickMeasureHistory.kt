@@ -97,6 +97,17 @@ class QuickMeasureHistory private constructor(
         }
     }
 
+    /// Replace an existing entry by id (map-peek "Edit this tree"). Upsert
+    /// carries REPLACE semantics, so the same-id row is overwritten in place;
+    /// mirror of `delete` for the mutating quick-edit sheet.
+    fun update(entry: QuickMeasureEntry) {
+        scope.launch {
+            dao.upsertEntry(EntryRow.from(entry))
+            _entries.value = dao.allEntries().map { it.toDomain() }
+            recomputeCapacity()
+        }
+    }
+
     fun clearAll() {
         scope.launch {
             dao.clearEntries()

@@ -1,6 +1,6 @@
 // DBH method selector — a small pill toggle that picks the capture method
 // on the DBH scan screen: the depth-API chord/circle fit ("Depth") vs the
-// two-tap trunk-edge AR caliper ("Caliper"). Mirrors the SlashScan floating
+// two-tap trunk-edge AR caliper ("Caliper"). A floating
 // control look used by the Distance Live/Two-point pill.
 //
 // Developer mode ONLY (field fix, both platforms): normal mode is

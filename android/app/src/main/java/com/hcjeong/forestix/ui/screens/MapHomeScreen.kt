@@ -9,11 +9,20 @@
 // and the single primary action is the centre (+) capture button. The
 // built-in Esri satellite base gives imagery out of the box; the user's
 // XYZ template renders as an overlay on top (toggle in the layers sheet).
+//
+// v3.1: the separate CruiseMapScreen is absorbed HERE as a toggled MODE
+// (tc.mapMode "measure" | "cruise") — one map, two modes, no navigation
+// between them. The left side-circle toggles the mode in place (camera and
+// zoom are shared, no snap), measure mode stays exactly this screen, and
+// cruise mode swaps in the CruiseModeContent pins/chrome/peeks/sheets:
+// quick pins are measure-only, cruise pins cruise-only. System back in
+// cruise mode returns to measure mode.
 
 package com.hcjeong.forestix.ui.screens
 
 import android.app.Activity
 import android.graphics.Bitmap
+import android.text.format.DateUtils
 import android.graphics.BitmapFactory
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -36,29 +45,31 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CenterFocusWeak
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Height
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Layers
-import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Park
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Straighten
 import androidx.compose.material.icons.filled.SwapHoriz
-import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -66,6 +77,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -81,13 +93,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
@@ -102,10 +118,14 @@ import com.hcjeong.forestix.basemap.MapMarker
 import com.hcjeong.forestix.basemap.MapMarkerShape
 import com.hcjeong.forestix.basemap.MapView
 import com.hcjeong.forestix.basemap.rememberMapCameraState
+import com.hcjeong.forestix.common.ForestixLogger
 import com.hcjeong.forestix.common.MeasurementFormatter
+import com.hcjeong.forestix.common.RegionalSpecies
 import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
+import com.hcjeong.forestix.data.SettingsSnapshot
+import com.hcjeong.forestix.data.cruise.CrashRecoveryService
 import com.hcjeong.forestix.geo.CoordinateConversions
 import com.hcjeong.forestix.positioning.CLLocationSnapshot
 import com.hcjeong.forestix.positioning.GeoMath
@@ -115,6 +135,15 @@ import com.hcjeong.forestix.ui.PendingTreeNumber
 import com.hcjeong.forestix.ui.Routes
 import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.pressableNoRipple
+import com.hcjeong.forestix.ui.screens.cruise.CruiseCapture
+import com.hcjeong.forestix.ui.screens.cruise.CruiseDistanceOverlay
+import com.hcjeong.forestix.ui.screens.cruise.CruiseModeBottomContent
+import com.hcjeong.forestix.ui.screens.cruise.CruiseModeEffects
+import com.hcjeong.forestix.ui.screens.cruise.CruiseModeSheets
+import com.hcjeong.forestix.ui.screens.cruise.CruiseModeState
+import com.hcjeong.forestix.ui.screens.cruise.cruiseModeMarkers
+import com.hcjeong.forestix.ui.screens.cruise.cruiseModePolygons
+import com.hcjeong.forestix.ui.screens.cruise.cruiseModePolylines
 import com.hcjeong.forestix.ui.softDropShadow
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixRadius
@@ -125,14 +154,15 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.PI
+import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
-/// Seoul-ish fallback — used only when there is no fix and no located
-/// reading (fresh install, indoors). Mirrors iOS `fallbackCamera`.
-private val DefaultCenter = CoordinateConversions.LatLon(latitude = 37.5665, longitude = 126.9780)
+/// Peavy Hall (OSU College of Forestry) fallback — used only when there is
+/// no fix and no located reading. Mirrors iOS `fallbackCamera`.
+private val DefaultCenter = CoordinateConversions.LatLon(latitude = 44.56417, longitude = -123.28556)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -144,9 +174,18 @@ fun MapHomeScreen(nav: NavController) {
     val settings by env.settings.state.collectAsStateWithLifecycle()
     val entries by env.history.entries.collectAsStateWithLifecycle()
 
-    // MARK: - Live GPS (GPSAccuracyBadge pattern: local service + launcher)
+    // v3.1 merged cruise mode: ONE map, two modes, persisted (tc.mapMode).
+    val isCruise = settings.mapMode == "cruise"
 
-    val location = remember { LocationService(context) }
+    // Re-entry housekeeping (was CruiseMapScreen's): a finished/abandoned
+    // cruise tally chain must not leak its session or its project scan
+    // calibration into the quick world — every landing on the home (the
+    // chain always pops back here) disarms it. Idempotent.
+    LaunchedEffect(Unit) { CruiseCapture.end(env) }
+
+    // MARK: - Live GPS (GPSAccuracyBadge pattern: shared service + launcher)
+
+    val location = remember { LocationService.shared(context) }
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
@@ -155,22 +194,22 @@ fun MapHomeScreen(nav: NavController) {
         if (granted) location.start()
     }
     LaunchedEffect(Unit) {
-        if (LocationService.hasLocationPermission(context)) {
-            location.start()
-        } else {
+        if (!LocationService.hasLocationPermission(context)) {
             launcher.launch(LocationService.PERMISSIONS)
         }
     }
     DisposableEffect(Unit) {
-        onDispose { location.stop() }
+        location.acquire()
+        onDispose { location.release() }
     }
     val fix by location.latestSnapshot.collectAsStateWithLifecycle()
 
-    // MARK: - Pins + camera
+    // MARK: - Pins + camera (the camera is SHARED across the mode toggle —
+    // switching modes never snaps or re-zooms the map)
 
     val pins = remember(entries) { buildTreePins(entries) }
 
-    // Last fix → else newest located reading → else the Seoul fallback,
+    // Last fix → else newest located reading → else the Peavy Hall fallback,
     // always at zoom 16 (iOS startUp()).
     val initialCamera = remember {
         val fromFix = LocationService.lastGlobalFix?.let {
@@ -207,9 +246,75 @@ fun MapHomeScreen(nav: NavController) {
     var farTreeConfirm by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var offlineOpen by remember { mutableStateOf(false) }
     var photoEntry by remember { mutableStateOf<QuickMeasureEntry?>(null) }
+    // Quick peek "Edit this tree" → compact edit sheet for one reading.
+    var editEntry by remember { mutableStateOf<QuickMeasureEntry?>(null) }
+
+    // Crash-recovery resume prompt: open plots (closedAt == null) edited within
+    // the last 24h, most-recent first. Non-null + non-empty shows the prompt.
+    var recoveryPrompt by remember {
+        mutableStateOf<List<CrashRecoveryService.ResumeCandidate>?>(null)
+    }
+
+    // MARK: - Cruise mode state + effects (data load / navigate guide /
+    // actions run only while the mode is on; the holder survives toggles so
+    // the 180 ms exit crossfade renders from live data)
+
+    val cruise = remember { CruiseModeState() }
+    if (isCruise) {
+        CruiseModeEffects(
+            state = cruise,
+            nav = nav,
+            settings = settings,
+            fix = fix,
+            awaitingFirstFix = awaitingFirstFix,
+            onCentreOnCruiseGeometry = {
+                awaitingFirstFix = false
+                mapCenter = it
+            },
+        )
+    }
+
+    // Crash recovery: on the home's FIRST appearance per launch, scan for open
+    // plots edited within the last 24h and surface the most-recent as a
+    // Resume / View / Discard prompt. The process-static guard makes this run
+    // AT MOST once per launch (the home recomposes / is re-entered on every
+    // Settings round-trip and mode toggle); a dismiss / Discard never re-prompts.
+    LaunchedEffect(Unit) {
+        if (!CrashRecoveryService.checkedThisLaunch) {
+            CrashRecoveryService.checkedThisLaunch = true
+            val found = try {
+                CrashRecoveryService.openPlotsWithinLast(
+                    projectRepo = env.projectRepository,
+                    plotRepo = env.plotRepository,
+                    treeRepo = env.treeRepository,
+                )
+            } catch (_: Exception) {
+                emptyList()
+            }
+            if (found.isNotEmpty()) {
+                recoveryPrompt = found
+                val top = found.first()
+                ForestixLogger.crashRecoveryPrompted(top.plot.projectId, top.plot.id)
+            }
+        }
+    }
+
+    /// The toggle circle + system back both land here. Leaving a mode drops
+    /// its selection so no stale peek pops back on the next visit.
+    fun setMode(mode: String) {
+        selectedPinId = null
+        cruise.selectedId = null
+        env.settings.setMapMode(mode)
+    }
 
     val selectedPin = pins.firstOrNull { it.id == selectedPinId }
-    BackHandler(enabled = selectedPin != null) { selectedPinId = null }
+    // System back: cruise mode is a MODE of the home, not a destination —
+    // back first dismisses a raised peek (the mode-specific handlers below
+    // compose later, so they win while enabled), then flips cruise back to
+    // measure; measure mode keeps the default behaviour.
+    BackHandler(enabled = isCruise) { setMode("measure") }
+    BackHandler(enabled = !isCruise && selectedPin != null) { selectedPinId = null }
+    BackHandler(enabled = isCruise && cruise.selectedId != null) { cruise.selectedId = null }
 
     Box(Modifier.fillMaxSize().background(colors.canvas)) {
         MapView(
@@ -225,20 +330,43 @@ fun MapHomeScreen(nav: NavController) {
             } else {
                 null
             },
-            markers = pins.map { pin ->
-                MapMarker(
-                    coordinate = pin.coordinate,
-                    title = pin.title,
-                    tint = if (pin.warn) colors.confidenceWarn else colors.primary,
-                    id = pin.id,
-                    shape = MapMarkerShape.PIN,
-                    badges = pin.badges,
-                    selected = pin.id == selectedPinId,
-                )
+            // Mode content separation (v3.1): quick pins are measure-only,
+            // cruise pins/rings/guides cruise-only — the map itself (camera,
+            // zoom, base + overlay) is shared across the toggle.
+            polygons = if (isCruise) {
+                cruiseModePolygons(cruise, settings, colors.accent)
+            } else {
+                emptyList()
+            },
+            polylines = if (isCruise) {
+                cruiseModePolylines(cruise, fix, colors.accent)
+            } else {
+                emptyList()
+            },
+            markers = if (isCruise) {
+                cruiseModeMarkers(cruise, settings, colors)
+            } else {
+                pins.map { pin ->
+                    MapMarker(
+                        coordinate = pin.coordinate,
+                        title = pin.title,
+                        tint = if (pin.warn) colors.confidenceWarn else colors.primary,
+                        id = pin.id,
+                        shape = MapMarkerShape.PIN,
+                        badges = pin.badges,
+                        selected = pin.id == selectedPinId,
+                    )
+                }
             },
             // Tapping the selected pin again deselects it (iOS toggle).
-            onMarkerTap = { selectedPinId = if (selectedPinId == it) null else it },
-            onMapTap = { selectedPinId = null },
+            onMarkerTap = { id ->
+                if (isCruise) {
+                    cruise.selectedId = if (cruise.selectedId == id) null else id
+                } else {
+                    selectedPinId = if (selectedPinId == id) null else id
+                }
+            },
+            onMapTap = { if (isCruise) cruise.selectedId = null else selectedPinId = null },
             youLocation = fix?.let {
                 CoordinateConversions.LatLon(latitude = it.latitude, longitude = it.longitude)
             },
@@ -260,19 +388,51 @@ fun MapHomeScreen(nav: NavController) {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs),
             ) {
-                GpsChip(fix)
-                Spacer(Modifier.weight(1f))
-                RoundChromeButton(Icons.Filled.Layers, "Basemap layers") { offlineOpen = true }
-                val dark = settings.appearance == "dark"
+                // GPS chip leads, bounded by a flexible slot so its
+                // single-line GPS readout truncates instead of shoving
+                // the trailing round buttons off-screen. Shared by both modes
+                // (the cruise project chip is gone — the project lives in the
+                // bottom cluster's PROJECT circle + strip now).
+                Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                    GpsChip(fix)
+                }
+                // My-location: recentre on the freshest fix (this screen's
+                // live service, else the last global fix) without ever
+                // zooming OUT past 16. Dimmed no-op until any fix exists.
+                val locateSnap = fix ?: LocationService.lastGlobalFix
                 RoundChromeButton(
-                    icon = if (dark) Icons.Filled.WbSunny else Icons.Filled.DarkMode,
-                    contentDescription = if (dark) "Switch to light appearance" else "Switch to dark appearance",
-                ) { env.settings.setAppearance(if (dark) "light" else "dark") }
+                    Icons.Filled.MyLocation,
+                    "My location",
+                    enabled = locateSnap != null,
+                ) {
+                    locateSnap?.let {
+                        camera.moveTo(
+                            CoordinateConversions.LatLon(
+                                latitude = it.latitude, longitude = it.longitude),
+                            zoom = max(camera.zoom, 16.0),
+                        )
+                    }
+                }
+                RoundChromeButton(Icons.Filled.Layers, "Basemap layers") { offlineOpen = true }
+                // Settings — rightmost of the top-right group, both modes.
+                RoundChromeButton(Icons.Filled.Settings, "Settings") {
+                    nav.navigate(Routes.SETTINGS)
+                }
             }
         }
 
+        // Cruise navigate mode: floating live distance chip riding the
+        // dashed guide line's midpoint (mock ⑦ `.distchip`).
+        if (isCruise) {
+            CruiseDistanceOverlay(cruise, camera, fix)
+        }
+
         // MARK: - Bottom: action cluster ①, or peek card ② when a pin is up.
-        // Both slide/fade over 0.18 s ease-out like the iOS transitions.
+        // Both slide/fade over 0.18 s ease-out like the iOS transitions; the
+        // MODE flip crossfades the whole region over the same 0.18 s ease-out.
+        // Both modes' clusters are built on the same fixed ClusterSlots
+        // geometry, so every circle lands on identical pixels and only the
+        // glyphs, fills and caption pills visibly swap.
 
         // Keep the last selected pin so the card's exit animation has data.
         var lastPin by remember { mutableStateOf<TreePin?>(null) }
@@ -284,38 +444,39 @@ fun MapHomeScreen(nav: NavController) {
                 .navigationBarsPadding(),
         ) {
             AnimatedContent(
-                targetState = selectedPin != null,
+                targetState = isCruise,
                 modifier = Modifier.align(Alignment.BottomCenter),
                 contentAlignment = Alignment.BottomCenter,
                 transitionSpec = {
                     val spec = tween<Float>(durationMillis = 180, easing = EaseOut)
-                    val slide = tween<IntOffset>(durationMillis = 180, easing = EaseOut)
-                    (slideInVertically(slide) { it } + fadeIn(spec)) togetherWith
-                        (slideOutVertically(slide) { it } + fadeOut(spec))
+                    fadeIn(spec) togetherWith fadeOut(spec)
                 },
-                label = "peekCluster",
-            ) { showPeek ->
-                val pin = if (showPeek) selectedPin ?: lastPin else null
-                if (pin == null) {
-                    ActionCluster(
-                        modifier = Modifier.padding(bottom = ForestixSpace.sm),
-                        onCruise = { nav.navigate(Routes.TIMBER_HUB) },
-                        onMeasure = { chooserOpen = true },
-                        onLog = { nav.navigate(Routes.FIELD_LOG) },
+                label = "modeSwap",
+            ) { cruiseMode ->
+                if (cruiseMode) {
+                    CruiseModeBottomContent(
+                        state = cruise,
+                        nav = nav,
+                        fix = fix,
+                        onToggleMode = { setMode("measure") },
                     )
                 } else {
-                    PeekCard(
-                        pin = pin,
-                        unitSystem = settings.unitSystem,
+                    MeasureBottomContent(
+                        selectedPin = selectedPin,
+                        lastPin = lastPin,
+                        settings = settings,
                         activity = activity,
-                        plotName = pin.entries.firstOrNull()?.plotID
-                            ?.let { env.history.plot(it) }
-                            ?.takeIf { !it.isDefault }?.name,
-                        modifier = Modifier
-                            .padding(horizontal = 12.dp)
-                            .padding(bottom = 20.dp),
+                        plotNameFor = { pin ->
+                            pin.entries.firstOrNull()?.plotID
+                                ?.let { env.history.plot(it) }
+                                ?.takeIf { !it.isDefault }?.name
+                        },
+                        onToggleMode = { setMode("cruise") },
+                        onMeasure = { chooserOpen = true },
+                        onLog = { nav.navigate(Routes.FIELD_LOG) },
                         onViewPhoto = { photoEntry = it },
-                        onMeasureAgain = {
+                        onEditEntry = { editEntry = it },
+                        onMeasureAgain = { pin ->
                             val tree = pin.treeNumber
                             if (tree == null) {
                                 // Tree-less pin ("New measurement") — plain
@@ -412,20 +573,171 @@ fun MapHomeScreen(nav: NavController) {
             onDismiss = { photoEntry = null },
         )
     }
+    // Quick-edit sheet (map-peek spec item 2): value / species / note +
+    // destructive Delete on the tapped reading. Save persists through the
+    // history store's update mutator; Delete removes the row + its photo.
+    editEntry?.let { entry ->
+        QuickEntryEditSheet(
+            entry = entry,
+            onDismiss = { editEntry = null },
+            onSave = { updated ->
+                env.history.update(updated)
+                editEntry = null
+            },
+            onDelete = {
+                env.history.delete(entry.id)
+                editEntry = null
+                // The pin may vanish (last reading gone) — drop any selection
+                // so a stale peek can't linger over the deleted tree.
+                selectedPinId = null
+            },
+        )
+    }
 
     // First-launch UX: the map home hosts the region picker (it is the
     // screen after the splash). Auto-present once; picking, skipping or
     // swipe-dismissing all stamp regionPickerSeen, and it stays reachable
-    // later via Settings → Region.
-    if (settings.region == null && !settings.regionPickerSeen) {
+    // later via Settings → Region. Measure mode only — the default mode is
+    // measure, so first run always lands here; cruise chrome stays clean.
+    if (!isCruise && !settings.regionPickerSeen) {
         ModalBottomSheet(
             onDismissRequest = { env.settings.setRegionPickerSeen(true) },
             containerColor = colors.surface,
         ) {
-            RegionPickerSheet(onDismiss = {
+            LocaleSetupSheet(onDismiss = {
                 // Selection/Skip already stamped regionPickerSeen — the
                 // state change hides the sheet.
             })
+        }
+    }
+
+    // MARK: - Cruise-mode sheets (project ⑤ / cruise setup ⑥ / record ⑧)
+
+    if (isCruise) {
+        CruiseModeSheets(
+            state = cruise,
+            nav = nav,
+            camera = camera,
+            fallbackCentre = mapCenter,
+        )
+    }
+
+    // Crash-recovery resume prompt. Resume reuses the SAME enter-open-plot
+    // mechanism the cruise map uses (current project + active plot pointer +
+    // cruise mode), so it lands on that plot's active cruise/tally surface;
+    // Discard dismisses without deleting anything (the plot stays open).
+    recoveryPrompt?.let { candidates ->
+        CrashRecoveryDialog(
+            candidates = candidates,
+            onResume = {
+                val c = candidates.first()
+                env.settings.setCruiseProjectId(c.plot.projectId.toString())
+                env.settings.setCruisePlotId(c.plot.id.toString())
+                env.settings.setMapMode("cruise")
+                ForestixLogger.plotOpened(c.plot.id, c.plot.projectId)
+                recoveryPrompt = null
+            },
+            onDiscard = { recoveryPrompt = null },
+        )
+    }
+}
+
+// MARK: - Crash-recovery resume prompt ---------------------------------------
+
+/// Three-option resume prompt (mock: Resume / View / Discard). "View" is
+/// folded into the card — the top candidate's plot #, project, live-tree count
+/// and relative last-edited time are shown inline so the cruiser can decide
+/// before acting. Resume targets the most-recent candidate; when several open
+/// plots qualify the rest are summarised so nothing is hidden. Discard deletes
+/// nothing — the plot stays open and reachable from the cruise map.
+@Composable
+private fun CrashRecoveryDialog(
+    candidates: List<CrashRecoveryService.ResumeCandidate>,
+    onResume: () -> Unit,
+    onDiscard: () -> Unit,
+) {
+    val top = candidates.firstOrNull() ?: return
+    val edited = DateUtils.getRelativeTimeSpanString(
+        top.lastEditedAt,
+        System.currentTimeMillis(),
+        DateUtils.MINUTE_IN_MILLIS,
+    )
+    val treeWord = if (top.liveTreeCount == 1) "tree" else "trees"
+    AlertDialog(
+        onDismissRequest = onDiscard,
+        title = { Text("Resume plot ${top.plot.plotNumber}?") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(ForestixSpace.xs)) {
+                Text(
+                    "Plot ${top.plot.plotNumber} · ${top.projectName}\n" +
+                        "${top.liveTreeCount} $treeWord · edited $edited",
+                )
+                if (candidates.size > 1) {
+                    val moreWord = if (candidates.size - 1 == 1) "plot" else "plots"
+                    Text(
+                        "+ ${candidates.size - 1} more open $moreWord from the last 24 hours.",
+                        color = Forestix.colors.textSecondary,
+                        style = Forestix.type.caption,
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onResume) { Text("Resume") } },
+        dismissButton = { TextButton(onClick = onDiscard) { Text("Discard") } },
+    )
+}
+
+// MARK: - Measure-mode bottom region -----------------------------------------
+
+/// The v2 home's cluster ↔ peek swap, byte-identical, lifted into its own
+/// composable so the v3.1 mode-flip AnimatedContent can host it as the
+/// measure branch.
+@Composable
+private fun MeasureBottomContent(
+    selectedPin: TreePin?,
+    lastPin: TreePin?,
+    settings: SettingsSnapshot,
+    activity: Activity?,
+    plotNameFor: (TreePin) -> String?,
+    onToggleMode: () -> Unit,
+    onMeasure: () -> Unit,
+    onLog: () -> Unit,
+    onViewPhoto: (QuickMeasureEntry) -> Unit,
+    onEditEntry: (QuickMeasureEntry) -> Unit,
+    onMeasureAgain: (TreePin) -> Unit,
+) {
+    AnimatedContent(
+        targetState = selectedPin != null,
+        contentAlignment = Alignment.BottomCenter,
+        transitionSpec = {
+            val spec = tween<Float>(durationMillis = 180, easing = EaseOut)
+            val slide = tween<IntOffset>(durationMillis = 180, easing = EaseOut)
+            (slideInVertically(slide) { it } + fadeIn(spec)) togetherWith
+                (slideOutVertically(slide) { it } + fadeOut(spec))
+        },
+        label = "peekCluster",
+    ) { showPeek ->
+        val pin = if (showPeek) selectedPin ?: lastPin else null
+        if (pin == null) {
+            ActionCluster(
+                modifier = Modifier.padding(bottom = ForestixSpace.sm),
+                onToggleMode = onToggleMode,
+                onMeasure = onMeasure,
+                onLog = onLog,
+            )
+        } else {
+            PeekCard(
+                pin = pin,
+                unitSystem = settings.unitSystem,
+                activity = activity,
+                plotName = plotNameFor(pin),
+                modifier = Modifier
+                    .padding(horizontal = 12.dp)
+                    .padding(bottom = 20.dp),
+                onViewPhoto = onViewPhoto,
+                onEditEntry = onEditEntry,
+                onMeasureAgain = { onMeasureAgain(pin) },
+            )
         }
     }
 }
@@ -498,15 +810,15 @@ private fun buildTreePins(entries: List<QuickMeasureEntry>): List<TreePin> {
 
 // MARK: - Top chrome pieces ---------------------------------------------------
 
-/// Unified GPS chip — labelled coordinate block of the last known fix
-/// with a freshness dot: green < 5 s, yellow 5–60 s, red past 60 s or
-/// when no fix ever arrived (then the text is just "no fix"). Once the
-/// fix goes stale the age counts up live (1 s tick, minutes past 60 s).
-/// Three short rows (X lat / Y lon / Z alt — Korean surveying axis
-/// convention, per field feedback) keep the chip narrow so it can never
-/// collide with the round buttons beside it (iOS gpsChip 1:1).
+/// GPS chip — labelled coordinate block of the last known fix behind a
+/// freshness dot: green < 5 s, yellow 5–60 s, red past 60 s or when no
+/// fix ever arrived ("no fix"). Three short rows: X = latitude, Y =
+/// longitude, Z = altitude (5-decimal mono, field-requested axis
+/// convention), with a live age suffix on the Z row once stale. No
+/// bearing / accuracy — the coloured dot carries freshness.
+/// Internal: shared by both map modes' top chrome.
 @Composable
-private fun GpsChip(fix: CLLocationSnapshot?) {
+internal fun GpsChip(fix: CLLocationSnapshot?) {
     val colors = Forestix.colors
     val type = Forestix.type
     // This screen's live service, else the newest fix any screen captured.
@@ -608,18 +920,22 @@ private fun GpsCoordRow(label: String, value: String) {
 }
 
 /// Mock `.roundbtn`, sized to the 44 dp hit-target rule, with the shared
-/// map-chrome pressed feedback (iOS MapPressableStyle).
+/// map-chrome pressed feedback (iOS MapPressableStyle). `enabled = false`
+/// renders the 0.45-alpha disabled look and swallows taps.
+/// Internal: shared with the cruise-mode map's chrome (v3).
 @Composable
-private fun RoundChromeButton(
+internal fun RoundChromeButton(
     icon: ImageVector,
     contentDescription: String,
+    enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
     val colors = Forestix.colors
     Box(
         Modifier
             .size(44.dp)
-            .pressableNoRipple(onClick = onClick)
+            .alpha(if (enabled) 1f else 0.45f)
+            .pressableNoRipple(enabled = enabled, onClick = onClick)
             .clip(CircleShape)
             .background(colors.surfaceRaised)
             .border(1.dp, colors.divider, CircleShape),
@@ -631,10 +947,31 @@ private fun RoundChromeButton(
 
 // MARK: - Bottom action cluster (mock `.actioncluster`) -----------------------
 
+/// Fixed slot geometry shared by BOTH mode clusters (v3.1). Every circle's
+/// frame derives ONLY from these constants — captions and pills render as
+/// NON-MEASURING decoration (fixed-width slots with centre-overflow, a
+/// reserved tally zone, a halo painted outside its slot) — so the MEASURE
+/// and CRUISE clusters measure pixel-identically and the mode flip
+/// crossfades in place instead of re-centring the row (iOS parity).
+internal object ClusterSlots {
+    /// Side-circle Ø = its slot width.
+    val side = 54.dp
+    /// (+) circle Ø = its slot width in BOTH modes (the cruise scoped halo
+    /// DRAWS outside this slot rather than enlarging it — the Android twin
+    /// of the iOS negative-inset overlay).
+    val capture = 74.dp
+    /// Gap between the three slots.
+    val gap = 26.dp
+    /// Reserved zone above the (+) where the cruise tally pill floats —
+    /// same height when empty (measure mode / no active plot) so the
+    /// pill's arrival can never resize or shift the cluster.
+    val tallyZone = 48.dp
+}
+
 @Composable
 private fun ActionCluster(
     modifier: Modifier = Modifier,
-    onCruise: () -> Unit,
+    onToggleMode: () -> Unit,
     onMeasure: () -> Unit,
     onLog: () -> Unit,
 ) {
@@ -642,40 +979,107 @@ private fun ActionCluster(
     Row(
         modifier,
         verticalAlignment = Alignment.Bottom,
-        horizontalArrangement = Arrangement.spacedBy(26.dp),
+        horizontalArrangement = Arrangement.spacedBy(ClusterSlots.gap),
     ) {
-        SideCircleButton("Cruise", Icons.Filled.Map, onCruise)
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Box(
-                Modifier
-                    .size(74.dp)
-                    .pressableNoRipple(onClick = onMeasure)
-                    .softDropShadow(Color.Black.copy(alpha = 0.28f), 10.dp, 6.dp)
-                    .clip(CircleShape)
-                    .background(colors.primary)
-                    .border(4.dp, colors.surface, CircleShape),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    Icons.Filled.Add,
-                    contentDescription = "New measurement",
-                    tint = MaterialTheme.colorScheme.onPrimary,
-                    modifier = Modifier.size(30.dp),
-                )
-            }
-            ClusterLabel("Measure", gap = 6.dp)
-        }
-        SideCircleButton("Log", Icons.AutoMirrored.Filled.List, onLog)
+        // v3.1: the left circle is the MODE TOGGLE showing the CURRENT mode
+        // — tree icon + "MEASURE" here; plot-centre target + "CRUISE" in
+        // cruise mode (CruiseModeContent's cluster). Tap flips the map in
+        // place.
+        SideCircleButton("Measure", Icons.Filled.Park, onClick = onToggleMode)
+        CaptureColumn(
+            caption = "Measure",
+            contentDescription = "New measurement",
+            fill = colors.primary,
+            ink = MaterialTheme.colorScheme.onPrimary,
+            onClick = onMeasure,
+        )
+        SideCircleButton("Log", Icons.AutoMirrored.Filled.List, onClick = onLog)
     }
 }
 
+/// The centre capture column, geometry-invariant across modes: reserved
+/// tally zone (fixed height; the cruise pill renders inside it as
+/// unbounded-width overflow), the 74 dp (+) slot (the accent-scoped halo
+/// paints OUTSIDE the slot via drawBehind, mock `.capture.scoped`), and
+/// the caption pill centre-overflowing the slot width. Nothing
+/// mode-dependent is ever measured, so the (+) occupies identical screen
+/// pixels in measure and cruise mode by construction.
+/// Internal: the cruise-mode cluster reuses it for its exact positions.
 @Composable
-private fun SideCircleButton(label: String, icon: ImageVector, onClick: () -> Unit) {
+internal fun CaptureColumn(
+    caption: String,
+    contentDescription: String,
+    fill: Color,
+    ink: Color,
+    haloed: Boolean = false,
+    tallyPill: (@Composable () -> Unit)? = null,
+    onClick: () -> Unit,
+) {
     val colors = Forestix.colors
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+    val accent = colors.accent
+    Column(
+        Modifier.width(ClusterSlots.capture),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Box(
+            Modifier.height(ClusterSlots.tallyZone).fillMaxWidth(),
+            contentAlignment = Alignment.BottomCenter,
+        ) {
+            if (tallyPill != null) tallyPill()
+        }
         Box(
             Modifier
-                .size(54.dp)
+                .size(ClusterSlots.capture)
+                // Accent-scoped outline while a plot is active — same ring
+                // as the retired 82 dp wrapper box (stroke centreline at
+                // slot radius + 3.25 dp), now layout-neutral.
+                .drawBehind {
+                    if (haloed) {
+                        drawCircle(
+                            color = accent,
+                            radius = size.minDimension / 2f + 3.25.dp.toPx(),
+                            style = Stroke(width = 1.5.dp.toPx()),
+                        )
+                    }
+                }
+                .pressableNoRipple(onClick = onClick)
+                .softDropShadow(Color.Black.copy(alpha = 0.28f), 10.dp, 6.dp)
+                .clip(CircleShape)
+                .background(fill)
+                .border(4.dp, colors.surface, CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Filled.Add,
+                contentDescription = contentDescription,
+                tint = ink,
+                modifier = Modifier.size(30.dp),
+            )
+        }
+        ClusterLabel(caption, gap = 6.dp)
+    }
+}
+
+/// 54 dp side circle + caption pill. `tint` overrides the glyph ink — the
+/// cruise cluster tints its mode-toggle ring in the cruise accent (v3.1).
+/// Internal: the cruise-mode cluster reuses it for its exact positions.
+@Composable
+internal fun SideCircleButton(
+    label: String,
+    icon: ImageVector,
+    tint: Color? = null,
+    onClick: () -> Unit,
+) {
+    val colors = Forestix.colors
+    Column(
+        // Fixed slot: the caption pill centre-overflows this width, so
+        // "MEASURE" vs "CRUISE" can never re-measure the cluster.
+        Modifier.width(ClusterSlots.side),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Box(
+            Modifier
+                .size(ClusterSlots.side)
                 .pressableNoRipple(onClick = onClick)
                 .softDropShadow(Color.Black.copy(alpha = 0.18f), 6.dp, 3.dp)
                 .clip(CircleShape)
@@ -683,7 +1087,12 @@ private fun SideCircleButton(label: String, icon: ImageVector, onClick: () -> Un
                 .border(1.dp, colors.divider, CircleShape),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(icon, contentDescription = label, tint = colors.textPrimary, modifier = Modifier.size(22.dp))
+            Icon(
+                icon,
+                contentDescription = label,
+                tint = tint ?: colors.textPrimary,
+                modifier = Modifier.size(22.dp),
+            )
         }
         ClusterLabel(label, gap = 5.dp)
     }
@@ -693,15 +1102,23 @@ private fun SideCircleButton(label: String, icon: ImageVector, onClick: () -> Un
 /// each label sits in a small dark-glass pill. Deliberately hardcoded —
 /// the backdrop is a satellite photo in BOTH themes. Gap above: 6 under
 /// the capture button, 5 under the side circles (iOS spacing).
+/// Internal: the cruise map's morphing (+) label reuses it (v3).
 @Composable
-private fun ClusterLabel(label: String, gap: Dp) {
+internal fun ClusterLabel(label: String, gap: Dp) {
     Text(
         label.uppercase(),
         style = Forestix.type.dataSmall.copy(
             fontSize = 10.5.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.6.sp),
         color = Color(0xFFF2F5F3),
+        maxLines = 1,
+        softWrap = false,
         modifier = Modifier
             .padding(top = gap)
+            // Centre-overflow: the pill measures unbounded, reports the
+            // incoming fixed-slot width, and spills symmetrically — so
+            // caption text NEVER affects the cluster's geometry (v3.1
+            // mode-invariance).
+            .wrapContentWidth(unbounded = true)
             .clip(RoundedCornerShape(5.dp))
             .background(Color(0xA606090A))
             .padding(horizontal = 8.dp, vertical = 3.dp),
@@ -718,6 +1135,7 @@ private fun PeekCard(
     plotName: String?,
     modifier: Modifier = Modifier,
     onViewPhoto: (QuickMeasureEntry) -> Unit,
+    onEditEntry: (QuickMeasureEntry) -> Unit,
     onMeasureAgain: () -> Unit,
 ) {
     val colors = Forestix.colors
@@ -726,7 +1144,8 @@ private fun PeekCard(
     val newest = pin.entries.first()
     val species = pin.entries.firstNotNullOfOrNull { it.speciesCode }
     val title = (pin.treeNumber?.let { "Tree $it" } ?: rowLabel(newest)) +
-        (species?.let { " · ${it.uppercase(Locale.US)}" } ?: "")
+        (species?.takeIf { it.isNotBlank() }
+            ?.let { " · ${RegionalSpecies.nameForCode(it)}" } ?: "")
     // Date, plus the plot name when the reading isn't on the default plot
     // (iOS peekSubtitle: "7 Jul · 09:41 · Plot 2").
     val subtitle = listOfNotNull(dateLine(newest.createdAt), plotName).joinToString(" · ")
@@ -770,7 +1189,12 @@ private fun PeekCard(
         }
         Spacer(Modifier.size(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            PhotoThumb(photoOwner?.photoPath, photoCount, activity)
+            // Tapping the thumbnail opens the existing full-screen viewer
+            // (map-peek spec item 2 — the retired "View photo" button's job).
+            PhotoThumb(
+                photoOwner?.photoPath, photoCount, activity,
+                onClick = photoOwner?.let { owner -> { onViewPhoto(owner) } },
+            )
             Column(Modifier.weight(1f)) {
                 val rows = latestPerKind(pin.entries)
                 rows.forEachIndexed { i, entry ->
@@ -781,13 +1205,13 @@ private fun PeekCard(
         }
         Spacer(Modifier.size(12.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs)) {
-            // "View photo" is ALWAYS rendered — disabled and dimmed when
-            // the tree has no photo (iOS peek card).
+            // "Edit this tree" replaces the redundant "View photo" (the thumb
+            // now opens the viewer): a compact edit sheet on the newest
+            // reading — value / species / note + destructive Delete.
             PeekActionButton(
-                "View photo", primary = false,
-                enabled = photoOwner != null,
+                "Edit this tree", primary = false,
                 modifier = Modifier.weight(1f),
-            ) { photoOwner?.let(onViewPhoto) }
+            ) { onEditEntry(newest) }
             PeekActionButton(
                 if (pin.treeNumber != null) "Measure this tree" else "New measurement",
                 primary = true, modifier = Modifier.weight(1f),
@@ -823,26 +1247,23 @@ private fun MeasureRow(entry: QuickMeasureEntry, unitSystem: UnitSystem) {
             modifier = Modifier.width(52.dp),
         )
         Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+            // ±σ intentionally dropped from the peek metric row (map-peek
+            // spec item 1) — the value stands alone; sigma still ships to
+            // storage / CSV / FieldLog and the full-screen photo viewer.
             Text(
                 valueText(entry, unitSystem),
                 style = type.dataSmall.copy(fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold),
                 color = colors.textPrimary,
             )
-            sigmaText(entry, unitSystem)?.let {
-                Text(
-                    " $it",
-                    style = type.dataSmall.copy(fontSize = 11.sp),
-                    color = colors.textTertiary,
-                )
-            }
         }
         TierChipSoft(entry.confidenceRaw)
     }
 }
 
 /// Mock `.chip` — soft tier-coloured background, dot + uppercase label.
+/// Internal: the cruise tree/plot peeks reuse it (v3).
 @Composable
-private fun TierChipSoft(rawTier: String) {
+internal fun TierChipSoft(rawTier: String) {
     val d = confidenceDescriptor(rawTier)
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -864,8 +1285,14 @@ private fun TierChipSoft(rawTier: String) {
 
 /// 96 dp thumbnail: the entry's auto-captured accept snapshot, a grey
 /// placeholder when the group has none, and a ×K overlay for extras.
+/// Internal: the cruise tree peek reuses it (v3).
 @Composable
-private fun PhotoThumb(photoName: String?, photoCount: Int, activity: Activity?) {
+internal fun PhotoThumb(
+    photoName: String?,
+    photoCount: Int,
+    activity: Activity?,
+    onClick: (() -> Unit)? = null,
+) {
     val colors = Forestix.colors
     val thumb by produceState<Bitmap?>(initialValue = null, photoName, activity) {
         value = withContext(Dispatchers.IO) {
@@ -877,6 +1304,14 @@ private fun PhotoThumb(photoName: String?, photoCount: Int, activity: Activity?)
         Modifier
             .size(96.dp)
             .clip(ForestixRadius.card)
+            // Tappable only when it actually owns a photo to open.
+            .then(
+                if (onClick != null && photoName != null) {
+                    Modifier.clickableNoRipple(onClick)
+                } else {
+                    Modifier
+                }
+            )
             .background(colors.surfaceRaised)
             .border(1.dp, colors.divider, ForestixRadius.card),
     ) {
@@ -912,8 +1347,9 @@ private fun PhotoThumb(photoName: String?, photoCount: Int, activity: Activity?)
     }
 }
 
+/// Internal: the cruise peeks reuse the same action button (v3).
 @Composable
-private fun PeekActionButton(
+internal fun PeekActionButton(
     label: String,
     primary: Boolean,
     modifier: Modifier = Modifier,
@@ -1169,7 +1605,7 @@ private fun PhotoViewerDialog(
                         listOfNotNull(
                             entry.treeNumber?.let { "T$it" },
                             entry.speciesCode?.takeIf { it.isNotEmpty() }
-                                ?.uppercase(Locale.US),
+                                ?.let { RegionalSpecies.nameForCode(it) },
                         ).joinToString(" · ").ifEmpty { "—" },
                     )
                     MetaCell("METHOD", entry.method)
@@ -1215,6 +1651,204 @@ private fun MetaCell(label: String, value: String) {
             modifier = Modifier.padding(top = 1.dp),
             maxLines = 1,
         )
+    }
+}
+
+// MARK: - Quick-entry edit sheet (map-peek spec item 2) ------------------------
+
+/// Compact editor raised from the quick peek's "Edit this tree": the measured
+/// value (native cm/m), species code, and note for ONE reading, plus a
+/// destructive Delete behind an AlertDialog confirm (removes the row + its
+/// photo via the history store). Measurement math is untouched — only the
+/// stored value and labels change.
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun QuickEntryEditSheet(
+    entry: QuickMeasureEntry,
+    onDismiss: () -> Unit,
+    onSave: (QuickMeasureEntry) -> Unit,
+    onDelete: () -> Unit,
+) {
+    val colors = Forestix.colors
+    val type = Forestix.type
+    var valueField by remember(entry.id) { mutableStateOf(editFormatNumber(entry.value)) }
+    var species by remember(entry.id) { mutableStateOf(entry.speciesCode ?: "") }
+    var note by remember(entry.id) { mutableStateOf(entry.note ?: "") }
+    var confirmDelete by remember(entry.id) { mutableStateOf(false) }
+
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = colors.surface) {
+        Column(
+            Modifier
+                .padding(horizontal = ForestixSpace.md)
+                .padding(bottom = ForestixSpace.xl),
+            verticalArrangement = Arrangement.spacedBy(ForestixSpace.sm),
+        ) {
+            Text(
+                entry.treeNumber?.let { "EDIT · TREE $it" }
+                    ?: "EDIT · ${rowLabel(entry).uppercase(Locale.US)}",
+                style = type.sectionHead.copy(
+                    fontWeight = FontWeight.ExtraBold, letterSpacing = 1.0.sp),
+                color = colors.textTertiary,
+            )
+            // Measured value — edited in native units (cm for DBH, m else),
+            // matching storage; the display unit system doesn't apply here.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = valueField,
+                    onValueChange = { valueField = it },
+                    label = { Text(rowLabel(entry)) },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(entry.valueUnit, style = type.body, color = colors.textSecondary)
+            }
+            OutlinedTextField(
+                value = species,
+                onValueChange = { species = it },
+                label = { Text("Species code") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(
+                    capitalization = KeyboardCapitalization.Characters),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            // Read-only resolution of the typed code → common name, so the
+            // cruiser can confirm what "DF" maps to. Hidden for blank or
+            // free-typed codes that don't resolve to a preset.
+            val resolvedSpecies = RegionalSpecies.nameForCode(species)
+            if (species.isNotBlank() && !resolvedSpecies.equals(species.trim(), ignoreCase = true)) {
+                Text(
+                    resolvedSpecies,
+                    style = type.body.copy(fontSize = 13.sp),
+                    color = colors.textSecondary,
+                )
+            }
+            OutlinedTextField(
+                value = note,
+                onValueChange = { note = it },
+                label = { Text("Note") },
+                minLines = 2,
+                maxLines = 4,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            PeekActionButton("Save changes", primary = true, modifier = Modifier.fillMaxWidth()) {
+                onSave(
+                    entry.copy(
+                        value = valueField.toDoubleOrNull() ?: entry.value,
+                        speciesCode = species.trim().ifEmpty { null },
+                        note = note.trim().ifEmpty { null },
+                    ),
+                )
+            }
+            // Destructive Delete — red-outlined, confirmed before it fires.
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 44.dp)
+                    .pressableNoRipple(onClick = { confirmDelete = true })
+                    .clip(ForestixRadius.control)
+                    .border(1.dp, colors.confidenceBad.copy(alpha = 0.5f), ForestixRadius.control),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "Delete",
+                    style = type.bodyBold.copy(fontSize = 14.sp),
+                    color = colors.confidenceBad,
+                )
+            }
+        }
+    }
+
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Delete this reading?") },
+            text = {
+                Text("This removes the measurement and its photo. This cannot be undone.")
+            },
+            confirmButton = {
+                TextButton(onClick = { confirmDelete = false; onDelete() }) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDelete = false }) { Text("Cancel") }
+            },
+        )
+    }
+}
+
+private fun editFormatNumber(v: Double): String =
+    if (v == v.toLong().toDouble()) {
+        v.toLong().toString()
+    } else {
+        String.format(Locale.US, "%.2f", v).trimEnd('0').trimEnd('.')
+    }
+
+// MARK: - Full-screen image viewer --------------------------------------------
+
+/// Bare full-screen photo viewer (image + close, no measurement meta) — the
+/// cruise tree peek's tappable thumbnail opens this. Reuses the quick-measure
+/// photo store + decoder; deliberately dark in both app appearances.
+@Composable
+internal fun FullScreenImageViewer(
+    photoName: String,
+    activity: Activity?,
+    onDismiss: () -> Unit,
+) {
+    val type = Forestix.type
+    val ink = Color(0xFFF2F5F3)
+    var loadFailed by remember(photoName) { mutableStateOf(false) }
+    val bitmap by produceState<Bitmap?>(initialValue = null, photoName, activity) {
+        val decoded = withContext(Dispatchers.IO) {
+            if (activity == null) null
+            else decodeSampled(MeasurePhotoStore.file(activity, photoName), targetPx = 1600)
+        }
+        value = decoded
+        if (decoded == null) loadFailed = true
+    }
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Box(Modifier.fillMaxSize().background(Color(0xFF0A0D0B))) {
+            val image = bitmap
+            when {
+                image != null -> Image(
+                    image.asImageBitmap(),
+                    contentDescription = "Measurement photo",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize(),
+                )
+                !loadFailed -> CircularProgressIndicator(
+                    color = ink,
+                    modifier = Modifier.align(Alignment.Center),
+                )
+                else -> Text(
+                    "Photo unavailable",
+                    style = type.body,
+                    color = Color(0xFF79837D),
+                    modifier = Modifier.align(Alignment.Center),
+                )
+            }
+            Box(
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .statusBarsPadding()
+                    .padding(end = 14.dp)
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xB306090A))
+                    .clickableNoRipple(onDismiss),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Filled.Close,
+                    contentDescription = "Close photo",
+                    tint = ink,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+        }
     }
 }
 

@@ -1,6 +1,6 @@
 // Field reference library — replaces the laminated pocket card a
-// cruiser carries in their vest. SilvaCruise's killer "vest in your
-// pocket" content packaged as in-app reference cards. Pure SwiftUI,
+// cruiser carries in their vest. A "vest in your
+// pocket" set of content packaged as in-app reference cards. Pure SwiftUI,
 // no sensor work.
 //
 // Sections:
@@ -12,8 +12,8 @@
 //     metric↔imperial)
 //
 // Each entry uses `FormulaCard`: bold title, monospace formula in a
-// tinted code-block, 1-line italic caption. Same anatomy SilvaCruise
-// uses, mapped to our DesignSystem tokens.
+// tinted code-block, 1-line italic caption. A consistent card
+// anatomy, mapped to our DesignSystem tokens.
 
 import SwiftUI
 

@@ -53,6 +53,16 @@ public enum ForestixPalette {
     public static let accent         = dyn(rgb(0.710, 0.463, 0.078),   // #B57614
                                            rgb(1.000, 0.706, 0.329))   // #FFB454
 
+    /// CRUISE-mode accent — the mode's identity colour on the map home:
+    /// the cruise (+) capture button and the mode toggle's icon while
+    /// cruising. Deliberately outside the signal family so mode never
+    /// reads as a measurement tier; plot STATUS colours are unchanged
+    /// (accent-amber active / ok-green done / dashed planned).
+    public static let cruiseAccent    = dyn(rgb(0.184, 0.427, 0.698),   // #2F6DB2
+                                            rgb(0.416, 0.659, 0.871))   // #6AA8DE
+    /// Ink ON cruiseAccent surfaces — white in both appearances (locked).
+    public static let cruiseAccentInk = Color.white                     // #FFFFFF
+
     public static let confidenceOk   = dyn(rgb(0.114, 0.478, 0.263),   // #1D7A43
                                            rgb(0.333, 0.816, 0.478))   // #55D07A
     public static let confidenceWarn = dyn(rgb(0.604, 0.392, 0.078),   // #9A6414
@@ -82,6 +92,8 @@ public enum ForestixPalette {
     public static let primaryInk     = Color(red: 0.024, green: 0.075, blue: 0.039)
     public static let primaryMuted   = Color(red: 0.184, green: 0.643, blue: 0.357).opacity(0.14)
     public static let accent         = Color(red: 0.710, green: 0.463, blue: 0.078)
+    public static let cruiseAccent    = Color(red: 0.184, green: 0.427, blue: 0.698)
+    public static let cruiseAccentInk = Color.white
     public static let confidenceOk   = Color(red: 0.114, green: 0.478, blue: 0.263)
     public static let confidenceWarn = Color(red: 0.604, green: 0.392, blue: 0.078)
     public static let confidenceBad  = Color(red: 0.690, green: 0.227, blue: 0.180)
@@ -191,6 +203,37 @@ public struct ForestixProminentButtonStyle: ButtonStyle {
 
 public extension ButtonStyle where Self == ForestixProminentButtonStyle {
     static var forestixProminent: ForestixProminentButtonStyle { ForestixProminentButtonStyle() }
+}
+
+// MARK: - AR secondary button style (solid white)
+
+/// Secondary actions on the AR measurement screens (Retake / Details /
+/// Reset / Cancel / Manual). The outlined `.bordered` style disappears
+/// over a bright sky in the camera feed, so these render as SOLID WHITE
+/// with dark primary ink — mirroring the white capture "+" button — and
+/// stay legible against any background. Disabled dims to 0.45 opacity.
+/// Same geometry as `ForestixProminentButtonStyle` so mixed rows align.
+public struct ForestixARSecondaryButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+    public init() {}
+    public func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(ForestixType.bodyBold)
+            .foregroundStyle(ForestixPalette.primaryInk)
+            .frame(maxWidth: .infinity, minHeight: 30)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: ForestixRadius.control, style: .continuous)
+                    .fill(Color.white.opacity(configuration.isPressed ? 0.78 : 1))
+            )
+            .opacity(isEnabled ? 1 : 0.45)
+            .animation(.easeOut(duration: 0.15), value: configuration.isPressed)
+    }
+}
+
+public extension ButtonStyle where Self == ForestixARSecondaryButtonStyle {
+    static var forestixARSecondary: ForestixARSecondaryButtonStyle { ForestixARSecondaryButtonStyle() }
 }
 
 // MARK: - Confidence tier helpers

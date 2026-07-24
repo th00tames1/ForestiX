@@ -1,5 +1,10 @@
 // Port of iOS Persistence/Repositories/PlannedPlotRepository.swift.
 // Spec §8 + REQ-PRJ-004, REQ-NAV-001 (visited vs remaining).
+//
+// `listUnvisited` means "not visited AND not skipped" — the nav-eligible
+// set. A skipped plot (inaccessible: cliff/water/private land) is a
+// documented decision, so it drops out of nearest-unvisited navigation
+// exactly like a visited one, persisted through the same update(p) upsert.
 
 package com.hcjeong.forestix.data.cruise
 

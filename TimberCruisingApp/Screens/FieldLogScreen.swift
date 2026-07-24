@@ -92,7 +92,8 @@ public struct FieldLogScreen: View {
                             plot: plot,
                             entries: plotEntries,
                             unitSystem: settings.unitSystem,
-                            logRule: settings.logRule)
+                            logRule: settings.logRule,
+                            areaUnit: settings.unitSystem.areaUnit)
                             .listRowInsets(EdgeInsets(
                                 top: ForestixSpace.sm,
                                 leading: ForestixSpace.md,
@@ -181,7 +182,7 @@ public struct FieldLogScreen: View {
         HStack(spacing: ForestixSpace.xs) {
             Image(systemName: "exclamationmark.triangle")
                 .foregroundStyle(ForestixPalette.confidenceWarn)
-            Text("Log nearing capacity — export soon to archive older readings.")
+            Text("Log nearly full. Export soon to free space.")
                 .font(ForestixType.caption)
                 .foregroundStyle(ForestixPalette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)

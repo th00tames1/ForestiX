@@ -27,8 +27,12 @@ public enum DeviceCapabilities {
     /// and later; iPads with the LiDAR scanner. Everything else falls
     /// back to **manual-only** mode — DBH via caliper, height via tape.
     public static var hasLiDAR: Bool {
-        #if canImport(ARKit)
-        if #available(iOS 13.4, macOS 10.15, *) {
+        // ARWorldTrackingConfiguration is iOS-only — `canImport(ARKit)` is
+        // also true on the macOS `swift test` host (the module exists) but
+        // the class does not, so gate on `os(iOS)` to keep the suite building
+        // on macOS while leaving device/simulator behaviour unchanged.
+        #if os(iOS)
+        if #available(iOS 13.4, *) {
             return ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
         }
         return false

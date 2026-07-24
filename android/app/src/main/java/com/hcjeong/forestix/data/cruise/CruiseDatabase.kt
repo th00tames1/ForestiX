@@ -16,6 +16,8 @@ package com.hcjeong.forestix.data.cruise
 import androidx.room.Database
 import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 
 /// Port of iOS `CoreDataError` (CoreDataStack.swift). The model-loading cases
 /// have no Room analogue; the two that survive are the ones repositories and
@@ -40,7 +42,7 @@ sealed class CruiseDataError(override val message: String) : Exception(message) 
         VolumeEquationEntity::class,
         HeightDiameterFitEntity::class,
     ],
-    version = 1,
+    version = 3,
     exportSchema = false,
 )
 @TypeConverters(CruiseConverters::class)
@@ -59,5 +61,23 @@ abstract class CruiseDatabase : RoomDatabase() {
         /// Database filename — the Room analogue of iOS
         /// `CoreDataStack.defaultStoreURL()`'s "TimberCruising.sqlite".
         const val NAME = "timber-cruising.db"
+
+        /// v1 → v2: cruise-mode map pins (v3 redesign) — trees carry the
+        /// GPS fix captured at Accept. Nullable REALs, no backfill.
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE TreeEntity ADD COLUMN latitude REAL")
+                db.execSQL("ALTER TABLE TreeEntity ADD COLUMN longitude REAL")
+            }
+        }
+
+        /// v2 → v3: PlannedPlot gains `skipped` (inaccessible plots the
+        /// cruiser can't reach). NOT NULL DEFAULT 0 — existing rows are
+        /// pending, not skipped.
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE PlannedPlotEntity ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0")
+            }
+        }
     }
 }

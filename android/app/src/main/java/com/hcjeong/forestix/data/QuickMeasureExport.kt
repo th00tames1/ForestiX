@@ -40,6 +40,7 @@ object QuickMeasureExport {
             "species", "position", "damage", "note",
             "confidence", "method",
             "latitude", "longitude", "photo",
+            "capture_mode",
         )
         val sb = StringBuilder()
         sb.append(headers.joinToString(",") { csv(it) }).append("\r\n")
@@ -69,6 +70,7 @@ object QuickMeasureExport {
                 e.latitude?.let { String.format(java.util.Locale.US, "%.6f", it) } ?: "",
                 e.longitude?.let { String.format(java.util.Locale.US, "%.6f", it) } ?: "",
                 e.photoPath ?: "",
+                e.captureMode ?: "",
             ).joinToString(",") { csv(it) }
             sb.append(row).append("\r\n")
         }
@@ -115,7 +117,7 @@ object QuickMeasureExport {
         }
 
         // -- Stems.csv (per DBH) --
-        val stems = StringBuilder("id,plot_id,tree_number,timestamp,dbh_cm,sigma_mm,position,confidence,method\r\n")
+        val stems = StringBuilder("id,plot_id,tree_number,timestamp,dbh_cm,sigma_mm,position,confidence,method,capture_mode\r\n")
         for (e in entries.filter { it.kind == MeasureKind.DBH }) {
             stems.append(
                 listOf(
@@ -123,6 +125,7 @@ object QuickMeasureExport {
                     e.treeNumber?.toString() ?: "", isoStamp(e.createdAt),
                     fmt(e.value), e.sigma?.let { fmt(it) } ?: "",
                     e.position?.raw ?: "", e.confidenceRaw, e.method,
+                    e.captureMode ?: "",
                 ).joinToString(",") { csv(it) }
             ).append("\r\n")
         }

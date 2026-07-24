@@ -40,6 +40,10 @@ public final class PlotSummaryViewModel: ObservableObject {
     @Published public private(set) var closedAt: Date? = nil
     @Published public private(set) var isLoading: Bool = false
     @Published public private(set) var isClosing: Bool = false
+    @Published public private(set) var isDeleting: Bool = false
+    /// Flips true once the plot + its trees are hard-removed — the view
+    /// dismisses back to the map on this.
+    @Published public private(set) var isDeleted: Bool = false
     @Published public private(set) var errorMessage: String? = nil
 
     public init(
@@ -74,8 +78,10 @@ public final class PlotSummaryViewModel: ObservableObject {
                 uniqueKeysWithValues: try speciesRepo.list().map { ($0.code, $0) })
             validation = PlotValidation.validatePlotForClose(
                 plot: plot, trees: trees, speciesByCode: speciesByCode)
-            recomputeStats()
+            // Fits BEFORE stats so the first computation already imputes
+            // (it previously ran against last refresh's fits).
             loadProjectHDFits()
+            recomputeStats()
             errorMessage = nil
         } catch {
             errorMessage = "Load failed: \(error.localizedDescription)"
@@ -101,13 +107,56 @@ public final class PlotSummaryViewModel: ObservableObject {
             // Non-fatal: fall back to an empty map; live trees still aggregate
             // TPA/BA/QMD, just not volume.
         }
+        // POOLED H–D fallback: this plot's pairs (≥3) first, project-
+        // wide pooled pairs as the fallback — the persisted §7.4
+        // per-species fits keep precedence, the pooled fit fills the
+        // species they don't cover yet.
+        var effectiveFits = hdFitsByProject
+        if let pooled = pooledHDFit() {
+            for code in Set(trees.map(\.speciesCode))
+            where effectiveFits[code] == nil {
+                effectiveFits[code] = pooled
+            }
+        }
         stats = PlotStatsCalculator.compute(
             plot: plot,
             cruiseDesign: design,
             trees: trees,
             species: speciesByCode,
             volumeEquations: volEquations,
-            hdFits: hdFitsByProject)
+            hdFits: effectiveFits)
+    }
+
+    /// Fit-eligible (DBH, height) pairs — the engine's cleaning rule.
+    private static func hdPairs(_ trees: [Tree]) -> [(dbhCm: Float, heightM: Float)] {
+        trees.compactMap { tree in
+            guard tree.deletedAt == nil, tree.dbhCm > 0,
+                  let h = tree.heightM, h > 1.3 else { return nil }
+            return (dbhCm: tree.dbhCm, heightM: h)
+        }
+    }
+
+    /// Pooled Näslund fit via the existing `HDModel` engine, no species
+    /// dimension: plot pairs at ≥3, else all project plots' pairs at ≥3.
+    private func pooledHDFit() -> HDModel.Fit? {
+        let plotPairs = Self.hdPairs(trees)
+        if plotPairs.count >= 3,
+           let fit = try? HDModel.fit(observations: plotPairs, minN: 3) {
+            return fit
+        }
+        guard let allPlots = try? plotRepo.listByProject(project.id) else {
+            return nil
+        }
+        var pooled: [(dbhCm: Float, heightM: Float)] = []
+        for p in allPlots {
+            let plotTrees = (try? treeRepo.listByPlot(p.id, includeDeleted: false)) ?? []
+            pooled.append(contentsOf: Self.hdPairs(plotTrees))
+        }
+        if pooled.count >= 3,
+           let fit = try? HDModel.fit(observations: pooled, minN: 3) {
+            return fit
+        }
+        return nil
     }
 
     private func loadProjectHDFits() {
@@ -166,6 +215,51 @@ public final class PlotSummaryViewModel: ObservableObject {
             errorMessage = nil
         } catch {
             errorMessage = "Close failed: \(error.localizedDescription). Your trees are saved; try again when you have signal."
+        }
+    }
+
+    // MARK: - Reopen
+
+    /// Reopen a closed plot: clear closedAt/closedBy and persist so the cruiser
+    /// can add or edit trees again (they closed early, or spotted a missed
+    /// tree). The H–D fits written at close time are left in place — re-closing
+    /// re-runs the rollup. This is the affordance the close-plot dialog already
+    /// promises ("you can reopen from Details").
+    public func reopen() {
+        guard closedAt != nil, !isClosing else { return }
+        var p = plot
+        p.closedAt = nil
+        p.closedBy = nil
+        do {
+            plot = try plotRepo.update(p)
+            closedAt = plot.closedAt
+            errorMessage = nil
+        } catch {
+            errorMessage = "Reopen failed: \(error.localizedDescription). Try again when you have signal."
+        }
+    }
+
+    // MARK: - Delete
+
+    /// Hard-remove this plot AND its trees (summary "Delete plot", mirrors
+    /// the map peek). Cascades every tree row (including soft-deleted, so
+    /// no orphans) and its photo, then the plot row itself. On success
+    /// `isDeleted` flips so the view can dismiss back to the map.
+    public func delete() {
+        guard !isClosing, !isDeleting else { return }
+        isDeleting = true
+        defer { isDeleting = false }
+        do {
+            let all = try treeRepo.listByPlot(plot.id, includeDeleted: true)
+            for tree in all {
+                if let photo = tree.photoPath { MeasurePhotoStore.delete(photo) }
+                try treeRepo.hardDelete(id: tree.id)
+            }
+            try plotRepo.delete(id: plot.id)
+            isDeleted = true
+            errorMessage = nil
+        } catch {
+            errorMessage = "Delete failed: \(error.localizedDescription)"
         }
     }
 

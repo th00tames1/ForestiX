@@ -59,6 +59,7 @@ import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.ar.ArCameraView
 import com.hcjeong.forestix.ar.ArController
+import com.hcjeong.forestix.ar.ArSessionHub
 import com.hcjeong.forestix.data.cruise.Project
 import com.hcjeong.forestix.sensors.ArDepthFrame
 import com.hcjeong.forestix.sensors.CylinderCalibration
@@ -292,7 +293,8 @@ fun CalibrationScreen(nav: NavController, projectId: String? = null) {
         }
     }
 
-    val controller = remember { ArController() }
+    // Shared app-scoped AR session (one ARCore world across the AR screens).
+    val controller = ArSessionHub.controller
     val viewModel = remember { CalibrationViewModel(session = controller) }
     var selectedProcedure by remember { mutableStateOf(CalibrationViewModel.Procedure.WALL) }
     var appliedToast by remember { mutableStateOf<String?>(null) }
@@ -417,10 +419,8 @@ fun CalibrationScreen(nav: NavController, projectId: String? = null) {
                     Text("Use sensible defaults (skip scan)")
                 }
                 Text(
-                    "Wall + cylinder results write to this project's depth noise, LiDAR bias, " +
-                        "and DBH α/β. The defaults shortcut applies the spec §7.10 identity " +
-                        "values without scanning — useful for getting into the field on a " +
-                        "freshly installed phone.",
+                    "Applies your wall and cylinder scans to this project. No scans yet? " +
+                        "Use defaults to start measuring now and calibrate later.",
                     style = type.caption,
                     color = colors.textSecondary,
                 )

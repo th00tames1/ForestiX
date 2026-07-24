@@ -3,8 +3,8 @@
 // Spec §6.2 says the PNW starter set ships in
 // `Resources/SpeciesDefaults.json` and `Resources/VolumeEquationsPNW.json`,
 // but the original Phase 0 build never wired them into Core Data, so a
-// real cruiser opening the app for the first time would land on
-// CruiseDesignScreen with an empty species picker.
+// real cruiser opening the app for the first time would face an
+// empty species picker.
 //
 // This file owns the JSON → typed-model decode. The actual Core Data
 // insertion lives in `Persistence/SeedDataLoader.swift` so this file
@@ -90,12 +90,52 @@ public enum SeedData {
         return file.species.map { $0.toModel() }
     }
 
-    /// Read + decode the bundled `VolumeEquationsPNW.json`.
+    /// Read + decode `SpeciesDefaultsMetric.json` — the internationalisation
+    /// framework's metric-country species (Finland / Germany), each already
+    /// bound to its m³ volume equation id. This is the link that makes metric
+    /// stem volume compute: the scan pickers offer these codes and the engine
+    /// resolves code → SpeciesConfig → volumeEquationId → the seeded equation,
+    /// exactly as the US set does. Korea is intentionally absent (coefficients
+    /// pending). Mirrors the Android sibling's metric species seed.
+    public static func bundledMetricSpecies() throws -> [SpeciesConfig] {
+        let file = try decode(SpeciesSeedFile.self, named: "SpeciesDefaultsMetric")
+        return file.species.map { $0.toModel() }
+    }
+
+    /// Read + decode the bundled `VolumeEquationsPNW.json` (US starter set).
     public static func bundledVolumeEquations() throws -> [VolumeEquation] {
         let file = try decode(VolumeEquationSeedFile.self,
                               named: "VolumeEquationsPNW")
         return file.equations.map { $0.toModel() }
     }
+
+    /// Read + decode `VolumeEquationsMetric.json` — the internationalisation
+    /// framework's metric (m³) equations (Laasasenaho + generic form factor).
+    /// Seeded alongside the US set so a metric cruiser has real m³ equations to
+    /// bind their species to. Korea is intentionally absent (coefficients
+    /// pending). Mirrors the Android sibling's metric seed.
+    public static func bundledMetricVolumeEquations() throws -> [VolumeEquation] {
+        let file = try decode(VolumeEquationSeedFile.self,
+                              named: "VolumeEquationsMetric")
+        return file.equations.map { $0.toModel() }
+    }
+
+    /// (code, commonName) pairs for the bundled metric species, in file order.
+    /// This is the single source of truth for the metric-country scan-picker
+    /// names: `Country.finlandSpecies` / `.germanySpecies` derive from here
+    /// (filtered by code prefix) rather than re-declaring the names. Decoded
+    /// once and cached. Empty only if the bundled resource is unreadable — a
+    /// packaging error the seed path trips on too.
+    public static func metricSpeciesNamePairs(
+        prefixedBy prefix: String
+    ) -> [(String, String)] {
+        cachedMetricNamePairs
+            .filter { $0.0.hasPrefix(prefix) }
+    }
+
+    /// All bundled metric (code, commonName) pairs, decoded once.
+    private static let cachedMetricNamePairs: [(String, String)] =
+        ((try? bundledMetricSpecies()) ?? []).map { ($0.code, $0.commonName) }
 
     private static func decode<T: Decodable>(
         _ type: T.Type, named name: String

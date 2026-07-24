@@ -10,7 +10,7 @@
 //  * Maintain a rolling buffer of up to 120 CLLocationSnapshots (2 min
 //    at 1 Hz, enough for the 60 s averaging window + headroom).
 //  * Expose StateFlows `latestSnapshot` / `headingTrueDeg` for live
-//    tier badges and the compass arrow on NavigationScreen. Heading
+//    tier badges and the cruise map's navigation guide. Heading
 //    comes from the rotation-vector sensor with a geomagnetic
 //    declination correction (prefer true, fall back to magnetic —
 //    same rule as the CLHeading handler on iOS).
@@ -72,8 +72,7 @@ class LocationService(
     val authStatus: StateFlow<AuthStatus> = _authStatus.asStateFlow()
 
     /// Compass heading in degrees true north (0…360). null until the
-    /// first heading update arrives. Used by NavigationScreen for the
-    /// arrow rotation.
+    /// first heading update arrives.
     private val _headingTrueDeg = MutableStateFlow<Double?>(null)
     val headingTrueDeg: StateFlow<Double?> = _headingTrueDeg.asStateFlow()
 
@@ -155,9 +154,34 @@ class LocationService(
         running = false
     }
 
-    /// Grab the most recent `n` samples — what PlotCenterViewModel
-    /// feeds into `GPSAveraging.compute` once the averaging window
-    /// elapses.
+    // MARK: - Shared-instance subscriber ref-counting (mirror of iOS)
+
+    /// Number of live `acquire()` holders on this instance.
+    private var subscriberCount = 0
+
+    /// Subscriber-counted `start()`: updates start on the 0 → 1 transition
+    /// and keep running until the last holder calls `release()`. Passive
+    /// consumers call this from the same DisposableEffect where they
+    /// previously start()/stop()'d their own per-screen instance. Without
+    /// a location grant start() still no-ops — the composable that owns
+    /// the permission launcher calls `start()` directly on grant (the
+    /// subscription is already counted, so the later release() balances).
+    fun acquire() {
+        subscriberCount += 1
+        if (subscriberCount == 1) start()
+    }
+
+    /// Balances `acquire()`. The listeners fully stop when the last
+    /// subscriber leaves, so the shared instance costs no battery while
+    /// no screen is showing live GPS.
+    fun release() {
+        subscriberCount = maxOf(0, subscriberCount - 1)
+        if (subscriberCount == 0) stop()
+    }
+
+    /// Grab the most recent `n` samples — what the centre-recording
+    /// sheet feeds into `GPSAveraging.compute` once the averaging
+    /// window elapses.
     fun recentSamples(n: Int): List<CLLocationSnapshot> =
         _buffer.value.takeLast(n)
 
@@ -230,6 +254,28 @@ class LocationService(
     }
 
     companion object {
+        /// App-scoped instance for PASSIVE consumers — the map home's GPS
+        /// chip + camera seeding, the scan screens' GPSAccuracyBadge, the
+        /// plot mini-map, the cruise-mode navigation reads, and the plot
+        /// start / stratum-draw single-fix stamps. One LocationManager
+        /// client instead of one per screen; subscriber ref-counting
+        /// (`acquire()`/`release()`) keeps it running while at least one
+        /// screen holds it and fully stops it at zero. Mirror of iOS
+        /// LocationService.shared.
+        ///
+        /// The GPS-AVERAGING flow (RecordCentreSheet / OffsetFlowScreen)
+        /// deliberately does NOT use this instance: it `clearBuffer()`s and
+        /// reads the rolling buffer as private state, which must stay
+        /// isolated from passive subscribers.
+        @Volatile
+        private var sharedInstance: LocationService? = null
+
+        fun shared(context: Context): LocationService =
+            sharedInstance ?: synchronized(this) {
+                sharedInstance
+                    ?: LocationService(context.applicationContext).also { sharedInstance = it }
+            }
+
         /// Most recent fix from ANY running instance (the GPS badge on the
         /// scan screens keeps one alive) — lets Accept-time capture read a
         /// position without a second location client. Mirror of iOS.

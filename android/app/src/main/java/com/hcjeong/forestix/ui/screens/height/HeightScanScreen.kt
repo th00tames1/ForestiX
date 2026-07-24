@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -23,6 +22,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -36,19 +36,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.runtime.rememberCoroutineScope
 import com.hcjeong.forestix.ui.MeasurePhotoStore
 import kotlinx.coroutines.launch
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
-import com.hcjeong.forestix.ar.ArController
 import com.hcjeong.forestix.ar.ArCameraView
 import com.hcjeong.forestix.ar.ArSceneMarker
+import com.hcjeong.forestix.ar.ArSessionHub
 import com.hcjeong.forestix.ar.MarkerShape
 import com.hcjeong.forestix.ar.Vec3
 import com.hcjeong.forestix.common.MeasurementFormatter
@@ -60,27 +57,26 @@ import com.hcjeong.forestix.sensors.ConfidenceTier
 import com.hcjeong.forestix.sensors.HeightEstimator
 import com.hcjeong.forestix.sensors.HeightMethod
 import com.hcjeong.forestix.sensors.HeightResult
+import com.hcjeong.forestix.sensors.RawCaptureStore
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hcjeong.forestix.ui.PendingTreeNumber
 import com.hcjeong.forestix.ui.Routes
-import com.hcjeong.forestix.ui.screens.ContinuationAction
-import com.hcjeong.forestix.ui.screens.ContinuationOrigin
-import com.hcjeong.forestix.ui.screens.MeasurementContinuationSheet
+import com.hcjeong.forestix.ui.screens.cruise.CruiseCapture
 import com.hcjeong.forestix.ui.screens.ScanMetadataSheet
-import com.hcjeong.forestix.ui.screens.CenteredText
 import com.hcjeong.forestix.ui.screens.DevHud
 import com.hcjeong.forestix.ui.screens.GPSAccuracyBadge
 import com.hcjeong.forestix.ui.screens.MeasureBackButton
 import com.hcjeong.forestix.ui.screens.MeasureCircleButton
-import com.hcjeong.forestix.ui.screens.MeasureControlColumn
-import com.hcjeong.forestix.ui.screens.MeasureFailureBanner
+import com.hcjeong.forestix.ui.screens.MeasureShutterBar
 import com.hcjeong.forestix.ui.screens.MeasureStatusPanel
+import com.hcjeong.forestix.ui.screens.MeasureTopChrome
+import com.hcjeong.forestix.ui.screens.MeasureValuePill
 import com.hcjeong.forestix.ui.screens.ResearchFieldsRow
+import com.hcjeong.forestix.ui.screens.ScanPlotMiniMap
+import com.hcjeong.forestix.ui.screens.scanPlotMiniMapVisible
 import com.hcjeong.forestix.ui.theme.Forestix
-import com.hcjeong.forestix.ui.theme.ForestixBorderedButton
 import com.hcjeong.forestix.ui.theme.ForestixProminentButton
-import com.hcjeong.forestix.ui.theme.ForestixRadius
-import com.hcjeong.forestix.ui.theme.confidenceDescriptor
+import com.hcjeong.forestix.ui.theme.ForestixWhiteButton
 import kotlinx.coroutines.delay
 import java.util.Locale
 import kotlin.math.abs
@@ -90,16 +86,21 @@ import kotlin.math.abs
 private enum class Stage { ANCHOR, WALKING, AIM_BASE, AIM_TOP, COMPUTED, REJECTED }
 private enum class CrownStep { NONE, LEFT, RIGHT, TOP, BOTTOM, DONE }
 
-/// Walk-off sweet spot assumes a ~30 m stem until better information
-/// exists — iOS HeightScanViewModel.expectedHeightM default.
-private const val EXPECTED_HEIGHT_M = 30f
+/// Anchor range gate (locked spec, iOS applies the same): the trunk anchor
+/// may only be captured from a hit ≤ 4 m away. Field round 8: with no
+/// DepthPoint available, a near-horizontal eye-level aim intersected the
+/// detected GROUND plane 12–44 m out and the walk-off readout started at
+/// that phantom distance.
+private const val ANCHOR_MAX_M = 4.0f
 
 @Composable
 fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     val env = LocalAppEnvironment.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val controller = remember { ArController() }
+    // Shared app-scoped AR session (world coordinates survive navigation,
+    // and the sampling plot's anchor renders here as a subdued overlay).
+    val controller = ArSessionHub.controller
     // Continuation from a just-saved DBH passes the SAME tree number so the
     // height lands on that tree; the map-home chooser hands one over via
     // PendingTreeNumber; otherwise the next free number is used. The slot
@@ -112,7 +113,6 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
             },
         )
     }
-    var continuationTree by remember { mutableStateOf<Int?>(null) }
     // Developer-mode research capture: true height (m) from a clinometer.
     var researchTrueM by remember { mutableStateOf("") }
     val settings by env.settings.state.collectAsStateWithLifecycle()
@@ -120,7 +120,6 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     // the active project's VIO drift fraction when launched from the
     // Add-Tree flow (iOS injects it into HeightScanViewModel).
     val calibration by env.activeScanCalibration.collectAsStateWithLifecycle()
-    val colors = Forestix.colors
     val type = Forestix.type
 
     var stage by remember { mutableStateOf(Stage.ANCHOR) }
@@ -131,6 +130,16 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     var topMarker by remember { mutableStateOf<Vec3?>(null) }
     var baseMarker by remember { mutableStateOf<Vec3?>(null) }
     var dhLive by remember { mutableStateOf(0f) }
+    // Walk-panel triplet (locked spec): camera→anchor horizontal distance
+    // at the MOMENT of anchoring, and the camera's displacement since then
+    // (starts at 0.00 — the old single readout confusingly opened at the
+    // full anchor distance). Total distance = dhLive (the d_h the math uses).
+    var anchorInitialDistM by remember { mutableStateOf<Float?>(null) }
+    var standingAtAnchor by remember { mutableStateOf<Vec3?>(null) }
+    var walkedLive by remember { mutableStateOf(0f) }
+    // Live anchor-aim validity (gated hit available?) — drives the locked
+    // "Move closer" status line and keeps the anchor "+" inert.
+    var anchorAimOk by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<HeightResult?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
 
@@ -148,6 +157,21 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     var metaNote by remember { mutableStateOf("") }
     var showMetadata by remember { mutableStateOf(false) }
 
+    // Raw-capture recorder arm (developer mode + tc.rawCaptureEnabled) +
+    // the geometry a height bundle records: full camera poses at anchor /
+    // base / top, the anchor hit type, and the 5 Hz pose-sample trail from
+    // anchoring to compute. Populated only while armed; zero cost otherwise.
+    val rawCaptureArmed = settings.developerMode && settings.rawCaptureEnabled
+    var anchorPose by remember { mutableStateOf<FloatArray?>(null) }
+    var anchorHitType by remember { mutableStateOf("unknown") }
+    var basePose by remember { mutableStateOf<FloatArray?>(null) }
+    var topPose by remember { mutableStateOf<FloatArray?>(null) }
+    val poseSamples = remember { mutableListOf<RawCaptureStore.PoseSample>() }
+    var anchorTimeMs by remember { mutableStateOf(0L) }
+    // The most-recent compute's stored bundle id — flipped to accepted when
+    // the cruiser taps Accept (iOS markAccepted flow).
+    var lastRawCaptureId by remember { mutableStateOf<String?>(null) }
+
     var crownStep by remember { mutableStateOf(CrownStep.NONE) }
     var cL by remember { mutableStateOf<Vec3?>(null) }
     var cR by remember { mutableStateOf<Vec3?>(null) }
@@ -156,11 +180,53 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     var crownW by remember { mutableStateOf<Double?>(null) }
     var crownH by remember { mutableStateOf<Double?>(null) }
 
-    // Live walk-off distance while walking back.
+    // Live walk-off distances while walking back: Total (camera→anchor,
+    // the d_h the math uses) + Walked (displacement since anchoring).
     LaunchedEffect(stage) {
         while (stage == Stage.WALKING) {
             anchorPt?.let { a -> controller.horizontalDistanceTo(a)?.let { dhLive = it } }
+            standingAtAnchor?.let { s0 -> controller.horizontalDistanceTo(s0)?.let { walkedLive = it } }
             delay(100)
+        }
+    }
+
+    // Raw-capture pose trail: sample the camera pose at 5 Hz from anchoring
+    // through compute (the walk-off + both aims) so the replay can re-derive
+    // d_h from the pose sequence and expose VIO drift. Armed-only.
+    LaunchedEffect(stage, rawCaptureArmed) {
+        if (!rawCaptureArmed) return@LaunchedEffect
+        while (stage == Stage.WALKING || stage == Stage.AIM_BASE || stage == Stage.AIM_TOP) {
+            controller.currentCameraPose()?.let {
+                poseSamples.add(RawCaptureStore.PoseSample(
+                    System.currentTimeMillis() - anchorTimeMs, it))
+            }
+            delay(200)
+        }
+    }
+
+    var devHitInfo by remember { mutableStateOf<String?>(null) }
+
+    // Anchor-stage aim gate poll (always on): a valid gated hit must exist
+    // for the "+" to do anything, and the status line shows the locked
+    // "Move closer" copy otherwise. Also feeds the dev HUD's hit line with
+    // accept/reject readouts ("plane 31.2m rejected").
+    LaunchedEffect(stage) {
+        if (stage != Stage.ANCHOR) return@LaunchedEffect
+        while (true) {
+            anchorAimOk = controller.screenCenterAnchorHit(ANCHOR_MAX_M) != null
+            devHitInfo = controller.lastCenterHitInfo
+            delay(250)
+        }
+    }
+
+    // Dev-mode probe for the OTHER stages: raycast the crosshair a few
+    // times a second so the HUD's hit line stays live (the anchor stage is
+    // covered by the gate poll above).
+    LaunchedEffect(settings.developerMode, stage) {
+        while (settings.developerMode && stage != Stage.ANCHOR) {
+            controller.screenCenterHit()
+            devHitInfo = controller.lastCenterHitInfo
+            delay(250)
         }
     }
 
@@ -191,9 +257,12 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     }
 
     fun captureCrown() {
-        controller.preferDepth = true
-        val hit = controller.screenCenterHit() ?: controller.forwardPointAtHorizontalDistance(crownProjDistance())
-        if (hit == null) { failure = "Couldn't read scene depth. Move slightly, then tap again."; return }
+        // Geometric placement (locked spec, iOS parity): the capture ray
+        // direction at the current pitch × the anchor-plane horizontal
+        // distance. NO fresh hitTest — at 10–30 m those fall back to
+        // planes/garbage and put the sphere visibly off the crosshair.
+        val hit = controller.forwardPointAtHorizontalDistance(crownProjDistance())
+        if (hit == null) { failure = "AR tracking not ready — try again."; return }
         failure = null
         when (crownStep) {
             CrownStep.LEFT -> { cL = hit; crownStep = CrownStep.RIGHT }
@@ -204,16 +273,72 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
         }
     }
 
+    // Serialize one Height compute for offline estimator replay (off the
+    // main thread). Records anchor / base / top geometry, d_h, calibration,
+    // and the 5 Hz pose trail; the store re-runs HeightEstimator.estimate
+    // from disk for the reproducibility self-check.
+    fun recordRawHeight(r: HeightResult, anchor: Vec3, aBase: Float, aTop: Float) {
+        if (!rawCaptureArmed) return
+        val aPose = anchorPose ?: return
+        val bPoseRaw = basePose ?: return
+        val tPose = topPose ?: return
+        val standing = standingLocked ?: return
+        // Pin the base camera_pose's translation column to the EXACT standing
+        // point the live estimator used, so the replay's standing == live and
+        // the self-check is exact (iOS parity).
+        val bPose = bPoseRaw.copyOf().also {
+            it[12] = standing.x; it[13] = standing.y; it[14] = standing.z
+        }
+        val cruise = CruiseCapture.target
+        val ctx = RawCaptureStore.CaptureContext(
+            mode = if (cruise != null) "cruise" else "quick",
+            projectId = cruise?.projectId?.toString(),
+            plotId = cruise?.plotId?.toString() ?: env.history.activePlotID.value?.toString(),
+            treeNumber = cruise?.treeNumber ?: pendingTree,
+            gps = com.hcjeong.forestix.positioning.LocationService.lastGlobalFix,
+        )
+        val samples = poseSamples.toList()
+        val hitType = anchorHitType
+        val dist = anchorInitialDistM ?: 0f
+        scope.launch {
+            val id = RawCaptureStore.recordHeight(
+                context = context,
+                anchorWorld = anchor, anchorHitType = hitType,
+                anchorDistanceM = dist, anchorPose = aPose,
+                basePitchDeg = (aBase * 180f / Math.PI.toFloat()), basePose = bPose,
+                topPitchDeg = (aTop * 180f / Math.PI.toFloat()), topPose = tPose,
+                dHm = r.dHm, live = r, cal = calibration,
+                poseSamples = samples,
+                unitSystem = if (settings.unitSystem == UnitSystem.METRIC) "metric" else "imperial",
+                ctx = ctx,
+            )
+            if (id != null) lastRawCaptureId = id
+        }
+    }
+
     fun captureHeight() {
         when (stage) {
             Stage.ANCHOR -> {
-                controller.preferDepth = true
-                val hit = controller.screenCenterHit()
-                if (hit == null) {
-                    failure = "Couldn't find the trunk at the crosshair. Aim at the trunk at eye level and try again."
-                    return
+                // Gated anchor (locked spec): DepthPoint or ray-facing Plane
+                // within 4 m only. No valid hit → the "+" is INERT — the
+                // status line already shows the locked "Move closer" copy.
+                val hit = controller.screenCenterAnchorHit(ANCHOR_MAX_M) ?: return
+                failure = null
+                anchorPt = hit
+                standingAtAnchor = controller.currentCameraPosition()
+                val d0 = controller.horizontalDistanceTo(hit) ?: 0f
+                anchorInitialDistM = d0
+                dhLive = d0
+                walkedLive = 0f
+                // Raw-capture: latch the anchor pose + hit provenance and
+                // start a fresh 5 Hz pose trail from this instant.
+                if (rawCaptureArmed) {
+                    anchorPose = controller.currentCameraPose()
+                    anchorHitType = controller.lastCenterHitInfo?.substringBefore(' ') ?: "unknown"
+                    poseSamples.clear()
+                    anchorTimeMs = System.currentTimeMillis()
                 }
-                failure = null; anchorPt = hit; dhLive = 0f; stage = Stage.WALKING
+                stage = Stage.WALKING
             }
             Stage.WALKING -> { stage = Stage.AIM_BASE }
             Stage.AIM_BASE -> {
@@ -224,6 +349,7 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 // Lock the standing pose on the first aim; both angles must
                 // come from the same spot (the §7.2 formula assumes it).
                 failure = null; alphaBase = a; standingLocked = s
+                if (rawCaptureArmed) basePose = controller.currentCameraPose()
                 val dh = kotlin.math.sqrt((s.x - anchor.x) * (s.x - anchor.x) + (s.z - anchor.z) * (s.z - anchor.z))
                 baseMarker = Vec3(anchor.x, s.y + dh * kotlin.math.tan(a), anchor.z)
                 stage = Stage.AIM_TOP
@@ -235,6 +361,7 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                     failure = "AR tracking not ready — try again."; return
                 }
                 failure = null; alphaTop = aTop
+                if (rawCaptureArmed) topPose = controller.currentCameraPose()
                 val dh = kotlin.math.sqrt((standing.x - anchor.x) * (standing.x - anchor.x) + (standing.z - anchor.z) * (standing.z - anchor.z))
                 topMarker = Vec3(anchor.x, standing.y + dh * kotlin.math.tan(aTop), anchor.z)
                 val r = HeightEstimator.estimate(
@@ -244,6 +371,9 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                     vioDriftFraction = calibration.vioDriftFraction,
                 )
                 result = r
+                // Raw-capture: serialize this compute for offline replay
+                // (every compute, accepted or rejected). Off the main thread.
+                recordRawHeight(r, anchor, aBase, aTop)
                 stage = if (r.confidence == ConfidenceTier.RED) Stage.REJECTED else Stage.COMPUTED
             }
             else -> {}
@@ -254,7 +384,12 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     fun resetAll() {
         stage = Stage.ANCHOR; anchorPt = null; standingLocked = null
         alphaBase = null; alphaTop = null; topMarker = null; baseMarker = null
-        dhLive = 0f; result = null; failure = null; resetCrown()
+        dhLive = 0f; anchorInitialDistM = null; standingAtAnchor = null
+        walkedLive = 0f; anchorAimOk = false
+        result = null; failure = null; resetCrown()
+        // Drop the raw-capture geometry so a fresh measurement starts clean.
+        anchorPose = null; basePose = null; topPose = null
+        anchorHitType = "unknown"; poseSamples.clear()
     }
 
     // Accept the result: record the entry (photo + GPS + metadata), fold in
@@ -263,7 +398,21 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     // (iOS submitManualEntry goes straight to .accepted).
     fun acceptResult(r: HeightResult) {
         val activity = context as? android.app.Activity
+        // Cruise tally session (v3): the height leg folds into the Tree row
+        // the DBH leg created, then the chain returns to the cruise map —
+        // no quick-history entry, no continuation sheet.
+        val cruise = CruiseCapture.target
+        // Snapshot the dev "True H" field now — the developer block below
+        // clears it synchronously before the async launch runs.
+        val rawTrue = researchTrueM.toDoubleOrNull()?.takeIf { it > 0 }
         scope.launch {
+            // Flip the just-recorded raw-capture bundle to accepted (iOS
+            // markAccepted parity) + fold in the field-entered ground truth.
+            lastRawCaptureId?.let { rid ->
+                RawCaptureStore.markAccepted(context, rid)
+                if (rawTrue != null) RawCaptureStore.setTruth(context, rid, rawTrue)
+                lastRawCaptureId = null
+            }
             // Chrome-less snapshot: hide the 2D chrome, give Compose one
             // committed frame, capture, then restore.
             val photo = activity?.let {
@@ -274,22 +423,35 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 name
             }
             val fix = com.hcjeong.forestix.positioning.LocationService.lastGlobalFix
-            env.history.append(
-                QuickMeasureEntry(
-                    kind = MeasureKind.HEIGHT, value = r.heightM.toDouble(),
-                    sigma = r.sigmaHm.toDouble(), confidenceRaw = r.confidence.raw,
-                    method = r.method.raw, treeNumber = pendingTree,
-                    plotID = env.history.activePlotID.value,
-                    speciesCode = metaSpecies,
-                    damageCodes = metaDamage,
-                    note = metaNote.ifBlank { null },
-                    latitude = fix?.latitude,
-                    longitude = fix?.longitude,
-                    photoPath = photo,
+            if (cruise != null) {
+                // Storage failure must not crash the AR screen — the tree
+                // keeps its DBH-only row from the first leg either way.
+                runCatching { CruiseCapture.recordHeight(env, r, photoPath = photo, fix = fix) }
+                // Back to the map home in cruise mode (the chain popped DBH
+                // already; tc.mapMode is still "cruise"); the new tree pin
+                // appears and the tally pill ticks up.
+                nav.popBackStack()
+            } else {
+                env.history.append(
+                    QuickMeasureEntry(
+                        kind = MeasureKind.HEIGHT, value = r.heightM.toDouble(),
+                        sigma = r.sigmaHm.toDouble(), confidenceRaw = r.confidence.raw,
+                        method = r.method.raw, treeNumber = pendingTree,
+                        plotID = env.history.activePlotID.value,
+                        speciesCode = metaSpecies,
+                        damageCodes = metaDamage,
+                        note = metaNote.ifBlank { null },
+                        latitude = fix?.latitude,
+                        longitude = fix?.longitude,
+                        photoPath = photo,
+                    )
                 )
-            )
+                // Quick measure saved — no continuation prompt (iOS parity);
+                // return to the map once the save completes.
+                nav.popBackStack()
+            }
         }
-        if (crownStep == CrownStep.DONE) {
+        if (cruise == null && crownStep == CrownStep.DONE) {
             val w = crownW; val ch = crownH
             if (w != null && ch != null) {
                 env.history.append(
@@ -301,7 +463,6 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 )
             }
         }
-        continuationTree = pendingTree
         if (settings.developerMode) {
             val fields = mutableMapOf(
                 "measure_type" to "height",
@@ -351,7 +512,14 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     }
 
     Box(Modifier.fillMaxSize()) {
-        ArCameraView(controller, markers(), modifier = Modifier.fillMaxSize())
+        ArCameraView(
+            controller,
+            markers(),
+            modifier = Modifier.fillMaxSize(),
+            // Active sampling plot (if any) as a subdued, non-interactive
+            // overlay under the height markers.
+            plotOverlay = ArSessionHub.PlotOverlay.SUBDUED,
+        )
         crosshairLabel?.let { label ->
             HeightAimCrosshair(label, Modifier.align(Alignment.Center))
         }
@@ -364,6 +532,13 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 .align(Alignment.TopStart)
                 .padding(start = 72.dp, top = 22.dp))
 
+        // Plot mini-map — top-right, same row as the GPS badge: the active
+        // cruise plot (ring + YOU + measured trees) or the quick sampling
+        // ring (ring + YOU). Hidden with the rest of the 2D chrome during
+        // the Accept snapshot blackout.
+        val miniMapUp = scanPlotMiniMapVisible()
+        if (!hidingChromeForCapture) ScanPlotMiniMap()
+
         if (settings.developerMode && !hidingChromeForCapture) {
             DevHud(
                 "HEIGHT",
@@ -371,66 +546,114 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                     "depth" to (if (controller.supportsDepth) "ARCore✓" else "plane"),
                     "track" to (if (controller.trackingOk()) "OK" else "…"),
                     "stage" to stage.name,
+                    // What the last centre raycast landed on (type + range) —
+                    // the anchor sphere is placed exactly at this hit, so a
+                    // "point"/far reading here explains an off-trunk anchor.
+                    "hit" to (devHitInfo ?: "—"),
                     "pitch" to (controller.cameraPitchDeg()?.let { String.format(Locale.US, "%+.1f°", it) } ?: "—"),
                     "d_h live" to String.format(Locale.US, "%.1f m", dhLive),
                     alphaBase?.let { "α_base" to String.format(Locale.US, "%+.1f°", Math.toDegrees(it.toDouble())) },
                     alphaTop?.let { "α_top" to String.format(Locale.US, "%+.1f°", Math.toDegrees(it.toDouble())) },
                     result?.let { "H" to String.format(Locale.US, "%.1f ±%.1f m · %s", it.heightM, it.sigmaHm, it.confidence.raw) },
                 ),
+                // Below the plot mini-map when it occupies the top-right
+                // slot (22 + 116 card + 12 gap).
+                topPadding = if (miniMapUp) 150.dp else 56.dp,
             )
         }
-        if (showCapture && !hidingChromeForCapture) MeasureControlColumn(
+        // U2 — bottom-centre shutter for the capture stages: "Manual"
+        // flanks left while anchoring, Retake flanks RIGHT once a
+        // walk/aim stage (or crown capture) could need restarting, and
+        // the WALKING readout triplet rides the live-value strip directly
+        // above the row (iOS MeasureShutterRow wiring 1:1).
+        if (showCapture && !hidingChromeForCapture) MeasureShutterBar(
             onCapture = { if (crownActive) captureCrown() else captureHeight() },
-            // Manual entry rides the rail directly below the capture "+"
-            // while anchoring — the walk/aim stages keep Retake instead.
-            extra = if (stage == Stage.ANCHOR) {
+            left = if (stage == Stage.ANCHOR && !crownActive) {
                 {
                     MeasureCircleButton(icon = Icons.Filled.Keyboard, caption = "Manual") {
                         manualOpen = true; manualText = ""
                     }
                 }
-            } else null,
+            } else {
+                null
+            },
+            right = if (crownActive || stage in listOf(
+                    Stage.WALKING, Stage.AIM_BASE, Stage.AIM_TOP)
+            ) {
+                {
+                    MeasureCircleButton(icon = Icons.Filled.Replay, caption = "Retake") {
+                        resetAll()
+                    }
+                }
+            } else {
+                null
+            },
+            valueStrip = when {
+                stage == Stage.WALKING -> ({
+                    // Walking readout (locked spec, identical on iOS): ONLY
+                    // three lines — Initial dist (camera→anchor at the
+                    // anchoring moment), Walked back (displacement since
+                    // anchoring, STARTS AT 0.00), and the primary Total
+                    // distance (current camera→anchor horizontal distance —
+                    // the d_h the math uses).
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        MeasureValuePill(
+                            "Initial dist " + MeasurementFormatter.distance(
+                                (anchorInitialDistM ?: 0f).toDouble(), settings.unitSystem),
+                            dimmed = true,
+                        )
+                        MeasureValuePill(
+                            "Walked back " + MeasurementFormatter.distance(
+                                walkedLive.toDouble(), settings.unitSystem),
+                            dimmed = true,
+                        )
+                        MeasureValuePill(
+                            "Total distance " + MeasurementFormatter.distance(
+                                dhLive.toDouble(), settings.unitSystem),
+                            large = true,
+                        )
+                    }
+                })
+                // Crown capture: keep the computed height on screen while
+                // the canopy taps run (iOS heightValueStrip parity).
+                crownActive && result != null -> ({
+                    MeasureValuePill(
+                        MeasurementFormatter.height(
+                            result!!.heightM.toDouble(), settings.unitSystem),
+                        large = true,
+                    )
+                })
+                else -> null
+            },
         )
 
-        if (!hidingChromeForCapture) MeasureStatusPanel {
-            // Anchor / tracking failures — orange banner, tap to dismiss
-            // (iOS anchorFailureBanner).
-            failure?.let { MeasureFailureBanner(it) { failure = null } }
-            CenteredText(
-                when {
-                    manualOpen -> "Enter height manually in metres."
-                    stage == Stage.ANCHOR -> "Aim at the trunk at eye level, then tap +."
-                    stage == Stage.WALKING -> "Walk back, then tap + to continue."
-                    stage == Stage.AIM_BASE -> "Aim at where the trunk meets the ground, then tap +."
-                    stage == Stage.AIM_TOP -> "Aim at the treetop, then tap +."
-                    stage == Stage.REJECTED -> result?.rejectionReason ?: "Rejected."
-                    else -> "Height computed."
-                },
-            )
+        // U1 — stage guidance + the dismissible anchor/tracking failure
+        // banner, top-centre (iOS anchorFailureBanner semantics kept; the
+        // crown aim instructions live on the crosshair label).
+        if (!hidingChromeForCapture) MeasureTopChrome(
+            instruction = when {
+                manualOpen -> "Enter height manually in metres."
+                // Locked spec: while no gated hit exists the "+" is
+                // inert and this exact copy explains why.
+                stage == Stage.ANCHOR && !anchorAimOk ->
+                    "Move closer — anchor within 4 m of the trunk."
+                stage == Stage.ANCHOR -> "Aim at the trunk at eye level, then tap +."
+                stage == Stage.WALKING -> "Walk back, then tap + to continue."
+                stage == Stage.AIM_BASE -> "Aim at where the trunk meets the ground, then tap +."
+                stage == Stage.AIM_TOP -> "Aim at the treetop, then tap +."
+                stage == Stage.REJECTED -> result?.rejectionReason ?: "Rejected."
+                else -> "Height computed."
+            },
+            failure = failure,
+            onDismissFailure = { failure = null },
+        )
 
-            // Walking readout — big walked-back distance + amber sweet-spot
-            // hint (iOS walkingReadout).
-            if (stage == Stage.WALKING && !manualOpen) {
-                Column(
-                    Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                    horizontalAlignment = Alignment.Start,
-                ) {
-                    Text(
-                        "Walked back " + MeasurementFormatter.distance(dhLive.toDouble(), settings.unitSystem),
-                        style = type.dataLarge,
-                        color = Color.White,
-                    )
-                    Text(
-                        walkHintText(dhLive),
-                        style = type.caption,
-                        color = colors.confidenceWarn,
-                    )
-                }
-            }
-
-            // Manual entry — typed height (iOS .manualEntry: field + Save,
-            // Cancel row beneath).
+        // Manual entry — typed height (iOS .manualEntry: field + Save,
+        // Cancel row beneath). The panel keeps the field + action rows.
+        if (!hidingChromeForCapture && manualOpen) MeasureStatusPanel {
             if (manualOpen) {
                 Row(
                     Modifier.fillMaxWidth(),
@@ -470,47 +693,31 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                         }
                     }
                 }
-                ForestixBorderedButton("Cancel", modifier = Modifier.fillMaxWidth()) {
+                ForestixWhiteButton("Cancel", modifier = Modifier.fillMaxWidth()) {
                     manualOpen = false
                 }
             }
+        }
 
-            // Result panel — unit-aware H + σ, tier chip (always on Height),
-            // actionable hint, and the α/d_h diagnostic line.
-            if (!manualOpen && (stage == Stage.COMPUTED || stage == Stage.REJECTED)) result?.let { r ->
+        // RESULT states (COMPUTED / REJECTED, crown capture excepted — the
+        // shutter row owns the crown taps): the existing result panel
+        // occupies the bottom as before. Unit-aware H + the α/d_h
+        // diagnostic line. Field fix: no σ, no tier chip, no tier hint —
+        // σ and the tier stay recorded internally, the tier still gates
+        // Accept, and a rejection's reason shows in the banner above.
+        if (!hidingChromeForCapture && !manualOpen && !crownActive &&
+            (stage == Stage.COMPUTED || stage == Stage.REJECTED)
+        ) MeasureStatusPanel {
+            result?.let { r ->
                 Column(
                     Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                     horizontalAlignment = Alignment.Start,
                 ) {
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        // Always show the computed H — the red tier chip and
-                        // the status-banner rejection reason carry the
-                        // warning. σ is hidden on red (a rejected fit's σ is
-                        // noise).
-                        Text(
-                            MeasurementFormatter.height(r.heightM.toDouble(), settings.unitSystem),
-                            style = type.dataLarge,
-                            color = Color.White,
-                        )
-                        if (r.confidence != ConfidenceTier.RED) {
-                            Text(
-                                MeasurementFormatter.heightSigma(r.sigmaHm.toDouble(), settings.unitSystem),
-                                style = type.dataSmall,
-                                color = Color.White.copy(alpha = 0.75f),
-                            )
-                        }
-                        Spacer(Modifier.weight(1f))
-                        HeightTierChip(r.confidence.raw)
-                    }
                     Text(
-                        heightTierHint(r.confidence),
-                        style = type.caption,
-                        color = Color.White.copy(alpha = 0.9f),
+                        MeasurementFormatter.height(r.heightM.toDouble(), settings.unitSystem),
+                        style = type.dataLarge,
+                        color = Color.White,
                     )
                     // Diagnostic — the raw captured inputs that fed the §7.2
                     // formula (iOS diagnosticLine).
@@ -538,31 +745,20 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 }
             }
 
-            // Crown section — amber prompts while capturing; a mono data
-            // line once done (iOS crownSection).
-            if (!manualOpen && stage == Stage.COMPUTED) {
-                if (crownActive) {
-                    Text(
-                        crownPrompt(crownStep),
-                        style = type.caption,
-                        color = colors.confidenceWarn,
-                    )
-                } else if (crownStep == CrownStep.DONE && crownW != null && crownH != null) {
-                    Text(
-                        String.format(Locale.US, "Crown %.2f m wide · %.2f m tall", crownW, crownH),
-                        style = type.data,
-                        color = Color.White,
-                    )
-                }
+            // Crown line once measured (iOS crownSection — the capture
+            // prompts live in the top banner + crosshair label now).
+            if (stage == Stage.COMPUTED && crownStep == CrownStep.DONE &&
+                crownW != null && crownH != null
+            ) {
+                Text(
+                    String.format(Locale.US, "Crown %.2f m wide · %.2f m tall", crownW, crownH),
+                    style = type.data,
+                    color = Color.White,
+                )
             }
 
-            // Action rows per stage (iOS actionRow). ANCHOR has none — the
-            // manual escape hatch lives on the rail's Manual button.
-            if (!manualOpen) when (stage) {
-                Stage.ANCHOR -> {}
-                Stage.WALKING, Stage.AIM_BASE, Stage.AIM_TOP -> {
-                    ForestixBorderedButton("Retake") { resetAll() }
-                }
+            // Action rows (iOS actionRow).
+            when (stage) {
                 Stage.COMPUTED -> {
                     Column(
                         Modifier.fillMaxWidth(),
@@ -571,17 +767,17 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                     ) {
                         // Crown control: start it, or restart it once done.
                         if (crownStep == CrownStep.NONE) {
-                            ForestixBorderedButton("Measure crown", modifier = Modifier.fillMaxWidth()) {
+                            ForestixWhiteButton("Measure crown", modifier = Modifier.fillMaxWidth()) {
                                 crownStep = CrownStep.LEFT
                             }
                         } else if (crownStep == CrownStep.DONE) {
-                            ForestixBorderedButton("Redo crown", modifier = Modifier.fillMaxWidth()) {
+                            ForestixWhiteButton("Redo crown", modifier = Modifier.fillMaxWidth()) {
                                 resetCrown()
                             }
                         }
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            ForestixBorderedButton("Retake", modifier = Modifier.weight(1f)) { resetAll() }
-                            ForestixBorderedButton("Details", modifier = Modifier.weight(1f)) {
+                            ForestixWhiteButton("Retake", modifier = Modifier.weight(1f)) { resetAll() }
+                            ForestixWhiteButton("Details", modifier = Modifier.weight(1f)) {
                                 showMetadata = true
                             }
                             ForestixProminentButton(
@@ -597,11 +793,12 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 Stage.REJECTED -> {
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         ForestixProminentButton("Retake") { resetAll() }
-                        ForestixBorderedButton("Manual") {
+                        ForestixWhiteButton("Manual") {
                             resetAll(); manualOpen = true; manualText = ""
                         }
                     }
                 }
+                else -> {}
             }
         }
 
@@ -618,26 +815,6 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
             )
         }
 
-        // Post-save continuation — next tree's diameter or done.
-        continuationTree?.let { savedTree ->
-            MeasurementContinuationSheet(
-                origin = ContinuationOrigin.AFTER_HEIGHT,
-                treeNumber = savedTree,
-                treeAlreadyHasHeight = env.history.entries.value.any {
-                    it.treeNumber == savedTree && it.kind == MeasureKind.HEIGHT
-                },
-                onAction = { action ->
-                    continuationTree = null
-                    when (action) {
-                        ContinuationAction.START_NEW_TREE_DIAMETER,
-                        ContinuationAction.MEASURE_HEIGHT_SAME_TREE -> {
-                            nav.navigate(Routes.DBH) { popUpTo(Routes.TREE_HUB) }
-                        }
-                        ContinuationAction.DONE -> nav.popBackStack()
-                    }
-                },
-            )
-        }
     }
 }
 
@@ -672,52 +849,3 @@ private fun HeightAimCrosshair(label: String, modifier: Modifier = Modifier) {
     }
 }
 
-/// Result-panel tier chip — 10 sp semibold, tracking 0.8, stroked chip
-/// outline; ALWAYS shown on Height (iOS behaviour).
-@Composable
-private fun HeightTierChip(rawTier: String) {
-    val d = confidenceDescriptor(rawTier)
-    Text(
-        d.label.uppercase(Locale.US),
-        style = TextStyle(fontSize = 10.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.8.sp),
-        color = d.color,
-        modifier = Modifier
-            .border(0.75.dp, d.color, ForestixRadius.chip)
-            .padding(horizontal = 8.dp, vertical = 3.dp),
-    )
-}
-
-/// Actionable one-liner per tier — same pattern as the Diameter result
-/// panel so the cruiser gets consistent guidance (iOS tierHint).
-private fun heightTierHint(tier: ConfidenceTier): String = when (tier) {
-    ConfidenceTier.GREEN -> "Good — geometry in sweet spot."
-    ConfidenceTier.YELLOW -> "Fair — long walk-off or steep aim. Acceptable."
-    ConfidenceTier.RED -> "Check — retake, or enter a tape estimate manually."
-}
-
-private fun crownPrompt(step: CrownStep): String = when (step) {
-    CrownStep.LEFT -> "Crown: aim at the LEFT edge, tap +"
-    CrownStep.RIGHT -> "Crown: aim at the RIGHT edge, tap +"
-    CrownStep.TOP -> "Crown: aim at the HIGHEST branch, tap +"
-    CrownStep.BOTTOM -> "Crown: aim at the LOWEST branch, tap +"
-    else -> ""
-}
-
-/// Sweet-spot walk-off guidance — iOS walkHintText + computeWalkHint:
-/// target band 0.6–1.0 × expected height.
-private fun walkHintText(dh: Float): String {
-    val lo = 0.6f * EXPECTED_HEIGHT_M
-    val hi = 1.0f * EXPECTED_HEIGHT_M
-    val delta = when {
-        dh < lo -> lo - dh
-        dh > hi -> hi - dh          // negative → walk forward
-        else -> 0f
-    }
-    return when {
-        delta > 0.1f ->
-            "Move back ${String.format(Locale.US, "%.1f", delta)} m " +
-                "(target ≈ 0.6–1.0 · ${EXPECTED_HEIGHT_M.toInt()} m)"
-        delta < -0.1f -> "Move forward ${String.format(Locale.US, "%.1f", -delta)} m"
-        else -> "You're in the sweet-spot band. Continue."
-    }
-}

@@ -21,6 +21,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Dangerous
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.filled.Warning
@@ -42,10 +43,14 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
+import com.hcjeong.forestix.common.AreaUnit
+import com.hcjeong.forestix.common.RegionalSpecies
+import com.hcjeong.forestix.common.areaUnit
 import com.hcjeong.forestix.inventory.PlotStats
 import com.hcjeong.forestix.ui.screens.ForestixScaffold
 import com.hcjeong.forestix.ui.screens.project.FormSection
 import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixBorderedButton
 import com.hcjeong.forestix.ui.theme.ForestixProminentButton
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import java.text.DateFormat
@@ -67,6 +72,7 @@ fun PlotSummaryScreen(
     onClosed: () -> Unit = { nav.popBackStack() },
 ) {
     val env = LocalAppEnvironment.current
+    val settings by env.settings.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val colors = Forestix.colors
     val type = Forestix.type
@@ -121,6 +127,7 @@ fun PlotSummaryScreen(
     val closedAt by vm.closedAt.collectAsStateWithLifecycle()
     val isClosing by vm.isClosing.collectAsStateWithLifecycle()
     val errorMessage by vm.errorMessage.collectAsStateWithLifecycle()
+    var confirmDelete by remember { mutableStateOf(false) }
 
     ForestixScaffold(nav, title = "Plot ${vm.plot.plotNumber} summary") { padding ->
         Column(
@@ -149,6 +156,9 @@ fun PlotSummaryScreen(
                             style = type.body,
                             color = colors.textSecondary)
                     }
+                    TextButton(onClick = { scope.launch { vm.reopen() } }) {
+                        Text("Reopen plot")
+                    }
                 }
             }
 
@@ -175,18 +185,27 @@ fun PlotSummaryScreen(
                 }
             }
 
+            // Density basis: a metric unit system reads per hectare, imperial
+            // per acre. Derived from the (manually-overridable) Units setting,
+            // not the country, so a manual toggle wins. The engine computes per
+            // acre; scale + relabel at display only (mirrors StandSummaryScreen).
+            val areaUnit = settings.unitSystem.areaUnit
+            val f = areaUnit.perAcreDensityFactor
+            val suffix = areaUnit.densitySuffix
+            val abbr = areaUnit.abbreviation
+
             // MARK: - Stats
             FormSection(header = "Plot stats") {
                 StatRow("Live trees", "${stats.liveTreeCount}")
-                StatRow("Trees / ac", String.format(Locale.US, "%.1f", stats.tpa))
-                StatRow("Basal area / ac",
-                    String.format(Locale.US, "%.2f m²/ac", stats.baPerAcreM2))
+                StatRow("Trees / $abbr", String.format(Locale.US, "%.1f", stats.tpa * f))
+                StatRow("Basal area / $abbr",
+                    String.format(Locale.US, "%.2f m²$suffix", stats.baPerAcreM2 * f))
                 StatRow("Quadratic mean diameter",
                     String.format(Locale.US, "%.1f cm", stats.qmdCm))
-                StatRow("Gross volume / ac",
-                    String.format(Locale.US, "%.1f m³/ac", stats.grossVolumePerAcreM3))
-                StatRow("Merchantable volume / ac",
-                    String.format(Locale.US, "%.1f m³/ac", stats.merchVolumePerAcreM3))
+                StatRow("Gross volume / $abbr",
+                    String.format(Locale.US, "%.1f m³$suffix", stats.grossVolumePerAcreM3 * f))
+                StatRow("Merchantable volume / $abbr",
+                    String.format(Locale.US, "%.1f m³$suffix", stats.merchVolumePerAcreM3 * f))
             }
 
             // MARK: - Species breakdown
@@ -196,7 +215,7 @@ fun PlotSummaryScreen(
                 } else {
                     stats.bySpecies.keys.sorted().forEach { code ->
                         val stat = stats.bySpecies[code] ?: return@forEach
-                        SpeciesRow(code, stat)
+                        SpeciesRow(code, stat, areaUnit)
                     }
                 }
             }
@@ -207,7 +226,7 @@ fun PlotSummaryScreen(
                     hdFitsByProject.keys.sorted().forEach { code ->
                         val fit = hdFitsByProject[code] ?: return@forEach
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Text(code, style = type.data, color = colors.textPrimary)
+                            Text(RegionalSpecies.nameForCode(code), style = type.data, color = colors.textPrimary)
                             Spacer(Modifier.weight(1f))
                             Text(
                                 String.format(Locale.US, "a=%.3f b=%.3f n=%d RMSE=%.2fm",
@@ -250,8 +269,51 @@ fun PlotSummaryScreen(
                 ) { nav.popBackStack() }
             }
 
+            // Destructive "Delete plot" (map-peek spec item 4) — cascades to
+            // the plot's trees, behind an AlertDialog confirm; pops back after.
+            ForestixBorderedButton(
+                label = "Delete plot",
+                icon = Icons.Filled.Delete,
+                tint = colors.confidenceBad,
+                modifier = Modifier.fillMaxWidth(),
+            ) { confirmDelete = true }
+
             Spacer(Modifier.height(ForestixSpace.xl))
         }
+    }
+
+    // MARK: - Delete confirm
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = {
+                Text(
+                    "Delete Plot ${vm.plot.plotNumber} and its ${stats.liveTreeCount} " +
+                        (if (stats.liveTreeCount == 1) "tree?" else "trees?"),
+                )
+            },
+            text = {
+                Text("This permanently removes the plot and all its trees. This cannot be undone.")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDelete = false
+                    scope.launch {
+                        try {
+                            env.treeRepository.listByPlot(vm.plot.id, includeDeleted = true)
+                                .forEach { env.treeRepository.hardDelete(it.id) }
+                            env.plotRepository.delete(vm.plot.id)
+                        } catch (_: Exception) {
+                            // Storage error — stay on the summary; retry later.
+                        }
+                        nav.popBackStack()
+                    }
+                }) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDelete = false }) { Text("Cancel") }
+            },
+        )
     }
 
     // MARK: - Error alert
@@ -296,26 +358,28 @@ private fun StatRow(label: String, value: String) {
 }
 
 @Composable
-private fun SpeciesRow(code: String, stat: PlotStats.SpeciesStat) {
+private fun SpeciesRow(code: String, stat: PlotStats.SpeciesStat, areaUnit: AreaUnit) {
     val colors = Forestix.colors
     val type = Forestix.type
+    val f = areaUnit.perAcreDensityFactor
+    val suffix = areaUnit.densitySuffix
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(code, style = type.data, color = colors.textPrimary)
+            Text(RegionalSpecies.nameForCode(code), style = type.data, color = colors.textPrimary)
             Spacer(Modifier.weight(1f))
             Text("${stat.count} trees", style = type.dataSmall, color = colors.textSecondary)
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
-                String.format(Locale.US, "%.1f /ac", stat.tpa),
+                String.format(Locale.US, "%.1f $suffix", stat.tpa * f),
                 style = type.dataSmall, color = colors.textSecondary)
             Spacer(Modifier.weight(1f))
             Text(
-                String.format(Locale.US, "%.2f m²/ac", stat.baPerAcreM2),
+                String.format(Locale.US, "%.2f m²$suffix", stat.baPerAcreM2 * f),
                 style = type.dataSmall, color = colors.textSecondary)
             Spacer(Modifier.weight(1f))
             Text(
-                String.format(Locale.US, "%.1f m³/ac", stat.grossVolumePerAcreM3),
+                String.format(Locale.US, "%.1f m³$suffix", stat.grossVolumePerAcreM3 * f),
                 style = type.dataSmall, color = colors.textSecondary)
         }
     }

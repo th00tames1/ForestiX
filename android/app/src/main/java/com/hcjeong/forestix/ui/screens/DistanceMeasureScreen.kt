@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
@@ -47,8 +48,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
-import com.hcjeong.forestix.ar.ArController
 import com.hcjeong.forestix.ar.ArCameraView
+import com.hcjeong.forestix.ar.ArSessionHub
 import com.hcjeong.forestix.ar.Vec3
 import com.hcjeong.forestix.ar.distance
 import com.hcjeong.forestix.common.MeasurementFormatter
@@ -59,8 +60,8 @@ import com.hcjeong.forestix.sensors.DistanceSmoother
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hcjeong.forestix.ui.softDropShadow
 import com.hcjeong.forestix.ui.theme.Forestix
-import com.hcjeong.forestix.ui.theme.ForestixBorderedButton
 import com.hcjeong.forestix.ui.theme.ForestixProminentButton
+import com.hcjeong.forestix.ui.theme.ForestixWhiteButton
 import java.util.Locale
 import java.util.UUID
 import kotlin.math.roundToInt
@@ -72,7 +73,8 @@ fun DistanceMeasureScreen(nav: NavController) {
     val env = LocalAppEnvironment.current
     val context = LocalContext.current
     val settings by env.settings.state.collectAsStateWithLifecycle()
-    val controller = remember { ArController() }
+    // Shared app-scoped AR session (one ARCore world across the AR screens).
+    val controller = ArSessionHub.controller
     val density = LocalDensity.current
     fun formatDistance(m: Double) = MeasurementFormatter.distance(m, settings.unitSystem)
 
@@ -200,78 +202,102 @@ fun DistanceMeasureScreen(nav: NavController) {
             }
         }
 
-        // Right-centre + button with Live/Two-point pill beneath.
-        MeasureControlColumn(
-            onCapture = { capture() },
-            extra = {
-                MeasurePill(if (mode == DistMode.LIVE) "Live" else "2-Pt") {
-                    mode = if (mode == DistMode.LIVE) DistMode.TWO_POINT else DistMode.LIVE
-                    resetTwoPoint()
-                }
-            },
+        // U1 — capture-failure hints and the two-point placement hints in
+        // the top-centre banner; Live mode has no stage guidance (iOS
+        // topBannerText parity — failures ride the plain banner here).
+        MeasureTopChrome(
+            instruction = failure
+                ?: if (mode == DistMode.TWO_POINT) twoPointHint(pointA, pointB) else null,
         )
 
-        // Bottom-centre readout — row order: header, value, hint, dev
-        // fields, buttons (iOS bottomPanel).
-        MeasureStatusPanel {
-            failure?.let {
-                Text(it, style = Forestix.type.caption, color = Color.White)
-            }
-            Text(
-                if (mode == DistMode.LIVE) "DEVICE → TARGET" else "POINT A → POINT B",
-                style = Forestix.type.sectionHead.copy(letterSpacing = 1.2.sp),
-                color = Color.White.copy(alpha = 0.75f),
-            )
-            val value = if (mode == DistMode.LIVE) liveDistance else twoPointDistance
-            CenteredText(value?.let { formatDistance(it) } ?: "—", large = true)
-            if (mode == DistMode.TWO_POINT) {
+        // A completed A→B pair is this screen's RESULT state — the value
+        // panel with Reset / Save replaces the shutter (iOS parity). Live
+        // mode never has a result state: the shutter itself logs the
+        // reading.
+        val isTwoPointResult =
+            mode == DistMode.TWO_POINT && pointA != null && pointB != null
+        if (isTwoPointResult) {
+            MeasureStatusPanel {
                 Text(
-                    twoPointHint(pointA, pointB),
-                    style = Forestix.type.caption,
-                    color = Color.White.copy(alpha = 0.85f),
+                    "POINT A → POINT B",
+                    style = Forestix.type.sectionHead.copy(letterSpacing = 1.2.sp),
+                    color = Color.White.copy(alpha = 0.75f),
                 )
-            }
-            if (settings.developerMode) {
-                ResearchFieldsRow(
-                    targetValue = settings.researchTreeId,
-                    onTargetChange = { env.settings.setResearchTreeId(it.trim()) },
-                    targetPlaceholder = "D1",
-                    trueLabel = "True (m)",
-                    trueValue = researchTrueM,
-                    onTrueChange = { researchTrueM = it.filter { c -> c.isDigit() || c == '.' } },
-                    truePlaceholder = "tape",
-                )
-            }
-            when (mode) {
-                DistMode.LIVE -> {
-                    // Explicit full-width Save alongside the "+" capture —
-                    // disabled until a distance locks (iOS actionRow).
+                CenteredText(twoPointDistance?.let { formatDistance(it) } ?: "—", large = true)
+                if (settings.developerMode) {
+                    ResearchFieldsRow(
+                        targetValue = settings.researchTreeId,
+                        onTargetChange = { env.settings.setResearchTreeId(it.trim()) },
+                        targetPlaceholder = "D1",
+                        trueLabel = "True (m)",
+                        trueValue = researchTrueM,
+                        onTrueChange = { researchTrueM = it.filter { c -> c.isDigit() || c == '.' } },
+                        truePlaceholder = "tape",
+                    )
+                }
+                Row(
+                    Modifier.fillMaxWidth().padding(top = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    ForestixWhiteButton("Reset", modifier = Modifier.weight(1f)) { resetTwoPoint() }
                     ForestixProminentButton(
                         "Save",
-                        modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
-                        enabled = liveDistance != null,
+                        modifier = Modifier.weight(1f),
+                        enabled = twoPointDistance != null,
                     ) {
-                        val d = liveDistance
-                        if (d != null) save(d, "live")
-                    }
-                }
-                DistMode.TWO_POINT -> {
-                    Row(
-                        Modifier.fillMaxWidth().padding(top = 2.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        ForestixBorderedButton("Reset", modifier = Modifier.weight(1f)) { resetTwoPoint() }
-                        ForestixProminentButton(
-                            "Save",
-                            modifier = Modifier.weight(1f),
-                            enabled = twoPointDistance != null,
-                        ) {
-                            val d = twoPointDistance
-                            if (d != null) { save(d, "two-point"); resetTwoPoint() }
-                        }
+                        val d = twoPointDistance
+                        if (d != null) { save(d, "two-point"); resetTwoPoint() }
                     }
                 }
             }
+        } else {
+            // U2 — bottom-centre shutter while measuring (Live: capture =
+            // save; Two-point: capture = place A/B), the Live/2-Pt mode
+            // toggle as the left flank, the live readout as the value
+            // strip above (dev research fields on their own scrim above
+            // that — typed BEFORE the shutter logs the reading).
+            MeasureShutterBar(
+                onCapture = { capture() },
+                left = {
+                    MeasurePill(if (mode == DistMode.LIVE) "Live" else "2-Pt") {
+                        mode = if (mode == DistMode.LIVE) DistMode.TWO_POINT else DistMode.LIVE
+                        resetTwoPoint()
+                    }
+                },
+                valueStrip = {
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        if (settings.developerMode) {
+                            Box(
+                                Modifier
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color.Black.copy(alpha = 0.55f))
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                            ) {
+                                ResearchFieldsRow(
+                                    targetValue = settings.researchTreeId,
+                                    onTargetChange = { env.settings.setResearchTreeId(it.trim()) },
+                                    targetPlaceholder = "D1",
+                                    trueLabel = "True (m)",
+                                    trueValue = researchTrueM,
+                                    onTrueChange = {
+                                        researchTrueM = it.filter { c -> c.isDigit() || c == '.' }
+                                    },
+                                    truePlaceholder = "tape",
+                                )
+                            }
+                        }
+                        MeasureValuePill(
+                            if (mode == DistMode.LIVE) "DEVICE → TARGET" else "POINT A → POINT B",
+                            dimmed = true,
+                        )
+                        val value = if (mode == DistMode.LIVE) liveDistance else twoPointDistance
+                        MeasureValuePill(value?.let { formatDistance(it) } ?: "—", large = true)
+                    }
+                },
+            )
         }
     }
 }

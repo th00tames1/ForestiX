@@ -10,11 +10,12 @@
 //   • 5–15 m  → "GPS fair"   (confidenceWarn)
 //   • > 15 m / unknown → "GPS check" (confidenceBad)
 //
-// The badge owns a local `LocationService` so it works without any
-// AppEnvironment plumbing — it lights up regardless of which scan
-// screen hosts it. Without a granted location permission the service
-// never produces a fix, so the badge silently falls back to "check"
-// (the iOS macOS-stub behaviour).
+// The badge subscribes to the app-scoped `LocationService.shared`
+// (acquire/release ref-counting) so it works without any AppEnvironment
+// plumbing — it lights up regardless of which scan screen hosts it,
+// without registering its own location/sensor listeners. Without a
+// granted location permission the service never produces a fix, so the
+// badge silently falls back to "check" (the iOS macOS-stub behaviour).
 
 package com.hcjeong.forestix.ui.screens
 
@@ -50,7 +51,7 @@ import com.hcjeong.forestix.ui.theme.Forestix
 @Composable
 fun GPSAccuracyBadge(modifier: Modifier = Modifier) {
     val context = LocalContext.current
-    val location = remember { LocationService(context) }
+    val location = remember { LocationService.shared(context) }
 
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -62,14 +63,13 @@ fun GPSAccuracyBadge(modifier: Modifier = Modifier) {
         if (granted) location.start()
     }
     LaunchedEffect(Unit) {
-        if (LocationService.hasLocationPermission(context)) {
-            location.start()
-        } else {
+        if (!LocationService.hasLocationPermission(context)) {
             launcher.launch(LocationService.PERMISSIONS)
         }
     }
     DisposableEffect(Unit) {
-        onDispose { location.stop() }
+        location.acquire()
+        onDispose { location.release() }
     }
 
     val snapshot by location.latestSnapshot.collectAsStateWithLifecycle()

@@ -1,6 +1,6 @@
 // In-app plot summary card — closes the "is this plot reasonable?"
-// loop in the field. Adopted from Arboreal Forest's instant
-// post-plot summary + SilvaCruise's stand stats. Cruiser doesn't
+// loop in the field. Modelled on an instant
+// post-plot summary + standard stand stats. Cruiser doesn't
 // need a desktop tool to know whether to re-cruise.
 //
 // Renders:
@@ -23,16 +23,24 @@ public struct PlotSummaryCard: View {
     public let entries: [QuickMeasureEntry]
     public let unitSystem: UnitSystem
     public let logRule: LogRule
+    /// Areal basis for the density stats (BA, TPA per unit land area). Metric
+    /// countries read per hectare; US per acre. Defaults to `.acre`.
+    public let areaUnit: AreaUnit
 
     public init(plot: QuickMeasurePlot,
                 entries: [QuickMeasureEntry],
                 unitSystem: UnitSystem,
-                logRule: LogRule) {
+                logRule: LogRule,
+                areaUnit: AreaUnit = .acre) {
         self.plot = plot
         self.entries = entries
         self.unitSystem = unitSystem
         self.logRule = logRule
+        self.areaUnit = areaUnit
     }
+
+    /// Per-acre → display-basis multiplier (1.0 US, 2.47105 metric hectares).
+    private var densityFactor: Double { areaUnit.perAcreDensityFactor }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: ForestixSpace.md) {
@@ -80,7 +88,8 @@ public struct PlotSummaryCard: View {
         var parts: [String] = []
         if !plot.unitName.isEmpty { parts.append(plot.unitName) }
         if let ac = plot.acres {
-            parts.append(String(format: "%.2f ac", ac))
+            parts.append(String(format: "%.2f %@",
+                                areaUnit.fromAcres(Double(ac)), areaUnit.abbreviation))
         }
         return parts.joined(separator: " · ")
     }
@@ -92,9 +101,11 @@ public struct PlotSummaryCard: View {
         return HStack(spacing: 0) {
             statsCell("TREES", s?.distinctTrees.description ?? "—")
             divider
-            statsCell("BASAL/AC", s.map { String(format: "%.0f", $0.baPerAcre) } ?? "—")
+            statsCell("BASAL/\(areaUnit.abbreviation.uppercased())",
+                      s.map { String(format: "%.0f", $0.baPerAcre * densityFactor) } ?? "—")
             divider
-            statsCell("TREES/AC",   s.map { String(format: "%.0f", $0.tpa) } ?? "—")
+            statsCell("TREES/\(areaUnit.abbreviation.uppercased())",
+                      s.map { String(format: "%.0f", $0.tpa * densityFactor) } ?? "—")
             divider
             statsCell("MEAN DBH",
                       s.flatMap { $0.qmd.map { qmd in
@@ -162,10 +173,11 @@ public struct PlotSummaryCard: View {
                     .foregroundStyle(ForestixPalette.textTertiary)
                 ForEach(s.speciesMix, id: \.code) { row in
                     HStack {
-                        Text(row.code.isEmpty ? "—" : row.code)
+                        Text(row.code.isEmpty ? "—" : RegionalSpecies.name(forCode: row.code))
                             .font(ForestixType.dataSmall)
                             .foregroundStyle(ForestixPalette.textSecondary)
-                            .frame(width: 56, alignment: .leading)
+                            .lineLimit(1)
+                            .frame(width: 96, alignment: .leading)
                         // Bar viz of the share, with a numeric label.
                         GeometryReader { geo in
                             ZStack(alignment: .leading) {
@@ -216,16 +228,24 @@ public struct PlotSummaryCard: View {
         let dbhTrees = trees.compactMap { $0.dbhCm }
         guard !dbhTrees.isEmpty else { return nil }
 
-        // BA per tree (m² → ft²/ac via dbh in inches). Use SilvaCruise's
-        // ft²-per-tree formula on each tree. With no plot-acres tied to
-        // these readings yet, "per acre" means "per tree-bin" — useful
-        // as a relative readout, refined in Phase 4 with real acreage.
-        let baFt2: [Double] = dbhTrees.map { cm in
-            let inches = cm / 2.54
-            return 0.005454 * inches * inches
+        // BA per tree, in the base unit that matches the displayed density
+        // label: ft² for the US "/ac" card, m² for the metric "/ha" card.
+        // Computing ft² and then labelling it "/ha" over-reads BA by ~10.76×
+        // (the ft²→m² factor), so the numerator has to switch with the label.
+        // With no plot-acres tied to these readings yet, "per acre" means
+        // "per tree-bin" — a relative readout, refined in Phase 4 with real
+        // acreage.
+        let baPerTree: [Double] = dbhTrees.map { cm in
+            if areaUnit == .hectare {
+                let m = cm / 100.0
+                return Double.pi / 4.0 * m * m          // m² basal area
+            } else {
+                let inches = cm / 2.54
+                return 0.005454 * inches * inches        // ft² basal area
+            }
         }
         let acres = max(plot.acres ?? 0.1, 0.05)   // sane fallback
-        let baPerAcre = baFt2.reduce(0, +) / acres
+        let baPerAcre = baPerTree.reduce(0, +) / acres
         let tpa = Double(dbhTrees.count) / acres
         // QMD in cm (display layer converts to inches if needed).
         let qmdSqCm = dbhTrees.map { $0 * $0 }.reduce(0, +) / Double(dbhTrees.count)

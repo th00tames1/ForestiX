@@ -14,25 +14,47 @@ public struct StandSummaryScreen: View {
 
     @StateObject private var viewModel: StandSummaryViewModel
 
-    public init(viewModel: @autoclosure @escaping () -> StandSummaryViewModel) {
+    /// TRUE when the active country's volume standard is pending official
+    /// coefficients (South Korea) — the gross-volume card then renders "—"
+    /// rather than a fabricated 0. Defaults to false so US / metric callers,
+    /// previews and tests are unchanged.
+    private let volumePending: Bool
+
+    /// Areal basis for the density cards (TPA, BA/area, volume/area). The
+    /// engine computes per acre; metric countries re-express per hectare. The
+    /// caller passes `settings.unitSystem.areaUnit`. Defaults to `.acre` so US
+    /// callers, previews and tests are unchanged.
+    private let areaUnit: AreaUnit
+
+    public init(viewModel: @autoclosure @escaping () -> StandSummaryViewModel,
+                volumePending: Bool = false,
+                areaUnit: AreaUnit = .acre) {
         _viewModel = StateObject(wrappedValue: viewModel())
+        self.volumePending = volumePending
+        self.areaUnit = areaUnit
     }
+
+    /// Per-acre → display-basis multiplier (1.0 for US acres, 2.47105 for
+    /// metric hectares).
+    private var densityFactor: Double { areaUnit.perAcreDensityFactor }
 
     public var body: some View {
         Form {
             headerSection
-            statCardSection(title: "Trees / ac", unit: "/ac",
-                            stat: viewModel.tpaStat,
+            statCardSection(title: "Trees / \(areaUnit.abbreviation)",
+                            unit: areaUnit.densitySuffix,
+                            stat: viewModel.tpaStat.scaledPerArea(by: densityFactor),
                             perPlot: viewModel.perPlotStats.map {
-                                (plot: $0.plot, value: Double($0.stats.tpa)) })
-            statCardSection(title: "Basal area", unit: "m²/ac",
-                            stat: viewModel.baStat,
+                                (plot: $0.plot, value: Double($0.stats.tpa) * densityFactor) })
+            statCardSection(title: "Basal area", unit: areaUnit.densityLabel("m²"),
+                            stat: viewModel.baStat.scaledPerArea(by: densityFactor),
                             perPlot: viewModel.perPlotStats.map {
-                                (plot: $0.plot, value: Double($0.stats.baPerAcreM2)) })
-            statCardSection(title: "Gross volume", unit: "m³/ac",
-                            stat: viewModel.volStat,
+                                (plot: $0.plot, value: Double($0.stats.baPerAcreM2) * densityFactor) })
+            statCardSection(title: "Gross volume", unit: areaUnit.densityLabel("m³"),
+                            stat: viewModel.volStat.scaledPerArea(by: densityFactor),
                             perPlot: viewModel.perPlotStats.map {
-                                (plot: $0.plot, value: Double($0.stats.grossVolumePerAcreM3)) })
+                                (plot: $0.plot, value: Double($0.stats.grossVolumePerAcreM3) * densityFactor) },
+                            pending: volumePending)
             perPlotTableSection
         }
         .navigationTitle("Stand summary")
@@ -71,9 +93,19 @@ public struct StandSummaryScreen: View {
         title: String,
         unit: String,
         stat: StandStat,
-        perPlot: [(plot: Models.Plot, value: Double)]
+        perPlot: [(plot: Models.Plot, value: Double)],
+        pending: Bool = false
     ) -> some View {
         Section(title) {
+            if pending {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("—").font(ForestixType.dataLarge)
+                    Text("Volume for South Korea is pending official NIFoS coefficients. Trees, basal area and stocking are unaffected.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } else {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Text(String(format: "%.2f %@", stat.mean, unit))
@@ -123,6 +155,7 @@ public struct StandSummaryScreen: View {
                     }
                 }
             }
+            }
         }
     }
 
@@ -134,9 +167,9 @@ public struct StandSummaryScreen: View {
                 HStack {
                     Text("#").frame(width: 28, alignment: .leading)
                     Text("Live").frame(maxWidth: .infinity, alignment: .trailing)
-                    Text("Trees/ac").frame(maxWidth: .infinity, alignment: .trailing)
-                    Text("Basal/ac").frame(maxWidth: .infinity, alignment: .trailing)
-                    Text("Volume/ac").frame(maxWidth: .infinity, alignment: .trailing)
+                    Text("Trees/\(areaUnit.abbreviation)").frame(maxWidth: .infinity, alignment: .trailing)
+                    Text("Basal/\(areaUnit.abbreviation)").frame(maxWidth: .infinity, alignment: .trailing)
+                    Text("Volume/\(areaUnit.abbreviation)").frame(maxWidth: .infinity, alignment: .trailing)
                 }
                 .font(.caption2.bold())
                 .foregroundStyle(.secondary)
@@ -146,11 +179,11 @@ public struct StandSummaryScreen: View {
                             .frame(width: 28, alignment: .leading)
                         Text("\(row.stats.liveTreeCount)")
                             .frame(maxWidth: .infinity, alignment: .trailing)
-                        Text(String(format: "%.1f", row.stats.tpa))
+                        Text(String(format: "%.1f", Double(row.stats.tpa) * densityFactor))
                             .frame(maxWidth: .infinity, alignment: .trailing)
-                        Text(String(format: "%.2f", row.stats.baPerAcreM2))
+                        Text(String(format: "%.2f", Double(row.stats.baPerAcreM2) * densityFactor))
                             .frame(maxWidth: .infinity, alignment: .trailing)
-                        Text(String(format: "%.1f", row.stats.grossVolumePerAcreM3))
+                        Text(String(format: "%.1f", Double(row.stats.grossVolumePerAcreM3) * densityFactor))
                             .frame(maxWidth: .infinity, alignment: .trailing)
                     }
                     .font(.caption.monospacedDigit())

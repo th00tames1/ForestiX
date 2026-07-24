@@ -1,4 +1,4 @@
-// Regional species presets — adopted from SilvaCruise's "pick your
+// Regional species presets — a "pick your
 // region, get the right species pre-selected" onboarding pattern.
 // Cuts first-run friction: the cruiser picks once and the rest of
 // the app filters its species pickers to the relevant 8–15 species.
@@ -189,4 +189,37 @@ public enum RegionalSpecies {
             return []   // empty = no filter applied
         }
     }
+
+    /// Resolves a stored FIA code to its human-readable common name,
+    /// searching across every region's preset list so a code tallied in
+    /// one region still reads correctly anywhere it's displayed. This is
+    /// display-only: stored `speciesCode` values and CSV columns keep the
+    /// code. Free-typed or otherwise unknown codes (not in any region,
+    /// e.g. "OT") fall back to the raw code so nothing is hidden.
+    public static func name(forCode code: String) -> String {
+        let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return code }
+        return canonicalNames[trimmed.uppercased()] ?? code
+    }
+
+    /// Code → common name, built once from all regional presets. First
+    /// occurrence wins when a code appears in several regions (a handful
+    /// of FIA codes collide across regions).
+    private static let canonicalNames: [String: String] = {
+        var map: [String: String] = [:]
+        for region in Region.allCases {
+            for (code, name) in defaultSpecies(for: region) {
+                let key = code.uppercased()
+                if map[key] == nil { map[key] = name }
+            }
+        }
+        // Fold in the non-US country presets (Finland / Germany / Korea) so a
+        // code tallied under a metric country still reads correctly wherever
+        // it's displayed.
+        for (code, name) in Country.allNonUSSpecies {
+            let key = code.uppercased()
+            if map[key] == nil { map[key] = name }
+        }
+        return map
+    }()
 }

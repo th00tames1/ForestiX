@@ -71,6 +71,7 @@ data class PlannedPlotEntity(
     val plannedLat: Double,
     val plannedLon: Double,
     val visited: Boolean,
+    val skipped: Boolean,
 )
 
 @Entity(tableName = "PlotEntity", indices = [Index("projectId")])
@@ -136,6 +137,12 @@ data class TreeEntity(
     val notes: String,
     val photoPath: String?,
     val rawScanPath: String?,
+
+    /// Cruise-mode map pin (v3 redesign): the GPS fix captured at Accept.
+    /// Nullable — trees recorded without a fix simply don't pin. Added in
+    /// schema v2 (CruiseDatabase.MIGRATION_1_2).
+    val latitude: Double? = null,
+    val longitude: Double? = null,
 
     val createdAt: Long,
     val updatedAt: Long,

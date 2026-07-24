@@ -1,5 +1,5 @@
 // Geodesy helpers — 1:1 port of iOS Positioning/GeoMath.swift.
-// Used by NavigationScreen and the track log.
+// Used by the cruise map's navigation guide and the track log.
 //
 // The plot-center math lives in GPSAveraging / OffsetFromOpening
 // (local ENU, good to sub-mm over 200 m). These helpers are the

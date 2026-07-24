@@ -25,6 +25,10 @@ public struct HeightScanScreen: View {
     @StateObject private var raycaster = ARCenterRaycaster()
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var settings: AppSettings
+    /// App-scoped active sampling plot — rendered as a subdued ring +
+    /// pole under the measurement markers so the cruiser keeps the plot
+    /// boundary in view while measuring. Changes only on place/reset.
+    @ObservedObject private var activePlot = ActiveSamplingPlot.shared
     public var onResult: (HeightResult) -> Void = { _ in }
     /// Fires when the cruiser explicitly accepts the result shown on
     /// screen (state → .accepted). Hosts that want to persist only on
@@ -72,18 +76,45 @@ public struct HeightScanScreen: View {
     /// Developer-mode research capture: true height (m) from a clinometer /
     /// Vertex, typed before Accept; logged to the research CSV.
     @State private var researchTrueM: String = ""
+    /// Live camera→crosshair raycast distance sampled while the anchor
+    /// stage is active — drives the ≤ 4 m anchor range gate's status
+    /// line. nil while the raycast misses (sky, no mesh/plane yet,
+    /// tracking not ready), which also counts as "gate not satisfied".
+    @State private var anchorAimDistanceM: Float?
     /// (mesh overlay removed — the Height scan uses the plane/tangent walk-off
     /// and the LiDAR reconstruction wireframe was just visual noise.)
     /// PLACEHOLDER-COMMENT
 
+    /// CRUISE MODE — the active cruise plot's mini-map payload; nil on
+    /// the quick-measure path, where the widget falls back to the
+    /// quick ActiveSamplingPlot ring or stays hidden. See DBHScanScreen.
+    private let cruisePlotInfo: PlotMiniMapInfo?
+
     public init(viewModel: @autoclosure @escaping () -> HeightScanViewModel,
                 onResult: @escaping (HeightResult) -> Void = { _ in },
                 onAccept: @escaping (HeightResult, ScanMetadata) -> Void = { _, _ in },
-                onCrown: @escaping (Double, Double) -> Void = { _, _ in }) {
+                onCrown: @escaping (Double, Double) -> Void = { _, _ in },
+                cruisePlotInfo: PlotMiniMapInfo? = nil) {
         _viewModel = StateObject(wrappedValue: viewModel())
         self.onResult = onResult
         self.onAccept = onAccept
         self.onCrown = onCrown
+        self.cruisePlotInfo = cruisePlotInfo
+    }
+
+    /// What the top-right mini-map shows: the cruise plot when the
+    /// add-tree chain supplied one, else the quick sampling ring, else
+    /// nothing.
+    private var miniMapInfo: PlotMiniMapInfo? {
+        if let cruisePlotInfo { return cruisePlotInfo }
+        guard let plot = activePlot.plot else { return nil }
+        return PlotMiniMapInfo(plotID: nil,
+                               plotNumber: nil,
+                               radiusM: plot.radiusM,
+                               centerLat: nil,
+                               centerLon: nil,
+                               treeCount: 0,
+                               trees: [])
     }
 
     // MARK: - Crown sub-flow state
@@ -109,7 +140,8 @@ public struct HeightScanScreen: View {
             // turn "cruiser tapped while aiming here" into a world hit.
             ARCameraView(manager: viewModel.session,
                          debugMeshOverlay: false,
-                         sceneMarkers: viewModel.sceneMarkers + crownMarkers,
+                         sceneMarkers: plotOverlayMarkers
+                             + viewModel.sceneMarkers + crownMarkers,
                          raycaster: raycaster)
                 .ignoresSafeArea()
             overlayChrome
@@ -131,19 +163,34 @@ public struct HeightScanScreen: View {
                     Spacer()
                 }
 
+                // Plot mini-map — top-right, same row as the GPS badge.
+                // Non-interactive; hidden with the rest of the 2D chrome
+                // during the Accept snapshot blackout.
+                if let info = miniMapInfo {
+                    VStack(spacing: 0) {
+                        HStack {
+                            Spacer()
+                            PlotMiniMapWidget(info: info)
+                                .padding(.trailing, ForestixSpace.md)
+                        }
+                        .padding(.top, 22)
+                        Spacer()
+                    }
+                }
+
                 // Floating back button — full-bleed chrome exit (the system
                 // nav bar is hidden on the AR screens).
                 MeasureBackButtonRow()
 
-                // Right-centre "+" capture button — replaces the centre
-                // Anchor Here / Aim Top / Aim Base buttons. It fires the
-                // current stage's capture action. The Manual escape hatch
-                // sits directly below it during the anchor stage.
-                if hasPrimaryCapture {
-                    MeasureControlColumn(capture: primaryCapture) {
-                        if showsManualRailButton {
-                            manualRailButton
-                        }
+                // Top-centre instruction banner (U1) — the stage strings
+                // moved out of the bottom panel (the crown aim prompts
+                // live on the crosshair label); the orange anchor-failure
+                // banner travels with it (tap to clear, as before).
+                MeasureTopBanner(statusText) {
+                    if let reason = viewModel.anchorFailureReason {
+                        bannerView(reason, tint: .orange)
+                            .accessibilityIdentifier("heightScan.anchorFailureBanner")
+                            .onTapGesture { viewModel.clearAnchorFailure() }
                     }
                 }
 
@@ -162,10 +209,35 @@ public struct HeightScanScreen: View {
                     }
                 }
 
-                // Bottom-centre status / value panel.
-                VStack {
+                // Bottom block (U2): capture stages get the camera-app
+                // shutter bottom-centre — "Manual" flanks left while
+                // anchoring, Retake flanks right once a walk/aim stage
+                // (or crown capture) could need restarting — with the
+                // live walk readout as the value strip above. RESULT
+                // states drop the shutter and show the existing
+                // value/action panel.
+                VStack(spacing: 12) {
                     Spacer()
-                    bottomPanel
+                    if hasPrimaryCapture {
+                        heightValueStrip
+                        MeasureShutterRow(
+                            capture: primaryCapture,
+                            leading: showsManualFlank
+                                ? .init(systemImage: "keyboard",
+                                        caption: "Manual") {
+                                    viewModel.enterManualEntry()
+                                }
+                                : nil,
+                            trailing: showsRetakeFlank
+                                ? .init(systemImage: "arrow.counterclockwise",
+                                        caption: "Retake") {
+                                    viewModel.retake()
+                                    resetCrown()
+                                }
+                                : nil)
+                    } else if showsResultPanel {
+                        bottomPanel
+                    }
                 }
             }
         }
@@ -176,7 +248,32 @@ public struct HeightScanScreen: View {
         #if os(iOS)
         .toolbar(.hidden, for: .navigationBar)
         #endif
-        .onAppear { viewModel.onAppear() }
+        // While the anchor stage is live, sample the screen-centre raycast
+        // distance at ~10 Hz (same cadence as the DBH caliper smoother) so
+        // the status line can flip between the aim prompt and the "Move
+        // closer" range-gate message as the cruiser approaches the trunk.
+        // The tap itself re-raycasts, so the gate enforced by the view
+        // model always uses a fresh hit — this sampler only drives chrome.
+        .task(id: anchorAiming) {
+            guard anchorAiming else {
+                anchorAimDistanceM = nil
+                return
+            }
+            while !Task.isCancelled {
+                raycaster.preferLiDARMesh = settings.measurementSource == .lidar
+                if let cam = raycaster.cameraWorldPosition,
+                   let hit = raycaster.screenCenterHit() {
+                    anchorAimDistanceM = simd_distance(cam, hit)
+                } else {
+                    anchorAimDistanceM = nil
+                }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
+        .onAppear {
+            configureRawCapture()
+            viewModel.onAppear()
+        }
         .onDisappear { viewModel.onDisappear() }
         .onChange(of: viewModel.result?.heightM) { _, newValue in
             if newValue != nil, let r = viewModel.result {
@@ -205,6 +302,12 @@ public struct HeightScanScreen: View {
                         latitude: fix?.latitude,
                         longitude: fix?.longitude)
                     onAccept(r, meta)
+                    // Raw-capture (developer mode): store the clinometer/Vertex
+                    // truth on the just-recorded bundle if typed before Accept.
+                    if let id = viewModel.lastRecordedBundleID,
+                       let t = Double(researchTrueM), t > 0 {
+                        RawCaptureStore.updateTruth(id: id, value: t)
+                    }
                     recordResearchRow(r)
                 }
             }
@@ -329,30 +432,102 @@ public struct HeightScanScreen: View {
 
     // MARK: - Bottom panel
 
+    /// RESULT states that render the bottom value/action panel (U2) —
+    /// capture stages render the shutter row instead. Crown-capture
+    /// steps count as capture stages (`hasPrimaryCapture` wins first).
+    private var showsResultPanel: Bool {
+        switch viewModel.state {
+        case .computed, .rejected, .manualEntry: return true
+        default: return false
+        }
+    }
+
+    /// Crown capture in progress — the shutter drives the four corner
+    /// taps; the crosshair label carries the aim prompt.
+    private var crownActive: Bool {
+        crownStep != .none && crownStep != .done
+    }
+
+    /// Manual flanks left during the anchor stage only.
+    private var showsManualFlank: Bool {
+        showsManualRailButton && !crownActive
+    }
+
+    /// Retake flanks right once there is a measurement in progress to
+    /// restart — the walk/aim stages plus crown capture.
+    private var showsRetakeFlank: Bool {
+        if crownActive { return true }
+        switch viewModel.state {
+        case .walking, .aimTopArmed, .aimTopCaptured, .aimBaseArmed:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Live value strip above the shutter (U2): the walk stage's three
+    /// distance lines — Initial dist, Walked back (starts at 0.00), and
+    /// the primary Total distance d_h — plus the computed height while
+    /// the crown sub-flow is capturing so the value stays on screen.
+    @ViewBuilder
+    private var heightValueStrip: some View {
+        if viewModel.state == .walking {
+            VStack(spacing: 4) {
+                MeasureValuePill(
+                    "Initial dist " + MeasurementFormatter.distance(
+                        m: Double(viewModel.initialDistanceM),
+                        in: settings.unitSystem),
+                    dimmed: true)
+                MeasureValuePill(
+                    "Walked back " + MeasurementFormatter.distance(
+                        m: Double(viewModel.walkedBackMeters),
+                        in: settings.unitSystem),
+                    dimmed: true)
+                MeasureValuePill(
+                    "Total distance " + MeasurementFormatter.distance(
+                        m: Double(viewModel.dhMeters),
+                        in: settings.unitSystem),
+                    large: true)
+            }
+            .accessibilityIdentifier("heightScan.walkingReadout")
+        } else if crownActive, let r = viewModel.result {
+            // Crown capture: keep the computed height on screen while
+            // the canopy taps run.
+            MeasureValuePill(
+                MeasurementFormatter.height(m: Double(r.heightM),
+                                            in: settings.unitSystem),
+                large: true)
+        }
+    }
+
     @ViewBuilder
     private var bottomPanel: some View {
         MeasureStatusPanel {
-            if let reason = viewModel.anchorFailureReason {
-                bannerView(reason, tint: .orange)
-                    .accessibilityIdentifier("heightScan.anchorFailureBanner")
-                    .onTapGesture { viewModel.clearAnchorFailure() }
-            }
-            statusBanner
             stagePanel
             actionRow
         }
     }
 
-    private var statusBanner: some View {
-        Text(statusText)
-            .font(.callout)
-            .foregroundStyle(.white)
-            .accessibilityIdentifier("heightScan.statusBanner")
+    /// True while the anchor stage's crosshair rests on a raycast hit
+    /// within the ≤ 4 m range gate — the only condition under which the
+    /// "+" will actually capture the anchor.
+    private var anchorWithinGate: Bool {
+        guard let d = anchorAimDistanceM else { return false }
+        return d <= HeightScanViewModel.anchorMaxRangeM
+    }
+
+    /// True for the pre-anchor aiming states — the window in which the
+    /// range-gate sampler runs.
+    private var anchorAiming: Bool {
+        viewModel.state == .idle || viewModel.state == .anchorSet
     }
 
     private var statusText: String {
         switch viewModel.state {
-        case .idle, .anchorSet:   return "Aim at the trunk at eye level, then tap +."
+        case .idle, .anchorSet:
+            return anchorWithinGate
+                ? "Aim at the trunk at eye level, then tap +."
+                : "Move closer — anchor within 4 m of the trunk."
         case .walking:            return "Walk back, then tap + to continue."
         case .aimTopArmed:        return "Aim at the treetop, then tap +."
         case .aimTopCaptured:     return "Top captured."
@@ -370,8 +545,6 @@ public struct HeightScanScreen: View {
     @ViewBuilder
     private var stagePanel: some View {
         switch viewModel.state {
-        case .walking:
-            walkingReadout
         case .computed:
             if let r = viewModel.result { resultPanel(r) }
             crownSection
@@ -411,33 +584,6 @@ public struct HeightScanScreen: View {
         case .top:    return "Crown: aim at the HIGHEST branch, tap +"
         case .bottom: return "Crown: aim at the LOWEST branch, tap +"
         default:      return ""
-        }
-    }
-
-    private var walkingReadout: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Walked back " + MeasurementFormatter.distance(
-                m: Double(viewModel.dhMeters), in: settings.unitSystem))
-                .font(ForestixType.dataLarge)
-                .foregroundStyle(.white)
-            Text(walkHintText)
-                .font(ForestixType.caption)
-                .foregroundStyle(ForestixPalette.confidenceWarn)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityIdentifier("heightScan.walkingReadout")
-    }
-
-    private var walkHintText: String {
-        let delta = viewModel.walkHintMeters
-        let expected = viewModel.expectedHeightM
-        if delta > 0.1 {
-            return "Move back \(String(format: "%.1f", delta)) m "
-                   + "(target ≈ 0.6–1.0 · \(Int(expected)) m)"
-        } else if delta < -0.1 {
-            return "Move forward \(String(format: "%.1f", -delta)) m"
-        } else {
-            return "You're in the sweet-spot band. Continue."
         }
     }
 
@@ -481,22 +627,17 @@ public struct HeightScanScreen: View {
                 // keep H in a sensible range even on red, so showing
                 // "0.8 m — Too close, step back" is more useful than
                 // hiding the number.
+                // Field fix: the value stands alone — no ±σ text and no
+                // tier chip/hint on the scan screens. σ + tier are still
+                // recorded with the entry (history / CSV / FieldLog
+                // unchanged); a red result keeps its rejection reason in
+                // the status banner.
                 Text(MeasurementFormatter.height(
                     m: Double(r.heightM), in: settings.unitSystem))
                     .font(ForestixType.dataLarge)
                     .foregroundStyle(.white)
-                if r.confidence != .red {
-                    Text(MeasurementFormatter.heightSigma(
-                        m: Double(r.sigmaHm), in: settings.unitSystem))
-                        .font(ForestixType.dataSmall)
-                        .foregroundStyle(.white.opacity(0.75))
-                }
                 Spacer()
-                tierChip(r.confidence)
             }
-            Text(tierHint(r.confidence))
-                .font(ForestixType.caption)
-                .foregroundStyle(.white.opacity(0.9))
             // Phase 13.2 diagnostic — Bug B persists in real-device tests
             // (desk reads ~89.6 m). The math in HeightEstimator is correct
             // when fed sane α / d_h, so we surface the actual captured
@@ -552,7 +693,9 @@ public struct HeightScanScreen: View {
 
     private var metadataChipLabel: String {
         var bits: [String] = []
-        if let s = metaSpecies, !s.isEmpty { bits.append(s) }
+        if let s = metaSpecies, !s.isEmpty {
+            bits.append(RegionalSpecies.name(forCode: s))
+        }
         if !metaDamage.isEmpty { bits.append("\(metaDamage.count) tag") }
         if bits.isEmpty { return "Add details" }
         return bits.joined(separator: " · ")
@@ -567,30 +710,6 @@ public struct HeightScanScreen: View {
         return String(
             format: "α_top %+.1f° · α_base %+.1f° · d_h %.2f m",
             topDeg, baseDeg, Double(r.dHm))
-    }
-
-    /// Actionable one-liner per tier — same pattern as the Diameter
-    /// result panel so the cruiser gets consistent guidance.
-    private func tierHint(_ tier: ConfidenceTier) -> String {
-        switch tier {
-        case .green:  return "Good — geometry in sweet spot."
-        case .yellow: return "Fair — long walk-off or steep aim. Acceptable."
-        case .red:    return "Check — retake, or enter a tape estimate manually."
-        }
-    }
-
-    private func tierChip(_ tier: ConfidenceTier) -> some View {
-        let d = ConfidenceStyle.descriptor(for: tier.rawValue)
-        return Text(d.label.uppercased())
-            .font(.system(size: 10, weight: .semibold, design: .default))
-            .tracking(0.8)
-            .padding(.horizontal, 8).padding(.vertical, 3)
-            .overlay(
-                RoundedRectangle(cornerRadius: ForestixRadius.chip,
-                                 style: .continuous)
-                    .stroke(d.color, lineWidth: 0.75)
-            )
-            .foregroundStyle(d.color)
     }
 
     private var manualEntryPanel: some View {
@@ -649,6 +768,17 @@ public struct HeightScanScreen: View {
     private static let crownRightId  = UUID(uuidString: "00000000-C0C0-0000-0000-000000000002") ?? UUID()
     private static let crownTopId    = UUID(uuidString: "00000000-C0C0-0000-0000-000000000003") ?? UUID()
     private static let crownBottomId = UUID(uuidString: "00000000-C0C0-0000-0000-000000000004") ?? UUID()
+
+    /// Subdued sampling-plot context (ring + centre pole at ~0.5 alpha,
+    /// pinned to the plot's ARAnchor). Shown only while a plot is active
+    /// AND its anchor is still alive in the shared session. Non-
+    /// interactive and listed before the measurement markers.
+    private var plotOverlayMarkers: [ARSceneMarker] {
+        guard let plot = activePlot.plot,
+              viewModel.session.worldAnchorExists(id: plot.anchorID)
+        else { return [] }
+        return ActiveSamplingPlot.subduedOverlayMarkers(for: plot)
+    }
 
     private var crownMarkers: [ARSceneMarker] {
         // Stable ids so these aren't torn down + rebuilt on every frame.
@@ -726,41 +856,33 @@ public struct HeightScanScreen: View {
         }
     }
 
-    /// Rail escape hatch for trees the sensors can't read — sits
-    /// directly below the capture "+" and opens the same manual-entry
-    /// state the old status-panel button did.
-    private var manualRailButton: some View {
-        MeasureCircleButton(systemImage: "keyboard", caption: "Manual") {
-            viewModel.enterManualEntry()
-        }
-        .accessibilityIdentifier("heightScan.enterManually")
-    }
-
-    /// Secondary actions only — the primary capture moved to the "+"
-    /// button on the trailing edge (and the anchor-stage Manual escape
-    /// hatch to the rail button beneath it).
+    /// Secondary actions only — the primary capture is the bottom-centre
+    /// shutter (the walk/aim stages' Retake is its right flank, the
+    /// anchor-stage Manual escape hatch its left).
     @ViewBuilder
     private var actionRow: some View {
         switch viewModel.state {
-        case .walking, .aimTopArmed, .aimTopCaptured, .aimBaseArmed:
-            Button("Retake") { viewModel.retake() }
-                .buttonStyle(.bordered)
         case .computed:
             VStack(spacing: 8) {
-                // Crown control: start it, or restart it once done.
-                if crownStep == .none {
-                    Button("Measure crown") { crownStep = .left }
-                        .buttonStyle(.bordered)
-                        .frame(maxWidth: .infinity)
-                        .accessibilityIdentifier("heightScan.measureCrown")
-                } else if crownStep == .done {
-                    Button("Redo crown") { resetCrown() }
-                        .buttonStyle(.bordered)
-                        .frame(maxWidth: .infinity)
+                // Crown control: start it, or restart it once done. Hidden
+                // in cruise-scoped sessions — the cruise Tree model has no
+                // crown fields, so a crown measured here would be silently
+                // dropped (Android gates identically).
+                if cruisePlotInfo == nil {
+                    if crownStep == .none {
+                        Button("Measure crown") { crownStep = .left }
+                            .buttonStyle(.forestixARSecondary)
+                            .frame(maxWidth: .infinity)
+                            .accessibilityIdentifier("heightScan.measureCrown")
+                    } else if crownStep == .done {
+                        Button("Redo crown") { resetCrown() }
+                            .buttonStyle(.forestixARSecondary)
+                            .frame(maxWidth: .infinity)
+                    }
                 }
                 HStack(spacing: 12) {
                     Button("Retake") { viewModel.retake(); resetCrown() }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.forestixARSecondary)
                         .frame(maxWidth: .infinity)
                     Button("Accept") {
                         if crownStep == .done, let w = crownWidthM, let h = crownHeightM {
@@ -779,12 +901,13 @@ public struct HeightScanScreen: View {
                 Button("Retake") { viewModel.retake() }
                     .buttonStyle(.forestixProminent)
                 Button("Manual") { viewModel.enterManualEntry() }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.forestixARSecondary)
             }
         case .manualEntry:
             Button("Cancel") { viewModel.retake() }
-                .buttonStyle(.bordered)
-        case .idle, .anchorSet, .accepted:
+                .buttonStyle(.forestixARSecondary)
+        case .idle, .anchorSet, .walking,
+             .aimTopArmed, .aimTopCaptured, .aimBaseArmed, .accepted:
             EmptyView()
         }
     }
@@ -805,12 +928,35 @@ public struct HeightScanScreen: View {
     /// crosshair at the trunk's base, and taps. The screen-centre
     /// raycast (LiDAR mesh first, plane fallback) returns the 3D
     /// world point of that trunk-base; the view model stores it as
-    /// the anchor. If the raycast misses, the view model surfaces
-    /// `anchorFailureReason` and the screen banner explains how to
-    /// reframe.
+    /// the anchor. The view model's ≤ 4 m range gate makes the tap an
+    /// inert no-op while the raycast misses or hits beyond the gate —
+    /// the status line ("Move closer — anchor within 4 m of the
+    /// trunk.") explains how to reframe.
     private func anchorTap() {
         raycaster.preferLiDARMesh = settings.measurementSource == .lidar
-        viewModel.anchorHereNow(screenCenterHit: raycaster.screenCenterHit())
+        viewModel.rawCaptureGPS = Self.currentGPS()
+        let hitType = settings.measurementSource == .lidar ? "lidarMesh" : "estimatedPlane"
+        viewModel.anchorHereNow(screenCenterHit: raycaster.screenCenterHit(),
+                                hitType: hitType)
+    }
+
+    /// Push the raw-capture recording config onto the view model (developer
+    /// mode only; the VM no-ops recording when disabled).
+    private func configureRawCapture() {
+        viewModel.rawCaptureEnabled = settings.developerMode && settings.rawCaptureEnabled
+        viewModel.rawCaptureContext = RawCaptureContext(
+            mode: cruisePlotInfo != nil ? "cruise" : "quick",
+            projectID: nil,
+            plotID: cruisePlotInfo?.plotID?.uuidString,
+            treeNumber: nil,
+            units: settings.unitSystem.rawValue)
+        viewModel.rawCaptureGPS = Self.currentGPS()
+    }
+
+    static func currentGPS() -> RawCaptureGPS? {
+        guard let fix = LocationService.lastGlobalFix else { return nil }
+        return RawCaptureGPS(lat: fix.latitude, lon: fix.longitude,
+                             accM: fix.horizontalAccuracyM)
     }
 
     /// Aim Top — crosshair on treetop. The sky has no plane, so the

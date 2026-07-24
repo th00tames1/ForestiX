@@ -13,6 +13,7 @@
 
 package com.hcjeong.forestix.sensors
 
+import com.hcjeong.forestix.ar.Vec3
 import java.util.Locale
 import kotlin.math.PI
 import kotlin.math.abs
@@ -66,6 +67,13 @@ data class DBHResult(
 
 /// Row-major depth + confidence grid with pinhole intrinsics and the
 /// column-major camera->world pose. Mirror of iOS ARDepthFrame.
+///
+/// Android note: fx/fy/cx/cy are the GPU-TEXTURE intrinsics scaled per axis
+/// to the depth grid (the ARCore depth image is registered to the texture's
+/// TEXTURE_NORMALIZED space). When the depth aspect differs from the texture
+/// aspect (typical: 4:3 depth vs 16:9 texture) the scaled fx and fy are NOT
+/// equal — consumers must use the focal matching the axis they measure
+/// along. iOS never sees this (sceneDepth and image are both 4:3 → fx==fy).
 class ArDepthFrame(
     val width: Int,
     val height: Int,
@@ -73,9 +81,69 @@ class ArDepthFrame(
     val confidence: ByteArray,    // 0/1/2, row-major
     val fx: Double, val fy: Double, val cx: Double, val cy: Double,
     val pose: FloatArray,         // column-major 4x4 (T_world_camera)
+    /// Diagnostic focals — what fx/fy would be if the depth image were
+    /// registered to the CPU IMAGE instead of the GPU texture (CPU-image
+    /// intrinsics × depth/CPU dims). Dev-HUD only: lets a field run decide
+    /// which registration the device actually honours.
+    val fxImg: Double = 0.0,
+    val fyImg: Double = 0.0,
+    /// VIEW-px -> depth-px affine (a, b, tx, c, d, ty):
+    ///   depthX = a·viewX + b·viewY + tx;  depthY = c·viewX + d·viewY + ty.
+    /// Built by the capture layer from ARCore's own VIEW→TEXTURE_NORMALIZED
+    /// transform, so it carries the display rotation + aspect crop exactly.
+    /// Null when the mapping isn't available (no viewport yet) — callers
+    /// fall back to centre-of-grid behaviour.
+    val depthFromViewAffine: FloatArray? = null,
+    /// Raw sensor u16 depth (native millimetres, row-major) — populated
+    /// ONLY while the raw-capture recorder is armed
+    /// (ArController.captureRawDepth). The serialized replay bundles store
+    /// these bytes verbatim and re-ingest them through `ingestMmInto`, so a
+    /// replayed frame is bit-identical to what the estimator consumed live.
+    /// Null in normal operation (zero cost with recording off).
+    val rawDepthMm: ShortArray? = null,
 ) {
+    companion object {
+        /// Shared u16-mm → (metres, confidence) ingest rule — the SINGLE
+        /// definition of how a raw ARCore D_16 sample becomes the float
+        /// depth + confidence the estimators consume (1–8000 mm valid,
+        /// everything else a conf-0 hole). Used by the live capture path
+        /// (ArController.acquireDepthFrame) AND the raw-capture replay
+        /// deserializer so replayed inputs match live ones exactly.
+        fun ingestMmInto(mm: Int, idx: Int, depth: FloatArray, confidence: ByteArray) {
+            if (mm in 1..8000) {
+                depth[idx] = mm / 1000f
+                confidence[idx] = 2
+            } else {
+                depth[idx] = 0f
+                confidence[idx] = 0
+            }
+        }
+    }
+
     fun depthAt(x: Int, y: Int): Float = depth[y * width + x]
     fun confidenceAt(x: Int, y: Int): Int = confidence[y * width + x].toInt() and 0xFF
+
+    /// Map a view-space pixel (e.g. the crosshair centre) to depth-grid
+    /// coordinates. Null when no mapping was captured.
+    fun viewToDepth(vx: Float, vy: Float): Pair<Double, Double>? {
+        val m = depthFromViewAffine ?: return null
+        val dx = m[0] * vx + m[1] * vy + m[2]
+        val dy = m[3] * vx + m[4] * vy + m[5]
+        return dx.toDouble() to dy.toDouble()
+    }
+
+    /// Map a depth-grid coordinate back to view-space pixels (inverse of
+    /// the affine). Null when no mapping / degenerate.
+    fun depthToView(dx: Double, dy: Double): Pair<Float, Float>? {
+        val m = depthFromViewAffine ?: return null
+        val det = m[0] * m[4] - m[1] * m[3]
+        if (abs(det) < 1e-9f) return null
+        val rx = dx - m[2]
+        val ry = dy - m[5]
+        val vx = (m[4] * rx - m[1] * ry) / det
+        val vy = (-m[3] * rx + m[0] * ry) / det
+        return vx.toFloat() to vy.toFloat()
+    }
 }
 
 sealed class GuideAxis {
@@ -243,6 +311,25 @@ object DBHEstimator {
         val stripLeftFraction: Float = 0f,
         val stripRightFraction: Float = 0f,
         val tier: ConfidenceTier = ConfidenceTier.YELLOW,
+        /// True when this frame produced no fit BECAUSE the silhouette walk
+        /// ran off the image border (edges not found) — a framing problem;
+        /// the UI reports "adjust framing" instead of a generic miss.
+        val edgesClipped: Boolean = false,
+        /// Rows discarded for border touches this frame (dev HUD).
+        val clippedRows: Int = 0,
+        /// Median silhouette width in walk-axis pixels (dev HUD).
+        val widthPx: Int = 0,
+        /// Clean rows THIS tick contributed (before any carry) — dev HUD
+        /// miss diagnosis ("rows 3/5") + the caller's rolling-quorum carry.
+        val cleanRows: Int = 0,
+        /// This tick's own clean-row widths — the caller may feed them back
+        /// as `carryWidths` on the next tick (rolling row quorum while the
+        /// aim is steady). Never includes borrowed carry widths.
+        val cleanWidths: List<Int> = emptyList(),
+        /// World-space cylinder-axis centre of this tick's fit (strip
+        /// midpoint back-projected, pushed one radius behind the surface) —
+        /// the overlay cylinder's anchor. Null when no fit.
+        val centerWorld: Vec3? = null,
     )
 
     /// Per-frame chord fit + the strip extent it was read from.
@@ -253,7 +340,31 @@ object DBHEstimator {
         /// Coefficient of variation of the per-row silhouette widths —
         /// null for the DEPTH_BAND algorithm (no row stack there).
         val widthCov: Double?,
+        /// Median silhouette width in walk-axis pixels (dev HUD).
+        val widthPx: Int = 0,
+        /// World-space CYLINDER-AXIS centre of this fit: the strip midpoint
+        /// back-projected at its own depth, pushed one radius behind the
+        /// front surface (iOS chordPreviewFit `center` parity). Anchors the
+        /// translucent cylinder overlay on the SAME fit the bar is drawn
+        /// from. Null when unavailable.
+        val centerWorld: Vec3? = null,
     )
+
+    /// Per-frame scan outcome: the chord fit (null when unusable) plus how
+    /// many rows were discarded because the silhouette walk ran off the
+    /// image border — edges not found inside the frame, so their "width"
+    /// would have been the image extent, not the trunk — and the clean-row
+    /// widths this frame produced on its own (rolling-quorum carry).
+    private data class FrameScan(
+        val chord: FrameChord?,
+        val borderClippedRows: Int = 0,
+        val cleanWidths: List<Int> = emptyList(),
+    )
+
+    /// Rows that must have run off the border for a failed frame to be
+    /// reported as a framing problem ("Edges not found — adjust framing.")
+    /// rather than a generic surface miss. 3 of the 21 attempted rows.
+    private const val EDGE_CLIP_ROWS_MIN = 3
 
     /// Single-frame chord diameter in metres, or null if the trunk strip
     /// can't be read this frame. This is the SAME quantity the committed
@@ -264,12 +375,14 @@ object DBHEstimator {
     private fun frameChordDiameterM(
         frame: ArDepthFrame, tapX: Double, tapY: Double, axis: GuideAxis, dTap: Float,
         cal: ProjectCalibration, algorithm: ChordAlgorithm,
-    ): FrameChord? = when (algorithm) {
-        ChordAlgorithm.SILHOUETTE -> frameSilhouetteDiameterM(frame, tapX, tapY, axis, dTap)
+        carryWidths: List<Int> = emptyList(),
+    ): FrameScan = when (algorithm) {
+        ChordAlgorithm.SILHOUETTE ->
+            frameSilhouetteDiameterM(frame, tapX, tapY, axis, dTap, carryWidths = carryWidths)
         ChordAlgorithm.DEPTH_BAND -> {
             val tapAlong = tapAlongAxis(tapX, tapY, axis)
             val strip = extractGuideStemStrip(frame, axis, tapAlong, dTap, 0.15f, cal.depthDiscontinuityM)
-            if (strip.size < 6) null else {
+            val chordFit = if (strip.size < 6) null else {
                 val pts = strip.map { idx ->
                     val (px, py) = pixelCoords(axis, idx)
                     BackProjection.worldXZ(px.toDouble(), py.toDouble(), frame.depthAt(px, py).toDouble(),
@@ -278,9 +391,11 @@ object DBHEstimator {
                 val chord = chordDiameterFromCloud(pts)
                 if (chord > 0.0) {
                     val extent = axisExtent(frame, axis).toFloat().coerceAtLeast(1f)
-                    FrameChord(chord, strip.min() / extent, strip.max() / extent, widthCov = null)
+                    FrameChord(chord, strip.min() / extent, strip.max() / extent,
+                        widthCov = null, widthPx = strip.size)
                 } else null
             }
+            FrameScan(chordFit)
         }
     }
 
@@ -291,59 +406,144 @@ object DBHEstimator {
         is GuideAxis.Col -> frame.height
     }
 
-    /// Silhouette strip walk — 1:1 port of iOS extractChordSilhouetteStrip.
-    /// Walks outward from the tap seed along the axis, stopping at an invalid
-    /// pixel (conf 0 / depth ≤ 0) or a depth jump > silhouetteJumpM. Returns
-    /// the contiguous trunk pixel indices (the projected silhouette edges).
+    /// Noise margin of the cylinder envelope: base term + range-scaled term.
+    /// This budgets RELATIVE depth wobble within one smoothed map (spatially
+    /// correlated ML-depth bias cancels in |d − dTap|), not absolute
+    /// accuracy: ~4.5 cm at 0.5 m, ~10.5 cm at 2.5 m. Simulated against the
+    /// acceptance cases: keeps the full tangent width of pure trunks
+    /// (10 cm@0.5 m … 60 cm@1.5 m all retain w = 2p*+1) while stopping a
+    /// wall +0.4 m behind a 10 cm object within 1–2 px of its edge.
+    private const val ENVELOPE_MARGIN_BASE_M = 0.03
+    private const val ENVELOPE_MARGIN_PER_M = 0.03
+
+    /// Cylinder-envelope edge criterion (field round 7, desk-test fix).
+    ///
+    /// A FIXED depth band around dTap cannot work: it must admit the trunk's
+    /// own front-face rise at the silhouette, √((z+r)²−r²) − z (e.g. +0.28 m
+    /// for r=0.30 at z=2.5), yet reject backgrounds that can sit closer than
+    /// that behind a small object (10 cm tumbler at 0.53 m with a wall
+    /// +0.4 m read DBH 64 cm through a 0.60 m band). The resolving fact:
+    /// the admissible deviation depends on the pixel's ANGULAR OFFSET from
+    /// the aim ray. Among all cylinders (any r) whose front is at depth
+    /// z = dTap and whose silhouette lies AT or BEYOND angular offset θ,
+    /// the maximum front-surface deviation at θ is achieved by the cylinder
+    /// tangent exactly at θ:  sin θ = r/(z+r) ⇒ r = z·sinθ/(1−sinθ), and the
+    /// rise there is √(z² + 2zr) − z = z·(√((1+sinθ)/(1−sinθ)) − 1).
+    /// So a pixel at offset p (θ = p/f_axis) whose |depth − dTap| exceeds
+    /// that envelope (+ noise margin) provably is NOT on any such trunk —
+    /// small offsets get a tight leash (≈ z·θ + margin, millimetres near the
+    /// seed) while big close trunks keep their full tangent rise.
+    private fun envelopeAllowanceM(dTap: Float, offsetPx: Int, focalPx: Double): Float {
+        val s = (offsetPx / focalPx).coerceIn(0.0, 0.95)
+        val rise = dTap * (sqrt((1.0 + s) / (1.0 - s)) - 1.0)
+        return (rise + ENVELOPE_MARGIN_BASE_M + ENVELOPE_MARGIN_PER_M * dTap).toFloat()
+    }
+
+    /// Silhouette walk result: the strip + whether each outward walk found a
+    /// real edge INSIDE the image (invalid pixel / per-step jump / envelope
+    /// stop). A walk that ran off the image border never located the
+    /// silhouette — its "width" is the image extent, not the trunk, so the
+    /// row is unusable (border-touch invalidity).
+    private data class SilhouetteStrip(
+        val indices: List<Int>,
+        val leftEdgeFound: Boolean,
+        val rightEdgeFound: Boolean,
+    ) {
+        val bothEdgesFound: Boolean get() = leftEdgeFound && rightEdgeFound
+        companion object { val EMPTY = SilhouetteStrip(emptyList(), false, false) }
+    }
+
+    /// Silhouette strip walk — port of iOS extractChordSilhouetteStrip plus
+    /// two Android additions (ML-depth edges are smooth ramps, not LiDAR
+    /// steps): the cylinder-envelope criterion above, and border-touch
+    /// flags. Walks outward from the tap seed along the axis; a walk stops
+    /// with "edge found" at an invalid pixel (conf 0 / depth ≤ 0), a
+    /// per-step jump > silhouetteJumpM, or an envelope violation — and with
+    /// "edge NOT found" when it runs off the image border.
     private fun extractChordSilhouetteStrip(
         frame: ArDepthFrame, axis: GuideAxis, tapAlong: Int, silhouetteJumpM: Float = 0.30f,
-    ): List<Int> {
+        tapDepthM: Float = 0f, focalPx: Double = 0.0,
+    ): SilhouetteStrip {
         val walkLength = when (axis) {
-            is GuideAxis.Row -> { if (axis.y < 0 || axis.y >= frame.height) return emptyList(); frame.width }
-            is GuideAxis.Col -> { if (axis.x < 0 || axis.x >= frame.width) return emptyList(); frame.height }
+            is GuideAxis.Row -> { if (axis.y < 0 || axis.y >= frame.height) return SilhouetteStrip.EMPTY; frame.width }
+            is GuideAxis.Col -> { if (axis.x < 0 || axis.x >= frame.width) return SilhouetteStrip.EMPTY; frame.height }
         }
         val clampedTap = tapAlong.coerceIn(0, walkLength - 1)
         fun depthAt(idx: Int): Float { val (x, y) = pixelCoords(axis, idx); return frame.depthAt(x, y) }
-        fun valid(idx: Int): Boolean {
-            val (x, y) = pixelCoords(axis, idx); return frame.confidenceAt(x, y) >= 1 && frame.depthAt(x, y) > 0f
+        fun rawValid(idx: Int): Boolean {
+            val (x, y) = pixelCoords(axis, idx)
+            return frame.confidenceAt(x, y) >= 1 && frame.depthAt(x, y) > 0f
         }
         var seed = clampedTap
-        if (!valid(seed)) {
+        if (!rawValid(seed)) {
             var found = -1
             for (off in 1..10) {
-                val l = clampedTap - off; if (l >= 0 && valid(l)) { found = l; break }
-                val r = clampedTap + off; if (r < walkLength && valid(r)) { found = r; break }
+                val l = clampedTap - off; if (l >= 0 && rawValid(l)) { found = l; break }
+                val r = clampedTap + off; if (r < walkLength && rawValid(r)) { found = r; break }
             }
-            if (found < 0) return emptyList()
+            if (found < 0) return SilhouetteStrip.EMPTY
             seed = found
+        }
+        val useEnvelope = tapDepthM > 0f && focalPx > 1.0
+        fun withinEnvelope(idx: Int): Boolean {
+            if (!useEnvelope) return true
+            return abs(depthAt(idx) - tapDepthM) <=
+                envelopeAllowanceM(tapDepthM, abs(idx - seed), focalPx)
         }
         val indices = ArrayList<Int>(); indices.add(seed)
         var lastDepth = depthAt(seed)
+        var leftEdgeFound = false
         var i = seed - 1
-        while (i >= 0 && valid(i)) {
-            val d = depthAt(i); if (abs(d - lastDepth) > silhouetteJumpM) break
+        while (i >= 0) {
+            if (!rawValid(i) || !withinEnvelope(i)) { leftEdgeFound = true; break }
+            val d = depthAt(i)
+            if (abs(d - lastDepth) > silhouetteJumpM) { leftEdgeFound = true; break }
             indices.add(i); lastDepth = d; i--
         }
-        lastDepth = depthAt(seed); i = seed + 1
-        while (i < walkLength && valid(i)) {
-            val d = depthAt(i); if (abs(d - lastDepth) > silhouetteJumpM) break
+        // (falling out at i == -1 leaves leftEdgeFound == false: border touch)
+        lastDepth = depthAt(seed)
+        var rightEdgeFound = false
+        i = seed + 1
+        while (i < walkLength) {
+            if (!rawValid(i) || !withinEnvelope(i)) { rightEdgeFound = true; break }
+            val d = depthAt(i)
+            if (abs(d - lastDepth) > silhouetteJumpM) { rightEdgeFound = true; break }
             indices.add(i); lastDepth = d; i++
         }
         indices.sort()
-        return indices
+        return SilhouetteStrip(indices, leftEdgeFound, rightEdgeFound)
     }
 
-    /// Per-frame silhouette diameter (m) — 1:1 port of iOS chordPreviewFit's
+    /// Per-frame silhouette diameter (m) — port of iOS chordPreviewFit's
     /// core: median silhouette width across ±rowSpan rows, then the pinhole
-    /// chord identity d = w·dTap/(fx − w/2). Null if too few usable rows.
+    /// chord identity d = w·dTap/(f − w/2). Null if too few usable rows.
+    ///
+    /// FOCAL CHOICE (Android): the width w is counted along the WALK axis —
+    /// depth-x for a Row walk (divide by fx), depth-y for a Col walk (divide
+    /// by fy). iOS always divides by fx because its depth grid has square
+    /// pixels (fx == fy); on Android the texture-registered per-axis scaling
+    /// makes fx ≠ fy whenever the depth aspect ≠ texture aspect (e.g. 4:3
+    /// depth on a 16:9 texture → fy = 4/3·fx), and a portrait trunk chord is
+    /// a Col walk — dividing by fx there over-reads the diameter by exactly
+    /// fy/fx (≈1.33×, field round 7).
     private fun frameSilhouetteDiameterM(
         frame: ArDepthFrame, tapX: Double, tapY: Double, axis: GuideAxis, dTap: Float,
         rowSpan: Int = 10, silhouetteJumpM: Float = 0.30f,
-    ): FrameChord? {
-        val fx = frame.fx
-        if (fx <= 0) return null
+        /// Clean-row widths from the caller's immediately-preceding ticks
+        /// (rolling row quorum). Borrowed ONLY when this tick found at
+        /// least one clean row of its own but fewer than the 5-row quorum —
+        /// single-tick edge jitter then no longer kills an established fit.
+        /// The committed burst (estimateChord) never passes carry.
+        carryWidths: List<Int> = emptyList(),
+    ): FrameScan {
+        val focal = when (axis) {
+            is GuideAxis.Row -> frame.fx
+            is GuideAxis.Col -> frame.fy
+        }
+        if (focal <= 0) return FrameScan(null)
         val centerAlong = tapAlongAxis(tapX, tapY, axis)
         val widths = ArrayList<Int>()
+        var clippedRows = 0
         // First usable strip extent → the on-screen chord span (iOS
         // `firstUsableExtent`).
         var extentL = -1
@@ -353,7 +553,15 @@ object DBHEstimator {
                 is GuideAxis.Row -> GuideAxis.Row(axis.y + offset)
                 is GuideAxis.Col -> GuideAxis.Col(axis.x + offset)
             }
-            val strip = extractChordSilhouetteStrip(frame, neighbour, centerAlong, silhouetteJumpM)
+            val scan = extractChordSilhouetteStrip(
+                frame, neighbour, centerAlong, silhouetteJumpM,
+                tapDepthM = dTap, focalPx = focal,
+            )
+            // Border-touch invalidity: a walk that ran off the image never
+            // located the silhouette — the row contributes nothing (its
+            // "width" would be the image extent, not the trunk).
+            if (scan.indices.isNotEmpty() && !scan.bothEdgesFound) { clippedRows++; continue }
+            val strip = scan.indices
             val l = strip.firstOrNull() ?: continue
             val r = strip.lastOrNull() ?: continue
             if (r <= l) continue
@@ -362,36 +570,99 @@ object DBHEstimator {
             widths.add(w)
             if (extentL < 0) { extentL = l; extentR = r }
         }
-        if (widths.size < 5) return null
-        widths.sort()
-        val medianWidth = widths[widths.size / 2]
+        val ownWidths = widths.toList()
+        // Rolling row quorum: the 5-row requirement may be met across this
+        // tick + the carry, but ONLY when this tick contributed at least one
+        // clean row of its own (never fabricate a fit from stale rows).
+        val fitWidths = when {
+            widths.size >= 5 -> widths
+            widths.isNotEmpty() && widths.size + carryWidths.size >= 5 ->
+                ArrayList(widths).apply { addAll(carryWidths) }
+            else -> return FrameScan(null, clippedRows, ownWidths)
+        }
+        fitWidths.sort()
+        val medianWidth = fitWidths[fitWidths.size / 2]
         val halfWidth = medianWidth / 2.0
-        if (fx - halfWidth <= 1.0) return null
-        val diameterM = medianWidth * dTap.toDouble() / (fx - halfWidth)
-        if (diameterM <= 0.0) return null
+        if (focal - halfWidth <= 1.0) return FrameScan(null, clippedRows, ownWidths)
+        val diameterM = medianWidth * dTap.toDouble() / (focal - halfWidth)
+        if (diameterM <= 0.0) return FrameScan(null, clippedRows, ownWidths)
         // Width consistency across the row stack — iOS chordPreviewFit's
         // tier input (CoV ≤ 0.10 ⇒ green preview chip).
-        val mean = widths.sum().toDouble() / widths.size
+        val mean = fitWidths.sum().toDouble() / fitWidths.size
         val cov = if (mean > 0) {
-            sqrt(widths.sumOf { (it - mean) * (it - mean) } / widths.size) / mean
+            sqrt(fitWidths.sumOf { (it - mean) * (it - mean) } / fitWidths.size) / mean
         } else 1.0
+        // Cylinder-overlay anchor — iOS chordPreviewFit `center` parity:
+        // back-project the guide row's strip MIDPOINT at its own depth
+        // (fallback dTap), then push one radius further along the
+        // camera→surface XZ ray — the cylinder AXIS sits one radius behind
+        // the visible front face. Because this is the SAME fit the chord
+        // bar is drawn from, the rendered cylinder and the bar agree in
+        // position and width by construction.
+        val centerWorld: Vec3? = if (extentL >= 0 && extentR >= 0) {
+            val midIdx = (extentL + extentR) / 2
+            val (mpx, mpy) = pixelCoords(axis, midIdx)
+            val pixDepth = frame.depthAt(mpx, mpy).toDouble()
+            val depthBP = if (pixDepth > 0) pixDepth else dTap.toDouble()
+            val surface = BackProjection.worldXZ(
+                mpx.toDouble(), mpy.toDouble(), depthBP,
+                frame.fx, frame.fy, frame.cx, frame.cy, frame.pose,
+            )
+            // World Y of the midpoint pixel (worldXZ omits it) — same
+            // row-1 dot product convention as BackProjection/Calibration.
+            val xc = (mpx - frame.cx) * depthBP / frame.fx
+            val yc = (mpy - frame.cy) * depthBP / frame.fy
+            val worldY = frame.pose[1] * xc + frame.pose[5] * yc +
+                frame.pose[9] * depthBP + frame.pose[13]
+            val camX = frame.pose[12].toDouble()
+            val camZ = frame.pose[14].toDouble()
+            val dx = surface.x - camX
+            val dz = surface.y - camZ          // V2.y carries world Z
+            val len = sqrt(dx * dx + dz * dz)
+            val rM = diameterM / 2.0
+            if (len > 1e-6) Vec3(
+                (surface.x + dx / len * rM).toFloat(),
+                worldY.toFloat(),
+                (surface.y + dz / len * rM).toFloat(),
+            ) else null
+        } else null
         val extent = axisExtent(frame, axis).toFloat().coerceAtLeast(1f)
-        return FrameChord(
-            diameterM,
-            if (extentL >= 0) extentL / extent else 0f,
-            if (extentR >= 0) extentR / extent else 1f,
-            widthCov = cov,
+        return FrameScan(
+            FrameChord(
+                diameterM,
+                if (extentL >= 0) extentL / extent else 0f,
+                if (extentR >= 0) extentR / extent else 1f,
+                widthCov = cov,
+                widthPx = medianWidth,
+                centerWorld = centerWorld,
+            ),
+            clippedRows,
+            ownWidths,
         )
     }
 
     fun livePreview(
         frame: ArDepthFrame, tapX: Double, tapY: Double, axis: GuideAxis, cal: ProjectCalibration,
         algorithm: ChordAlgorithm = ChordAlgorithm.SILHOUETTE,
+        /// Preview-layer tap-depth override (aiming robustness): the screen
+        /// may seed the walk from its EMA-smoothed distance when the fresh
+        /// centre median is a hole or a one-tick outlier, instead of failing
+        /// the tick. The committed burst (estimateChord) never overrides.
+        dTapOverrideM: Float? = null,
+        /// Clean-row widths from the previous 1–2 ticks (rolling quorum).
+        carryWidths: List<Int> = emptyList(),
     ): DbhPreview? {
-        val dTap = medianDepth(tapX, tapY, frame, 2) ?: return null
+        val dTap = dTapOverrideM ?: medianDepth(tapX, tapY, frame, 2) ?: return null
         if (dTap !in 0.4f..3.5f) return DbhPreview(0f, dTap, false, 0)
-        val chord = frameChordDiameterM(frame, tapX, tapY, axis, dTap, cal, algorithm)
-            ?: return DbhPreview(0f, dTap, false, 0)
+        val scan = frameChordDiameterM(frame, tapX, tapY, axis, dTap, cal, algorithm, carryWidths)
+        val chord = scan.chord
+            ?: return DbhPreview(
+                0f, dTap, false, 0,
+                edgesClipped = scan.borderClippedRows >= EDGE_CLIP_ROWS_MIN,
+                clippedRows = scan.borderClippedRows,
+                cleanRows = scan.cleanWidths.size,
+                cleanWidths = scan.cleanWidths,
+            )
         val locked = chord.diameterM in 0.025..2.0
         val dia = (cal.dbhCorrectionAlpha + cal.dbhCorrectionBeta * (chord.diameterM * 100)).toFloat()
         // Preview tier — width consistency, iOS chordPreviewFit parity:
@@ -401,7 +672,175 @@ object DBHEstimator {
         } else {
             ConfidenceTier.YELLOW
         }
-        return DbhPreview(dia, dTap, locked, 1, chord.leftFrac, chord.rightFrac, tier)
+        return DbhPreview(
+            dia, dTap, locked, 1, chord.leftFrac, chord.rightFrac, tier,
+            clippedRows = scan.borderClippedRows, widthPx = chord.widthPx,
+            cleanRows = scan.cleanWidths.size, cleanWidths = scan.cleanWidths,
+            centerWorld = chord.centerWorld,
+        )
+    }
+
+    // MARK: - Manual edge-bracket (ADJUST) constrained estimate
+
+    /// Constrained estimate for the manual edge-bracket (ADJUST) mode: the
+    /// user places the trunk's two silhouette edges as VIEW-space x
+    /// positions on the horizontal guide line, so the handle span IS the
+    /// width — depth only supplies z. Same pinhole chord identity and
+    /// axis-matched focal as the auto silhouette path,
+    /// d = w·z/(f_axis − w/2), where w is the span in depth walk-axis
+    /// pixels (view x mapped through the view↔depth affine) and z is the
+    /// median depth INSIDE the bracket at the guide row. The automatic
+    /// edge search never runs here; the auto path is untouched.
+    /// Null when the view↔depth mapping is unavailable or no usable depth
+    /// exists inside the bracket.
+    fun constrainedEstimate(
+        frame: ArDepthFrame,
+        leftViewX: Float,
+        rightViewX: Float,
+        guideViewY: Float,
+        cal: ProjectCalibration,
+    ): DbhPreview? {
+        val pL = frame.viewToDepth(min(leftViewX, rightViewX), guideViewY) ?: return null
+        val pR = frame.viewToDepth(max(leftViewX, rightViewX), guideViewY) ?: return null
+        val dxSpan = abs(pR.first - pL.first)
+        val dySpan = abs(pR.second - pL.second)
+        // Walk axis = the depth axis the screen-horizontal bracket spans
+        // (rotated 90° in portrait); divide by the SAME axis-matched focal
+        // as the auto path (fx for a depth-x walk, fy for a depth-y walk).
+        val isRowWalk = dxSpan >= dySpan
+        val focal = if (isRowWalk) frame.fx else frame.fy
+        if (focal <= 1.0) return null
+        val w = max(dxSpan, dySpan)
+        if (w < 2.0) return null
+        // Median depth INSIDE the bracket along the guide row.
+        val steps = Math.round(w).toInt().coerceAtLeast(2)
+        val depths = ArrayList<Float>(steps + 1)
+        for (i in 0..steps) {
+            val t = i.toDouble() / steps
+            val x = Math.round(pL.first + (pR.first - pL.first) * t).toInt()
+            val y = Math.round(pL.second + (pR.second - pL.second) * t).toInt()
+            if (x < 0 || x >= frame.width || y < 0 || y >= frame.height) continue
+            if (frame.confidenceAt(x, y) < 1) continue
+            val d = frame.depthAt(x, y)
+            if (d > 0f) depths.add(d)
+        }
+        if (depths.size < 3) return null
+        depths.sort()
+        val z = depths[depths.size / 2]
+        // Same null gates as iOS bracketChordFit: bracket depth 0.3–5 m,
+        // RAW diameter 2.5–100 cm — outside them there is no fit at all.
+        if (z !in 0.3f..5.0f) return null
+        val halfW = w / 2.0
+        if (focal - halfW <= 1.0) return null
+        val diameterM = w * z / (focal - halfW)
+        val rawCm = diameterM * 100.0
+        if (rawCm !in 2.5..100.0) return null
+        val dia = (cal.dbhCorrectionAlpha + cal.dbhCorrectionBeta * rawCm).toFloat()
+        // A returned fit IS capturable (the user vouches for the edges) —
+        // iOS tap-gate parity. nPoints carries the bracket span in
+        // walk-axis px (iOS PreviewFit.inlierCount).
+        return DbhPreview(dia, z, locked = true, nPoints = Math.round(w).toInt())
+    }
+
+    /// Single-frame ADJUST bracket fit in DEPTH-axis-fraction space — the
+    /// cross-platform-canonical manual-bracket primitive (iOS
+    /// DBHEstimator.bracketChordFit parity). The two handles are fractions
+    /// [0,1] ALONG THE GUIDE AXIS of the depth grid (row → x, col → y); their
+    /// span is the silhouette width w in walk-axis pixels and z is the median
+    /// depth inside that span at the guide line. Same pinhole chord identity
+    /// as the auto path, d = w·z/(f_axis − w/2), axis-matched focal. Returns
+    /// the RAW (un-calibrated) diameter (cm) + span, or null on the same
+    /// gates iOS uses (bracket depth 0.3–5 m, raw diameter 2.5–100 cm).
+    ///
+    /// This lives in depth-fraction space (not view-px like constrainedEstimate)
+    /// so the raw-capture manifest can store the two handles as view-independent
+    /// fractions — byte-identical to the iOS bracket schema (no view size / no
+    /// guide_y needed to replay). The live view-space ADJUST UI keeps using
+    /// constrainedEstimate; this is the recording/replay-shared entry point.
+    data class BracketFit(val diameterCm: Double, val spanPx: Int)
+
+    fun bracketChordFit(
+        frame: ArDepthFrame, guideAxis: GuideAxis, leftFraction: Double, rightFraction: Double,
+    ): BracketFit? {
+        val extent = axisExtent(frame, guideAxis)
+        if (extent < 2) return null
+        val lo = min(leftFraction, rightFraction)
+        val hi = max(leftFraction, rightFraction)
+        val a = Math.round(lo * extent).toInt().coerceIn(0, extent - 1)
+        val b = Math.round(hi * extent).toInt().coerceIn(0, extent - 1)
+        val w = b - a
+        if (w < 2) return null
+        val focal = when (guideAxis) {
+            is GuideAxis.Row -> frame.fx
+            is GuideAxis.Col -> frame.fy
+        }
+        if (focal <= 1.0) return null
+        // Bounds check the fixed guide coordinate.
+        when (guideAxis) {
+            is GuideAxis.Row -> if (guideAxis.y < 0 || guideAxis.y >= frame.height) return null
+            is GuideAxis.Col -> if (guideAxis.x < 0 || guideAxis.x >= frame.width) return null
+        }
+        val depths = ArrayList<Float>(w + 1)
+        for (idx in a..b) {
+            val (px, py) = pixelCoords(guideAxis, idx)
+            if (px < 0 || px >= frame.width || py < 0 || py >= frame.height) continue
+            if (frame.confidenceAt(px, py) < 1) continue
+            val d = frame.depthAt(px, py)
+            if (d > 0f) depths.add(d)
+        }
+        if (depths.size < 3) return null
+        depths.sort()
+        val z = depths[depths.size / 2]
+        if (z !in 0.3f..5.0f) return null
+        val halfW = w / 2.0
+        if (focal - halfW <= 1.0) return null
+        val diameterM = w * z.toDouble() / (focal - halfW)
+        val rawCm = diameterM * 100.0
+        if (rawCm !in 2.5..100.0) return null
+        return BracketFit(rawCm, w)
+    }
+
+    /// ADJUST bracket burst estimate over the stored frames — median of the
+    /// per-frame bracket fits, calibration applied, frame-to-frame agreement
+    /// grading the tier (iOS bracketChordEstimate parity: range/mean ≤ 15% ⇒
+    /// green). The recording + replay share THIS entry point (no forked
+    /// bracket math). `leftFraction`/`rightFraction` are guide-axis fractions.
+    fun bracketChordEstimate(
+        frames: List<ArDepthFrame>,
+        guideAxis: GuideAxis,
+        leftFraction: Double,
+        rightFraction: Double,
+        cal: ProjectCalibration,
+    ): DBHResult? {
+        if (frames.size < 5) return null
+        val diameters = ArrayList<Double>(frames.size)
+        var spanPxSum = 0
+        for (f in frames) {
+            val fit = bracketChordFit(f, guideAxis, leftFraction, rightFraction) ?: continue
+            diameters.add(fit.diameterCm)
+            spanPxSum += fit.spanPx
+        }
+        if (diameters.size < 3) {
+            return DBHResult(
+                diameterCm = 0f, centerX = 0f, centerZ = 0f,
+                arcCoverageDeg = 0f, rmseMm = 0f, sigmaRmm = 0f,
+                nInliers = diameters.size, confidence = ConfidenceTier.RED,
+                method = DBHMethod.LIDAR_CHORD_SILHOUETTE,
+                rejectionReason = "Not enough usable frames; hold steadier or move closer",
+            )
+        }
+        diameters.sort()
+        val medianRawCm = diameters[diameters.size / 2]
+        val mean = diameters.average()
+        val cov = if (mean > 0) (diameters.last() - diameters.first()) / mean else 1.0
+        val diaCm = cal.dbhCorrectionAlpha + cal.dbhCorrectionBeta * medianRawCm
+        return DBHResult(
+            diameterCm = diaCm.toFloat(), centerX = 0f, centerZ = 0f,
+            arcCoverageDeg = 0f, rmseMm = 0f, sigmaRmm = 0f,
+            nInliers = spanPxSum,
+            confidence = if (cov <= 0.15) ConfidenceTier.GREEN else ConfidenceTier.YELLOW,
+            method = DBHMethod.LIDAR_CHORD_SILHOUETTE, rejectionReason = null,
+        )
     }
 
     /// Committed DBH = MEDIAN of the per-frame chord diameters over the
@@ -423,10 +862,20 @@ object DBHEstimator {
             return redChord("Move to 0.4–3.5 m; tap depth ${fmt2(dTap)} m out of range", 0)
 
         val diameters = ArrayList<Double>(frames.size)
+        var clippedFrames = 0
         for (f in frames) {
-            frameChordDiameterM(f, tapX, tapY, axis, dTap, cal, algorithm)?.let { diameters.add(it.diameterM) }
+            val scan = frameChordDiameterM(f, tapX, tapY, axis, dTap, cal, algorithm)
+            val c = scan.chord
+            if (c != null) diameters.add(c.diameterM)
+            else if (scan.borderClippedRows >= EDGE_CLIP_ROWS_MIN) clippedFrames++
         }
-        if (diameters.size < 3) return redChord("Not enough trunk surface; hold steadier / move closer", diameters.size)
+        if (diameters.size < 3) {
+            // Distinguish the FRAMING failure (silhouette ran off the image
+            // border — trunk edges not visible) from a plain surface miss.
+            return if (clippedFrames > frames.size / 2)
+                redChord("Edges not found — adjust framing", diameters.size)
+            else redChord("Not enough trunk surface; hold steadier / move closer", diameters.size)
+        }
 
         diameters.sort()
         val medianM = diameters[diameters.size / 2]

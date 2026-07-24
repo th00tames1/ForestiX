@@ -40,18 +40,21 @@ public final class AppSettings: ObservableObject {
         public static let tileProviderLabel       = "tc.tileProviderLabel"
         public static let providerUsageAck        = "tc.providerUsageAcknowledged"
         public static let overlayEnabled          = "tc.overlayEnabled"
-        public static let advancedMode            = "tc.advancedMode"
+        public static let country                 = "tc.country"
         public static let region                  = "tc.region"
         public static let regionPickerSeen        = "tc.regionPickerSeen"
         public static let logRule                 = "tc.logRule"
         public static let dbhMeasurementMethod    = "tc.dbhMeasurementMethod"
         public static let measurementSource       = "tc.measurementSource"
         public static let developerMode           = "tc.developerMode"
+        public static let rawCaptureEnabled       = "tc.rawCaptureEnabled"
         public static let appearance              = "tc.appearance"
         public static let dbhMethodSource         = "tc.dbhMethodSource"
         public static let researchTreeId          = "tc.researchTreeId"
         public static let researchTrueValue       = "tc.researchTrueValue"
         public static let researchSpecies         = "tc.researchSpecies"
+        public static let currentCruiseProjectID  = "tc.currentCruiseProjectID"
+        public static let mapMode                 = "tc.mapMode"
     }
 
     private let defaults: UserDefaults
@@ -110,18 +113,51 @@ public final class AppSettings: ObservableObject {
         set { defaults.set(newValue, forKey: Keys.overlayEnabled); objectWillChange.send() }
     }
 
-    /// When `true`, the full project/plot/cruise workflow is shown at
-    /// app launch. When `false` (the default for new users), Forestix
-    /// boots straight into Quick Measure — just DBH + Height — so
-    /// cruisers who only want a one-off measurement aren't forced
-    /// through project setup.
-    public var advancedMode: Bool {
-        get { defaults.bool(forKey: Keys.advancedMode) }
-        set { defaults.set(newValue, forKey: Keys.advancedMode); objectWillChange.send() }
+    /// CRUISE MODE — id of the project the cruise map is currently
+    /// scoped to (the project chip). nil until the cruiser has picked
+    /// or created one; the map home's cruise mode falls back to the
+    /// most recently updated project.
+    public var currentCruiseProjectID: UUID? {
+        get {
+            guard let raw = defaults.string(forKey: Keys.currentCruiseProjectID)
+            else { return nil }
+            return UUID(uuidString: raw)
+        }
+        set {
+            if let id = newValue {
+                defaults.set(id.uuidString, forKey: Keys.currentCruiseProjectID)
+            } else {
+                defaults.removeObject(forKey: Keys.currentCruiseProjectID)
+            }
+            objectWillChange.send()
+        }
+    }
+
+    /// Map home mode — "measure" (quick measure, the default) or
+    /// "cruise". One map, two modes: the home screen renders the mode
+    /// this returns and the toggle circle flips it. Persisted so the
+    /// app reopens in the mode the cruiser was working in.
+    public var mapMode: String {
+        get { defaults.string(forKey: Keys.mapMode) ?? "measure" }
+        set { defaults.set(newValue, forKey: Keys.mapMode); objectWillChange.send() }
+    }
+
+    /// Country the cruiser is working in — sits above `region` and decides the
+    /// volume standard, the cubic unit, whether a board-foot log rule applies,
+    /// and whether the first-run cascade shows the US region step. Defaults to
+    /// `.unitedStates` so every existing install keeps behaving exactly as it
+    /// did before internationalisation landed. The Android sibling reads the
+    /// same `tc.country` key.
+    public var country: Country {
+        get { Country.fromRaw(defaults.string(forKey: Keys.country)) }
+        set {
+            defaults.set(newValue.rawValue, forKey: Keys.country)
+            objectWillChange.send()
+        }
     }
 
     /// Pre-loaded regional species filter. nil = no region picked yet
-    /// (RegionPickerSheet hasn't been shown / has been dismissed).
+    /// (the first-run locale cascade hasn't been shown / has been dismissed).
     /// "all" = explicit "show every species" choice.
     public var region: Region? {
         get {
@@ -172,6 +208,19 @@ public final class AppSettings: ObservableObject {
     public var developerMode: Bool {
         get { defaults.bool(forKey: Keys.developerMode) }
         set { defaults.set(newValue, forKey: Keys.developerMode); objectWillChange.send() }
+    }
+
+    /// RAW-CAPTURE REPLAY (developer-mode research) — when on, every DBH
+    /// burst and every Height compute serializes a bundle of the exact raw
+    /// inputs the estimator consumed (depth buffers, intrinsics, tap, axis,
+    /// poses, calibration, one reference RGB) plus a reproducibility
+    /// self-check, so the owner can re-run current/updated estimator code
+    /// on stored field data offline. Gated by BOTH this flag AND
+    /// `developerMode`; default OFF so field cruisers pay zero cost. The
+    /// Android sibling reads the same `tc.rawCaptureEnabled` key.
+    public var rawCaptureEnabled: Bool {
+        get { defaults.bool(forKey: Keys.rawCaptureEnabled) }
+        set { defaults.set(newValue, forKey: Keys.rawCaptureEnabled); objectWillChange.send() }
     }
 
     /// App appearance — "light" (default) or "dark". Both are the same

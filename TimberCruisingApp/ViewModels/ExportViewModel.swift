@@ -105,6 +105,10 @@ public final class ExportViewModel: ObservableObject {
                 let result = try FullCruiseExporter.write(
                     bundle: bundle,
                     into: base,
+                    localization: PDFLocalization.forProject(
+                        units: project.units,
+                        species: bundle.species,
+                        trees: bundle.trees),
                     progress: { [weak self] done, total, label in
                         // Already on MainActor (caller is too).
                         self?.progress = total == 0 ? 1 : Double(done) / Double(total)
@@ -145,6 +149,10 @@ public final class ExportViewModel: ObservableObject {
             let base = try documentsRoot()
             let result = try FullCruiseExporter.write(
                 bundle: bundle, into: base,
+                localization: PDFLocalization.forProject(
+                    units: project.units,
+                    species: bundle.species,
+                    trees: bundle.trees),
                 progress: nil)
             lastSessionFolder = result.folder
             if let art = result.artefacts.first(where: { $0.kind == kind }) {
@@ -237,5 +245,34 @@ public struct RepositoryExportDataSource: ExportDataSource {
 
     public func hdFits(forProjectId id: UUID) throws -> [HeightDiameterFit] {
         try env.hdFitRepository.listByProject(id)
+    }
+}
+
+// MARK: - Report localisation
+
+extension PDFLocalization {
+    /// Build the PDF report's display localisation for an export bundle.
+    /// `AreaUnit` and `RegionalSpecies` live in this (UI) layer, above the
+    /// Export module, so the resolved area basis and species-name lookup are
+    /// computed here and handed down as plain data. The area basis follows the
+    /// project's own unit system (metric → per hectare, imperial → per acre),
+    /// which mirrors the country the project was created under.
+    static func forProject(units: UnitSystem,
+                           species: [SpeciesConfig],
+                           trees: [Tree]) -> PDFLocalization {
+        let areaUnit: AreaUnit = units == .metric ? .hectare : .acre
+        var names: [String: String] = [:]
+        for sp in species where names[sp.code] == nil {
+            names[sp.code] = RegionalSpecies.name(forCode: sp.code)
+        }
+        for t in trees where names[t.speciesCode] == nil {
+            names[t.speciesCode] = RegionalSpecies.name(forCode: t.speciesCode)
+        }
+        return PDFLocalization(
+            densityFactor: areaUnit.perAcreDensityFactor,
+            areaSuffix: areaUnit.densitySuffix,
+            areaAbbr: areaUnit.abbreviation,
+            areaWord: areaUnit == .hectare ? "hectare" : "acre",
+            speciesNames: names)
     }
 }

@@ -64,6 +64,10 @@ data class ForestixColors(
     val primaryInk: Color,
     val primaryMuted: Color,
     val accent: Color,
+    /// Cruise-mode identity (map-mode toggle, v3.1): the cruise (+) capture
+    /// button fill and the toggle icon tint while cruise mode is on.
+    /// Content on it is plain white in BOTH palettes (LOCKED spec values).
+    val cruiseAccent: Color,
     val confidenceOk: Color,
     val confidenceWarn: Color,
     val confidenceBad: Color,
@@ -88,6 +92,7 @@ private val FieldDark = ForestixColors(
     primaryInk = PrimaryInk,
     primaryMuted = Color(0xFF55D07A).copy(alpha = 0.16f),
     accent = Color(0xFFFFB454),
+    cruiseAccent = Color(0xFF6AA8DE),
     confidenceOk = Color(0xFF55D07A),
     confidenceWarn = Color(0xFFFFB454),
     confidenceBad = Color(0xFFFF7A6B),
@@ -105,6 +110,7 @@ private val FieldLight = ForestixColors(
     primaryInk = PrimaryInk,
     primaryMuted = Color(0xFF2FA45B).copy(alpha = 0.14f),
     accent = Color(0xFFB57614),
+    cruiseAccent = Color(0xFF2F6DB2),
     confidenceOk = Color(0xFF1D7A43),
     confidenceWarn = Color(0xFF9A6414),
     confidenceBad = Color(0xFFB03A2E),
@@ -295,6 +301,57 @@ fun ForestixBorderedButton(
             }
             Text(label, style = LocalForestixTypography.current.bodyBold,
                 color = contentColor)
+        }
+    }
+}
+
+/// AR-screen sibling of ForestixBorderedButton — same geometry and pressed
+/// timing, but a SOLID WHITE fill with the primaryInk label (mirroring the
+/// white capture "+" aesthetic). Field fix: over bright sky the outlined
+/// buttons were invisible in the camera view; the solid fill reads in any
+/// light. AR action rows only — non-AR screens keep the bordered style.
+@Composable
+fun ForestixWhiteButton(
+    label: String,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    icon: ImageVector? = null,
+    onClick: () -> Unit,
+) {
+    val colors = LocalForestixColors.current
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val fillAlpha by animateFloatAsState(
+        targetValue = if (pressed) 0.78f else 1f,
+        animationSpec = tween(durationMillis = 150, easing = EaseOut),
+        label = "whitePressed",
+    )
+    Box(
+        modifier
+            .heightIn(min = 46.dp)
+            .clip(ForestixRadius.control)
+            .background(Color.White.copy(alpha = fillAlpha))
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                enabled = enabled,
+                role = Role.Button,
+                onClick = onClick,
+            )
+            .alpha(if (enabled) 1f else 0.45f)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            if (icon != null) {
+                Icon(icon, contentDescription = null,
+                    tint = colors.primaryInk, modifier = Modifier.size(18.dp))
+            }
+            Text(label, style = LocalForestixTypography.current.bodyBold,
+                color = colors.primaryInk)
         }
     }
 }

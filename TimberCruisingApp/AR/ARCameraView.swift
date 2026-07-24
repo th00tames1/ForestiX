@@ -1,7 +1,7 @@
 // Phase 7.2 hardening — SwiftUI wrapper around RealityKit's ARView.
 //
-// The Phase 2 / 3 / 5 audit found that DBHScanScreen, HeightScanScreen,
-// and ARBoundaryScreen were rendering only their overlay chrome over a
+// The Phase 2 / 3 / 5 audit found that DBHScanScreen and HeightScanScreen
+// were rendering only their overlay chrome over a
 // black `Color.black.ignoresSafeArea()` placeholder — the actual camera
 // feed never made it onto the screen. A real cruiser pointing the phone
 // at a tree would just see a black rectangle with a guide line floating
@@ -59,17 +59,28 @@ public struct ARSceneMarker: Identifiable, Equatable {
     /// sphere is fine at 3 m but nearly invisible from 15 m across a
     /// height walk-off, and overwhelming at arm's length.
     public var scalesWithDistance: Bool
+    /// When set, the marker is pinned to the ARKit `ARAnchor` with this
+    /// identifier instead of a fixed world coordinate — `worldPosition`
+    /// is then a LOCAL offset from the anchor's origin. RealityKit
+    /// tracks the anchor's live transform, so ARKit world-map
+    /// corrections (drift compensation, relocalization) move the marker
+    /// with the anchor. If the anchor doesn't exist the marker simply
+    /// doesn't render. Used by the sampling-plot ring/pole so the plot
+    /// centre stays pinned to the physical ground across screens.
+    public var worldAnchorID: UUID?
 
     public init(id: UUID = UUID(),
                 worldPosition: SIMD3<Float>,
                 shape: Shape,
                 colorRGBA: SIMD4<Float>,
-                scalesWithDistance: Bool = false) {
+                scalesWithDistance: Bool = false,
+                worldAnchorID: UUID? = nil) {
         self.id = id
         self.worldPosition = worldPosition
         self.shape = shape
         self.colorRGBA = colorRGBA
         self.scalesWithDistance = scalesWithDistance
+        self.worldAnchorID = worldAnchorID
     }
 }
 
@@ -84,6 +95,17 @@ public struct ARCameraView: UIViewRepresentable {
 
     public let session: ARSession
     public var debugMeshOverlay: Bool
+    /// RealityKit scene-understanding occlusion: virtual content is
+    /// hidden where the reconstructed world mesh sits in front of it,
+    /// so the sampling ring visually passes BEHIND tree trunks instead
+    /// of floating over everything. Per-ARView (each screen owns its
+    /// own ARView over the shared session), so enabling it here never
+    /// leaks into another screen — DBH / Height deliberately keep it
+    /// OFF so their treetop spheres and subdued ring overlay stay
+    /// visible through canopy. Requires the session configuration to
+    /// run `sceneReconstruction` (all measure presets do on LiDAR
+    /// hardware); on non-LiDAR devices the option is a harmless no-op.
+    public var realWorldOcclusion: Bool
     public var sceneMarkers: [ARSceneMarker]
     /// Optional raycaster that gets bound to the underlying ARView on
     /// creation so callers can fire screen-centre raycasts (Height
@@ -92,10 +114,12 @@ public struct ARCameraView: UIViewRepresentable {
 
     public init(session: ARSession,
                 debugMeshOverlay: Bool = false,
+                realWorldOcclusion: Bool = false,
                 sceneMarkers: [ARSceneMarker] = [],
                 raycaster: ARCenterRaycaster? = nil) {
         self.session = session
         self.debugMeshOverlay = debugMeshOverlay
+        self.realWorldOcclusion = realWorldOcclusion
         self.sceneMarkers = sceneMarkers
         self.raycaster = raycaster
     }
@@ -116,7 +140,12 @@ public struct ARCameraView: UIViewRepresentable {
         /// adds an OFFSET relative to the anchored origin instead of
         /// repositioning, which doubled the rendered position on every
         /// rebuild and made previously-placed markers visibly jump.
+        /// (For anchor-pinned markers this stores the LOCAL offset.)
         var markerPositions: [UUID: SIMD3<Float>] = [:]
+        /// ARAnchor identifier a marker is pinned to (anchor-pinned
+        /// markers only). Distinguishes the two anchoring modes when
+        /// diffing — a marker that changes mode is torn down and rebuilt.
+        var markerWorldAnchorIDs: [UUID: UUID] = [:]
         /// Ids of markers that keep a constant APPARENT size — their child
         /// entity is rescaled every frame from the camera distance.
         var scalingIds: Set<UUID> = []
@@ -144,6 +173,7 @@ public struct ARCameraView: UIViewRepresentable {
         // the ARKitSessionManager owns the session lifecycle.
         view.session = session
         applyDebugOptions(to: view)
+        applyOcclusion(to: view)
         view.renderOptions.insert(.disableMotionBlur)
         // Camera background fills behind any SwiftUI overlay we put
         // above this view — no need to set background colour.
@@ -156,8 +186,11 @@ public struct ARCameraView: UIViewRepresentable {
             guard let view, let coordinator, !coordinator.scalingIds.isEmpty else { return }
             let cam = view.cameraTransform.translation
             for id in coordinator.scalingIds {
-                guard let anchor = coordinator.markerAnchors[id],
-                      let pos = coordinator.markerPositions[id] else { continue }
+                guard let anchor = coordinator.markerAnchors[id] else { continue }
+                // Live entity world position — correct for both
+                // world-pinned anchors (equals the stored position) and
+                // ARAnchor-pinned ones (tracks the anchor transform).
+                let pos = anchor.position(relativeTo: nil)
                 let d = simd_distance(cam, pos)
                 let factor = min(Self.scaleMax,
                                  max(Self.scaleMin, d / Self.scaleReferenceM))
@@ -174,6 +207,7 @@ public struct ARCameraView: UIViewRepresentable {
             view.session = session
         }
         applyDebugOptions(to: view)
+        applyOcclusion(to: view)
         // Rebind on every update in case the binding instance changed
         // (SwiftUI can recreate helpers across view updates).
         if raycaster?.arview !== view {
@@ -192,6 +226,20 @@ public struct ARCameraView: UIViewRepresentable {
         // and the mesh alone gives the same "is the scene tracked?"
         // signal. ARView ships with featurePoints off by default, so
         // explicit clearing is no longer needed.
+    }
+
+    /// Insert/remove the scene-understanding occlusion render option.
+    /// Applied on make AND update (idempotent set ops) so a screen that
+    /// flips the flag — or a recycled ARView — always converges on the
+    /// requested state. Occlusion consumes the same LiDAR mesh the
+    /// session's `sceneReconstruction` already builds; there is no
+    /// extra per-frame CPU cost in our code.
+    private func applyOcclusion(to view: ARView) {
+        if realWorldOcclusion {
+            view.environment.sceneUnderstanding.options.insert(.occlusion)
+        } else {
+            view.environment.sceneUnderstanding.options.remove(.occlusion)
+        }
     }
 
     // MARK: - Marker diffing
@@ -217,6 +265,7 @@ public struct ARCameraView: UIViewRepresentable {
             }
             coordinator.markerShapes.removeValue(forKey: staleId)
             coordinator.markerPositions.removeValue(forKey: staleId)
+            coordinator.markerWorldAnchorIDs.removeValue(forKey: staleId)
         }
 
         // Add new, re-anchor moved, or refresh shape on existing anchors.
@@ -226,6 +275,53 @@ public struct ARCameraView: UIViewRepresentable {
         // offset relative to that anchored origin — assigning the world
         // position back into translation doubles the rendered location.
         for marker in sceneMarkers {
+            // A marker that switches anchoring mode (world ↔ ARAnchor) or
+            // moves to a different ARAnchor is torn down and rebuilt —
+            // the AnchoringComponent target can't be redirected in place.
+            if let existing = coordinator.markerAnchors[marker.id],
+               coordinator.markerWorldAnchorIDs[marker.id] != marker.worldAnchorID {
+                view.scene.removeAnchor(existing)
+                coordinator.markerAnchors.removeValue(forKey: marker.id)
+                coordinator.markerShapes.removeValue(forKey: marker.id)
+                coordinator.markerPositions.removeValue(forKey: marker.id)
+                coordinator.markerWorldAnchorIDs.removeValue(forKey: marker.id)
+            }
+
+            // ARAnchor-pinned markers: the AnchorEntity targets the
+            // ARAnchor identifier and RealityKit tracks its transform —
+            // `worldPosition` is a child-space offset, so moves and shape
+            // changes are plain child mutations (no re-anchoring, ever).
+            if let targetID = marker.worldAnchorID {
+                if let existing = coordinator.markerAnchors[marker.id] {
+                    if coordinator.markerShapes[marker.id] != marker.shape {
+                        for child in existing.children {
+                            child.removeFromParent()
+                        }
+                        let child = Self.makeEntity(for: marker)
+                        child.position = marker.worldPosition
+                        existing.addChild(child)
+                        coordinator.markerShapes[marker.id] = marker.shape
+                        coordinator.markerPositions[marker.id] = marker.worldPosition
+                    } else if coordinator.markerPositions[marker.id] != marker.worldPosition {
+                        for child in existing.children {
+                            child.position = marker.worldPosition
+                        }
+                        coordinator.markerPositions[marker.id] = marker.worldPosition
+                    }
+                } else {
+                    let anchor = AnchorEntity(.anchor(identifier: targetID))
+                    let child = Self.makeEntity(for: marker)
+                    child.position = marker.worldPosition
+                    anchor.addChild(child)
+                    view.scene.addAnchor(anchor)
+                    coordinator.markerAnchors[marker.id] = anchor
+                    coordinator.markerShapes[marker.id] = marker.shape
+                    coordinator.markerPositions[marker.id] = marker.worldPosition
+                    coordinator.markerWorldAnchorIDs[marker.id] = targetID
+                }
+                continue
+            }
+
             if let existing = coordinator.markerAnchors[marker.id] {
                 let storedPosition = coordinator.markerPositions[marker.id]
                 // Dead-band: ignore sub-centimetre jitter so the live DBH
@@ -363,6 +459,7 @@ public struct ARCameraView: UIViewRepresentable {
 public struct ARCameraView: View {
     public init(session: Any,
                 debugMeshOverlay: Bool = false,
+                realWorldOcclusion: Bool = false,
                 sceneMarkers: [ARSceneMarker] = [],
                 raycaster: ARCenterRaycaster? = nil) {}
     public var body: some View { Color.black }
@@ -376,10 +473,12 @@ public struct ARCameraView: View {
 extension ARCameraView {
     public init(manager: ARKitSessionManager,
                 debugMeshOverlay: Bool = false,
+                realWorldOcclusion: Bool = false,
                 sceneMarkers: [ARSceneMarker] = [],
                 raycaster: ARCenterRaycaster? = nil) {
         self.init(session: manager.session,
                   debugMeshOverlay: debugMeshOverlay,
+                  realWorldOcclusion: realWorldOcclusion,
                   sceneMarkers: sceneMarkers,
                   raycaster: raycaster)
     }
@@ -388,10 +487,12 @@ extension ARCameraView {
 extension ARCameraView {
     public init(manager: Any,
                 debugMeshOverlay: Bool = false,
+                realWorldOcclusion: Bool = false,
                 sceneMarkers: [ARSceneMarker] = [],
                 raycaster: ARCenterRaycaster? = nil) {
         self.init(session: manager,
                   debugMeshOverlay: debugMeshOverlay,
+                  realWorldOcclusion: realWorldOcclusion,
                   sceneMarkers: sceneMarkers,
                   raycaster: raycaster)
     }

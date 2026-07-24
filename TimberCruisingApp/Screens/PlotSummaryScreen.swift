@@ -15,9 +15,22 @@ public struct PlotSummaryScreen: View {
 
     public var onClosed: () -> Void = {}
 
-    public init(viewModel: @autoclosure @escaping () -> PlotSummaryViewModel) {
+    /// Areal basis for the density rows (TPA, BA/area, volume/area). The engine
+    /// computes per acre; metric countries re-express per hectare. The caller
+    /// passes `settings.unitSystem.areaUnit`. Defaults to `.acre` so US callers,
+    /// previews and tests are unchanged.
+    private let areaUnit: AreaUnit
+
+    @State private var confirmingDelete = false
+
+    public init(viewModel: @autoclosure @escaping () -> PlotSummaryViewModel,
+                areaUnit: AreaUnit = .acre) {
         _viewModel = StateObject(wrappedValue: viewModel())
+        self.areaUnit = areaUnit
     }
+
+    /// Per-acre → display-basis multiplier (1.0 US acres, 2.47105 hectares).
+    private var densityFactor: Double { areaUnit.perAcreDensityFactor }
 
     public var body: some View {
         Form {
@@ -42,6 +55,15 @@ public struct PlotSummaryScreen: View {
         } message: {
             Text(viewModel.errorMessage ?? "")
         }
+        .alert("Delete plot?", isPresented: $confirmingDelete) {
+            Button("Delete plot", role: .destructive) {
+                viewModel.delete()
+                if viewModel.isDeleted { dismiss() }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Delete Plot \(viewModel.plot.plotNumber) and its \(viewModel.trees.count) tree\(viewModel.trees.count == 1 ? "" : "s")? This can't be undone.")
+        }
     }
 
     private var errorBinding: Binding<Bool> {
@@ -55,6 +77,12 @@ public struct PlotSummaryScreen: View {
             Label("Plot closed \(viewModel.closedAt?.formatted(date: .abbreviated, time: .shortened) ?? "")",
                   systemImage: "lock.circle.fill")
                 .foregroundStyle(.secondary)
+            Button {
+                viewModel.reopen()
+            } label: {
+                Text("Reopen plot")
+            }
+            .accessibilityIdentifier("plotSummary.reopen")
         }
     }
 
@@ -86,15 +114,22 @@ public struct PlotSummaryScreen: View {
     private var statsSection: some View {
         Section("Plot stats") {
             statRow("Live trees", "\(viewModel.stats.liveTreeCount)")
-            statRow("Trees / ac", String(format: "%.1f", viewModel.stats.tpa))
-            statRow("Basal area / ac",
-                    String(format: "%.2f m²/ac", viewModel.stats.baPerAcreM2))
+            statRow("Trees / \(areaUnit.abbreviation)",
+                    String(format: "%.1f", Double(viewModel.stats.tpa) * densityFactor))
+            statRow("Basal area / \(areaUnit.abbreviation)",
+                    String(format: "%.2f %@",
+                           Double(viewModel.stats.baPerAcreM2) * densityFactor,
+                           areaUnit.densityLabel("m²")))
             statRow("Quadratic mean diameter",
                     String(format: "%.1f cm", viewModel.stats.qmdCm))
-            statRow("Gross volume / ac",
-                    String(format: "%.1f m³/ac", viewModel.stats.grossVolumePerAcreM3))
-            statRow("Merchantable volume / ac",
-                    String(format: "%.1f m³/ac", viewModel.stats.merchVolumePerAcreM3))
+            statRow("Gross volume / \(areaUnit.abbreviation)",
+                    String(format: "%.1f %@",
+                           Double(viewModel.stats.grossVolumePerAcreM3) * densityFactor,
+                           areaUnit.densityLabel("m³")))
+            statRow("Merchantable volume / \(areaUnit.abbreviation)",
+                    String(format: "%.1f %@",
+                           Double(viewModel.stats.merchVolumePerAcreM3) * densityFactor,
+                           areaUnit.densityLabel("m³")))
         }
     }
 
@@ -118,18 +153,25 @@ public struct PlotSummaryScreen: View {
                 ForEach(sortedSpecies(), id: \.0) { code, stat in
                     VStack(alignment: .leading, spacing: 2) {
                         HStack {
-                            Text(code).font(.body.monospaced().bold())
+                            Text(RegionalSpecies.name(forCode: code))
+                                .font(.body.bold())
                             Spacer()
                             Text("\(stat.count) trees")
                                 .font(.caption.monospacedDigit())
                                 .foregroundStyle(.secondary)
                         }
                         HStack {
-                            Text(String(format: "%.1f /ac", stat.tpa))
+                            Text(String(format: "%.1f %@",
+                                        Double(stat.tpa) * densityFactor,
+                                        areaUnit.densitySuffix))
                             Spacer()
-                            Text(String(format: "%.2f m²/ac", stat.baPerAcreM2))
+                            Text(String(format: "%.2f %@",
+                                        Double(stat.baPerAcreM2) * densityFactor,
+                                        areaUnit.densityLabel("m²")))
                             Spacer()
-                            Text(String(format: "%.1f m³/ac", stat.grossVolumePerAcreM3))
+                            Text(String(format: "%.1f %@",
+                                        Double(stat.grossVolumePerAcreM3) * densityFactor,
+                                        areaUnit.densityLabel("m³")))
                         }
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
@@ -150,7 +192,8 @@ public struct PlotSummaryScreen: View {
             ForEach(viewModel.hdFitsByProject.keys.sorted(), id: \.self) { code in
                 if let fit = viewModel.hdFitsByProject[code] {
                     HStack {
-                        Text(code).font(.body.monospaced().bold())
+                        Text(RegionalSpecies.name(forCode: code))
+                            .font(.body.bold())
                         Spacer()
                         Text(String(format: "a=%.3f b=%.3f n=%d RMSE=%.2fm",
                                     fit.a, fit.b, fit.nObs, fit.rmse))
@@ -196,6 +239,18 @@ public struct PlotSummaryScreen: View {
                 .buttonStyle(.forestixProminent)
                 .controlSize(.large)
             }
+
+            // Hard removal from the map — cascades the plot's trees +
+            // photos, then the plot. Same affordance as the map peek.
+            Button(role: .destructive) {
+                confirmingDelete = true
+            } label: {
+                Label("Delete plot", systemImage: "trash")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .disabled(viewModel.isDeleting)
         }
     }
 }

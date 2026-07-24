@@ -1,5 +1,5 @@
 // Stocking & Density gauge — a 5-band gradient bar with a position
-// marker, modelled on SilvaCruise's plot-summary readout. Lets the
+// marker, modelled on a standard plot-summary readout. Lets the
 // cruiser see at a glance whether a stand is understocked / fully
 // stocked / over-dense without parsing four separate density numbers.
 //

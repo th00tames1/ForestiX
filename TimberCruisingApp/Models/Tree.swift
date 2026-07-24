@@ -90,6 +90,11 @@ public struct Tree: Identifiable, Codable, Sendable {
     public var updatedAt: Date
     public var deletedAt: Date?             // soft-delete
 
+    // GPS fix captured at Accept (cruise-mode map pins). Optional —
+    // trees recorded without a fix simply don't appear on the map.
+    public var latitude: Double?
+    public var longitude: Double?
+
     public init(
         id: UUID,
         plotId: UUID,
@@ -124,7 +129,9 @@ public struct Tree: Identifiable, Codable, Sendable {
         rawScanPath: String?,
         createdAt: Date,
         updatedAt: Date,
-        deletedAt: Date?
+        deletedAt: Date?,
+        latitude: Double? = nil,
+        longitude: Double? = nil
     ) {
         self.id = id
         self.plotId = plotId
@@ -160,5 +167,7 @@ public struct Tree: Identifiable, Codable, Sendable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.deletedAt = deletedAt
+        self.latitude = latitude
+        self.longitude = longitude
     }
 }

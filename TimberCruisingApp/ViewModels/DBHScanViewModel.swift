@@ -72,6 +72,42 @@ public final class DBHScanViewModel: ObservableObject {
     /// is being shown.
     @Published public private(set) var previewStatusText: String?
 
+    // MARK: - Manual edge-bracket (ADJUST) mode
+
+    /// True while the DBH ADJUST mode is active: the live estimate and
+    /// the capture burst measure the span between the two user-placed
+    /// edge handles instead of the automatic edge-finder. Depth method
+    /// only — the screen never enables it for the AR caliper/motion
+    /// developer modes.
+    @Published public var edgeAdjustActive: Bool = false {
+        didSet { if !edgeAdjustActive { adjustAxisLatch = nil } }
+    }
+    /// Handle positions as fractions (0…1) of the on-screen walk axis —
+    /// the same normalisation `PreviewFit.stripLeftFraction` uses, so
+    /// screen x-fraction ↔ depth walk-axis fraction is the existing
+    /// view↔depth mapping the fit-chord overlay already relies on.
+    @Published public var edgeBracketLeftFraction: Double = 0.25
+    @Published public var edgeBracketRightFraction: Double = 0.75
+    /// True when the most recently committed result was captured in
+    /// ADJUST mode — recorded as the entry's "capture_mode" tag
+    /// ("manual" vs "auto").
+    @Published public private(set) var resultCapturedManually: Bool = false
+
+    /// Guide axis latched on the first ADJUST preview tick and held for
+    /// the whole ADJUST session. `pickGuideAxis` votes per frame on the
+    /// wider silhouette chord, which can flip row↔col on the cluttered
+    /// scenes ADJUST exists for — and a flip changes the walk-axis
+    /// extent the handle fractions map onto, jumping the value. One
+    /// deterministic axis per session keeps the bracket stable.
+    private var adjustAxisLatch: GuideAxis?
+    /// Bracket state latched at the moment the capture "+" started the
+    /// burst, so dragging a handle (or leaving ADJUST) mid-burst can't
+    /// change what the in-flight capture measures.
+    private var burstUsedBracket = false
+    private var burstBracketLeft: Double = 0
+    private var burstBracketRight: Double = 0
+    private var burstBracketAxis: GuideAxis?
+
     // MARK: - Dependencies
 
     public let session: ARKitSessionManager
@@ -85,6 +121,26 @@ public final class DBHScanViewModel: ObservableObject {
     /// without leaving the scan screen. Defaults to `.chord` (the new
     /// silhouette / pixel-width method).
     @Published public var dbhMeasurementMethod: DBHMeasurementMethod = .chord
+
+    // MARK: - Raw-capture recording (developer-mode research)
+
+    /// When true (screen sets it from `developerMode && rawCaptureEnabled`),
+    /// every completed depth burst — accepted, rejected, or ADJUST-bracket —
+    /// serializes a raw-capture bundle. Off ⇒ zero recording cost.
+    public var rawCaptureEnabled: Bool = false
+    /// Context tags (mode / project / plot / tree / units) written into the
+    /// manifest. Set by the scan screen on appear.
+    public var rawCaptureContext: RawCaptureContext = .quick
+    /// Latest GPS fix, supplied by the screen (which owns the location read).
+    public var rawCaptureGPS: RawCaptureGPS?
+    /// Bundle id of the most recently recorded burst — the screen patches
+    /// its `accepted` flag + truth value at Accept.
+    @Published public private(set) var lastRecordedBundleID: String?
+    /// Representative depth frames (one per sub-sample) retained across the
+    /// burst for serialization. Only populated while recording is armed.
+    private var recordFrames: [ARDepthFrame] = []
+    /// Reference camera JPEG grabbed at burst start (developer mode only).
+    private var recordReferenceJPEG: Data?
 
     // MARK: - Burst state
 
@@ -132,8 +188,8 @@ public final class DBHScanViewModel: ObservableObject {
     private let recentRawDiameterCapacity: Int = 5
     /// Phase 16.2 hysteresis, retuned in Phase 18.2. The earlier
     /// 10 %/3-frame gate left the cruiser staring at "Stabilizing…"
-    /// far longer than peer apps (ForestScanner / Single-Shot SAM
-    /// publish on a single fit). Loosened to 12 %/2-frames — still
+    /// far longer than a single-shot segmentation pipeline (e.g.
+    /// Single-Shot SAM), which publishes on one fit. Loosened to 12 %/2-frames — still
     /// rejects obvious chatter but unlocks the published value almost
     /// as soon as the cruiser steadies the phone.
     ///   • Enter stable when CoV ≤ 0.12 over 2+ frames
@@ -166,13 +222,21 @@ public final class DBHScanViewModel: ObservableObject {
 
     // MARK: - Construction
 
+    /// Shared-session client token — one per view-model instance so a
+    /// mid-transition overlap (DBH cover dismissing while the Height
+    /// cover attaches) can never pause the session under the new screen.
+    private let arClientID = UUID()
+
     public init(
         calibration: ProjectCalibration,
         session: ARKitSessionManager? = nil,
         rawPointsWriter: (@Sendable ([SIMD2<Double>]) -> String?)? = nil,
         method: DBHMeasurementMethod = .chord
     ) {
-        self.session = session ?? ARKitSessionManager()
+        // Default to the APP-SHARED session (field round 8): one ARKit
+        // world frame across all measure screens, so the sampling-plot
+        // anchor placed elsewhere renders here too.
+        self.session = session ?? .shared
         self.calibration = calibration
         self.rawPointsWriter = rawPointsWriter
         self.dbhMeasurementMethod = method
@@ -202,10 +266,12 @@ public final class DBHScanViewModel: ObservableObject {
     public func onAppear() {
         // Always start the AR session — even on non-LiDAR devices we want
         // the camera feed to render so the cruiser can see what they're
-        // pointing at while entering DBH manually. `session.run()` is
-        // internally guarded against unsupported configurations, so it's
-        // safe to call on any device.
-        session.run()
+        // pointing at while entering DBH manually. Attaching is internally
+        // guarded against unsupported configurations, so it's safe to
+        // call on any device. The DBH configuration keeps the depth
+        // stream + VIO features + scene reconstruction on; applied with
+        // no reset options, so world anchors survive screen entry.
+        session.attach(client: arClientID, configuration: .dbhScan)
         subscribeToDepth()
         subscribeToFeatures()
 
@@ -243,11 +309,13 @@ public final class DBHScanViewModel: ObservableObject {
             captureGeneration &+= 1
             burstBuffer.removeAll(keepingCapacity: true)
             subSamples.removeAll(keepingCapacity: true)
+            recordFrames.removeAll(keepingCapacity: true)
+            recordReferenceJPEG = nil
             vioFeatureBuffer.removeAll(keepingCapacity: true)
             captureSampleIndex = 0
             state = (state == .vioCapturing) ? .vioAiming : .aligning
         }
-        session.pause()
+        session.detach(client: arClientID)
     }
 
     private func subscribeToDepth() {
@@ -345,6 +413,43 @@ public final class DBHScanViewModel: ObservableObject {
             frame: frame,
             tapPixel: SIMD2(Double(cx), Double(cy)),
             calibration: calibration)
+
+        // ADJUST (edge-bracket) mode bypasses BOTH the automatic
+        // edge-finding and the stability/EMA machinery: the live value
+        // and the chord bar must track the user's handles exactly, so
+        // the raw bracket fit is published on every preview tick. The
+        // guide axis is latched for the whole ADJUST session (see
+        // `adjustAxisLatch`).
+        if edgeAdjustActive {
+            if adjustAxisLatch == nil { adjustAxisLatch = axis }
+            let fit = DBHEstimator.bracketChordFit(
+                frame: frame,
+                guideAxis: adjustAxisLatch ?? axis,
+                leftFraction: edgeBracketLeftFraction,
+                rightFraction: edgeBracketRightFraction)
+            smoothedPreviewDbhCm = nil
+            smoothedCenterWorldXZ = nil
+            lastTapDepthHint = nil
+            recentRawDiameters.removeAll()
+            isStable = false
+            consecutiveRedFrames = 0
+            previewFit = fit
+            previewDbhCm = fit?.diameterCm
+            previewTier = fit?.tier
+            previewStatusText = nil
+            let pose = frame.cameraPoseWorld
+            guideRowWorldY = pose.columns.3.y
+            if let stem = fit?.centerWorldXZ {
+                let camXZ = SIMD2<Double>(Double(pose.columns.3.x),
+                                          Double(pose.columns.3.z))
+                let d = stem - camXZ
+                distanceToStemCenterM = Float((d.x * d.x + d.y * d.y).squareRoot())
+            } else {
+                distanceToStemCenterM = nil
+            }
+            return
+        }
+
         // Phase 19 — dispatch on the user's chosen DBH method. The chord
         // method is stateless frame-to-frame (no depth-window anchoring
         // needed: median over ± 10 rows already absorbs intra-frame
@@ -515,7 +620,16 @@ public final class DBHScanViewModel: ObservableObject {
     /// coordinate space (caller converts from view coords to depth
     /// coords via the ARKit displayTransform).
     public func tap(at tapPixel: SIMD2<Double>) {
-        guard state == .armed else { return }
+        if edgeAdjustActive {
+            // ADJUST mode: the estimate is user-constrained, so the only
+            // gate is that a bracket fit exists on screen. `.aligning`
+            // is allowed too — centre-pixel depth stability is an
+            // auto-path concept, and the bracket's own median depth
+            // already validated inside `bracketChordFit`.
+            guard state == .armed || state == .aligning else { return }
+        } else {
+            guard state == .armed else { return }
+        }
         // Phase 18.4 — the tap is now the *only* way to start the
         // burst, so we keep the gate loose: any fit visible on screen
         // (red rejections excluded) is enough. Waiting for the
@@ -524,9 +638,19 @@ public final class DBHScanViewModel: ObservableObject {
         // is committed enough to tap, the burst's own §7.1 tree will
         // catch a fit that's too noisy to record.
         guard let fit = previewFit, fit.tier != .red else { return }
+        // Latch the bracket so mid-burst handle drags / mode exits can't
+        // change what this capture measures.
+        burstUsedBracket = edgeAdjustActive
+        burstBracketLeft = edgeBracketLeftFraction
+        burstBracketRight = edgeBracketRightFraction
+        burstBracketAxis = adjustAxisLatch
         burstBuffer.removeAll(keepingCapacity: true)
         burstTap = tapPixel
         subSamples.removeAll(keepingCapacity: true)
+        // Raw-capture arm: start a fresh representative-frame set and grab
+        // the reference camera image at the burst's first moment.
+        recordFrames.removeAll(keepingCapacity: true)
+        recordReferenceJPEG = rawCaptureEnabled ? session.currentCameraImageJPEG() : nil
         captureSampleIndex = 1
         sampleStartTime = ProcessInfo.processInfo.systemUptime
         captureGeneration &+= 1
@@ -547,6 +671,8 @@ public final class DBHScanViewModel: ObservableObject {
     public func retake() {
         burstBuffer.removeAll()
         subSamples.removeAll(keepingCapacity: true)
+        recordFrames.removeAll(keepingCapacity: true)
+        recordReferenceJPEG = nil
         captureSampleIndex = 0
         captureGeneration &+= 1
         vioFeatureBuffer.removeAll(keepingCapacity: true)
@@ -596,6 +722,7 @@ public final class DBHScanViewModel: ObservableObject {
                 trackingStayedNormal: session.trackingStayedNormalSinceWatch)
         }
         result = outcome
+        resultCapturedManually = false
         if let r = outcome {
             state = r.confidence == .red ? .rejected : .fitted
         } else {
@@ -631,6 +758,7 @@ public final class DBHScanViewModel: ObservableObject {
 
     public func submitManualEntry() {
         guard let cm = Double(manualDbhCm), cm > 0 else { return }
+        resultCapturedManually = false
         result = DBHResult(
             diameterCm: Float(cm),
             centerXZ: SIMD2(0, 0),
@@ -651,23 +779,35 @@ public final class DBHScanViewModel: ObservableObject {
     private func finishSubSample() {
         let frames = burstBuffer
         burstBuffer.removeAll(keepingCapacity: true)
+        // Retain ONE representative depth frame per sub-sample (≤5 → the
+        // depth_0..4.bin bundle layout) for raw-capture replay.
+        if rawCaptureEnabled, let rep = frames.first { recordFrames.append(rep) }
         if let firstFrame = frames.first {
             let axis = DBHEstimator.pickGuideAxis(
                 frame: firstFrame,
                 tapPixel: burstTap,
                 calibration: calibration)
-            let input = DBHScanInput(
-                frames: frames,
-                tapPixel: burstTap,
-                guideAxis: axis,
-                projectCalibration: calibration,
-                rawPointsWriter: rawPointsWriter)
-            // Phase 19 dispatch — chord method on the chord burst path,
-            // partial-arc method on the original §7.1 pipeline.
+            // Dispatch: manual bracket (ADJUST captures, latched at tap
+            // time) → chord method → original §7.1 partial-arc pipeline.
             let outcome: DBHResult?
-            switch dbhMeasurementMethod {
-            case .chord:               outcome = DBHEstimator.chordEstimate(input: input)
-            case .partialArcCircleFit: outcome = DBHEstimator.estimate(input: input)
+            if burstUsedBracket {
+                outcome = DBHEstimator.bracketChordEstimate(
+                    frames: frames,
+                    guideAxis: burstBracketAxis ?? axis,
+                    leftFraction: burstBracketLeft,
+                    rightFraction: burstBracketRight,
+                    calibration: calibration)
+            } else {
+                let input = DBHScanInput(
+                    frames: frames,
+                    tapPixel: burstTap,
+                    guideAxis: axis,
+                    projectCalibration: calibration,
+                    rawPointsWriter: rawPointsWriter)
+                switch dbhMeasurementMethod {
+                case .chord:               outcome = DBHEstimator.chordEstimate(input: input)
+                case .partialArcCircleFit: outcome = DBHEstimator.estimate(input: input)
+                }
             }
             if let outcome { subSamples.append(outcome) }
         }
@@ -693,12 +833,42 @@ public final class DBHScanViewModel: ObservableObject {
         // On aggregate failure surface a red sub-sample if there was one —
         // it carries the human-readable rejection reason.
         result = outcome ?? samples.first(where: { $0.confidence == .red })
+        resultCapturedManually = burstUsedBracket
         if let r = result, r.confidence != .red, outcome != nil {
             state = .fitted
         } else {
             state = .rejected
         }
         resultGeneration &+= 1
+        recordRawBurstIfNeeded()
+    }
+
+    /// Serialize the raw-capture bundle for the just-finished depth burst
+    /// (developer mode only). Off the main actor — the estimator + IO run in
+    /// a detached task over Sendable snapshots; only the resulting bundle id
+    /// hops back to update `lastRecordedBundleID`.
+    private func recordRawBurstIfNeeded() {
+        guard rawCaptureEnabled, !recordFrames.isEmpty else { return }
+        let framesToRecord = recordFrames
+        recordFrames.removeAll(keepingCapacity: true)
+        let tap = burstTap
+        let cal = calibration
+        let algo = dbhMeasurementMethod
+        let bracket = RawCaptureManifest.DBHBundle.Bracket(
+            enabled: burstUsedBracket, left: burstBracketLeft, right: burstBracketRight)
+        let manual = burstUsedBracket
+        let ctx = rawCaptureContext
+        let jpeg = recordReferenceJPEG
+        let gps = rawCaptureGPS
+        recordReferenceJPEG = nil
+        Task.detached(priority: .utility) { [weak self] in
+            let id = RawCaptureRecorder.recordDBH(
+                frames: framesToRecord, tapPixel: tap, calibration: cal,
+                algorithm: algo, bracket: bracket,
+                captureManual: manual, context: ctx,
+                referenceJPEG: jpeg, gps: gps)
+            await MainActor.run { self?.lastRecordedBundleID = id }
+        }
     }
 
     /// AR-caliper capture (non-LiDAR path). The screen supplies the two
@@ -713,6 +883,7 @@ public final class DBHScanViewModel: ObservableObject {
                                             rightDir: rightDir,
                                             distanceM: distanceM)
         result = outcome
+        resultCapturedManually = false
         if let r = outcome {
             state = r.confidence == .red ? .rejected : .fitted
         } else {

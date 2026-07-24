@@ -159,6 +159,7 @@ public enum PlannedPlotMapper {
         e.plannedLat = s.plannedLat
         e.plannedLon = s.plannedLon
         e.visited = s.visited
+        e.skipped = s.skipped
     }
 
     public static func toStruct(_ e: PlannedPlotEntity) -> PlannedPlot {
@@ -169,7 +170,8 @@ public enum PlannedPlotMapper {
             plotNumber: Int(e.plotNumber),
             plannedLat: e.plannedLat,
             plannedLon: e.plannedLon,
-            visited: e.visited
+            visited: e.visited,
+            skipped: e.skipped
         )
     }
 }
@@ -278,6 +280,9 @@ public enum TreeMapper {
         e.createdAt = s.createdAt
         e.updatedAt = s.updatedAt
         e.deletedAt = s.deletedAt
+
+        e.latitude = s.latitude.map(NSNumber.init(value:))
+        e.longitude = s.longitude.map(NSNumber.init(value:))
     }
 
     public static func toStruct(_ e: TreeEntity) throws -> Tree {
@@ -336,7 +341,9 @@ public enum TreeMapper {
             rawScanPath: e.rawScanPath,
             createdAt: e.createdAt,
             updatedAt: e.updatedAt,
-            deletedAt: e.deletedAt
+            deletedAt: e.deletedAt,
+            latitude: e.latitude?.doubleValue,
+            longitude: e.longitude?.doubleValue
         )
     }
 }

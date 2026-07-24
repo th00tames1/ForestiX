@@ -176,6 +176,7 @@ object PlannedPlotMapper {
         plannedLat = s.plannedLat,
         plannedLon = s.plannedLon,
         visited = s.visited,
+        skipped = s.skipped,
     )
 
     fun toStruct(e: PlannedPlotEntity) = PlannedPlot(
@@ -186,6 +187,7 @@ object PlannedPlotMapper {
         plannedLat = e.plannedLat,
         plannedLon = e.plannedLon,
         visited = e.visited,
+        skipped = e.skipped,
     )
 }
 
@@ -289,6 +291,9 @@ object TreeMapper {
         photoPath = s.photoPath,
         rawScanPath = s.rawScanPath,
 
+        latitude = s.latitude,
+        longitude = s.longitude,
+
         createdAt = s.createdAt,
         updatedAt = s.updatedAt,
         deletedAt = s.deletedAt,
@@ -342,6 +347,8 @@ object TreeMapper {
             notes = e.notes,
             photoPath = e.photoPath,
             rawScanPath = e.rawScanPath,
+            latitude = e.latitude,
+            longitude = e.longitude,
             createdAt = e.createdAt,
             updatedAt = e.updatedAt,
             deletedAt = e.deletedAt,

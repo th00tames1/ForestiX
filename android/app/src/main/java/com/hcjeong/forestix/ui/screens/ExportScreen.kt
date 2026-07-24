@@ -53,6 +53,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import com.hcjeong.forestix.AppEnvironment
 import com.hcjeong.forestix.LocalAppEnvironment
+import com.hcjeong.forestix.common.ForestixLogger
 import com.hcjeong.forestix.data.cruise.CruiseDesign
 import com.hcjeong.forestix.data.cruise.HeightDiameterFit
 import com.hcjeong.forestix.data.cruise.PlannedPlot
@@ -64,7 +65,6 @@ import com.hcjeong.forestix.data.cruise.Tree
 import com.hcjeong.forestix.export.CSVExporter
 import com.hcjeong.forestix.export.ExportArtefact
 import com.hcjeong.forestix.export.ExportBundleBuilder
-import com.hcjeong.forestix.export.ExportBundleError
 import com.hcjeong.forestix.export.ExportDataSource
 import com.hcjeong.forestix.export.FullCruiseExporter
 import com.hcjeong.forestix.export.GeoJSONExporter
@@ -189,6 +189,10 @@ class ExportViewModel(val project: Project) {
                 }
             }
             _lastSessionFolder.value = result.folder
+            // A full-cruise export is Android's per-project backup analogue
+            // (whole project written to disk): log it like iOS backupCreated.
+            ForestixLogger.backupCreated(
+                project.id, result.artefacts.sumOf { it.url.length() })
             var files = _exportedFiles.value
             for (art in result.artefacts) {
                 files = listOf(ExportedFile(url = art.url, displayName = art.displayName)) + files
@@ -275,8 +279,19 @@ class RepositoryExportDataSource private constructor(
 
     override fun project(): Project = cachedProject
 
+    /// Ad-hoc cruising (v3 "Start plot") never creates a design row, so
+    /// the bundle falls back to a fixed-area stub around the plots' own
+    /// denormalized areas — the same rule the cruise map's live stats use.
     override fun cruiseDesign(forProjectId: UUID): CruiseDesign =
-        designs.firstOrNull() ?: throw ExportBundleError.DesignNotFound()
+        designs.firstOrNull() ?: CruiseDesign(
+            id = UUID.randomUUID(),
+            projectId = forProjectId,
+            plotType = com.hcjeong.forestix.data.cruise.PlotType.FIXED_AREA,
+            plotAreaAcres = plotsList.maxByOrNull { it.startedAt }?.plotAreaAcres ?: 0.1f,
+            baf = null,
+            samplingScheme = com.hcjeong.forestix.data.cruise.SamplingScheme.MANUAL,
+            gridSpacingMeters = null,
+        )
 
     override fun strata(forProjectId: UUID): List<Stratum> = strataList
     override fun plannedPlots(forProjectId: UUID): List<PlannedPlot> = plannedList
@@ -358,7 +373,7 @@ private fun ExportContent(nav: NavController, project: Project) {
                 if (target.isDirectory) zipFolderForShare(target) else target
             }
             if (file != null) {
-                shareFile(context, FullCruiseExporter.shareUri(context, file), mimeFor(file))
+                shareFile(context, FullCruiseExporter.shareUri(context, file), exportMimeFor(file))
             }
         } finally {
             // Clear the trigger only AFTER the chooser has fired: nulling
@@ -507,12 +522,12 @@ private fun ExportActionRow(
     }
 }
 
-// MARK: - Share helpers
+// MARK: - Share helpers (shared with the cruise project sheet's Export all)
 
 /// Zip a session folder's files into `<folder>.zip` beside it (still under
 /// the FileProvider-visible Exports/ tree) so the whole export session can
 /// ride one ACTION_SEND intent — the Android stand-in for iOS folder share.
-private fun zipFolderForShare(folder: File): File? {
+internal fun zipFolderForShare(folder: File): File? {
     val files = folder.listFiles()?.filter { it.isFile }?.sortedBy { it.name } ?: return null
     if (files.isEmpty()) return null
     val entries = files.map { it.name to it.readBytes() }
@@ -521,7 +536,7 @@ private fun zipFolderForShare(folder: File): File? {
     return zip
 }
 
-private fun mimeFor(file: File): String = when (file.extension.lowercase(Locale.US)) {
+internal fun exportMimeFor(file: File): String = when (file.extension.lowercase(Locale.US)) {
     "csv" -> "text/csv"
     "geojson", "json" -> "application/geo+json"
     "zip" -> "application/zip"

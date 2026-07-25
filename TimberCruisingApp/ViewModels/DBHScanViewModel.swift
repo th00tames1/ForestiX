@@ -134,8 +134,16 @@ public final class DBHScanViewModel: ObservableObject {
     /// Latest GPS fix, supplied by the screen (which owns the location read).
     public var rawCaptureGPS: RawCaptureGPS?
     /// Bundle id of the most recently recorded burst — the screen patches
-    /// its `accepted` flag + truth value at Accept.
+    /// its truth value + operator-accepted flag at Accept.
+    ///
+    /// MINTED SYNCHRONOUSLY at the end of the burst, BEFORE the detached
+    /// writer runs. A fast Accept used to find this nil and silently drop the
+    /// tape-measured truth; now the id always exists and the truth is either
+    /// patched into the manifest or parked in a sidecar the writer folds in.
     @Published public private(set) var lastRecordedBundleID: String?
+    /// Outcome of the most recent capture attempt — the screen renders this
+    /// verbatim so a failed write can never look like a saved one.
+    @Published public private(set) var lastCaptureOutcome: RawCaptureOutcome?
     /// Representative depth frames (one per sub-sample) retained across the
     /// burst for serialization. Only populated while recording is armed.
     private var recordFrames: [ARDepthFrame] = []
@@ -651,6 +659,8 @@ public final class DBHScanViewModel: ObservableObject {
         // the reference camera image at the burst's first moment.
         recordFrames.removeAll(keepingCapacity: true)
         recordReferenceJPEG = rawCaptureEnabled ? session.currentCameraImageJPEG() : nil
+        // A new burst supersedes the previous capture's saved / NOT-saved pill.
+        lastCaptureOutcome = nil
         captureSampleIndex = 1
         sampleStartTime = ProcessInfo.processInfo.systemUptime
         captureGeneration &+= 1
@@ -673,6 +683,13 @@ public final class DBHScanViewModel: ObservableObject {
         subSamples.removeAll(keepingCapacity: true)
         recordFrames.removeAll(keepingCapacity: true)
         recordReferenceJPEG = nil
+        lastCaptureOutcome = nil
+        // The previous bundle is no longer "the capture on screen". In the
+        // cruise tally the loop retakes between trees, and a truth typed for
+        // the NEXT tree must never land on the LAST tree's bundle. (Accept
+        // applies its truth before the loop calls retake, so nothing typed
+        // for the accepted tree is affected.)
+        lastRecordedBundleID = nil
         captureSampleIndex = 0
         captureGeneration &+= 1
         vioFeatureBuffer.removeAll(keepingCapacity: true)
@@ -750,14 +767,33 @@ public final class DBHScanViewModel: ObservableObject {
     public func accept() {
         guard let r = result, r.confidence != .red else { return }
         state = .accepted
+        markLastBundleAccepted()
+    }
+
+    /// Stamp `operator_accepted` on the bundle this Accept confirms. Distinct
+    /// from the record-time `tier_ok` gate, and safe to call while the writer
+    /// is still running (the store parks it and the writer folds it in).
+    private func markLastBundleAccepted() {
+        guard rawCaptureEnabled, let id = lastRecordedBundleID else { return }
+        Task.detached(priority: .utility) {
+            _ = RawCaptureStore.markAccepted(id: id)
+        }
     }
 
     public func enterManualEntry() {
         state = .manualEntry
     }
 
+    /// Unit system the manual-entry field is being typed in. The screen keeps
+    /// this in sync with AppSettings — under imperial the field prompts for
+    /// INCHES, and the typed number used to be stored straight into
+    /// `diameterCm`, corrupting every manual imperial entry by 2.54x.
+    public var manualEntryUnits: UnitSystem = .metric
+
     public func submitManualEntry() {
-        guard let cm = Double(manualDbhCm), cm > 0 else { return }
+        guard let typed = TruthInput.parsePositive(manualDbhCm) else { return }
+        let cm = manualEntryUnits == .imperial ? Units.inchesToCm(typed) : typed
+        guard cm > 0 else { return }
         resultCapturedManually = false
         result = DBHResult(
             diameterCm: Float(cm),
@@ -844,11 +880,28 @@ public final class DBHScanViewModel: ObservableObject {
     }
 
     /// Serialize the raw-capture bundle for the just-finished depth burst
-    /// (developer mode only). Off the main actor — the estimator + IO run in
-    /// a detached task over Sendable snapshots; only the resulting bundle id
-    /// hops back to update `lastRecordedBundleID`.
+    /// (developer mode only). The bundle id is minted HERE, synchronously, so
+    /// the truth field has a target the instant the burst ends; the estimator
+    /// + IO then run detached over Sendable snapshots and report an explicit
+    /// saved/failed outcome back to the main actor.
+    ///
+    /// The context (mode / project / plot / TREE NUMBER / units) is snapshot
+    /// at record time from `rawCaptureContext`, which the screen refreshes on
+    /// every capture — the cruise tally reuses one screen instance, so a
+    /// context captured once at `.onAppear` froze every bundle in the plot at
+    /// the first tree's number.
     private func recordRawBurstIfNeeded() {
-        guard rawCaptureEnabled, !recordFrames.isEmpty else { return }
+        // A NEW capture supersedes the previous bundle on every path below,
+        // the failing ones included. Leaving the id set meant a capture that
+        // never wrote anything still pointed at the PREVIOUS tree's bundle,
+        // so a truth typed for this tree had a live target on the wrong tree.
+        // Only a freshly minted id may set it again.
+        lastRecordedBundleID = nil
+        guard rawCaptureEnabled else { return }
+        guard !recordFrames.isEmpty else {
+            lastCaptureOutcome = .failed(reason: "no depth frames in the burst")
+            return
+        }
         let framesToRecord = recordFrames
         recordFrames.removeAll(keepingCapacity: true)
         let tap = burstTap
@@ -861,13 +914,17 @@ public final class DBHScanViewModel: ObservableObject {
         let jpeg = recordReferenceJPEG
         let gps = rawCaptureGPS
         recordReferenceJPEG = nil
+        let id = UUID().uuidString
+        lastRecordedBundleID = id
+        lastCaptureOutcome = nil
         Task.detached(priority: .utility) { [weak self] in
-            let id = RawCaptureRecorder.recordDBH(
+            let outcome = RawCaptureRecorder.recordDBH(
+                id: id,
                 frames: framesToRecord, tapPixel: tap, calibration: cal,
                 algorithm: algo, bracket: bracket,
                 captureManual: manual, context: ctx,
                 referenceJPEG: jpeg, gps: gps)
-            await MainActor.run { self?.lastRecordedBundleID = id }
+            await MainActor.run { self?.lastCaptureOutcome = outcome }
         }
     }
 

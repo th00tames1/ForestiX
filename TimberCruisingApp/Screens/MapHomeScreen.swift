@@ -1439,7 +1439,11 @@ public struct MapHomeScreen: View {
                     // tree number.
                     if fullMeasurementChain { chainHeightPending = true }
                     presentingDBHScan = false
-                })
+                },
+                // Raw-capture join keys: without these a stored bundle can't
+                // be paired back to the tree (and its truth) it documents.
+                projectID: currentProject?.id.uuidString,
+                quickTreeNumber: pendingTreeNumber)
         }
     }
 
@@ -1477,7 +1481,12 @@ public struct MapHomeScreen: View {
                         method: "ar.crown.dh",
                         treeNumber: pendingTreeNumber,
                         plotID: history.activePlotID))
-                })
+                },
+                // Raw-capture join keys — height bundles used to be anonymous
+                // (tree + project hardcoded nil), so they couldn't be paired
+                // with the tree's DBH bundle or its hand-measured truth.
+                projectID: currentProject?.id.uuidString,
+                treeNumber: pendingTreeNumber)
             .environmentObject(history)
             .environmentObject(settings)
         }

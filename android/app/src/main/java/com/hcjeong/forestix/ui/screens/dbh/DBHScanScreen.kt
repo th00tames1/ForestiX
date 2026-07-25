@@ -72,6 +72,7 @@ import com.hcjeong.forestix.ar.MarkerShape
 import com.hcjeong.forestix.ar.Vec3
 import com.hcjeong.forestix.ar.distance
 import com.hcjeong.forestix.common.MeasurementFormatter
+import com.hcjeong.forestix.common.TruthInput
 import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.common.Units
 import com.hcjeong.forestix.sensors.ArCaliperDbh
@@ -102,7 +103,13 @@ import com.hcjeong.forestix.ui.screens.MeasureShutterBar
 import com.hcjeong.forestix.ui.screens.MeasureStatusPanel
 import com.hcjeong.forestix.ui.screens.MeasureTopChrome
 import com.hcjeong.forestix.ui.screens.MeasureValuePill
+import com.hcjeong.forestix.ui.screens.RawCaptureBadge
+import com.hcjeong.forestix.ui.screens.RawCaptureOffNotice
+import com.hcjeong.forestix.ui.screens.RawCaptureStatus
+import com.hcjeong.forestix.ui.screens.RawCaptureStrings
 import com.hcjeong.forestix.ui.screens.ResearchFieldsRow
+import com.hcjeong.forestix.ui.screens.TruthFieldNote
+import com.hcjeong.forestix.ui.screens.TruthFieldWarning
 import com.hcjeong.forestix.ui.screens.ScanPlotMiniMap
 import com.hcjeong.forestix.ui.screens.TiltBadge
 import com.hcjeong.forestix.ui.screens.scanPlotMiniMapVisible
@@ -285,21 +292,68 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // acquired frame so a burst can be serialized for offline replay; reset
     // on leave so no other screen inherits the cost.
     val rawCaptureArmed = settings.developerMode && settings.rawCaptureEnabled
+    // REF-COUNTED arm (see ArSessionHub.armRawDepth). A plain
+    // `onDispose { controller.captureRawDepth = false }` used to disarm the
+    // process-wide controller from the OUTGOING screen during the
+    // DBH→Height chain, silently stripping every chained height bundle's
+    // aim frames — a disposing screen may only release its own token.
     DisposableEffect(rawCaptureArmed) {
-        controller.captureRawDepth = rawCaptureArmed
-        onDispose { controller.captureRawDepth = false }
+        val token = if (rawCaptureArmed) ArSessionHub.armRawDepth() else null
+        onDispose { token?.let { ArSessionHub.releaseRawDepth(it) } }
     }
-    // The most-recent burst's stored bundle id — flipped to accepted when the
-    // cruiser taps Accept (iOS markAccepted flow).
+    // The most-recent burst's stored bundle id — minted SYNCHRONOUSLY at
+    // burst end (not when the async write finishes), so an Accept tapped
+    // before serialization completes still attaches its ground truth. Flipped
+    // to operator_accepted on Accept (iOS markAccepted flow).
     var lastRawCaptureId by remember { mutableStateOf<String?>(null) }
+    // Visible outcome of the last capture attempt (saved / NOT saved).
+    var rawCaptureStatus by remember { mutableStateOf<RawCaptureStatus?>(null) }
+    var rawStatusEpoch by remember { mutableStateOf(0) }
+    // Reason the last capture failed to record (null = the last capture
+    // saved). Accept reads it so a typed truth is never attached to — or
+    // silently lost with — a bundle that isn't there.
+    var lastCaptureFailure by remember { mutableStateOf<String?>(null) }
+    // Why the typed ground truth could not be stored; shown under the truth
+    // field, and the field is NOT cleared while it is set.
+    var truthSaveFailure by remember { mutableStateOf<String?>(null) }
+    // A truth QUEUED against a bundle whose write hasn't finished. It is not
+    // in any manifest yet, so the field keeps the text and shows a pending
+    // note; the recorder resolves it — folded in (clear the field) or lost
+    // with a failed write (hand the number back). Round 1 cleared the field on
+    // a merely-queued result, so a write that then failed erased the pairing.
+    var truthPending by remember { mutableStateOf<String?>(null) }
+    var truthPendingId by remember { mutableStateOf<String?>(null) }
+    var truthPendingText by remember { mutableStateOf("") }
+    // Storage headroom, re-read on entry and after every capture: below the
+    // guard the recorder refuses to write, so the REC pill says LOW STORAGE
+    // before a whole plot is lost.
+    var storageLow by remember { mutableStateOf(false) }
+    LaunchedEffect(rawCaptureArmed, rawStatusEpoch) {
+        storageLow = rawCaptureArmed &&
+            RawCaptureStore.freeSpaceBytes(context) < RawCaptureStore.MIN_FREE_BYTES
+    }
+    LaunchedEffect(rawStatusEpoch) {
+        // A success fades; a FAILURE stays up until the next attempt — a lost
+        // capture must not scroll past unnoticed.
+        if (rawCaptureStatus?.saved == true) {
+            delay(4_000)
+            rawCaptureStatus = null
+        }
+    }
+    fun postRawStatus(status: RawCaptureStatus) {
+        rawCaptureStatus = status
+        rawStatusEpoch += 1
+    }
 
     // Serialize one DBH burst for offline estimator replay (off the main
     // thread). `bracket` non-null = the ADJUST manual path. Fired at the end
     // of every burst regardless of tier (accepted / rejected / ADJUST alike).
+    // `rgb` is the reference JPEG grabbed at BURST START.
     fun recordRawDbh(
         frames: List<ArDepthFrame>,
         tapX: Double, tapY: Double, axisRow: Boolean,
         bracket: RawCaptureStore.BracketSpec?,
+        rgb: ByteArray?,
     ) {
         if (!rawCaptureArmed) return
         val cruise = CruiseCapture.target
@@ -310,9 +364,14 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             treeNumber = cruise?.treeNumber ?: pendingTree,
             gps = com.hcjeong.forestix.positioning.LocationService.lastGlobalFix,
         )
+        // Mint the id NOW so Accept has something to attach truth to even if
+        // the write is still running (RawCaptureStore queues edits per id).
+        val id = RawCaptureStore.newBundleId()
+        lastRawCaptureId = id
         scope.launch {
-            val id = RawCaptureStore.recordDbh(
+            val outcome = RawCaptureStore.recordDbh(
                 context = context,
+                id = id,
                 frames = frames,
                 tapX = tapX, tapY = tapY, axisRow = axisRow,
                 bracket = bracket,
@@ -320,10 +379,58 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 algorithmRaw = settings.dbhChordAlgorithm,
                 unitSystem = if (settings.unitSystem == UnitSystem.METRIC) "metric" else "imperial",
                 ctx = ctx,
-                captureRgb = { file -> controller.captureCameraJpeg(file) },
+                rgb = rgb,
             )
-            if (id != null) lastRawCaptureId = id
+            if (outcome.saved) {
+                lastCaptureFailure = null
+                postRawStatus(RawCaptureStatus(RawCaptureStrings.saved(outcome.frameCount), true))
+                // A truth typed mid-write is DURABLE only now that the
+                // manifest carries it — this is the only place the field may
+                // be cleared for a queued value.
+                if (outcome.queuedTruthSaved != null && truthPendingId == id) {
+                    if (researchTrueCm == truthPendingText) researchTrueCm = ""
+                    truthPending = null
+                    truthPendingId = null
+                }
+            } else {
+                // Nothing on disk under this id — drop it so a later Accept
+                // can't queue truth onto a bundle that will never exist.
+                if (lastRawCaptureId == id) lastRawCaptureId = null
+                lastCaptureFailure = outcome.error ?: "write failed"
+                postRawStatus(RawCaptureStatus(RawCaptureStrings.notSaved(outcome.error), false))
+                // A truth queued against this bundle died with it. Losing the
+                // pairing is acceptable; losing it INVISIBLY is not — put the
+                // number back on screen (or at least name it) and say so.
+                outcome.queuedTruthLost?.let { lost ->
+                    val text = TruthInput.text(lost)
+                    val restore = TruthInput.normalized(researchTrueCm).isEmpty()
+                    if (restore) researchTrueCm = text
+                    // Only retire the pending marker if it is THIS capture's —
+                    // a later capture may already own it.
+                    if (truthPendingId == id) {
+                        truthPending = null
+                        truthPendingId = null
+                    }
+                    truthSaveFailure = RawCaptureStrings.truthLost(text, restore)
+                }
+            }
         }
+    }
+
+    // One reference RGB JPEG of the CURRENT camera frame, grabbed at burst
+    // START (iOS parity). The old path let the store grab it on a background
+    // thread AFTER the whole burst, by which time the phone was often
+    // pointing elsewhere — or the frame was gone and rgb_file came back null.
+    // Written to a throwaway cache file (the only sink captureCameraJpeg
+    // offers), read into memory, deleted.
+    fun captureReferenceJpeg(): ByteArray? {
+        if (!rawCaptureArmed) return null
+        return try {
+            val tmp = java.io.File.createTempFile("dbh_ref_", ".jpg", context.cacheDir)
+            val bytes = if (controller.captureCameraJpeg(tmp)) tmp.readBytes() else null
+            tmp.delete()
+            bytes
+        } catch (_: Throwable) { null }
     }
 
     // Preview smoothing (EMA α=0.3 on the diameter + distance, iOS parity)
@@ -665,6 +772,8 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         stage = Stage.CAPTURING
         failure = null
         resultFromAdjust = false
+        lastCaptureFailure = null
+        truthSaveFailure = null
         scope.launch {
             val samples = ArrayList<DBHResult>()
             var firstRed: DBHResult? = null      // surface the FIRST red (matches iOS)
@@ -672,6 +781,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             // tap/axis) so the burst can be serialized for offline replay.
             var recFrames: List<ArDepthFrame>? = null
             var recTapX = 0.0; var recTapY = 0.0; var recAxisRow = false
+            var recRgb: ByteArray? = null
             for (k in 1..SAMPLE_COUNT) {
                 sampleProgress = k
                 // ~0.5 s window per sub-sample (min 5 frames for the chord;
@@ -683,7 +793,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     attempts++
                     delay(50)
                 }
-                if (frames.size < 5) continue
+                if (frames.isEmpty()) continue
                 val f0 = frames.first()
                 // Same crosshair→depth-pixel mapping as the live preview so
                 // the committed burst reads the exact spot the cruiser aimed.
@@ -693,10 +803,17 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 // Auto-pick the across-the-trunk axis (fixes severe under-read
                 // when the sensor orientation made the strip run along the trunk).
                 val axis = DBHEstimator.pickGuideAxis(f0, tapX, tapY, calibration)
+                // Latch the RAW window BEFORE the 5-frame estimator gate: a
+                // dusk/canopy window that can't be estimated is exactly the
+                // data the corpus needs, and dropping it here is what made
+                // whole captures vanish silently.
                 if (recFrames == null && rawCaptureArmed) {
                     recFrames = frames.toList()
                     recTapX = tapX; recTapY = tapY; recAxisRow = axis is GuideAxis.Row
+                    recRgb = captureReferenceJpeg()
                 }
+                // The live estimate still needs its 5-frame window.
+                if (frames.size < 5) continue
                 // Chord (silhouette-width) method = median of the SAME per-frame
                 // chord the live preview shows, so preview ≈ recorded value.
                 val sub = DBHEstimator.estimateChord(frames, tapX, tapY, axis, calibration, chordAlgorithm)
@@ -706,7 +823,14 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 } else samples.add(sub)
             }
             sampleProgress = 0
-            recFrames?.let { recordRawDbh(it, recTapX, recTapY, recAxisRow, bracket = null) }
+            val rec = recFrames
+            if (rec != null) {
+                recordRawDbh(rec, recTapX, recTapY, recAxisRow, bracket = null, rgb = recRgb)
+            } else if (rawCaptureArmed) {
+                lastCaptureFailure = "no depth frames in this burst"
+                postRawStatus(RawCaptureStatus(
+                    RawCaptureStrings.notSaved(lastCaptureFailure), false))
+            }
             val agg = DBHEstimator.aggregateSamples(samples)
             if (agg == null) {
                 // Surface the red sub-sample's reason when we have one — it
@@ -737,6 +861,8 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         stage = Stage.CAPTURING
         failure = null
         resultFromAdjust = true
+        lastCaptureFailure = null
+        truthSaveFailure = null
         val lockedLeftFrac = adjustLeftFrac
         val lockedRightFrac = adjustRightFrac
         scope.launch {
@@ -746,6 +872,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             // latched view-space bracket for offline replay.
             var recFrames: List<ArDepthFrame>? = null
             var recBracket: RawCaptureStore.BracketSpec? = null
+            var recRgb: ByteArray? = null
             for (k in 1..SAMPLE_COUNT) {
                 sampleProgress = k
                 // Same ~0.5 s window per sub-sample as the auto burst.
@@ -756,15 +883,19 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     attempts++
                     delay(50)
                 }
-                if (frames.size < 5) continue
+                if (frames.isEmpty()) continue
                 val vw = controller.viewWidthPx.toFloat()
                 val cy = controller.viewHeightPx / 2f
                 if (vw <= 1f) continue
+                // Latch the raw window BEFORE the estimator's 5-frame gate
+                // (same reasoning as the auto burst) + the reference RGB.
                 if (recFrames == null && rawCaptureArmed) {
                     recFrames = frames.toList()
                     recBracket = RawCaptureStore.BracketSpec(
                         lockedLeftFrac * vw, lockedRightFrac * vw, cy)
+                    recRgb = captureReferenceJpeg()
                 }
+                if (frames.size < 5) continue
                 val diameters = ArrayList<Double>(frames.size)
                 var spanPxSum = 0
                 for (f in frames) {
@@ -805,7 +936,11 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             sampleProgress = 0
             val rf = recFrames; val rb = recBracket
             if (rf != null && rb != null) {
-                recordRawDbh(rf, tapX = 0.0, tapY = 0.0, axisRow = false, bracket = rb)
+                recordRawDbh(rf, tapX = 0.0, tapY = 0.0, axisRow = false, bracket = rb, rgb = recRgb)
+            } else if (rawCaptureArmed) {
+                lastCaptureFailure = "no depth frames in this burst"
+                postRawStatus(RawCaptureStatus(
+                    RawCaptureStrings.notSaved(lastCaptureFailure), false))
             }
             val agg = DBHEstimator.aggregateSamples(subs)
             if (agg == null) {
@@ -898,17 +1033,64 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         // Cruise tally session (v3): captured once so the whole accept
         // rides ONE consistent routing decision.
         val cruise = CruiseCapture.target
-        // Snapshot the dev "True Ø" field now — the developer block below
-        // clears it synchronously before the async launch runs.
-        val rawTrue = researchTrueCm.toDoubleOrNull()?.takeIf { it > 0 }
+        // Snapshot the typed "True Ø" BEFORE anything async: the truth must
+        // survive regardless of whether the bundle write has finished (the
+        // store queues edits against the synchronously-minted id) — the old
+        // code wrote truth only when the write had already completed, so a
+        // fast Accept dropped it and the field was cleared anyway.
+        val truthTextAtAccept = researchTrueCm
+        val rawTrue = TruthInput.parsePositive(truthTextAtAccept)
+        truthSaveFailure = null
         scope.launch {
-            // Flip the just-recorded raw-capture bundle to accepted (iOS
-            // markAccepted parity) + fold in the field-entered ground truth.
-            lastRawCaptureId?.let { rid ->
-                RawCaptureStore.markAccepted(context, rid)
-                if (rawTrue != null) RawCaptureStore.setTruth(context, rid, rawTrue)
-                lastRawCaptureId = null
+            // Stamp operator_accepted on the bundle this Accept confirms
+            // (safe while the writer is still running — the store parks it).
+            val rid = lastRawCaptureId
+            if (rid != null) RawCaptureStore.markAccepted(context, rid)
+            // Attach the typed ground truth. The input is cleared ONLY once
+            // the value is durable (in the manifest, or queued for the
+            // in-flight writer); on any failure the text stays put.
+            if (settings.developerMode && TruthInput.normalized(truthTextAtAccept).isNotEmpty()) {
+                when {
+                    rawTrue == null -> truthSaveFailure = RawCaptureStrings.TRUTH_NOT_A_NUMBER
+                    // Not recording: the value still went to the research CSV.
+                    !rawCaptureArmed -> if (researchTrueCm == truthTextAtAccept) researchTrueCm = ""
+                    // The capture itself failed — keep the typed value on
+                    // screen rather than attach it to a bundle that isn't there.
+                    lastCaptureFailure != null -> truthSaveFailure =
+                        RawCaptureStrings.truthCaptureFailed(lastCaptureFailure)
+                    rid == null -> if (researchTrueCm == truthTextAtAccept) researchTrueCm = ""
+                    else -> {
+                        // Claim the pending slot BEFORE the store call: the
+                        // recorder's own completion handler reads it to decide
+                        // whether the queued value landed.
+                        truthPendingId = rid
+                        truthPendingText = truthTextAtAccept
+                        when (RawCaptureStore.setTruth(context, rid, rawTrue)) {
+                            // Durable — the manifest already exists.
+                            RawCaptureStore.TruthWrite.SAVED -> {
+                                truthPending = null
+                                truthPendingId = null
+                                if (researchTrueCm == truthTextAtAccept) researchTrueCm = ""
+                            }
+                            // QUEUED is NOT durable: the value lives only in
+                            // the store's pending queue until the in-flight
+                            // write folds it in, so the text stays put.
+                            // (If the writer already resolved it, truthPendingId
+                            // is null again and there is nothing to announce.)
+                            RawCaptureStore.TruthWrite.QUEUED ->
+                                if (truthPendingId == rid) {
+                                    truthPending = RawCaptureStrings.TRUTH_PENDING
+                                }
+                            RawCaptureStore.TruthWrite.FAILED -> {
+                                truthPending = null
+                                truthPendingId = null
+                                truthSaveFailure = RawCaptureStrings.TRUTH_WRITE_FAILED
+                            }
+                        }
+                    }
+                }
             }
+            lastRawCaptureId = null
             // Chrome-less snapshot: hide the 2D chrome, give Compose one
             // committed frame, capture, then restore.
             val photo = activity?.let {
@@ -1019,12 +1201,13 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             controller.cameraForwardElevationRad()?.let {
                 fields["pitch_deg"] = String.format(Locale.US, "%.1f", it * 180f / Math.PI.toFloat())
             }
-            researchTrueCm.toDoubleOrNull()?.takeIf { it > 0 }?.let { t ->
+            rawTrue?.let { t ->
                 fields["true_value"] = String.format(Locale.US, "%.2f", t)
                 fields["error"] = String.format(Locale.US, "%.2f", r.diameterCm - t)
             }
             ResearchLog.record(context, fields)
-            researchTrueCm = ""
+            // The field is NOT cleared here any more — the accept coroutine
+            // above clears it only once the truth is durably applied.
         }
     }
 
@@ -1137,6 +1320,20 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         val miniMapUp = scanPlotMiniMapVisible()
         if (!hidingChromeForCapture) ScanPlotMiniMap()
 
+        // Raw-capture recording state: a persistent REC pill while the
+        // recorder is REALLY armed (the hub's ref-counted token set, not the
+        // Settings wish — the pill used to stay red through an arm clobber
+        // while nothing was being recorded), and the last attempt's outcome
+        // (saved / NOT saved) directly under it.
+        if (!hidingChromeForCapture) {
+            RawCaptureBadge(
+                armed = ArSessionHub.rawDepthArmed,
+                requested = rawCaptureArmed,
+                storageLow = storageLow,
+                status = rawCaptureStatus,
+            )
+        }
+
         // Cruise tally target pill — top-centre on the GPS-badge row, the
         // auto tree number the next Accept saves to ("Tree 8", updating).
         // iOS tallyTargetPill 1:1 (13 bold mono, black 0.65 capsule).
@@ -1198,6 +1395,13 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 listOfNotNull(
                     "depth" to (if (controller.supportsDepth) "ARCore✓" else "plane"),
                     "track" to (if (controller.trackingOk()) "OK" else "…"),
+                    // Recorder state — an explicit warning when developer
+                    // mode is on but nothing is being kept for the corpus.
+                    "rec" to when {
+                        !settings.rawCaptureEnabled -> "OFF — not recording"
+                        ArSessionHub.rawDepthArmed -> "armed"
+                        else -> "off"
+                    },
                     devDepth?.let { "depthMap" to it },
                     devIntr?.let { "fx/fy cx,cy" to it },
                     devIntrImg?.let { "fImg" to it },
@@ -1565,7 +1769,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 ) {
                     OutlinedTextField(
                         value = manualText,
-                        onValueChange = { manualText = it.filter { c -> c.isDigit() || c == '.' } },
+                        onValueChange = { manualText = TruthInput.sanitize(it) },
                         placeholder = {
                             Text(
                                 if (settings.unitSystem == UnitSystem.METRIC) "Diameter in cm"
@@ -1576,11 +1780,20 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         modifier = Modifier.weight(1f),
                     )
+                    // The field is typed in the ACTIVE unit system: under
+                    // imperial the prompt says inches, so the number must be
+                    // converted before it lands in diameterCm (it used to be
+                    // stored raw — a silent 2.54x corruption).
+                    val typed = TruthInput.parse(manualText)?.toFloat()
+                    val typedCm = typed?.let {
+                        if (settings.unitSystem == UnitSystem.METRIC) it
+                        else Units.inchesToCm(it.toDouble()).toFloat()
+                    }
                     ForestixProminentButton(
                         "Save",
-                        enabled = (manualText.toFloatOrNull() ?: 0f) > 0f,
+                        enabled = (typedCm ?: 0f) > 0f,
                     ) {
-                        val cm = manualText.toFloatOrNull()
+                        val cm = typedCm
                         if (cm != null && cm > 0f) {
                             val r = DBHResult(
                                 diameterCm = cm, centerX = 0f, centerZ = 0f,
@@ -1592,6 +1805,10 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                             resultFromAdjust = false
                             failure = null
                             manualOpen = false
+                            // A typed diameter is NOT any recorded burst's
+                            // reading — release the bundle id so the accept
+                            // can't mark an unrelated capture as accepted.
+                            lastRawCaptureId = null
                             // iOS submitManualEntry goes straight to
                             // .accepted — record and continue.
                             acceptResult(r)
@@ -1632,20 +1849,41 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         )
                     }
                     if (settings.developerMode) {
-                        ResearchFieldsRow(
-                            targetValue = settings.researchTreeId,
-                            onTargetChange = { env.settings.setResearchTreeId(it.trim()) },
-                            targetPlaceholder = "T1",
-                            trueLabel = "True Ø (cm)",
-                            trueValue = researchTrueCm,
-                            onTrueChange = { researchTrueCm = it.filter { c -> c.isDigit() || c == '.' } },
-                            truePlaceholder = "tape",
-                        )
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            ResearchFieldsRow(
+                                targetValue = settings.researchTreeId,
+                                onTargetChange = { env.settings.setResearchTreeId(it.trim()) },
+                                targetPlaceholder = "T1",
+                                trueLabel = "True Ø (cm)",
+                                trueValue = researchTrueCm,
+                                // ',' is NORMALISED to '.', never deleted — the
+                                // old digit filter turned "12,5" into "125".
+                                onTrueChange = { researchTrueCm = TruthInput.sanitize(it) },
+                                truePlaceholder = "tape",
+                            )
+                            // Live warning under the truth field: a failed save,
+                            // unparseable text, or an implausible value.
+                            (truthSaveFailure
+                                ?: TruthInput.fieldWarning(researchTrueCm, isHeight = false))
+                                ?.let { w -> TruthFieldWarning(w) }
+                            // Queued-but-not-yet-durable truth: the field was
+                            // deliberately NOT cleared, so say why.
+                            if (truthSaveFailure == null) {
+                                truthPending?.let { TruthFieldNote(it) }
+                            }
+                            // Developer mode on but the recorder off: nothing
+                            // is being kept for the corpus. Say it here, where
+                            // the truth is typed.
+                            if (!settings.rawCaptureEnabled) RawCaptureOffNotice()
+                        }
                     }
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     ForestixWhiteButton("Retake", modifier = Modifier.weight(1f)) {
                         result = null; failure = null; stage = Stage.AIMING
+                        // A discarded burst must not collect the NEXT
+                        // reading's accept flag or ground truth.
+                        lastRawCaptureId = null
                     }
                     ForestixWhiteButton("Details", modifier = Modifier.weight(1f)) {
                         showMetadata = true

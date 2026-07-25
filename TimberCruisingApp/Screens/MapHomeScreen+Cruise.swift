@@ -143,6 +143,15 @@ extension MapHomeScreen {
         (liveTrees(in: plotID).map(\.treeNumber).max() ?? 0) + 1
     }
 
+    /// Tree number of the tree the SCOPED HEIGHT session is measuring — the
+    /// raw-capture join key for a height bundle. Read from the tree row
+    /// (`chainTreeID`), not from `chainTreeNumber`, which is the diameter
+    /// loop's NEXT target and would mislabel the bundle.
+    var chainHeightTreeNumber: Int? {
+        guard let plotID = chainPlotID, let treeID = chainTreeID else { return nil }
+        return liveTrees(in: plotID).first(where: { $0.id == treeID })?.treeNumber
+    }
+
     /// The unvisited planned plot the (+) "Set plot centre" targets:
     /// nearest to the current fix, or — with no fix — the lowest-numbered
     /// one. nil when none exist. (`plannedPlots` is already filtered to
@@ -741,7 +750,8 @@ extension MapHomeScreen {
                 },
                 cruisePlotInfo: cruiseMiniMapInfo(plotID: chainPlotID),
                 tallyTreeNumber: chainTreeNumber,
-                onUndoTally: { undoLastTally() })
+                onUndoTally: { undoLastTally() },
+                projectID: currentProject?.id.uuidString)
             .environmentObject(settings)
         }
     }
@@ -755,7 +765,11 @@ extension MapHomeScreen {
                     saveChainHeight(result, meta: meta)
                     presentingCruiseHeight = false
                 },
-                cruisePlotInfo: cruiseMiniMapInfo(plotID: chainPlotID))
+                cruisePlotInfo: cruiseMiniMapInfo(plotID: chainPlotID),
+                // Raw-capture join keys: the height session measures a KNOWN
+                // tree, so its bundle must carry that tree's number.
+                projectID: currentProject?.id.uuidString,
+                treeNumber: chainHeightTreeNumber)
             .environmentObject(history)
             .environmentObject(settings)
         }

@@ -225,6 +225,11 @@ public enum RawCaptureReplay {
                              rmseCorrected: (sse / Double(n)).squareRoot())
     }
 
+    /// Minimum scored captures before the "best" row may be highlighted as a
+    /// winner. Under this, an RMSE ordering is noise — the table still shows
+    /// every number, it just doesn't crown anything. Shared with Android.
+    public static let minRankingN: Int = 5
+
     /// Build the ranking rows shared by the DBH and height sweeps: raw
     /// {n, bias, RMSE, MAE} plus the OLS correction fit, sorted best-first by
     /// RAW RMSE (algorithms with no scored captures sink last). `order` is the
@@ -266,20 +271,29 @@ public enum RawCaptureReplay {
     }
 
     /// The full ranked report the "Compare algorithms" view renders.
+    ///
+    /// HONEST SKIP ACCOUNTING (S6): the two skip reasons are counted
+    /// SEPARATELY, so `scored + skippedNoTruth + skippedUnreadable == total`
+    /// always holds. Previously an unreadable bundle (missing depth file,
+    /// truncated write) was tallied under "no truth" and vanished — exactly
+    /// the class of data loss this corpus can't afford.
     public struct DBHSweepReport: Sendable {
         public let rankings: [AlgorithmRanking]   // best-first (lowest RMSE)
         public let perCapture: [DBHSweepCapture]  // only truthed captures
         public let totalDBH: Int
         public let scored: Int                    // truthed & reconstructable
-        public let skippedNoTruth: Int
+        public let skippedNoTruth: Int            // truth never entered
+        public let skippedUnreadable: Int         // truthed but won't reconstruct
     }
 
     /// Sweep every DBH capture and rank the algorithms best-first by RMSE
-    /// against the hand-measured truth. Captures with no truth are skipped
-    /// (counted). Pure + Sendable — the caller runs it off the main actor.
+    /// against the hand-measured truth. Captures with no truth, and captures
+    /// whose bytes won't reconstruct, are counted separately.
+    /// Pure + Sendable — the caller runs it off the main actor.
     public static func rankDBH(_ summaries: [RawCaptureSummary]) -> DBHSweepReport {
         var totalDBH = 0
         var skipped = 0
+        var unreadable = 0
         var scored = 0
         // Per-algorithm (estimate, truth) pairs, keyed by registry id — feeds
         // both the raw error stats and the OLS correction fit.
@@ -290,7 +304,7 @@ public enum RawCaptureReplay {
             totalDBH += 1
             guard let truth = sum.manifest.truth.value else { skipped += 1; continue }
             guard let entries = sweepDBH(manifest: sum.manifest, id: sum.id) else {
-                skipped += 1; continue
+                unreadable += 1; continue
             }
             scored += 1
             var winnerId: String?
@@ -311,7 +325,8 @@ public enum RawCaptureReplay {
 
         return DBHSweepReport(
             rankings: rankings, perCapture: perCapture,
-            totalDBH: totalDBH, scored: scored, skippedNoTruth: skipped)
+            totalDBH: totalDBH, scored: scored,
+            skippedNoTruth: skipped, skippedUnreadable: unreadable)
     }
 
     // MARK: Height
@@ -415,13 +430,13 @@ public enum RawCaptureReplay {
     /// slope/terrain-corrected tangent or a future depth-based method is ONE
     /// entry here. The second entry demonstrates the correction step.
     public static let heightCandidates: [HeightCandidate] = [
-        HeightCandidate(id: "tangent", name: "Walk-off tangent") { inp in
+        HeightCandidate(id: "tangent", name: "Two-tangent") { inp in
             acceptedHeightM(HeightEstimator.estimate(input: heightInput(inp)))
         },
         // EXAMPLE corrected candidate: base tangent estimator, then a plain
         // post-correction (here a fixed bias). Shows the registry supports
         // preprocess → estimator → correction with one line each.
-        HeightCandidate(id: "tangentBias", name: "Tangent + fixed bias") { inp in
+        HeightCandidate(id: "tangentBias", name: "Two-tangent + fixed bias") { inp in
             guard let h = acceptedHeightM(HeightEstimator.estimate(input: heightInput(inp)))
             else { return nil }   // N/A: base estimator rejected this capture
             return h + exampleHeightBiasM
@@ -478,7 +493,8 @@ public enum RawCaptureReplay {
         public let perCapture: [HeightSweepCapture]  // only truthed captures
         public let totalHeight: Int
         public let scored: Int
-        public let skippedNoTruth: Int
+        public let skippedNoTruth: Int               // truth never entered
+        public let skippedUnreadable: Int            // truthed but won't reconstruct
     }
 
     /// Sweep every height capture and rank the algorithms best-first by raw
@@ -487,6 +503,7 @@ public enum RawCaptureReplay {
     public static func rankHeight(_ summaries: [RawCaptureSummary]) -> HeightSweepReport {
         var totalHeight = 0
         var skipped = 0
+        var unreadable = 0
         var scored = 0
         var pairs: [String: [(est: Double, truth: Double)]] = [:]
         var perCapture: [HeightSweepCapture] = []
@@ -495,7 +512,7 @@ public enum RawCaptureReplay {
             totalHeight += 1
             guard let truth = sum.manifest.truth.value else { skipped += 1; continue }
             guard let entries = sweepHeight(manifest: sum.manifest) else {
-                skipped += 1; continue
+                unreadable += 1; continue
             }
             scored += 1
             var winnerId: String?
@@ -516,7 +533,8 @@ public enum RawCaptureReplay {
 
         return HeightSweepReport(
             rankings: rankings, perCapture: perCapture,
-            totalHeight: totalHeight, scored: scored, skippedNoTruth: skipped)
+            totalHeight: totalHeight, scored: scored,
+            skippedNoTruth: skipped, skippedUnreadable: unreadable)
     }
 
     // MARK: Shared reconstruction helpers
@@ -561,9 +579,15 @@ public enum RawCaptureRecorder {
     /// per-sub-sample depth frames (≤5 → depth_0..4.bin). The canonical
     /// `result_live` is the production estimator run over exactly these
     /// (confidence-derived) frames, so replay reproduces it bit-for-bit.
-    /// Returns the bundle id (nil only on a hard IO/empty-input failure).
+    ///
+    /// `id` is minted by the CALLER, synchronously, before this work is
+    /// dispatched — so a ground truth typed and Accepted while the bundle is
+    /// still being written already knows which bundle it belongs to.
+    /// Returns a `.saved` / `.failed` outcome; every failure carries a reason
+    /// the scan screen shows in a warning colour. Nothing is swallowed.
     @discardableResult
     public static func recordDBH(
+        id: String,
         frames: [ARDepthFrame],
         tapPixel: SIMD2<Double>,
         calibration: ProjectCalibration,
@@ -573,11 +597,17 @@ public enum RawCaptureRecorder {
         context: RawCaptureContext,
         referenceJPEG: Data?,
         gps: RawCaptureGPS?
-    ) -> String? {
-        guard let first = frames.first else { return nil }
-        let id = UUID().uuidString
+    ) -> RawCaptureOutcome {
+        guard let first = frames.first else {
+            return .failed(reason: "no depth frames in the burst")
+        }
         let dir = RawCaptureStore.bundleDirectory(id: id)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        do {
+            try RawCaptureStore.assertStorageAvailable()
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        } catch {
+            return .failed(reason: message(error))
+        }
 
         // Canonicalize: derive confidence from depth (shared cross-platform
         // rule) so the stored bytes fully determine the estimator input.
@@ -601,7 +631,14 @@ public enum RawCaptureRecorder {
         var frameMetas: [RawCaptureManifest.DBHBundle.Frame] = []
         for (i, f) in canon.enumerated() {
             let name = RawCaptureStore.depthFileName(i)
-            RawCaptureStore.writeDepth(f.depth, to: dir.appendingPathComponent(name))
+            do {
+                try RawCaptureStore.writeDepth(f.depth, to: dir.appendingPathComponent(name))
+            } catch {
+                // Tearing the bundle down also destroys a truth/Accept the
+                // operator has already been told is queued — say so.
+                return .failed(reason: message(error)
+                               + RawCaptureStore.discardFailedBundle(id: id))
+            }
             frameMetas.append(.init(
                 depthFile: name,
                 width: f.width, height: f.height, format: "f32m",
@@ -624,13 +661,20 @@ public enum RawCaptureRecorder {
         }
 
         let liveValue = Double(liveResult?.diameterCm ?? 0)
-        // Android parity: `accepted` = the fit was acceptable (tier != red),
-        // decided at record time (not the cruiser's later Accept tap).
+        // TWO explicit booleans (cross-platform, S8): `tier_ok` is the
+        // RECORD-TIME quality gate (fit not red); `operator_accepted` starts
+        // false and is set by `markAccepted` when the cruiser taps Accept.
+        // The legacy `accepted` key now mirrors operator_accepted on BOTH
+        // platforms, so the pooled corpus reads it one way.
+        let tierOK = (liveResult?.confidence ?? .red) != .red
         let resultLive = RawCaptureManifest.ResultLive(
             value: liveValue,
             sigma: Double(liveResult?.sigmaRmm ?? 0),
             tier: liveResult?.confidence.rawValue ?? "red",
-            accepted: (liveResult?.confidence ?? .red) != .red,
+            accepted: false,                    // legacy mirror of operator_accepted
+            tierOk: tierOK,
+            operatorAccepted: false,
+            frameCount: frameMetas.count,
             perFrame: perFrame)
 
         var manifest = baseManifest(
@@ -643,15 +687,32 @@ public enum RawCaptureRecorder {
             gps: gps)
         manifest.dbh = .init(frames: frameMetas, bracket: bracket, rgbFile: rgbFile)
         manifest.replaySelfcheck = .init(status: "fail", rerunValue: nil, delta: nil)
-        RawCaptureStore.writeManifest(manifest, id: id)
+        do {
+            try RawCaptureStore.writeManifest(manifest, id: id)
+        } catch {
+            return .failed(reason: message(error)
+                           + RawCaptureStore.discardFailedBundle(id: id))
+        }
 
         // Reproducibility self-check: reload from disk + re-run.
         let reran = RawCaptureStore.loadManifest(id: id)
             .flatMap { RawCaptureReplay.rerunDBH(manifest: $0, id: id) }
         manifest.replaySelfcheck = RawCaptureReplay.evaluate(
             rerun: reran.map { Double($0.diameterCm) }, live: liveValue)
-        RawCaptureStore.writeManifest(manifest, id: id)
-        return id
+        do {
+            try RawCaptureStore.commitManifestFoldingTruth(manifest, id: id)
+        } catch {
+            // The bundle IS on disk (first write succeeded) but the self-check
+            // stamp / folded truth didn't land — say so rather than claim a
+            // clean save.
+            return .failed(reason: message(error))
+        }
+        return .saved(id: id, frames: frameMetas.count)
+    }
+
+    /// Human-readable one-liner for the scan screen's failure pill.
+    static func message(_ error: Error) -> String {
+        (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
     }
 
     /// Production estimator over the stored frames — the SAME entry points
@@ -697,9 +758,11 @@ public enum RawCaptureRecorder {
 
     // MARK: Height
 
-    /// Serialize one Height compute bundle + self-check.
+    /// Serialize one Height compute bundle + self-check. `id` is minted by the
+    /// caller synchronously (see `recordDBH`), and the outcome is explicit.
     @discardableResult
     public static func recordHeight(
+        id: String,
         anchorWorld: SIMD3<Float>,
         anchorHitType: String,
         anchorDistanceM: Float,
@@ -722,10 +785,14 @@ public enum RawCaptureRecorder {
         baseJPEG: Data? = nil,
         topFrame: ARDepthFrame? = nil,
         topJPEG: Data? = nil
-    ) -> String? {
-        let id = UUID().uuidString
+    ) -> RawCaptureOutcome {
         let dir = RawCaptureStore.bundleDirectory(id: id)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        do {
+            try RawCaptureStore.assertStorageAvailable()
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        } catch {
+            return .failed(reason: message(error))
+        }
 
         // Base camera_pose: real camera rotation with its translation column
         // pinned to the exact standing point the live estimator used, so the
@@ -736,10 +803,19 @@ public enum RawCaptureRecorder {
         // Aim frames (schema 2). Same canonicalization + f32m depth format +
         // ~80% reference JPEG the DBH path uses, so a pooled depth-height
         // algorithm sees byte-consistent inputs across both capture kinds.
-        let baseAimExtra = writeAimFrame(prefix: "base", frame: baseFrame,
-                                         jpeg: baseJPEG, dir: dir)
-        let topAimExtra = writeAimFrame(prefix: "top", frame: topFrame,
-                                        jpeg: topJPEG, dir: dir)
+        let baseAimExtra: AimFrameExtra?
+        let topAimExtra: AimFrameExtra?
+        do {
+            baseAimExtra = try writeAimFrame(prefix: "base", frame: baseFrame,
+                                             jpeg: baseJPEG, dir: dir)
+            topAimExtra = try writeAimFrame(prefix: "top", frame: topFrame,
+                                            jpeg: topJPEG, dir: dir)
+        } catch {
+            // Tearing the bundle down also destroys a truth/Accept the
+            // operator has already been told is queued — say so.
+            return .failed(reason: message(error)
+                           + RawCaptureStore.discardFailedBundle(id: id))
+        }
 
         let liveResult = HeightEstimator.estimate(input: HeightMeasureInput(
             anchorPointWorld: anchorWorld,
@@ -749,11 +825,18 @@ public enum RawCaptureRecorder {
             trackingStateWasNormalThroughout: true,
             projectCalibration: calibration))
 
+        // tier_ok = record-time quality gate; operator_accepted is set later
+        // by markAccepted when the cruiser taps Accept (S8, both platforms).
+        let tierOK = liveResult.confidence != .red
+        let aimFrames = [baseAimExtra, topAimExtra].compactMap { $0 }.count
         let resultLive = RawCaptureManifest.ResultLive(
             value: Double(liveResult.heightM),
             sigma: Double(liveResult.sigmaHm),
             tier: liveResult.confidence.rawValue,
-            accepted: liveResult.confidence != .red,   // Android parity
+            accepted: false,                    // legacy mirror of operator_accepted
+            tierOk: tierOK,
+            operatorAccepted: false,
+            frameCount: aimFrames,
             perFrame: [])
 
         var manifest = baseManifest(
@@ -781,7 +864,12 @@ public enum RawCaptureRecorder {
                 .init(tMs: $0.tMs, pose: RawCaptureMatrix.flat($0.pose))
             })
         manifest.replaySelfcheck = .init(status: "fail", rerunValue: nil, delta: nil)
-        RawCaptureStore.writeManifest(manifest, id: id)
+        do {
+            try RawCaptureStore.writeManifest(manifest, id: id)
+        } catch {
+            return .failed(reason: message(error)
+                           + RawCaptureStore.discardFailedBundle(id: id))
+        }
 
         // Self-check against the stored-d_h re-run. The pose-reposed
         // derivation is recomputed on demand in the replay UI (Android
@@ -792,8 +880,12 @@ public enum RawCaptureRecorder {
             manifest.replaySelfcheck = RawCaptureReplay.evaluate(
                 rerun: Double(rerun.result.heightM), live: liveValue)
         }
-        RawCaptureStore.writeManifest(manifest, id: id)
-        return id
+        do {
+            try RawCaptureStore.commitManifestFoldingTruth(manifest, id: id)
+        } catch {
+            return .failed(reason: message(error))
+        }
+        return .saved(id: id, frames: aimFrames)
     }
 
     // MARK: Shared
@@ -867,11 +959,13 @@ public enum RawCaptureRecorder {
     /// Write `depth_<prefix>.bin` (row-major f32 metres, same format the DBH
     /// path uses) and, when present, `rgb_<prefix>.jpg`. Returns nil when no
     /// frame was captured, which keeps the aim schema-1-shaped (tangent only).
+    /// Throws on a real IO failure — a half-written aim frame must not pass
+    /// for a complete bundle.
     static func writeAimFrame(prefix: String, frame: ARDepthFrame?,
-                              jpeg: Data?, dir: URL) -> AimFrameExtra? {
+                              jpeg: Data?, dir: URL) throws -> AimFrameExtra? {
         guard let f = frame else { return nil }
         let depthName = "depth_\(prefix).bin"
-        RawCaptureStore.writeDepth(f.depth, to: dir.appendingPathComponent(depthName))
+        try RawCaptureStore.writeDepth(f.depth, to: dir.appendingPathComponent(depthName))
         var rgbName: String?
         if let jpeg {
             let name = "rgb_\(prefix).jpg"

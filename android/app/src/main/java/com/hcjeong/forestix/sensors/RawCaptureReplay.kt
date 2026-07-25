@@ -21,6 +21,11 @@ import kotlin.math.tan
 
 object RawCaptureReplay {
 
+    /// Enough scored captures for a "best algorithm" claim to mean anything.
+    /// Below this the ranking is shown but no winner is crowned — an RMSE
+    /// ordering over a handful of trees is noise. Identical value on iOS.
+    const val MIN_RANKING_N = 5
+
     /// DBH replay outcome. `value` is the current estimator's diameter (cm)
     /// over the stored frames; `perFrame` the per-frame chord diameters.
     data class DbhReplay(
@@ -172,7 +177,7 @@ object RawCaptureReplay {
     /// THE candidate registry (cross-platform seed set: the four existing
     /// geometries). Order is the table's default/tie-break order.
     val DBH_CANDIDATES: List<DbhCandidate> = listOf(
-        DbhCandidate("silhouette", "Chord / silhouette") { i ->
+        DbhCandidate("silhouette", "Chord (silhouette)") { i ->
             DBHEstimator.estimateChord(
                 i.frames, i.tapX, i.tapY, i.axis, i.cal, ChordAlgorithm.SILHOUETTE,
             )?.diameterCm?.toDouble()
@@ -182,12 +187,15 @@ object RawCaptureReplay {
                 DbhScanInput(i.frames, i.tapX, i.tapY, i.axis, i.cal),
             )?.diameterCm?.toDouble()
         },
-        DbhCandidate("depthBand", "Depth-band") { i ->
+        DbhCandidate("depthBand", "Depth-band chord") { i ->
             DBHEstimator.estimateChord(
                 i.frames, i.tapX, i.tapY, i.axis, i.cal, ChordAlgorithm.DEPTH_BAND,
             )?.diameterCm?.toDouble()
         },
-        DbhCandidate("bracketChord", "Manual bracket-chord") { i ->
+        // Id is "bracket" — the SAME slug iOS writes. It used to be
+        // "bracketChord" here, so the two platforms' sweep tables could not
+        // be pooled by algorithm id.
+        DbhCandidate("bracket", "Manual bracket-chord") { i ->
             val (left, right) = i.bracket ?: return@DbhCandidate null   // N/A: no manual bracket
             DBHEstimator.bracketChordEstimate(i.frames, i.axis, left, right, i.cal)
                 ?.diameterCm?.toDouble()
@@ -284,7 +292,7 @@ object RawCaptureReplay {
     /// offset — a stand-in showing exactly where a real correction (e.g. a
     /// slope-corrected standing distance, or a fitted bias) would live.
     val HEIGHT_CANDIDATES: List<HeightCandidate> = listOf(
-        HeightCandidate("tangent", "Two-tangent (base)") { i ->
+        HeightCandidate("tangent", "Two-tangent") { i ->
             HeightEstimator.estimate(
                 anchorX = i.anchorX, anchorZ = i.anchorZ,
                 standingX = i.standingX, standingZ = i.standingZ,

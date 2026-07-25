@@ -48,7 +48,85 @@ object RawCaptureStore {
     // tangent method exactly — replay is tolerant of their absence.
     const val SCHEMA = 2
     private const val MAX_FRAMES = 5
+
+    /// Frame FLOOR for a DBH bundle: one raw frame is enough. The old floor
+    /// of 5 silently dropped the whole capture under dusk / canopy / tracking
+    /// loss — exactly the conditions the validation corpus needs most — and
+    /// the caller discarded the null without a word. iOS has no floor either,
+    /// so recording whatever exists also aligns the two corpora; the actual
+    /// count is written to the manifest (`result_live.frame_count`) so a thin bundle
+    /// is visible in analysis instead of invisible.
+    private const val MIN_FRAMES = 1
     private const val SELF_CHECK_REL_TOL = 1e-3
+
+    /// Refuse to start a new bundle below this much free space. A depth
+    /// burst is a few MB; running the phone to zero mid-transect would
+    /// half-write bundles and can wedge the whole app, so the recorder stops
+    /// LOUDLY (the scan screen shows the failure) while there is still room.
+    const val MIN_FREE_BYTES = 2L * 1024L * 1024L * 1024L
+
+    /// Outcome of one record attempt — never a bare null. `error` is the
+    /// user-visible reason the bundle did NOT save; `frameCount` is what
+    /// actually reached disk.
+    ///
+    /// The two truth fields close the queued-edit hole: an operator can type a
+    /// ground truth and Accept while this write is still in flight, and that
+    /// value lives only in the pending queue until the manifest lands.
+    ///   queuedTruthSaved — the queued value was folded into the manifest; it
+    ///                      is DURABLE, so the scan screen may finally clear
+    ///                      the input field.
+    ///   queuedTruthLost  — the write failed with a queued value on it. The
+    ///                      pairing is gone; the value is handed back so the
+    ///                      screen can put it on screen again. Losing the
+    ///                      pairing is acceptable, losing it invisibly is not.
+    data class RecordOutcome(
+        val id: String?,
+        val frameCount: Int,
+        val error: String?,
+        val queuedTruthSaved: Double? = null,
+        val queuedTruthLost: Double? = null,
+    ) {
+        val saved: Boolean get() = id != null && error == null
+    }
+
+    /// Result of a truth write. QUEUED is NOT durable — the value sits in the
+    /// pending queue until the in-flight bundle write folds it in, so a caller
+    /// must keep the operator's typed text until it sees SAVED.
+    enum class TruthWrite { SAVED, QUEUED, FAILED }
+
+    /// Truth / acceptance typed BEFORE the async bundle write finished.
+    /// Held here and folded into the manifest by the recorder itself, so a
+    /// fast Accept can never drop a hand-measured value (the old code only
+    /// wrote truth when lastRecordedBundleID already existed).
+    private class PendingEdit {
+        var truth: Double? = null
+        var hasTruth: Boolean = false
+        var accepted: Boolean = false
+    }
+
+    private val pendingLock = Any()
+    private val pending = HashMap<String, PendingEdit>()
+
+    /// Mint a bundle id SYNCHRONOUSLY at capture time. The scan screen holds
+    /// this id immediately, so Accept can attach truth to a bundle whose
+    /// serialization is still in flight.
+    fun newBundleId(): String = UUID.randomUUID().toString()
+
+    /// Free space on the volume holding the bundles.
+    fun freeSpaceBytes(context: Context): Long =
+        try { root(context).usableSpace } catch (_: Throwable) { Long.MAX_VALUE }
+
+    fun lowOnSpace(context: Context): Boolean = freeSpaceBytes(context) < MIN_FREE_BYTES
+
+    /// Reason text shown on the scan screens' NOT SAVED pill (iOS wording).
+    private fun lowStorageReason(free: Long): String =
+        "Low storage (${byteLabel(free)} free)"
+
+    private fun byteLabel(bytes: Long): String = when {
+        bytes >= 1_073_741_824L -> String.format(Locale.US, "%.1f GB", bytes / 1_073_741_824.0)
+        bytes >= 1_048_576L -> String.format(Locale.US, "%.0f MB", bytes / 1_048_576.0)
+        else -> String.format(Locale.US, "%.0f KB", bytes / 1024.0)
+    }
 
     /// Capture context — the cruise/quick provenance + GPS the manifest's
     /// `context` / `gps` blocks record.
@@ -85,12 +163,16 @@ object RawCaptureStore {
 
     // MARK: - DBH recording
 
-    /// Serialize one DBH burst. `frames` must carry rawDepthMm (recorder
-    /// armed). Returns the bundle id, or null if there's nothing
-    /// reproducible (fewer than 5 raw frames). Runs entirely off the main
-    /// thread.
+    /// Serialize one DBH burst under the id the caller already minted
+    /// (newBundleId), so an Accept racing this write still lands its truth.
+    /// `frames` must carry rawDepthMm (recorder armed); `rgb` is the
+    /// reference JPEG grabbed at BURST START by the scan screen (iOS parity —
+    /// the old post-burst background grab often pointed elsewhere or came
+    /// back null). Returns a RecordOutcome that always says why a bundle did
+    /// not save. Runs entirely off the main thread.
     suspend fun recordDbh(
         context: Context,
+        id: String,
         frames: List<ArDepthFrame>,
         tapX: Double,
         tapY: Double,
@@ -100,20 +182,29 @@ object RawCaptureStore {
         algorithmRaw: String,          // "silhouette" | "band"
         unitSystem: String,            // "metric" | "imperial"
         ctx: CaptureContext,
-        captureRgb: (File) -> Boolean,
-    ): String? = withContext(Dispatchers.IO) {
+        rgb: ByteArray?,
+    ): RecordOutcome = withContext(Dispatchers.IO) {
         val raw = frames.filter { it.rawDepthMm != null }.take(MAX_FRAMES)
-        if (raw.size < 5) return@withContext null
-        val id = UUID.randomUUID().toString()
+        if (raw.size < MIN_FRAMES) {
+            return@withContext RecordOutcome(
+                null, 0, "no raw depth frames in this burst", queuedTruthLost = dropPending(id))
+        }
+        val free = freeSpaceBytes(context)
+        if (free < MIN_FREE_BYTES) {
+            return@withContext RecordOutcome(
+                null, 0, lowStorageReason(free), queuedTruthLost = dropPending(id))
+        }
         val dir = bundleDir(context, id)
         dir.mkdirs()
         try {
             // 1) Raw depth grids.
             raw.forEachIndexed { i, f -> writeU16Le(File(dir, "depth_$i.bin"), f.rawDepthMm!!) }
-            // 2) One reference RGB (first frame). Best-effort — a miss just
-            //    leaves rgb_file null.
-            val rgbFile = File(dir, "rgb_0.jpg")
-            val haveRgb = try { captureRgb(rgbFile) } catch (_: Throwable) { false }
+            // 2) One reference RGB, captured by the caller at burst start.
+            //    Best-effort — a miss just leaves rgb_file null.
+            val haveRgb = try {
+                if (rgb != null && rgb.isNotEmpty()) { File(dir, "rgb_0.jpg").writeBytes(rgb); true }
+                else false
+            } catch (_: Throwable) { false }
 
             // 3) Live estimator result over the STORED frames (the
             //    reproducible unit the self-check re-derives). For the manual
@@ -123,7 +214,12 @@ object RawCaptureStore {
             //    the recording + replay share DBHEstimator.bracketChordEstimate.
             val algorithm = ChordAlgorithm.fromRaw(algorithmRaw)
             val bracketGeom = if (bracket != null) deriveBracket(raw.first(), bracket) else null
-            if (bracket != null && bracketGeom == null) { dir.deleteRecursively(); return@withContext null }
+            if (bracket != null && bracketGeom == null) {
+                dir.deleteRecursively()
+                return@withContext RecordOutcome(
+                    null, 0, "bracket geometry couldn't be mapped to the depth frame",
+                    queuedTruthLost = dropPending(id))
+            }
             val effTapX: Double
             val effTapY: Double
             val effAxisStr: String
@@ -163,14 +259,16 @@ object RawCaptureStore {
                 captureMode = if (bracket != null) "manual" else "auto",
                 cal = cal,
             ))
-            // accepted starts false at capture (recording fires at burst
-            // end, before the cruiser decides) — flipped by markAccepted on
-            // Accept. iOS parity, so cross-platform "acceptance" matches.
+            // operator_accepted starts false at capture (recording fires at
+            // burst end, before the cruiser decides) — flipped by
+            // markAccepted on Accept. tier_ok is the RECORD-TIME fit verdict.
+            // iOS writes both keys with the same meaning.
             manifest.put("result_live", resultLiveJson(
                 value = liveRes?.diameterCm?.toDouble() ?: 0.0,
                 sigma = liveRes?.sigmaRmm?.toDouble() ?: 0.0,
                 tier = liveRes?.confidence?.raw ?: "red",
                 accepted = false,
+                frameCount = raw.size,
                 perFrame = perFrame,
             ))
             manifest.put("truth", truthJson(null, null))
@@ -213,11 +311,12 @@ object RawCaptureStore {
             manifest.put("replay_selfcheck",
                 selfCheckJson(liveRes?.diameterCm?.toDouble(), rerun, null))
 
-            File(dir, "manifest.json").writeText(manifest.toString())
-            id
-        } catch (_: Throwable) {
+            val foldedTruth = writeManifest(id, dir, manifest)
+            RecordOutcome(id, raw.size, null, queuedTruthSaved = foldedTruth)
+        } catch (t: Throwable) {
             dir.deleteRecursively()
-            null
+            RecordOutcome(
+                null, 0, writeFailureReason(context, t), queuedTruthLost = dropPending(id))
         }
     }
 
@@ -225,6 +324,7 @@ object RawCaptureStore {
 
     suspend fun recordHeight(
         context: Context,
+        id: String,
         anchorWorld: Vec3,
         anchorHitType: String,
         anchorDistanceM: Float,
@@ -241,8 +341,12 @@ object RawCaptureStore {
         ctx: CaptureContext,
         baseAim: HeightAim? = null,
         topAim: HeightAim? = null,
-    ): String? = withContext(Dispatchers.IO) {
-        val id = UUID.randomUUID().toString()
+    ): RecordOutcome = withContext(Dispatchers.IO) {
+        val free = freeSpaceBytes(context)
+        if (free < MIN_FREE_BYTES) {
+            return@withContext RecordOutcome(
+                null, 0, lowStorageReason(free), queuedTruthLost = dropPending(id))
+        }
         val dir = bundleDir(context, id)
         dir.mkdirs()
         try {
@@ -266,7 +370,8 @@ object RawCaptureStore {
                 value = live.heightM.toDouble(),
                 sigma = live.sigmaHm.toDouble(),
                 tier = live.confidence.raw,
-                accepted = false,          // flipped by markAccepted on Accept
+                accepted = false,          // operator_accepted — flipped on Accept
+                frameCount = 0,            // patched below once the aims are attached
                 perFrame = emptyList(),
             ))
             manifest.put("truth", truthJson(null, null))
@@ -285,13 +390,14 @@ object RawCaptureStore {
             baseJson.put("pitch_deg", basePitchDeg.toDouble())
             baseJson.put("camera_pose", floatArr(basePose))
             // Schema 2: base-aim depth + RGB (keys omitted when unavailable).
-            attachAimFrame(dir, baseAim, "depth_base.bin", "rgb_base.jpg", baseJson)
+            var aimFrames = 0
+            if (attachAimFrame(dir, baseAim, "depth_base.bin", "rgb_base.jpg", baseJson)) aimFrames++
             heightBlock.put("base", baseJson)
             val topJson = JSONObject()
             topJson.put("pitch_deg", topPitchDeg.toDouble())
             topJson.put("camera_pose", floatArr(topPose))
             // Schema 2: top-aim depth + RGB (keys omitted when unavailable).
-            attachAimFrame(dir, topAim, "depth_top.bin", "rgb_top.jpg", topJson)
+            if (attachAimFrame(dir, topAim, "depth_top.bin", "rgb_top.jpg", topJson)) aimFrames++
             heightBlock.put("top", topJson)
             heightBlock.put("d_h_m", dHm.toDouble())
             val samplesArr = JSONArray()
@@ -310,11 +416,17 @@ object RawCaptureStore {
             manifest.put("replay_selfcheck", selfCheckJson(
                 live.heightM.toDouble(), replay?.value, replay?.valueReposed))
 
-            File(dir, "manifest.json").writeText(manifest.toString())
-            id
-        } catch (_: Throwable) {
+            // Aim depth frames actually stored (0-2): a chained height that
+            // lost the recorder arm mid-flight is explicit rather than an
+            // invisible schema-1 degradation.
+            manifest.optJSONObject("result_live")?.put("frame_count", aimFrames)
+
+            val foldedTruth = writeManifest(id, dir, manifest)
+            RecordOutcome(id, aimFrames, null, queuedTruthSaved = foldedTruth)
+        } catch (t: Throwable) {
             dir.deleteRecursively()
-            null
+            RecordOutcome(
+                null, 0, writeFailureReason(context, t), queuedTruthLost = dropPending(id))
         }
     }
 
@@ -332,6 +444,9 @@ object RawCaptureStore {
         val tier: String?,
         val truthValue: Double?,
         val selfCheckStatus: String?,
+        /// Raw depth frames actually stored (DBH bundles). Null for height /
+        /// pre-frame_count bundles.
+        val frameCount: Int?,
     )
 
     fun list(context: Context): List<Summary> {
@@ -356,9 +471,33 @@ object RawCaptureStore {
                 tier = resObj?.optString("tier")?.takeIf { it.isNotEmpty() },
                 truthValue = truthObj?.optDouble("value")?.takeIf { !it.isNaN() },
                 selfCheckStatus = selfObj?.optString("status")?.takeIf { it.isNotEmpty() },
+                frameCount = resObj?.optInt("frame_count", -1)?.takeIf { it >= 0 }
+                    ?: m.optJSONObject("dbh")?.optJSONArray("frames")?.length(),
             )
         }.sortedByDescending { it.createdAt }
     }
+
+    /// What is ON DISK versus what could be READ. [list] skips any bundle
+    /// whose manifest.json is missing or won't parse, so a truncated or
+    /// half-written manifest used to make a whole capture vanish: absent from
+    /// the total, from every skip counter, from the Settings count and from
+    /// the sweep footer — whose arithmetic still balanced. Counting the bundle
+    /// DIRECTORIES separately makes that class visible.
+    ///
+    /// A bundle being serialized RIGHT NOW (directory created, manifest not
+    /// written yet) counts as unparseable for those few hundred milliseconds.
+    /// That over-report is deliberate: the same on-disk shape left behind by a
+    /// process killed mid-write is a permanent corpse, and it must not be
+    /// possible to hide one by calling it a transient.
+    data class Inventory(val directories: Int, val parsed: Int) {
+        /// Bundles that exist on disk but cannot be read. Never negative.
+        val unparseable: Int get() = (directories - parsed).coerceAtLeast(0)
+    }
+
+    fun inventory(context: Context): Inventory = Inventory(
+        directories = root(context).listFiles()?.count { it.isDirectory } ?: 0,
+        parsed = list(context).size,
+    )
 
     fun manifestOf(context: Context, id: String): JSONObject? {
         val mf = File(bundleDir(context, id), "manifest.json")
@@ -368,8 +507,11 @@ object RawCaptureStore {
 
     fun dirOf(context: Context, id: String): File = bundleDir(context, id)
 
-    fun count(context: Context): Int =
-        root(context).listFiles()?.count { it.isDirectory && File(it, "manifest.json").exists() } ?: 0
+    /// READABLE bundles only — exactly the set [list] returns. It used to
+    /// count any directory holding a manifest.json file, parseable or not, so
+    /// it disagreed with every other number in the app. Use [inventory] when
+    /// the unreadable ones matter.
+    fun count(context: Context): Int = list(context).size
 
     fun totalSizeBytes(context: Context): Long = root(context).walkTopDown()
         .filter { it.isFile }.map { it.length() }.sum()
@@ -382,45 +524,71 @@ object RawCaptureStore {
         bundleDir(context, id).deleteRecursively()
     }
 
-    /// Flip a bundle's result_live.accepted to true — called from the scan
-    /// screen when the cruiser taps Accept (recording happens earlier, at
-    /// burst finalize / height compute). iOS RawCaptureStore.markAccepted parity.
+    /// Flip a bundle's operator_accepted (and the legacy `accepted` mirror)
+    /// to true — called when the cruiser taps Accept. If the bundle is still
+    /// being serialized the flag is QUEUED and folded in by the recorder, so
+    /// a fast Accept is never lost. iOS markAccepted parity.
+    ///
+    /// The WHOLE read-modify-write runs under pendingLock (see setTruth).
     suspend fun markAccepted(context: Context, id: String): Boolean =
         withContext(Dispatchers.IO) {
-            val m = manifestOf(context, id) ?: return@withContext false
-            val res = m.optJSONObject("result_live") ?: return@withContext false
-            res.put("accepted", true)
-            try {
-                File(bundleDir(context, id), "manifest.json").writeText(m.toString())
-                true
-            } catch (_: Throwable) {
-                false
+            synchronized(pendingLock) {
+                val file = manifestFile(context, id)
+                if (!file.exists()) {
+                    pending.getOrPut(id) { PendingEdit() }.accepted = true
+                    return@synchronized true
+                }
+                val m = manifestOf(context, id) ?: return@synchronized false
+                applyAccepted(m)
+                writeQuietly(file, m)
             }
         }
 
-    /// Persist an operator-entered ground-truth value into a bundle's
-    /// manifest (dev replay screen). Rewrites manifest.json in place.
-    suspend fun setTruth(context: Context, id: String, value: Double?): Boolean =
+    /// Persist an operator-entered ground truth into a bundle's manifest.
+    /// `value == null` CLEARS the stored truth and is only ever reached from
+    /// an explicit Clear action — an empty or unparseable field never gets
+    /// here, so a stored truth cannot be wiped by a stray Save. Queued the
+    /// same way as markAccepted while the bundle is still being written.
+    ///
+    /// QUEUED is deliberately DISTINCT from SAVED: the value is not in any
+    /// manifest yet, so the caller must keep the operator's typed text until
+    /// the recorder reports it folded in (RecordOutcome.queuedTruthSaved).
+    ///
+    /// The read-modify-write happens INSIDE pendingLock, the same lock the
+    /// recorder's manifest drain holds — the two used to interleave, and a
+    /// direct setTruth landing between the drain's read and its write was
+    /// clobbered with no error.
+    suspend fun setTruth(context: Context, id: String, value: Double?): TruthWrite =
         withContext(Dispatchers.IO) {
-            val m = manifestOf(context, id) ?: return@withContext false
-            m.put("truth", truthJson(value, if (value != null) iso8601() else null))
-            try {
-                File(bundleDir(context, id), "manifest.json").writeText(m.toString())
-                true
-            } catch (_: Throwable) {
-                false
+            synchronized(pendingLock) {
+                val file = manifestFile(context, id)
+                if (!file.exists()) {
+                    pending.getOrPut(id) { PendingEdit() }.also {
+                        it.truth = value; it.hasTruth = true
+                    }
+                    return@synchronized TruthWrite.QUEUED
+                }
+                val m = manifestOf(context, id) ?: return@synchronized TruthWrite.FAILED
+                m.put("truth", truthJson(value, if (value != null) iso8601() else null))
+                if (writeQuietly(file, m)) TruthWrite.SAVED else TruthWrite.FAILED
             }
         }
+
+    /// Zip result — a Uri, or the reason the export could not be produced.
+    data class ExportResult(val uri: Uri?, val error: String?)
 
     /// Zip the whole raw-captures directory into the shared export cache and
     /// return a shareable Uri (same FileProvider flow as the research CSV).
-    suspend fun exportZipUri(context: Context): Uri? = withContext(Dispatchers.IO) {
+    /// Streams entry by entry — nothing is held in memory — and reports the
+    /// failure instead of returning a silent null.
+    suspend fun exportZip(context: Context): ExportResult = withContext(Dispatchers.IO) {
         val src = root(context)
         val bundles = src.listFiles()?.filter { it.isDirectory } ?: emptyList()
-        if (bundles.isEmpty()) return@withContext null
+        if (bundles.isEmpty()) return@withContext ExportResult(null, "No captures to export.")
         val dir = File(context.cacheDir, "Exports").apply { mkdirs() }
         val zip = File(dir, "forestix_raw_captures.zip")
         try {
+            if (zip.exists()) zip.delete()
             ZipOutputStream(zip.outputStream().buffered()).use { zos ->
                 src.walkTopDown().filter { it.isFile }.forEach { file ->
                     val rel = file.relativeTo(src).path
@@ -429,10 +597,114 @@ object RawCaptureStore {
                     zos.closeEntry()
                 }
             }
-            FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", zip)
-        } catch (_: Throwable) {
-            null
+            ExportResult(
+                FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", zip),
+                null,
+            )
+        } catch (t: Throwable) {
+            runCatching { zip.delete() }
+            ExportResult(null, "Export failed — ${writeFailureReason(context, t)}.")
         }
+    }
+
+    // MARK: - Manifest writing / pending edits
+
+    private fun manifestFile(context: Context, id: String): File =
+        File(bundleDir(context, id), "manifest.json")
+
+    /// Write a freshly built manifest, folding in anything the operator typed
+    /// while the write was in flight. Drain + apply + write happen in ONE
+    /// critical section: setTruth/markAccepted take the same lock, so an edit
+    /// either queues (and is folded here) or finds the finished file and
+    /// rewrites it — it can never land between a drain's read and its write
+    /// and be clobbered.
+    ///
+    /// Returns the queued TRUTH that was folded in (null = none), so the
+    /// recorder can tell the scan screen its typed value is now durable.
+    /// A failed write puts the queued edit BACK on the queue and rethrows, so
+    /// the caller's failure path reports it as lost instead of eating it.
+    private fun writeManifest(id: String, dir: File, manifest: JSONObject): Double? =
+        synchronized(pendingLock) {
+            val edit = pending.remove(id)
+            if (edit != null) applyPending(manifest, edit)
+            try {
+                writeAtomic(File(dir, "manifest.json"), manifest.toString())
+            } catch (t: Throwable) {
+                if (edit != null) pending[id] = edit
+                throw t
+            }
+            if (edit != null && edit.hasTruth) edit.truth else null
+        }
+
+    /// Temp file + rename. `writeText` truncates in place, so a crash (or a
+    /// disk filling up) mid-rewrite left a HALF-WRITTEN manifest.json — a
+    /// bundle that then disappears from every listing because it no longer
+    /// parses. The rename is atomic within the app's own storage, so a reader
+    /// sees either the whole old manifest or the whole new one.
+    private fun writeAtomic(file: File, text: String) {
+        val tmp = File(file.parentFile, "${file.name}.tmp")
+        java.io.FileOutputStream(tmp).use { out ->
+            out.write(text.toByteArray(Charsets.UTF_8))
+            out.flush()
+            runCatching { out.fd.sync() }
+        }
+        if (tmp.renameTo(file)) return
+        // Fallback for volumes that refuse rename-onto-existing. The ORIGINAL
+        // is moved aside, never deleted outright: deleting it first and then
+        // failing the second rename would turn a perfectly readable bundle
+        // into an unreadable one — the exact damage this function exists to
+        // prevent.
+        val backup = File(file.parentFile, "${file.name}.bak")
+        backup.delete()
+        val movedAside = file.exists() && file.renameTo(backup)
+        if (tmp.renameTo(file)) {
+            backup.delete()
+            return
+        }
+        if (movedAside) backup.renameTo(file)   // put the old manifest back
+        tmp.delete()
+        throw java.io.IOException("couldn't replace ${file.name}")
+    }
+
+    private fun writeQuietly(file: File, manifest: JSONObject): Boolean = try {
+        writeAtomic(file, manifest.toString())
+        true
+    } catch (_: Throwable) {
+        false
+    }
+
+    private fun applyPending(manifest: JSONObject, edit: PendingEdit) {
+        if (edit.hasTruth) {
+            manifest.put(
+                "truth",
+                truthJson(edit.truth, if (edit.truth != null) iso8601() else null),
+            )
+        }
+        if (edit.accepted) applyAccepted(manifest)
+    }
+
+    private fun applyAccepted(manifest: JSONObject) {
+        val res = manifest.optJSONObject("result_live") ?: return
+        res.put("operator_accepted", true)
+        res.put("accepted", true)          // legacy mirror (older readers)
+    }
+
+    /// Discard a bundle's queued edits after its write failed, RETURNING the
+    /// ground truth that died with it (null when none was queued, or when the
+    /// queued edit was an explicit clear). The caller must surface it — a
+    /// queued truth thrown away in silence is exactly the invisible loss this
+    /// whole path exists to prevent.
+    private fun dropPending(id: String): Double? {
+        val edit = synchronized(pendingLock) { pending.remove(id) } ?: return null
+        return if (edit.hasTruth) edit.truth else null
+    }
+
+    /// Human-readable reason for a failed write — a full disk is the one the
+    /// field cares about, so it is named explicitly.
+    private fun writeFailureReason(context: Context, t: Throwable): String {
+        val free = freeSpaceBytes(context)
+        if (free < MIN_FREE_BYTES) return lowStorageReason(free)
+        return t::class.java.simpleName + (t.message?.let { ": $it" } ?: "")
     }
 
     // MARK: - JSON builders (schema-locked)
@@ -460,13 +732,28 @@ object RawCaptureStore {
 
     // result_live — value/sigma/tier are non-optional (iOS parity: 0/0/"red"
     // fallbacks), so a cross-platform decoder never meets a null here.
+    //
+    // TWO explicit booleans (identical on iOS), because the old single
+    // `accepted` key meant "fit not red" on one platform and "the operator
+    // pressed Accept" on the other — the same key, two different questions:
+    //   tier_ok          — RECORD-TIME verdict: the live fit was not red.
+    //   operator_accepted — the cruiser actually accepted this reading
+    //                       (false at record time, set by markAccepted).
+    // `accepted` is kept as a mirror of operator_accepted so bundles written
+    // before this change still decode.
     private fun resultLiveJson(
-        value: Double, sigma: Double, tier: String, accepted: Boolean, perFrame: List<Double>,
+        value: Double, sigma: Double, tier: String, accepted: Boolean,
+        frameCount: Int, perFrame: List<Double>,
     ): JSONObject = JSONObject().apply {
         put("value", value)
         put("sigma", sigma)
         put("tier", tier)
+        put("tier_ok", tier != "red")
+        put("operator_accepted", accepted)
         put("accepted", accepted)
+        // Frames actually stored (DBH: raw depth grids; height: aim depth
+        // frames, 0-2). Same key + placement as iOS: `result_live.frame_count`.
+        put("frame_count", frameCount)
         put("per_frame", JSONArray().apply { perFrame.forEach { put(it) } })
     }
 
@@ -538,12 +825,15 @@ object RawCaptureStore {
     /// "u16mm"). No-op (no keys added) when the frame or its armed raw depth is
     /// absent, so the aim block stays schema-1-shaped and tangent replay is
     /// unaffected.
+    /// Returns true when a depth grid was actually attached (false = the aim
+    /// block stays schema-1-shaped), so the caller can report how many aim
+    /// frames a bundle really carries.
     private fun attachAimFrame(
         dir: File, aim: HeightAim?, depthName: String, rgbName: String, json: JSONObject,
-    ) {
-        val frame = aim?.frame ?: return
-        val raw = frame.rawDepthMm ?: return
-        if (raw.size != frame.width * frame.height) return
+    ): Boolean {
+        val frame = aim?.frame ?: return false
+        val raw = frame.rawDepthMm ?: return false
+        if (raw.size != frame.width * frame.height) return false
         writeU16Le(File(dir, depthName), raw)
         var haveRgb = false
         aim.rgb?.let { bytes ->
@@ -560,6 +850,7 @@ object RawCaptureStore {
         json.put("fy", frame.fy)
         json.put("cx", frame.cx)
         json.put("cy", frame.cy)
+        return true
     }
 
     private val IDENTITY_AFFINE = floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f)

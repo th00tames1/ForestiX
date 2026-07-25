@@ -75,7 +75,25 @@ public struct HeightScanScreen: View {
     @State private var hidingChromeForCapture = false
     /// Developer-mode research capture: true height (m) from a clinometer /
     /// Vertex, typed before Accept; logged to the research CSV.
+    /// NEVER cleared until durably applied — see `applyTypedTruth`.
     @State private var researchTrueM: String = ""
+    /// Non-nil when the last Accept could NOT attach the typed truth; the
+    /// text stays in the field so the value isn't lost.
+    @State private var truthSaveFailure: String?
+    /// The bundle a kept-on-screen truth was typed FOR — stops it silently
+    /// landing on a later capture. Cleared when the cruiser edits the field.
+    @State private var truthOwnerBundleID: String?
+    /// Owner sentinel for a truth kept on screen for a measurement that
+    /// produced NO bundle (manual entry, or after a retake). Never a real
+    /// bundle id, so the cross-tree guard in `applyTypedTruth` still fires.
+    private static let noBundleOwner = "no-bundle"
+    /// The bundle a typed truth is QUEUED against — parked in the bundle's
+    /// sidecar while its writer is still running. Queued is NOT durable, so
+    /// the field keeps the text until that capture reports SAVED.
+    @State private var truthQueuedForBundleID: String?
+    /// Free-space check refreshed on appear / at each capture, so the REC
+    /// pill can call out a phone that is filling up.
+    @State private var storageLow = false
     /// Live camera→crosshair raycast distance sampled while the anchor
     /// stage is active — drives the ≤ 4 m anchor range gate's status
     /// line. nil while the raycast misses (sky, no mesh/plane yet,
@@ -90,16 +108,27 @@ public struct HeightScanScreen: View {
     /// quick ActiveSamplingPlot ring or stays hidden. See DBHScanScreen.
     private let cruisePlotInfo: PlotMiniMapInfo?
 
+    /// RAW-CAPTURE JOIN KEYS. Height bundles used to be written with
+    /// `treeNumber: nil` and `projectID: nil` hardcoded, so a stored height
+    /// capture could not be paired with its tree — or with that tree's DBH
+    /// bundle and hand-measured truth. Both are now threaded in by the host.
+    private let projectID: String?
+    private let treeNumber: Int?
+
     public init(viewModel: @autoclosure @escaping () -> HeightScanViewModel,
                 onResult: @escaping (HeightResult) -> Void = { _ in },
                 onAccept: @escaping (HeightResult, ScanMetadata) -> Void = { _, _ in },
                 onCrown: @escaping (Double, Double) -> Void = { _, _ in },
-                cruisePlotInfo: PlotMiniMapInfo? = nil) {
+                cruisePlotInfo: PlotMiniMapInfo? = nil,
+                projectID: String? = nil,
+                treeNumber: Int? = nil) {
         _viewModel = StateObject(wrappedValue: viewModel())
         self.onResult = onResult
         self.onAccept = onAccept
         self.onCrown = onCrown
         self.cruisePlotInfo = cruisePlotInfo
+        self.projectID = projectID
+        self.treeNumber = treeNumber
     }
 
     /// What the top-right mini-map shows: the cruise plot when the
@@ -154,8 +183,19 @@ public struct HeightScanScreen: View {
                     // the cruiser a single-glance read on canopy quality
                     // before they anchor. Leading 72 / top 22 clears the
                     // floating back button (same offsets as Android).
-                    HStack {
-                        GPSAccuracyBadge()
+                    HStack(alignment: .top) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            GPSAccuracyBadge()
+                            // Recording state is never implicit: armed ⇒ a red
+                            // REC pill stays up, and the last capture's
+                            // saved / NOT-saved outcome sits under it.
+                            if viewModel.rawCaptureEnabled {
+                                RawCaptureRecPill(storageLow: storageLow)
+                            }
+                            if let outcome = viewModel.lastCaptureOutcome {
+                                RawCaptureOutcomePill(outcome: outcome)
+                            }
+                        }
                         Spacer()
                     }
                     .padding(.leading, 72)
@@ -275,6 +315,22 @@ public struct HeightScanScreen: View {
             viewModel.onAppear()
         }
         .onDisappear { viewModel.onDisappear() }
+        // Editing the truth field retires any "couldn't save" state.
+        .onChange(of: researchTrueM) { _, _ in
+            truthOwnerBundleID = nil
+            truthSaveFailure = nil
+            // The text is no longer the value that was queued.
+            truthQueuedForBundleID = nil
+        }
+        // A QUEUED truth only becomes durable when the capture that owns it
+        // reports SAVED — that is the write which folded the sidecar into the
+        // manifest. NOT SAVED means the bundle and the queued value are gone.
+        .onChange(of: viewModel.lastCaptureOutcome) { _, outcome in
+            resolveQueuedTruth(outcome)
+        }
+        .onChange(of: treeNumber) { _, _ in configureRawCapture() }
+        .onChange(of: settings.rawCaptureEnabled) { _, _ in configureRawCapture() }
+        .onChange(of: settings.developerMode) { _, _ in configureRawCapture() }
         .onChange(of: viewModel.result?.heightM) { _, newValue in
             if newValue != nil, let r = viewModel.result {
                 onResult(r)
@@ -302,13 +358,13 @@ public struct HeightScanScreen: View {
                         latitude: fix?.latitude,
                         longitude: fix?.longitude)
                     onAccept(r, meta)
-                    // Raw-capture (developer mode): store the clinometer/Vertex
-                    // truth on the just-recorded bundle if typed before Accept.
-                    if let id = viewModel.lastRecordedBundleID,
-                       let t = Double(researchTrueM), t > 0 {
-                        RawCaptureStore.updateTruth(id: id, value: t)
-                    }
+                    // Raw-capture (developer mode): attach the clinometer /
+                    // Vertex truth to the just-recorded bundle. The id is
+                    // minted synchronously at compute, so this works even when
+                    // Accept beats the detached writer — and the field is not
+                    // cleared until the value is durable.
                     recordResearchRow(r)
+                    applyTypedTruth()
                 }
             }
         }
@@ -418,6 +474,10 @@ public struct HeightScanScreen: View {
     private var devHUDLines: [(String, String)] {
         var out: [(String, String)] = [
             ("source", settings.measurementSource.displayName),
+            // Recording state + the join key written into the bundle.
+            ("raw", viewModel.rawCaptureEnabled
+                ? "REC · tree \(treeNumber.map(String.init) ?? "—")"
+                : "OFF — not recording"),
             ("d_h live", String(format: "%.1f m", Double(viewModel.dhMeters))),
         ]
         if let r = viewModel.result {
@@ -610,12 +670,118 @@ public struct HeightScanScreen: View {
         if !settings.researchTreeId.isEmpty {
             f["tree_id"] = settings.researchTreeId   // repeat auto-filled by record()
         }
-        if let t = Double(researchTrueM), t > 0 {
+        // ',' is a legitimate decimal separator on the cruiser's keypad.
+        //
+        // OWNER GATE: the field is deliberately kept across trees when a truth
+        // could not be attached (queued, no bundle, or a failed save), so the
+        // text on screen may belong to an EARLIER measurement. Both owner marks
+        // are nil only while the value was typed for THIS compute — anything
+        // else would stamp the previous tree's clinometer reading onto this row.
+        let truthIsForThisMeasurement =
+            truthOwnerBundleID == nil && truthQueuedForBundleID == nil
+        if truthIsForThisMeasurement,
+           let t = TruthInput.parsePositive(researchTrueM) {
             f["true_value"] = String(format: "%.2f", t)
             f["error"] = String(format: "%.2f", Double(r.heightM) - t)
         }
         ResearchLog.shared.record(f)
-        researchTrueM = ""
+        // NOTE: the field is deliberately NOT cleared here — `applyTypedTruth`
+        // clears it only once the value is durably on the bundle.
+    }
+
+    /// Attach the typed ground truth to the bundle this Accept confirms.
+    /// Cleared ONLY when the value is DURABLY in a manifest. A merely QUEUED
+    /// value (parked in the bundle's sidecar for the in-flight writer) keeps
+    /// the text and shows a pending line, because that writer can still fail
+    /// and tear the sidecar down with the bundle. Mirrors DBHScanScreen exactly.
+    private func applyTypedTruth() {
+        guard settings.developerMode else { return }
+        truthSaveFailure = nil
+        let raw = researchTrueM
+        guard !TruthInput.normalized(raw).isEmpty else { return }
+        guard let t = TruthInput.parsePositive(raw) else {
+            truthSaveFailure = "Not a number — truth not saved"
+            return
+        }
+        // Recording is OFF for this session: the value went into the research
+        // CSV row written just above, so the field can clear. The dev block
+        // already carries the "Raw capture OFF" notice.
+        guard viewModel.rawCaptureEnabled else {
+            researchTrueM = ""
+            truthOwnerBundleID = nil
+            truthQueuedForBundleID = nil
+            return
+        }
+        // Recording is ON but this measurement produced no bundle — manual
+        // entry, or a retake that cleared the id. Clearing silently here threw
+        // a clinometer reading away with no bundle to pair it to; warn like the
+        // other paths and keep it, owned by nothing so it can't drift onto the
+        // next tree's bundle.
+        guard let id = viewModel.lastRecordedBundleID else {
+            truthSaveFailure = "No raw capture for this measurement — truth kept on screen"
+            truthOwnerBundleID = Self.noBundleOwner
+            truthQueuedForBundleID = nil
+            return
+        }
+        // Left over from an earlier capture that couldn't take it — attaching
+        // it here would put one tree's measurement on another tree's bundle.
+        if let owner = truthOwnerBundleID, owner != id {
+            truthSaveFailure = "Unsaved truth from an earlier capture — re-type it for this tree, or clear the field"
+            return
+        }
+        if case .failed(let reason) = viewModel.lastCaptureOutcome {
+            truthSaveFailure = "Capture NOT saved (\(reason)) — truth kept on screen"
+            truthOwnerBundleID = id
+            truthQueuedForBundleID = nil
+            return
+        }
+        switch RawCaptureStore.applyTruth(id: id, value: t) {
+        case .applied:
+            // In the manifest — the only state that may clear the field.
+            researchTrueM = ""
+            truthOwnerBundleID = nil
+            truthQueuedForBundleID = nil
+        case .pending:
+            // QUEUED against a writer that is still running. Clearing on a
+            // queued result is how a clinometer reading disappeared with a
+            // bundle whose write later failed — keep it and say it's pending.
+            truthOwnerBundleID = id
+            truthQueuedForBundleID = id
+        case .failed(let reason):
+            truthSaveFailure = "Truth NOT saved — \(reason)"
+            truthOwnerBundleID = id
+            truthQueuedForBundleID = nil
+        }
+    }
+
+    /// Settle a queued truth against the outcome of the capture that owns it.
+    /// SAVED means the writer folded the sidecar into the manifest, so the
+    /// value is finally durable and the field can clear. NOT SAVED means the
+    /// bundle — and the queued value with it — is gone: the text stays on
+    /// screen with the reason so the cruiser can re-type or re-measure.
+    private func resolveQueuedTruth(_ outcome: RawCaptureOutcome?) {
+        guard let queued = truthQueuedForBundleID, let outcome else { return }
+        switch outcome {
+        case .saved(let savedID, _) where savedID == queued:
+            truthQueuedForBundleID = nil
+            truthOwnerBundleID = nil
+            truthSaveFailure = nil
+            researchTrueM = ""
+        case .failed(let reason):
+            truthQueuedForBundleID = nil
+            truthSaveFailure = "Capture NOT saved (\(reason)) — truth kept on screen"
+        default:
+            break
+        }
+    }
+
+    /// Live warning under the truth field: unparseable text, or a value
+    /// outside the plausible height window.
+    private var truthFieldWarning: String? {
+        if let failure = truthSaveFailure { return failure }
+        if TruthInput.isUnparseable(researchTrueM) { return "Not a number" }
+        guard let v = TruthInput.parsePositive(researchTrueM) else { return nil }
+        return TruthInput.heightWarning(m: v)
     }
 
     private func resultPanel(_ r: HeightResult) -> some View {
@@ -666,24 +832,37 @@ public struct HeightScanScreen: View {
             }
             .padding(.top, 2)
             if settings.developerMode {
-                HStack(spacing: 6) {
-                    Text("Target")
-                        .font(ForestixType.caption)
-                        .foregroundStyle(.white.opacity(0.8))
-                    TextField("T1", text: Binding(
-                        get: { settings.researchTreeId },
-                        set: { settings.researchTreeId = $0 }))
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 70)
-                        .accessibilityIdentifier("heightScan.researchTarget")
-                    Text("True H (m)")
-                        .font(ForestixType.caption)
-                        .foregroundStyle(.white.opacity(0.8))
-                    TextField("clinometer", text: $researchTrueM)
-                        .keyboardType(.decimalPad)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 90)
-                        .accessibilityIdentifier("heightScan.researchTrue")
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Text("Target")
+                            .font(ForestixType.caption)
+                            .foregroundStyle(.white.opacity(0.8))
+                        TextField("T1", text: Binding(
+                            get: { settings.researchTreeId },
+                            set: { settings.researchTreeId = $0 }))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 70)
+                            .accessibilityIdentifier("heightScan.researchTarget")
+                        Text("True H (m)")
+                            .font(ForestixType.caption)
+                            .foregroundStyle(.white.opacity(0.8))
+                        // ',' is accepted and normalised to '.' on submit.
+                        TextField("clinometer", text: $researchTrueM)
+                            .keyboardType(.decimalPad)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 90)
+                            .accessibilityIdentifier("heightScan.researchTrue")
+                    }
+                    if let warning = truthFieldWarning {
+                        TruthFieldWarning(text: warning)
+                    } else if truthQueuedForBundleID != nil {
+                        TruthFieldPending()
+                    }
+                    // Developer mode on, recording off ⇒ this session is
+                    // producing NO corpus. Say so where the truth is typed.
+                    if !settings.rawCaptureEnabled {
+                        RawCaptureOffNotice()
+                    }
                 }
             }
         }
@@ -723,7 +902,13 @@ public struct HeightScanScreen: View {
                 .keyboardType(.decimalPad)
                 #endif
                 .accessibilityIdentifier("heightScan.manualInput")
-            Button("Save") { viewModel.submitManualEntry() }
+            Button("Save") {
+                // The field prompts in the ACTIVE unit system; the view model
+                // converts feet → metres on submit (it used to store the typed
+                // feet straight into heightM).
+                viewModel.manualEntryUnits = settings.unitSystem
+                viewModel.submitManualEntry()
+            }
                 .buttonStyle(.forestixProminent)
         }
     }
@@ -934,23 +1119,30 @@ public struct HeightScanScreen: View {
     /// trunk.") explains how to reframe.
     private func anchorTap() {
         raycaster.preferLiDARMesh = settings.measurementSource == .lidar
-        viewModel.rawCaptureGPS = Self.currentGPS()
+        // Rebuild the recording context (tree number, plot, project, GPS)
+        // from LIVE values as the measurement opens — see DBHScanScreen.
+        configureRawCapture()
         let hitType = settings.measurementSource == .lidar ? "lidarMesh" : "estimatedPlane"
         viewModel.anchorHereNow(screenCenterHit: raycaster.screenCenterHit(),
                                 hitType: hitType)
     }
 
     /// Push the raw-capture recording config onto the view model (developer
-    /// mode only; the VM no-ops recording when disabled).
+    /// mode only; the VM no-ops recording when disabled). Called on appear,
+    /// on any join-key change, and again at the anchor tap that opens a
+    /// measurement, so the bundle carries the tree it actually documents.
     private func configureRawCapture() {
         viewModel.rawCaptureEnabled = settings.developerMode && settings.rawCaptureEnabled
         viewModel.rawCaptureContext = RawCaptureContext(
             mode: cruisePlotInfo != nil ? "cruise" : "quick",
-            projectID: nil,
+            projectID: projectID,
             plotID: cruisePlotInfo?.plotID?.uuidString,
-            treeNumber: nil,
+            treeNumber: treeNumber,
             units: settings.unitSystem.rawValue)
         viewModel.rawCaptureGPS = Self.currentGPS()
+        // Manual entry is typed in whatever the active unit system is.
+        viewModel.manualEntryUnits = settings.unitSystem
+        storageLow = viewModel.rawCaptureEnabled && RawCaptureStore.isStorageLow()
     }
 
     static func currentGPS() -> RawCaptureGPS? {

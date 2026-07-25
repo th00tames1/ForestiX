@@ -148,7 +148,12 @@ public final class HeightScanViewModel: ObservableObject {
     public var rawCaptureEnabled: Bool = false
     public var rawCaptureContext: RawCaptureContext = .quick
     public var rawCaptureGPS: RawCaptureGPS?
+    /// Minted synchronously when the compute finishes, BEFORE the detached
+    /// writer runs — so a truth typed and Accepted immediately always has a
+    /// bundle to attach to (see DBHScanViewModel for the same fix).
     @Published public private(set) var lastRecordedBundleID: String?
+    /// Saved / NOT-saved outcome of the most recent capture attempt.
+    @Published public private(set) var lastCaptureOutcome: RawCaptureOutcome?
 
     private var recordAnchorPose = matrix_identity_float4x4
     private var recordAnchorHitType = "unknown"
@@ -529,6 +534,10 @@ public final class HeightScanViewModel: ObservableObject {
         lastPoseSampleTime = 0
         recordBaseFrame = nil; recordBaseJPEG = nil
         recordTopFrame = nil; recordTopJPEG = nil
+        lastCaptureOutcome = nil
+        // The previous bundle is no longer "the capture on screen" — a truth
+        // typed after a retake must not land on the abandoned measurement.
+        lastRecordedBundleID = nil
         state = .idle
         rebuildSceneMarkers()
     }
@@ -536,14 +545,24 @@ public final class HeightScanViewModel: ObservableObject {
     public func accept() {
         guard let r = result, r.confidence != .red else { return }
         state = .accepted
+        markLastBundleAccepted()
     }
 
     public func enterManualEntry() {
         state = .manualEntry
     }
 
+    /// Unit system the manual-entry field is typed in — the field prompts for
+    /// FEET under imperial, and the number used to be stored straight into
+    /// `heightM` (a 3.28x corruption). The screen keeps this in sync.
+    public var manualEntryUnits: UnitSystem = .metric
+
     public func submitManualEntry() {
-        guard let m = Float(manualHeightM), m > 1.3 else { return }
+        guard let typed = TruthInput.parsePositive(manualHeightM) else { return }
+        let metres = manualEntryUnits == .imperial
+            ? Units.feetToMeters(typed) : typed
+        guard metres > 1.3 else { return }
+        let m = Float(metres)
         result = HeightResult(
             heightM: m,
             dHm: 0,
@@ -592,6 +611,10 @@ public final class HeightScanViewModel: ObservableObject {
                                          standing: SIMD3<Float>,
                                          alphaTop: Float,
                                          alphaBase: Float) {
+        // A NEW compute supersedes the previous bundle on every path below,
+        // the failing ones included — never leave the id pointing at the
+        // PREVIOUS tree's bundle (DBH sibling carries the same guard).
+        lastRecordedBundleID = nil
         guard rawCaptureEnabled else { return }
         let anchorPose = recordAnchorPose
         let hitType = recordAnchorHitType
@@ -607,8 +630,12 @@ public final class HeightScanViewModel: ObservableObject {
         let baseJPEG = recordBaseJPEG
         let topFrame = recordTopFrame
         let topJPEG = recordTopJPEG
+        let id = UUID().uuidString
+        lastRecordedBundleID = id
+        lastCaptureOutcome = nil
         Task.detached(priority: .utility) { [weak self] in
-            let id = RawCaptureRecorder.recordHeight(
+            let outcome = RawCaptureRecorder.recordHeight(
+                id: id,
                 anchorWorld: anchor, anchorHitType: hitType,
                 anchorDistanceM: distance, anchorPose: anchorPose,
                 basePitchRad: alphaBase, baseStanding: standing,
@@ -618,7 +645,16 @@ public final class HeightScanViewModel: ObservableObject {
                 calibration: cal, context: ctx, gps: gps,
                 baseFrame: baseFrame, baseJPEG: baseJPEG,
                 topFrame: topFrame, topJPEG: topJPEG)
-            await MainActor.run { self?.lastRecordedBundleID = id }
+            await MainActor.run { self?.lastCaptureOutcome = outcome }
+        }
+    }
+
+    /// Stamp `operator_accepted` on the bundle the cruiser just confirmed.
+    /// Safe before the writer has finished — the store parks it.
+    private func markLastBundleAccepted() {
+        guard rawCaptureEnabled, let id = lastRecordedBundleID else { return }
+        Task.detached(priority: .utility) {
+            _ = RawCaptureStore.markAccepted(id: id)
         }
     }
 

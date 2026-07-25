@@ -1335,6 +1335,97 @@ public enum DBHEstimator {
             rejectionReason: nil)
     }
 
+    /// Burst-mode DEPTH-BAND chord measurement — the fourth candidate
+    /// geometry in the accuracy-validation sweep, and the Android sibling's
+    /// `ChordAlgorithm.DEPTH_BAND` path ported to iOS so the two corpora can
+    /// be scored with the same set of algorithms. Instead of the silhouette
+    /// pixel-width, each frame extracts the depth-banded stem strip (±0.15 m
+    /// around the tap depth), back-projects it to world XZ, and reads the
+    /// diameter as the XZ bounding-box diagonal of that point cloud. Median
+    /// across frames, then the project's cylinder calibration — identical
+    /// tail to `chordEstimate`.
+    public static func depthBandChordEstimate(
+        frames: [ARDepthFrame],
+        tapPixel: SIMD2<Double>,
+        guideAxis: GuideAxis,
+        calibration cal: ProjectCalibration
+    ) -> DBHResult? {
+        guard frames.count >= 5 else { return nil }
+        let tapAlong = tapAlongAxis(tapPixel, axis: guideAxis)
+
+        var diameters: [Double] = []
+        var centersX: [Double] = []
+        var centersZ: [Double] = []
+        for frame in frames {
+            guard let dTap = medianDepth(around: tapPixel, frame: frame, radius: 2),
+                  (0.3...5.0).contains(dTap) else { continue }
+            let strip = extractGuideStemStrip(
+                frame: frame, axis: guideAxis, tapAlongAxis: tapAlong,
+                dTap: dTap, deltaDepth: 0.15,
+                discontinuityThresholdM: cal.depthDiscontinuityM)
+            guard strip.count >= 6 else { continue }
+            var pts: [SIMD2<Double>] = []
+            pts.reserveCapacity(strip.count)
+            for idx in strip {
+                let (px, py) = pixelCoords(axis: guideAxis, idx: idx)
+                pts.append(BackProjection.worldXZ(
+                    x: Double(px), y: Double(py),
+                    depth: Double(frame.depth(atX: px, y: py)),
+                    intrinsics: frame.intrinsics,
+                    cameraPoseWorld: frame.cameraPoseWorld))
+            }
+            let chordM = chordDiameterFromCloud(pts)
+            guard chordM > 0 else { continue }
+            let diameterCm = chordM * 100.0
+            guard (2.5...100.0).contains(diameterCm) else { continue }
+            diameters.append(diameterCm)
+            var minX = Double.infinity, maxX = -Double.infinity
+            var minZ = Double.infinity, maxZ = -Double.infinity
+            for p in pts {
+                minX = Swift.min(minX, p.x); maxX = Swift.max(maxX, p.x)
+                minZ = Swift.min(minZ, p.y); maxZ = Swift.max(maxZ, p.y)
+            }
+            centersX.append((minX + maxX) / 2)
+            centersZ.append((minZ + maxZ) / 2)
+        }
+
+        guard diameters.count >= 3 else {
+            return redResult(
+                reason: "Not enough usable frames; hold steadier or move closer",
+                method: .lidarChordSilhouette,
+                nInliers: diameters.count)
+        }
+
+        let sortedDia = diameters.sorted()
+        let medianRawCm = sortedDia[sortedDia.count / 2]
+        let mean = sortedDia.reduce(0, +) / Double(sortedDia.count)
+        let lo = sortedDia.first ?? mean
+        let hi = sortedDia.last ?? mean
+        let cov = mean > 0 ? (hi - lo) / mean : 1
+        let tier: ConfidenceTier = cov <= 0.15 ? .green : .yellow
+
+        let dbhCm = Double(cal.dbhCorrectionAlpha)
+            + Double(cal.dbhCorrectionBeta) * medianRawCm
+
+        let sortedCx = centersX.sorted()
+        let sortedCz = centersZ.sorted()
+        let medCenter = SIMD2<Float>(
+            Float(sortedCx[sortedCx.count / 2]),
+            Float(sortedCz[sortedCz.count / 2]))
+
+        return DBHResult(
+            diameterCm: Float(dbhCm),
+            centerXZ: medCenter,
+            arcCoverageDeg: 0,
+            rmseMm: 0,
+            sigmaRmm: 0,
+            nInliers: diameters.count,
+            confidence: tier,
+            method: .lidarChordSilhouette,
+            rawPointsPath: nil,
+            rejectionReason: nil)
+    }
+
     // MARK: - Manual edge-bracket (ADJUST) fits
 
     /// Single-frame DBH estimate constrained by two user-placed edge

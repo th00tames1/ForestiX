@@ -53,6 +53,7 @@ import com.hcjeong.forestix.ar.ArSessionHub
 import com.hcjeong.forestix.ar.Vec3
 import com.hcjeong.forestix.ar.distance
 import com.hcjeong.forestix.common.MeasurementFormatter
+import com.hcjeong.forestix.common.TruthInput
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
 import com.hcjeong.forestix.data.ResearchLog
@@ -157,7 +158,7 @@ fun DistanceMeasureScreen(nav: NavController) {
             controller.cameraForwardElevationRad()?.let {
                 fields["pitch_deg"] = String.format(Locale.US, "%.1f", it * 180f / Math.PI.toFloat())
             }
-            researchTrueM.toDoubleOrNull()?.takeIf { it > 0 }?.let { t ->
+            TruthInput.parse(researchTrueM)?.takeIf { it > 0 }?.let { t ->
                 fields["true_value"] = String.format(Locale.US, "%.3f", t)
                 fields["error"] = String.format(Locale.US, "%.3f", d - t)
             }
@@ -231,7 +232,7 @@ fun DistanceMeasureScreen(nav: NavController) {
                         targetPlaceholder = "D1",
                         trueLabel = "True (m)",
                         trueValue = researchTrueM,
-                        onTrueChange = { researchTrueM = it.filter { c -> c.isDigit() || c == '.' } },
+                        onTrueChange = { researchTrueM = TruthInput.sanitize(it) },
                         truePlaceholder = "tape",
                     )
                 }
@@ -282,9 +283,7 @@ fun DistanceMeasureScreen(nav: NavController) {
                                     targetPlaceholder = "D1",
                                     trueLabel = "True (m)",
                                     trueValue = researchTrueM,
-                                    onTrueChange = {
-                                        researchTrueM = it.filter { c -> c.isDigit() || c == '.' }
-                                    },
+                                    onTrueChange = { researchTrueM = TruthInput.sanitize(it) },
                                     truePlaceholder = "tape",
                                 )
                             }

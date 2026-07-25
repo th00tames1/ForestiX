@@ -142,6 +142,55 @@ object ArSessionHub {
         linkedCruisePlotId = cruisePlotId
     }
 
+    // MARK: - Raw-depth recorder arm (REF-COUNTED)
+
+    /// `controller` is process-wide, and navigation-compose composes the
+    /// INCOMING destination BEFORE disposing the outgoing one. A plain
+    /// `onDispose { controller.captureRawDepth = false }` therefore let the
+    /// DBH screen switch the recorder OFF for the whole Height session in the
+    /// "Full measurement" DBH→Height chain — every chained height bundle
+    /// silently lost its base/top aim frames while still self-checking
+    /// "pass". Same hazard the attach-token guard already fixes for
+    /// updateScreenConfig/detach; here a ref count is the natural shape: a
+    /// disposing screen releases only its OWN token and can never clear state
+    /// it no longer owns.
+    private val rawDepthArms = HashSet<Int>()
+    private var rawDepthArmSeq = 0
+
+    /// True while any attached screen holds the arm — the scan screens' REC
+    /// indicator reads THIS, so it shows the recorder's real state rather
+    /// than one screen's wish. OBSERVABLE (snapshot state): the pill used to
+    /// be fed from the Settings flag and stayed red through an arm clobber
+    /// while nothing was being recorded.
+    var rawDepthArmed by mutableStateOf(false)
+        private set
+
+    /// Arm the native u16 depth copy on every acquired frame. Returns the
+    /// token that [releaseRawDepth] must present.
+    @Synchronized
+    fun armRawDepth(): Int {
+        val token = ++rawDepthArmSeq
+        rawDepthArms.add(token)
+        syncRawDepthArm()
+        return token
+    }
+
+    /// Release one arm. The recorder only switches off once the LAST holder
+    /// has released.
+    @Synchronized
+    fun releaseRawDepth(token: Int) {
+        if (rawDepthArms.remove(token)) syncRawDepthArm()
+    }
+
+    /// The ONE writer of the recorder flag + its observable mirror: both are
+    /// always re-derived from the live token set, never set independently.
+    @Synchronized
+    private fun syncRawDepthArm() {
+        val armed = rawDepthArms.isNotEmpty()
+        controller.captureRawDepth = armed
+        rawDepthArmed = armed
+    }
+
     // MARK: - Internals
 
     private var sceneView: SharedArSceneView? = null
@@ -315,6 +364,15 @@ object ArSessionHub {
     }
 
     private fun dropViewState() {
+        // The raw-depth ARM TOKENS are deliberately NOT cleared here: they
+        // belong to the SCREENS that took them, not to the view. Dropping the
+        // set on an activity recreation (rotation, returning from a permission
+        // dialog) orphaned the incoming composition's freshly-taken token —
+        // the recorder went off and never came back, so every later capture on
+        // that screen failed until the operator navigated away and back.
+        // Only the view/session state dies here; the arm is re-derived from
+        // whatever tokens are still registered.
+        syncRawDepthArm()
         hostActivity?.lifecycle?.removeObserver(activityObserver)
         sceneView = null
         hostActivity = null

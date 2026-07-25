@@ -14,9 +14,17 @@ import Sensors
 public struct RawCapturesScreen: View {
 
     @State private var summaries: [RawCaptureSummary] = []
+    /// On-disk accounting. `summaries` only holds bundles whose manifest
+    /// decoded; this is what the folder ACTUALLY contains, so a capture that
+    /// exists but can't be read is visible instead of vanishing from every
+    /// count on this screen.
+    @State private var inventory = RawCaptureStore.Inventory(directories: 0, parsed: 0)
     @State private var rerunSummary: String?
     @State private var isRerunning = false
     @State private var confirmClear = false
+    /// Export runs off the main actor and can fail; both states are visible.
+    @State private var isExporting = false
+    @State private var exportError: String?
     #if os(iOS)
     @State private var shareURL: URL?
     #endif
@@ -27,9 +35,19 @@ public struct RawCapturesScreen: View {
         List {
             if summaries.isEmpty {
                 Section {
-                    Text("No raw captures yet. Turn on “Record raw captures”, then measure a tree in Developer mode.")
-                        .font(ForestixType.caption)
-                        .foregroundStyle(ForestixPalette.textSecondary)
+                    // "No captures yet" is only true when the FOLDER is empty
+                    // too. With unreadable bundles on disk it was a flat lie —
+                    // the exact failure this screen exists to make impossible.
+                    if inventory.unparseable > 0 {
+                        Text(unreadableNotice)
+                            .font(ForestixType.caption)
+                            .foregroundStyle(ForestixPalette.confidenceWarn)
+                            .accessibilityIdentifier("rawCaptures.unreadable")
+                    } else {
+                        Text("No captures yet. Turn on Settings › Developer › Record raw captures, then measure a tree.")
+                            .font(ForestixType.caption)
+                            .foregroundStyle(ForestixPalette.textSecondary)
+                    }
                 }
             } else {
                 Section {
@@ -37,7 +55,8 @@ public struct RawCapturesScreen: View {
                         rerunAll()
                     } label: {
                         HStack {
-                            Label("Re-run all", systemImage: "arrow.triangle.2.circlepath")
+                            Label("Re-run all (current estimators)",
+                                  systemImage: "arrow.triangle.2.circlepath")
                             Spacer()
                             if isRerunning { ProgressView() }
                         }
@@ -51,7 +70,26 @@ public struct RawCapturesScreen: View {
                             .accessibilityIdentifier("rawCaptures.rerunSummary")
                     }
                 } header: {
-                    Text("Re-run current estimators")
+                    Text("Stored captures")
+                }
+
+                Section {
+                    NavigationLink {
+                        DBHAlgorithmSweepView()
+                    } label: {
+                        Label("Compare algorithms (DBH)", systemImage: "list.number")
+                    }
+                    .accessibilityIdentifier("rawCaptures.compareAlgorithms")
+                    NavigationLink {
+                        HeightAlgorithmSweepView()
+                    } label: {
+                        Label("Compare algorithms (height)", systemImage: "list.number")
+                    }
+                    .accessibilityIdentifier("rawCaptures.compareAlgorithmsHeight")
+                } header: {
+                    Text("Accuracy validation")
+                } footer: {
+                    Text("Runs every candidate algorithm over the stored captures from the same recorded inputs and ranks them by error vs your entered ground truth — raw, plus an in-sample fitted bias/slope correction.")
                 }
 
                 Section {
@@ -64,11 +102,31 @@ public struct RawCapturesScreen: View {
                     }
                     .onDelete(perform: deleteRows)
                 } header: {
-                    Text("Captures (\(summaries.count))")
+                    // Readable / on disk — the two numbers differ exactly when
+                    // captures are unreadable, and the header says so first.
+                    Text(inventory.unparseable > 0
+                         ? "Captures (\(summaries.count) of \(inventory.directories) readable)"
+                         : "Captures (\(summaries.count))")
+                } footer: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        if inventory.unparseable > 0 {
+                            Text(unreadableNotice)
+                                .foregroundStyle(ForestixPalette.confidenceWarn)
+                                .accessibilityIdentifier("rawCaptures.unreadable")
+                        }
+                        // Free space sits WITH the corpus size: the field
+                        // session that fills the phone stops recording, and you
+                        // want to see that coming, not discover it at the truck.
+                        Text(storageFooter)
+                            .foregroundStyle(RawCaptureStore.isStorageLow()
+                                             ? ForestixPalette.confidenceWarn
+                                             : ForestixPalette.textSecondary)
+                            .accessibilityIdentifier("rawCaptures.storage")
+                    }
                 }
             }
         }
-        .navigationTitle("Raw Captures")
+        .navigationTitle("Raw captures")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -77,11 +135,12 @@ public struct RawCapturesScreen: View {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Button {
-                        if let url = RawCaptureStore.exportZIP() { shareURL = url }
+                        exportCorpus()
                     } label: {
-                        Label("Export ZIP", systemImage: "square.and.arrow.up")
+                        Label(isExporting ? "Exporting…" : "Export ZIP",
+                              systemImage: "square.and.arrow.up")
                     }
-                    .disabled(summaries.isEmpty)
+                    .disabled(summaries.isEmpty || isExporting)
                     Button(role: .destructive) {
                         confirmClear = true
                     } label: {
@@ -103,7 +162,14 @@ public struct RawCapturesScreen: View {
             RawCaptureShareSheet(url: item.url)
         }
         #endif
-        .confirmationDialog("Delete every raw capture?",
+        .alert("Export failed",
+               isPresented: Binding(get: { exportError != nil },
+                                    set: { if !$0 { exportError = nil } })) {
+            Button("OK", role: .cancel) { exportError = nil }
+        } message: {
+            Text(exportError ?? "")
+        }
+        .confirmationDialog("Clear all raw captures?",
                             isPresented: $confirmClear,
                             titleVisibility: .visible) {
             Button("Delete all", role: .destructive) {
@@ -112,7 +178,7 @@ public struct RawCapturesScreen: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This erases all recorded bundles on this device. This cannot be undone.")
+            Text("Deletes every stored bundle (depth, poses, images). This cannot be undone.")
         }
         .onAppear(perform: reload)
     }
@@ -166,7 +232,63 @@ public struct RawCapturesScreen: View {
     // MARK: - Actions
 
     private func reload() {
-        summaries = RawCaptureStore.list()
+        // Explicit refresh point: clear out sidecar-only leftovers from an
+        // earlier build so they neither inflate "unreadable" nor reach the ZIP.
+        RawCaptureStore.reapOrphanBundles()
+        let listing = RawCaptureStore.listing()
+        summaries = listing.summaries
+        inventory = listing.inventory
+    }
+
+    /// "X MB on device · Y GB free".
+    private var storageFooter: String {
+        let bytes = RawCaptureStore.totalSizeBytes()
+        let size = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+        return "\(size) on device · \(RawCaptureStore.freeSpaceText())"
+    }
+
+    /// The vanishing class, stated plainly. A bundle whose manifest.json is
+    /// missing or won't decode is skipped by every reader on this screen, so
+    /// it is absent from the count above, from both sweeps, and from every
+    /// skip counter — while the arithmetic in those footers still balances.
+    /// Counting the folders on disk is the only way the operator can see that
+    /// captures exist which nothing can read.
+    private var unreadableNotice: String {
+        let n = inventory.unparseable
+        return "\(n) capture folder\(n == 1 ? "" : "s") on disk cannot be read "
+            + "(manifest.json missing or corrupt). \(n == 1 ? "It is" : "They are") "
+            + "NOT in the count above, in either algorithm sweep, or in any skip "
+            + "tally — export the corpus and inspect \(n == 1 ? "it" : "them") "
+            + "before trusting the totals."
+    }
+
+    /// Zip the corpus OFF the main actor, streaming entry by entry to a temp
+    /// file. The old path read the whole corpus into memory (twice) on the
+    /// main thread from a SwiftUI button — on a real corpus that is a jetsam
+    /// kill, and the field data is stranded on the phone with no way off.
+    /// Failures now surface in an alert instead of silently doing nothing.
+    private func exportCorpus() {
+        #if os(iOS)
+        guard !isExporting else { return }
+        isExporting = true
+        exportError = nil
+        Task.detached(priority: .userInitiated) {
+            do {
+                let url = try RawCaptureStore.exportZIPStreaming()
+                await MainActor.run {
+                    shareURL = url
+                    isExporting = false
+                }
+            } catch {
+                let message = (error as? LocalizedError)?.errorDescription
+                    ?? error.localizedDescription
+                await MainActor.run {
+                    exportError = message
+                    isExporting = false
+                }
+            }
+        }
+        #endif
     }
 
     private func deleteRows(_ offsets: IndexSet) {
@@ -245,6 +367,9 @@ struct RawCaptureDetailView: View {
 
     @State private var manifest: RawCaptureManifest?
     @State private var truthText: String = ""
+    /// Result of the last Save / Clear — the console never changes a stored
+    /// truth without saying what it did.
+    @State private var truthStatus: String?
     @State private var rerunPrimary: Double?
     @State private var rerunReposed: Double?
     @State private var didRerun = false
@@ -261,7 +386,7 @@ struct RawCaptureDetailView: View {
                     .foregroundStyle(ForestixPalette.textSecondary)
             }
         }
-        .navigationTitle("Capture")
+        .navigationTitle("Capture detail")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -277,9 +402,22 @@ struct RawCaptureDetailView: View {
             labeled("Live value", String(format: "%.2f %@", m.resultLive.value, unit))
             labeled("σ", String(format: "%.2f", m.resultLive.sigma))
             labeled("Tier", m.resultLive.tier)
-            labeled("Accepted", m.resultLive.accepted ? "yes" : "no")
+            // A thin burst (dusk / canopy / tracking loss) is recorded rather
+            // than dropped — the count is visible so it can be weighed in
+            // analysis. Height bundles carry 0–2 aim frames.
+            if m.kind == "height" {
+                labeled("Aim depth frames", "\(m.resultLive.frameCount)",
+                        warn: m.resultLive.frameCount < 2)
+            } else {
+                labeled("Depth frames", "\(m.resultLive.frameCount)",
+                        warn: m.resultLive.frameCount < 5)
+            }
             labeled("Self-check", m.replaySelfcheck.status
                     + (m.replaySelfcheck.delta.map { String(format: " (Δ %.3f)", $0) } ?? ""))
+            // TWO explicit booleans — the old single "accepted" flag meant
+            // "fit not red" here and "operator accepted" on Android.
+            labeled("Fit tier OK (record time)", m.resultLive.tierOk ? "yes" : "no")
+            labeled("Operator accepted", m.resultLive.operatorAccepted ? "yes" : "no")
         } header: {
             Text("Result")
         }
@@ -288,7 +426,7 @@ struct RawCaptureDetailView: View {
     @ViewBuilder
     private func comparisonSection(_ m: RawCaptureManifest) -> some View {
         Section {
-            labeled("Original (live)", String(format: "%.2f %@", m.resultLive.value, unit))
+            labeled("Live (recorded)", String(format: "%.2f %@", m.resultLive.value, unit))
             labeled("Re-run (current)",
                     didRerun ? (rerunPrimary.map { String(format: "%.2f %@", $0, unit) } ?? "—")
                              : "tap Re-run")
@@ -296,7 +434,7 @@ struct RawCaptureDetailView: View {
                 labeled("Δ re-run − live", String(format: "%+.3f %@", r - m.resultLive.value, unit))
             }
             if m.kind == "height", didRerun {
-                labeled("Re-run (d_h re-derived)",
+                labeled("Re-run (reposed d_h)",
                         rerunReposed.map { String(format: "%.2f %@", $0, unit) } ?? "—")
             }
             if let t = m.truth.value {
@@ -320,6 +458,7 @@ struct RawCaptureDetailView: View {
     private func truthSection(_ m: RawCaptureManifest) -> some View {
         Section {
             HStack {
+                // ',' is accepted as the decimal separator and normalised.
                 TextField(m.kind == "height" ? "True height (m)" : "True Ø (cm)",
                           text: $truthText)
                     #if os(iOS)
@@ -327,20 +466,67 @@ struct RawCaptureDetailView: View {
                     #endif
                     .textFieldStyle(.roundedBorder)
                     .accessibilityIdentifier("rawCaptures.detail.truthField")
-                Button("Save") {
-                    let value = Double(truthText)
-                    RawCaptureStore.updateTruth(id: id, value: value)
-                    load()
-                    onChange()
-                }
+                Button("Save") { saveTruth(kind: m.kind) }
                 .buttonStyle(.forestixProminent)
                 .frame(width: 90)
             }
+            if let warning = truthWarning(kind: m.kind) {
+                TruthFieldWarning(text: warning)
+            }
+            // Clearing a stored truth is EXPLICIT. Save used to write
+            // `Double(text)` straight through, so an empty or mistyped field
+            // wiped a good hand measurement on the way past.
+            if m.truth.value != nil {
+                Button(role: .destructive) {
+                    truthStatus = RawCaptureStore.clearTruth(id: id) == .applied
+                        ? "Truth cleared." : "Couldn't clear the truth."
+                    load()
+                    onChange()
+                } label: {
+                    Label("Clear stored truth", systemImage: "xmark.circle")
+                }
+                .accessibilityIdentifier("rawCaptures.detail.truthClear")
+            }
+            if let status = truthStatus {
+                Text(status)
+                    .font(ForestixType.caption)
+                    .foregroundStyle(ForestixPalette.textSecondary)
+            }
         } header: {
-            Text("Ground truth")
+            Text("Ground truth (\(unit))")
         } footer: {
-            Text("Persists into the bundle manifest; used as the reference in Re-run comparisons.")
+            Text("Persists into the bundle manifest; used as the reference in Re-run comparisons. Blank or unreadable input is never saved — use Clear to remove a stored value.")
         }
+    }
+
+    /// Save guard: an empty or unparseable field NEVER overwrites a stored
+    /// truth, and the input is left alone so nothing typed is lost.
+    private func saveTruth(kind: String) {
+        guard let value = TruthInput.parsePositive(truthText) else {
+            truthStatus = TruthInput.normalized(truthText).isEmpty
+                ? "Nothing entered — stored truth left as it was."
+                : "Not a number — stored truth left as it was."
+            return
+        }
+        switch RawCaptureStore.applyTruth(id: id, value: value) {
+        case .applied:
+            truthStatus = "Truth saved."
+            load()
+            onChange()
+        case .pending:
+            // Queued, not in the manifest yet (the writer is still running).
+            // Neither reloaded nor cleared — `load()` would replace the typed
+            // text with the manifest's older value.
+            truthStatus = "Truth queued — waiting for the capture to finish writing"
+        case .failed(let reason):
+            truthStatus = "NOT saved — \(reason)"
+        }
+    }
+
+    private func truthWarning(kind: String) -> String? {
+        if TruthInput.isUnparseable(truthText) { return "Not a number" }
+        guard let v = TruthInput.parsePositive(truthText) else { return nil }
+        return TruthInput.warning(value: v, isHeight: kind == "height")
     }
 
     @ViewBuilder
@@ -372,13 +558,16 @@ struct RawCaptureDetailView: View {
         }
     }
 
-    private func labeled(_ k: String, _ v: String) -> some View {
+    /// `warn` tints the value — used for a thin frame count, which is kept
+    /// (not dropped) but shouldn't pass unnoticed.
+    private func labeled(_ k: String, _ v: String, warn: Bool = false) -> some View {
         HStack {
             Text(k).foregroundStyle(ForestixPalette.textSecondary)
             Spacer()
             Text(v)
                 .font(ForestixType.dataSmall)
-                .foregroundStyle(ForestixPalette.textPrimary)
+                .foregroundStyle(warn ? ForestixPalette.confidenceWarn
+                                      : ForestixPalette.textPrimary)
                 .multilineTextAlignment(.trailing)
         }
     }
@@ -405,6 +594,496 @@ struct RawCaptureDetailView: View {
                 rerunPrimary = primary
                 rerunReposed = reposed
                 didRerun = true
+            }
+        }
+    }
+}
+
+// MARK: - DBH multi-algorithm sweep (accuracy validation)
+
+/// Ranks every candidate DBH algorithm against the entered ground truth.
+/// Read/replay only — all math is `RawCaptureReplay.rankDBH`, which runs the
+/// production estimators over the stored bytes. Runs off the main actor like
+/// the "Re-run all" self-check.
+struct DBHAlgorithmSweepView: View {
+
+    @State private var report: RawCaptureReplay.DBHSweepReport?
+    @State private var isRunning = false
+    /// Bundle folders the listing couldn't read — in none of the sweep's own
+    /// counters, so they are reported separately rather than vanishing.
+    @State private var unreadableOnDisk = 0
+
+    var body: some View {
+        List {
+            if isRunning {
+                Section {
+                    HStack {
+                        ProgressView()
+                        Text("Comparing…").foregroundStyle(ForestixPalette.textSecondary)
+                    }
+                }
+            }
+            if let r = report {
+                summarySection(r)
+                if r.rankings.contains(where: { $0.n > 0 }) {
+                    rankingSection(r)
+                    perCaptureSection(r)
+                }
+            }
+        }
+        .navigationTitle("Compare algorithms (DBH)")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .onAppear(perform: runIfNeeded)
+    }
+
+    // MARK: Summary
+
+    @ViewBuilder
+    private func summarySection(_ r: RawCaptureReplay.DBHSweepReport) -> some View {
+        Section {
+            labeled("DBH captures", "\(r.totalDBH)")
+            labeled("Scored (with truth)", "\(r.scored)")
+            labeled("Skipped (no truth)", "\(r.skippedNoTruth)")
+            // Unreadable captures used to be tallied as "no truth" and vanish.
+            labeled("Skipped (unreadable)", "\(r.skippedUnreadable)")
+            // Bundles the LISTING couldn't read never reach this report at
+            // all, so they get their own row instead of balancing out of it.
+            if unreadableOnDisk > 0 {
+                labeled("On disk, unreadable", "\(unreadableOnDisk)")
+            }
+            if let best = r.rankings.first(where: { $0.n > 0 }) {
+                // No winner is crowned on a handful of captures.
+                if best.n >= RawCaptureReplay.minRankingN {
+                    labeled("Best (lowest raw RMSE)", best.name)
+                } else {
+                    labeled("Best (lowest raw RMSE)",
+                            "not called (n < \(RawCaptureReplay.minRankingN))")
+                }
+            }
+        } header: {
+            Text("Corpus")
+        } footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(SweepCopy.corpusFooter(
+                    scored: r.scored,
+                    noTruth: r.skippedNoTruth,
+                    unreadable: r.skippedUnreadable,
+                    total: r.totalDBH,
+                    truthNoun: "diameter"))
+                if let note = SweepCopy.unreadableOnDisk(unreadableOnDisk) {
+                    Text(note).foregroundStyle(ForestixPalette.confidenceWarn)
+                }
+            }
+        }
+    }
+
+    // MARK: Ranking table
+
+    @ViewBuilder
+    private func rankingSection(_ r: RawCaptureReplay.DBHSweepReport) -> some View {
+        Section {
+            AlgorithmRankingTable(rankings: r.rankings, unit: "cm")
+            AlgorithmRankingLegend()
+        } header: {
+            Text("Algorithm ranking (DBH, vs truth)")
+        } footer: {
+            Text(SweepCopy.rankingFooter(unit: "cm"))
+        }
+    }
+
+    // MARK: Per-capture breakdown
+
+    @ViewBuilder
+    private func perCaptureSection(_ r: RawCaptureReplay.DBHSweepReport) -> some View {
+        Section {
+            ForEach(r.perCapture, id: \.id) { cap in
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        Text(cap.treeNumber.map { "Tree \($0)" } ?? "Capture")
+                            .font(ForestixType.bodyBold)
+                        Spacer()
+                        Text(String(format: "truth %.1f cm", cap.truth))
+                            .font(ForestixType.dataSmall)
+                            .foregroundStyle(ForestixPalette.textSecondary)
+                    }
+                    ForEach(cap.entries, id: \.algorithmId) { e in
+                        captureAlgoRow(e, truth: cap.truth, isWinner: e.algorithmId == cap.winnerId)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+        } header: {
+            Text("Per capture (★ = closest to truth)")
+        }
+    }
+
+    private func captureAlgoRow(_ e: RawCaptureReplay.DBHSweepEntry,
+                                truth: Double, isWinner: Bool) -> some View {
+        HStack(spacing: 4) {
+            Text(isWinner ? "★ \(e.name)" : "  \(e.name)")
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .lineLimit(1)
+            if let v = e.value {
+                Text(String(format: "%.1f", v)).frame(width: 56, alignment: .trailing)
+                Text(String(format: "%+.1f", v - truth)).frame(width: 56, alignment: .trailing)
+            } else {
+                Text("N/A").frame(width: 56, alignment: .trailing)
+                Text("—").frame(width: 56, alignment: .trailing)
+            }
+        }
+        .font(.system(size: 11, weight: isWinner ? .bold : .regular, design: .monospaced))
+        .foregroundStyle(isWinner ? ForestixPalette.confidenceOk
+                                  : (e.value == nil ? ForestixPalette.textSecondary
+                                                    : ForestixPalette.textPrimary))
+    }
+
+    // MARK: Layout helper
+
+    private func labeled(_ k: String, _ v: String) -> some View {
+        HStack {
+            Text(k).foregroundStyle(ForestixPalette.textSecondary)
+            Spacer()
+            Text(v)
+                .font(ForestixType.dataSmall)
+                .foregroundStyle(ForestixPalette.textPrimary)
+        }
+    }
+
+    // MARK: Run
+
+    private func runIfNeeded() {
+        guard report == nil, !isRunning else { return }
+        isRunning = true
+        Task.detached(priority: .userInitiated) {
+            let listing = RawCaptureStore.listing()
+            let out = RawCaptureReplay.rankDBH(listing.summaries)
+            let gap = listing.inventory.unparseable
+            await MainActor.run {
+                report = out
+                unreadableOnDisk = gap
+                isRunning = false
+            }
+        }
+    }
+}
+
+// MARK: - Shared sweep copy (DBH + height, matched to Android)
+
+/// ONE source for the sweep footers, so the DBH and Height views can't drift
+/// apart from each other or from the Android sibling. Both platforms sort by
+/// RAW RMSE; the corrected column is an in-sample calibration fit and is
+/// labelled as such wherever it appears.
+enum SweepCopy {
+
+    /// "scored + skipped == total" is stated explicitly, so a capture that
+    /// silently disappeared from the corpus is visible as an arithmetic gap.
+    static func corpusFooter(scored: Int, noTruth: Int, unreadable: Int,
+                             total: Int, truthNoun: String) -> String {
+        let accounting = "\(scored) scored + \(noTruth) no truth "
+            + "+ \(unreadable) unreadable = \(total) captures."
+        if scored == 0 {
+            return accounting + " No captures have a truth value yet — enter true "
+                + truthNoun + "s on individual captures, then return here."
+        }
+        var out = accounting + " Ranked over the \(scored) capture"
+            + (scored == 1 ? "" : "s") + " with a ground-truth \(truthNoun)."
+        if unreadable > 0 {
+            out += " Unreadable captures have a truth but their stored bytes "
+                + "won't reconstruct — inspect them before trusting the corpus."
+        }
+        if scored < RawCaptureReplay.minRankingN {
+            out += " Fewer than \(RawCaptureReplay.minRankingN) scored captures: "
+                + "no winner is called yet."
+        }
+        return out
+    }
+
+    /// Appended to a sweep's corpus footer when the raw-captures folder holds
+    /// bundle directories the listing can't read at all. Those captures are in
+    /// NONE of the numbers above — including the "scored + skipped = total"
+    /// identity, which balances precisely because they were never counted.
+    static func unreadableOnDisk(_ n: Int) -> String? {
+        guard n > 0 else { return nil }
+        return "\(n) further capture folder\(n == 1 ? "" : "s") on disk cannot be "
+            + "read (manifest.json missing or corrupt) and \(n == 1 ? "is" : "are") "
+            + "in none of these numbers."
+    }
+
+    static func rankingFooter(unit: String) -> String {
+        "bias = mean(estimate − truth); RMSE / MAE in \(unit). "
+        + "Sorted by RAW RMSE — the corrected column never reorders the table. "
+        + "corr, a, b come from an IN-SAMPLE fit truth ≈ a + b·estimate on these "
+        + "same captures (a calibration fit, not held-out), so corr is optimistic; "
+        + "a biased algorithm can look best only after correction. "
+        + "No winner is highlighted until n ≥ \(RawCaptureReplay.minRankingN)."
+    }
+}
+
+// MARK: - Shared ranking table (DBH + height)
+
+/// The best-first ranking rendered as a horizontally-scrollable column table:
+/// n · bias · RMSE(raw) · RMSE(corrected, in-sample) · a · b. Shared by both
+/// sweep views so DBH and height stay structurally identical.
+///
+/// Ordering is by RAW RMSE on both platforms — the corrected number is an
+/// in-sample calibration fit and must never be the sort key. The raw winner
+/// (row 0) is bold-green ONLY once it has n ≥ `minRankingN`; under that the
+/// numbers are still shown but nothing is crowned, because an RMSE ordering
+/// over a handful of trees is noise. The lowest CORRECTED RMSE gets its cell
+/// tinted (same n floor) so a systematically-biased algorithm that only wins
+/// after correction is visible without reordering the table.
+struct AlgorithmRankingTable: View {
+
+    let rankings: [RawCaptureReplay.AlgorithmRanking]
+    let unit: String
+
+    /// Enough scored captures for a "best" claim to mean anything.
+    private var winnerIsCallable: Bool {
+        (rankings.first(where: { $0.n > 0 })?.n ?? 0) >= RawCaptureReplay.minRankingN
+    }
+
+    private var bestCorrectedId: String? {
+        guard winnerIsCallable else { return nil }
+        return rankings.filter { $0.n > 0 }
+            .min { $0.rmseCorrected < $1.rmseCorrected }?.algorithmId
+    }
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 5) {
+                header
+                ForEach(Array(rankings.enumerated()), id: \.element.algorithmId) { idx, rank in
+                    row(rank,
+                        isWinner: idx == 0 && rank.n > 0 && winnerIsCallable,
+                        isBestCorrected: rank.algorithmId == bestCorrectedId)
+                }
+            }
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 6) {
+            Text("Algorithm").frame(width: 132, alignment: .leading)
+            Text("n").frame(width: 24, alignment: .trailing)
+            Text("bias").frame(width: 48, alignment: .trailing)
+            Text("RMSE").frame(width: 48, alignment: .trailing)
+            // "corr" is in-sample — spelled out in the header, not just the
+            // footer, so the column can't be read as held-out accuracy.
+            Text("corr*").frame(width: 52, alignment: .trailing)
+            Text("a").frame(width: 48, alignment: .trailing)
+            Text("b").frame(width: 44, alignment: .trailing)
+        }
+        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+        .foregroundStyle(ForestixPalette.textSecondary)
+    }
+
+    private func row(_ rank: RawCaptureReplay.AlgorithmRanking,
+                     isWinner: Bool, isBestCorrected: Bool) -> some View {
+        HStack(spacing: 6) {
+            Text(rank.name).frame(width: 132, alignment: .leading).lineLimit(1)
+            Text("\(rank.n)").frame(width: 24, alignment: .trailing)
+            if rank.n > 0 {
+                Text(String(format: "%+.2f", rank.bias)).frame(width: 48, alignment: .trailing)
+                Text(String(format: "%.2f", rank.rmse)).frame(width: 48, alignment: .trailing)
+                Text(String(format: "%.2f", rank.rmseCorrected))
+                    .frame(width: 52, alignment: .trailing)
+                    .foregroundStyle(isBestCorrected ? ForestixPalette.confidenceOk
+                                                     : ForestixPalette.textPrimary)
+                if rank.fitted {
+                    Text(String(format: "%+.2f", rank.a)).frame(width: 48, alignment: .trailing)
+                    Text(String(format: "%.3f", rank.b)).frame(width: 44, alignment: .trailing)
+                } else {
+                    Text("—").frame(width: 48, alignment: .trailing)
+                    Text("—").frame(width: 44, alignment: .trailing)
+                }
+            } else {
+                Text("—").frame(width: 48, alignment: .trailing)
+                Text("—").frame(width: 48, alignment: .trailing)
+                Text("—").frame(width: 52, alignment: .trailing)
+                Text("—").frame(width: 48, alignment: .trailing)
+                Text("—").frame(width: 44, alignment: .trailing)
+            }
+        }
+        .font(.system(size: 12, weight: isWinner ? .bold : .regular, design: .monospaced))
+        .foregroundStyle(isWinner ? ForestixPalette.confidenceOk : ForestixPalette.textPrimary)
+        .accessibilityIdentifier("rawCaptures.sweep.rankRow")
+    }
+}
+
+/// Footnote under the ranking table: what the starred column is.
+struct AlgorithmRankingLegend: View {
+    var body: some View {
+        Text("* corr = in-sample corrected RMSE (calibration fit, not held-out)")
+            .font(ForestixType.caption)
+            .foregroundStyle(ForestixPalette.textSecondary)
+    }
+}
+
+// MARK: - Height multi-algorithm sweep (accuracy validation)
+
+/// Mirror of `DBHAlgorithmSweepView` over stored HEIGHT captures. Read/replay
+/// only — all math is `RawCaptureReplay.rankHeight`, which runs the production
+/// tangent estimator (and any registered height candidate) over the stored
+/// tangent geometry. Runs off the main actor.
+struct HeightAlgorithmSweepView: View {
+
+    @State private var report: RawCaptureReplay.HeightSweepReport?
+    @State private var isRunning = false
+    /// Bundle folders the listing couldn't read — in none of the sweep's own
+    /// counters, so they are reported separately rather than vanishing.
+    @State private var unreadableOnDisk = 0
+
+    var body: some View {
+        List {
+            if isRunning {
+                Section {
+                    HStack {
+                        ProgressView()
+                        Text("Comparing…").foregroundStyle(ForestixPalette.textSecondary)
+                    }
+                }
+            }
+            if let r = report {
+                summarySection(r)
+                if r.rankings.contains(where: { $0.n > 0 }) {
+                    rankingSection(r)
+                    perCaptureSection(r)
+                }
+            }
+        }
+        .navigationTitle("Compare algorithms (height)")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .onAppear(perform: runIfNeeded)
+    }
+
+    // MARK: Summary
+
+    @ViewBuilder
+    private func summarySection(_ r: RawCaptureReplay.HeightSweepReport) -> some View {
+        Section {
+            labeled("Height captures", "\(r.totalHeight)")
+            labeled("Scored (with truth)", "\(r.scored)")
+            labeled("Skipped (no truth)", "\(r.skippedNoTruth)")
+            labeled("Skipped (unreadable)", "\(r.skippedUnreadable)")
+            // Bundles the LISTING couldn't read never reach this report at
+            // all, so they get their own row instead of balancing out of it.
+            if unreadableOnDisk > 0 {
+                labeled("On disk, unreadable", "\(unreadableOnDisk)")
+            }
+            if let best = r.rankings.first(where: { $0.n > 0 }) {
+                if best.n >= RawCaptureReplay.minRankingN {
+                    labeled("Best (lowest raw RMSE)", best.name)
+                } else {
+                    labeled("Best (lowest raw RMSE)",
+                            "not called (n < \(RawCaptureReplay.minRankingN))")
+                }
+            }
+        } header: {
+            Text("Corpus")
+        } footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(SweepCopy.corpusFooter(
+                    scored: r.scored,
+                    noTruth: r.skippedNoTruth,
+                    unreadable: r.skippedUnreadable,
+                    total: r.totalHeight,
+                    truthNoun: "height"))
+                if let note = SweepCopy.unreadableOnDisk(unreadableOnDisk) {
+                    Text(note).foregroundStyle(ForestixPalette.confidenceWarn)
+                }
+            }
+        }
+    }
+
+    // MARK: Ranking table
+
+    @ViewBuilder
+    private func rankingSection(_ r: RawCaptureReplay.HeightSweepReport) -> some View {
+        Section {
+            AlgorithmRankingTable(rankings: r.rankings, unit: "m")
+            AlgorithmRankingLegend()
+        } header: {
+            Text("Algorithm ranking (Height, vs truth)")
+        } footer: {
+            Text(SweepCopy.rankingFooter(unit: "m"))
+        }
+    }
+
+    // MARK: Per-capture breakdown
+
+    @ViewBuilder
+    private func perCaptureSection(_ r: RawCaptureReplay.HeightSweepReport) -> some View {
+        Section {
+            ForEach(r.perCapture, id: \.id) { cap in
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        Text(cap.treeNumber.map { "Tree \($0)" } ?? "Capture")
+                            .font(ForestixType.bodyBold)
+                        Spacer()
+                        Text(String(format: "truth %.1f m", cap.truth))
+                            .font(ForestixType.dataSmall)
+                            .foregroundStyle(ForestixPalette.textSecondary)
+                    }
+                    ForEach(cap.entries, id: \.algorithmId) { e in
+                        captureAlgoRow(e, truth: cap.truth, isWinner: e.algorithmId == cap.winnerId)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+        } header: {
+            Text("Per capture (★ = closest to truth)")
+        }
+    }
+
+    private func captureAlgoRow(_ e: RawCaptureReplay.HeightSweepEntry,
+                                truth: Double, isWinner: Bool) -> some View {
+        HStack(spacing: 4) {
+            Text(isWinner ? "★ \(e.name)" : "  \(e.name)")
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .lineLimit(1)
+            if let v = e.value {
+                Text(String(format: "%.2f", v)).frame(width: 56, alignment: .trailing)
+                Text(String(format: "%+.2f", v - truth)).frame(width: 56, alignment: .trailing)
+            } else {
+                Text("N/A").frame(width: 56, alignment: .trailing)
+                Text("—").frame(width: 56, alignment: .trailing)
+            }
+        }
+        .font(.system(size: 11, weight: isWinner ? .bold : .regular, design: .monospaced))
+        .foregroundStyle(isWinner ? ForestixPalette.confidenceOk
+                                  : (e.value == nil ? ForestixPalette.textSecondary
+                                                    : ForestixPalette.textPrimary))
+    }
+
+    // MARK: Layout helper
+
+    private func labeled(_ k: String, _ v: String) -> some View {
+        HStack {
+            Text(k).foregroundStyle(ForestixPalette.textSecondary)
+            Spacer()
+            Text(v)
+                .font(ForestixType.dataSmall)
+                .foregroundStyle(ForestixPalette.textPrimary)
+        }
+    }
+
+    // MARK: Run
+
+    private func runIfNeeded() {
+        guard report == nil, !isRunning else { return }
+        isRunning = true
+        Task.detached(priority: .userInitiated) {
+            let listing = RawCaptureStore.listing()
+            let out = RawCaptureReplay.rankHeight(listing.summaries)
+            let gap = listing.inventory.unparseable
+            await MainActor.run {
+                report = out
+                unreadableOnDisk = gap
+                isRunning = false
             }
         }
     }

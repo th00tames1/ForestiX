@@ -89,7 +89,27 @@ public struct DBHScanScreen: View {
     /// Developer-mode research capture: tape-measured true diameter (cm)
     /// typed before Accept; logged with the scan context to the research
     /// CSV so error can be analysed against distance / aim angle.
+    /// NEVER cleared until the value is durably on the bundle (or there is
+    /// no bundle to attach it to) — see `applyTypedTruth`.
     @State private var researchTrueCm: String = ""
+    /// Non-nil when the last Accept could NOT attach the typed truth. The
+    /// text stays in the field so the value isn't lost.
+    @State private var truthSaveFailure: String?
+    /// The bundle a kept-on-screen truth was typed FOR. Guards against the
+    /// value silently landing on the next tree's bundle in the tally loop —
+    /// cleared the moment the cruiser edits the field.
+    @State private var truthOwnerBundleID: String?
+    /// Owner sentinel for a truth kept on screen for a measurement that
+    /// produced NO bundle (manual entry, or after a retake). Never a real
+    /// bundle id, so the cross-tree guard in `applyTypedTruth` still fires.
+    private static let noBundleOwner = "no-bundle"
+    /// The bundle a typed truth is QUEUED against — parked in the bundle's
+    /// sidecar while its writer is still running. Queued is NOT durable, so
+    /// the field keeps the text until that capture reports SAVED.
+    @State private var truthQueuedForBundleID: String?
+    /// Free-space check, refreshed when the screen appears and on each
+    /// capture, so the REC pill can call out a phone that is filling up.
+    @State private var storageLow = false
 
     /// Hampel-style robust moving average over the screen-centre AR
     /// distance while the caliper is aiming — the estimated-plane raycast
@@ -124,6 +144,17 @@ public struct DBHScanScreen: View {
     /// tree row (and its photo) and steps the auto number back.
     private let onUndoTally: (() -> Void)?
 
+    /// RAW-CAPTURE JOIN KEYS — the project this measurement belongs to, and
+    /// (quick-measure only) the tree number the host is targeting. Without
+    /// these a stored bundle can't be joined back to the field record it
+    /// documents. The cruise tally supplies its number via `tallyTreeNumber`.
+    private let projectID: String?
+    private let quickTreeNumber: Int?
+
+    /// The tree number that goes into the bundle: the cruise tally's live
+    /// target when looping, else the host's quick-measure target.
+    private var captureTreeNumber: Int? { tallyTreeNumber ?? quickTreeNumber }
+
     /// Saved-tree toast state: number shown in "Tree 7 saved · Undo".
     @State private var tallyToastNumber: Int?
     /// Bumps on every toast show so the 3 s auto-hide task restarts.
@@ -140,13 +171,17 @@ public struct DBHScanScreen: View {
                 onAccept: @escaping (DBHResult, ScanMetadata) -> Void = { _, _ in },
                 cruisePlotInfo: PlotMiniMapInfo? = nil,
                 tallyTreeNumber: Int? = nil,
-                onUndoTally: (() -> Void)? = nil) {
+                onUndoTally: (() -> Void)? = nil,
+                projectID: String? = nil,
+                quickTreeNumber: Int? = nil) {
         _viewModel = StateObject(wrappedValue: viewModel())
         self.onResult = onResult
         self.onAccept = onAccept
         self.cruisePlotInfo = cruisePlotInfo
         self.tallyTreeNumber = tallyTreeNumber
         self.onUndoTally = onUndoTally
+        self.projectID = projectID
+        self.quickTreeNumber = quickTreeNumber
     }
 
     /// What the top-right mini-map shows: the cruise plot when the
@@ -440,6 +475,32 @@ public struct DBHScanScreen: View {
             viewModel.onAppear()
         }
         .onDisappear { viewModel.onDisappear() }
+        // CRUISE TALLY — the loop reuses this one screen and advances its
+        // target without re-appearing, so the recording context has to follow
+        // the number (belt-and-braces with the rebuild at burst start).
+        .onChange(of: captureTreeNumber) { _, _ in
+            configureRawCapture()
+        }
+        // Editing the truth field retires any "couldn't save" state: the text
+        // is now the cruiser's current intent for the capture on screen.
+        .onChange(of: researchTrueCm) { _, _ in
+            truthOwnerBundleID = nil
+            truthSaveFailure = nil
+            // The text is no longer the value that was queued.
+            truthQueuedForBundleID = nil
+        }
+        // A QUEUED truth only becomes durable when the capture that owns it
+        // reports SAVED — that is the write which folded the sidecar into the
+        // manifest. NOT SAVED means the bundle and the queued value are gone.
+        .onChange(of: viewModel.lastCaptureOutcome) { _, outcome in
+            resolveQueuedTruth(outcome)
+        }
+        .onChange(of: settings.rawCaptureEnabled) { _, _ in
+            configureRawCapture()
+        }
+        .onChange(of: settings.developerMode) { _, _ in
+            configureRawCapture()
+        }
         .onChange(of: settings.dbhMeasurementMethod) { _, m in
             viewModel.dbhMeasurementMethod = m
         }
@@ -491,16 +552,13 @@ public struct DBHScanScreen: View {
                         captureMode: viewModel.resultCapturedManually
                             ? "manual" : "auto")
                     onAccept(r, meta)
-                    // Raw-capture (developer mode): store the tape-measured
-                    // truth on the just-recorded bundle if the cruiser typed
-                    // one before Accept. The bundle is written at burst
-                    // finalize; by the time the human taps Accept the detached
-                    // recorder has produced its id.
-                    if let id = viewModel.lastRecordedBundleID,
-                       let t = Double(researchTrueCm), t > 0 {
-                        RawCaptureStore.updateTruth(id: id, value: t)
-                    }
+                    // Raw-capture (developer mode): attach the tape-measured
+                    // truth to the just-recorded bundle. The bundle id is
+                    // minted synchronously at burst finalize, so this works
+                    // even when Accept beats the detached writer — and the
+                    // field is not cleared until the value is durable.
                     recordResearchRow(r)
+                    applyTypedTruth()
                     // CRUISE QUICK-TALLY LOOP — the host saved the tree
                     // and auto-incremented its target; reset this screen
                     // (scan + per-tree metadata) to aiming for the next
@@ -549,8 +607,19 @@ public struct DBHScanScreen: View {
     /// above the crosshair so the cruiser sees device level at the same
     /// focal point as the trunk circle they're aiming at.
     private var topStrip: some View {
-        HStack(spacing: ForestixSpace.xs) {
-            GPSAccuracyBadge()
+        HStack(alignment: .top, spacing: ForestixSpace.xs) {
+            VStack(alignment: .leading, spacing: 6) {
+                GPSAccuracyBadge()
+                // Recording state is never implicit: armed ⇒ a red REC pill
+                // stays on screen, and the last capture's saved / NOT-saved
+                // outcome sits right under it.
+                if viewModel.rawCaptureEnabled {
+                    RawCaptureRecPill(storageLow: storageLow)
+                }
+                if let outcome = viewModel.lastCaptureOutcome {
+                    RawCaptureOutcomePill(outcome: outcome)
+                }
+            }
             Spacer()
         }
         .padding(.leading, 72)
@@ -629,9 +698,14 @@ public struct DBHScanScreen: View {
     /// Capture the trunk at the depth-map centre — the crosshair the
     /// cruiser lined up on the trunk. Fired by the "+" button.
     private func captureTap() {
-        // Refresh the GPS tag right at burst start so the recorded bundle
-        // (developer mode) carries a fresh fix.
-        viewModel.rawCaptureGPS = Self.currentGPS()
+        // Rebuild the recording context from LIVE values at burst start. The
+        // cruise tally reuses ONE screen instance and advances its tree number
+        // without the screen re-appearing, so a context built only in
+        // `.onAppear` stamped every bundle in the plot with the FIRST tree's
+        // number. This call runs off the current body, so `tallyTreeNumber`
+        // here is the tree actually being measured. (It also refreshes the GPS
+        // tag, which is why the old fix-refresh line is gone.)
+        configureRawCapture()
         let frame = viewModel.session.latestDepthFrame
         let width  = Double(frame?.width  ?? 256)
         let height = Double(frame?.height ?? 192)
@@ -639,16 +713,20 @@ public struct DBHScanScreen: View {
     }
 
     /// Push the raw-capture recording config onto the view model (developer
-    /// mode only; the VM no-ops recording when disabled).
+    /// mode only; the VM no-ops recording when disabled). Called on appear,
+    /// whenever the tally target changes, and again at every burst start.
     private func configureRawCapture() {
         viewModel.rawCaptureEnabled = settings.developerMode && settings.rawCaptureEnabled
         viewModel.rawCaptureContext = RawCaptureContext(
             mode: cruisePlotInfo != nil ? "cruise" : "quick",
-            projectID: nil,
+            projectID: projectID,
             plotID: cruisePlotInfo?.plotID?.uuidString,
-            treeNumber: tallyTreeNumber,
+            treeNumber: captureTreeNumber,
             units: settings.unitSystem.rawValue)
         viewModel.rawCaptureGPS = Self.currentGPS()
+        // Manual entry is typed in whatever the active unit system is.
+        viewModel.manualEntryUnits = settings.unitSystem
+        storageLow = viewModel.rawCaptureEnabled && RawCaptureStore.isStorageLow()
     }
 
     static func currentGPS() -> RawCaptureGPS? {
@@ -796,6 +874,11 @@ public struct DBHScanScreen: View {
             out.append(("fx/fy", String(format: "%.0f/%.0f", f.intrinsics[0, 0], f.intrinsics[1, 1])))
             out.append(("cx/cy", String(format: "%.0f/%.0f", f.intrinsics[2, 0], f.intrinsics[2, 1])))
         }
+        // Recording state + the join key that goes into the bundle, so a
+        // frozen tree number is visible in the HUD instead of after the fact.
+        out.append(("raw", viewModel.rawCaptureEnabled
+                    ? "REC · tree \(captureTreeNumber.map(String.init) ?? "—")"
+                    : "OFF — not recording"))
         out.append(("Ø live", viewModel.previewDbhCm.map { String(format: "%.1f cm", $0) } ?? "—"))
         out.append(("dist", viewModel.distanceToStemCenterM.map { String(format: "%.2f m", Double($0)) } ?? "—"))
         if let r = viewModel.result {
@@ -1343,12 +1426,124 @@ public struct DBHScanScreen: View {
             f["depth_w"] = "\(frame.width)"
             f["depth_h"] = "\(frame.height)"
         }
-        if let t = Double(researchTrueCm), t > 0 {
+        // ',' is a legitimate decimal separator on the cruiser's keypad.
+        //
+        // OWNER GATE: the field is deliberately kept across trees when a truth
+        // could not be attached (queued, no bundle, or a failed save), so the
+        // text on screen may belong to an EARLIER measurement. Both owner marks
+        // are nil only while the value was typed for THIS burst — anything else
+        // would stamp the previous tree's tape reading onto this row.
+        let truthIsForThisMeasurement =
+            truthOwnerBundleID == nil && truthQueuedForBundleID == nil
+        if truthIsForThisMeasurement,
+           let t = TruthInput.parsePositive(researchTrueCm) {
             f["true_value"] = String(format: "%.2f", t)
             f["error"] = String(format: "%.2f", Double(r.diameterCm) - t)
         }
         ResearchLog.shared.record(f)
-        researchTrueCm = ""
+        // NOTE: the field is deliberately NOT cleared here — `applyTypedTruth`
+        // clears it only once the value is durably on the bundle.
+    }
+
+    /// Attach the typed ground truth to the bundle this Accept confirms.
+    ///
+    /// The input is cleared ONLY when the value is DURABLY in a manifest. A
+    /// merely QUEUED value (parked in the bundle's sidecar for the in-flight
+    /// writer) keeps the text and shows a pending line, because that writer
+    /// can still fail and tear the sidecar down with the bundle. On any
+    /// failure the text stays put and a warning is shown, so a hand-measured
+    /// value is never silently thrown away.
+    private func applyTypedTruth() {
+        guard settings.developerMode else { return }
+        truthSaveFailure = nil
+        let raw = researchTrueCm
+        guard !TruthInput.normalized(raw).isEmpty else { return }
+        guard let t = TruthInput.parsePositive(raw) else {
+            truthSaveFailure = "Not a number — truth not saved"
+            return
+        }
+        // Recording is OFF for this session: the value went into the research
+        // CSV row written just above, so the field can clear. The dev block
+        // already carries the "Raw capture OFF" notice.
+        guard viewModel.rawCaptureEnabled else {
+            researchTrueCm = ""
+            truthOwnerBundleID = nil
+            truthQueuedForBundleID = nil
+            return
+        }
+        // Recording is ON but this measurement produced no bundle — manual
+        // entry, or a retake that cleared the id. Clearing silently here threw
+        // a tape measurement away with no bundle to pair it to; warn like the
+        // other paths and keep it, owned by nothing so it can't drift onto the
+        // next tree's bundle.
+        guard let id = viewModel.lastRecordedBundleID else {
+            truthSaveFailure = "No raw capture for this measurement — truth kept on screen"
+            truthOwnerBundleID = Self.noBundleOwner
+            truthQueuedForBundleID = nil
+            return
+        }
+        // Left over from an earlier capture that couldn't take it: attaching
+        // it here would put one tree's tape measurement on another tree's
+        // bundle. Make the cruiser re-enter (or clear) it instead.
+        if let owner = truthOwnerBundleID, owner != id {
+            truthSaveFailure = "Unsaved truth from an earlier capture — re-type it for this tree, or clear the field"
+            return
+        }
+        // The capture itself failed — keep the typed value on screen rather
+        // than attach it to a bundle that isn't there.
+        if case .failed(let reason) = viewModel.lastCaptureOutcome {
+            truthSaveFailure = "Capture NOT saved (\(reason)) — truth kept on screen"
+            truthOwnerBundleID = id
+            truthQueuedForBundleID = nil
+            return
+        }
+        switch RawCaptureStore.applyTruth(id: id, value: t) {
+        case .applied:
+            // In the manifest — the only state that may clear the field.
+            researchTrueCm = ""
+            truthOwnerBundleID = nil
+            truthQueuedForBundleID = nil
+        case .pending:
+            // QUEUED against a writer that is still running. Clearing on a
+            // queued result is how a hand measurement disappeared with a
+            // bundle whose write later failed — keep it and say it's pending.
+            truthOwnerBundleID = id
+            truthQueuedForBundleID = id
+        case .failed(let reason):
+            truthSaveFailure = "Truth NOT saved — \(reason)"
+            truthOwnerBundleID = id
+            truthQueuedForBundleID = nil
+        }
+    }
+
+    /// Settle a queued truth against the outcome of the capture that owns it.
+    /// SAVED means the writer folded the sidecar into the manifest, so the
+    /// value is finally durable and the field can clear. NOT SAVED means the
+    /// bundle — and the queued value with it — is gone: the text stays on
+    /// screen with the reason so the cruiser can re-type or re-measure.
+    private func resolveQueuedTruth(_ outcome: RawCaptureOutcome?) {
+        guard let queued = truthQueuedForBundleID, let outcome else { return }
+        switch outcome {
+        case .saved(let savedID, _) where savedID == queued:
+            truthQueuedForBundleID = nil
+            truthOwnerBundleID = nil
+            truthSaveFailure = nil
+            researchTrueCm = ""
+        case .failed(let reason):
+            truthQueuedForBundleID = nil
+            truthSaveFailure = "Capture NOT saved (\(reason)) — truth kept on screen"
+        default:
+            break
+        }
+    }
+
+    /// Live warning under the truth field: unparseable text, or a value
+    /// outside the plausible DBH window.
+    private var truthFieldWarning: String? {
+        if let failure = truthSaveFailure { return failure }
+        if TruthInput.isUnparseable(researchTrueCm) { return "Not a number" }
+        guard let v = TruthInput.parsePositive(researchTrueCm) else { return nil }
+        return TruthInput.dbhWarning(cm: v)
     }
 
     @ViewBuilder
@@ -1370,24 +1565,37 @@ public struct DBHScanScreen: View {
                 Spacer()
             }
             if settings.developerMode {
-                HStack(spacing: 6) {
-                    Text("Target")
-                        .font(ForestixType.caption)
-                        .foregroundStyle(.white.opacity(0.8))
-                    TextField("T1", text: Binding(
-                        get: { settings.researchTreeId },
-                        set: { settings.researchTreeId = $0 }))
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 70)
-                        .accessibilityIdentifier("dbhScan.researchTarget")
-                    Text("True Ø (cm)")
-                        .font(ForestixType.caption)
-                        .foregroundStyle(.white.opacity(0.8))
-                    TextField("tape", text: $researchTrueCm)
-                        .keyboardType(.decimalPad)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 90)
-                        .accessibilityIdentifier("dbhScan.researchTrue")
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Text("Target")
+                            .font(ForestixType.caption)
+                            .foregroundStyle(.white.opacity(0.8))
+                        TextField("T1", text: Binding(
+                            get: { settings.researchTreeId },
+                            set: { settings.researchTreeId = $0 }))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 70)
+                            .accessibilityIdentifier("dbhScan.researchTarget")
+                        Text("True Ø (cm)")
+                            .font(ForestixType.caption)
+                            .foregroundStyle(.white.opacity(0.8))
+                        // ',' is accepted and normalised to '.' on submit.
+                        TextField("tape", text: $researchTrueCm)
+                            .keyboardType(.decimalPad)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 90)
+                            .accessibilityIdentifier("dbhScan.researchTrue")
+                    }
+                    if let warning = truthFieldWarning {
+                        TruthFieldWarning(text: warning)
+                    } else if truthQueuedForBundleID != nil {
+                        TruthFieldPending()
+                    }
+                    // Developer mode on, recording off ⇒ this session is
+                    // producing NO corpus. Say so where the truth is typed.
+                    if !settings.rawCaptureEnabled {
+                        RawCaptureOffNotice()
+                    }
                 }
             }
         }
@@ -1407,7 +1615,13 @@ public struct DBHScanScreen: View {
                 .keyboardType(.decimalPad)
                 #endif
                 .accessibilityIdentifier("dbhScan.manualInput")
-            Button("Save") { viewModel.submitManualEntry() }
+            Button("Save") {
+                // The field prompts in the ACTIVE unit system; the view model
+                // converts inches → cm on submit (it used to store the typed
+                // inches straight into diameterCm, a 2.54x corruption).
+                viewModel.manualEntryUnits = settings.unitSystem
+                viewModel.submitManualEntry()
+            }
                 .buttonStyle(.forestixProminent)
                 .accessibilityIdentifier("dbhScan.manualSave")
         }

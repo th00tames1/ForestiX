@@ -463,8 +463,23 @@ fun SettingsScreen(nav: NavController) {
                             onCheckedChange = { env.settings.setRawCaptureEnabled(it) },
                         )
                     }
-                    val rawCount = remember(storeRefresh) { RawCaptureStore.count(context) }
+                    // Developer mode on, recorder off: the AR screens show
+                    // internals but keep NOTHING for the validation corpus.
+                    if (!settings.rawCaptureEnabled) {
+                        Text(
+                            "NOT RECORDING — measurements are not being stored for replay.",
+                            style = type.caption, color = colors.confidenceWarn,
+                        )
+                    }
+                    // Readable bundles + the ones that exist on disk but whose
+                    // manifest won't parse: the latter are in NO list and no
+                    // total, so the count alone used to under-report the
+                    // corpus without a word.
+                    val rawInv = remember(storeRefresh) { RawCaptureStore.inventory(context) }
+                    val rawCount = rawInv.parsed
+                    val rawUnreadable = rawInv.unparseable
                     val rawBytes = remember(storeRefresh) { RawCaptureStore.totalSizeBytes(context) }
+                    val rawFree = remember(storeRefresh) { RawCaptureStore.freeSpaceBytes(context) }
                     FormDivider()
                     Row(
                         Modifier.fillMaxWidth().clickableNoRipple { nav.navigate(Routes.RAW_CAPTURES) },
@@ -475,8 +490,18 @@ fun SettingsScreen(nav: NavController) {
                             Icons.Filled.Inventory2, contentDescription = null,
                             tint = colors.primary, modifier = Modifier.size(18.dp))
                         Text(
-                            "Raw captures — $rawCount · ${rawBytesLabel(rawBytes)}",
-                            style = type.body, color = colors.textPrimary,
+                            "Raw captures — $rawCount" +
+                                (if (rawUnreadable > 0) " (+$rawUnreadable unreadable)" else "") +
+                                " · ${rawBytesLabel(rawBytes)} · " +
+                                "${rawBytesLabel(rawFree)} free",
+                            style = type.body,
+                            color = if (rawFree < RawCaptureStore.MIN_FREE_BYTES ||
+                                rawUnreadable > 0
+                            ) {
+                                colors.confidenceWarn
+                            } else {
+                                colors.textPrimary
+                            },
                             modifier = Modifier.weight(1f),
                         )
                         Icon(

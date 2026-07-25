@@ -147,15 +147,56 @@ public struct RawCaptureManifest: Codable, Sendable {
         public var value: Double
         public var sigma: Double
         public var tier: String
+        /// LEGACY key, kept so an existing corpus still parses. It meant two
+        /// different things on the two platforms ("fit not red" on iOS,
+        /// "operator accepted" on Android), which is exactly why the two
+        /// explicit booleans below now exist. Going forward BOTH platforms
+        /// write it as a mirror of `operatorAccepted`, so the pooled corpus
+        /// has one meaning for it.
         public var accepted: Bool
+        /// RECORD-TIME quality gate: the live fit was not red.
+        public var tierOk: Bool
+        /// The cruiser tapped Accept on this capture. False at record time;
+        /// set later by `RawCaptureStore.markAccepted`.
+        public var operatorAccepted: Bool
+        /// Depth frames stored in the bundle (DBH: burst frames; height:
+        /// base/top aim frames, 0–2).
+        public var frameCount: Int
         public var perFrame: [Double]
         enum CodingKeys: String, CodingKey {
             case value, sigma, tier, accepted
+            case tierOk = "tier_ok"
+            case operatorAccepted = "operator_accepted"
+            case frameCount = "frame_count"
             case perFrame = "per_frame"
         }
-        public init(value: Double, sigma: Double, tier: String, accepted: Bool, perFrame: [Double]) {
+        public init(value: Double, sigma: Double, tier: String, accepted: Bool,
+                    tierOk: Bool? = nil, operatorAccepted: Bool = false,
+                    frameCount: Int = 0, perFrame: [Double]) {
             self.value = value; self.sigma = sigma; self.tier = tier
-            self.accepted = accepted; self.perFrame = perFrame
+            self.accepted = accepted
+            self.tierOk = tierOk ?? accepted
+            self.operatorAccepted = operatorAccepted
+            self.frameCount = frameCount
+            self.perFrame = perFrame
+        }
+
+        /// Hand-rolled decode so pre-existing bundles (which have `accepted`
+        /// but none of the new keys) still load: `tier_ok` falls back to the
+        /// legacy `accepted`, `operator_accepted` to false, `frame_count` to
+        /// the per-frame count.
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            value = try c.decode(Double.self, forKey: .value)
+            sigma = try c.decode(Double.self, forKey: .sigma)
+            tier = try c.decode(String.self, forKey: .tier)
+            accepted = try c.decodeIfPresent(Bool.self, forKey: .accepted) ?? false
+            perFrame = try c.decodeIfPresent([Double].self, forKey: .perFrame) ?? []
+            tierOk = try c.decodeIfPresent(Bool.self, forKey: .tierOk) ?? accepted
+            operatorAccepted =
+                try c.decodeIfPresent(Bool.self, forKey: .operatorAccepted) ?? false
+            frameCount =
+                try c.decodeIfPresent(Int.self, forKey: .frameCount) ?? perFrame.count
         }
     }
 
@@ -291,12 +332,38 @@ public struct RawCaptureManifest: Codable, Sendable {
         public struct Aim: Codable, Sendable {
             public var pitchDeg: Double
             public var cameraPose: [Double] // 16
+            // Schema 2 (LOCKED, key-identical to Android): the depth frame +
+            // reference RGB grabbed at THIS aim (base or top) tap, so a height
+            // bundle can re-run depth-based height algorithms — not just the
+            // tangent method. All optional: an old (schema 1) height capture
+            // has none of these and still re-runs the tangent method exactly
+            // as before. `format` is platform-specific ("f32m" iOS / "u16mm"
+            // Android); every other key is byte-identical across platforms.
+            public var depthFile: String?   // "depth_base.bin" / "depth_top.bin"
+            public var rgbFile: String?     // "rgb_base.jpg" / "rgb_top.jpg"
+            public var width: Int?
+            public var height: Int?
+            public var format: String?      // "f32m"
+            public var fx: Double?
+            public var fy: Double?
+            public var cx: Double?
+            public var cy: Double?
             enum CodingKeys: String, CodingKey {
                 case pitchDeg = "pitch_deg"
                 case cameraPose = "camera_pose"
+                case depthFile = "depth_file"
+                case rgbFile = "rgb_file"
+                case width, height, format, fx, fy, cx, cy
             }
-            public init(pitchDeg: Double, cameraPose: [Double]) {
+            public init(pitchDeg: Double, cameraPose: [Double],
+                        depthFile: String? = nil, rgbFile: String? = nil,
+                        width: Int? = nil, height: Int? = nil, format: String? = nil,
+                        fx: Double? = nil, fy: Double? = nil,
+                        cx: Double? = nil, cy: Double? = nil) {
                 self.pitchDeg = pitchDeg; self.cameraPose = cameraPose
+                self.depthFile = depthFile; self.rgbFile = rgbFile
+                self.width = width; self.height = height; self.format = format
+                self.fx = fx; self.fy = fy; self.cx = cx; self.cy = cy
             }
         }
 
@@ -325,6 +392,42 @@ public struct RawCaptureSummary: Identifiable, Sendable {
     }
 }
 
+// MARK: - Record outcome (what the scan screen shows after a capture)
+
+/// The result of one raw-capture write attempt. A capture either RECORDS AND
+/// SAYS SO or FAILS LOUDLY — the screens render this verbatim, so a failed
+/// capture can never look like a saved one.
+public enum RawCaptureOutcome: Sendable, Equatable {
+    case saved(id: String, frames: Int)
+    case failed(reason: String)
+
+    public var isSaved: Bool { if case .saved = self { return true }; return false }
+
+    public var id: String? {
+        if case .saved(let id, _) = self { return id }
+        return nil
+    }
+}
+
+/// Errors surfaced (never swallowed) by the bundle writers.
+public enum RawCaptureError: Error, LocalizedError, Sendable {
+    case lowStorage(freeBytes: Int64)
+    case writeFailed(String)
+    case bundleMissing(String)
+
+    /// Reasons are shown verbatim after "NOT SAVED — " on the scan screens,
+    /// so they are phrased as a cause, not a sentence (Android wording).
+    public var errorDescription: String? {
+        switch self {
+        case .lowStorage(let free):
+            let s = ByteCountFormatter.string(fromByteCount: free, countStyle: .file)
+            return "Low storage (\(s) free)"
+        case .writeFailed(let m):   return m
+        case .bundleMissing(let m): return m
+        }
+    }
+}
+
 // MARK: - On-disk store
 
 public enum RawCaptureStore {
@@ -335,6 +438,42 @@ public enum RawCaptureStore {
             .appendingPathComponent("raw-captures", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
+    }
+
+    // MARK: Free space
+
+    /// Head-room a capture requires before it will even start writing. A
+    /// bundle is ~1 MB, but a phone that is this close to full will start
+    /// failing writes mid-bundle and leave half-written captures behind.
+    public static let minimumFreeBytes: Int64 = 2 * 1024 * 1024 * 1024   // 2 GB
+
+    /// Bytes available for new data on the Documents volume, or nil when the
+    /// system won't tell us.
+    public static func freeSpaceBytes() -> Int64? {
+        let values = try? rootDirectory.resourceValues(
+            forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        if let v = values?.volumeAvailableCapacityForImportantUsage { return Int64(v) }
+        let attrs = try? FileManager.default.attributesOfFileSystem(
+            forPath: rootDirectory.path)
+        return (attrs?[.systemFreeSize] as? NSNumber)?.int64Value
+    }
+
+    public static func freeSpaceText() -> String {
+        guard let free = freeSpaceBytes() else { return "free space unknown" }
+        return ByteCountFormatter.string(fromByteCount: free, countStyle: .file) + " free"
+    }
+
+    /// True when the device has less than `minimumFreeBytes` available.
+    public static func isStorageLow() -> Bool {
+        guard let free = freeSpaceBytes() else { return false }
+        return free < minimumFreeBytes
+    }
+
+    /// Throws `.lowStorage` when a capture must not start. Called by the
+    /// recorder before the first byte is written.
+    static func assertStorageAvailable() throws {
+        guard let free = freeSpaceBytes(), free < minimumFreeBytes else { return }
+        throw RawCaptureError.lowStorage(freeBytes: free)
     }
 
     public static func bundleDirectory(id: String) -> URL {
@@ -357,28 +496,125 @@ public enum RawCaptureStore {
 
     // MARK: Listing / size / delete
 
-    /// Every bundle on disk, newest first (by manifest `created_at`).
-    /// Bundles whose manifest can't be parsed are skipped.
-    public static func list() -> [RawCaptureSummary] {
+    /// WHAT IS ON DISK vs WHAT CAN BE READ.
+    ///
+    /// `list()` skips any bundle whose manifest.json is missing or won't
+    /// decode. Such a capture used to be absent from the total, from every
+    /// skip counter, from the Settings count and from the sweep footers whose
+    /// arithmetic still "balanced" — a whole vanishing class of field data
+    /// that nothing on screen could reveal. Counting the bundle DIRECTORIES
+    /// straight off the filesystem makes the gap explicit:
+    /// `unparseable = directories − parsed`.
+    ///
+    /// CROSS-PLATFORM: same definition and same wording as the Android sibling.
+    public struct Inventory: Sendable, Equatable {
+        /// Bundle directories on disk that claim to be captures.
+        public let directories: Int
+        /// Directories whose manifest decoded (== `list().count`).
+        public let parsed: Int
+        /// Captures that exist on disk but cannot be read. NEVER hidden.
+        public var unparseable: Int { max(0, directories - parsed) }
+        public init(directories: Int, parsed: Int) {
+            self.directories = directories; self.parsed = parsed
+        }
+    }
+
+    /// `list()` plus the on-disk accounting it is measured against.
+    public struct Listing: Sendable {
+        public let summaries: [RawCaptureSummary]
+        public let inventory: Inventory
+    }
+
+    /// A directory holding ONLY `pending_patch.json` is a leftover: operator
+    /// input was parked for a capture whose recorder then aborted, so nothing
+    /// will ever complete it. `savePendingPatch` no longer creates bundle
+    /// directories, so new ones can't appear — but a corpus recorded by an
+    /// earlier build can hold them, and left alone they are swept into the
+    /// export as empty bundles and counted as unreadable captures.
+    ///
+    /// They are only reaped past this grace window, so a bundle whose recorder
+    /// is still between `createDirectory` and its first payload write is never
+    /// touched (a bundle write finishes in seconds).
+    static let orphanReapGraceSeconds: TimeInterval = 300
+
+    /// Every readable bundle (newest first, by manifest `created_at`) together
+    /// with the count of bundle directories actually present.
+    ///
+    /// READ-ONLY: sidecar-only leftovers are excluded from the count but NOT
+    /// deleted here, because this runs inside SwiftUI body evaluation (the
+    /// Settings summary) and a view body must not mutate the filesystem.
+    /// Deletion is `reapOrphanBundles()`, called at explicit refresh points.
+    public static func listing() -> Listing {
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(
             at: rootDirectory,
             includingPropertiesForKeys: [.isDirectoryKey],
             options: [.skipsHiddenFiles])
-        else { return [] }
+        else { return Listing(summaries: [], inventory: Inventory(directories: 0, parsed: 0)) }
         var out: [RawCaptureSummary] = []
+        var directories = 0
         for dir in entries {
             var isDir: ObjCBool = false
             guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue
             else { continue }
             let mURL = dir.appendingPathComponent("manifest.json")
-            guard let data = try? Data(contentsOf: mURL),
+            let hasManifest = fm.fileExists(atPath: mURL.path)
+            // Only a manifest-less directory can be a sidecar leftover, so the
+            // full contents scan stays off the common path.
+            if !hasManifest, isSidecarOnly(dir: dir) { continue }
+            directories += 1
+            guard hasManifest,
+                  let data = try? Data(contentsOf: mURL),
                   let m = try? decoder().decode(RawCaptureManifest.self, from: data)
-            else { continue }
+            else { continue }        // counted in `directories`, reported as unparseable
             out.append(RawCaptureSummary(id: dir.lastPathComponent, manifest: m))
         }
         out.sort { $0.manifest.createdAt > $1.manifest.createdAt }
-        return out
+        return Listing(summaries: out,
+                       inventory: Inventory(directories: directories, parsed: out.count))
+    }
+
+    public static func list() -> [RawCaptureSummary] { listing().summaries }
+
+    /// On-disk accounting on its own (Settings summary, console footer).
+    public static func inventory() -> Inventory { listing().inventory }
+
+    /// True when the directory holds nothing but a pending sidecar and has sat
+    /// that way past the grace window — a bundle whose recorder aborted. A
+    /// directory still inside the window is treated as a live capture: it is
+    /// counted (so it can't disappear from the accounting) and never removed.
+    private static func isSidecarOnly(dir: URL) -> Bool {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: dir.path) else { return false }
+        let payload = names.filter { $0 != "pending_patch.json" && !$0.hasPrefix(".") }
+        guard payload.isEmpty, names.contains("pending_patch.json") else { return false }
+        let modified = (try? dir.resourceValues(forKeys: [.contentModificationDateKey]))?
+            .contentModificationDate ?? Date()
+        return Date().timeIntervalSince(modified) > orphanReapGraceSeconds
+    }
+
+    /// Delete sidecar-only leftovers so they aren't swept into an export as
+    /// empty bundles. Called where the operator explicitly refreshes the
+    /// raw-captures console and before an export — never from a view body.
+    /// Returns how many were removed.
+    @discardableResult
+    public static func reapOrphanBundles() -> Int {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(
+            at: rootDirectory,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles])
+        else { return 0 }
+        var removed = 0
+        for dir in entries {
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue,
+                  !fm.fileExists(atPath: dir.appendingPathComponent("manifest.json").path),
+                  isSidecarOnly(dir: dir)
+            else { continue }
+            if (try? fm.removeItem(at: dir)) != nil { removed += 1 }
+        }
+        return removed
     }
 
     public static func count() -> Int { list().count }
@@ -416,52 +652,291 @@ public enum RawCaptureStore {
         return try? decoder().decode(RawCaptureManifest.self, from: data)
     }
 
-    static func writeManifest(_ m: RawCaptureManifest, id: String) {
-        guard let data = try? encoder().encode(m) else { return }
-        try? data.write(to: manifestURL(id: id))
+    /// Write the manifest. THROWS — a swallowed failure here leaves a
+    /// depth-only bundle that looks recorded but can never be replayed.
+    static func writeManifest(_ m: RawCaptureManifest, id: String) throws {
+        do {
+            let data = try encoder().encode(m)
+            try data.write(to: manifestURL(id: id), options: .atomic)
+        } catch {
+            throw RawCaptureError.writeFailed("manifest.json — \(error.localizedDescription)")
+        }
     }
 
-    /// Set (or clear) the ground-truth value on a stored bundle. Used by the
-    /// scan screen at Accept (when the dev "True" field was filled) and by
-    /// the replay UI's truth-entry field afterwards.
+    // MARK: Ground truth + Accept (never silently dropped)
+
+    /// Serialises "the recorder finishes the manifest" against "the operator
+    /// enters a truth / taps Accept". A value entered while the bundle is
+    /// still being written can no longer land in the gap between the two.
+    private static let patchLock = NSLock()
+
+    /// Sidecar carrying operator input that arrived BEFORE the manifest
+    /// existed. The recorder folds it in under the same lock, then deletes it.
+    /// Bundle-local bookkeeping — not part of the cross-platform manifest.
+    static func pendingPatchURL(id: String) -> URL {
+        bundleDirectory(id: id).appendingPathComponent("pending_patch.json")
+    }
+
+    struct PendingPatch: Codable, Sendable {
+        var truth: RawCaptureManifest.Truth?
+        var operatorAccepted: Bool
+        enum CodingKeys: String, CodingKey {
+            case truth
+            case operatorAccepted = "operator_accepted"
+        }
+        init(truth: RawCaptureManifest.Truth? = nil, operatorAccepted: Bool = false) {
+            self.truth = truth; self.operatorAccepted = operatorAccepted
+        }
+    }
+
+    /// Caller must already hold `patchLock`.
+    private static func loadPendingPatch(id: String) -> PendingPatch? {
+        guard let data = try? Data(contentsOf: pendingPatchURL(id: id)) else { return nil }
+        return try? decoder().decode(PendingPatch.self, from: data)
+    }
+
+    /// Merge whatever is parked in the sidecar into `m` before it is written,
+    /// so no writer can clobber operator input it didn't know about.
+    /// Caller must already hold `patchLock`.
+    private static func absorbPendingPatch(into m: inout RawCaptureManifest, id: String) {
+        guard let patch = loadPendingPatch(id: id) else { return }
+        if let t = patch.truth, t.value != nil { m.truth = t }
+        if patch.operatorAccepted {
+            m.resultLive.operatorAccepted = true
+            m.resultLive.accepted = true
+        }
+    }
+
+    /// Caller must already hold `patchLock`.
+    ///
+    /// The bundle directory is NEVER created here. Creating it just to park a
+    /// sidecar for an id whose recorder had already aborted left an empty
+    /// zombie bundle that nothing reaps and the export sweeps up. The recorder
+    /// creates the directory as its FIRST action, so the only time this throws
+    /// is when the capture never started — which is exactly when the caller
+    /// must be told the value is not durable instead of being handed a
+    /// success it can clear the field on.
+    private static func savePendingPatch(_ p: PendingPatch, id: String) throws {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: bundleDirectory(id: id).path,
+                                             isDirectory: &isDir), isDir.boolValue
+        else { throw RawCaptureError.bundleMissing("capture bundle not on disk") }
+        let data = try encoder().encode(p)
+        try data.write(to: pendingPatchURL(id: id), options: .atomic)
+    }
+
+    /// Tear down a bundle whose write FAILED, and say whether operator input
+    /// died with it. The writer used to `removeItem(at: dir)` outright, which
+    /// destroyed a `pending_patch.json` the operator had already been told was
+    /// queued — the pairing vanished with nothing on screen to show for it.
+    /// Losing the pairing is acceptable; losing it INVISIBLY is not, so the
+    /// returned note is appended to the NOT SAVED reason the scan screen
+    /// renders verbatim.
+    ///
+    /// CROSS-PLATFORM: wording matched to the Android sibling.
+    static func discardFailedBundle(id: String) -> String {
+        patchLock.lock()
+        defer { patchLock.unlock() }
+        let patch = loadPendingPatch(id: id)
+        let hadTruth = patch?.truth?.value != nil
+        try? FileManager.default.removeItem(at: bundleDirectory(id: id))
+        return hadTruth ? " · typed ground truth discarded — re-enter it" : ""
+    }
+
+    /// What happened to a typed truth.
+    ///
+    /// `applied` — the value IS in a manifest on disk. This is the only state
+    ///   that may clear the operator's input.
+    /// `pending` — the value is parked in the bundle's sidecar for the
+    ///   in-flight recorder to fold in. Accepted, but NOT yet durable: if that
+    ///   recorder then fails, the bundle is torn down and the sidecar with it.
+    ///   `pending` used to report `isDurable`, so the field was cleared the
+    ///   instant the value was merely QUEUED and a later write failure took
+    ///   the hand measurement with it, silently. Callers keep the text and
+    ///   show a queued state until the capture itself reports SAVED.
+    /// `failed`  — nothing was written. Keep the text and warn.
+    public enum TruthOutcome: Sendable, Equatable {
+        case applied
+        case pending
+        case failed(String)
+
+        /// In a manifest — the ONLY state that may clear the input field.
+        public var isDurable: Bool { self == .applied }
+        /// Accepted for an in-flight write; the input stays on screen.
+        public var isQueued: Bool { self == .pending }
+    }
+
+    /// Attach a ground-truth value to a bundle. Safe at ANY point relative to
+    /// the async bundle write: an existing manifest is patched, otherwise the
+    /// value is parked in a sidecar the recorder picks up. Callers MUST NOT
+    /// clear their input field unless the returned outcome `isDurable`.
+    public static func applyTruth(id: String, value: Double) -> TruthOutcome {
+        patchLock.lock()
+        defer { patchLock.unlock() }
+        let truth = RawCaptureManifest.Truth(value: value, enteredAt: Self.isoNow())
+        if var m = loadManifest(id: id) {
+            // Carry over anything already parked (e.g. an Accept that beat the
+            // recorder) so writing the manifest can't drop it.
+            absorbPendingPatch(into: &m, id: id)
+            m.truth = truth
+            do {
+                try writeManifest(m, id: id)
+                try? FileManager.default.removeItem(at: pendingPatchURL(id: id))
+                return .applied
+            } catch {
+                return .failed(error.localizedDescription)
+            }
+        }
+        // Manifest not on disk yet — park the value beside it.
+        do {
+            var patch = loadPendingPatch(id: id) ?? PendingPatch()
+            patch.truth = truth
+            try savePendingPatch(patch, id: id)
+            return .pending
+        } catch {
+            return .failed(error.localizedDescription)
+        }
+    }
+
+    /// Clear a stored truth. EXPLICIT ONLY — an empty or unparseable input
+    /// must never reach this (that is how a good truth got wiped).
     @discardableResult
-    public static func updateTruth(id: String, value: Double?) -> Bool {
-        guard var m = loadManifest(id: id) else { return false }
-        m.truth = RawCaptureManifest.Truth(
-            value: value,
-            enteredAt: value == nil ? nil : Self.isoNow())
-        writeManifest(m, id: id)
-        return true
+    public static func clearTruth(id: String) -> TruthOutcome {
+        patchLock.lock()
+        defer { patchLock.unlock() }
+        if var patch = loadPendingPatch(id: id) {
+            patch.truth = nil
+            try? savePendingPatch(patch, id: id)
+        }
+        guard var m = loadManifest(id: id) else { return .failed("bundle not found") }
+        m.truth = RawCaptureManifest.Truth(value: nil, enteredAt: nil)
+        do {
+            try writeManifest(m, id: id)
+            return .applied
+        } catch {
+            return .failed(error.localizedDescription)
+        }
+    }
+
+    /// The recorder's LAST write: folds in any operator input that landed
+    /// while the bundle was still being written — a truth that patched the
+    /// intermediate manifest, and/or a truth/Accept parked in the sidecar —
+    /// then commits, all under the patch lock. In either interleaving nothing
+    /// the operator entered is lost.
+    static func commitManifestFoldingTruth(_ m: RawCaptureManifest, id: String) throws {
+        patchLock.lock()
+        defer { patchLock.unlock() }
+        var manifest = m
+        // (a) operator input that patched the intermediate manifest on disk
+        if let onDisk = loadManifest(id: id) {
+            if manifest.truth.value == nil, onDisk.truth.value != nil {
+                manifest.truth = onDisk.truth
+            }
+            if onDisk.resultLive.operatorAccepted {
+                manifest.resultLive.operatorAccepted = true
+                manifest.resultLive.accepted = true
+            }
+        }
+        // (b) operator input parked before any manifest existed
+        if let patch = loadPendingPatch(id: id) {
+            if let t = patch.truth, t.value != nil { manifest.truth = t }
+            if patch.operatorAccepted {
+                manifest.resultLive.operatorAccepted = true
+                manifest.resultLive.accepted = true
+            }
+        }
+        try writeManifest(manifest, id: id)
+        try? FileManager.default.removeItem(at: pendingPatchURL(id: id))
+    }
+
+    // (The old `updateTruth(id:value:)` is deliberately gone: passing nil
+    // meant "clear", so an unparseable field cleared a stored truth on the
+    // way past. Callers now say which they mean — `applyTruth` or
+    // `clearTruth` — and get a durability outcome back.)
+
+    // MARK: Operator accept
+
+    /// Mark a stored bundle as accepted BY THE CRUISER — `operator_accepted`,
+    /// explicitly distinct from the record-time `tier_ok` quality gate. Like
+    /// the truth it survives being called before the writer has finished.
+    @discardableResult
+    public static func markAccepted(id: String) -> Bool {
+        patchLock.lock()
+        defer { patchLock.unlock() }
+        if var m = loadManifest(id: id) {
+            absorbPendingPatch(into: &m, id: id)
+            m.resultLive.operatorAccepted = true
+            m.resultLive.accepted = true        // legacy mirror (older readers)
+            do {
+                try writeManifest(m, id: id)
+                try? FileManager.default.removeItem(at: pendingPatchURL(id: id))
+                return true
+            } catch {
+                return false
+            }
+        }
+        var patch = loadPendingPatch(id: id) ?? PendingPatch()
+        patch.operatorAccepted = true
+        do {
+            try savePendingPatch(patch, id: id)
+            return true
+        } catch {
+            return false
+        }
     }
 
     // MARK: Export ZIP
 
     /// Zip the entire raw-captures tree (stored, uncompressed) so the whole
-    /// research corpus can leave the device via the share sheet. Returns the
-    /// written .zip URL (in the temp dir) or nil when empty / on failure.
-    public static func exportZIP() -> URL? {
+    /// research corpus can leave the device via the share sheet.
+    ///
+    /// STREAMED, entry by entry, straight to a temp file: the previous version
+    /// read every bundle into an array of `Data` and then concatenated a
+    /// SECOND full copy into one archive `Data` — on a real corpus that is
+    /// gigabytes twice over and the app is jetsam-killed, stranding the field
+    /// data on the phone. Peak memory here is one 1 MiB chunk.
+    ///
+    /// Off the main actor (`nonisolated`, callers use a detached task) and
+    /// THROWING — an export that fails must say so, not return silently.
+    public static func exportZIPStreaming() throws -> URL {
         let fm = FileManager.default
-        guard let en = fm.enumerator(at: rootDirectory, includingPropertiesForKeys: nil)
-        else { return nil }
-        var files: [(String, Data)] = []
+        // Sidecar-only leftovers are not captures; keep them out of the corpus
+        // instead of shipping empty bundles to the analyst.
+        reapOrphanBundles()
         let rootPath = rootDirectory.path
+        guard let en = fm.enumerator(at: rootDirectory, includingPropertiesForKeys: nil)
+        else { throw RawCaptureError.bundleMissing("raw-captures folder unreadable") }
+
+        var files: [(name: String, url: URL)] = []
         for case let url as URL in en {
             var isDir: ObjCBool = false
             guard fm.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue
             else { continue }
-            guard let data = try? Data(contentsOf: url) else { continue }
-            // Relative path under raw-captures/, forward slashes for ZIP.
             var rel = url.path
             if rel.hasPrefix(rootPath) { rel.removeFirst(rootPath.count) }
             rel = rel.drop(while: { $0 == "/" }).description
-            files.append(("raw-captures/" + rel, data))
+            files.append((name: "raw-captures/" + rel, url: url))
         }
-        guard !files.isEmpty else { return nil }
-        let archive = ZipWriter.storedArchive(files: files)
+        guard !files.isEmpty else {
+            throw RawCaptureError.bundleMissing("no captures to export")
+        }
+
         let out = fm.temporaryDirectory
             .appendingPathComponent("forestix-raw-captures-\(Int(Date().timeIntervalSince1970)).zip")
-        do { try archive.write(to: out); return out } catch { return nil }
+        let writer = try ZipStreamWriter(url: out)
+        do {
+            for f in files { try writer.add(name: f.name, fileURL: f.url) }
+            try writer.finish()
+        } catch {
+            writer.cancel()
+            try? fm.removeItem(at: out)
+            throw error
+        }
+        return out
     }
+
+    // (The old nil-returning `exportZIP()` is deliberately gone: a corpus
+    // export that fails must say why, not hand back a nil the UI shrugs at.)
 
     // MARK: - Environment helpers
 
@@ -491,10 +966,17 @@ public enum RawCaptureStore {
 
     static func depthFileName(_ index: Int) -> String { "depth_\(index).bin" }
 
-    /// Row-major little-endian f32 metres (Apple platforms are LE).
-    static func writeDepth(_ depth: [Float], to url: URL) {
+    /// Row-major little-endian f32 metres (Apple platforms are LE). THROWS —
+    /// a swallowed depth-write failure leaves a manifest pointing at bytes
+    /// that aren't there, which only shows up months later on replay.
+    static func writeDepth(_ depth: [Float], to url: URL) throws {
         let data = depth.withUnsafeBufferPointer { Data(buffer: $0) }
-        try? data.write(to: url)
+        do {
+            try data.write(to: url, options: .atomic)
+        } catch {
+            throw RawCaptureError.writeFailed(
+                "\(url.lastPathComponent) — \(error.localizedDescription)")
+        }
     }
 
     static func readDepth(url: URL, count: Int) -> [Float]? {

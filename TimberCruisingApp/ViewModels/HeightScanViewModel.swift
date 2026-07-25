@@ -148,7 +148,12 @@ public final class HeightScanViewModel: ObservableObject {
     public var rawCaptureEnabled: Bool = false
     public var rawCaptureContext: RawCaptureContext = .quick
     public var rawCaptureGPS: RawCaptureGPS?
+    /// Minted synchronously when the compute finishes, BEFORE the detached
+    /// writer runs — so a truth typed and Accepted immediately always has a
+    /// bundle to attach to (see DBHScanViewModel for the same fix).
     @Published public private(set) var lastRecordedBundleID: String?
+    /// Saved / NOT-saved outcome of the most recent capture attempt.
+    @Published public private(set) var lastCaptureOutcome: RawCaptureOutcome?
 
     private var recordAnchorPose = matrix_identity_float4x4
     private var recordAnchorHitType = "unknown"
@@ -157,6 +162,14 @@ public final class HeightScanViewModel: ObservableObject {
     private var recordTopPose = matrix_identity_float4x4
     private var recordPoseSamples: [(tMs: Int, pose: simd_float4x4)] = []
     private var lastPoseSampleTime: TimeInterval = 0
+
+    // Schema-2 aim frames: the depth frame + reference RGB retained at the
+    // base-aim and top-aim taps (developer mode only), so a height bundle can
+    // later re-run depth-based height algorithms, not just tangent.
+    private var recordBaseFrame: ARDepthFrame?
+    private var recordBaseJPEG: Data?
+    private var recordTopFrame: ARDepthFrame?
+    private var recordTopJPEG: Data?
 
     // MARK: - Construction
 
@@ -230,6 +243,22 @@ public final class HeightScanViewModel: ObservableObject {
         recordPoseSamples.append((tMs: tMs, pose: frame.cameraPoseWorld))
     }
 
+    /// Retain the base-aim depth frame + reference RGB for the raw-capture
+    /// bundle (developer mode only). Grabbed at the base tap so the stored
+    /// aim frame matches the pitch the tangent method used.
+    private func retainBaseAimFrame() {
+        guard rawCaptureEnabled else { return }
+        recordBaseFrame = session.latestDepthFrame
+        recordBaseJPEG = session.currentCameraImageJPEG()
+    }
+
+    /// Retain the top-aim depth frame + reference RGB (developer mode only).
+    private func retainTopAimFrame() {
+        guard rawCaptureEnabled else { return }
+        recordTopFrame = session.latestDepthFrame
+        recordTopJPEG = session.currentCameraImageJPEG()
+    }
+
     /// Read the current ARKit camera translation in world space. Falls
     /// back through two sources in order:
     ///   1. `session.currentCameraWorldPosition` — published on every
@@ -283,6 +312,8 @@ public final class HeightScanViewModel: ObservableObject {
         // clock reference (developer mode only).
         recordPoseSamples.removeAll(keepingCapacity: true)
         lastPoseSampleTime = 0
+        recordBaseFrame = nil; recordBaseJPEG = nil
+        recordTopFrame = nil; recordTopJPEG = nil
         recordAnchorPose = session.latestDepthFrame?.cameraPoseWorld ?? matrix_identity_float4x4
         recordAnchorTime = session.latestDepthFrame?.timestamp ?? 0
         state = .anchorSet
@@ -331,6 +362,7 @@ public final class HeightScanViewModel: ObservableObject {
         standingPointWorldAtAimTop = standingPointWorld
         baseAimedWorld = aimedAtWorld
         recordBasePose = session.latestDepthFrame?.cameraPoseWorld ?? matrix_identity_float4x4
+        retainBaseAimFrame()
         state = .aimTopArmed
         rebuildSceneMarkers()
     }
@@ -347,6 +379,7 @@ public final class HeightScanViewModel: ObservableObject {
         alphaTopSampleCount = pitchBuffer.sampleCount(centeredOn: tapTime)
         topAimedWorld = aimedAtWorld
         recordTopPose = session.latestDepthFrame?.cameraPoseWorld ?? matrix_identity_float4x4
+        retainTopAimFrame()
         compute()
         rebuildSceneMarkers()
     }
@@ -464,6 +497,7 @@ public final class HeightScanViewModel: ObservableObject {
         self.alphaBaseRad = alphaBaseRad
         standingPointWorldAtAimTop = standingPointWorld
         recordBasePose = session.latestDepthFrame?.cameraPoseWorld ?? matrix_identity_float4x4
+        retainBaseAimFrame()
         state = .aimTopArmed
         rebuildSceneMarkers()
     }
@@ -475,6 +509,7 @@ public final class HeightScanViewModel: ObservableObject {
         else { return }
         self.alphaTopRad = alphaTopRad
         recordTopPose = session.latestDepthFrame?.cameraPoseWorld ?? matrix_identity_float4x4
+        retainTopAimFrame()
         compute()
         rebuildSceneMarkers()
     }
@@ -497,6 +532,12 @@ public final class HeightScanViewModel: ObservableObject {
         anchorFailureReason = nil
         recordPoseSamples.removeAll(keepingCapacity: true)
         lastPoseSampleTime = 0
+        recordBaseFrame = nil; recordBaseJPEG = nil
+        recordTopFrame = nil; recordTopJPEG = nil
+        lastCaptureOutcome = nil
+        // The previous bundle is no longer "the capture on screen" — a truth
+        // typed after a retake must not land on the abandoned measurement.
+        lastRecordedBundleID = nil
         state = .idle
         rebuildSceneMarkers()
     }
@@ -504,14 +545,24 @@ public final class HeightScanViewModel: ObservableObject {
     public func accept() {
         guard let r = result, r.confidence != .red else { return }
         state = .accepted
+        markLastBundleAccepted()
     }
 
     public func enterManualEntry() {
         state = .manualEntry
     }
 
+    /// Unit system the manual-entry field is typed in — the field prompts for
+    /// FEET under imperial, and the number used to be stored straight into
+    /// `heightM` (a 3.28x corruption). The screen keeps this in sync.
+    public var manualEntryUnits: UnitSystem = .metric
+
     public func submitManualEntry() {
-        guard let m = Float(manualHeightM), m > 1.3 else { return }
+        guard let typed = TruthInput.parsePositive(manualHeightM) else { return }
+        let metres = manualEntryUnits == .imperial
+            ? Units.feetToMeters(typed) : typed
+        guard metres > 1.3 else { return }
+        let m = Float(metres)
         result = HeightResult(
             heightM: m,
             dHm: 0,
@@ -560,6 +611,10 @@ public final class HeightScanViewModel: ObservableObject {
                                          standing: SIMD3<Float>,
                                          alphaTop: Float,
                                          alphaBase: Float) {
+        // A NEW compute supersedes the previous bundle on every path below,
+        // the failing ones included — never leave the id pointing at the
+        // PREVIOUS tree's bundle (DBH sibling carries the same guard).
+        lastRecordedBundleID = nil
         guard rawCaptureEnabled else { return }
         let anchorPose = recordAnchorPose
         let hitType = recordAnchorHitType
@@ -571,16 +626,35 @@ public final class HeightScanViewModel: ObservableObject {
         let cal = calibration
         let ctx = rawCaptureContext
         let gps = rawCaptureGPS
+        let baseFrame = recordBaseFrame
+        let baseJPEG = recordBaseJPEG
+        let topFrame = recordTopFrame
+        let topJPEG = recordTopJPEG
+        let id = UUID().uuidString
+        lastRecordedBundleID = id
+        lastCaptureOutcome = nil
         Task.detached(priority: .utility) { [weak self] in
-            let id = RawCaptureRecorder.recordHeight(
+            let outcome = RawCaptureRecorder.recordHeight(
+                id: id,
                 anchorWorld: anchor, anchorHitType: hitType,
                 anchorDistanceM: distance, anchorPose: anchorPose,
                 basePitchRad: alphaBase, baseStanding: standing,
                 baseRotationPose: basePose,
                 topPitchRad: alphaTop, topPose: topPose,
                 dHM: dh, poseSamples: samples,
-                calibration: cal, context: ctx, gps: gps)
-            await MainActor.run { self?.lastRecordedBundleID = id }
+                calibration: cal, context: ctx, gps: gps,
+                baseFrame: baseFrame, baseJPEG: baseJPEG,
+                topFrame: topFrame, topJPEG: topJPEG)
+            await MainActor.run { self?.lastCaptureOutcome = outcome }
+        }
+    }
+
+    /// Stamp `operator_accepted` on the bundle the cruiser just confirmed.
+    /// Safe before the writer has finished — the store parks it.
+    private func markLastBundleAccepted() {
+        guard rawCaptureEnabled, let id = lastRecordedBundleID else { return }
+        Task.detached(priority: .utility) {
+            _ = RawCaptureStore.markAccepted(id: id)
         }
     }
 

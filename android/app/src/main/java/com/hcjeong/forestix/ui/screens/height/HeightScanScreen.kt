@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -49,10 +50,13 @@ import com.hcjeong.forestix.ar.ArSessionHub
 import com.hcjeong.forestix.ar.MarkerShape
 import com.hcjeong.forestix.ar.Vec3
 import com.hcjeong.forestix.common.MeasurementFormatter
+import com.hcjeong.forestix.common.TruthInput
 import com.hcjeong.forestix.common.UnitSystem
+import com.hcjeong.forestix.common.Units
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
 import com.hcjeong.forestix.data.ResearchLog
+import com.hcjeong.forestix.sensors.ArDepthFrame
 import com.hcjeong.forestix.sensors.ConfidenceTier
 import com.hcjeong.forestix.sensors.HeightEstimator
 import com.hcjeong.forestix.sensors.HeightMethod
@@ -71,13 +75,20 @@ import com.hcjeong.forestix.ui.screens.MeasureShutterBar
 import com.hcjeong.forestix.ui.screens.MeasureStatusPanel
 import com.hcjeong.forestix.ui.screens.MeasureTopChrome
 import com.hcjeong.forestix.ui.screens.MeasureValuePill
+import com.hcjeong.forestix.ui.screens.RawCaptureBadge
+import com.hcjeong.forestix.ui.screens.RawCaptureOffNotice
+import com.hcjeong.forestix.ui.screens.RawCaptureStatus
+import com.hcjeong.forestix.ui.screens.RawCaptureStrings
 import com.hcjeong.forestix.ui.screens.ResearchFieldsRow
+import com.hcjeong.forestix.ui.screens.TruthFieldNote
+import com.hcjeong.forestix.ui.screens.TruthFieldWarning
 import com.hcjeong.forestix.ui.screens.ScanPlotMiniMap
 import com.hcjeong.forestix.ui.screens.scanPlotMiniMapVisible
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixProminentButton
 import com.hcjeong.forestix.ui.theme.ForestixWhiteButton
 import kotlinx.coroutines.delay
+import java.io.File
 import java.util.Locale
 import kotlin.math.abs
 
@@ -92,6 +103,11 @@ private enum class CrownStep { NONE, LEFT, RIGHT, TOP, BOTTOM, DONE }
 /// detected GROUND plane 12–44 m out and the walk-off readout started at
 /// that phantom distance.
 private const val ANCHOR_MAX_M = 4.0f
+
+/// Hard cap on the raw-capture 5 Hz pose trail (iOS parity): ~2 minutes of
+/// walk-off. Without it a session parked on the aim stage grew the manifest
+/// without bound.
+private const val MAX_POSE_SAMPLES = 600
 
 @Composable
 fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
@@ -166,11 +182,90 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     var anchorHitType by remember { mutableStateOf("unknown") }
     var basePose by remember { mutableStateOf<FloatArray?>(null) }
     var topPose by remember { mutableStateOf<FloatArray?>(null) }
+    // Schema-2 height capture: the AR depth frame + a reference RGB JPEG
+    // grabbed AT the base tap and the top tap (same u16-mm depth + ~80% JPEG
+    // the DBH path stores), so future height algorithms can be re-run over the
+    // aim pixels. Populated only while armed; the tangent replay never reads
+    // them, so an old bundle without them still re-runs unchanged.
+    var baseAimFrame by remember { mutableStateOf<ArDepthFrame?>(null) }
+    var topAimFrame by remember { mutableStateOf<ArDepthFrame?>(null) }
+    var baseAimRgb by remember { mutableStateOf<ByteArray?>(null) }
+    var topAimRgb by remember { mutableStateOf<ByteArray?>(null) }
+    // Keep the shared controller's raw-depth arm on for the whole height
+    // session while recording, so acquireDepthFrame() at the base/top tap
+    // carries the native u16 grid to serialize. Nothing else in the height
+    // flow calls acquireDepthFrame, so there is no per-frame cost.
+    // REF-COUNTED arm (see ArSessionHub.armRawDepth): in the "Full
+    // measurement" DBH→Height chain navigation-compose composes THIS screen
+    // before the DBH screen disposes, and the old
+    // `onDispose { controller.captureRawDepth = false }` on the outgoing DBH
+    // screen therefore disarmed the process-wide controller for the whole
+    // height session — every chained height bundle lost its base/top aim
+    // frames while still self-checking "pass".
+    DisposableEffect(rawCaptureArmed) {
+        val token = if (rawCaptureArmed) ArSessionHub.armRawDepth() else null
+        onDispose { token?.let { ArSessionHub.releaseRawDepth(it) } }
+    }
+    // Grab the current AR depth frame + reference RGB JPEG bytes at an aim
+    // moment. Returns (frame, jpegBytes) — either may be null; recordHeight
+    // degrades gracefully. The JPEG is written to a throwaway cache file (the
+    // only sink captureCameraJpeg offers), read into memory, then deleted — so
+    // nothing lingers and there is no temp-file lifecycle to race.
+    fun captureAim(): Pair<ArDepthFrame?, ByteArray?> {
+        if (!rawCaptureArmed) return null to null
+        val frame = controller.acquireDepthFrame()
+        val rgb = try {
+            val tmp = File.createTempFile("height_aim_", ".jpg", context.cacheDir)
+            val bytes = if (controller.captureCameraJpeg(tmp)) tmp.readBytes() else null
+            tmp.delete()
+            bytes
+        } catch (_: Throwable) { null }
+        return frame to rgb
+    }
     val poseSamples = remember { mutableListOf<RawCaptureStore.PoseSample>() }
     var anchorTimeMs by remember { mutableStateOf(0L) }
-    // The most-recent compute's stored bundle id — flipped to accepted when
-    // the cruiser taps Accept (iOS markAccepted flow).
+    // The most-recent compute's stored bundle id — minted SYNCHRONOUSLY at
+    // compute time (not when the async write finishes), so an Accept tapped
+    // immediately still attaches its ground truth. Flipped to
+    // operator_accepted on Accept (iOS markAccepted flow).
     var lastRawCaptureId by remember { mutableStateOf<String?>(null) }
+    // Visible outcome of the last capture attempt (saved / NOT saved).
+    var rawCaptureStatus by remember { mutableStateOf<RawCaptureStatus?>(null) }
+    var rawStatusEpoch by remember { mutableStateOf(0) }
+    // Reason the last compute failed to record (null = it saved). Accept
+    // reads it so a typed truth is never attached to — or silently lost
+    // with — a bundle that isn't there.
+    var lastCaptureFailure by remember { mutableStateOf<String?>(null) }
+    // Why the typed ground truth could not be stored; shown under the truth
+    // field, and the field is NOT cleared while it is set.
+    var truthSaveFailure by remember { mutableStateOf<String?>(null) }
+    // A truth QUEUED against a bundle whose write hasn't finished. It is not
+    // in any manifest yet, so the field keeps the text and shows a pending
+    // note; the recorder resolves it — folded in (clear the field) or lost
+    // with a failed write (hand the number back). Round 1 cleared the field on
+    // a merely-queued result, so a write that then failed erased the pairing.
+    var truthPending by remember { mutableStateOf<String?>(null) }
+    var truthPendingId by remember { mutableStateOf<String?>(null) }
+    var truthPendingText by remember { mutableStateOf("") }
+    // Storage headroom, re-read on entry and after every capture: below the
+    // guard the recorder refuses to write, so the REC pill says LOW STORAGE
+    // before a whole plot is lost.
+    var storageLow by remember { mutableStateOf(false) }
+    LaunchedEffect(rawCaptureArmed, rawStatusEpoch) {
+        storageLow = rawCaptureArmed &&
+            RawCaptureStore.freeSpaceBytes(context) < RawCaptureStore.MIN_FREE_BYTES
+    }
+    LaunchedEffect(rawStatusEpoch) {
+        // A success fades; a FAILURE stays up until the next attempt.
+        if (rawCaptureStatus?.saved == true) {
+            delay(4_000)
+            rawCaptureStatus = null
+        }
+    }
+    fun postRawStatus(status: RawCaptureStatus) {
+        rawCaptureStatus = status
+        rawStatusEpoch += 1
+    }
 
     var crownStep by remember { mutableStateOf(CrownStep.NONE) }
     var cL by remember { mutableStateOf<Vec3?>(null) }
@@ -197,8 +292,13 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
         if (!rawCaptureArmed) return@LaunchedEffect
         while (stage == Stage.WALKING || stage == Stage.AIM_BASE || stage == Stage.AIM_TOP) {
             controller.currentCameraPose()?.let {
-                poseSamples.add(RawCaptureStore.PoseSample(
-                    System.currentTimeMillis() - anchorTimeMs, it))
+                // Cap the trail like iOS (~600 samples = 2 min at 5 Hz):
+                // unbounded, a session left standing on the aim stage grew
+                // the manifest without limit.
+                if (poseSamples.size < MAX_POSE_SAMPLES) {
+                    poseSamples.add(RawCaptureStore.PoseSample(
+                        System.currentTimeMillis() - anchorTimeMs, it))
+                }
             }
             delay(200)
         }
@@ -279,10 +379,25 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     // from disk for the reproducibility self-check.
     fun recordRawHeight(r: HeightResult, anchor: Vec3, aBase: Float, aTop: Float) {
         if (!rawCaptureArmed) return
-        val aPose = anchorPose ?: return
-        val bPoseRaw = basePose ?: return
-        val tPose = topPose ?: return
-        val standing = standingLocked ?: return
+        // A missing pose used to abort recording in silence. Say which piece
+        // is absent — the operator can retake immediately instead of
+        // discovering the hole back at the desk.
+        val aPose = anchorPose
+        val bPoseRaw = basePose
+        val tPose = topPose
+        val standing = standingLocked
+        if (aPose == null || bPoseRaw == null || tPose == null || standing == null) {
+            val missing = listOfNotNull(
+                if (aPose == null) "anchor" else null,
+                if (bPoseRaw == null) "base" else null,
+                if (tPose == null) "top" else null,
+                if (standing == null) "standing" else null,
+            ).joinToString("/")
+            lastCaptureFailure = "no $missing pose (tracking lost)"
+            postRawStatus(RawCaptureStatus(
+                RawCaptureStrings.notSaved(lastCaptureFailure), false))
+            return
+        }
         // Pin the base camera_pose's translation column to the EXACT standing
         // point the live estimator used, so the replay's standing == live and
         // the self-check is exact (iOS parity).
@@ -300,9 +415,23 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
         val samples = poseSamples.toList()
         val hitType = anchorHitType
         val dist = anchorInitialDistM ?: 0f
+        // Schema-2 aim captures (base/top depth + RGB). Snapshot the temp files
+        // now and hand them off; recordHeight copies them into the bundle.
+        val baseAim = RawCaptureStore.HeightAim(baseAimFrame, baseAimRgb)
+        val topAim = RawCaptureStore.HeightAim(topAimFrame, topAimRgb)
+        // Mint the id NOW so Accept has something to attach truth to even if
+        // the write is still running (RawCaptureStore queues edits per id).
+        val id = RawCaptureStore.newBundleId()
+        lastRawCaptureId = id
+        // Aim depth frames are the schema-2 payload; when the recorder was
+        // disarmed mid-session (or ARCore gave no depth) they are absent and
+        // the bundle silently degrades to schema-1 — flag that, it is exactly
+        // the failure the DBH→Height chain used to produce.
+        val aimsMissing = baseAimFrame?.rawDepthMm == null || topAimFrame?.rawDepthMm == null
         scope.launch {
-            val id = RawCaptureStore.recordHeight(
+            val outcome = RawCaptureStore.recordHeight(
                 context = context,
+                id = id,
                 anchorWorld = anchor, anchorHitType = hitType,
                 anchorDistanceM = dist, anchorPose = aPose,
                 basePitchDeg = (aBase * 180f / Math.PI.toFloat()), basePose = bPose,
@@ -311,8 +440,49 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 poseSamples = samples,
                 unitSystem = if (settings.unitSystem == UnitSystem.METRIC) "metric" else "imperial",
                 ctx = ctx,
+                baseAim = baseAim,
+                topAim = topAim,
             )
-            if (id != null) lastRawCaptureId = id
+            if (outcome.saved) {
+                lastCaptureFailure = null
+                postRawStatus(
+                    if (aimsMissing) {
+                        // Bundle is on disk but degraded: the tangent replay
+                        // still works, future depth-based height methods
+                        // cannot. Warning colour, never a plain "saved".
+                        RawCaptureStatus("Raw capture saved · NO aim depth frames", false)
+                    } else {
+                        RawCaptureStatus(RawCaptureStrings.SAVED, true)
+                    },
+                )
+                // A truth typed mid-write is DURABLE only now that the
+                // manifest carries it — this is the only place the field may
+                // be cleared for a queued value.
+                if (outcome.queuedTruthSaved != null && truthPendingId == id) {
+                    if (researchTrueM == truthPendingText) researchTrueM = ""
+                    truthPending = null
+                    truthPendingId = null
+                }
+            } else {
+                if (lastRawCaptureId == id) lastRawCaptureId = null
+                lastCaptureFailure = outcome.error ?: "write failed"
+                postRawStatus(RawCaptureStatus(RawCaptureStrings.notSaved(outcome.error), false))
+                // A truth queued against this bundle died with it. Losing the
+                // pairing is acceptable; losing it INVISIBLY is not — put the
+                // number back on screen (or at least name it) and say so.
+                outcome.queuedTruthLost?.let { lost ->
+                    val text = TruthInput.text(lost)
+                    val restore = TruthInput.normalized(researchTrueM).isEmpty()
+                    if (restore) researchTrueM = text
+                    // Only retire the pending marker if it is THIS capture's —
+                    // a later capture may already own it.
+                    if (truthPendingId == id) {
+                        truthPending = null
+                        truthPendingId = null
+                    }
+                    truthSaveFailure = RawCaptureStrings.truthLost(text, restore)
+                }
+            }
         }
     }
 
@@ -349,7 +519,11 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 // Lock the standing pose on the first aim; both angles must
                 // come from the same spot (the §7.2 formula assumes it).
                 failure = null; alphaBase = a; standingLocked = s
-                if (rawCaptureArmed) basePose = controller.currentCameraPose()
+                if (rawCaptureArmed) {
+                    basePose = controller.currentCameraPose()
+                    val (fr, rgb) = captureAim()
+                    baseAimFrame = fr; baseAimRgb = rgb
+                }
                 val dh = kotlin.math.sqrt((s.x - anchor.x) * (s.x - anchor.x) + (s.z - anchor.z) * (s.z - anchor.z))
                 baseMarker = Vec3(anchor.x, s.y + dh * kotlin.math.tan(a), anchor.z)
                 stage = Stage.AIM_TOP
@@ -361,7 +535,11 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                     failure = "AR tracking not ready — try again."; return
                 }
                 failure = null; alphaTop = aTop
-                if (rawCaptureArmed) topPose = controller.currentCameraPose()
+                if (rawCaptureArmed) {
+                    topPose = controller.currentCameraPose()
+                    val (fr, rgb) = captureAim()
+                    topAimFrame = fr; topAimRgb = rgb
+                }
                 val dh = kotlin.math.sqrt((standing.x - anchor.x) * (standing.x - anchor.x) + (standing.z - anchor.z) * (standing.z - anchor.z))
                 topMarker = Vec3(anchor.x, standing.y + dh * kotlin.math.tan(aTop), anchor.z)
                 val r = HeightEstimator.estimate(
@@ -388,8 +566,13 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
         walkedLive = 0f; anchorAimOk = false
         result = null; failure = null; resetCrown()
         // Drop the raw-capture geometry so a fresh measurement starts clean.
+        // Releasing the bundle id too: a discarded compute must not collect
+        // the NEXT reading's accept flag or ground truth.
+        lastRawCaptureId = null
+        lastCaptureFailure = null; truthSaveFailure = null
         anchorPose = null; basePose = null; topPose = null
         anchorHitType = "unknown"; poseSamples.clear()
+        baseAimFrame = null; topAimFrame = null; baseAimRgb = null; topAimRgb = null
     }
 
     // Accept the result: record the entry (photo + GPS + metadata), fold in
@@ -402,17 +585,64 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
         // the DBH leg created, then the chain returns to the cruise map —
         // no quick-history entry, no continuation sheet.
         val cruise = CruiseCapture.target
-        // Snapshot the dev "True H" field now — the developer block below
-        // clears it synchronously before the async launch runs.
-        val rawTrue = researchTrueM.toDoubleOrNull()?.takeIf { it > 0 }
+        // Snapshot the typed "True H" BEFORE anything async: the truth must
+        // survive regardless of whether the bundle write has finished (the
+        // store queues edits against the synchronously-minted id) — the old
+        // code wrote truth only when the write had already completed, so a
+        // fast Accept dropped it and the field was cleared anyway.
+        val truthTextAtAccept = researchTrueM
+        val rawTrue = TruthInput.parsePositive(truthTextAtAccept)
+        truthSaveFailure = null
         scope.launch {
-            // Flip the just-recorded raw-capture bundle to accepted (iOS
-            // markAccepted parity) + fold in the field-entered ground truth.
-            lastRawCaptureId?.let { rid ->
-                RawCaptureStore.markAccepted(context, rid)
-                if (rawTrue != null) RawCaptureStore.setTruth(context, rid, rawTrue)
-                lastRawCaptureId = null
+            // Stamp operator_accepted on the bundle this Accept confirms
+            // (safe while the writer is still running — the store parks it).
+            val rid = lastRawCaptureId
+            if (rid != null) RawCaptureStore.markAccepted(context, rid)
+            // Attach the typed ground truth. The input is cleared ONLY once
+            // the value is durable (in the manifest, or queued for the
+            // in-flight writer); on any failure the text stays put.
+            if (settings.developerMode && TruthInput.normalized(truthTextAtAccept).isNotEmpty()) {
+                when {
+                    rawTrue == null -> truthSaveFailure = RawCaptureStrings.TRUTH_NOT_A_NUMBER
+                    // Not recording: the value still went to the research CSV.
+                    !rawCaptureArmed -> if (researchTrueM == truthTextAtAccept) researchTrueM = ""
+                    // The capture itself failed — keep the typed value on
+                    // screen rather than attach it to a bundle that isn't there.
+                    lastCaptureFailure != null -> truthSaveFailure =
+                        RawCaptureStrings.truthCaptureFailed(lastCaptureFailure)
+                    rid == null -> if (researchTrueM == truthTextAtAccept) researchTrueM = ""
+                    else -> {
+                        // Claim the pending slot BEFORE the store call: the
+                        // recorder's own completion handler reads it to decide
+                        // whether the queued value landed.
+                        truthPendingId = rid
+                        truthPendingText = truthTextAtAccept
+                        when (RawCaptureStore.setTruth(context, rid, rawTrue)) {
+                            // Durable — the manifest already exists.
+                            RawCaptureStore.TruthWrite.SAVED -> {
+                                truthPending = null
+                                truthPendingId = null
+                                if (researchTrueM == truthTextAtAccept) researchTrueM = ""
+                            }
+                            // QUEUED is NOT durable: the value lives only in
+                            // the store's pending queue until the in-flight
+                            // write folds it in, so the text stays put.
+                            // (If the writer already resolved it, truthPendingId
+                            // is null again and there is nothing to announce.)
+                            RawCaptureStore.TruthWrite.QUEUED ->
+                                if (truthPendingId == rid) {
+                                    truthPending = RawCaptureStrings.TRUTH_PENDING
+                                }
+                            RawCaptureStore.TruthWrite.FAILED -> {
+                                truthPending = null
+                                truthPendingId = null
+                                truthSaveFailure = RawCaptureStrings.TRUTH_WRITE_FAILED
+                            }
+                        }
+                    }
+                }
             }
+            lastRawCaptureId = null
             // Chrome-less snapshot: hide the 2D chrome, give Compose one
             // committed frame, capture, then restore.
             val photo = activity?.let {
@@ -481,12 +711,13 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
             if (settings.researchTreeId.isNotEmpty()) {
                 fields["tree_id"] = settings.researchTreeId  // repeat auto-filled by record()
             }
-            researchTrueM.toDoubleOrNull()?.takeIf { it > 0 }?.let { t ->
+            rawTrue?.let { t ->
                 fields["true_value"] = String.format(Locale.US, "%.2f", t)
                 fields["error"] = String.format(Locale.US, "%.2f", r.heightM - t)
             }
             ResearchLog.record(context, fields)
-            researchTrueM = ""
+            // The field is NOT cleared here any more — the accept coroutine
+            // above clears it only once the truth is durably applied.
         }
     }
 
@@ -539,12 +770,35 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
         val miniMapUp = scanPlotMiniMapVisible()
         if (!hidingChromeForCapture) ScanPlotMiniMap()
 
+        // Raw-capture recording state: a persistent REC pill while the
+        // recorder is armed, and the last attempt's outcome (saved / NOT
+        // saved) directly under it.
+        // REC reads the hub's REAL ref-counted arm, never the Settings wish:
+        // after an arm clobber the pill must not keep claiming it is
+        // recording. `requested` turns that mismatch into a loud NOT
+        // RECORDING instead of silence.
+        if (!hidingChromeForCapture) {
+            RawCaptureBadge(
+                armed = ArSessionHub.rawDepthArmed,
+                requested = rawCaptureArmed,
+                storageLow = storageLow,
+                status = rawCaptureStatus,
+            )
+        }
+
         if (settings.developerMode && !hidingChromeForCapture) {
             DevHud(
                 "HEIGHT",
                 listOfNotNull(
                     "depth" to (if (controller.supportsDepth) "ARCore✓" else "plane"),
                     "track" to (if (controller.trackingOk()) "OK" else "…"),
+                    // Recorder state — an explicit warning when developer
+                    // mode is on but nothing is being kept for the corpus.
+                    "rec" to when {
+                        !settings.rawCaptureEnabled -> "OFF — not recording"
+                        ArSessionHub.rawDepthArmed -> "armed"
+                        else -> "off"
+                    },
                     "stage" to stage.name,
                     // What the last centre raycast landed on (type + range) —
                     // the anchor sphere is placed exactly at this hit, so a
@@ -662,7 +916,7 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 ) {
                     OutlinedTextField(
                         value = manualText,
-                        onValueChange = { manualText = it.filter { c -> c.isDigit() || c == '.' } },
+                        onValueChange = { manualText = TruthInput.sanitize(it) },
                         placeholder = {
                             Text(
                                 if (settings.unitSystem == UnitSystem.METRIC) "Height in metres"
@@ -673,11 +927,20 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         modifier = Modifier.weight(1f),
                     )
+                    // The field is typed in the ACTIVE unit system: under
+                    // imperial the prompt says feet, so the number must be
+                    // converted before it lands in heightM (and before the
+                    // 1.3 m gate, which is a METRE threshold).
+                    val typed = TruthInput.parse(manualText)?.toFloat()
+                    val typedM = typed?.let {
+                        if (settings.unitSystem == UnitSystem.METRIC) it
+                        else Units.feetToMeters(it.toDouble()).toFloat()
+                    }
                     ForestixProminentButton(
                         "Save",
-                        enabled = (manualText.toFloatOrNull() ?: 0f) > 1.3f,
+                        enabled = (typedM ?: 0f) > 1.3f,
                     ) {
-                        val m = manualText.toFloatOrNull()
+                        val m = typedM
                         if (m != null && m > 1.3f) {
                             val r = HeightResult(
                                 heightM = m, dHm = 0f, alphaTopRad = 0f, alphaBaseRad = 0f,
@@ -687,6 +950,10 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                             result = r
                             failure = null
                             manualOpen = false
+                            // A typed height is NOT any recorded compute's
+                            // reading — release the bundle id so the accept
+                            // can't mark an unrelated capture as accepted.
+                            lastRawCaptureId = null
                             // iOS submitManualEntry goes straight to
                             // .accepted — record and continue.
                             acceptResult(r)
@@ -732,15 +999,32 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                         color = Color.White.copy(alpha = 0.55f),
                     )
                     if (settings.developerMode) {
-                        ResearchFieldsRow(
-                            targetValue = settings.researchTreeId,
-                            onTargetChange = { env.settings.setResearchTreeId(it.trim()) },
-                            targetPlaceholder = "T1",
-                            trueLabel = "True H (m)",
-                            trueValue = researchTrueM,
-                            onTrueChange = { researchTrueM = it.filter { c -> c.isDigit() || c == '.' } },
-                            truePlaceholder = "clinometer",
-                        )
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            ResearchFieldsRow(
+                                targetValue = settings.researchTreeId,
+                                onTargetChange = { env.settings.setResearchTreeId(it.trim()) },
+                                targetPlaceholder = "T1",
+                                trueLabel = "True H (m)",
+                                trueValue = researchTrueM,
+                                // ',' is NORMALISED to '.', never deleted — the
+                                // old digit filter turned "12,5" into "125".
+                                onTrueChange = { researchTrueM = TruthInput.sanitize(it) },
+                                truePlaceholder = "clinometer",
+                            )
+                            // Live warning under the truth field: a failed save,
+                            // unparseable text, or an implausible value.
+                            (truthSaveFailure
+                                ?: TruthInput.fieldWarning(researchTrueM, isHeight = true))
+                                ?.let { w -> TruthFieldWarning(w) }
+                            // Queued-but-not-yet-durable truth: the field was
+                            // deliberately NOT cleared, so say why.
+                            if (truthSaveFailure == null) {
+                                truthPending?.let { TruthFieldNote(it) }
+                            }
+                            // Developer mode on but the recorder off: nothing
+                            // is being kept for the corpus.
+                            if (!settings.rawCaptureEnabled) RawCaptureOffNotice()
+                        }
                     }
                 }
             }

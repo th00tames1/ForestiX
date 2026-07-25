@@ -380,7 +380,7 @@ public struct SettingsScreen: View {
                 ) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Record raw captures")
-                        Text("Save each scan's raw depth and pose data so measurements can be re-run offline. Off by default.")
+                        Text("Store raw depth, intrinsics, poses and calibration for each measurement so the estimator can be re-run offline. Off by default.")
                             .font(ForestixType.caption)
                             .foregroundStyle(ForestixPalette.textSecondary)
                     }
@@ -404,12 +404,23 @@ public struct SettingsScreen: View {
         }
     }
 
-    /// "N · X MB" summary for the raw-captures row.
+    /// "N · X MB · Y GB free" summary for the raw-captures row. Free space is
+    /// shown here because a phone that runs out mid-plot stops recording, and
+    /// there is no recovering the trees already walked past.
+    ///
+    /// The count is READABLE bundles. When the folder holds bundles whose
+    /// manifest won't decode, the gap is called out here too ("N · 2 unreadable
+    /// · …") — that class used to be missing from this number with nothing on
+    /// screen to say so.
     private var rawCaptureSummaryText: String {
-        let n = RawCaptureStore.count()
+        let inv = RawCaptureStore.inventory()
         let bytes = RawCaptureStore.totalSizeBytes()
         let size = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
-        return "\(n) · \(size)"
+        var bits = ["\(inv.parsed)"]
+        if inv.unparseable > 0 { bits.append("\(inv.unparseable) unreadable") }
+        bits.append(size)
+        bits.append(RawCaptureStore.freeSpaceText())
+        return bits.joined(separator: " · ")
     }
 
     // MARK: - 6. Advanced

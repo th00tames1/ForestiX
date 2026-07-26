@@ -35,11 +35,19 @@ public final class TileCache: @unchecked Sendable {
         public let urlTemplate: String       // e.g. https://tile.example/{z}/{x}/{y}.png
         public let fileExtension: String     // "png", "jpg"
         public let providerId: String        // slug used as subdirectory
+        /// Headers every tile request for this provider must carry.
+        /// OpenStreetMap's tile usage policy REQUIRES an identifying
+        /// User-Agent and blocks anonymous clients, so the provider —
+        /// not the call site — owns the header set. Empty for providers
+        /// that ask for nothing (Esri, user templates).
+        public let requestHeaders: [String: String]
 
-        public init(urlTemplate: String, fileExtension: String, providerId: String) {
+        public init(urlTemplate: String, fileExtension: String, providerId: String,
+                    requestHeaders: [String: String] = [:]) {
             self.urlTemplate = urlTemplate
             self.fileExtension = fileExtension
             self.providerId = providerId
+            self.requestHeaders = requestHeaders
         }
 
         /// Build a provider id from a URL template if the caller doesn't have
@@ -113,6 +121,19 @@ public final class TileCache: @unchecked Sendable {
             .replacingOccurrences(of: "{x}", with: "\(key.x)")
             .replacingOccurrences(of: "{y}", with: "\(key.y)")
         return URL(string: resolved)
+    }
+
+    /// The request every fetch path must use — the interactive loader AND
+    /// the offline downloader. Carries the provider's required headers
+    /// (OSM's identifying User-Agent), so no call site can accidentally
+    /// hit a policy-gated provider anonymously.
+    public func request(for key: Key) -> URLRequest? {
+        guard let url = resolvedURL(for: key) else { return nil }
+        var request = URLRequest(url: url)
+        for (field, value) in provider.requestHeaders {
+            request.setValue(value, forHTTPHeaderField: field)
+        }
+        return request
     }
 
     // MARK: - Cache stats

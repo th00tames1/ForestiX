@@ -12,9 +12,11 @@
 // so with no custom template configured the map was a blank surface with a
 // "No basemap tiles configured — set a tile URL in Settings" notice — which
 // read as "you must configure tiles before you can draw a boundary". It now
-// uses the same two-layer stack as basemap/MapView: the built-in Esri World
-// Imagery satellite base, with the user's template drawn OVER it when they
-// have one. Drawing needs a project, never a tile template.
+// uses the same two-layer stack as basemap/MapView: the built-in base the
+// Map settings sheet selected (tc.mapType — satellite = Esri, normal =
+// OpenStreetMap), with the user's template drawn OVER it when they have one
+// and have acknowledged its provider policy. Drawing needs a project, never
+// a tile template.
 
 package com.hcjeong.forestix.ui.screens.project
 
@@ -228,11 +230,15 @@ private fun StratumDrawContent(nav: NavController, project: Project) {
                     centeredOnFix = true    // user took control; stop auto-centring
                 },
                 vertices = vertices,
-                // OVERLAY only — the satellite base underneath is built in,
-                // and the user's template rides on top when they have one
-                // (and have not hidden it). Same semantics as the map home.
-                overlayURLTemplate = settings.tileURLTemplate
-                    ?.takeIf { settings.overlayEnabled },
+                // Base = the built-in layer the Map settings sheet selected
+                // (satellite / normal); the user's template rides on top as
+                // an OVERLAY, honouring its toggle AND the provider
+                // usage-policy acknowledgement. Identical semantics to the
+                // map home (MapHomeScreen).
+                mapType = settings.mapType,
+                overlayURLTemplate = settings.tileURLTemplate?.takeIf {
+                    settings.overlayEnabled && settings.providerUsageAcknowledged
+                },
                 onTap = { viewModel.addVertex(it) },
                 modifier = Modifier.fillMaxWidth().weight(1f),
             )
@@ -319,8 +325,11 @@ private fun StratumDrawMap(
     camZoom: Double,
     onCamera: (CoordinateConversions.LatLon, Double) -> Unit,
     vertices: List<CoordinateConversions.LatLon>,
-    /// Optional user tile template drawn ON TOP of the built-in satellite
-    /// base; null/blank = satellite only (still perfectly drawable).
+    /// Persisted `tc.mapType` — picks the built-in base layer, exactly as
+    /// on the map home ("normal" = OpenStreetMap, else Esri satellite).
+    mapType: String,
+    /// Optional user tile template drawn ON TOP of the built-in base;
+    /// null/blank = base only (still perfectly drawable).
     overlayURLTemplate: String?,
     onTap: (CoordinateConversions.LatLon) -> Unit,
     modifier: Modifier = Modifier,
@@ -336,9 +345,12 @@ private fun StratumDrawMap(
     val centerState = rememberUpdatedState(camCenter)
     val zoomState = rememberUpdatedState(camZoom)
 
-    // Base = built-in Esri World Imagery (zero setup); overlay = the user's
-    // template when present. Identical layering to basemap/MapView.
-    val baseFetcher = remember { TileFetcher.esriWorldImagery(context) }
+    // Base = the built-in provider the user's map type selects (satellite =
+    // Esri, normal = OpenStreetMap) — one factory, TileFetcher.builtInBase,
+    // so this map can never disagree with the map home about which base is
+    // in use. Overlay = the user's template when present. Identical
+    // layering to basemap/MapView.
+    val baseFetcher = remember(mapType) { TileFetcher.builtInBase(context, mapType) }
     val overlayFetcher = remember(overlayURLTemplate) {
         overlayURLTemplate?.takeIf { it.isNotBlank() }?.let { TileFetcher(context, it) }
     }
@@ -467,11 +479,12 @@ private fun StratumDrawMap(
             }
         }
 
-        // Imagery credit for the built-in satellite base — required by the
-        // Esri terms, so it stays on wherever that base is drawn (same badge
+        // Credit for the built-in base — required by the Esri imagery terms
+        // and by the ODbL for OpenStreetMap, so it stays on wherever a
+        // built-in base is drawn and SWITCHES with the map type (same badge
         // as basemap/MapView).
         Text(
-            TileFetcher.ESRI_WORLD_IMAGERY_ATTRIBUTION,
+            TileFetcher.builtInAttribution(mapType),
             style = Forestix.type.dataSmall.copy(fontSize = 9.sp),
             color = Color.White.copy(alpha = 0.78f),
             modifier = Modifier

@@ -137,6 +137,50 @@ public struct BasemapGuideLine: Equatable {
     }
 }
 
+// MARK: - Survey boundary overlay
+
+/// The imported survey boundary, ready to draw.
+///
+/// DRAW ORDER (fixed, and the reason this is a Canvas layer rather than
+/// a SwiftUI overlay): satellite-or-OSM base → the user's XYZ overlay →
+/// THIS → the app's own content (plot pins, planned plots, the location
+/// marker) which lives in views stacked above the Canvas. Being inside
+/// the Canvas is also what makes the boundary hit-test-transparent: the
+/// pins sit in front of it, so a tap meant for a pin can never land on
+/// the boundary.
+public struct BasemapBoundaryOverlay: Equatable {
+
+    public struct Shape: Equatable {
+        public enum Kind: Equatable, Sendable { case polygon, line, point }
+        public let kind: Kind
+        /// Polygon: ring 0 outer, the rest holes. Line: one path.
+        /// Point: one ring holding one position.
+        public let rings: [[CoordinateConversions.LatLon]]
+
+        public init(kind: Kind, rings: [[CoordinateConversions.LatLon]]) {
+            self.kind = kind
+            self.rings = rings
+        }
+    }
+
+    public let shapes: [Shape]
+    /// Outline colour. Drawn over a dark halo so it reads on BOTH bases
+    /// (bright imagery and pale OSM street tiles).
+    public let stroke: Color
+    /// Semi-transparent polygon fill.
+    public let fill: Color
+    public let lineWidth: Double
+
+    public init(shapes: [Shape], stroke: Color, fill: Color, lineWidth: Double = 2.5) {
+        self.shapes = shapes
+        self.stroke = stroke
+        self.fill = fill
+        self.lineWidth = lineWidth
+    }
+
+    public var isEmpty: Bool { shapes.isEmpty }
+}
+
 // MARK: - Style
 
 /// Colours injected by the host — the Basemap target cannot see the app
@@ -175,6 +219,43 @@ public struct BasemapStyle {
     }
 }
 
+// MARK: - Base map type
+
+/// Which built-in BASE layer the map draws under everything else,
+/// persisted as `tc.mapType`. Raw values are the on-disk contract shared
+/// with the Android sibling — do not rename them.
+///
+/// Default is `.satellite`: that is what the app has always drawn, so an
+/// existing install sees no change.
+public enum BasemapType: String, CaseIterable, Sendable {
+    case satellite
+    case normal
+
+    public static let `default`: BasemapType = .satellite
+
+    public static func fromRaw(_ raw: String?) -> BasemapType {
+        guard let raw, let v = BasemapType(rawValue: raw) else { return .default }
+        return v
+    }
+
+    /// The tile provider this type draws.
+    public var provider: TileCache.ProviderConfig {
+        switch self {
+        case .satellite: return .esriWorldImagery
+        case .normal:    return .openStreetMap
+        }
+    }
+
+    /// Attribution the provider's terms require on screen. Swaps with the
+    /// layer — it is a licence obligation, not decoration.
+    public var attribution: String {
+        switch self {
+        case .satellite: return TileCache.ProviderConfig.esriWorldImageryAttribution
+        case .normal:    return TileCache.ProviderConfig.openStreetMapAttribution
+        }
+    }
+}
+
 // MARK: - Provider convenience
 
 public extension TileCache.ProviderConfig {
@@ -190,6 +271,32 @@ public extension TileCache.ProviderConfig {
     /// Attribution the imagery terms require on screen whenever the
     /// built-in base layer can draw.
     static let esriWorldImageryAttribution = "Esri · Maxar · Earthstar Geographics"
+
+    /// Built-in STREET base layer — OpenStreetMap standard tiles. The
+    /// alternative to satellite for cruisers working roads, parcels and
+    /// labelled features rather than canopy.
+    ///
+    /// OSM's tile usage policy REQUIRES an identifying User-Agent (the
+    /// operators block anonymous / generic clients outright), so the
+    /// header rides on the provider config and every fetch path picks it
+    /// up through `TileCache.request(for:)`.
+    static let openStreetMap = TileCache.ProviderConfig(
+        urlTemplate: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+        fileExtension: "png",
+        providerId: "osm-standard",
+        requestHeaders: ["User-Agent": TileCache.ProviderConfig.osmUserAgent])
+
+    /// Attribution the ODbL requires on screen whenever OSM tiles draw.
+    static let openStreetMapAttribution = "© OpenStreetMap contributors"
+
+    /// Descriptive, contactable client identifier — what the OSM tile
+    /// policy asks for. Built from the app's own bundle version so a
+    /// released build identifies itself precisely.
+    static var osmUserAgent: String {
+        let version = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString")
+            as? String) ?? "1.0"
+        return "Forestix/\(version) (iOS timber-cruising app; +https://github.com/th00tames1/ForestiX)"
+    }
 
     /// Build a config from a user-pasted XYZ template (Settings). The
     /// file extension is sniffed from the template tail; unknown
@@ -287,14 +394,16 @@ final class BasemapTileLoader: ObservableObject {
         guard let cache,
               !inflight.contains(key),
               !failed.contains(key),
-              let url = cache.resolvedURL(for: key)
+              // Provider-owned request: carries OSM's required
+              // identifying User-Agent when the OSM base is selected.
+              let request = cache.request(for: key)
         else { return }
         inflight.insert(key)
         Task { [weak self] in
             var decoded: CGImage?
             var payload: Data?
             do {
-                let (data, response) = try await URLSession.shared.data(from: url)
+                let (data, response) = try await URLSession.shared.data(for: request)
                 let status = (response as? HTTPURLResponse)?.statusCode ?? 200
                 if (200..<300).contains(status), let image = Self.decode(data) {
                     decoded = image
@@ -363,6 +472,9 @@ public struct BasemapMapView: View {
     /// Optional user overlay (contour / forest-service tiles) — drawn
     /// on top of the base; transparent pixels let the imagery through.
     private let overlayTileCache: TileCache?
+    /// Imported survey boundary — drawn ABOVE both tile layers and BELOW
+    /// every app-owned marker.
+    private let boundary: BasemapBoundaryOverlay?
     private let markers: [BasemapMarker]
     private let selectedMarkerID: String?
     private let youLocation: CoordinateConversions.LatLon?
@@ -387,6 +499,7 @@ public struct BasemapMapView: View {
     public init(camera: Binding<BasemapCamera>,
                 baseTileCache: TileCache?,
                 overlayTileCache: TileCache? = nil,
+                boundary: BasemapBoundaryOverlay? = nil,
                 markers: [BasemapMarker] = [],
                 selectedMarkerID: String? = nil,
                 youLocation: CoordinateConversions.LatLon? = nil,
@@ -398,6 +511,7 @@ public struct BasemapMapView: View {
         self._camera = camera
         self.baseTileCache = baseTileCache
         self.overlayTileCache = overlayTileCache
+        self.boundary = boundary
         self.markers = markers
         self.selectedMarkerID = selectedMarkerID
         self.youLocation = youLocation
@@ -431,6 +545,13 @@ public struct BasemapMapView: View {
                     // (contours etc.) composite over the imagery.
                     for tile in overlayTiles {
                         context.draw(tile.image, in: tile.rect)
+                    }
+                    // Imported survey boundary — above BOTH tile layers,
+                    // below every app-owned marker (those are views
+                    // stacked on this Canvas, so they also take the taps).
+                    if let boundary, !boundary.isEmpty {
+                        Self.drawBoundary(boundary, camera: camera,
+                                          size: canvasSize, context: &context)
                     }
                     // Navigation guide — dashed you→plot line under the
                     // pins (they are separate views above the Canvas).
@@ -616,6 +737,108 @@ public struct BasemapMapView: View {
             path.move(to: CGPoint(x: 0, y: sy))
             path.addLine(to: CGPoint(x: size.width, y: sy))
         }
+        return path
+    }
+
+    // MARK: Survey boundary
+
+    /// Project + stroke the imported boundary. Polygons get a
+    /// semi-transparent fill plus an outline; lines get the outline only;
+    /// points get a small ringed dot. Everything is drawn over a dark
+    /// halo so the boundary reads on both bases — a thin bright line
+    /// disappears into pale OSM street tiles, and a thin dark line
+    /// disappears into shaded canopy on the satellite base.
+    private static func drawBoundary(_ boundary: BasemapBoundaryOverlay,
+                                     camera: BasemapCamera,
+                                     size: CGSize,
+                                     context: inout GraphicsContext) {
+        // A shape entirely outside a generously padded viewport is
+        // skipped before any of its vertices are projected.
+        let pad = 64.0
+        let viewport = CGRect(x: -pad, y: -pad,
+                              width: size.width + pad * 2,
+                              height: size.height + pad * 2)
+
+        var areaPath = Path()
+        var outlinePath = Path()
+        var dots: [CGPoint] = []
+
+        for shape in boundary.shapes {
+            switch shape.kind {
+            case .point:
+                guard let p = shape.rings.first?.first else { continue }
+                let pt = screenPoint(latitude: p.latitude, longitude: p.longitude,
+                                     camera: camera, viewportSize: size)
+                if viewport.contains(pt) { dots.append(pt) }
+            case .polygon, .line:
+                let closed = (shape.kind == .polygon)
+                for ring in shape.rings {
+                    guard let sub = projectedPath(ring, camera: camera,
+                                                  size: size, viewport: viewport,
+                                                  closed: closed)
+                    else { continue }
+                    if closed { areaPath.addPath(sub) }
+                    outlinePath.addPath(sub)
+                }
+            }
+        }
+
+        if !areaPath.isEmpty {
+            // Even-odd so inner rings punch holes in the outer ring.
+            context.fill(areaPath, with: .color(boundary.fill), style: FillStyle(eoFill: true))
+        }
+        if !outlinePath.isEmpty {
+            context.stroke(outlinePath, with: .color(.black.opacity(0.38)),
+                           style: StrokeStyle(lineWidth: boundary.lineWidth + 2.2,
+                                              lineCap: .round, lineJoin: .round))
+            context.stroke(outlinePath, with: .color(boundary.stroke),
+                           style: StrokeStyle(lineWidth: boundary.lineWidth,
+                                              lineCap: .round, lineJoin: .round))
+        }
+        for dot in dots {
+            let r = boundary.lineWidth + 2.0
+            let rect = CGRect(x: dot.x - r, y: dot.y - r, width: r * 2, height: r * 2)
+            context.fill(Path(ellipseIn: rect), with: .color(boundary.fill))
+            context.stroke(Path(ellipseIn: rect), with: .color(.black.opacity(0.38)),
+                           lineWidth: boundary.lineWidth + 1.6)
+            context.stroke(Path(ellipseIn: rect), with: .color(boundary.stroke),
+                           lineWidth: boundary.lineWidth)
+        }
+    }
+
+    /// Project one ring/path, dropping vertices that land within ~0.6 pt
+    /// of the previous one (a 40 000-vertex cadastral boundary zoomed out
+    /// otherwise re-strokes the same pixels thousands of times). Returns
+    /// nil when the whole ring sits off-screen.
+    private static func projectedPath(_ ring: [CoordinateConversions.LatLon],
+                                      camera: BasemapCamera,
+                                      size: CGSize,
+                                      viewport: CGRect,
+                                      closed: Bool) -> Path? {
+        guard ring.count >= 2 else { return nil }
+        var points: [CGPoint] = []
+        points.reserveCapacity(ring.count)
+        var minX = Double.infinity, maxX = -Double.infinity
+        var minY = Double.infinity, maxY = -Double.infinity
+        var last: CGPoint?
+        for p in ring {
+            let pt = screenPoint(latitude: p.latitude, longitude: p.longitude,
+                                 camera: camera, viewportSize: size)
+            minX = min(minX, pt.x); maxX = max(maxX, pt.x)
+            minY = min(minY, pt.y); maxY = max(maxY, pt.y)
+            if let last, abs(pt.x - last.x) < 0.6, abs(pt.y - last.y) < 0.6 { continue }
+            points.append(pt)
+            last = pt
+        }
+        let bounds = CGRect(x: minX, y: minY,
+                            width: max(maxX - minX, 0.01),
+                            height: max(maxY - minY, 0.01))
+        guard bounds.intersects(viewport) else { return nil }
+        guard points.count >= 2 else { return nil }
+        var path = Path()
+        path.move(to: points[0])
+        for pt in points.dropFirst() { path.addLine(to: pt) }
+        if closed { path.closeSubpath() }
         return path
     }
 

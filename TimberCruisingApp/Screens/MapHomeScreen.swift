@@ -22,14 +22,16 @@
 // capture button. Tapping a pin slides up a peek card — the map never
 // disappears under the cruiser.
 //
-// Tiles come in two layers: a built-in satellite base (Esri World
-// Imagery — imagery out of the box whenever online, attribution label
-// bottom-left) and an optional user XYZ overlay from Settings (contour /
-// forest-service tiles) drawn on top. The canvas colour + faint grid
-// only show through where a base tile is neither cached nor fetchable.
-// The layers sheet handles both layers' status, the overlay on/off
-// toggle, "download visible area" (OfflineBasemap.planJob per layer →
-// sequential fetch into TileCache) and cache stats/clearing.
+// Tiles come in layers, bottom to top: the built-in BASE (satellite —
+// Esri World Imagery — or normal — OpenStreetMap standard — chosen in
+// Map settings › Map type and persisted as `tc.mapType`), then the
+// optional user XYZ overlay from Settings (contour / forest-service
+// tiles), then the imported survey boundary, then this screen's own
+// pins/rings/you-dot. The canvas colour + faint grid only show through
+// where a base tile is neither cached nor fetchable. The bottom-left
+// attribution label swaps with the base layer — it is a licence term,
+// not decoration. MapSettingsSheet (Screens/MapSettingsSheet.swift)
+// owns map type, boundary import/remove and offline download.
 //
 // Measurement flows are fullScreenCovers — Accept persists into QuickMeasureHistory
 // with the ScanMetadata GPS fix + auto-photo, which is exactly what
@@ -45,13 +47,17 @@ import Basemap
 
 // MARK: - Shared tile-cache factories
 
-/// Built-in satellite base layer — always available, no setup and no
-/// acknowledgement gate (it ships with the app). nil only if the cache
-/// directory itself cannot be created.
+/// Built-in base layer — always available, no setup and no
+/// acknowledgement gate (it ships with the app). WHICH base is decided
+/// by Map settings › Map type (`tc.mapType`): satellite (Esri World
+/// Imagery, the default) or normal (OpenStreetMap standard). Each
+/// provider gets its own cache subdirectory, so switching type never
+/// mixes or discards the other type's downloaded tiles.
+/// nil only if the cache directory itself cannot be created.
 @MainActor
-fileprivate func makeBaseTileCache() -> TileCache? {
+func makeBaseTileCache(settings: AppSettings) -> TileCache? {
     try? TileCache(rootURL: TileCache.defaultBasemapRoot(),
-                   provider: .esriWorldImagery)
+                   provider: settings.mapType.provider)
 }
 
 /// User overlay layer from Settings, drawn ON TOP of the satellite
@@ -60,7 +66,7 @@ fileprivate func makeBaseTileCache() -> TileCache? {
 /// applied at the call sites, not here, so the sheet can still show
 /// status + cache stats for a toggled-off overlay.)
 @MainActor
-fileprivate func makeOverlayTileCache(settings: AppSettings) -> TileCache? {
+func makeOverlayTileCache(settings: AppSettings) -> TileCache? {
     guard settings.providerUsageAcknowledged,
           let template = settings.tileURLTemplate
     else { return nil }
@@ -83,6 +89,10 @@ public struct MapHomeScreen: View {
     /// `startUp()`, released in `onDisappear`. Shared by both modes —
     /// cruise plot-centre stamping uses it too.
     @ObservedObject var location = LocationService.shared
+
+    /// The one imported survey boundary — shared with Map settings, so
+    /// an import lands on the map the moment the sheet closes.
+    @ObservedObject var surveyBoundary = SurveyBoundaryModel.shared
 
     /// Peavy Hall (OSU College of Forestry) fallback — used only when
     /// there is no fix and no located reading.
@@ -108,11 +118,8 @@ public struct MapHomeScreen: View {
     /// First-run region picker — hosted here (the app's root screen) so
     /// it auto-presents right after the splash hands off.
     @State private var presentingRegionPicker = false
-    /// Settings presented from the layers sheet's "Open Settings" row —
-    /// launched from the sheet's onDismiss so the two presentations
-    /// don't fight (same two-step pattern as `pendingChoice`).
+    /// Settings, opened from the gear in the top-right chrome.
     @State private var presentingSettings = false
-    @State private var pendingOpenSettings = false
     @State private var photoViewer: PhotoViewerContext?
     /// Quick-peek "Edit this tree" — the entry the compact edit sheet is
     /// editing (the pin's primary reading). nil = sheet closed.
@@ -284,6 +291,13 @@ public struct MapHomeScreen: View {
                 recenterOnFirstFix(snap)
                 if isCruiseMode { checkNavArrival(snap) }
             }
+            // A boundary imported from Map settings frames itself — a
+            // boundary you cannot see is indistinguishable from one that
+            // failed to import. Only fires on a NEW import: the stored
+            // one is already loaded before this screen appears.
+            .onChange(of: surveyBoundary.boundary?.importedAt) { _, _ in
+                frameImportedBoundary()
+            }
             .task {
                 // First-launch UX: auto-present the region picker once,
                 // after the splash has settled — but never re-prompt a
@@ -345,18 +359,9 @@ public struct MapHomeScreen: View {
             } message: { warning in
                 Text("Your current GPS position is about \(warning.distanceM) m from this tree's pin. Measure it anyway?")
             }
-            .sheet(isPresented: $presentingLayers, onDismiss: {
-                if pendingOpenSettings {
-                    pendingOpenSettings = false
-                    presentingSettings = true
-                }
-            }) {
-                BasemapLayersSheet(visibleRegion: visibleRegion,
-                                   onOpenSettings: {
-                    pendingOpenSettings = true
-                    presentingLayers = false
-                })
-                .environmentObject(settings)
+            .sheet(isPresented: $presentingLayers) {
+                MapSettingsSheet(visibleRegion: visibleRegion)
+                    .environmentObject(settings)
             }
             // ANY dismissal — Skip, row pick, or a plain swipe-down —
             // stamps regionPickerSeen so the picker never nags again.
@@ -408,8 +413,26 @@ public struct MapHomeScreen: View {
 
     // MARK: Map + pins
 
+    /// Move the camera onto a freshly imported boundary. The zoom is
+    /// derived from the boundary's lat/lon span against a typical phone
+    /// viewport — precise enough to put the whole stand on screen, and
+    /// clamped to the renderer's fetchable range.
+    private func frameImportedBoundary() {
+        guard let box = surveyBoundary.boundary?.boundingBox else { return }
+        let lonSpan = max(box.maxLon - box.minLon, 1e-6)
+        let latSpan = max(box.maxLat - box.minLat, 1e-6)
+        let zoomX = log2(360.0 / lonSpan * (360.0 / 256.0))
+        let zoomY = log2(180.0 / latSpan * (640.0 / 256.0))
+        let zoom = min(max(min(zoomX, zoomY) - 0.4, 3), BasemapMapView.maxTileZoom)
+        withAnimation(.easeOut(duration: 0.35)) {
+            camera = BasemapCamera(latitude: (box.minLat + box.maxLat) / 2,
+                                   longitude: (box.minLon + box.maxLon) / 2,
+                                   zoom: zoom)
+        }
+    }
+
     private var baseTileCache: TileCache? {
-        makeBaseTileCache()
+        makeBaseTileCache(settings: settings)
     }
 
     private var overlayTileCache: TileCache? {
@@ -424,6 +447,10 @@ public struct MapHomeScreen: View {
             camera: $camera,
             baseTileCache: baseTileCache,
             overlayTileCache: overlayTileCache,
+            // Imported survey boundary — above both tile layers, below
+            // every pin/ring/you-dot (those are views over the Canvas,
+            // so the boundary can never intercept a tap meant for one).
+            boundary: surveyBoundary.overlay,
             markers: isCruiseMode ? cruiseMarkers : markers,
             selectedMarkerID: selectedPinID,
             youLocation: location.latestSnapshot.map {
@@ -613,7 +640,7 @@ public struct MapHomeScreen: View {
                 chromeButtonGlyph("square.stack.3d.up")
             }
             .buttonStyle(MapPressableStyle())
-            .accessibilityLabel("Basemap layers")
+            .accessibilityLabel("Map settings")
             .accessibilityIdentifier("mapHome.layers")
 
             // Settings — rightmost of the top-right group, both modes.
@@ -744,12 +771,14 @@ public struct MapHomeScreen: View {
         age < 60 ? "\(Int(age)) s ago" : "\(Int(age / 60)) min ago"
     }
 
-    /// Esri imagery attribution — required by the terms whenever the
-    /// built-in base layer is on screen, so it is always on. Fixed
-    /// colours on purpose: it sits on satellite imagery, not on an app
-    /// surface (same rationale as the photo viewer's dark chrome).
+    /// Base-layer attribution — a licence obligation, not decoration, so
+    /// it is always on AND it SWAPS with the selected map type: Esri ·
+    /// Maxar · Earthstar Geographics for satellite, "© OpenStreetMap
+    /// contributors" (ODbL) for normal. Fixed colours on purpose: it sits
+    /// on map tiles, not on an app surface (same rationale as the photo
+    /// viewer's dark chrome).
     private var attributionBadge: some View {
-        Text(TileCache.ProviderConfig.esriWorldImageryAttribution)
+        Text(settings.mapType.attribution)
             .font(.system(size: 9, design: .monospaced))
             .foregroundStyle(Color.white.opacity(0.78))
             .padding(.horizontal, 6)
@@ -1923,336 +1952,5 @@ private struct MeasurePhotoDetailView: View {
         guard let lat = context.entry.latitude,
               let lon = context.entry.longitude else { return "—" }
         return String(format: "%.5f, %.5f", lat, lon)
-    }
-}
-
-// MARK: - Layers / offline sheet
-
-/// Basemap status + offline download. Two layer rows — the built-in
-/// satellite base and the user overlay with its on/off toggle — then
-/// "Download visible area" (planJob PER LAYER over the last visible
-/// bbox at the spec zoom range, fetched as one sequential queue with
-/// combined progress + cancel), per-layer cache stats, clear.
-private struct BasemapLayersSheet: View {
-
-    @EnvironmentObject private var settings: AppSettings
-    @Environment(\.dismiss) private var dismiss
-
-    let visibleRegion: BasemapRegion?
-    /// "Open Settings" tapped while no overlay template is configured —
-    /// the host dismisses this sheet and presents Settings.
-    let onOpenSettings: () -> Void
-
-    @StateObject private var downloader = OfflineTileDownloader()
-    @State private var baseStats: TileCache.Stats?
-    @State private var overlayStats: TileCache.Stats?
-
-    private var baseCache: TileCache? {
-        makeBaseTileCache()
-    }
-
-    /// Overlay cache regardless of the on/off toggle — the sheet still
-    /// shows status + cache stats for a toggled-off overlay.
-    private var overlayCache: TileCache? {
-        makeOverlayTileCache(settings: settings)
-    }
-
-    /// What "Download visible area" fetches: base always, overlay only
-    /// when configured AND switched on.
-    private var downloadCaches: [TileCache] {
-        var out: [TileCache] = []
-        if let baseCache { out.append(baseCache) }
-        if settings.overlayEnabled, let overlayCache { out.append(overlayCache) }
-        return out
-    }
-
-    var body: some View {
-        NavigationStack {
-            List {
-                layersSection
-                downloadSection
-                cacheSection
-            }
-            .navigationTitle("Basemap")
-            #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { dismiss() }
-                }
-            }
-        }
-        // Fully expanded from the start — field report: opening at
-        // .medium hid half the sheet and needed a scroll-up.
-        .presentationDetents([.large])
-        .presentationDragIndicator(.visible)
-        .onAppear { refreshStats() }
-        .onChange(of: downloader.phase) { _, phase in
-            if case .finished = phase { refreshStats() }
-        }
-    }
-
-    private var layersSection: some View {
-        Section {
-            // Base layer — built-in, nothing to configure.
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Satellite base · built-in")
-                    .font(ForestixType.bodyBold)
-                    .foregroundStyle(ForestixPalette.textPrimary)
-                Text("Esri World Imagery — fetched as you pan while online, kept on disk for offline use.")
-                    .font(ForestixType.caption)
-                    .foregroundStyle(ForestixPalette.textSecondary)
-            }
-
-            // Overlay layer — the user template from Settings.
-            Toggle(isOn: Binding(get: { settings.overlayEnabled },
-                                 set: { settings.overlayEnabled = $0 })) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Overlay · your template")
-                        .font(ForestixType.bodyBold)
-                        .foregroundStyle(ForestixPalette.textPrimary)
-                    if let template = settings.tileURLTemplate {
-                        Text(settings.tileProviderLabel ?? template)
-                            .font(ForestixType.dataSmall)
-                            .foregroundStyle(ForestixPalette.textTertiary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    } else {
-                        Text("None set — add an XYZ template in Settings → Basemap tiles.")
-                            .font(ForestixType.caption)
-                            .foregroundStyle(ForestixPalette.textSecondary)
-                    }
-                }
-            }
-            .disabled(settings.tileURLTemplate == nil)
-            .accessibilityIdentifier("mapHome.layers.overlayToggle")
-
-            if settings.tileURLTemplate == nil {
-                Button("Open Settings") { onOpenSettings() }
-                    .accessibilityIdentifier("mapHome.layers.openSettings")
-            }
-
-            if settings.tileURLTemplate != nil,
-               !settings.providerUsageAcknowledged {
-                Text("Overlay tiles stay hidden until you confirm the provider's usage policy in Settings → Basemap tiles.")
-                    .font(ForestixType.caption)
-                    .foregroundStyle(ForestixPalette.confidenceWarn)
-            }
-        } header: {
-            Text("Layers")
-        } footer: {
-            Text("The satellite base draws first; the overlay (contour or forest-service tiles) draws on top of it.")
-        }
-    }
-
-    @ViewBuilder
-    private var downloadSection: some View {
-        Section {
-            switch downloader.phase {
-            case .idle:
-                downloadButton
-            case let .running(done, total, failed):
-                VStack(alignment: .leading, spacing: ForestixSpace.xxs) {
-                    ProgressView(value: Double(done), total: Double(max(total, 1)))
-                        .tint(ForestixPalette.primary)
-                    HStack {
-                        Text("\(done) / \(total) tiles")
-                            .font(ForestixType.dataSmall)
-                            .foregroundStyle(ForestixPalette.textSecondary)
-                        if failed > 0 {
-                            Text("· \(failed) failed")
-                                .font(ForestixType.dataSmall)
-                                .foregroundStyle(ForestixPalette.confidenceWarn)
-                        }
-                    }
-                }
-                Button("Cancel download", role: .destructive) {
-                    downloader.cancel()
-                }
-                .accessibilityIdentifier("mapHome.layers.cancelDownload")
-            case let .tooLarge(planned):
-                Text("Area too large (\(planned) tiles) — zoom in and try again.")
-                    .font(ForestixType.caption)
-                    .foregroundStyle(ForestixPalette.confidenceWarn)
-                downloadButton
-            case let .finished(fetched, failed, alreadyCached, cancelled):
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(cancelled
-                         ? "Cancelled — kept \(fetched) downloaded tiles."
-                         : fetched == 0 && failed == 0
-                             ? "Nothing to fetch — area already cached"
-                             : "Downloaded \(fetched) tiles")
-                        .font(ForestixType.bodyBold)
-                        .foregroundStyle(ForestixPalette.textPrimary)
-                    Text(finishDetail(failed: failed, alreadyCached: alreadyCached))
-                        .font(ForestixType.caption)
-                        .foregroundStyle(failed > 0
-                            ? ForestixPalette.confidenceWarn
-                            : ForestixPalette.textSecondary)
-                }
-                downloadButton
-            }
-        } header: {
-            Text("Offline download")
-        } footer: {
-            Text("Downloads the visible area (base plus any overlay) for offline use. Max \(OfflineTileDownloader.maxPlannedTiles) tiles — zoom in if the area is too large.")
-        }
-    }
-
-    private var downloadButton: some View {
-        Button {
-            guard let region = visibleRegion else { return }
-            let caches = downloadCaches
-            guard !caches.isEmpty else { return }
-            downloader.start(region: region, caches: caches)
-        } label: {
-            Label("Download visible area", systemImage: "arrow.down.circle")
-        }
-        .disabled(downloadCaches.isEmpty || visibleRegion == nil)
-        .accessibilityIdentifier("mapHome.layers.download")
-    }
-
-    private func finishDetail(failed: Int, alreadyCached: Int) -> String {
-        var parts: [String] = []
-        if failed > 0 { parts.append("\(failed) failed — try again in coverage") }
-        parts.append("\(alreadyCached) were already cached")
-        return parts.joined(separator: " · ")
-    }
-
-    private var cacheSection: some View {
-        Section("Cache") {
-            cacheRow("Satellite base", stats: baseStats)
-            if overlayCache != nil {
-                cacheRow("Overlay", stats: overlayStats)
-            }
-            Button("Clear cache", role: .destructive) {
-                try? baseCache?.clear()
-                try? overlayCache?.clear()
-                refreshStats()
-            }
-            .disabled(storedTileCount == 0)
-            .accessibilityIdentifier("mapHome.layers.clearCache")
-        }
-    }
-
-    private func cacheRow(_ label: String, stats: TileCache.Stats?) -> some View {
-        HStack {
-            Text(label)
-                .foregroundStyle(ForestixPalette.textPrimary)
-            Spacer()
-            Text(statsText(stats))
-                .font(ForestixType.dataSmall)
-                .foregroundStyle(ForestixPalette.textSecondary)
-        }
-    }
-
-    private var storedTileCount: Int {
-        (baseStats?.fileCount ?? 0) + (overlayStats?.fileCount ?? 0)
-    }
-
-    private func statsText(_ stats: TileCache.Stats?) -> String {
-        guard let stats else { return "—" }
-        let bytes = ByteCountFormatter.string(fromByteCount: stats.byteCount,
-                                              countStyle: .file)
-        return "\(stats.fileCount) tiles · \(bytes)"
-    }
-
-    private func refreshStats() {
-        baseStats = baseCache?.stats()
-        overlayStats = overlayCache?.stats()
-    }
-}
-
-// MARK: - Offline tile downloader
-
-/// Sequential URLSession fetch of a planned OfflineBasemap job into the
-/// TileCache. Sequential on purpose: field devices are usually on weak
-/// cellular, and providers' usage policies frown on parallel hammering.
-@MainActor
-private final class OfflineTileDownloader: ObservableObject {
-
-    /// Refuse plans bigger than this — a zoomed-out viewport at zoom
-    /// 12–17 explodes into millions of tiles; field areas stay well
-    /// under the cap. Applied to the COMBINED base + overlay count.
-    static let maxPlannedTiles = 4_000
-
-    enum Phase: Equatable {
-        case idle
-        case running(done: Int, total: Int, failed: Int)
-        /// Plan exceeded `maxPlannedTiles` — nothing was fetched.
-        case tooLarge(planned: Int)
-        case finished(fetched: Int, failed: Int, alreadyCached: Int,
-                      cancelled: Bool)
-    }
-
-    @Published private(set) var phase: Phase = .idle
-    private var task: Task<Void, Never>?
-
-    var isRunning: Bool {
-        if case .running = phase { return true }
-        return false
-    }
-
-    func start(region: BasemapRegion, caches: [TileCache]) {
-        guard !isRunning, !caches.isEmpty else { return }
-        // Visible bbox exactly (no AOI buffer) at the spec zoom range,
-        // planned per layer, fetched as ONE combined sequential queue so
-        // the progress line reads x / (base + overlay).
-        var queue: [(cache: TileCache, key: TileCache.Key)] = []
-        var cachedCount = 0
-        for cache in caches {
-            let job = OfflineBasemap.planJob(
-                aoiRings: [region.ring],
-                zoomRange: OfflineBasemap.defaultZoomRange,
-                bufferMeters: 0,
-                cache: cache)
-            cachedCount += job.alreadyCached
-            queue += job.tiles.map { (cache, $0) }
-        }
-        let work = queue
-        let alreadyCached = cachedCount
-        guard !work.isEmpty else {
-            phase = .finished(fetched: 0, failed: 0,
-                              alreadyCached: alreadyCached,
-                              cancelled: false)
-            return
-        }
-        guard work.count <= Self.maxPlannedTiles else {
-            phase = .tooLarge(planned: work.count)
-            return
-        }
-        phase = .running(done: 0, total: work.count, failed: 0)
-        task = Task { [weak self] in
-            var done = 0
-            var failed = 0
-            var cancelled = false
-            for item in work {
-                if Task.isCancelled { cancelled = true; break }
-                do {
-                    guard let url = item.cache.resolvedURL(for: item.key) else {
-                        throw URLError(.badURL)
-                    }
-                    let (data, response) = try await URLSession.shared.data(from: url)
-                    let status = (response as? HTTPURLResponse)?.statusCode ?? 200
-                    guard (200..<300).contains(status) else {
-                        throw URLError(.badServerResponse)
-                    }
-                    try item.cache.store(data, for: item.key)
-                } catch {
-                    failed += 1
-                }
-                done += 1
-                self?.phase = .running(done: done, total: work.count,
-                                       failed: failed)
-            }
-            self?.phase = .finished(fetched: done - failed, failed: failed,
-                                    alreadyCached: alreadyCached,
-                                    cancelled: cancelled)
-        }
-    }
-
-    func cancel() {
-        task?.cancel()
     }
 }

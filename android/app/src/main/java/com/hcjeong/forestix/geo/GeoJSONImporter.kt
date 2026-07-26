@@ -3,6 +3,14 @@
 // FeatureCollection. Accepts Polygon and MultiPolygon geometries in WGS84
 // decimal degrees.
 //
+// "WGS84 decimal degrees" is CHECKED, not assumed: a legacy `crs` member
+// naming anything else is refused (see `GeoJSONCRS`) wherever it sits —
+// root, Feature, geometry or GeometryCollection member, since GeoJSON 2008
+// permitted it on any object — and every position is range-checked.
+// Without the first of those a Korea 2000 stratum — degrees, in range —
+// sizes and places every plot in it a few hundred metres off, and the
+// acreage it reports looks entirely reasonable.
+//
 // If a feature's properties supply `name` or `areaAcres`, those values are
 // used; otherwise the importer falls back to a sensible name and computes
 // area via the spherical-excess formula (§8 "spherical excess area" note in
@@ -34,6 +42,11 @@ sealed class GeoJSONImportError(val description: String) : Exception(description
     class UnsupportedGeometry(reason: String) : GeoJSONImportError("Unsupported geometry: $reason")
     class EmptyFeatureCollection : GeoJSONImportError("GeoJSON has no features")
     class InvalidCoordinate(reason: String) : GeoJSONImportError("Invalid coordinate: $reason")
+
+    /// The legacy `crs` member named a CRS that is not WGS84. Word for
+    /// word the sentence the boundary importer uses — a stratum drawn in
+    /// the wrong CRS is wrong for exactly the same reason a boundary is.
+    class NotWGS84(found: String) : GeoJSONImportError(BoundaryCRS.notWgs84(found))
 }
 
 /// A polygon resolved from one GeoJSON feature. `rings` stores the outer ring
@@ -65,6 +78,13 @@ object GeoJSONImporter {
         }
         val obj = any as? JsonObject
             ?: throw GeoJSONImportError.MalformedJSON("Top-level JSON is not an object")
+        // The legacy `crs` member, read on this path for the same reason
+        // the boundary importer reads it: a Korea 2000 stratum is degrees
+        // and in range, so the per-position range check below cannot tell
+        // it apart from a WGS84 one. Read at EVERY level — root, Feature,
+        // geometry, GeometryCollection member — because GeoJSON 2008
+        // permitted the member on any object and exporters used that.
+        GeoJSONCRS.rejectionAnywhere(obj)?.let { throw GeoJSONImportError.NotWGS84(it) }
 
         val result = collect(obj, inheritedProperties = JsonObject(emptyMap()))
         if (result.isEmpty()) throw GeoJSONImportError.EmptyFeatureCollection()

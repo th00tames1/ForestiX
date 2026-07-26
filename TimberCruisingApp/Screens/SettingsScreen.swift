@@ -507,7 +507,7 @@ public struct SettingsScreen: View {
     private var basemapSection: some View {
         Section(
             header: Text("Basemap tiles"),
-            footer: Text("Paste an XYZ template ({z}/{x}/{y}) to draw contour or forest-service tiles over the satellite base. It shows only after you confirm the provider's usage policy below.")
+            footer: Text("Paste an XYZ template ({z}/{x}/{y}) to draw contour or forest-service tiles over the map base. It shows only after you confirm the provider's usage policy below.")
         ) {
             TextField("https://tile.example.com/{z}/{x}/{y}.png", text: $tileTemplate)
                 #if os(iOS)
@@ -530,6 +530,14 @@ public struct SettingsScreen: View {
                 .onChange(of: providerAck) { _, new in
                     settings.providerUsageAcknowledged = new
                 }
+            // Draw/hide the configured overlay. It lives here beside the
+            // template it belongs to — the map's own sheet keeps to map
+            // type, boundary and offline maps.
+            Toggle("Show overlay on the map",
+                   isOn: Binding(get: { settings.overlayEnabled },
+                                 set: { settings.overlayEnabled = $0 }))
+                .disabled(settings.tileURLTemplate == nil)
+                .accessibilityIdentifier("settings.overlayEnabled")
         }
     }
 

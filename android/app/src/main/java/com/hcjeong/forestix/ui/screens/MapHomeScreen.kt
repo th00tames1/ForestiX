@@ -114,6 +114,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
+import com.hcjeong.forestix.basemap.MapBoundaryOverlay
 import com.hcjeong.forestix.basemap.MapMarker
 import com.hcjeong.forestix.basemap.MapMarkerShape
 import com.hcjeong.forestix.basemap.MapView
@@ -126,7 +127,9 @@ import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
 import com.hcjeong.forestix.data.SettingsSnapshot
 import com.hcjeong.forestix.data.cruise.CrashRecoveryService
+import com.hcjeong.forestix.geo.BoundaryGeometryKind
 import com.hcjeong.forestix.geo.CoordinateConversions
+import com.hcjeong.forestix.geo.SurveyBoundaryStore
 import com.hcjeong.forestix.positioning.CLLocationSnapshot
 import com.hcjeong.forestix.positioning.GeoMath
 import com.hcjeong.forestix.positioning.LocationService
@@ -235,6 +238,22 @@ fun MapHomeScreen(nav: NavController) {
     }
     val camera = rememberMapCameraState()
 
+    // Imported survey boundary (Map settings → Survey boundary). Read once
+    // per process off the main thread; the store's flow keeps the map and
+    // the sheet in step when it is imported or removed.
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) { SurveyBoundaryStore.loadIfNeeded(context) }
+    }
+    val storedBoundary by SurveyBoundaryStore.state.collectAsStateWithLifecycle()
+    val importedBoundary = remember(storedBoundary) {
+        storedBoundary?.geometries.orEmpty().map { geometry ->
+            MapBoundaryOverlay(
+                rings = geometry.rings,
+                closed = geometry.kind == BoundaryGeometryKind.POLYGON,
+            )
+        }
+    }
+
     var selectedPinId by remember { mutableStateOf<String?>(null) }
     var chooserOpen by remember { mutableStateOf(false) }
     // Peek-card "Measure this tree" scopes the chooser to that pin's tree
@@ -244,7 +263,7 @@ fun MapHomeScreen(nav: NavController) {
     // Far-GPS confirmation before the scoped chooser: (tree, whole metres)
     // when the current fix sits > 30 m from the tapped tree's pin.
     var farTreeConfirm by remember { mutableStateOf<Pair<Int, Int>?>(null) }
-    var offlineOpen by remember { mutableStateOf(false) }
+    var mapSettingsOpen by remember { mutableStateOf(false) }
     var photoEntry by remember { mutableStateOf<QuickMeasureEntry?>(null) }
     // Quick peek "Edit this tree" → compact edit sheet for one reading.
     var editEntry by remember { mutableStateOf<QuickMeasureEntry?>(null) }
@@ -321,15 +340,18 @@ fun MapHomeScreen(nav: NavController) {
             center = mapCenter,
             modifier = Modifier.fillMaxSize(),
             initialZoom = 16.0,
-            // Base stays the built-in satellite; the user template is an
-            // overlay on top, honouring the layers sheet's toggle AND the
-            // provider usage-policy acknowledgement (iOS
-            // makeOverlayTileCache gate).
+            // Base = the built-in layer the Map settings sheet selected
+            // (satellite / normal); the user template is an overlay on top,
+            // honouring its toggle AND the provider usage-policy
+            // acknowledgement (iOS makeOverlayTileCache gate).
+            mapType = settings.mapType,
             overlayURLTemplate = if (settings.overlayEnabled && settings.providerUsageAcknowledged) {
                 settings.tileURLTemplate
             } else {
                 null
             },
+            // Imported survey boundary — over the tiles, under app content.
+            boundary = importedBoundary,
             // Mode content separation (v3.1): quick pins are measure-only,
             // cruise pins/rings/guides cruise-only — the map itself (camera,
             // zoom, base + overlay) is shared across the toggle.
@@ -413,7 +435,7 @@ fun MapHomeScreen(nav: NavController) {
                         )
                     }
                 }
-                RoundChromeButton(Icons.Filled.Layers, "Basemap layers") { offlineOpen = true }
+                RoundChromeButton(Icons.Filled.Layers, "Map settings") { mapSettingsOpen = true }
                 // Settings — rightmost of the top-right group, both modes.
                 RoundChromeButton(Icons.Filled.Settings, "Settings") {
                     nav.navigate(Routes.SETTINGS)
@@ -555,14 +577,10 @@ fun MapHomeScreen(nav: NavController) {
             },
         )
     }
-    if (offlineOpen) {
-        OfflineMapSheet(
+    if (mapSettingsOpen) {
+        MapSettingsSheet(
             camera = camera,
-            onDismiss = { offlineOpen = false },
-            onOpenSettings = {
-                offlineOpen = false
-                nav.navigate(Routes.SETTINGS)
-            },
+            onDismiss = { mapSettingsOpen = false },
         )
     }
     photoEntry?.let { entry ->

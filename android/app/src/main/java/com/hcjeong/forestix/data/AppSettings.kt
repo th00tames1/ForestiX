@@ -42,6 +42,11 @@ data class SettingsSnapshot(
     /// Maps to sensors.ChordAlgorithm. Default silhouette so Android matches
     /// iOS out of the box.
     val dbhChordAlgorithm: String = "silhouette",
+    /// Which BUILT-IN base layer the map draws — "satellite" (Esri World
+    /// Imagery) or "normal" (OpenStreetMap standard). Default satellite so
+    /// nothing changes for existing installs (mirror of iOS tc.mapType).
+    /// The user's own XYZ template is a separate OVERLAY, not a base.
+    val mapType: String = "satellite",
     val tileURLTemplate: String? = null,
     val tileProviderLabel: String? = null,
     /// Draw the user overlay template on top of the built-in satellite
@@ -111,6 +116,7 @@ class AppSettings(private val context: Context) {
 
     private object Keys {
         val unitSystem = stringPreferencesKey("tc.unitSystem")
+        val mapType = stringPreferencesKey("tc.mapType")
         val tileURLTemplate = stringPreferencesKey("tc.tileURLTemplate")
         val tileProviderLabel = stringPreferencesKey("tc.tileProviderLabel")
         val overlayEnabled = booleanPreferencesKey("tc.overlayEnabled")
@@ -162,6 +168,8 @@ class AppSettings(private val context: Context) {
             logRule = LogRule.fromRaw(p[Keys.logRule] ?: "scribner"),
             dbhMeasurementMethod = DBHMeasurementMethod.fromRaw(p[Keys.dbhMethod]),
             dbhChordAlgorithm = p[Keys.dbhChordAlgorithm] ?: "silhouette",
+            // Anything unrecognised falls back to the satellite default.
+            mapType = if (p[Keys.mapType] == "normal") "normal" else "satellite",
             tileURLTemplate = p[Keys.tileURLTemplate]?.takeIf { it.isNotBlank() },
             tileProviderLabel = p[Keys.tileProviderLabel],
             overlayEnabled = p[Keys.overlayEnabled] ?: true,
@@ -238,6 +246,12 @@ class AppSettings(private val context: Context) {
     fun setDbhChordAlgorithm(raw: String) = update {
         _state.value = _state.value.copy(dbhChordAlgorithm = raw)
         it[Keys.dbhChordAlgorithm] = raw
+    }
+
+    fun setMapType(value: String) = update {
+        val raw = if (value == "normal") "normal" else "satellite"
+        _state.value = _state.value.copy(mapType = raw)
+        it[Keys.mapType] = raw
     }
 
     fun setTileURLTemplate(value: String?) = update {

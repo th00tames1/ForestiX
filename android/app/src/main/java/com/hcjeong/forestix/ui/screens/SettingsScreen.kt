@@ -389,9 +389,25 @@ fun SettingsScreen(nav: NavController) {
                             onCheckedChange = { env.settings.setProviderUsageAcknowledged(it) },
                         )
                     }
+                    // Draw/hide the configured overlay. It lives here beside
+                    // the template it belongs to — the map's own sheet keeps
+                    // to map type, boundary and offline maps.
+                    FormDivider()
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "Show overlay on the map",
+                            style = type.body, color = colors.textPrimary,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Switch(
+                            checked = settings.overlayEnabled,
+                            onCheckedChange = { env.settings.setOverlayEnabled(it) },
+                            enabled = settings.tileURLTemplate != null,
+                        )
+                    }
                     Text(
                         "Paste an XYZ template ({z}/{x}/{y}) to draw contour or " +
-                            "forest-service tiles over the satellite base. It shows only after " +
+                            "forest-service tiles over the map base. It shows only after " +
                             "you confirm the provider's usage policy above.",
                         style = type.caption, color = colors.textSecondary,
                     )

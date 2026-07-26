@@ -98,6 +98,17 @@ data class MapPolygonOverlay(
     val strokeColor: Color = Color(0xFF34C759),
 )
 
+/// The IMPORTED SURVEY BOUNDARY (Map settings → Survey boundary). Drawn
+/// between the basemap layers and the app's own content, in WGS84 lon/lat.
+/// `rings[0]` is the outer ring and the rest are holes for a polygon; a
+/// polyline carries one open path and a point a single coordinate. It is
+/// display-only — hit-testing never considers it, so it can't steal taps
+/// meant for pins.
+data class MapBoundaryOverlay(
+    val rings: List<List<CoordinateConversions.LatLon>>,
+    val closed: Boolean,
+)
+
 /// An open polyline (v3 cruise mock `.guide`) — the dashed you-dot → plot
 /// navigation guide. Screen-projected like the polygon rings; `dashed`
 /// mirrors the mock's dotted 2/9 round-cap pattern (iOS BasemapGuideLine).
@@ -214,9 +225,16 @@ fun MapView(
     /// satellite base (zero-setup imagery whenever online). Callers that
     /// pass the user template here keep their old single-layer behaviour.
     tileURLTemplate: String? = null,
+    /// Which BUILT-IN base to draw when `tileURLTemplate` is null:
+    /// AppSettings.mapType — "satellite" (Esri, the default) or "normal"
+    /// (OpenStreetMap standard). Also picks the attribution line.
+    mapType: String = "satellite",
     /// Optional OVERLAY drawn on top of the base — the map home passes
     /// AppSettings.tileURLTemplate here (often transparent PNG tiles).
     overlayURLTemplate: String? = null,
+    /// Imported survey boundary — over the tile layers, UNDER everything
+    /// the app itself draws (stratum polygons, pins, guide, you-dot).
+    boundary: List<MapBoundaryOverlay> = emptyList(),
     polygons: List<MapPolygonOverlay> = emptyList(),
     polylines: List<MapPolylineOverlay> = emptyList(),
     markers: List<MapMarker> = emptyList(),
@@ -269,11 +287,12 @@ fun MapView(
         ).value
     } else 0f
 
-    // Base layer: caller override, else the built-in satellite provider.
+    // Base layer: caller override, else the built-in provider the user's
+    // map type selects (satellite = Esri, normal = OpenStreetMap).
     val baseIsBuiltin = tileURLTemplate.isNullOrBlank()
-    val baseFetcher = remember(tileURLTemplate) {
+    val baseFetcher = remember(tileURLTemplate, mapType) {
         tileURLTemplate?.takeIf { it.isNotBlank() }?.let { TileFetcher(context, it) }
-            ?: TileFetcher.esriWorldImagery(context)
+            ?: TileFetcher.builtInBase(context, mapType)
     }
     val overlayFetcher = remember(overlayURLTemplate) {
         overlayURLTemplate?.takeIf { it.isNotBlank() }?.let { TileFetcher(context, it) }
@@ -473,6 +492,53 @@ fun MapView(
                 (lonToXNorm(p.longitude) * worldPx - originX).toFloat(),
                 (latToYNorm(p.latitude) * worldPx - originY).toFloat(),
             )
+
+            // MARK: Imported survey boundary — ABOVE both tile layers,
+            // BELOW every piece of app content. A dark casing under the
+            // amber stroke keeps it legible on bright satellite imagery and
+            // on the pale OSM street base alike; polygons get a light fill
+            // with holes punched out (even-odd).
+            if (boundary.isNotEmpty()) {
+                val boundaryTint = Color(0xFFFFB454)
+                val casing = Color.Black.copy(alpha = 0.45f)
+                for (feature in boundary) {
+                    val paths = feature.rings.filter { it.size >= 2 }
+                    if (feature.closed && paths.isNotEmpty()) {
+                        val path = Path()
+                        path.fillType = androidx.compose.ui.graphics.PathFillType.EvenOdd
+                        for (ring in paths) {
+                            ring.forEachIndexed { i, p ->
+                                val pt = screenPoint(p)
+                                if (i == 0) path.moveTo(pt.x, pt.y) else path.lineTo(pt.x, pt.y)
+                            }
+                            path.close()
+                        }
+                        drawPath(path, color = boundaryTint.copy(alpha = 0.16f))
+                        drawPath(path, color = casing, style = Stroke(width = 5.dp.toPx()))
+                        drawPath(path, color = boundaryTint, style = Stroke(width = 2.5.dp.toPx()))
+                    } else {
+                        for (ring in paths) {
+                            val path = Path()
+                            ring.forEachIndexed { i, p ->
+                                val pt = screenPoint(p)
+                                if (i == 0) path.moveTo(pt.x, pt.y) else path.lineTo(pt.x, pt.y)
+                            }
+                            drawPath(path, color = casing, style = Stroke(width = 5.dp.toPx()))
+                            drawPath(
+                                path,
+                                color = boundaryTint,
+                                style = Stroke(width = 2.5.dp.toPx()),
+                            )
+                        }
+                    }
+                    // Single-coordinate features (imported survey points).
+                    for (ring in feature.rings.filter { it.size == 1 }) {
+                        val pt = screenPoint(ring[0])
+                        drawCircle(color = casing, radius = 5.dp.toPx(), center = pt)
+                        drawCircle(color = boundaryTint, radius = 3.5.dp.toPx(), center = pt)
+                    }
+                }
+            }
 
             // MARK: Polygons (stratum outer rings)
             for (polygon in polygons) {
@@ -726,13 +792,14 @@ fun MapView(
             }
         }
 
-        // Imagery credit for the built-in satellite base — required by the
-        // Esri terms, so it stays on whenever that base is in use. Fixed
-        // dark-glass colours on purpose: it sits on satellite imagery, not
-        // on an app surface (iOS attributionBadge).
+        // Credit for the built-in base — required by the Esri imagery terms
+        // and by the ODbL for OpenStreetMap, so it stays on whenever a
+        // built-in base is in use and SWITCHES with the map type. Fixed
+        // dark-glass colours on purpose: it sits on map tiles, not on an
+        // app surface (iOS attributionBadge).
         if (baseIsBuiltin) {
             Text(
-                TileFetcher.ESRI_WORLD_IMAGERY_ATTRIBUTION,
+                TileFetcher.builtInAttribution(mapType),
                 style = Forestix.type.dataSmall.copy(
                     fontSize = 9.sp, fontWeight = FontWeight.Normal),
                 color = Color.White.copy(alpha = 0.78f),

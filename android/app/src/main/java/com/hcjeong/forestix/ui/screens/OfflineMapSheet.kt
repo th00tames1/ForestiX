@@ -1,41 +1,37 @@
-// Basemap layers sheet — target of the map home's layers button (mock
-// design/forestix-redesign-v2-maphome.html ① `.roundbtn` layers), a
-// full-height grouped sheet mirroring the iOS BasemapLayersSheet
-// structure: LAYERS (built-in satellite base row + the user overlay's
-// always-visible toggle + usage-policy warning), OFFLINE DOWNLOAD
-// ("Download visible area" over the EXACT visible bbox at zoom 12–17,
-// system progress bar with a live failed count and a destructive cancel),
-// and CACHE (per-layer stats + destructive clear). The overlay's tile
-// fetching/downloading is gated on settings.providerUsageAcknowledged —
-// the gate is policy, not styling. Dismissing the sheet cancels an
-// in-flight download.
+// Offline maps — the LAST group of the Map settings sheet (MapSettingsSheet).
+// It was a sheet of its own until the map's scattered layer/offline controls
+// were consolidated; the download engine here is unchanged, only its host
+// moved.
+//
+// "Download visible area" plans the EXACT visible bbox at zoom 12–17 for the
+// Satellite base plus the user overlay when it is on and acknowledged,
+// drains the combined queue with a live failed count and a destructive
+// cancel, and reports per-layer cache stats with a destructive clear. The
+// combined tile cap is unchanged.
+//
+// NOT for the built-in Normal base: OpenStreetMap's Tile Usage Policy
+// prohibits bulk/systematic downloading, and a correct User-Agent does not
+// exempt it — doing it anyway gets the app blocked for every user. With
+// Normal selected the download control is replaced by a plain explanation;
+// a cruiser's OWN tile provider stays downloadable (their provider, their
+// terms), and viewing OSM tiles live is unaffected.
 
 package com.hcjeong.forestix.ui.screens
 
 import android.text.format.Formatter
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowCircleDown
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -47,11 +43,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.basemap.MapCameraState
@@ -60,7 +53,6 @@ import com.hcjeong.forestix.basemap.TileCache
 import com.hcjeong.forestix.basemap.TileFetcher
 import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.theme.Forestix
-import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -72,6 +64,13 @@ import kotlinx.coroutines.withContext
 /// explodes into millions of tiles; field areas stay well under the cap.
 /// Applied to the COMBINED base + overlay count.
 private const val MaxPlannedTiles = 4_000
+
+/// Shown in place of the download control while the built-in Normal base
+/// is selected — OSM's Tile Usage Policy forbids bulk downloading.
+private const val NormalMapOfflineNotice =
+    "Offline download isn't available for the Normal map — OpenStreetMap's " +
+        "tile policy doesn't allow bulk downloads. Switch to Satellite, or " +
+        "set your own tile provider in Settings › Basemap tiles."
 
 /// Download lifecycle, mirroring the iOS OfflineTileDownloader.Phase
 /// (idle / running / tooLarge / finished — `cancelled` flips the finished
@@ -88,60 +87,8 @@ private sealed interface DownloadPhase {
     ) : DownloadPhase
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun OfflineMapSheet(
-    camera: MapCameraState,
-    onDismiss: () -> Unit,
-    onOpenSettings: () -> Unit,
-) {
-    val colors = Forestix.colors
-    val type = Forestix.type
-
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        // Full-height, fully expanded from the start — field report:
-        // opening half-collapsed hid the download button.
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        containerColor = colors.canvas,
-    ) {
-        Column(Modifier.fillMaxHeight()) {
-            // Nav-bar-style header: centred inline title + Close.
-            Box(Modifier.fillMaxWidth()) {
-                Text(
-                    "Basemap",
-                    style = type.bodyBold.copy(fontSize = 17.sp),
-                    color = colors.textPrimary,
-                    modifier = Modifier.align(Alignment.Center),
-                )
-                TextButton(
-                    onClick = onDismiss,
-                    modifier = Modifier.align(Alignment.CenterEnd),
-                ) {
-                    Text("Close", style = type.body, color = colors.primary)
-                }
-            }
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = ForestixSpace.md)
-                    .padding(top = ForestixSpace.xs, bottom = ForestixSpace.xl),
-                verticalArrangement = Arrangement.spacedBy(ForestixSpace.lg),
-            ) {
-                BasemapSheetContent(camera = camera, onOpenSettings = onOpenSettings)
-            }
-        }
-    }
-}
-
-// MARK: - Sections (iOS BasemapLayersSheet: Layers / Offline download / Cache)
-
-@Composable
-private fun BasemapSheetContent(
-    camera: MapCameraState,
-    onOpenSettings: () -> Unit,
-) {
+internal fun OfflineMapsSection(camera: MapCameraState) {
     val colors = Forestix.colors
     val type = Forestix.type
     val context = LocalContext.current
@@ -151,11 +98,15 @@ private fun BasemapSheetContent(
 
     val template = settings.tileURLTemplate
     val acknowledged = settings.providerUsageAcknowledged
-    val baseFetcher = remember { TileFetcher.esriWorldImagery(context) }
+    // The base the map is actually drawing — download and cache stats must
+    // follow the map type, or the cruiser caches tiles they never see.
+    val baseFetcher = remember(settings.mapType) {
+        TileFetcher.builtInBase(context, settings.mapType)
+    }
     // Overlay cache exists only once the cruiser pasted a template AND
     // acknowledged the provider's usage policy (iOS makeOverlayTileCache).
     // The on/off toggle is applied where tiles are fetched, not here, so
-    // the sheet still shows status + stats for a toggled-off overlay.
+    // the section still shows stats for a toggled-off overlay.
     val overlayFetcher = remember(template, acknowledged) {
         if (acknowledged) template?.let { TileFetcher(context, it) } else null
     }
@@ -163,7 +114,7 @@ private fun BasemapSheetContent(
     var baseStats by remember { mutableStateOf<TileCache.Stats?>(null) }
     var overlayStats by remember { mutableStateOf<TileCache.Stats?>(null) }
     var statsTick by remember { mutableIntStateOf(0) }
-    LaunchedEffect(overlayFetcher, statsTick) {
+    LaunchedEffect(baseFetcher, overlayFetcher, statsTick) {
         withContext(Dispatchers.IO) {
             val base = baseFetcher.cache.stats()
             val overlay = overlayFetcher?.cache?.stats()
@@ -175,101 +126,44 @@ private fun BasemapSheetContent(
     var phase by remember { mutableStateOf<DownloadPhase>(DownloadPhase.Idle) }
     var downloadJob by remember { mutableStateOf<Job?>(null) }
 
-    // MARK: Layers
+    // The built-in Normal base is OpenStreetMap, whose Tile Usage Policy
+    // prohibits bulk downloading — so it is never queued. Satellite is,
+    // and so is the cruiser's OWN provider when it is configured, on and
+    // acknowledged: their provider, their terms.
+    val baseDownloadable = settings.mapType != "normal"
+    val overlayDownloadable = overlayFetcher != null && settings.overlayEnabled
+    val canDownload = baseDownloadable || overlayDownloadable
 
-    FormSection(
-        header = "LAYERS",
-        footer = "The satellite base draws first; the overlay (contour or " +
-            "forest-service tiles) draws on top of it.",
-    ) {
-        // Base layer — built-in, nothing to configure.
-        Column(Modifier.fillMaxWidth().padding(ForestixSpace.sm)) {
-            Text("Satellite base · built-in", style = type.bodyBold, color = colors.textPrimary)
-            Text(
-                "Esri World Imagery — fetched as you pan while online, kept " +
-                    "on disk for offline use.",
-                style = type.caption,
-                color = colors.textSecondary,
-                modifier = Modifier.padding(top = 2.dp),
-            )
-        }
-        HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
-        // Overlay layer — the user's XYZ template drawn on top. The toggle
-        // is ALWAYS visible; without a template it is disabled so the
-        // control's existence stays discoverable.
-        Row(
-            Modifier.fillMaxWidth().padding(ForestixSpace.sm),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("Overlay · your template", style = type.bodyBold, color = colors.textPrimary)
-                if (template == null) {
-                    Text(
-                        "None set — add an XYZ template in Settings → Basemap tiles.",
-                        style = type.caption,
-                        color = colors.textSecondary,
-                        modifier = Modifier.padding(top = 2.dp),
-                    )
-                } else {
-                    Text(
-                        settings.tileProviderLabel ?: template,
-                        style = type.dataSmall,
-                        color = colors.textTertiary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(top = 2.dp),
-                    )
-                }
-            }
-            Switch(
-                checked = settings.overlayEnabled,
-                onCheckedChange = { env.settings.setOverlayEnabled(it) },
-                enabled = template != null,
-            )
-        }
-        if (template != null && !acknowledged) {
-            HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
-            Text(
-                "Overlay tiles stay hidden until you confirm the provider's " +
-                    "usage policy in Settings → Basemap tiles.",
-                style = type.caption,
-                color = colors.confidenceWarn,
-                modifier = Modifier.fillMaxWidth().padding(ForestixSpace.sm),
-            )
-        }
-        if (template == null) {
-            HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
-            Text(
-                "Open Settings",
-                style = type.body,
-                color = colors.primary,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickableNoRipple(onOpenSettings)
-                    .padding(ForestixSpace.sm),
-            )
-        }
-    }
-
-    // MARK: Offline download
-
-    FormSection(
-        header = "OFFLINE DOWNLOAD",
-        footer = "Downloads the visible area (base plus any overlay) for " +
-            "offline use. Max $MaxPlannedTiles tiles — zoom in if the area " +
-            "is too large.",
+    MapSheetGroup(
+        header = "Offline maps",
+        footer = "Downloads the visible area (the selected base plus any " +
+            "overlay) for offline use. Max $MaxPlannedTiles tiles — zoom in " +
+            "if the area is too large.",
     ) {
         val launchDownload: () -> Unit = {
             startDownload(
                 scope = scope,
                 camera = camera,
-                baseFetcher = baseFetcher,
-                overlayFetcher = if (settings.overlayEnabled) overlayFetcher else null,
+                baseFetcher = if (baseDownloadable) baseFetcher else null,
+                overlayFetcher = if (overlayDownloadable) overlayFetcher else null,
                 setPhase = { phase = it },
                 setJob = { downloadJob = it },
                 bumpStats = { statsTick++ },
             )
         }
+
+        // OSM policy: no download control for the built-in Normal base —
+        // a plain explanation stands in its place.
+        if (!baseDownloadable) {
+            Text(
+                NormalMapOfflineNotice,
+                style = type.caption,
+                color = colors.textSecondary,
+                modifier = Modifier.fillMaxWidth().padding(ForestixSpace.sm),
+            )
+            if (canDownload) HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
+        }
+
         when (val p = phase) {
             is DownloadPhase.Running -> {
                 Column(Modifier.fillMaxWidth().padding(ForestixSpace.sm)) {
@@ -313,8 +207,10 @@ private fun BasemapSheetContent(
                     color = colors.confidenceWarn,
                     modifier = Modifier.fillMaxWidth().padding(ForestixSpace.sm),
                 )
-                HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
-                DownloadRow(camera, launchDownload)
+                if (canDownload) {
+                    HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
+                    DownloadRow(camera, launchDownload)
+                }
             }
 
             is DownloadPhase.Finished -> {
@@ -336,18 +232,18 @@ private fun BasemapSheetContent(
                         modifier = Modifier.padding(top = 2.dp),
                     )
                 }
-                HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
-                DownloadRow(camera, launchDownload)
+                if (canDownload) {
+                    HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
+                    DownloadRow(camera, launchDownload)
+                }
             }
 
-            DownloadPhase.Idle -> DownloadRow(camera, launchDownload)
+            DownloadPhase.Idle -> if (canDownload) DownloadRow(camera, launchDownload)
         }
-    }
 
-    // MARK: Cache
-
-    FormSection(header = "CACHE", footer = null) {
-        CacheRow("Satellite base", baseStats)
+        // Cache — per-layer stats plus the destructive clear.
+        HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
+        CacheRow("Base map", baseStats)
         if (overlayFetcher != null) {
             HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
             CacheRow("Overlay", overlayStats)
@@ -410,13 +306,15 @@ private fun DownloadRow(camera: MapCameraState, onClick: () -> Unit) {
     }
 }
 
-/// Plan BOTH layers over the EXACT visible bbox (buffer 0, iOS semantics)
-/// and drain the combined queue sequentially with live x/total + failed
-/// progress. Guarded at MaxPlannedTiles combined.
+/// Plan the DOWNLOADABLE layers over the EXACT visible bbox (buffer 0, iOS
+/// semantics) and drain the combined queue sequentially with live x/total +
+/// failed progress. Guarded at MaxPlannedTiles combined. A null fetcher is a
+/// layer that must not be bulk-downloaded (the built-in OSM base) — it is
+/// simply absent from the plan.
 private fun startDownload(
     scope: kotlinx.coroutines.CoroutineScope,
     camera: MapCameraState,
-    baseFetcher: TileFetcher,
+    baseFetcher: TileFetcher?,
     overlayFetcher: TileFetcher?,
     setPhase: (DownloadPhase) -> Unit,
     setJob: (Job?) -> Unit,
@@ -486,45 +384,6 @@ private fun finishDetail(failed: Int, alreadyCached: Int): String {
     if (failed > 0) parts.add("$failed failed — try again in coverage")
     parts.add("$alreadyCached were already cached")
     return parts.joinToString(" · ")
-}
-
-// MARK: - Pieces
-
-/// Grouped card section — uppercase sectionHead header, surface card with
-/// hairline-divided rows, caption footer (the iOS insetGrouped Form look).
-@Composable
-private fun FormSection(
-    header: String,
-    footer: String?,
-    content: @Composable () -> Unit,
-) {
-    val colors = Forestix.colors
-    val type = Forestix.type
-    Column(Modifier.fillMaxWidth()) {
-        Text(
-            header,
-            style = type.sectionHead,
-            color = colors.textTertiary,
-            modifier = Modifier.padding(start = ForestixSpace.sm, bottom = 6.dp),
-        )
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .clip(ForestixRadius.card)
-                .background(colors.surface),
-        ) {
-            content()
-        }
-        footer?.let {
-            Text(
-                it,
-                style = type.caption,
-                color = colors.textSecondary,
-                modifier = Modifier.padding(
-                    start = ForestixSpace.sm, top = 6.dp, end = ForestixSpace.sm),
-            )
-        }
-    }
 }
 
 @Composable

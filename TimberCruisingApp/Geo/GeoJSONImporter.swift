@@ -2,6 +2,15 @@
 // GeoJSON FeatureCollection. Accepts Polygon and MultiPolygon geometries in
 // WGS84 decimal degrees.
 //
+// "WGS84 decimal degrees" is CHECKED, not assumed: a legacy `crs` member
+// naming anything else is refused (see `GeoJSONCRS`) wherever in the
+// document it sits — root, Feature or geometry, because GeoJSON 2008 §3
+// allowed it on all three and QGIS/ArcGIS exports use every one of them —
+// and every position is range-checked. Without the first of those a
+// Korea 2000 stratum — degrees, in range — sizes and places every plot in
+// it a few hundred metres off, and the acreage it reports looks entirely
+// reasonable.
+//
 // If a feature's properties supply `name` or `areaAcres`, those values are
 // used; otherwise the importer falls back to a sensible name and computes
 // area via the spherical-excess formula (§8 "spherical excess area" note in
@@ -16,6 +25,10 @@ public enum GeoJSONImportError: Error, CustomStringConvertible {
     case unsupportedGeometry(String)
     case emptyFeatureCollection
     case invalidCoordinate(String)
+    /// The legacy `crs` member named a CRS that is not WGS84. Word for
+    /// word the sentence the boundary importer uses — a stratum drawn in
+    /// the wrong CRS is wrong for exactly the same reason a boundary is.
+    case notWGS84(found: String)
 
     public var description: String {
         switch self {
@@ -23,6 +36,9 @@ public enum GeoJSONImportError: Error, CustomStringConvertible {
         case .unsupportedGeometry(let r): return "Unsupported geometry: \(r)"
         case .emptyFeatureCollection: return "GeoJSON has no features"
         case .invalidCoordinate(let r): return "Invalid coordinate: \(r)"
+        case .notWGS84(let found):
+            return "This file is not in WGS84 (found: \(found)). "
+                + "Convert it to WGS84 / EPSG:4326 (for example in QGIS) and import again."
         }
     }
 }
@@ -64,6 +80,15 @@ public enum GeoJSONImporter {
         }
         guard let object = any as? [String: Any] else {
             throw GeoJSONImportError.malformedJSON("Top-level JSON is not an object")
+        }
+        // The legacy `crs` member — at EVERY level of the document, and
+        // read on this path for the same reason the boundary importer
+        // reads it: a Korea 2000 stratum is degrees and in range, so the
+        // per-position range check below cannot tell it apart from a
+        // WGS84 one. Both GeoJSON entry points share one gate so a
+        // stratum file and a boundary file cannot be judged differently.
+        if let found = GeoJSONCRS.rejectionAnywhere(object) {
+            throw GeoJSONImportError.notWGS84(found: found)
         }
 
         let result = try collect(object: object, inheritedProperties: [:])

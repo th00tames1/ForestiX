@@ -12,6 +12,7 @@
 
 import SwiftUI
 import Models
+import Basemap
 #if canImport(MapKit)
 import MapKit
 #endif
@@ -21,6 +22,19 @@ public struct StratumDrawScreen: View {
     @EnvironmentObject private var environment: AppEnvironment
     @StateObject private var viewModel: StratumDrawViewModel
     @Environment(\.dismiss) private var dismiss
+
+    /// The base layer the cruiser picked in Map settings › Map type.
+    /// A boundary drawn on imagery when the cruiser asked for streets
+    /// (or the reverse) makes them second-guess where they are tapping,
+    /// so this screen follows the same `tc.mapType` the map home does.
+    ///
+    /// Read straight from the key rather than through the injected
+    /// `AppSettings`: this screen is pushed from the cruise-setup sheet,
+    /// which does not carry that object in its environment, and an
+    /// `@EnvironmentObject` that is not there is a crash, not a
+    /// fallback.
+    @AppStorage(AppSettings.Keys.mapType)
+    private var mapTypeRaw: String = BasemapType.default.rawValue
 
     public init(project: Project) {
         _viewModel = StateObject(wrappedValue:
@@ -91,6 +105,7 @@ public struct StratumDrawScreen: View {
                         .stroke(.green, lineWidth: 2)
                 }
             }
+            .mapStyle(selectedMapStyle)
             .mapControls {
                 MapCompass()
                 MapScaleView()
@@ -102,6 +117,12 @@ public struct StratumDrawScreen: View {
             }
         }
         .frame(maxHeight: .infinity)
+    }
+
+    /// Satellite → imagery, Normal → the standard street map, matching
+    /// what Map settings › Map type selected.
+    private var selectedMapStyle: MapStyle {
+        BasemapType.fromRaw(mapTypeRaw) == .satellite ? .imagery : .standard
     }
     #else
     @ViewBuilder private var mapArea: some View {

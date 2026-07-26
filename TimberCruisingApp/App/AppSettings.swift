@@ -16,6 +16,7 @@
 //                             layers sheet).
 
 import Foundation
+import Basemap
 import Common
 import Models
 import Sensors
@@ -59,6 +60,7 @@ public final class AppSettings: ObservableObject {
         public static let researchSpecies         = "tc.researchSpecies"
         public static let currentCruiseProjectID  = "tc.currentCruiseProjectID"
         public static let mapMode                 = "tc.mapMode"
+        public static let mapType                 = "tc.mapType"
     }
 
     private let defaults: UserDefaults
@@ -144,6 +146,20 @@ public final class AppSettings: ObservableObject {
     public var mapMode: String {
         get { defaults.string(forKey: Keys.mapMode) ?? "measure" }
         set { defaults.set(newValue, forKey: Keys.mapMode); objectWillChange.send() }
+    }
+
+    /// Which BUILT-IN base layer the map draws — "satellite" (Esri World
+    /// Imagery) or "normal" (OpenStreetMap standard street tiles), picked
+    /// in Map settings › Map type. Defaults to `.satellite`, which is
+    /// what the app has always drawn, so existing installs see no change.
+    /// The Android sibling reads the same `tc.mapType` key and the same
+    /// raw values.
+    public var mapType: BasemapType {
+        get { BasemapType.fromRaw(defaults.string(forKey: Keys.mapType)) }
+        set {
+            defaults.set(newValue.rawValue, forKey: Keys.mapType)
+            objectWillChange.send()
+        }
     }
 
     /// Country the cruiser is working in — sits above `region` and decides the

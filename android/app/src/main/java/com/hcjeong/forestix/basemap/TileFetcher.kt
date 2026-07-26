@@ -130,8 +130,10 @@ class TileFetcher(
             connection = url.openConnection() as HttpURLConnection
             connection.connectTimeout = 10_000
             connection.readTimeout = 15_000
-            // Identify ourselves per the OSM tile usage policy.
-            connection.setRequestProperty("User-Agent", "ForestiX/1.0 (offline basemap)")
+            // A descriptive, identifying User-Agent is REQUIRED by the OSM
+            // tile usage policy (a generic library UA gets blocked), so it
+            // goes on every tile request regardless of provider.
+            connection.setRequestProperty("User-Agent", USER_AGENT)
             if (connection.responseCode != HttpURLConnection.HTTP_OK) return null
             val bytes = connection.inputStream.use { it.readBytes() }
             if (bytes.isEmpty()) null else bytes
@@ -143,6 +145,10 @@ class TileFetcher(
     }
 
     companion object {
+        /// Identifies the app to tile providers. The OSM tile policy
+        /// requires a UA naming the application; keep it descriptive.
+        const val USER_AGENT = "ForestiX/1.0 (Android forest-inventory field app)"
+
         /// Built-in satellite base layer — Esri World Imagery, shown by
         /// default so the map has real imagery with zero setup (mirror of
         /// the iOS built-in provider; note the {z}/{y}/{x} path order).
@@ -161,6 +167,31 @@ class TileFetcher(
             fileExtension = "jpg",
             providerId = ESRI_WORLD_IMAGERY_PROVIDER_ID,
         )
+
+        /// Built-in street base layer — OpenStreetMap standard, the
+        /// "Normal" map type. Same {z}/{x}/{y} order OSM publishes.
+        const val OSM_STANDARD_TEMPLATE = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+        const val OSM_STANDARD_PROVIDER_ID = "osm-standard"
+        /// Required by the ODbL — always visible while this base is drawn.
+        const val OSM_STANDARD_ATTRIBUTION = "© OpenStreetMap contributors"
+
+        fun osmStandard(context: Context): TileFetcher = TileFetcher(
+            context = context,
+            urlTemplate = OSM_STANDARD_TEMPLATE,
+            fileExtension = "png",
+            providerId = OSM_STANDARD_PROVIDER_ID,
+        )
+
+        /// The built-in base for a persisted `tc.mapType` — "normal" is
+        /// OSM standard, anything else (the default) is Esri satellite.
+        /// One factory so the map, the offline downloader and the cache
+        /// stats can never disagree about which base is in use.
+        fun builtInBase(context: Context, mapType: String): TileFetcher =
+            if (mapType == "normal") osmStandard(context) else esriWorldImagery(context)
+
+        /// Attribution line that must ride along with `builtInBase`.
+        fun builtInAttribution(mapType: String): String =
+            if (mapType == "normal") OSM_STANDARD_ATTRIBUTION else ESRI_WORLD_IMAGERY_ATTRIBUTION
 
         /// Infer the tile file extension from the template ("…/{y}.png"
         /// -> "png"). Defaults to png when the template has none.

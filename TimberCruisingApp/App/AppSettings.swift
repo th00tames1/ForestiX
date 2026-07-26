@@ -49,7 +49,11 @@ public final class AppSettings: ObservableObject {
         public static let developerMode           = "tc.developerMode"
         public static let rawCaptureEnabled       = "tc.rawCaptureEnabled"
         public static let appearance              = "tc.appearance"
-        public static let dbhMethodSource         = "tc.dbhMethodSource"
+        // RETIRED: "tc.dbhMethodSource" (depth / AR-motion / AR-caliper
+        // picker). The AR arms are gone — they recorded no raw captures —
+        // so the DBH scan is depth-only. The key is no longer read, which
+        // migrates any stored "arMotion"/"arCaliper" value to the depth
+        // method.
         public static let researchTreeId          = "tc.researchTreeId"
         public static let researchTrueValue       = "tc.researchTrueValue"
         public static let researchSpecies         = "tc.researchSpecies"
@@ -285,35 +289,13 @@ public final class AppSettings: ObservableObject {
         }
     }
 
-    /// 3-way DBH sensing path (LiDAR depth / AR motion / AR caliper) —
-    /// the within-device comparison picker, now a Developer-mode research
-    /// control. Field mode always uses the LiDAR depth path (the DBH
-    /// screen blocks scanning outright on non-LiDAR devices). In
-    /// Developer mode the persisted choice is honoured; a persisted
-    /// `.lidarDepth` on a non-LiDAR device is reported as `.arCaliper`
-    /// (the most robust depth-free method).
-    public var dbhMethodSource: DBHMethodSource {
-        get {
-            guard developerMode else {
-                return ARKitSessionManager.supportsLiDAR ? .lidarDepth
-                                                         : .arCaliper
-            }
-            let stored = defaults.string(forKey: Keys.dbhMethodSource)
-                .flatMap(DBHMethodSource.init(rawValue:)) ?? .lidarDepth
-            if !ARKitSessionManager.supportsLiDAR && stored == .lidarDepth {
-                return .arCaliper
-            }
-            return stored
-        }
-        set {
-            // Clamp on write too so a non-LiDAR device never persists
-            // `.lidarDepth` — keeps the stored value in sync with the getter,
-            // which already reports `.arCaliper` on those devices.
-            let clamped: DBHMethodSource =
-                (!ARKitSessionManager.supportsLiDAR && newValue == .lidarDepth)
-                ? .arCaliper : newValue
-            defaults.set(clamped.rawValue, forKey: Keys.dbhMethodSource)
-            objectWillChange.send()
-        }
-    }
+    /// DBH sensing path. There is exactly ONE now: the LiDAR depth path.
+    ///
+    /// This used to be a 3-way picker that CLAMPED toward `.arCaliper` on
+    /// non-LiDAR hardware. Both AR arms were removed (they recorded no raw
+    /// captures), so the getter ignores whatever is stored and always reports
+    /// the depth method — that is the migration: a device that persisted
+    /// "arMotion" / "arCaliper" can no longer select a method that does not
+    /// exist. Read-only: nothing writes the key any more.
+    public var dbhMethodSource: DBHMethodSource { .lidarDepth }
 }

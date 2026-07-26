@@ -1,12 +1,15 @@
-// Settings surface — reorganized into seven ordered groups (iOS/Android parity):
-//   1. Region & units       — Country, Region (US), Volume standard, Units, Log rule (US)
+// Settings surface — reorganized into eight ordered groups (iOS/Android parity):
+//   1. Region & units       — Country, Region (US), Units, Log rule (US)
 //   2. Display              — Light/Dark appearance
 //   3. Calibration          — wall + cylinder fit wizard
 //   4. Data & backup        — .tcproj backup/restore (per-project exports live on the project screen)
-//   5. Developer & research — gated by developer mode: DBH algorithm, Research CSV,
-//                             diagnostic log, raw-capture recorder + Raw captures
-//   6. Advanced             — Basemap tiles overlay, behind a navigation row
-//   7. Danger zone          — erase all data (always last)
+//   5. Advanced             — Basemap tiles overlay, behind a navigation row (ordinary
+//                             field setup, so it sits ABOVE the developer group)
+//   6. Developer & research — gated by developer mode: DBH algorithm, research CSV /
+//                             diagnostic log EXPORTS, raw-capture recorder + Raw captures
+//   7. Clear developer data — gated; the destructive Clears, kept in their own section
+//                             away from the Export rows, each confirmed
+//   8. Danger zone          — erase all data (always last)
 // This is a re-grouping + gating pass: every binding, action, and string is the
 // same one committed before; only where it lives changed.
 
@@ -34,6 +37,13 @@ public struct SettingsScreen: View {
     @State private var isPresentingResetStep2 = false
     @State private var resetError: String?
 
+    // Developer-data clears — confirmed, and deliberately housed in their own
+    // section away from the Export rows (a mis-tap used to wipe the corpus).
+    @State private var isPresentingClearResearch = false
+    @State private var isPresentingClearEvents = false
+    /// Bumped after a clear so the row count / disabled state re-reads.
+    @State private var storeRefresh = 0
+
     #if os(iOS)
     @State private var isPresentingImport = false
     #endif
@@ -46,8 +56,11 @@ public struct SettingsScreen: View {
             displaySection
             calibrationSection
             dataBackupSection
-            developerSection
+            // Basemap tiles is ordinary field setup, not developer tooling —
+            // it sits ABOVE the developer group (Android matches).
             advancedSection
+            developerSection
+            clearDeveloperDataSection
             dangerZoneSection
         }
         .navigationTitle("Settings")
@@ -99,6 +112,34 @@ public struct SettingsScreen: View {
             Button("OK", role: .cancel) { backup.restoreSummary = nil }
         } message: {
             Text(backup.restoreSummary ?? "")
+        }
+        // Developer-data clears — each Clear is confirmed, and the Clears
+        // themselves live in their own section, never under an Export row.
+        .confirmationDialog(
+            "Clear research CSV?",
+            isPresented: $isPresentingClearResearch,
+            titleVisibility: .visible
+        ) {
+            Button("Clear", role: .destructive) {
+                ResearchLog.shared.clear()
+                storeRefresh += 1
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This deletes every research row on this device. Anything not already exported is gone for good.")
+        }
+        .confirmationDialog(
+            "Clear diagnostic log?",
+            isPresented: $isPresentingClearEvents,
+            titleVisibility: .visible
+        ) {
+            Button("Clear", role: .destructive) {
+                ForestixLogger.clear()
+                storeRefresh += 1
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This deletes every logged event on this device. Anything not already exported is gone for good.")
         }
         .confirmationDialog(
             "Reset Forestix data?",
@@ -177,16 +218,10 @@ public struct SettingsScreen: View {
                 .accessibilityIdentifier("settings.region")
             }
 
-            // Read-only volume standard, derived from the selection.
-            HStack {
-                Text("Volume standard")
-                Spacer()
-                Text(settings.country.volumeStandard.displayName)
-                    .font(ForestixType.caption)
-                    .foregroundStyle(ForestixPalette.textSecondary)
-                    .multilineTextAlignment(.trailing)
-            }
-            .accessibilityIdentifier("settings.volumeStandard")
+            // The read-only "Volume standard" row lived here. Dropped as
+            // redundant: it only restated what the Log rule picker below
+            // already says. Country.volumeStandard and the volume logic
+            // behind it are untouched.
 
             // Units override — display DBH, height and distance in metric or
             // imperial regardless of the country default above.
@@ -291,12 +326,13 @@ public struct SettingsScreen: View {
         }
     }
 
-    // MARK: - 5. Developer & research
+    // MARK: - 6. Developer & research
     // Gated behind developer mode: the toggle is the only always-visible row.
     // When on, this is the single home for every dev/study tool — the DBH
     // algorithm picker (moved in from its own section), Research CSV, the
     // diagnostic log (gated here too, matching Android), and the raw-capture
-    // recorder + Raw captures browser.
+    // recorder + Raw captures browser. The destructive Clears live in their
+    // own section AFTER this one.
     private var developerSection: some View {
         Section {
             Toggle(isOn: Binding(
@@ -333,12 +369,19 @@ public struct SettingsScreen: View {
                 // (value, true value, error, distance, pitch/α, n, σ, tier)
                 // the accuracy study analyses. Rows are appended by the
                 // scan/distance screens whenever developer mode is on.
+                //
+                // Field fix: Clear used to sit DIRECTLY under Export for both
+                // logs, so one mis-tap destroyed the research corpus. Only the
+                // non-destructive Exports live here now; both Clears moved to
+                // their own "Clear developer data" section below, behind a
+                // confirmation.
                 HStack {
                     Text("Research CSV")
                     Spacer()
                     Text("\(ResearchLog.shared.rowCount()) rows")
                         .foregroundStyle(ForestixPalette.textSecondary)
                 }
+                .id(storeRefresh)
                 Button {
                     backup.shareURL = ResearchLog.shared.fileURL
                 } label: {
@@ -346,27 +389,16 @@ public struct SettingsScreen: View {
                 }
                 .disabled(!ResearchLog.shared.hasData)
                 .accessibilityIdentifier("settings.exportResearch")
-                Button(role: .destructive) {
-                    ResearchLog.shared.clear()
-                } label: {
-                    Label("Clear research CSV", systemImage: "trash")
-                }
-                .disabled(!ResearchLog.shared.hasData)
 
                 // Diagnostic log — gated here to match Android (it used to be a
-                // standalone, always-visible section).
+                // standalone, always-visible section). Share only; the Clear
+                // lives in the separate section below.
                 Button {
                     backup.shareURL = ForestixLogger.currentLogURL
                 } label: {
                     Label("Export diagnostic log", systemImage: "square.and.arrow.up")
                 }
                 .accessibilityIdentifier("settings.exportLog")
-                Button(role: .destructive) {
-                    ForestixLogger.clear()
-                } label: {
-                    Label("Clear diagnostic log", systemImage: "trash")
-                }
-                .accessibilityIdentifier("settings.clearLog")
                 Text("All logs stay on this device. Export here if Forestix support asks you to.")
                     .font(ForestixType.caption)
                     .foregroundStyle(ForestixPalette.textSecondary)
@@ -423,10 +455,40 @@ public struct SettingsScreen: View {
         return bits.joined(separator: " · ")
     }
 
-    // MARK: - 6. Advanced
+    // MARK: - 7. Clear developer data (gated)
+    // The two destructive Clears used to sit immediately under their own Export
+    // rows, one mis-tap from wiping the research corpus. They live here now — a
+    // separate section, away from every Export, each behind a confirmation.
+    @ViewBuilder
+    private var clearDeveloperDataSection: some View {
+        if settings.developerMode {
+            Section(
+                header: Text("Clear developer data"),
+                footer: Text("Clearing is permanent. Export first — the exported file is the only copy once these are cleared.")
+            ) {
+                Button(role: .destructive) {
+                    isPresentingClearResearch = true
+                } label: {
+                    Label("Clear research CSV", systemImage: "trash")
+                }
+                .disabled(!ResearchLog.shared.hasData)
+                .accessibilityIdentifier("settings.clearResearch")
+
+                Button(role: .destructive) {
+                    isPresentingClearEvents = true
+                } label: {
+                    Label("Clear diagnostic log", systemImage: "trash")
+                }
+                .accessibilityIdentifier("settings.clearLog")
+            }
+            .id(storeRefresh)
+        }
+    }
+
+    // MARK: - 5. Advanced
     // The default satellite basemap works with nothing set, so the custom XYZ
     // overlay controls sit behind a navigation row here rather than on the
-    // main list.
+    // main list. Ordinary field setup, so it sits ABOVE the developer group.
     private var advancedSection: some View {
         Section(header: Text("Advanced")) {
             NavigationLink {
@@ -471,7 +533,7 @@ public struct SettingsScreen: View {
         }
     }
 
-    // MARK: - 7. Danger zone (always last)
+    // MARK: - 8. Danger zone (always last)
     private var dangerZoneSection: some View {
         Section(
             header: Text("Danger zone"),

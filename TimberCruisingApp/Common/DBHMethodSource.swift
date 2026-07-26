@@ -1,26 +1,30 @@
 // Which DBH sensing path the cruiser has selected on the scan screen.
-// This is the user-facing 3-way method picker that underpins the
-// within-device LiDAR-vs-AR comparison study:
+//
+// FIELD FIX — this used to be a 3-way picker (LiDAR depth / AR motion /
+// AR caliper) for the within-device comparison study. The two AR arms are
+// GONE: they recorded no raw captures, so nothing measured with them could
+// ever be re-derived offline, and the picker put a mis-tap between the
+// cruiser and the only path that produces research-grade data. Exactly one
+// method remains.
 //
 //   • lidarDepth — depth point-cloud circle-fit / chord (LiDAR only)
-//   • arMotion   — circle-fit to accumulated VIO feature points (no LiDAR)
-//   • arCaliper  — two-tap trunk edges × AR-estimated distance (no LiDAR)
+//
+// The type is kept (rather than deleted) because its raw value is the
+// `depth_source` column of the research CSV and the raw-capture manifest;
+// keeping it single-valued keeps those exports joinable with the rows the
+// study has already collected. Android matches.
 //
 // Orthogonal to DBHMeasurementMethod (chord vs partial-arc), which only
-// refines the LiDAR depth path. Persisted independently in AppSettings.
+// refines the LiDAR depth path.
 
 import Foundation
 
 public enum DBHMethodSource: String, CaseIterable, Codable, Sendable {
     case lidarDepth
-    case arMotion
-    case arCaliper
 
     public var displayName: String {
         switch self {
         case .lidarDepth: return "LiDAR"
-        case .arMotion:   return "AR motion"
-        case .arCaliper:  return "AR caliper"
         }
     }
 
@@ -28,11 +32,6 @@ public enum DBHMethodSource: String, CaseIterable, Codable, Sendable {
     public var shortTag: String {
         switch self {
         case .lidarDepth: return "lidar-depth"
-        case .arMotion:   return "ar-motion"
-        case .arCaliper:  return "ar-caliper"
         }
     }
-
-    /// True for the two depth-free AR paths (run on every iPhone).
-    public var isAR: Bool { self != .lidarDepth }
 }

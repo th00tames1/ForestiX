@@ -43,7 +43,9 @@ object RawCaptureReplay {
     data class HeightReplay(
         val value: Double,
         val valueReposed: Double,
-        val sigmaM: Double,
+        /// Re-derived σ_H — null when the stored geometry admits none
+        /// (degenerate d_h, inverted aims), never a stand-in 0.
+        val sigmaM: Double?,
         val tier: String,
         val rejectionReason: String?,
     )
@@ -411,7 +413,7 @@ object RawCaptureReplay {
         }
 
         return HeightReplay(
-            res.heightM.toDouble(), reposed, res.sigmaHm.toDouble(),
+            res.heightM.toDouble(), reposed, res.sigmaHm?.toDouble(),
             res.confidence.raw, res.rejectionReason,
         )
     }

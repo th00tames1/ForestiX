@@ -368,7 +368,14 @@ object RawCaptureStore {
             ))
             manifest.put("result_live", resultLiveJson(
                 value = live.heightM.toDouble(),
-                sigma = live.sigmaHm.toDouble(),
+                // σ_H is null when the estimator could not derive one at all
+                // (degenerate d_h, inverted aims) — a NON-measurement, which
+                // is also refused at Accept. The manifest's sigma key is
+                // schema-locked non-optional, so it falls back to 0 exactly
+                // as the DBH path does for a failed fit; the tier below is
+                // "red" for every such bundle and the raw geometry is stored,
+                // so the value is re-derivable offline.
+                sigma = live.sigmaHm?.toDouble() ?: 0.0,
                 tier = live.confidence.raw,
                 accepted = false,          // operator_accepted — flipped on Accept
                 frameCount = 0,            // patched below once the aims are attached

@@ -831,7 +831,16 @@ public enum RawCaptureRecorder {
         let aimFrames = [baseAimExtra, topAimExtra].compactMap { $0 }.count
         let resultLive = RawCaptureManifest.ResultLive(
             value: Double(liveResult.heightM),
-            sigma: Double(liveResult.sigmaHm),
+            // The bundle now carries the REAL σ for red fits too — a red
+            // tangent reading is still a measurement and its σ is what the
+            // algorithm comparison propagates. σ is unset only when the
+            // capture is not a measurement (degenerate d_h, inverted aims,
+            // non-finite pose); `sigma` is a non-optional key in the
+            // schema shared with the Android sibling, so those write 0.
+            // Such a bundle is always tier "red" with tier_ok false, and
+            // `HeightEstimator.canAccept` refuses it, so operator_accepted
+            // can never become true for it — filter on those, not on σ.
+            sigma: liveResult.sigmaHm.map(Double.init) ?? 0,
             tier: liveResult.confidence.rawValue,
             accepted: false,                    // legacy mirror of operator_accepted
             tierOk: tierOK,

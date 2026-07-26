@@ -1484,7 +1484,10 @@ public struct MapHomeScreen: View {
                     history.append(QuickMeasureEntry(
                         kind: .height,
                         value: Double(result.heightM),
-                        sigma: Double(result.sigmaHm),
+                        // `QuickMeasureEntry.sigma` is already optional —
+                        // a reading with no propagated σ (typed manual
+                        // entry) records none, rather than ±0.
+                        sigma: result.sigmaHm.map(Double.init),
                         confidenceRaw: result.confidence.rawValue,
                         method: result.method.rawValue,
                         treeNumber: pendingTreeNumber,

@@ -13,14 +13,15 @@
 //  - re-entering this screen with an active plot resumes it (Reset clears).
 //
 // Performance: the hub renders the plot nodes directly (a radius change
-// rebuilds only the ring node against a cached material), the out-of-bounds
-// flash is an isolated animation, and — once the centre is placed — the
-// plane-grid renderer is switched OFF for the walking phase. The Depth API
-// now stays ON the whole time: this screen runs camera-stream DEPTH
-// OCCLUSION so the boundary ring passes BEHIND real trunks (a deliberate
-// partial revert of the walking-phase depth shutdown — occlusion consumes
-// a depth image every frame; the plane-renderer + material-cache fixes
-// stay). A north-up plot mini-map floats top-right once the centre lands.
+// rewrites the ring's vertex buffer in place; the per-frame pump does
+// nothing unless the anchor pose actually moved), the out-of-bounds flash is
+// an isolated animation, and — once the centre is placed — both the
+// plane-grid renderer and the Depth API are switched OFF for the walking
+// phase. Camera-stream DEPTH OCCLUSION is off: it made the ring and pillar
+// flicker (a ground-coplanar overlay cannot be depth-tested against ARCore's
+// depth-from-motion image at grazing incidence) and it consumed a depth
+// image every frame — see ArSessionHub. A north-up plot mini-map floats
+// top-right once the centre lands.
 
 package com.hcjeong.forestix.ui.screens
 
@@ -126,17 +127,20 @@ fun SamplingPlotScreen(nav: NavController) {
 
     Box(Modifier.fillMaxSize()) {
         // The hub renders the plot itself (OWNER = full alpha). The plane
-        // grid is only needed while AIMING for the centre; depth stays ON
-        // throughout because ring occlusion consumes it per frame (the
-        // ring hides behind real trunks — perf trade documented above).
+        // grid and the Depth API are only needed while AIMING for the
+        // centre — both go off the moment it lands. Depth OCCLUSION is off
+        // (see ArSessionHub): depth-testing a ground-coplanar ring against
+        // ARCore's depth-from-motion image at grazing incidence is what made
+        // the ring and pillar flicker, and it cost a depth image per frame
+        // for the whole session.
         ArCameraView(
             controller,
             emptyList<ArSceneMarker>(),
             modifier = Modifier.fillMaxSize(),
-            enableDepth = true,
+            enableDepth = !placed,
             planeRenderer = !placed,
             plotOverlay = ArSessionHub.PlotOverlay.OWNER,
-            depthOcclusion = true,
+            depthOcclusion = false,
         )
 
         OutsideFlashOverlay(isOutside)

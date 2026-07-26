@@ -542,19 +542,41 @@ public final class HeightScanViewModel: ObservableObject {
         rebuildSceneMarkers()
     }
 
+    /// A computed height is ALWAYS acceptable, whatever the tier. It used to
+    /// be gated on `confidence != .red`, which meant a red fit could never be
+    /// committed at all — the cruiser was left with Retake and Manual and no
+    /// way to keep a number the geometry had actually produced, and (developer
+    /// mode) no way to attach a typed truth to exactly the hard cases the
+    /// algorithm comparison needs. The tier is NOT laundered by this: `result`
+    /// keeps its red, and so do Tree.heightConfidence, the research CSV row
+    /// and the raw-capture manifest.
+    ///
+    /// What is still refused is a result that is not a measurement — see
+    /// `HeightEstimator.canAccept`.
     public func accept() {
-        guard let r = result, r.confidence != .red else { return }
+        guard let r = result, HeightEstimator.canAccept(r) else { return }
         state = .accepted
         markLastBundleAccepted()
+    }
+
+    /// Whether the result on screen may be committed — drives the Accept
+    /// button's enabled state in both result stages.
+    public var canAcceptResult: Bool {
+        guard let r = result else { return false }
+        return HeightEstimator.canAccept(r)
     }
 
     /// The host could NOT store the accepted reading. Drop back to the result
     /// panel so the value is still on screen and Accept is tappable again —
     /// the alternative (sitting in `.accepted`, which renders no actions)
     /// would hide a lost measurement behind a dead end.
+    ///
+    /// Returns to whichever result stage the Accept came from, mirroring
+    /// `compute()`'s routing: a red fit must land back on `.rejected`, which
+    /// is the stage carrying Manual alongside Retake and Accept.
     public func acceptFailed() {
-        guard state == .accepted, result != nil else { return }
-        state = .computed
+        guard state == .accepted, let r = result else { return }
+        state = (r.confidence == .red) ? .rejected : .computed
     }
 
     public func enterManualEntry() {
@@ -570,14 +592,26 @@ public final class HeightScanViewModel: ObservableObject {
         guard let typed = TruthInput.parsePositive(manualHeightM) else { return }
         let metres = manualEntryUnits == .imperial
             ? Units.feetToMeters(typed) : typed
-        guard metres > 1.3 else { return }
+        // SAME floor as the AR path (`HeightEstimator.minHMeters`, 0.3 m),
+        // read from the estimator so the two can never drift apart again.
+        // This used to be a hard-coded 1.3 m, which survived the round that
+        // dropped the AR floor to 0.3 m — leaving a 0.8 m seedling that the
+        // walk-off flow measures happily but that the cruiser could not type
+        // in, with the Save button simply doing nothing and no explanation.
+        // Imperial input is still converted to metres BEFORE the comparison,
+        // so the floor means the same physical height in either unit system.
+        guard metres >= Double(HeightEstimator.minHMeters) else { return }
         let m = Float(metres)
         result = HeightResult(
             heightM: m,
             dHm: 0,
             alphaTopRad: 0,
             alphaBaseRad: 0,
-            sigmaHm: 0,
+            // A typed height has NO propagated σ — there is no baseline and
+            // no aim angles to propagate. Recording nil says exactly that;
+            // the 0 that used to sit here claimed the cruiser's guess was
+            // exact, in the same field the tangent σ_H is stored in.
+            sigmaHm: nil,
             confidence: .yellow,
             method: .manualEntry,
             rejectionReason: nil)
@@ -607,6 +641,10 @@ public final class HeightScanViewModel: ObservableObject {
             projectCalibration: calibration)
         let r = HeightEstimator.estimate(input: input)
         result = r
+        // `.rejected` is the RED-TIER result stage, not a dead end: it
+        // renders the same result panel (value + inline reason + the
+        // developer truth field) and its action row offers Accept
+        // alongside Retake and Manual. The tier itself is untouched.
         state = (r.confidence == .red) ? .rejected : .computed
         recordRawHeightIfNeeded(result: r, anchor: anchor, standing: standing,
                                 alphaTop: at, alphaBase: ab)

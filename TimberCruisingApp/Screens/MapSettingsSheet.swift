@@ -8,8 +8,11 @@
 //                        (Esri World Imagery), two selectable cards.
 //                        Persisted as `tc.mapType`; the on-map
 //                        attribution swaps with it.
-//   2. Survey boundary — current-state row, Import, Remove, and the
-//                        supported-format hint. One boundary at a time.
+//   2. Shapefile       — current-state row, Import, Remove, and the
+//                        supported-format hint (which stays: the group
+//                        is named for the file cruisers actually bring,
+//                        but KML/KMZ and GeoJSON are accepted too).
+//                        One boundary at a time.
 //   3. Offline maps    — the EXISTING download engine, moved here
 //                        wholesale (plan per layer over the last visible
 //                        bbox → one sequential queue with combined
@@ -185,7 +188,7 @@ private extension MapSettingsSheet {
     }
 }
 
-// MARK: - 2. Survey boundary
+// MARK: - 2. Shapefile
 
 private extension MapSettingsSheet {
 
@@ -234,7 +237,7 @@ private extension MapSettingsSheet {
                 importFailure = nil
                 presentingImporter = true
             } label: {
-                Label("Import boundary file", systemImage: "square.and.arrow.down")
+                Label("Import shapefile", systemImage: "square.and.arrow.down")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(ForestixProminentButtonStyle())
@@ -247,7 +250,11 @@ private extension MapSettingsSheet {
                     .accessibilityIdentifier("mapSettings.boundary.remove")
             }
         } header: {
-            Text("Survey boundary")
+            // "Shapefile" is what a cruiser calls this file, so it is what
+            // the group is called. The format hint below stays exactly
+            // where it was — the label must not over-promise or
+            // under-promise what the importer actually accepts.
+            Text("Shapefile")
         } footer: {
             Text(SurveyBoundaryImporter.formatHint)
                 .font(ForestixType.caption)
@@ -275,7 +282,7 @@ private extension MapSettingsSheet {
                         .foregroundStyle(ForestixPalette.textSecondary)
                 }
             } else {
-                Text("No boundary loaded")
+                Text("No shapefile loaded")
                     .font(ForestixType.body)
                     .foregroundStyle(ForestixPalette.textSecondary)
             }

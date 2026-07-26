@@ -654,13 +654,23 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
             }
             val fix = com.hcjeong.forestix.positioning.LocationService.lastGlobalFix
             if (cruise != null) {
-                // Storage failure must not crash the AR screen — the tree
-                // keeps its DBH-only row from the first leg either way.
-                runCatching { CruiseCapture.recordHeight(env, r, photoPath = photo, fix = fix) }
-                // Back to the map home in cruise mode (the chain popped DBH
-                // already; tc.mapMode is still "cruise"); the new tree pin
-                // appears and the tally pill ticks up.
-                nav.popBackStack()
+                // The height leg must actually land on the tree row. It used
+                // to be a bare `runCatching {}` followed by an unconditional
+                // pop, so a failed fold looked identical to a success and the
+                // tree peek quietly kept showing DBH alone. Keep the result on
+                // screen and name the failure instead; Accept can be retried.
+                val folded = runCatching {
+                    CruiseCapture.recordHeight(env, r, photoPath = photo, fix = fix)
+                }.getOrDefault(false)
+                if (folded) {
+                    // Back to the map home in cruise mode (the chain popped
+                    // DBH already; tc.mapMode is still "cruise"); the new tree
+                    // pin appears and the tally pill ticks up.
+                    nav.popBackStack()
+                } else {
+                    failure = "Height NOT saved to Tree ${cruise.treeNumber} — " +
+                        "the tree row couldn't be updated. Tap Accept again."
+                }
             } else {
                 env.history.append(
                     QuickMeasureEntry(

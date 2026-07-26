@@ -27,15 +27,9 @@ public final class DBHScanViewModel: ObservableObject {
         case accepted
         case rejected
         case manualEntry
-        /// AR-caliper path (non-LiDAR): waiting for the cruiser to tap the
-        /// LEFT trunk edge.
-        case arAwaitingLeft
-        /// AR-caliper path: left edge captured, waiting for the RIGHT edge.
-        case arAwaitingRight
-        /// AR-motion path: aiming at the trunk before the sweep starts.
-        case vioAiming
-        /// AR-motion path: accumulating VIO feature points during the sweep.
-        case vioCapturing
+        // The AR-caliper (arAwaitingLeft/arAwaitingRight) and AR-motion
+        // (vioAiming/vioCapturing) stages were removed with their capture
+        // arms — the DBH scan is the depth path plus manual entry.
     }
 
     // MARK: - Published surface
@@ -255,20 +249,6 @@ public final class DBHScanViewModel: ObservableObject {
         }
     }
 
-    /// User-selected DBH sensing path (LiDAR depth / AR motion / AR caliper).
-    /// The screen sets this from AppSettings before `onAppear` and on the
-    /// method picker change. Drives which capture flow runs.
-    public var dbhMethodSource: DBHMethodSource = .lidarDepth
-    /// First trunk-edge ray, cached between the two AR-caliper edge taps.
-    private var arLeftDir: SIMD3<Float>?
-    /// AR-motion sweep state — accumulated VIO feature points + the aim
-    /// anchor + sweep start time (ProcessInfo uptime).
-    private var vioFeatureBuffer: [SIMD3<Float>] = []
-    private var vioAnchor: SIMD3<Float>?
-    private var vioStartTime: TimeInterval = 0
-    private let vioWindowSec: TimeInterval = 3.0
-    private var featureCancellable: AnyCancellable?
-
     // MARK: - Lifecycle
 
     public func onAppear() {
@@ -281,47 +261,32 @@ public final class DBHScanViewModel: ObservableObject {
         // no reset options, so world anchors survive screen entry.
         session.attach(client: arClientID, configuration: .dbhScan)
         subscribeToDepth()
-        subscribeToFeatures()
 
         let resettable = state == .idle || state == .accepted
             || state == .rejected || state == .manualEntry
         guard resettable else { return }
 
-        switch dbhMethodSource {
-        case .lidarDepth:
-            // Depth point-cloud burst. Falls back to manual on a non-LiDAR
-            // device (shouldn't occur — AppSettings clamps away .lidarDepth).
-            state = isLiDARSupported ? .aligning : .manualEntry
-        case .arMotion:
-            // VIO feature-point sweep — no depth required, runs on every phone.
-            vioFeatureBuffer.removeAll(keepingCapacity: true)
-            state = .vioAiming
-        case .arCaliper:
-            // Two-tap trunk edges — no depth required.
-            arLeftDir = nil
-            state = .arAwaitingLeft
-        }
+        // Depth point-cloud burst — the only capture path. Falls back to
+        // manual entry on a device without a depth sensor.
+        state = isLiDARSupported ? .aligning : .manualEntry
     }
 
     public func onDisappear() {
         depthCancellable?.cancel()
         depthCancellable = nil
-        featureCancellable?.cancel()
-        featureCancellable = nil
         // Abort any in-flight capture so a watchdog that fires while the
         // screen is backgrounded (scenePhase .inactive keeps the run loop
         // alive) can't commit a phantom partial result. Bumping the
         // generation invalidates the pending watchdog Tasks; we roll state
         // back to the aiming stage WITHOUT touching `result`.
-        if state == .capturing || state == .vioCapturing {
+        if state == .capturing {
             captureGeneration &+= 1
             burstBuffer.removeAll(keepingCapacity: true)
             subSamples.removeAll(keepingCapacity: true)
             recordFrames.removeAll(keepingCapacity: true)
             recordReferenceJPEG = nil
-            vioFeatureBuffer.removeAll(keepingCapacity: true)
             captureSampleIndex = 0
-            state = (state == .vioCapturing) ? .vioAiming : .aligning
+            state = .aligning
         }
         session.detach(client: arClientID)
     }
@@ -332,29 +297,6 @@ public final class DBHScanViewModel: ObservableObject {
             .sink { [weak self] frame in
                 self?.handleDepthFrame(frame)
             }
-    }
-
-    /// VIO feature-point stream — accumulated only while an AR-motion sweep
-    /// is in progress (`.vioCapturing`).
-    private func subscribeToFeatures() {
-        featureCancellable = session.$latestRawFeaturePoints
-            .compactMap { $0 }
-            .sink { [weak self] points in
-                self?.handleFeaturePoints(points)
-            }
-    }
-
-    private func handleFeaturePoints(_ points: [SIMD3<Float>]) {
-        guard state == .vioCapturing else { return }
-        // ARKit's `rawFeaturePoints` is the running (cumulative) point cloud,
-        // so REPLACE the buffer with the latest snapshot rather than appending.
-        // Appending every frame re-added the same points dozens of times per
-        // second — inflating n, collapsing σ_R toward zero, and turning the
-        // O(n²) statistical-outlier pass into a main-thread stall.
-        vioFeatureBuffer = points
-        if ProcessInfo.processInfo.systemUptime - vioStartTime >= vioWindowSec {
-            finishVIOCapture()
-        }
     }
 
     private func handleDepthFrame(_ frame: ARDepthFrame) {
@@ -386,8 +328,7 @@ public final class DBHScanViewModel: ObservableObject {
         let previewable: Bool
         switch state {
         case .aligning, .armed, .rejected: previewable = true
-        case .capturing, .fitted, .accepted, .manualEntry, .idle,
-             .arAwaitingLeft, .arAwaitingRight, .vioAiming, .vioCapturing:
+        case .capturing, .fitted, .accepted, .manualEntry, .idle:
             previewable = false
         }
 
@@ -692,76 +633,8 @@ public final class DBHScanViewModel: ObservableObject {
         lastRecordedBundleID = nil
         captureSampleIndex = 0
         captureGeneration &+= 1
-        vioFeatureBuffer.removeAll(keepingCapacity: true)
         result = nil
-        arLeftDir = nil
-        switch dbhMethodSource {
-        case .lidarDepth: state = isLiDARSupported ? .aligning : .manualEntry
-        case .arMotion:   state = .vioAiming
-        case .arCaliper:  state = .arAwaitingLeft
-        }
-    }
-
-    /// AR-motion sweep — start accumulating VIO feature points. `anchor` is
-    /// an approximate trunk-surface point at the aim height (the screen's
-    /// centre raycast hit) used to centre the trunk-band ROI.
-    public func startVIOCapture(anchor: SIMD3<Float>) {
-        vioAnchor = anchor
-        vioFeatureBuffer.removeAll(keepingCapacity: true)
-        vioStartTime = ProcessInfo.processInfo.systemUptime
-        session.beginTrackingWatch()
-        captureGeneration &+= 1
-        let generation = captureGeneration
-        state = .vioCapturing
-        // Watchdog — the sweep normally ends when `handleFeaturePoints` sees
-        // the window elapse, but if the VIO feature stream stalls (no frames
-        // delivered) that never fires and the screen hangs in `.vioCapturing`.
-        // Guarantee finalisation slightly after the window regardless. The
-        // generation guard stops a stale watchdog from finalising a LATER
-        // sweep that happens to also be `.vioCapturing`.
-        let timeout = vioWindowSec + 0.5
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-            guard let self, self.state == .vioCapturing,
-                  self.captureGeneration == generation else { return }
-            self.finishVIOCapture()
-        }
-    }
-
-    private func finishVIOCapture() {
-        // Guard against a double finish — the watchdog and the feature-stream
-        // path can both fire; whichever runs first wins.
-        guard state == .vioCapturing else { return }
-        let outcome = vioAnchor.flatMap { anchor in
-            VIOMotionDBH.estimate(
-                featurePoints: vioFeatureBuffer,
-                anchorWorld: anchor,
-                trackingStayedNormal: session.trackingStayedNormalSinceWatch)
-        }
-        result = outcome
-        resultCapturedManually = false
-        if let r = outcome {
-            state = r.confidence == .red ? .rejected : .fitted
-        } else {
-            state = .rejected
-        }
-        resultGeneration &+= 1
-        vioFeatureBuffer.removeAll(keepingCapacity: true)
-    }
-
-    /// AR-caliper first tap — cache the LEFT trunk-edge ray and advance to
-    /// awaiting the right edge.
-    public func captureAREdgeLeft(dir: SIMD3<Float>) {
-        arLeftDir = dir
-        state = .arAwaitingRight
-    }
-
-    /// AR-caliper second tap — combine the cached left ray with the RIGHT
-    /// edge ray + AR-estimated distance into a diameter via captureARCaliper.
-    public func captureAREdgeRight(dir: SIMD3<Float>, distanceM: Float) {
-        guard let left = arLeftDir else { state = .arAwaitingLeft; return }
-        captureARCaliper(leftDir: left, rightDir: dir, distanceM: distanceM)
-        arLeftDir = nil
+        state = isLiDARSupported ? .aligning : .manualEntry
     }
 
     public func accept() {
@@ -928,26 +801,6 @@ public final class DBHScanViewModel: ObservableObject {
         }
     }
 
-    /// AR-caliper capture (non-LiDAR path). The screen supplies the two
-    /// trunk-edge ray directions + an AR-estimated distance; we build a
-    /// DBHResult the same way the depth burst does so the rest of the
-    /// screen (status panel, tier, Accept) is unchanged. Unlike the depth
-    /// path this does not require LiDAR, so it ignores `unsupportedBanner`.
-    public func captureARCaliper(leftDir: SIMD3<Float>,
-                                 rightDir: SIMD3<Float>,
-                                 distanceM: Float) {
-        let outcome = ARCaliperDBH.estimate(leftDir: leftDir,
-                                            rightDir: rightDir,
-                                            distanceM: distanceM)
-        result = outcome
-        resultCapturedManually = false
-        if let r = outcome {
-            state = r.confidence == .red ? .rejected : .fitted
-        } else {
-            state = .rejected
-        }
-        resultGeneration &+= 1
-    }
 }
 
 // MARK: - Preview / snapshot factories

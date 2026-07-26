@@ -213,16 +213,25 @@ object CruiseCapture {
     }
 
     /// Height Accept (cruise session): fold the height leg into the Tree
-    /// row the DBH leg created. No-op when that row doesn't exist (the
-    /// chain always runs DBH first).
+    /// row the DBH leg created.
+    ///
+    /// Returns TRUE only when the reading actually reached the row. Field
+    /// fix: this used to return Unit and the caller swallowed every failure
+    /// in a `runCatching {}` before popping back to the map — so a missing
+    /// session, an unreadable row or a failed update looked exactly like a
+    /// success, and the tree peek went on showing DBH alone with nothing
+    /// anywhere saying the height had been dropped. The caller now keeps
+    /// the result on screen and says so when this returns false.
     suspend fun recordHeight(
         env: AppEnvironment,
         r: HeightResult,
         photoPath: String?,
         fix: CLLocationSnapshot?,
-    ) {
-        if (target == null) return
-        val tree = savedTreeId?.let { env.treeRepository.read(it) } ?: return
+    ): Boolean {
+        if (target == null) return false
+        val tree = savedTreeId
+            ?.let { runCatching { env.treeRepository.read(it) }.getOrNull() }
+            ?: return false
         tree.heightM = r.heightM
         tree.heightMethod = r.method
         tree.heightSource = "measured"
@@ -237,6 +246,6 @@ object CruiseCapture {
             tree.longitude = fix.longitude
         }
         tree.updatedAt = System.currentTimeMillis()
-        env.treeRepository.update(tree)
+        return runCatching { env.treeRepository.update(tree) }.isSuccess
     }
 }

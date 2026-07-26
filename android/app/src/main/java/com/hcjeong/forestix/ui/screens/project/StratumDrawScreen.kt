@@ -6,8 +6,15 @@
 // the map is a self-contained Web-Mercator canvas (same math as
 // basemap/MapView.kt) extended with tap-to-coordinate support, drawing the
 // tapped vertices as numbered red pins and a green closed-polygon preview
-// once ≥3 points are placed. Tiles honour AppSettings.tileURLTemplate; with
-// no template configured the overlays render on a bare background.
+// once ≥3 points are placed.
+//
+// Basemap (field fix): this used to draw ONLY AppSettings.tileURLTemplate,
+// so with no custom template configured the map was a blank surface with a
+// "No basemap tiles configured — set a tile URL in Settings" notice — which
+// read as "you must configure tiles before you can draw a boundary". It now
+// uses the same two-layer stack as basemap/MapView: the built-in Esri World
+// Imagery satellite base, with the user's template drawn OVER it when they
+// have one. Drawing needs a project, never a tile template.
 
 package com.hcjeong.forestix.ui.screens.project
 
@@ -66,6 +73,9 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
@@ -218,7 +228,11 @@ private fun StratumDrawContent(nav: NavController, project: Project) {
                     centeredOnFix = true    // user took control; stop auto-centring
                 },
                 vertices = vertices,
-                tileURLTemplate = settings.tileURLTemplate,
+                // OVERLAY only — the satellite base underneath is built in,
+                // and the user's template rides on top when they have one
+                // (and have not hidden it). Same semantics as the map home.
+                overlayURLTemplate = settings.tileURLTemplate
+                    ?.takeIf { settings.overlayEnabled },
                 onTap = { viewModel.addVertex(it) },
                 modifier = Modifier.fillMaxWidth().weight(1f),
             )
@@ -305,7 +319,9 @@ private fun StratumDrawMap(
     camZoom: Double,
     onCamera: (CoordinateConversions.LatLon, Double) -> Unit,
     vertices: List<CoordinateConversions.LatLon>,
-    tileURLTemplate: String?,
+    /// Optional user tile template drawn ON TOP of the built-in satellite
+    /// base; null/blank = satellite only (still perfectly drawable).
+    overlayURLTemplate: String?,
     onTap: (CoordinateConversions.LatLon) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -320,11 +336,15 @@ private fun StratumDrawMap(
     val centerState = rememberUpdatedState(camCenter)
     val zoomState = rememberUpdatedState(camZoom)
 
-    val fetcher = remember(tileURLTemplate) {
-        tileURLTemplate?.takeIf { it.isNotBlank() }?.let { TileFetcher(context, it) }
+    // Base = built-in Esri World Imagery (zero setup); overlay = the user's
+    // template when present. Identical layering to basemap/MapView.
+    val baseFetcher = remember { TileFetcher.esriWorldImagery(context) }
+    val overlayFetcher = remember(overlayURLTemplate) {
+        overlayURLTemplate?.takeIf { it.isNotBlank() }?.let { TileFetcher(context, it) }
     }
-    val tileTick = if (fetcher != null) {
-        fetcher.tilesVersion.collectAsStateWithLifecycle().value
+    val baseTick = baseFetcher.tilesVersion.collectAsStateWithLifecycle().value
+    val overlayTick = if (overlayFetcher != null) {
+        overlayFetcher.tilesVersion.collectAsStateWithLifecycle().value
     } else 0
 
     val labelPaint = remember {
@@ -382,7 +402,8 @@ private fun StratumDrawMap(
                     }
                 },
         ) {
-            @Suppress("UNUSED_EXPRESSION") tileTick
+            @Suppress("UNUSED_EXPRESSION") baseTick
+            @Suppress("UNUSED_EXPRESSION") overlayTick
 
             drawRect(color = colors.surface)
 
@@ -393,17 +414,17 @@ private fun StratumDrawMap(
             val originX = lonToXNorm(camCenter.longitude) * worldPx - size.width / 2.0
             val originY = latToYNorm(camCenter.latitude) * worldPx - size.height / 2.0
 
-            // MARK: Tiles
-            if (fetcher != null) {
-                val tx0 = floor(originX / tilePx).toInt()
-                val tx1 = floor((originX + size.width) / tilePx).toInt()
-                val ty0 = floor(originY / tilePx).toInt().coerceAtLeast(0)
-                val ty1 = floor((originY + size.height) / tilePx).toInt().coerceAtMost(n - 1)
+            // MARK: Tiles — satellite base first, then the optional overlay.
+            val tx0 = floor(originX / tilePx).toInt()
+            val tx1 = floor((originX + size.width) / tilePx).toInt()
+            val ty0 = floor(originY / tilePx).toInt().coerceAtLeast(0)
+            val ty1 = floor((originY + size.height) / tilePx).toInt().coerceAtMost(n - 1)
+            for (layer in listOfNotNull(baseFetcher, overlayFetcher)) {
                 for (ty in ty0..ty1) {
                     for (tx in tx0..tx1) {
                         val wrappedX = ((tx % n) + n) % n
                         val key = TileCache.Key(z = tileZoom, x = wrappedX, y = ty)
-                        val bitmap = fetcher.bitmapFor(key, scope) ?: continue
+                        val bitmap = layer.bitmapFor(key, scope) ?: continue
                         val dstX = (tx * tilePx - originX).roundToInt()
                         val dstY = (ty * tilePx - originY).roundToInt()
                         val dstSize = ceil(tilePx).toInt() + 1
@@ -446,16 +467,20 @@ private fun StratumDrawMap(
             }
         }
 
-        if (fetcher == null) {
-            Text(
-                "No basemap tiles configured — set a tile URL in Settings",
-                style = Forestix.type.caption,
-                color = colors.textSecondary,
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(ForestixSpace.xs),
-            )
-        }
+        // Imagery credit for the built-in satellite base — required by the
+        // Esri terms, so it stays on wherever that base is drawn (same badge
+        // as basemap/MapView).
+        Text(
+            TileFetcher.ESRI_WORLD_IMAGERY_ATTRIBUTION,
+            style = Forestix.type.dataSmall.copy(fontSize = 9.sp),
+            color = Color.White.copy(alpha = 0.78f),
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(start = 10.dp, bottom = 4.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(Color.Black.copy(alpha = 0.28f))
+                .padding(horizontal = 6.dp, vertical = 2.5.dp),
+        )
     }
 }
 

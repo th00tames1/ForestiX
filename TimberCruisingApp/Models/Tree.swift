@@ -21,15 +21,14 @@ public enum DBHMethod: String, Codable, Sendable {
     /// path. Records that the diameter came from the projected trunk
     /// width × depth / fx identity rather than a circle fit.
     case lidarChordSilhouette
-    /// Non-LiDAR AR caliper — diameter from two trunk-edge ray directions
-    /// × an AR-estimated distance (no depth map). Enables DBH on non-LiDAR
-    /// iPhones and underpins the within-device LiDAR-vs-AR comparison.
+    /// LEGACY, decode-only. The AR-caliper (two-tap trunk edges) and
+    /// AR-motion (VIO circle fit) capture arms were removed — they recorded
+    /// no raw captures, so nothing could be re-derived from them. Trees
+    /// already tallied with either arm still carry these raw strings, so the
+    /// cases stay so the Core Data mapper can decode them; nothing produces
+    /// them any more. Raw strings MUST keep matching Android so
+    /// cross-platform exports join.
     case arCaliper
-    /// Non-LiDAR AR-motion — diameter from a circle fit to ARKit sparse
-    /// VIO feature points accumulated over a short motion sweep. Same
-    /// circle-fit algorithm as the LiDAR depth path, but the point cloud
-    /// comes from visual-inertial features instead of the depth sensor —
-    /// the cleanest "same algorithm, different sensor" comparison arm.
     case arVioCircleFit
     case manualCaliper
     case manualVisual

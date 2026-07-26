@@ -1467,6 +1467,10 @@ public struct MapHomeScreen: View {
                         longitude: meta.longitude,
                         photoPath: meta.photoPath))
                     presentingHeightScan = false
+                    // Quick measure is an in-memory/JSON append that cannot
+                    // report a row-level failure — the reading is on the
+                    // history the moment this returns.
+                    return true
                 },
                 onCrown: { widthM, heightM in
                     // Crown is measured inside the Height session — it

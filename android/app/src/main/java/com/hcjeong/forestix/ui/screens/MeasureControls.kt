@@ -20,6 +20,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.size
@@ -62,6 +64,9 @@ import com.hcjeong.forestix.ui.theme.Forestix
 
 /// Circular translucent back button pinned top-left so every AR screen has
 /// a consistent, always-visible exit affordance over the camera feed.
+/// No elevation shadow — same reason as MeasureCircleButton: through a
+/// translucent fill the platform's tessellated shadow reads as a grey
+/// polygon behind the glyph.
 @Composable
 fun BoxScope.MeasureBackButton(onClick: () -> Unit) {
     Box(
@@ -69,7 +74,6 @@ fun BoxScope.MeasureBackButton(onClick: () -> Unit) {
             .align(Alignment.TopStart)
             .padding(start = 16.dp, top = 16.dp)
             .size(44.dp)
-            .shadow(3.dp, CircleShape, clip = false)
             .clip(CircleShape)
             .background(Color.Black.copy(alpha = 0.55f))
             .border(0.5.dp, Color.White.copy(alpha = 0.18f), CircleShape)
@@ -127,15 +131,17 @@ fun BoxScope.MeasureTopChrome(
 /// Camera-style capture chrome: a 70 dp white shutter bottom-centre
 /// (16 above the nav bars) flanked by FIXED 68×70 secondary slots (the
 /// 52 dp flank circle top-padded 9 so its centre aligns with the
-/// shutter's; captions hang below without affecting the row — iOS
-/// MeasureShutterRow geometry 1:1). A compact live-value strip renders
-/// directly above the row; `above` renders 12 above the whole block
-/// (DbhMethodSelector / ADJUST exit pill placement semantics unchanged).
-/// `onCapture == null` keeps the row (and its slots) without the shutter
-/// circle — the AR-caliper arm captures via screen taps.
+/// shutter's; the caption sits below it and the slot grows to fit — iOS
+/// MeasureShutterRow geometry). A compact live-value strip renders directly
+/// above the row; `above` renders 12 above the whole block (ADJUST exit pill
+/// / Undo toast placement semantics unchanged).
+///
+/// `onCapture` used to be nullable so the AR-caliper arm could keep the row
+/// without a shutter (it captured via screen taps). That arm is gone and
+/// every screen has a shutter, so the parameter is required again.
 @Composable
 fun BoxScope.MeasureShutterBar(
-    onCapture: (() -> Unit)?,
+    onCapture: () -> Unit,
     left: (@Composable () -> Unit)? = null,
     right: (@Composable () -> Unit)? = null,
     valueStrip: (@Composable () -> Unit)? = null,
@@ -156,22 +162,26 @@ fun BoxScope.MeasureShutterBar(
             horizontalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             ShutterFlankSlot(left)
-            if (onCapture != null) {
-                CaptureButton(onCapture)
-            } else {
-                Box(Modifier.size(70.dp))
-            }
+            CaptureButton(onCapture)
             ShutterFlankSlot(right)
         }
     }
 }
 
-/// Fixed 68×70 flank slot; the 52 dp circle is top-padded 9 so its centre
-/// sits at the shutter centre, and the caption overflows below the slot.
+/// 68 dp-wide flank slot, at LEAST as tall as the 70 dp shutter; the 52 dp
+/// circle is top-padded 9 so its centre sits at the shutter centre.
+///
+/// Field fix: the slot used to be a hard `size(68.dp, 70.dp)`. The circle
+/// alone eats 9 + 52 of that, so the Column handed its caption a ~6 dp
+/// height budget — and a Text whose paragraph overflows its box clips to
+/// that box, which is why only the tops of the caption letters rendered.
+/// `heightIn(min = …)` lets the slot grow to the caption instead (and keeps
+/// growing at large system font scales), while the Row's Top alignment
+/// keeps every circle centre on the shutter centre.
 @Composable
 private fun ShutterFlankSlot(content: (@Composable () -> Unit)?) {
     Box(
-        Modifier.size(width = 68.dp, height = 70.dp),
+        Modifier.width(68.dp).heightIn(min = 70.dp),
         contentAlignment = Alignment.TopCenter,
     ) {
         if (content != null) {
@@ -221,6 +231,13 @@ fun CaptureButton(onClick: () -> Unit) {
 
 /// 52 dp translucent circular icon button with an optional caption beneath
 /// — a floating-control look. Used for the Distance mode toggle.
+///
+/// Field fix: this used to carry `shadow(3.dp, CircleShape, clip = false)`.
+/// An elevation shadow is drawn UNDER the whole casting outline, and the
+/// platform tessellates that outline into a coarse polygon at this size —
+/// so through a 0.55-alpha fill it read as a grey octagon sitting behind
+/// the icon, a second shape on top of the circle. The hairline white border
+/// already separates the button from the camera feed, so the shadow goes.
 @Composable
 fun MeasureCircleButton(
     icon: ImageVector,
@@ -236,7 +253,6 @@ fun MeasureCircleButton(
         Box(
             Modifier
                 .size(52.dp)
-                .shadow(3.dp, CircleShape, clip = false)
                 .clip(CircleShape)
                 .background(Color.Black.copy(alpha = 0.55f))
                 .border(0.5.dp, Color.White.copy(alpha = 0.18f), CircleShape)
@@ -289,6 +305,12 @@ fun BoxScope.MeasureStatusPanel(
             // Keep clear of the system navigation bar (edge-to-edge is on):
             // inset first, then a 16dp visual gap above it.
             .navigationBarsPadding()
+            // ...and out from under the keyboard. This panel carries the
+            // Retake / Details / ACCEPT row, and developer mode adds the
+            // "True H (m)" research field right above it — tapping that field
+            // raised the IME straight over Accept, so a measured height had no
+            // reachable save button and was silently never recorded.
+            .imePadding()
             .padding(bottom = 16.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(12.dp),

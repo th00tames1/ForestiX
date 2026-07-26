@@ -37,10 +37,6 @@ data class SettingsSnapshot(
     val unitSystem: UnitSystem = UnitSystem.IMPERIAL,
     val logRule: LogRule = LogRule.SCRIBNER,
     val dbhMeasurementMethod: DBHMeasurementMethod = DBHMeasurementMethod.CHORD,
-    /// DBH scan capture flow — "depth" (depth-API chord fit) or "caliper"
-    /// (two-tap trunk edges). Stored raw to keep the data layer free of a
-    /// UI-package enum dependency; the scan screen maps it to DbhCaptureMethod.
-    val dbhCaptureMethod: String = "depth",
     /// Per-frame chord algorithm for the depth method — "silhouette"
     /// (iOS-identical pixel-width) or "band" (Android point-cloud diagonal).
     /// Maps to sensors.ChordAlgorithm. Default silhouette so Android matches
@@ -124,7 +120,10 @@ class AppSettings(private val context: Context) {
         val regionPickerSeen = booleanPreferencesKey("tc.regionPickerSeen")
         val logRule = stringPreferencesKey("tc.logRule")
         val dbhMethod = stringPreferencesKey("tc.dbhMeasurementMethod")
-        val dbhCaptureMethod = stringPreferencesKey("tc.dbhCaptureMethod")
+        // RETIRED: "tc.dbhCaptureMethod" (depth / AR-motion / AR-caliper
+        // picker). The AR arms are gone — they recorded no raw captures —
+        // so the DBH scan is depth-only. The key is no longer read, which
+        // migrates any stored "motion"/"caliper" value to the depth method.
         val dbhChordAlgorithm = stringPreferencesKey("tc.dbhChordAlgorithm")
         val developerMode = booleanPreferencesKey("tc.developerMode")
         val researchTreeId = stringPreferencesKey("tc.researchTreeId")
@@ -162,7 +161,6 @@ class AppSettings(private val context: Context) {
             },
             logRule = LogRule.fromRaw(p[Keys.logRule] ?: "scribner"),
             dbhMeasurementMethod = DBHMeasurementMethod.fromRaw(p[Keys.dbhMethod]),
-            dbhCaptureMethod = p[Keys.dbhCaptureMethod] ?: "depth",
             dbhChordAlgorithm = p[Keys.dbhChordAlgorithm] ?: "silhouette",
             tileURLTemplate = p[Keys.tileURLTemplate]?.takeIf { it.isNotBlank() },
             tileProviderLabel = p[Keys.tileProviderLabel],
@@ -235,11 +233,6 @@ class AppSettings(private val context: Context) {
     fun setDbhMethod(value: DBHMeasurementMethod) = update {
         _state.value = _state.value.copy(dbhMeasurementMethod = value)
         it[Keys.dbhMethod] = value.raw
-    }
-
-    fun setDbhCaptureMethod(raw: String) = update {
-        _state.value = _state.value.copy(dbhCaptureMethod = raw)
-        it[Keys.dbhCaptureMethod] = raw
     }
 
     fun setDbhChordAlgorithm(raw: String) = update {

@@ -35,7 +35,15 @@ public struct HeightScanScreen: View {
     /// user confirmation should use this instead of `onResult`.
     /// `metadata` carries optional species / damage / note attached
     /// via `ScanMetadataSheet`.
-    public var onAccept: (HeightResult, ScanMetadata) -> Void = { _, _ in }
+    ///
+    /// RETURNS TRUE only when the reading actually reached storage. Field
+    /// fix: this used to return Void and the cruise host dismissed the cover
+    /// unconditionally straight after calling it — so a height that never
+    /// landed on the Tree row looked exactly like one that did, and the tree
+    /// peek went on showing DBH alone with nothing anywhere saying the
+    /// reading had been dropped. A `false` keeps the result on screen and
+    /// names the failure; Accept can be tapped again.
+    public var onAccept: (HeightResult, ScanMetadata) -> Bool = { _, _ in true }
     /// Fires when the cruiser measures the crown inside this Height
     /// session and accepts. `widthM` / `heightM` are at real scale because
     /// the canopy points are forward-projected to the tree's walk-off
@@ -94,6 +102,10 @@ public struct HeightScanScreen: View {
     /// Free-space check refreshed on appear / at each capture, so the REC
     /// pill can call out a phone that is filling up.
     @State private var storageLow = false
+    /// Non-nil when the host could NOT store the accepted height. The result
+    /// stays on screen with this reason instead of the cover closing as if
+    /// the reading had been saved.
+    @State private var heightSaveFailure: String?
     /// Live camera→crosshair raycast distance sampled while the anchor
     /// stage is active — drives the ≤ 4 m anchor range gate's status
     /// line. nil while the raycast misses (sky, no mesh/plane yet,
@@ -117,7 +129,7 @@ public struct HeightScanScreen: View {
 
     public init(viewModel: @autoclosure @escaping () -> HeightScanViewModel,
                 onResult: @escaping (HeightResult) -> Void = { _ in },
-                onAccept: @escaping (HeightResult, ScanMetadata) -> Void = { _, _ in },
+                onAccept: @escaping (HeightResult, ScanMetadata) -> Bool = { _, _ in true },
                 onCrown: @escaping (Double, Double) -> Void = { _, _ in },
                 cruisePlotInfo: PlotMiniMapInfo? = nil,
                 projectID: String? = nil,
@@ -231,6 +243,12 @@ public struct HeightScanScreen: View {
                         bannerView(reason, tint: .orange)
                             .accessibilityIdentifier("heightScan.anchorFailureBanner")
                             .onTapGesture { viewModel.clearAnchorFailure() }
+                    }
+                    // The accepted reading did NOT reach the tree row. Loud,
+                    // and the value stays on screen so Accept can be retried.
+                    if let failure = heightSaveFailure {
+                        bannerView(failure, tint: ForestixPalette.confidenceBad)
+                            .accessibilityIdentifier("heightScan.saveFailureBanner")
                     }
                 }
 
@@ -357,7 +375,21 @@ public struct HeightScanScreen: View {
                         photoPath: photo,
                         latitude: fix?.latitude,
                         longitude: fix?.longitude)
-                    onAccept(r, meta)
+                    // The host reports whether the reading actually reached
+                    // storage. A dropped height used to be indistinguishable
+                    // from a saved one (the cover closed either way), which is
+                    // how a measured height ended up missing from the tree
+                    // peek with nothing on screen to say so.
+                    if onAccept(r, meta) {
+                        heightSaveFailure = nil
+                    } else {
+                        heightSaveFailure = treeNumber.map {
+                            "Height NOT saved to Tree \($0) — the tree row couldn't be updated. Tap Accept again."
+                        } ?? "Height NOT saved — the tree row couldn't be updated. Tap Accept again."
+                        // Back to the result panel so the value is still on
+                        // screen and Accept is tappable again.
+                        viewModel.acceptFailed()
+                    }
                     // Raw-capture (developer mode): attach the clinometer /
                     // Vertex truth to the just-recorded bundle. The id is
                     // minted synchronously at compute, so this works even when

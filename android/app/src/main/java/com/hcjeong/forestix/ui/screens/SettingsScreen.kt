@@ -1,13 +1,17 @@
 // Settings — grouped-card sections in the shared cross-platform order (iOS
 // parity), REGROUPED from the old per-control sections:
-//   1. Region & units   — Country/Region → Volume standard → Units → Log rule
+//   1. Region & units   — Country/Region → Units → Log rule
 //   2. Display          — Appearance (Light/Dark)
 //   3. Calibration      — wall/cylinder fit wizard
 //   4. Data & backup    — .tcproj export + restore; pointer to per-project exports
-//   5. Developer & research — GATED behind the developer-mode toggle: DBH
-//                          algorithm, research CSV, diagnostic log, raw captures
-//   6. Advanced         — Basemap tiles behind a disclosure
-//   7. Danger zone      — erase-all, always last
+//   5. Advanced         — Basemap tiles behind a disclosure (ordinary field
+//                          setup, so it sits ABOVE the developer group)
+//   6. Developer & research — GATED behind the developer-mode toggle: DBH
+//                          algorithm, research CSV / diagnostic log EXPORTS,
+//                          raw captures
+//   7. Clear developer data — GATED; the destructive Clears, kept in their own
+//                          card away from the Export rows, each confirmed
+//   8. Danger zone      — erase-all, always last
 //
 // This is a re-grouping + reorder + gating change only; every control keeps
 // its exact binding/action and its committed copy. When developer mode is on,
@@ -103,6 +107,11 @@ fun SettingsScreen(nav: NavController) {
     var resetStep1 by remember { mutableStateOf(false) }
     var resetStep2 by remember { mutableStateOf(false) }
     var resetError by remember { mutableStateOf<String?>(null) }
+
+    // Developer-data clears — confirmed, and deliberately housed in their own
+    // card away from the Export rows (a mis-tap used to wipe the corpus).
+    var confirmClearResearch by remember { mutableStateOf(false) }
+    var confirmClearEvents by remember { mutableStateOf(false) }
 
     // Backup / restore (Data & backup group).
     val backup = remember(env) { BackupViewModel(env) }
@@ -221,14 +230,10 @@ fun SettingsScreen(nav: NavController) {
                     }
                 }
                 FormDivider()
-                // Volume standard — read-only, derived from the country.
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("Volume standard", style = type.body, color = colors.textPrimary,
-                        modifier = Modifier.weight(1f))
-                    Text(settings.country.volumeStandardLabel, style = type.caption,
-                        color = colors.textSecondary)
-                }
-                FormDivider()
+                // The read-only "Volume standard" row lived here. Dropped as
+                // redundant: it only restated what the Log rule picker below
+                // already says. Country.volumeStandardLabel and the volume
+                // logic behind it are untouched.
                 // Units override (Imperial → Metric). Committed footer kept as
                 // an inline caption now that this is no longer its own section.
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -331,10 +336,82 @@ fun SettingsScreen(nav: NavController) {
                 ) { restoreLauncher.launch(arrayOf("*/*")) }
             }
 
-            // MARK: - 5. Developer & research (GATED — the developer-mode
+            // MARK: - 5. Basemap tiles (was inside "Advanced", BELOW the
+            // developer group). Moved ABOVE it: it is ordinary field setup,
+            // not developer tooling. Content unchanged — still a disclosure,
+            // still folded by default because the built-in satellite base
+            // works with nothing set.
+            FormSection(header = "Advanced") {
+                var basemapExpanded by remember { mutableStateOf(false) }
+                Row(
+                    Modifier.fillMaxWidth().clickableNoRipple { basemapExpanded = !basemapExpanded },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Basemap tiles", style = type.body, color = colors.textPrimary,
+                        modifier = Modifier.weight(1f))
+                    Icon(
+                        if (basemapExpanded) Icons.Filled.KeyboardArrowDown
+                        else Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = null,
+                        tint = colors.textTertiary, modifier = Modifier.size(14.dp))
+                }
+                if (basemapExpanded) {
+                    var tileTemplate by remember { mutableStateOf(settings.tileURLTemplate ?: "") }
+                    var providerLabel by remember { mutableStateOf(settings.tileProviderLabel ?: "") }
+                    FormDivider()
+                    FormTextField(
+                        value = tileTemplate,
+                        onValueChange = { new ->
+                            tileTemplate = new
+                            env.settings.setTileURLTemplate(new.ifEmpty { null })
+                        },
+                        placeholder = "https://tile.example.com/{z}/{x}/{y}.png",
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                    )
+                    FormDivider()
+                    FormTextField(
+                        value = providerLabel,
+                        onValueChange = { new ->
+                            providerLabel = new
+                            env.settings.setTileProviderLabel(new.ifEmpty { null })
+                        },
+                        placeholder = "Provider name (optional)",
+                    )
+                    FormDivider()
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "I have reviewed this provider's usage policy",
+                            style = type.body, color = colors.textPrimary,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Switch(
+                            checked = settings.providerUsageAcknowledged,
+                            onCheckedChange = { env.settings.setProviderUsageAcknowledged(it) },
+                        )
+                    }
+                    Text(
+                        "Paste an XYZ template ({z}/{x}/{y}) to draw contour or " +
+                            "forest-service tiles over the satellite base. It shows only after " +
+                            "you confirm the provider's usage policy above.",
+                        style = type.caption, color = colors.textSecondary,
+                    )
+                }
+            }
+
+            // MARK: - 6. Developer & research (GATED — the developer-mode
             // toggle is the only always-visible row; when on it holds ALL dev /
             // study tooling: DBH algorithm, research CSV, diagnostic log, and
-            // the raw-capture recorder).
+            // the raw-capture recorder). The destructive Clears live in their
+            // own card AFTER this one.
+            val hasData = remember(storeRefresh, settings.developerMode) {
+                settings.developerMode && ResearchLog.hasData(context)
+            }
+            val rowCount = remember(storeRefresh, settings.developerMode) {
+                if (settings.developerMode) ResearchLog.rowCount(context) else 0
+            }
+            val hasEvents = remember(storeRefresh, settings.developerMode) {
+                settings.developerMode && ForestixLogger.hasEvents()
+            }
             FormSection(header = "Developer & research") {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -383,12 +460,12 @@ fun SettingsScreen(nav: NavController) {
                     // appended by the scan/distance screens while developer
                     // mode is on. Identical schema to the iOS ResearchLog so
                     // the exports concatenate.
-                    val hasData = remember(storeRefresh, settings.developerMode) {
-                        ResearchLog.hasData(context)
-                    }
-                    val rowCount = remember(storeRefresh, settings.developerMode) {
-                        ResearchLog.rowCount(context)
-                    }
+                    //
+                    // Field fix: Clear used to sit DIRECTLY under Export for
+                    // both logs, so one mis-tap destroyed the research corpus.
+                    // Only the non-destructive Exports live here now; both
+                    // Clears moved to their own "Clear developer data" card
+                    // below, behind a confirmation.
                     FormDivider()
                     Row(
                         Modifier.fillMaxWidth(),
@@ -407,23 +484,10 @@ fun SettingsScreen(nav: NavController) {
                     ) {
                         ResearchLog.exportUri(context)?.let { shareFile(context, it, "text/csv") }
                     }
-                    FormDivider()
-                    SettingsActionRow(
-                        title = "Clear research CSV",
-                        icon = Icons.Filled.Delete,
-                        enabled = hasData,
-                        destructive = true,
-                    ) {
-                        ResearchLog.clear(context)
-                        storeRefresh++
-                    }
 
                     // Event log — local-only structured analytics (plot open,
                     // backup create/restore, crash-recovery prompt). JSONL,
-                    // never uploaded; share/clear mirror the iOS Settings rows.
-                    val hasEvents = remember(storeRefresh, settings.developerMode) {
-                        ForestixLogger.hasEvents()
-                    }
+                    // never uploaded; share mirrors the iOS Settings row.
                     FormDivider()
                     SettingsActionRow(
                         title = "Export diagnostic log",
@@ -433,16 +497,6 @@ fun SettingsScreen(nav: NavController) {
                         ForestixLogger.exportUri(context)?.let {
                             shareFile(context, it, "application/json")
                         }
-                    }
-                    FormDivider()
-                    SettingsActionRow(
-                        title = "Clear diagnostic log",
-                        icon = Icons.Filled.Delete,
-                        enabled = hasEvents,
-                        destructive = true,
-                    ) {
-                        ForestixLogger.clear()
-                        storeRefresh++
                     }
 
                     // Raw-capture replay recorder — serialize the raw inputs
@@ -511,66 +565,33 @@ fun SettingsScreen(nav: NavController) {
                 }
             }
 
-            // MARK: - 6. Advanced (Basemap tiles behind a disclosure — the
-            // default satellite base works with nothing set, so it stays folded).
-            FormSection(header = "Advanced") {
-                var basemapExpanded by remember { mutableStateOf(false) }
-                Row(
-                    Modifier.fillMaxWidth().clickableNoRipple { basemapExpanded = !basemapExpanded },
-                    verticalAlignment = Alignment.CenterVertically,
+            // MARK: - 7. Clear developer data (GATED). The two destructive
+            // Clears used to sit immediately under their own Export rows, one
+            // mis-tap from wiping the research corpus. They live here now — a
+            // separate card, away from every Export, each behind a confirm.
+            if (settings.developerMode) {
+                FormSection(
+                    header = "Clear developer data",
+                    footer = "Clearing is permanent. Export first — the exported file is the " +
+                        "only copy once these are cleared.",
                 ) {
-                    Text("Basemap tiles", style = type.body, color = colors.textPrimary,
-                        modifier = Modifier.weight(1f))
-                    Icon(
-                        if (basemapExpanded) Icons.Filled.KeyboardArrowDown
-                        else Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                        contentDescription = null,
-                        tint = colors.textTertiary, modifier = Modifier.size(14.dp))
-                }
-                if (basemapExpanded) {
-                    var tileTemplate by remember { mutableStateOf(settings.tileURLTemplate ?: "") }
-                    var providerLabel by remember { mutableStateOf(settings.tileProviderLabel ?: "") }
+                    SettingsActionRow(
+                        title = "Clear research CSV",
+                        icon = Icons.Filled.Delete,
+                        enabled = hasData,
+                        destructive = true,
+                    ) { confirmClearResearch = true }
                     FormDivider()
-                    FormTextField(
-                        value = tileTemplate,
-                        onValueChange = { new ->
-                            tileTemplate = new
-                            env.settings.setTileURLTemplate(new.ifEmpty { null })
-                        },
-                        placeholder = "https://tile.example.com/{z}/{x}/{y}.png",
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                    )
-                    FormDivider()
-                    FormTextField(
-                        value = providerLabel,
-                        onValueChange = { new ->
-                            providerLabel = new
-                            env.settings.setTileProviderLabel(new.ifEmpty { null })
-                        },
-                        placeholder = "Provider name (optional)",
-                    )
-                    FormDivider()
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            "I have reviewed this provider's usage policy",
-                            style = type.body, color = colors.textPrimary,
-                            modifier = Modifier.weight(1f),
-                        )
-                        Switch(
-                            checked = settings.providerUsageAcknowledged,
-                            onCheckedChange = { env.settings.setProviderUsageAcknowledged(it) },
-                        )
-                    }
-                    Text(
-                        "Paste an XYZ template ({z}/{x}/{y}) to draw contour or " +
-                            "forest-service tiles over the satellite base. It shows only after " +
-                            "you confirm the provider's usage policy above.",
-                        style = type.caption, color = colors.textSecondary,
-                    )
+                    SettingsActionRow(
+                        title = "Clear diagnostic log",
+                        icon = Icons.Filled.Delete,
+                        enabled = hasEvents,
+                        destructive = true,
+                    ) { confirmClearEvents = true }
                 }
             }
 
-            // MARK: - 7. Danger zone (iOS dangerZoneSection — ALWAYS last)
+            // MARK: - 8. Danger zone (iOS dangerZoneSection — ALWAYS last)
             FormSection(
                 header = "Danger zone",
                 footer = "Permanently erases every project on this device.",
@@ -614,6 +635,50 @@ fun SettingsScreen(nav: NavController) {
     }
 
     // MARK: - Destructive reset dialogs (iOS confirmationDialog chain)
+    if (confirmClearResearch) {
+        AlertDialog(
+            onDismissRequest = { confirmClearResearch = false },
+            title = { Text("Clear research CSV?") },
+            text = {
+                Text(
+                    "This deletes every research row on this device. Anything not " +
+                        "already exported is gone for good.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmClearResearch = false
+                    ResearchLog.clear(context)
+                    storeRefresh++
+                }) { Text("Clear") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmClearResearch = false }) { Text("Cancel") }
+            },
+        )
+    }
+    if (confirmClearEvents) {
+        AlertDialog(
+            onDismissRequest = { confirmClearEvents = false },
+            title = { Text("Clear diagnostic log?") },
+            text = {
+                Text(
+                    "This deletes every logged event on this device. Anything not " +
+                        "already exported is gone for good.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmClearEvents = false
+                    ForestixLogger.clear()
+                    storeRefresh++
+                }) { Text("Clear") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmClearEvents = false }) { Text("Cancel") }
+            },
+        )
+    }
     if (resetStep1) {
         AlertDialog(
             onDismissRequest = { resetStep1 = false },

@@ -762,8 +762,13 @@ extension MapHomeScreen {
                 viewModel: HeightScanViewModel(
                     calibration: calibration(from: currentProject)),
                 onAccept: { result, meta in
-                    saveChainHeight(result, meta: meta)
-                    presentingCruiseHeight = false
+                    // Dismiss ONLY when the height actually landed on the
+                    // tree row. This used to pop unconditionally, so a
+                    // dropped reading looked identical to a saved one and
+                    // the tree peek kept showing DBH alone.
+                    let stored = saveChainHeight(result, meta: meta)
+                    if stored { presentingCruiseHeight = false }
+                    return stored
                 },
                 cruisePlotInfo: cruiseMiniMapInfo(plotID: chainPlotID),
                 // Raw-capture join keys: the height session measures a KNOWN
@@ -827,11 +832,23 @@ extension MapHomeScreen {
 
     /// Accepted Height → update the scoped tree (tree peek / heights
     /// sheet target).
+    ///
+    /// Returns TRUE only when the reading actually reached the row. FIELD FIX:
+    /// this used to return Void and had three silent exits — no scoped tree
+    /// (`chainTreeID` nil, e.g. after `undoLastTally()` or `startAddTree`), a
+    /// row the repository could not read, and a `try?`-swallowed update error.
+    /// The caller dismissed the cover straight afterwards regardless, so every
+    /// one of those looked exactly like a successful save: the map came back,
+    /// the tree peek still showed DBH alone, and nothing anywhere said the
+    /// height had been thrown away. Each exit is now reported, and a
+    /// successful write refreshes the snapshot the peek reads before the
+    /// cover's own `onDismiss` gets a chance to race it.
+    @discardableResult
     func saveChainHeight(_ result: HeightResult,
-                         meta: HeightScanScreen.ScanMetadata) {
-        guard let id = chainTreeID,
-              var tree = try? environment.treeRepository.read(id: id)
-        else { return }
+                         meta: HeightScanScreen.ScanMetadata) -> Bool {
+        guard let id = chainTreeID else { return false }
+        guard var tree = try? environment.treeRepository.read(id: id)
+        else { return false }
         tree.heightM = result.heightM
         tree.heightMethod = result.method
         tree.heightSource = "measured"
@@ -846,7 +863,15 @@ extension MapHomeScreen {
             tree.longitude = meta.longitude
         }
         tree.updatedAt = Date()
-        _ = try? environment.treeRepository.update(tree)
+        do {
+            _ = try environment.treeRepository.update(tree)
+        } catch {
+            return false
+        }
+        // Re-read the plot's trees NOW so the tree peek can never render the
+        // pre-write snapshot of this tree.
+        reloadCruise()
+        return true
     }
     #endif
 
@@ -1282,6 +1307,13 @@ extension MapHomeScreen {
                 .disabled(tree.photoPath == nil)
                 .accessibilityLabel("View photo")
                 .accessibilityIdentifier("cruiseMap.treePeek.photoThumb")
+                // DBH + HEIGHT only — there is deliberately no CROWN row.
+                // The quick-measure peek has one because QuickMeasureEntry
+                // carries a `.crown` kind; the cruise Tree has no crown
+                // width/height fields, and both platforms hide "Measure
+                // crown" inside a cruise-scoped Height session for exactly
+                // that reason, so a crown can never exist for a cruise tree.
+                // Android's cruise peek matches (DBH + HEIGHT).
                 VStack(spacing: 0) {
                     metricRow(
                         label: "DBH",

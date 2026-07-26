@@ -548,6 +548,15 @@ public final class HeightScanViewModel: ObservableObject {
         markLastBundleAccepted()
     }
 
+    /// The host could NOT store the accepted reading. Drop back to the result
+    /// panel so the value is still on screen and Accept is tappable again —
+    /// the alternative (sitting in `.accepted`, which renders no actions)
+    /// would hide a lost measurement behind a dead end.
+    public func acceptFailed() {
+        guard state == .accepted, result != nil else { return }
+        state = .computed
+    }
+
     public func enterManualEntry() {
         state = .manualEntry
     }

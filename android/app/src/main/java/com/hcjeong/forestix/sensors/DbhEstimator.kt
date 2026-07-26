@@ -42,11 +42,13 @@ enum class DBHMethod(val raw: String) {
     LIDAR_IRREGULAR("lidarIrregular"),
     LIDAR_CHORD_SILHOUETTE("lidarChordSilhouette"),
     MANUAL_CALIPER("manualCaliper"),
-    // Two-tap trunk-edge caliper (no depth) — raw string MUST match iOS
-    // `arCaliper` so cross-platform exports join.
+    // LEGACY, decode-only. The AR-caliper (two-tap trunk edges) and AR-motion
+    // (VIO circle fit) capture arms were removed — they recorded no raw
+    // captures, so nothing could be re-derived from them. Trees already
+    // tallied with either arm still carry these raw strings, so the cases
+    // stay so Mappers can decode them; nothing produces them any more. Raw
+    // strings MUST keep matching iOS so cross-platform exports join.
     AR_CALIPER("arCaliper"),
-    // AR-motion — circle fit to VIO feature points from a short sweep.
-    // Raw MUST match iOS `arVioCircleFit`.
     AR_VIO_CIRCLE_FIT("arVioCircleFit"),
     // Typed manual entry — raw MUST match iOS `manualVisual`.
     MANUAL_VISUAL("manualVisual"),

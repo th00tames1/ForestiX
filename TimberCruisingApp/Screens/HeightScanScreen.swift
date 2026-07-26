@@ -1,11 +1,17 @@
 // Spec §5.3 HeightScan layout + §4.4 state machine.
 //
-// Five stages render distinct chrome over a black AR placeholder:
+// Six stages render distinct chrome over a black AR placeholder:
 //   1. anchorSet        — "Touch phone to tree base" + [Anchor Here]
 //   2. walking          — live d_h + "Move back X m" hint + [Continue]
 //   3. aimBaseArmed     — crosshair on the base + [Aim Base]   (base-first)
 //   4. aimTopArmed      — crosshair on the top  + [Aim Top]
 //   5. computed         — H ± σ_H panel + [Retake] / [Accept]
+//   6. rejected         — the RED-TIER result: same panel, the reason
+//                         inline under the value, + [Retake] / [Manual]
+//                         / [Accept]. A computed height is always
+//                         acceptable; only a non-measurement (inverted
+//                         aims, out-of-range H, degenerate geometry)
+//                         leaves Accept inert.
 //
 // Per Phase 2 Decision #5 (carried over) the AR view is a deterministic
 // black placeholder so snapshot tests compare only the overlay chrome.
@@ -513,7 +519,11 @@ public struct HeightScanScreen: View {
             ("d_h live", String(format: "%.1f m", Double(viewModel.dhMeters))),
         ]
         if let r = viewModel.result {
-            out.append(("H", String(format: "%.1f ±%.1f m", Double(r.heightM), Double(r.sigmaHm))))
+            // σ is unset only for a result that is not a measurement —
+            // show that as "±—" rather than inventing a zero.
+            out.append(("H", r.sigmaHm.map {
+                String(format: "%.1f ±%.1f m", Double(r.heightM), Double($0))
+            } ?? String(format: "%.1f ±— m", Double(r.heightM))))
             out.append(("α_top", String(format: "%+.1f°", Double(r.alphaTopRad) * 180 / .pi)))
             out.append(("α_base", String(format: "%+.1f°", Double(r.alphaBaseRad) * 180 / .pi)))
             out.append(("d_h", String(format: "%.1f m", Double(r.dHm))))
@@ -642,6 +652,9 @@ public struct HeightScanScreen: View {
             crownSection
         case .rejected:
             if let r = viewModel.result { resultPanel(r) }
+            // Crown is available on the red-tier stage too — see the
+            // `.rejected` branch of `actionRow`.
+            crownSection
         case .manualEntry:
             manualEntryPanel
         default:
@@ -691,7 +704,11 @@ public struct HeightScanScreen: View {
             "depth_source": settings.measurementSource.rawValue,
             "measured_value": String(format: "%.2f", r.heightM),
             "unit": "m",
-            "sigma": String(format: "%.2f", r.sigmaHm),
+            // EMPTY, never "0.00", when the reading has no propagated σ
+            // (a typed manual entry). A tangent fit always has a real σ
+            // here — `canAccept` refuses to commit one that does not, so
+            // this row cannot claim ±0.00 m on a measurement.
+            "sigma": r.sigmaHm.map { String(format: "%.2f", $0) } ?? "",
             "confidence_tier": r.confidence.rawValue,
             "distance_m": String(format: "%.2f", r.dHm),
             "alpha_top_deg": String(format: "%.2f", r.alphaTopRad * 180 / .pi),
@@ -828,13 +845,26 @@ public struct HeightScanScreen: View {
                 // Field fix: the value stands alone — no ±σ text and no
                 // tier chip/hint on the scan screens. σ + tier are still
                 // recorded with the entry (history / CSV / FieldLog
-                // unchanged); a red result keeps its rejection reason in
-                // the status banner.
+                // unchanged); a poor fit carries its reason on the line
+                // directly below.
                 Text(MeasurementFormatter.height(
                     m: Double(r.heightM), in: settings.unitSystem))
                     .font(ForestixType.dataLarge)
                     .foregroundStyle(.white)
                 Spacer()
+            }
+            // WHY the fit is poor, INLINE — beside the number, not only
+            // in the top banner. A red fit is acceptable now (the action
+            // row offers Accept at every tier), so the cruiser has to be
+            // able to read the reason at the moment of deciding; the
+            // banner carries the stage prompt and is the wrong place to
+            // park something that changes what the reading means.
+            if let reason = r.rejectionReason {
+                Text(reason)
+                    .font(ForestixType.caption)
+                    .foregroundStyle(ForestixPalette.confidenceBad)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("heightScan.resultReason")
             }
             // Phase 13.2 diagnostic — Bug B persists in real-device tests
             // (desk reads ~89.6 m). The math in HeightEstimator is correct
@@ -1109,16 +1139,67 @@ public struct HeightScanScreen: View {
                     }
                     .buttonStyle(.forestixProminent)
                     .frame(maxWidth: .infinity)
-                    .disabled(viewModel.result?.confidence == .red)
+                    .disabled(!viewModel.canAcceptResult)
                     .accessibilityIdentifier("heightScan.acceptButton")
                 }
             }
         case .rejected:
-            HStack(spacing: 12) {
-                Button("Retake") { viewModel.retake() }
+            // RED-TIER RESULT — and Accept lives here too. A red fit is
+            // still a fit: σ_H and the aim angles say it is poor, the
+            // reason says why in the panel above, and the cruiser decides.
+            // This row used to offer only Retake and Manual, which meant a
+            // legitimately-measured tree could not be kept at all — and, in
+            // developer mode, that a typed ground truth could never be
+            // committed for exactly the hard cases the algorithm comparison
+            // needs. The tier still travels with the reading.
+            //
+            // Accept goes inert only when the result is not a measurement
+            // (inverted aims, out-of-range H, degenerate geometry, or a
+            // σ_H the propagation could not derive) — see
+            // `HeightEstimator.canAccept`.
+            VStack(spacing: 8) {
+                // CROWN LIVES HERE TOO. It was only on the `.computed`
+                // row, which meant a red-but-acceptable tree — a fit the
+                // cruiser is allowed to keep — could never get crown
+                // width/height: the same tree, one tier down, silently
+                // lost a whole measurement. Crown geometry does not
+                // depend on the height tier at all (it is four raycast
+                // taps scaled by d_h), so the same gate as `.computed`
+                // applies and nothing else changes.
+                if cruisePlotInfo == nil {
+                    if crownStep == .none {
+                        Button("Measure crown") { crownStep = .left }
+                            .buttonStyle(.forestixARSecondary)
+                            .frame(maxWidth: .infinity)
+                            .accessibilityIdentifier("heightScan.measureCrown")
+                    } else if crownStep == .done {
+                        Button("Redo crown") { resetCrown() }
+                            .buttonStyle(.forestixARSecondary)
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                HStack(spacing: 12) {
+                    Button("Retake") { viewModel.retake(); resetCrown() }
+                        .buttonStyle(.forestixARSecondary)
+                        .frame(maxWidth: .infinity)
+                    Button("Manual") { viewModel.enterManualEntry() }
+                        .buttonStyle(.forestixARSecondary)
+                        .frame(maxWidth: .infinity)
+                    Button("Accept") {
+                        // Hand the crown up BEFORE the height, exactly as
+                        // the `.computed` row does — an Accept that
+                        // dropped it would throw away the taps the
+                        // cruiser just made.
+                        if crownStep == .done, let w = crownWidthM, let h = crownHeightM {
+                            onCrown(w, h)
+                        }
+                        viewModel.accept()
+                    }
                     .buttonStyle(.forestixProminent)
-                Button("Manual") { viewModel.enterManualEntry() }
-                    .buttonStyle(.forestixARSecondary)
+                    .frame(maxWidth: .infinity)
+                    .disabled(!viewModel.canAcceptResult)
+                    .accessibilityIdentifier("heightScan.acceptButton")
+                }
             }
         case .manualEntry:
             Button("Cancel") { viewModel.retake() }

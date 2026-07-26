@@ -94,6 +94,11 @@ import kotlin.math.abs
 
 // Aim BASE before TOP: from eye level you tilt down slightly to the base,
 // then sweep up to the top — one continuous motion, less device rotation.
+//
+// REJECTED is the RED-TIER RESULT stage, not a dead end: it renders the same
+// result panel (value + inline reason + the developer truth field) and its
+// action row offers Accept alongside Retake and Manual. The tier itself is
+// untouched — it still travels with the reading.
 private enum class Stage { ANCHOR, WALKING, AIM_BASE, AIM_TOP, COMPUTED, REJECTED }
 private enum class CrownStep { NONE, LEFT, RIGHT, TOP, BOTTOM, DONE }
 
@@ -580,6 +585,11 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     // row. Shared by the result row's Accept and the manual-entry Save
     // (iOS submitManualEntry goes straight to .accepted).
     fun acceptResult(r: HeightResult) {
+        // Refused only when the result is not a measurement at all (inverted
+        // aims, out-of-range H, degenerate geometry). The TIER is deliberately
+        // not part of this — a red fit is committable, with its reason shown
+        // inline, and stays red everywhere it is recorded.
+        if (!HeightEstimator.canAccept(r)) return
         val activity = context as? android.app.Activity
         // Cruise tally session (v3): the height leg folds into the Tree row
         // the DBH leg created, then the chain returns to the cruise map —
@@ -675,7 +685,11 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 env.history.append(
                     QuickMeasureEntry(
                         kind = MeasureKind.HEIGHT, value = r.heightM.toDouble(),
-                        sigma = r.sigmaHm.toDouble(), confidenceRaw = r.confidence.raw,
+                        // σ null = no uncertainty was derivable. It stays
+                        // null in the history rather than becoming a 0 that
+                        // reads as perfect precision. (Accept already refuses
+                        // tangent fits with no σ — see HeightEstimator.canAccept.)
+                        sigma = r.sigmaHm?.toDouble(), confidenceRaw = r.confidence.raw,
                         method = r.method.raw, treeNumber = pendingTree,
                         plotID = env.history.activePlotID.value,
                         speciesCode = metaSpecies,
@@ -710,7 +724,9 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 "depth_source" to "ar",
                 "measured_value" to String.format(Locale.US, "%.2f", r.heightM),
                 "unit" to "m",
-                "sigma" to String.format(Locale.US, "%.2f", r.sigmaHm),
+                // Empty cell when σ_H was not derivable — the research CSV
+                // must never carry a manufactured 0 in the σ column.
+                "sigma" to (r.sigmaHm?.let { String.format(Locale.US, "%.2f", it) } ?: ""),
                 "confidence_tier" to r.confidence.raw,
                 "distance_m" to String.format(Locale.US, "%.2f", r.dHm),
                 "alpha_top_deg" to String.format(Locale.US, "%.2f", r.alphaTopRad * 180f / Math.PI.toFloat()),
@@ -818,7 +834,14 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                     "d_h live" to String.format(Locale.US, "%.1f m", dhLive),
                     alphaBase?.let { "α_base" to String.format(Locale.US, "%+.1f°", Math.toDegrees(it.toDouble())) },
                     alphaTop?.let { "α_top" to String.format(Locale.US, "%+.1f°", Math.toDegrees(it.toDouble())) },
-                    result?.let { "H" to String.format(Locale.US, "%.1f ±%.1f m · %s", it.heightM, it.sigmaHm, it.confidence.raw) },
+                    // "σ n/a" (not "±0.0") when no uncertainty was derivable —
+                    // the internals HUD is the one place a developer reads
+                    // this number raw, so it must not lie about it.
+                    result?.let { r ->
+                        val sig = r.sigmaHm?.let { s -> String.format(Locale.US, "±%.1f m", s) }
+                            ?: "σ n/a"
+                        "H" to String.format(Locale.US, "%.1f m %s · %s", r.heightM, sig, r.confidence.raw)
+                    },
                 ),
                 // Below the plot mini-map when it occupies the top-right
                 // slot (22 + 116 card + 12 gap).
@@ -940,21 +963,32 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                     // The field is typed in the ACTIVE unit system: under
                     // imperial the prompt says feet, so the number must be
                     // converted before it lands in heightM (and before the
-                    // 1.3 m gate, which is a METRE threshold).
+                    // plausibility gate, which is a METRE threshold).
                     val typed = TruthInput.parse(manualText)?.toFloat()
                     val typedM = typed?.let {
                         if (settings.unitSystem == UnitSystem.METRIC) it
                         else Units.feetToMeters(it.toDouble()).toFloat()
                     }
+                    // SAME floor as the AR path (HeightEstimator.MIN_H_M,
+                    // 0.3 m). It was a separate hard-coded 1.3 m, which left
+                    // the absurd split where a 0.8 m seedling could be
+                    // MEASURED but not TYPED. Inclusive, exactly like the
+                    // estimator's MIN_H_M..MAX_H_M window.
+                    val manualOk = (typedM ?: 0f) >= HeightEstimator.MIN_H_M
                     ForestixProminentButton(
                         "Save",
-                        enabled = (typedM ?: 0f) > 1.3f,
+                        enabled = manualOk,
                     ) {
                         val m = typedM
-                        if (m != null && m > 1.3f) {
+                        if (m != null && m >= HeightEstimator.MIN_H_M) {
                             val r = HeightResult(
                                 heightM = m, dHm = 0f, alphaTopRad = 0f, alphaBaseRad = 0f,
-                                sigmaHm = 0f, confidence = ConfidenceTier.YELLOW,
+                                // A typed height has NO propagated uncertainty —
+                                // there is no geometry to propagate. Recording 0
+                                // would claim perfect precision and poison the
+                                // sigma column the accuracy work reads, so leave
+                                // it unset (iOS stores nil here too).
+                                sigmaHm = null, confidence = ConfidenceTier.YELLOW,
                                 method = HeightMethod.MANUAL_ENTRY, rejectionReason = null,
                             )
                             result = r
@@ -980,8 +1014,10 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
         // shutter row owns the crown taps): the existing result panel
         // occupies the bottom as before. Unit-aware H + the α/d_h
         // diagnostic line. Field fix: no σ, no tier chip, no tier hint —
-        // σ and the tier stay recorded internally, the tier still gates
-        // Accept, and a rejection's reason shows in the banner above.
+        // σ and the tier stay recorded internally. The tier no longer gates
+        // Accept (a red fit is a fit); what a red fit DOES get is its reason
+        // rendered inline under the number, so the cruiser reads it before
+        // committing rather than only catching it in the transient banner.
         if (!hidingChromeForCapture && !manualOpen && !crownActive &&
             (stage == Stage.COMPUTED || stage == Stage.REJECTED)
         ) MeasureStatusPanel {
@@ -996,6 +1032,20 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                         style = type.dataLarge,
                         color = Color.White,
                     )
+                    // WHY the fit is poor, INLINE — beside the number, not
+                    // only in the top banner. A red fit is acceptable now
+                    // (the action row offers Accept at every tier), so the
+                    // cruiser has to be able to read the reason at the moment
+                    // of deciding; the banner carries the stage prompt and is
+                    // the wrong place to park something that changes what the
+                    // reading means. Null on green/yellow.
+                    r.rejectionReason?.let { reason ->
+                        Text(
+                            reason,
+                            style = type.caption,
+                            color = Forestix.colors.confidenceBad,
+                        )
+                    }
                     // Diagnostic — the raw captured inputs that fed the §7.2
                     // formula (iOS diagnosticLine).
                     Text(
@@ -1077,7 +1127,7 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                             ForestixProminentButton(
                                 "Accept",
                                 modifier = Modifier.weight(1f),
-                                enabled = result?.confidence != ConfidenceTier.RED,
+                                enabled = result?.let { HeightEstimator.canAccept(it) } == true,
                             ) {
                                 result?.let { acceptResult(it) }
                             }
@@ -1085,10 +1135,34 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                     }
                 }
                 Stage.REJECTED -> {
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        ForestixProminentButton("Retake") { resetAll() }
-                        ForestixWhiteButton("Manual") {
+                    // RED-TIER RESULT — and Accept lives here too. A red fit
+                    // is still a fit: σ_H and the aim angles say it is poor,
+                    // the reason says why in the panel above, and the cruiser
+                    // decides. This row used to offer only Retake and Manual,
+                    // which meant a legitimately-measured tree could not be
+                    // kept at all — and, in developer mode, that a typed
+                    // ground truth could never be committed for exactly the
+                    // hard cases the algorithm comparison needs. The tier
+                    // still travels with the reading (Tree.heightConfidence,
+                    // research CSV, raw-capture manifest all keep `red`).
+                    //
+                    // Accept goes inert only when the result is not a
+                    // measurement (inverted aims, out-of-range H, degenerate
+                    // geometry) — see HeightEstimator.canAccept.
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        ForestixWhiteButton("Retake", modifier = Modifier.weight(1f)) { resetAll() }
+                        ForestixWhiteButton("Manual", modifier = Modifier.weight(1f)) {
                             resetAll(); manualOpen = true; manualText = ""
+                        }
+                        ForestixProminentButton(
+                            "Accept",
+                            modifier = Modifier.weight(1f),
+                            enabled = result?.let { HeightEstimator.canAccept(it) } == true,
+                        ) {
+                            result?.let { acceptResult(it) }
                         }
                     }
                 }

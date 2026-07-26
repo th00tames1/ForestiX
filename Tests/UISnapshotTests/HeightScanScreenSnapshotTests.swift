@@ -51,16 +51,38 @@ final class HeightScanScreenSnapshotTests: XCTestCase {
             rejectionReason: nil)
     }
 
+    /// A red fit that is STILL A MEASUREMENT — the shape the `.rejected`
+    /// stage takes in the field now. d_h = 1 m with an 88° top aim trips
+    /// the steep-angle guard, yet the geometry is sound: H = 29.5 m with a
+    /// real, large σ_H (±4.34 m, the sec⁴ term dominating). The old
+    /// fixture used H = 0 with σ = 0 and both aims at 0°, which is an
+    /// inverted non-measurement — it rendered the row with Accept inert
+    /// and so could never show the Accept-on-red affordance at all.
     private func redResult(reason: String) -> HeightResult {
+        HeightResult(
+            heightM: 29.47,
+            dHm: 1.0,
+            alphaTopRad: 1.5359,        // 88°
+            alphaBaseRad: -0.6981,      // -40°
+            sigmaHm: 4.34,
+            confidence: .red,
+            method: .vioWalkoffTangent,
+            rejectionReason: reason)
+    }
+
+    /// A red result that is NOT a measurement: the aims are inverted, so
+    /// σ_H is underivable and stays unset. `HeightEstimator.canAccept`
+    /// refuses it, which is what makes Accept inert in this state.
+    private func unacceptableResult() -> HeightResult {
         HeightResult(
             heightM: 0,
             dHm: 2.0,
             alphaTopRad: 0,
             alphaBaseRad: 0,
-            sigmaHm: 0,
+            sigmaHm: nil,
             confidence: .red,
             method: .vioWalkoffTangent,
-            rejectionReason: reason)
+            rejectionReason: "Top aim was at or below the base — re-capture the top higher")
     }
 
     // MARK: - State matrix
@@ -116,10 +138,28 @@ final class HeightScanScreenSnapshotTests: XCTestCase {
         assertSnapshot(of: host(vm), as: .image(on: .iPhone13))
     }
 
+    /// RED-TIER RESULT STAGE. The row is now three buttons — Retake,
+    /// Manual, Accept — with the crown control above them, and the
+    /// rejection reason inline under the value rather than only in the
+    /// top banner. Accept is LIVE here: a red fit is still a fit, and the
+    /// cruiser decides with the reason in front of them.
+    ///
+    /// The old reason string ("Walked back less than 3 m") named a floor
+    /// that no longer exists; the steep-aim reason is one the estimator
+    /// actually produces.
     func testRejected() {
         let vm = HeightScanViewModel.preview(
             state: .rejected,
-            result: redResult(reason: "Walked back less than 3 m"))
+            result: redResult(reason: "Top angle too steep; step back"))
+        assertSnapshot(of: host(vm), as: .image(on: .iPhone13))
+    }
+
+    /// Same stage, but the result is not a measurement (inverted aims,
+    /// σ unset) — the row is identical except that Accept is inert.
+    func testRejectedNotAMeasurement() {
+        let vm = HeightScanViewModel.preview(
+            state: .rejected,
+            result: unacceptableResult())
         assertSnapshot(of: host(vm), as: .image(on: .iPhone13))
     }
 

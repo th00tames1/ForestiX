@@ -46,12 +46,36 @@ public struct HeightMeasureInput: Sendable {
 public enum HeightEstimator {
 
     /// Spec §7.2 constants.
-    public static let minDhMeters: Float = 3.0
+
+    /// GEOMETRIC SANITY FLOOR — deliberately tiny, and NOT a quality
+    /// proxy. Below this the standing point and the anchor are
+    /// effectively the same point: there is no baseline for the tangent
+    /// triangle and d_h is pure pose noise.
+    ///
+    /// This used to be 3.0 m, a crude stand-in for "the aim angles will
+    /// be bad from this close" — a thing σ_H and the α_top check below
+    /// already measure directly, and measure correctly at every tree
+    /// size. Distance is the wrong variable:
+    ///
+    ///   • A 2 m sapling from d_h = 1.5 m gives α_top ≈ 18°,
+    ///     α_base ≈ −45°, H = 2.0 m and σ_H/H ≈ 2.2% — comfortably
+    ///     inside the 5% green band, yet the old floor refused it
+    ///     outright, which made a tree farm unmeasurable.
+    ///   • A 20 m tree at exactly 3.0 m has α_top ≈ 81° and is a poor
+    ///     measurement, yet it satisfied the old floor.
+    ///
+    /// So the floor is now only the degenerate case, and the tier comes
+    /// from σ_H/H and the angle checks — unchanged, and unweakened.
+    public static let minDhMeters: Float = 0.3
     public static let yellowDhMeters: Float = 25.0
     public static let highDriftDhMeters: Float = 30.0
     public static let maxAlphaTopRadRed: Float = 85 * .pi / 180
     public static let maxAlphaTopRadYellow: Float = 75 * .pi / 180
-    public static let minHMeters: Float = 1.5
+    /// Lower bound on a plausible measured height. 0.3 m (was 1.5 m) so
+    /// seedlings and saplings are measurable at all. The inversion guard
+    /// and `maxHMeters` are untouched: a negative or inverted result is
+    /// still refused, and so is anything above 100 m.
+    public static let minHMeters: Float = 0.3
     public static let maxHMeters: Float = 100.0
     public static let sigmaAlphaRad: Float = 0.3 * .pi / 180
     public static let sigmaRatioYellow: Float = 0.05
@@ -73,6 +97,9 @@ public enum HeightEstimator {
                        dh: dh,
                        reason: "AR tracking lost mid-measurement")
         }
+        // Degenerate geometry only — see `minDhMeters`. Everything the
+        // old 3 m floor was standing in for is measured by σ_H and the
+        // α_top check in Step 5, which are correct at every tree size.
         if dh < minDhMeters {
             return red(input: input,
                        dh: dh,
@@ -117,19 +144,21 @@ public enum HeightEstimator {
         }
 
         // Step 4. σ_H propagation — three variance terms per §7.2.
-        //   σ_d   = vioDriftFraction · d_h
-        //   σ_α   = 0.3° constant (IMU pitch noise)
-        //   σ_H²  = (tanTop − tanBase)² · σ_d²
-        //         + d_h² · sec⁴(α_top) · σ_α²
-        //         + d_h² · sec⁴(α_base) · σ_α²
-        let sigmaD = input.projectCalibration.vioDriftFraction * dh
-        let tanDiff = tanTop - tanBase
-        let term1 = tanDiff * tanDiff * sigmaD * sigmaD
-        let secTop  = 1.0 / cos(input.alphaTopRad)
-        let secBase = 1.0 / cos(input.alphaBaseRad)
-        let term2 = dh * dh * pow(secTop,  4) * sigmaAlphaRad * sigmaAlphaRad
-        let term3 = dh * dh * pow(secBase, 4) * sigmaAlphaRad * sigmaAlphaRad
-        let sigmaH = sqrt(term1 + term2 + term3)
+        // Same helper the red paths use, so there is exactly one σ_H in
+        // the app and a red fit's σ is computed the same way a green
+        // one's is. It cannot be nil here (d_h, both angles and the
+        // aim ordering were all checked above), but the tier must never
+        // be derived from a fabricated number, so the impossible case
+        // returns red with σ unset rather than σ = 0.
+        guard let sigmaH = propagatedSigma(dh: dh,
+                                           alphaTopRad: input.alphaTopRad,
+                                           alphaBaseRad: input.alphaBaseRad,
+                                           calibration: input.projectCalibration)
+        else {
+            return red(input: input,
+                       dh: dh,
+                       reason: "Height uncertainty not derivable from this geometry")
+        }
 
         // Step 5. Tier from the §7.9 check matrix.
         // `d_h > 30 m` is explicitly yellow per §7.2 failure table, so we
@@ -150,6 +179,17 @@ public enum HeightEstimator {
         ]
         let tier = combineChecks(checks)
 
+        // A red tier HERE is the σ / angle / walk-back verdict — the
+        // criteria that actually measure quality, now that the flat
+        // distance floor is gone. Name the failing checks so the result
+        // panel can show WHY inline: the fit is still acceptable, and a
+        // cruiser must be able to read the reason next to the number
+        // before committing it. Mirrors DBHEstimator's red-only
+        // `rejectionReason` line; yellow/green stay nil as before.
+        let reason: String? = tier == .red
+            ? (failedCheckReasons(checks) ?? "Quality below threshold")
+            : nil
+
         return HeightResult(
             heightM: H,
             dHm: dh,
@@ -158,8 +198,102 @@ public enum HeightEstimator {
             sigmaHm: sigmaH,
             confidence: tier,
             method: .vioWalkoffTangent,
-            rejectionReason: nil
+            rejectionReason: reason
         )
+    }
+
+    // MARK: - σ_H propagation
+
+    /// §7.2 σ_H from the three variance terms:
+    ///
+    ///   σ_d   = vioDriftFraction · d_h
+    ///   σ_α   = 0.3° constant (IMU pitch noise)
+    ///   σ_H²  = (tan α_top − tan α_base)² · σ_d²
+    ///         + d_h² · sec⁴(α_top) · σ_α²
+    ///         + d_h² · sec⁴(α_base) · σ_α²
+    ///
+    /// EVERY path that produces a height uses this — green, yellow and
+    /// red alike. The red paths used to short-circuit to σ = 0, which
+    /// was harmless only while a red fit could never be committed; now
+    /// that it can, a zero there would persist the WORST readings into
+    /// `Tree.heightSigmaM`, the quick-measure history, the research CSV
+    /// and the raw-capture manifest claiming perfect precision, and
+    /// silently corrupt the σ-propagation spine the accuracy study rests
+    /// on. The formula is well defined for any finite d_h and angles —
+    /// a steep aim simply produces a large σ, which is the true answer
+    /// and exactly what the analysis needs to see.
+    ///
+    /// Returns nil only where σ is genuinely meaningless, i.e. where the
+    /// result is not a measurement:
+    ///   • a non-finite pose or angle (nothing to propagate),
+    ///   • d_h below `minDhMeters` — there is no baseline, so σ_d =
+    ///     f · d_h is not an uncertainty on anything,
+    ///   • an inverted aim pair, where H itself is unphysical.
+    /// `canAccept` refuses all three, so a nil σ cannot reach storage.
+    static func propagatedSigma(dh: Float,
+                                alphaTopRad: Float,
+                                alphaBaseRad: Float,
+                                calibration: ProjectCalibration) -> Float? {
+        guard dh.isFinite, alphaTopRad.isFinite, alphaBaseRad.isFinite,
+              dh >= minDhMeters else { return nil }
+        let tanTop = tan(alphaTopRad)
+        let tanBase = tan(alphaBaseRad)
+        guard tanTop.isFinite, tanBase.isFinite, tanTop > tanBase else { return nil }
+
+        let sigmaD = calibration.vioDriftFraction * dh
+        let tanDiff = tanTop - tanBase
+        let secTop  = 1.0 / cos(alphaTopRad)
+        let secBase = 1.0 / cos(alphaBaseRad)
+        let term1 = tanDiff * tanDiff * sigmaD * sigmaD
+        let term2 = dh * dh * pow(secTop,  4) * sigmaAlphaRad * sigmaAlphaRad
+        let term3 = dh * dh * pow(secBase, 4) * sigmaAlphaRad * sigmaAlphaRad
+        let sigmaH = sqrt(term1 + term2 + term3)
+        return sigmaH.isFinite ? sigmaH : nil
+    }
+
+    /// Every failing check's reason, joined — what made the tier red.
+    private static func failedCheckReasons(_ checks: [Check]) -> String? {
+        let failed = checks
+            .filter { !$0.passed && !$0.reason.isEmpty }
+            .map(\.reason)
+        return failed.isEmpty ? nil : failed.joined(separator: " · ")
+    }
+
+    // MARK: - Acceptability
+
+    /// Whether a result is a real fit the cruiser may commit.
+    ///
+    /// THE TIER IS NOT PART OF THIS. A red fit is still a fit: the
+    /// cruiser sees the reason inline and decides, and the tier travels
+    /// with the reading (Tree.heightConfidence, research CSV, raw-capture
+    /// manifest) so the accuracy analysis can filter on it. Refused here
+    /// is only a result that is not a measurement at all — an inverted
+    /// pair of aims, a height outside the plausible window, degenerate
+    /// standing-point/anchor geometry, or (equivalently) a σ_H the
+    /// propagation could not derive. Those carry no physical meaning,
+    /// so no amount of cruiser judgement makes them safe to store.
+    ///
+    /// Non-tangent methods (manual entry, tape, imputed H–D) are not this
+    /// function's business and always pass.
+    public static func canAccept(_ result: HeightResult) -> Bool {
+        guard result.method == .vioWalkoffTangent else { return true }
+        // σ must be a REAL propagated value. A tangent reading whose σ is
+        // unset is one the geometry could not put an uncertainty on, and
+        // committing it would write a height into `Tree.heightSigmaM`,
+        // the quick-measure history and the research CSV with no
+        // uncertainty attached at all. Belt-and-braces against a fake
+        // zero ever being reintroduced upstream: a σ that is not finite
+        // and positive is refused here too, so nothing claiming perfect
+        // precision can reach storage.
+        guard let sigma = result.sigmaHm, sigma.isFinite, sigma > 0 else { return false }
+        guard result.heightM.isFinite, result.dHm.isFinite else { return false }
+        guard result.heightM >= minHMeters,
+              result.heightM <= maxHMeters else { return false }
+        guard result.dHm >= minDhMeters else { return false }
+        // Inversion guard, re-derived from the stored aims: a top aim at
+        // or below the base is geometrically impossible.
+        guard tan(result.alphaTopRad) > tan(result.alphaBaseRad) else { return false }
+        return true
     }
 
     // MARK: - Red helper
@@ -182,7 +316,15 @@ public enum HeightEstimator {
             dHm: dh,
             alphaTopRad: input.alphaTopRad,
             alphaBaseRad: input.alphaBaseRad,
-            sigmaHm: 0,
+            // The REAL σ for this geometry, not a zero. Tracking-lost and
+            // steep-aim reds are ordinary tangent measurements that the
+            // cruiser may commit, so they must carry a σ the analysis can
+            // propagate; `propagatedSigma` returns nil only for the reds
+            // that are not measurements, and `canAccept` refuses those.
+            sigmaHm: propagatedSigma(dh: dh,
+                                     alphaTopRad: input.alphaTopRad,
+                                     alphaBaseRad: input.alphaBaseRad,
+                                     calibration: input.projectCalibration),
             confidence: .red,
             method: .vioWalkoffTangent,
             rejectionReason: reason

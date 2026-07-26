@@ -5,9 +5,12 @@
 //   Map type          two selectable cards, Normal (OpenStreetMap) /
 //                     Satellite (Esri) — persisted as tc.mapType, default
 //                     satellite so nothing changes for existing installs.
-//   Survey boundary   current-state row + "Import boundary file"; SHP
+//   Shapefile         current-state row + "Import shapefile"; SHP
 //                     (.shp + .prj, or .zip), KML/KMZ, GeoJSON. WGS84 only
-//                     — a refusal is shown inline, never swallowed.
+//                     — a refusal is shown inline, never swallowed. The
+//                     format-hint footer stays: the section is named for
+//                     what cruisers actually bring, not for the only thing
+//                     the importer takes.
 //   Offline maps      the existing download + cache UI, moved in whole
 //                     (OfflineMapSheet.OfflineMapsSection).
 //
@@ -233,7 +236,11 @@ private fun SurveyBoundaryGroup() {
         }
     }
 
-    MapSheetGroup(header = "Survey boundary", footer = BoundaryImporter.FORMAT_HINT) {
+    // "Shapefile" is what a cruiser calls this — nobody arrives at the sheet
+    // looking for a "survey boundary". The FORMAT_HINT footer stays exactly
+    // where it was so the shorter label can't misrepresent what is accepted:
+    // KML/KMZ and GeoJSON go through the same importer.
+    MapSheetGroup(header = "Shapefile", footer = BoundaryImporter.FORMAT_HINT) {
         // Current-state row: what is loaded right now, or that nothing is.
         Row(
             Modifier.fillMaxWidth().padding(ForestixSpace.sm),
@@ -248,7 +255,7 @@ private fun SurveyBoundaryGroup() {
             )
             Column(Modifier.weight(1f)) {
                 Text(
-                    stored?.displayName ?: "No boundary loaded",
+                    stored?.displayName ?: "No shapefile loaded",
                     style = if (stored == null) type.body else type.bodyBold,
                     color = if (stored == null) colors.textSecondary else colors.textPrimary,
                     maxLines = 1,
@@ -302,7 +309,7 @@ private fun SurveyBoundaryGroup() {
                 modifier = Modifier.size(20.dp),
             )
             Text(
-                if (importing) "Reading file…" else "Import boundary file",
+                if (importing) "Reading file…" else "Import shapefile",
                 style = type.body,
                 color = colors.primary,
             )

@@ -211,17 +211,18 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String) {
     }
 
     Box(Modifier.fillMaxSize()) {
-        // Sampling-tool parity: plane grid only while aiming; depth stays
-        // ON throughout for ring occlusion (the boundary ring passes
-        // BEHIND real trunks — see SamplingPlotScreen / ArSessionHub).
+        // Sampling-tool parity: plane grid AND the Depth API only while
+        // aiming for the centre; no depth occlusion (it made the ring and
+        // pillar flicker and cost a depth image per frame — see
+        // SamplingPlotScreen / ArSessionHub).
         ArCameraView(
             controller,
             emptyList<ArSceneMarker>(),
             modifier = Modifier.fillMaxSize(),
-            enableDepth = true,
+            enableDepth = !placed,
             planeRenderer = !placed,
             plotOverlay = ArSessionHub.PlotOverlay.OWNER,
-            depthOcclusion = true,
+            depthOcclusion = false,
         )
 
         CruiseOutsideFlash(isOutside)

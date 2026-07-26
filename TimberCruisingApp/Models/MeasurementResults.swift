@@ -55,7 +55,21 @@ public struct HeightResult: Sendable {
     public let dHm: Float
     public let alphaTopRad: Float
     public let alphaBaseRad: Float
-    public let sigmaHm: Float
+    /// σ_H from the §7.2 three-term propagation, in metres.
+    ///
+    /// NEVER a placeholder zero. A red-tier tangent fit is still a
+    /// measurement, so it carries its REAL (and usually large) σ — that
+    /// is the number the accuracy study propagates, and a fabricated 0
+    /// there would claim the worst readings were perfect.
+    ///
+    /// nil means σ is genuinely underivable, which happens only for a
+    /// result that is not a measurement at all: a non-finite pose or
+    /// angle, a degenerate d_h (no baseline for the tangent triangle),
+    /// or an inverted aim pair. `HeightEstimator.canAccept` refuses any
+    /// tangent result whose σ is nil, so an unset σ cannot be committed.
+    /// Non-tangent methods (typed manual entry) have no propagated σ at
+    /// all and carry nil for that reason.
+    public let sigmaHm: Float?
     public let confidence: ConfidenceTier
     public let method: HeightMethod
     public let rejectionReason: String?
@@ -65,7 +79,7 @@ public struct HeightResult: Sendable {
         dHm: Float,
         alphaTopRad: Float,
         alphaBaseRad: Float,
-        sigmaHm: Float,
+        sigmaHm: Float?,
         confidence: ConfidenceTier,
         method: HeightMethod,
         rejectionReason: String?

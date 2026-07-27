@@ -64,6 +64,14 @@ data class SettingsSnapshot(
     /// region picker). Stamped once the cascade is picked, skipped or
     /// dismissed so it never auto-presents again.
     val regionPickerSeen: Boolean = false,
+    /// CRUISE — after a diameter is accepted in the cruise tally, go
+    /// straight into Height for the SAME tree. Field report F10: the tally
+    /// used to loop diameter-only, so heights were never asked for and the
+    /// cruiser had to go back through the tree peek for every one.
+    ///
+    /// Defaults to TRUE. Cruisers running a diameter-only tally turn it off
+    /// in Settings › Measuring. Key + wording identical on iOS.
+    val measureHeightAfterDiameter: Boolean = true,
     /// Developer / research mode — surfaces the live measurement internals
     /// (depth source, intrinsics, point counts, raw chord, pitch, σ) on the
     /// AR screens and unlocks the validation-experiment tooling.
@@ -131,6 +139,7 @@ class AppSettings(private val context: Context) {
         // so the DBH scan is depth-only. The key is no longer read, which
         // migrates any stored "motion"/"caliper" value to the depth method.
         val dbhChordAlgorithm = stringPreferencesKey("tc.dbhChordAlgorithm")
+        val measureHeightAfterDBH = booleanPreferencesKey("tc.measureHeightAfterDiameter")
         val developerMode = booleanPreferencesKey("tc.developerMode")
         val researchTreeId = stringPreferencesKey("tc.researchTreeId")
         val rawCaptureEnabled = booleanPreferencesKey("tc.rawCaptureEnabled")
@@ -177,6 +186,9 @@ class AppSettings(private val context: Context) {
             country = Country.fromRaw(p[Keys.country]) ?: Country.default,
             region = p[Keys.region],
             regionPickerSeen = p[Keys.regionPickerSeen] ?: false,
+            // Defaults ON (F10) — `?: true`, so an install that has never
+            // touched the toggle chains diameter → height.
+            measureHeightAfterDiameter = p[Keys.measureHeightAfterDBH] ?: true,
             developerMode = p[Keys.developerMode] ?: false,
             researchTreeId = p[Keys.researchTreeId] ?: "",
             rawCaptureEnabled = p[Keys.rawCaptureEnabled] ?: false,
@@ -221,6 +233,11 @@ class AppSettings(private val context: Context) {
     fun setRawCaptureEnabled(value: Boolean) = update {
         _state.value = _state.value.copy(rawCaptureEnabled = value)
         it[Keys.rawCaptureEnabled] = value
+    }
+
+    fun setMeasureHeightAfterDiameter(value: Boolean) = update {
+        _state.value = _state.value.copy(measureHeightAfterDiameter = value)
+        it[Keys.measureHeightAfterDBH] = value
     }
 
     fun setDeveloperMode(value: Boolean) = update {

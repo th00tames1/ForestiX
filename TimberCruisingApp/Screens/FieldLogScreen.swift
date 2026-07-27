@@ -56,7 +56,7 @@ public struct FieldLogScreen: View {
                             shareURL = history.exportBundle(
                                 logRule: settings.logRule)
                         } label: {
-                            Label("Bundle (5-file zip)", systemImage: "doc.zipper")
+                            Label("All tables (zip of 5 CSVs)", systemImage: "doc.zipper")
                         }
                     } label: {
                         Label("Export", systemImage: "square.and.arrow.up")
@@ -165,14 +165,22 @@ public struct FieldLogScreen: View {
     }
 
     private func summaryCell(value: String, label: String) -> some View {
+        // Single-line throughout: "LAST" can carry a date ("Mar 14") at
+        // 26 pt, which is what would push this row into wrapping first.
         VStack(alignment: .leading, spacing: 2) {
             Text(value)
                 .font(ForestixType.dataLarge)
                 .foregroundStyle(ForestixPalette.textPrimary)
+                .lineLimit(1)
+                .allowsTightening(true)
+                .minimumScaleFactor(FieldLogTable.valueScaleFloor)
             Text(label)
                 .font(ForestixType.sectionHead)
-                .tracking(1.2)
+                .tracking(FieldLogTable.headerTracking)
                 .foregroundStyle(ForestixPalette.textTertiary)
+                .lineLimit(1)
+                .allowsTightening(true)
+                .minimumScaleFactor(FieldLogTable.labelScaleFloor)
         }
     }
 
@@ -220,23 +228,164 @@ public struct FieldLogScreen: View {
     }
 }
 
+// MARK: - Table geometry
+
+/// Splits the proposed width across its subviews on fixed WEIGHTS. Both the
+/// column header and every row lay out through this, so the columns line up
+/// without either side hard-coding a point width — and on a narrow phone the
+/// columns give ground proportionally instead of the last one falling off the
+/// end.
+private struct WeightedColumns: Layout {
+
+    let weights: [CGFloat]
+    let spacing: CGFloat
+
+    private func widths(for total: CGFloat) -> [CGFloat] {
+        let usable = max(0, total - spacing * CGFloat(max(0, weights.count - 1)))
+        let sum = weights.reduce(0, +)
+        guard sum > 0 else { return weights.map { _ in 0 } }
+        return weights.map { usable * $0 / sum }
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize,
+                      subviews: Subviews,
+                      cache: inout ()) -> CGSize {
+        // No width proposed (an "ideal size" query, which List does make while
+        // estimating row heights): answer with the content's own width rather
+        // than the 10 pt placeholder `replacingUnspecifiedDimensions` returns,
+        // which would report a row one line tall of squeezed columns.
+        guard let total = proposal.width, total > 0 else {
+            let ideal = subviews.map { $0.sizeThatFits(.unspecified) }
+            let width = ideal.reduce(0) { $0 + $1.width }
+                + spacing * CGFloat(max(0, subviews.count - 1))
+            return CGSize(width: width, height: ideal.map(\.height).max() ?? 0)
+        }
+        let w = widths(for: total)
+        let height = zip(subviews, w).map { sub, width in
+            sub.sizeThatFits(ProposedViewSize(width: width,
+                                              height: proposal.height)).height
+        }.max() ?? 0
+        return CGSize(width: total, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect,
+                       proposal: ProposedViewSize,
+                       subviews: Subviews,
+                       cache: inout ()) {
+        let w = widths(for: bounds.width)
+        var x = bounds.minX
+        for (index, sub) in subviews.enumerated() {
+            let width = index < w.count ? w[index] : 0
+            sub.place(at: CGPoint(x: x, y: bounds.midY),
+                      anchor: .leading,
+                      proposal: ProposedViewSize(width: width,
+                                                 height: bounds.height))
+            x += width + spacing
+        }
+    }
+}
+
+/// Shared geometry for the field-log table.
+///
+/// FIELD REPORT — the columns used to be pinned to 52 / 96 / 64 pt with QUALITY
+/// unsized. On a 360 pt phone a list row has ~288 pt of content, and those four
+/// columns plus their 12 pt gaps demanded 314 (measured): "PRECISION" wrapped to
+/// "PRECISI/ON", "QUALITY" to "QUALI/TY", and the GOOD chip broke to "GOO/D".
+/// A sampling-plot VALUE ("r 5.6 m · 98.5 m²") never fitted 96 pt either and
+/// truncated mid-number.
+///
+/// Now the four columns share whatever width the row has, on these weights.
+/// At 288 pt of content the shares are TYPE 45.9 / VALUE 107.9 / ± RANGE 47.1 /
+/// QUALITY 63.1, against measured demands of "Height" 48.2, "31.4 cm" 73.6,
+/// "±1.1 mm" 56.3 and a CHECK chip 65.6 — every ordinary cell fits or scales
+/// only slightly, and the widest chip label sits at 0.96. Every cell is
+/// single-line, so nothing can break mid-word; the scale floors below are a
+/// backstop for the rare long value, not the layout.
+///
+/// VALUE was widened from 8 to 9.4 when the plot row's "r" was spelled out:
+/// "5.6 m radius · 98.5 m²" wants ~232 pt against the 91.8 pt the old split
+/// gave it (0.40 scale — exactly the floor, i.e. a truncated measurement).
+/// The width comes off TYPE and ± RANGE, whose contents had the most slack;
+/// QUALITY is untouched because the tier chip cannot scale.
+private enum FieldLogTable {
+    /// TYPE · VALUE · ± RANGE · QUALITY. VALUE carries the longest strings,
+    /// so it gets the biggest share.
+    static let weights: [CGFloat] = [4.0, 9.4, 4.1, 5.5]
+    /// 8 pt, not the 12 pt row default: three 12 pt gaps cost 36 pt of column
+    /// width on the phone that could least afford it.
+    static let gap: CGFloat = ForestixSpace.xs
+    /// ALL-CAPS header tracking. The house `sectionHead` value is 1.2, which
+    /// adds ~8 pt to a seven-letter header — on its own enough to push QUALITY
+    /// out of its column at 360 pt. 0.8 keeps the spaced-caps look and fits.
+    static let headerTracking: CGFloat = 0.8
+    /// `ForestixType` is a FIXED-size ramp (`Font.system(size:)`), so the
+    /// system text-size setting does not stretch these columns on iOS the way
+    /// it does on Android. What bounds the remaining variation is this floor:
+    /// a cell shrinks a little rather than truncating, and never below it.
+    /// 0.72 rather than 0.8: "± RANGE" is four glyphs wider than the "PREC"
+    /// it replaced and lands at ~0.75 in the narrowed column. Nothing else
+    /// in the table comes near this floor.
+    static let labelScaleFloor: CGFloat = 0.72
+    /// Values may be much longer than their column: measured at 13/17 pt, a
+    /// sampling-plot row ("5.6 m radius · 98.5 m²") wants ~232 pt against the
+    /// 108 pt VALUE gets on a 360 pt phone, i.e. 0.47 scale. The floor sits
+    /// well under that so the string always lands whole — a truncated
+    /// measurement is a wrong measurement, and it is only ever the plot/crown
+    /// rows that scale at all.
+    static let valueScaleFloor: CGFloat = 0.35
+}
+
+/// One cell of the table: always a single line, tightened and then scaled
+/// down to fit rather than wrapped or truncated.
+private struct FieldLogCell: View {
+    let text: String
+    let font: Font
+    let color: Color
+    var alignment: Alignment = .trailing
+    var tracking: CGFloat = 0
+    var scaleFloor: CGFloat = FieldLogTable.labelScaleFloor
+
+    var body: some View {
+        Text(text)
+            .font(font)
+            .tracking(tracking)
+            .foregroundStyle(color)
+            .lineLimit(1)
+            .allowsTightening(true)
+            .minimumScaleFactor(scaleFloor)
+            .frame(maxWidth: .infinity, alignment: alignment)
+    }
+}
+
 // MARK: - Column header
 
 /// The column header lives as the List `Section` header, which gets
-/// inset-grouped styling for free. It's a separate view so the column
-/// widths match the row below — update both or neither.
+/// inset-grouped styling for free. It's a separate view, so it shares the
+/// column weights with the row below — update `FieldLogTable` or neither.
+///
+/// "± RANGE", not "PREC": the column holds a propagated standard deviation,
+/// which "precision" named in its statistics sense and "PREC" then truncated
+/// into an abbreviation of a word that was already wrong. The cells under it
+/// already print the honest thing ("±1.1 mm"), so the header just names it.
+/// Android uses the identical string.
 private struct FieldLogColumnHeader: View {
     var body: some View {
-        HStack(spacing: ForestixSpace.sm) {
-            Text("TYPE").frame(width: 52, alignment: .leading)
-            Text("VALUE").frame(width: 96, alignment: .trailing)
-            Text("PRECISION").frame(width: 64, alignment: .trailing)
-            Spacer(minLength: 0)
-            Text("QUALITY")
+        WeightedColumns(weights: FieldLogTable.weights,
+                        spacing: FieldLogTable.gap) {
+            cell("TYPE", alignment: .leading)
+            cell("VALUE")
+            cell("± RANGE")
+            cell("QUALITY")
         }
-        .font(ForestixType.sectionHead)
-        .tracking(1.2)
-        .foregroundStyle(ForestixPalette.textTertiary)
+    }
+
+    private func cell(_ text: String,
+                      alignment: Alignment = .trailing) -> some View {
+        FieldLogCell(text: text,
+                     font: ForestixType.sectionHead,
+                     color: ForestixPalette.textTertiary,
+                     alignment: alignment,
+                     tracking: FieldLogTable.headerTracking)
     }
 }
 
@@ -248,25 +397,25 @@ private struct FieldLogRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: ForestixSpace.sm) {
-                Text(typeLabel)
-                    .font(ForestixType.dataSmall)
-                    .foregroundStyle(ForestixPalette.textSecondary)
-                    .frame(width: 52, alignment: .leading)
+            // Same weights as the column header — the two are one table.
+            WeightedColumns(weights: FieldLogTable.weights,
+                            spacing: FieldLogTable.gap) {
+                FieldLogCell(text: typeLabel,
+                             font: ForestixType.dataSmall,
+                             color: ForestixPalette.textSecondary,
+                             alignment: .leading)
 
-                Text(valueText)
-                    .font(ForestixType.data)
-                    .foregroundStyle(ForestixPalette.textPrimary)
-                    .frame(width: 96, alignment: .trailing)
+                FieldLogCell(text: valueText,
+                             font: ForestixType.data,
+                             color: ForestixPalette.textPrimary,
+                             scaleFloor: FieldLogTable.valueScaleFloor)
 
-                Text(sigmaText)
-                    .font(ForestixType.dataSmall)
-                    .foregroundStyle(ForestixPalette.textTertiary)
-                    .frame(width: 64, alignment: .trailing)
-
-                Spacer(minLength: 0)
+                FieldLogCell(text: sigmaText,
+                             font: ForestixType.dataSmall,
+                             color: ForestixPalette.textTertiary)
 
                 TierChip(rawTier: entry.confidenceRaw)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
             }
             HStack(spacing: 6) {
                 if let n = entry.treeNumber {
@@ -283,14 +432,18 @@ private struct FieldLogRow: View {
                 Text(timestampText)
                     .font(ForestixType.dataSmall)
                     .foregroundStyle(ForestixPalette.textTertiary)
+                    .lineLimit(1)
             }
-            .padding(.leading, 52 + ForestixSpace.sm)
+            // No indent: the old one was "52 + gap", i.e. hard-coded to the
+            // width the TYPE column no longer has. The meta line is a
+            // sub-label of the row, so it reads from the row's own edge.
         }
         .padding(.vertical, 2)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
             (entry.treeNumber.map { "Tree \($0). " } ?? "") +
-            "\(typeLabel) \(valueText), precision \(sigmaText), \(entry.confidenceRaw)")
+            "\(typeLabel) \(valueText), give or take \(sigmaText), "
+            + ConfidenceStyle.descriptor(for: entry.confidenceRaw).label)
     }
 
     private var typeLabel: String {
@@ -321,7 +474,7 @@ private struct FieldLogRow: View {
         case .samplingPlot:
             let area = entry.secondaryValue
                 ?? (.pi * entry.value * entry.value)
-            return String(format: "r %.1f m · %.1f m²", entry.value, area)
+            return String(format: "%.1f m radius · %.1f m²", entry.value, area)
         }
     }
 
@@ -370,6 +523,12 @@ private struct TierChip: View {
         return Text(d.label.uppercased())
             .font(ForestixType.sectionHead)
             .tracking(0.8)
+            // One line, always: a squeezed column used to break the chip
+            // mid-word ("GOO/D") rather than let it stay a word.
+            .lineLimit(1)
+            .allowsTightening(true)
+            .minimumScaleFactor(FieldLogTable.labelScaleFloor)
+            .fixedSize(horizontal: true, vertical: false)
             .padding(.horizontal, ForestixSpace.xs)
             .padding(.vertical, 3)
             .overlay(

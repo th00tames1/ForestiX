@@ -89,19 +89,22 @@ object PlotValidation {
             if (tree.dbhConfidence == ConfidenceTier.RED) {
                 warnings.add(ValidationIssue(
                     code = Code.redTierDbh,
-                    message = "Tree #${tree.treeNumber}: DBH measurement is red-tier.",
+                    message = "Tree #${tree.treeNumber}: the diameter reading is flagged Check — " +
+                        "re-measure if you can.",
                     affectedId = tree.id))
             }
             if (tree.status == TreeStatus.LIVE && tree.heightConfidence == ConfidenceTier.RED) {
                 warnings.add(ValidationIssue(
                     code = Code.redTierHeight,
-                    message = "Tree #${tree.treeNumber}: height measurement is red-tier.",
+                    message = "Tree #${tree.treeNumber}: the height reading is flagged Check — " +
+                        "re-measure if you can.",
                     affectedId = tree.id))
             }
             if (tree.status == TreeStatus.LIVE && tree.heightM == null && tree.heightSource != "imputed") {
                 warnings.add(ValidationIssue(
                     code = Code.missingHeightOnLive,
-                    message = "Tree #${tree.treeNumber}: live tree has no height — volume will be imputed.",
+                    message = "Tree #${tree.treeNumber}: no height measured — the height will be " +
+                        "estimated from this project's height curve.",
                     affectedId = tree.id))
             }
         }

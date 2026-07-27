@@ -37,11 +37,10 @@ public struct StockingGauge: View {
                 Spacer()
             }
             gradientBar
-            tickLabels
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Stocking \(regimeLabel)")
-        .accessibilityValue(String(format: "%.0f percent", relativeDensityPct))
+        .accessibilityValue(regimeLabel)
     }
 
     // MARK: - Regime pill
@@ -105,27 +104,12 @@ public struct StockingGauge: View {
         .frame(height: 18)
     }
 
-    // MARK: - Tick labels
-
-    private var tickLabels: some View {
-        HStack {
-            tickLabel("0%")
-            Spacer()
-            tickLabel("25%")
-            Spacer()
-            tickLabel("35%")
-            Spacer()
-            tickLabel("60%")
-            Spacer()
-            tickLabel("100%")
-        }
-    }
-
-    private func tickLabel(_ s: String) -> some View {
-        Text(s)
-            .font(ForestixType.dataSmall)
-            .foregroundStyle(ForestixPalette.textTertiary)
-    }
+    // The 0/25/35/60/100 % tick row is gone. That axis was a relative
+    // density index — Reineke SDI over a hard-coded generic maximum —
+    // and nothing on screen named SDI, Reineke, or what the percentage
+    // was a percentage OF. The coloured band, the marker and the word
+    // pill say everything the gauge can honestly say; the marker is
+    // still placed from the same number, so the CHECK is unchanged.
 }
 
 #Preview {

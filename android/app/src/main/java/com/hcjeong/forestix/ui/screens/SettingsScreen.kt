@@ -296,12 +296,35 @@ fun SettingsScreen(nav: NavController) {
                 }
             }
 
+            // MARK: - 2b. Measuring
+            // FIELD REPORT F10 — the cruise tally chains diameter → height by
+            // default. Cruisers who only want diameters turn it off here.
+            // Strings and the stored key are identical on iOS.
+            FormSection(
+                header = "Measuring",
+                footer = "After you accept a diameter in cruise, Height opens for " +
+                    "the same tree. Skip returns to the tally.",
+            ) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Measure height after diameter",
+                        style = type.body,
+                        color = colors.textPrimary,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Switch(
+                        checked = settings.measureHeightAfterDiameter,
+                        onCheckedChange = { env.settings.setMeasureHeightAfterDiameter(it) },
+                    )
+                }
+            }
+
             // MARK: - 3. Calibration (navigation row, iOS NavigationLink)
             FormSection(
                 header = "Calibration",
-                footer = "Wall fit captures the LiDAR depth noise and bias; " +
-                    "cylinder fit estimates a linear DBH correction. " +
-                    "Run both before your first field pilot.",
+                footer = "Scan a flat wall, then a round post you have measured. " +
+                    "This tells Forestix how far off your phone's depth sensor runs, " +
+                    "so diameters come out right. Do both before your first cruise.",
             ) {
                 Row(
                     Modifier.fillMaxWidth().clickableNoRipple { nav.navigate(Routes.CALIBRATION) },
@@ -406,9 +429,10 @@ fun SettingsScreen(nav: NavController) {
                         )
                     }
                     Text(
-                        "Paste an XYZ template ({z}/{x}/{y}) to draw contour or " +
-                            "forest-service tiles over the map base. It shows only after " +
-                            "you confirm the provider's usage policy above.",
+                        "Paste the address of a map-tile service (it will contain " +
+                            "{z}/{x}/{y}) to draw contour or forest-service maps over the " +
+                            "base map. It shows only after you confirm the provider's " +
+                            "usage policy above.",
                         style = type.caption, color = colors.textSecondary,
                     )
                 }

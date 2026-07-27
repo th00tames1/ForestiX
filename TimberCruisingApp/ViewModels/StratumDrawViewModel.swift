@@ -78,7 +78,10 @@ public final class StratumDrawViewModel: ObservableObject {
         case 0: return "Tap the corners on the map"
         case 1: return "1 point — need at least 3"
         case 2: return "2 points — one more to go"
-        default: return "\(vertices.count) points · closed polygon"
+        // "closed polygon" was the geometry term; what the cruiser needs to
+        // know is that the corners now join up into a shape with an area.
+        // The 3-vertex threshold above is unchanged.
+        default: return "\(vertices.count) points · area closed"
         }
     }
 

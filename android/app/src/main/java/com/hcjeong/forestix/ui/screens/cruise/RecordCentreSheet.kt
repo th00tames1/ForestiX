@@ -185,8 +185,9 @@ fun RecordCentreSheet(
             String.format(Locale.US, "±%.1f m", snap.horizontalAccuracyM)
         else -> "±— m"
     }
-    val liveTier: PositionTier? = readout?.tier
-        ?: snap?.let { LocationService.tier(forHorizontalAccuracyM = it.horizontalAccuracyM) }
+    // (`liveTier` went with the chip — field report F9. `LocationService.tier`
+    // and `GPSAveraging.classify` are untouched; the grade is still computed
+    // and stored on the Plot, it just isn't shown to a cruiser.)
     val failed = windowDone && final == null
     val sampleCount = readout?.nSamples ?: location.buffer.value.size
     val metaTitle = when {
@@ -201,8 +202,12 @@ fun RecordCentreSheet(
         failed ->
             "Not enough samples (need 30 with accuracy ≤ 20 m)\nTry the offset link below."
         final != null ->
-            "${final.nSamples} fixes · median centre locked\n" +
-                String.format(Locale.US, "σxy %.1f m", final.sampleStdXyM)
+            // The scatter of the GPS fixes, as a plain quantity. It used to
+            // print as "σxy 1.4 m" — a Greek letter with an algebraic
+            // subscript, on the sheet the A/B/C/D position grade was already
+            // pulled from for being unreadable.
+            "${final.nSamples} fixes · centre locked\n" +
+                String.format(Locale.US, "fixes spread ±%.1f m", final.sampleStdXyM)
         else ->
             "$sampleCount fixes · needs 30 good ones\n" +
                 "median converges over $AVERAGING_WINDOW_S s"
@@ -228,7 +233,14 @@ fun RecordCentreSheet(
                     color = colors.textTertiary,
                 )
                 Spacer(Modifier.weight(1f))
-                TierChip(liveTier)
+                // FIELD REPORT F9 — the A/B/C/D "TIER B" / "NO FIX" chip is
+                // gone. It is a GPS-averaging grade the cruiser has no way
+                // to act on and no way to interpret. The plain accuracy
+                // figure (±x.x m) is still right there in the progress ring,
+                // which is the one number that means something on a ridge.
+                // `positionTier` is UNCHANGED on the Plot record and in every
+                // export — see convertPlannedToActivePlot below, which still
+                // stamps `positionTier = result.tier`.
             }
             Spacer(Modifier.size(ForestixSpace.sm))
 
@@ -335,7 +347,7 @@ fun RecordCentreSheet(
     }
 }
 
-// MARK: - Ring + tier chip
+// MARK: - Ring
 
 @Composable
 private fun ProgressRing(progress: Float, centreTop: String, centreBottom: String) {
@@ -383,34 +395,11 @@ private fun ProgressRing(progress: Float, centreTop: String, centreBottom: Strin
     }
 }
 
-/// A/B/C/D collapsed onto the instrument hues the rest of the app uses:
-/// A → ok, B/C → warn, D → bad; "NO FIX" before the first sample.
-@Composable
-private fun TierChip(tier: PositionTier?) {
-    val colors = Forestix.colors
-    val color = when (tier) {
-        PositionTier.A -> colors.confidenceOk
-        PositionTier.B, PositionTier.C -> colors.confidenceWarn
-        PositionTier.D -> colors.confidenceBad
-        null -> colors.textTertiary
-    }
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-        modifier = Modifier
-            .clip(ForestixRadius.chip)
-            .background(color.copy(alpha = 0.12f))
-            .padding(horizontal = 7.dp, vertical = 2.dp),
-    ) {
-        Box(Modifier.size(6.dp).clip(CircleShape).background(color))
-        Text(
-            tier?.let { "TIER ${it.raw}" } ?: "NO FIX",
-            style = Forestix.type.caption.copy(
-                fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.6.sp),
-            color = color,
-        )
-    }
-}
+// (The A/B/C/D `TierChip` — "TIER B" / "NO FIX" — was deleted per field
+// report F9. It graded GPS averaging on a scale nothing in the field
+// explains, and a cruiser could neither act on a "C" nor tell what would
+// make it a "B". The ±x.x m accuracy in the ring is the plain figure that
+// survives. Storage and exports are untouched.)
 
 // MARK: - Conversion (retired CruiseFlowCoordinator.acceptCenter semantics)
 

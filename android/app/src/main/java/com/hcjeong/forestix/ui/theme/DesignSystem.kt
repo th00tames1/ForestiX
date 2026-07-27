@@ -43,10 +43,12 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -164,6 +166,34 @@ object ForestixSpace {
     val md: Dp = 16.dp
     val lg: Dp = 24.dp
     val xl: Dp = 32.dp
+}
+
+// MARK: - Dense-table text scaling ----------------------------------------
+
+/// Upper bound on the SYSTEM font scale inside dense tabular layouts.
+///
+/// A field log is a four-column table of numbers. On a 360 dp phone those
+/// columns and their gutters already spend ~93 % of the row, so an
+/// accessibility text size of 1.5–2× does not make the table more
+/// readable — it makes headers break mid-word ("PRECISI/ON"), quality
+/// chips split ("GOO/D") and values ellipsise. Bounding the scale keeps
+/// the table intact while still honouring the first slice of the user's
+/// preference. Everything OUTSIDE a table — titles, buttons, body copy,
+/// empty states, dialogs — keeps scaling without any limit.
+const val ForestixDenseMaxFontScale = 1.15f
+
+/// Runs `content` with the system font scale clamped to
+/// [ForestixDenseMaxFontScale]. Only `fontScale` (sp → dp) is clamped;
+/// `density` (dp → px) is passed through untouched, so icons, spacing and
+/// every dp dimension in the subtree are unaffected.
+@Composable
+fun ForestixDenseTextScale(content: @Composable () -> Unit) {
+    val current = LocalDensity.current
+    val bounded = remember(current) {
+        if (current.fontScale <= ForestixDenseMaxFontScale) current
+        else Density(current.density, ForestixDenseMaxFontScale)
+    }
+    CompositionLocalProvider(LocalDensity provides bounded, content = content)
 }
 
 // MARK: - Shape -----------------------------------------------------------

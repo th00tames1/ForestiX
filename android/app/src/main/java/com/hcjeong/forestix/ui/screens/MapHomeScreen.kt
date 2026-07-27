@@ -1439,15 +1439,15 @@ private fun MeasureChooserSheet(
                 emphasized = true,
             ) { onChoose("${Routes.DBH}?chain=true", true) }
             HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
-            ChoiceRow(Icons.Filled.Straighten, "Diameter (DBH)", "Depth · AR motion · AR caliper") {
+            ChoiceRow(Icons.Filled.Straighten, "Diameter (DBH)", "Scan the trunk with the camera") {
                 onChoose(Routes.DBH, true)
             }
             HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
-            ChoiceRow(Icons.Filled.Height, "Height", "Walk-off tangent · crown add-on") {
+            ChoiceRow(Icons.Filled.Height, "Height", "Walk back, aim at the base and the top") {
                 onChoose(Routes.HEIGHT, true)
             }
             HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
-            ChoiceRow(Icons.Filled.SwapHoriz, "Distance", "Live · two-point") {
+            ChoiceRow(Icons.Filled.SwapHoriz, "Distance", "Point at a target, or tap two points") {
                 onChoose(Routes.DISTANCE, false)
             }
             HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
@@ -1626,7 +1626,7 @@ private fun PhotoViewerDialog(
                                 ?.let { RegionalSpecies.nameForCode(it) },
                         ).joinToString(" · ").ifEmpty { "—" },
                     )
-                    MetaCell("METHOD", entry.method)
+                    MetaCell("METHOD", methodLabel(entry.method))
                     MetaCell(
                         "GPS",
                         if (entry.latitude != null && entry.longitude != null) {
@@ -1642,15 +1642,38 @@ private fun PhotoViewerDialog(
     }
 }
 
-/// "Ø 32.4 cm" / "H 18.2 m" — the viewer's headline value with the iOS
-/// kind prefixes.
+/// "DBH 32.4 cm" / "Height 18.2 m" — the viewer's headline value, labelled
+/// with the same words the peek card the cruiser arrived from uses (it used
+/// to read "Ø" and "H": a drafting symbol and a formula variable).
 private fun bigValueText(e: QuickMeasureEntry, system: UnitSystem): String {
     val prefix = when (e.kind) {
-        MeasureKind.DBH -> "Ø "
-        MeasureKind.HEIGHT -> "H "
+        MeasureKind.DBH -> "DBH "
+        MeasureKind.HEIGHT -> "Height "
         else -> ""
     }
     return prefix + valueText(e, system)
+}
+
+/// The stored `method` raw value as a phrase a cruiser can read.
+///
+/// The meta strip used to print the raw identifier — "lidarChordSilhouette",
+/// "vioWalkoffTangent", "two-point.arcore". Those strings exist so the CSV
+/// and the two platforms' exports join; they are not English. The raw value
+/// is UNCHANGED on the record and in every export — only the display is
+/// mapped. Unknown values fall back to a neutral word rather than leaking a
+/// new identifier onto the screen.
+private fun methodLabel(raw: String): String = when {
+    raw.startsWith("lidar") -> "Trunk scan"
+    raw.startsWith("manual") -> "Typed in"
+    raw == "vioWalkoffTangent" -> "Walk-back sighting"
+    raw == "tapeTangent" -> "Tape and angle"
+    raw == "imputedHD" -> "Estimated from the height curve"
+    raw.startsWith("ar.crown") -> "Crown span"
+    raw.startsWith("ar.tap") -> "Tapped on screen"
+    raw.startsWith("live.") -> "Pointed at a target"
+    raw.startsWith("two-point") -> "Two points"
+    raw.isEmpty() -> "—"
+    else -> "Measured"
 }
 
 @Composable
@@ -1888,7 +1911,7 @@ private fun valueText(e: QuickMeasureEntry, system: UnitSystem): String = when (
     MeasureKind.DISTANCE -> MeasurementFormatter.distance(e.value, system)
     MeasureKind.SAMPLING_PLOT -> {
         val area = e.secondaryValue ?: (PI * e.value * e.value)
-        String.format(Locale.US, "r %.1f m · %.0f m²", e.value, area)
+        String.format(Locale.US, "%.1f m radius · %.0f m²", e.value, area)
     }
 }
 

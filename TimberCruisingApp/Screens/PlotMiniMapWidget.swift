@@ -15,7 +15,12 @@
 //     as confidence-tinted dots. Intentionally no walked-trail breadcrumb —
 //     the card is plot-relative, not a track log;
 //   • header "PLOT 2 · 5" (plot number · tree count) top-left inside,
-//     "r 12 m" bottom-right inside. Non-interactive.
+//     "r 12 m" bottom-right inside.
+//
+// INTERACTION (field report F11): hosts that can re-open plot setup pass
+// `onTap`, and the card becomes a button — cyan edge + a pencil badge, the
+// app's existing "you can edit this" language. Without `onTap` it renders
+// exactly as before and swallows nothing.
 //
 // POSITION DATA
 //   YOU   — the camera's offset from the plot's AR anchor when the
@@ -102,6 +107,13 @@ public struct PlotMiniMapWidget: View {
 
     public let info: PlotMiniMapInfo
 
+    /// FIELD REPORT F11 — the card is a WAY BACK INTO PLOT SETUP. Once the
+    /// first (+) had placed the sampling plot there was no route to change
+    /// its radius or centre; tapping the preview of the thing you want to
+    /// edit is the obvious one. nil keeps the card inert (quick-measure, and
+    /// any host with no plot to edit), exactly as it used to be.
+    public let onTap: (() -> Void)?
+
     @StateObject private var model = PlotMiniMapLiveModel()
 
     /// Card side (locked).
@@ -113,14 +125,31 @@ public struct PlotMiniMapWidget: View {
     /// The map home's GPS you-dot blue (#3B82C4).
     private static let youBlue = Color(red: 0.231, green: 0.510, blue: 0.769)
 
-    public init(info: PlotMiniMapInfo) {
+    public init(info: PlotMiniMapInfo, onTap: (() -> Void)? = nil) {
         self.info = info
+        self.onTap = onTap
     }
 
     private var ringRadiusPt: CGFloat { Self.side * Self.ringFraction / 2 }
     private var centrePt: CGFloat { Self.side / 2 }
 
     public var body: some View {
+        if let onTap {
+            Button(action: onTap) { card }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Edit plot. \(headerText.lowercased()), radius \(Int(info.radiusM)) metres")
+                .accessibilityHint("Reopens plot setup to change the radius or centre")
+                .accessibilityIdentifier("plotMiniMap")
+        } else {
+            card
+                .allowsHitTesting(false)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Plot map. \(headerText.lowercased()), radius \(Int(info.radiusM)) metres")
+                .accessibilityIdentifier("plotMiniMap")
+        }
+    }
+
+    private var card: some View {
         ZStack {
             // Plot ring — the boundary, always centred (the map is
             // plot-relative, not user-centred).
@@ -168,7 +197,12 @@ public struct PlotMiniMapWidget: View {
         .overlay(
             RoundedRectangle(cornerRadius: ForestixRadius.card,
                              style: .continuous)
-                .stroke(.white.opacity(0.18), lineWidth: 0.5))
+                // Tappable cards carry the brighter AR-cyan edge the rest of
+                // the plot chrome uses for "this is the plot, and you can
+                // touch it"; inert ones keep the old hairline.
+                .stroke(onTap == nil ? .white.opacity(0.18)
+                                     : Self.ringCyan.opacity(0.75),
+                        lineWidth: onTap == nil ? 0.5 : 1))
         .overlay(alignment: .topLeading) {
             Text(headerText)
                 .font(.system(size: 9, weight: .semibold, design: .monospaced))
@@ -176,20 +210,30 @@ public struct PlotMiniMapWidget: View {
                 .padding(.leading, 7)
                 .padding(.top, 6)
         }
+        .overlay(alignment: .topTrailing) {
+            // The affordance: the app's standard "edit this" pencil, in the
+            // one corner the card's content never occupies. Only drawn when
+            // there is somewhere to go.
+            if onTap != nil {
+                Image(systemName: "pencil.circle.fill")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .padding(.trailing, 6)
+                    .padding(.top, 5)
+            }
+        }
         .overlay(alignment: .bottomTrailing) {
-            Text(String(format: "r %.0f m", info.radiusM))
+            Text(String(format: "%.0f m radius", info.radiusM))
                 .font(.system(size: 8, weight: .medium, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.75))
                 .padding(.trailing, 7)
                 .padding(.bottom, 5)
         }
-        .allowsHitTesting(false)
+        .contentShape(RoundedRectangle(cornerRadius: ForestixRadius.card,
+                                       style: .continuous))
         .onAppear { model.start(info: info) }
         .onDisappear { model.stop() }
         .onChange(of: info) { _, new in model.update(info: new) }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Plot map. \(headerText.lowercased()), radius \(Int(info.radiusM)) metres")
-        .accessibilityIdentifier("plotMiniMap")
     }
 
     private var headerText: String {

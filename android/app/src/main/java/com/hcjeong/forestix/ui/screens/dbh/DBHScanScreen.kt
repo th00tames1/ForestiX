@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -88,14 +89,16 @@ import com.hcjeong.forestix.ui.MeasurePhotoStore
 import com.hcjeong.forestix.ui.PendingTreeNumber
 import com.hcjeong.forestix.ui.Routes
 import com.hcjeong.forestix.ui.screens.cruise.CruiseCapture
+import com.hcjeong.forestix.ui.screens.cruise.CruiseRoutes
 import com.hcjeong.forestix.ui.screens.ScanMetadataSheet
-import com.hcjeong.forestix.ui.screens.DevHud
 import com.hcjeong.forestix.ui.screens.GPSAccuracyBadge
 import com.hcjeong.forestix.ui.screens.MeasureBackButton
 import com.hcjeong.forestix.ui.screens.MeasureCircleButton
 import com.hcjeong.forestix.ui.screens.MeasureShutterBar
 import com.hcjeong.forestix.ui.screens.MeasureStatusPanel
 import com.hcjeong.forestix.ui.screens.MeasureTopChrome
+import com.hcjeong.forestix.ui.screens.MeasureTopStrip
+import com.hcjeong.forestix.ui.screens.MeasureMiniMapSlot
 import com.hcjeong.forestix.ui.screens.MeasureValuePill
 import com.hcjeong.forestix.ui.screens.RawCaptureBadge
 import com.hcjeong.forestix.ui.screens.RawCaptureOffNotice
@@ -291,8 +294,8 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     var truthPendingId by remember { mutableStateOf<String?>(null) }
     var truthPendingText by remember { mutableStateOf("") }
     // Storage headroom, re-read on entry and after every capture: below the
-    // guard the recorder refuses to write, so the REC pill says LOW STORAGE
-    // before a whole plot is lost.
+    // guard the recorder refuses to write, and the capture's outcome pill
+    // says so before a whole plot is lost.
     var storageLow by remember { mutableStateOf(false) }
     LaunchedEffect(rawCaptureArmed, rawStatusEpoch) {
         storageLow = rawCaptureArmed &&
@@ -992,7 +995,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 // plot — the quick-measure history (and its map pins) never
                 // sees cruise readings. A storage failure must not crash
                 // the AR screen; the missing pin surfaces it on the map.
-                runCatching {
+                val savedTreeId = runCatching {
                     CruiseCapture.recordDbh(
                         env, r,
                         speciesCode = metaSpecies,
@@ -1001,11 +1004,12 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         photoPath = photo,
                         fix = fix,
                     )
-                }
-                // A. QUICK-TALLY LOOP: no Height leg, no pop, no
-                // continuation — bump the session to the plot's next tree
-                // number and reset this screen to aiming, with the Undo
-                // toast (F) offering a 3 s take-back.
+                }.getOrNull()
+                // A. QUICK-TALLY LOOP: no pop, no continuation — bump the
+                // session to the plot's next tree number and reset this
+                // screen to aiming, with the Undo toast (F) offering a 3 s
+                // take-back.
+                val measuredTreeNumber = cruise.treeNumber
                 CruiseCapture.advanceTally()
                 cruiseTreeNumber = CruiseCapture.target?.treeNumber
                 pendingTree = CruiseCapture.target?.treeNumber ?: pendingTree
@@ -1016,8 +1020,17 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 metaDamage = emptyList()
                 metaNote = ""
                 stage = Stage.AIMING
-                undoToast = cruise.treeNumber
+                undoToast = measuredTreeNumber
                 undoEpoch += 1
+                // F10 — DIAMETER → HEIGHT CHAIN, on by default. Push Height
+                // for the tree just written, ON TOP of this tally (so its
+                // Accept and its Skip both land back here, already aiming at
+                // the next tree). `savedTreeId == null` means the row never
+                // reached the database, and a height would have nothing to
+                // fold into, so the chain is skipped and the loop continues.
+                if (settings.measureHeightAfterDiameter && savedTreeId != null) {
+                    nav.navigate("height?tree=$measuredTreeNumber&chained=true")
+                }
             } else {
                 env.history.append(
                     QuickMeasureEntry(
@@ -1175,25 +1188,63 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
 
         if (!hidingChromeForCapture) MeasureBackButton { nav.popBackStack() }
 
-        // GPS-accuracy pill on the top strip — leading 72 / top 22, clear of
-        // the floating back button (same offsets as iOS DBHScanScreen).
-        if (!hidingChromeForCapture) GPSAccuracyBadge(
-            Modifier
-                .align(Alignment.TopStart)
-                .padding(start = 72.dp, top = 22.dp))
-
         // Plot mini-map — top-right, same row as the GPS badge: the active
         // cruise plot (ring + YOU + measured trees) or the quick sampling
         // ring (ring + YOU). Hidden with the rest of the 2D chrome during
         // the Accept snapshot blackout.
+        // F11 — the card is TAPPABLE in cruise: it re-opens plot setup so
+        // the radius / centre stay editable after the first placement. The
+        // session's project/plot are fixed for this screen's lifetime
+        // (advanceTally only moves the tree NUMBER), so one remember is safe.
         val miniMapUp = scanPlotMiniMapVisible()
-        if (!hidingChromeForCapture) ScanPlotMiniMap()
+        val editPlotTarget = remember { CruiseCapture.target }
+        if (!hidingChromeForCapture) ScanPlotMiniMap(
+            onEditPlot = editPlotTarget?.let { c ->
+                {
+                    nav.navigate(
+                        CruiseRoutes.editPlot(c.projectId.toString(), c.plotId.toString()))
+                }
+            },
+        )
 
-        // Raw-capture recording state: a persistent REC pill while the
-        // recorder is REALLY armed (the hub's ref-counted token set, not the
-        // Settings wish — the pill used to stay red through an arm clobber
-        // while nothing was being recorded), and the last attempt's outcome
-        // (saved / NOT saved) directly under it.
+        // Top strip: GPS pill leading, the cruise tally target ("Tree 8",
+        // the auto number the next Accept saves to) centred in what is left.
+        // ONE row, inset past the status bar, with the mini-map's width
+        // reserved on the trailing edge — the two used to be independently
+        // aligned overlays and collided on narrow screens.
+        // iOS tallyTargetPill styling 1:1 (13 bold mono, black 0.65 capsule).
+        if (!hidingChromeForCapture) {
+            MeasureTopStrip(
+                reserveTrailing = if (miniMapUp) MeasureMiniMapSlot else 0.dp,
+                leading = { GPSAccuracyBadge() },
+                centre = {
+                    cruiseTreeNumber?.let { n ->
+                        Text(
+                            "Tree $n",
+                            style = TextStyle(
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace,
+                            ),
+                            color = Color.White,
+                            maxLines = 1,
+                            modifier = Modifier
+                                .shadow(3.dp, CircleShape, clip = false)
+                                .clip(CircleShape)
+                                .background(Color.Black.copy(alpha = 0.65f))
+                                .border(0.5.dp, Color.White.copy(alpha = 0.18f), CircleShape)
+                                .padding(horizontal = 12.dp, vertical = 7.dp),
+                        )
+                    }
+                },
+            )
+        }
+
+        // Raw-capture recording state: the last attempt's outcome (saved /
+        // NOT saved), plus a loud NOT RECORDING warning when Settings asked
+        // for recording and the recorder is not actually armed. There is no
+        // persistent REC pill — `armed` reads the hub's REAL ref-counted
+        // arm (never the Settings wish) so that mismatch is still caught.
         if (!hidingChromeForCapture) {
             RawCaptureBadge(
                 armed = ArSessionHub.rawDepthArmed,
@@ -1201,31 +1252,6 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 storageLow = storageLow,
                 status = rawCaptureStatus,
             )
-        }
-
-        // Cruise tally target pill — top-centre on the GPS-badge row, the
-        // auto tree number the next Accept saves to ("Tree 8", updating).
-        // iOS tallyTargetPill 1:1 (13 bold mono, black 0.65 capsule).
-        cruiseTreeNumber?.let { n ->
-            if (!hidingChromeForCapture) {
-                Text(
-                    "Tree $n",
-                    style = TextStyle(
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace,
-                    ),
-                    color = Color.White,
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(top = 22.dp)
-                        .shadow(3.dp, CircleShape, clip = false)
-                        .clip(CircleShape)
-                        .background(Color.Black.copy(alpha = 0.65f))
-                        .border(0.5.dp, Color.White.copy(alpha = 0.18f), CircleShape)
-                        .padding(horizontal = 12.dp, vertical = 7.dp),
-                )
-            }
         }
 
         // D. Border chip — small dark-glass pill directly UNDER the
@@ -1248,6 +1274,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     color = if (inside) Color.White else colors.confidenceWarn,
                     modifier = Modifier
                         .align(Alignment.TopEnd)
+                        .statusBarsPadding()
                         .padding(top = 144.dp, end = 16.dp)
                         .clip(CircleShape)
                         .background(Color.Black.copy(alpha = 0.65f))
@@ -1257,44 +1284,15 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             }
         }
 
-        if (settings.developerMode && !hidingChromeForCapture) {
-            val p = preview
-            DevHud(
-                "DBH",
-                listOfNotNull(
-                    "depth" to (if (controller.supportsDepth) "ARCore✓" else "plane"),
-                    "track" to (if (controller.trackingOk()) "OK" else "…"),
-                    // Recorder state — an explicit warning when developer
-                    // mode is on but nothing is being kept for the corpus.
-                    "rec" to when {
-                        !settings.rawCaptureEnabled -> "OFF — not recording"
-                        ArSessionHub.rawDepthArmed -> "armed"
-                        else -> "off"
-                    },
-                    devDepth?.let { "depthMap" to it },
-                    devIntr?.let { "fx/fy cx,cy" to it },
-                    devIntrImg?.let { "fImg" to it },
-                    devGeom?.let { "geom" to it },
-                    devEdge?.let { "edge" to it },
-                    devAxis?.let { "axis" to it },
-                    devMap?.let { "tap px" to it },
-                    "dist" to (p?.distanceM?.let { String.format(Locale.US, "%.2f m", it) } ?: "—"),
-                    "Ø live" to (p?.let { String.format(Locale.US, "%.1f cm", it.diameterCm) } ?: "—"),
-                    "pts" to (p?.nPoints?.toString() ?: "—"),
-                    "locked" to (if (p?.locked == true) "yes" else "no"),
-                    result?.let { "Ø saved" to String.format(Locale.US, "%.1f ±%.0fmm", it.diameterCm, it.sigmaRmm) },
-                ),
-                // Below the plot mini-map when it occupies the top-right
-                // slot (22 + 116 card + 12 gap); the cruise border chip
-                // claims the first slot under the card, so cruise sessions
-                // push the HUD one row further down.
-                topPadding = when {
-                    cruiseTreeNumber != null -> 180.dp
-                    miniMapUp -> 150.dp
-                    else -> 56.dp
-                },
-            )
-        }
+        // The developer internals HUD is NOT drawn here any more. In the
+        // field it covered the AR view and collided with the mini-map and
+        // the border chip, and a cruiser has no use for it. The DevHud
+        // component still exists (ui/screens/DevHud.kt) and the dev* state
+        // below is still computed, so it can be re-attached for a bench
+        // session; nothing about RECORDING went with it. The research CSV
+        // row (ResearchLog.record, in the accept path above) and the
+        // raw-capture bundle (ArSessionHub.rawDepth* / RawCaptureStore) are
+        // written from the measurement path, never from this overlay.
 
         // Guide line + live fit chord (drawn relative to screen centre).
         // All scanning chrome is suppressed while the depth blocker is up.
@@ -1523,7 +1521,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     // the image — the trunk's edges aren't in frame, so no
                     // fit can lock. Honest guidance instead of a lock.
                     preview?.edgesClipped == true ->
-                        "Edges not found — adjust framing."
+                        "Can't see both sides of the trunk — step back so the whole trunk is in view."
                     else -> "Align the guide to the trunk's uphill side; hold steady."
                 }
                 // Depth burst: the under-crosshair capture pill carries the
@@ -1699,13 +1697,14 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         modifier = Modifier.size(44.dp),
                     )
                     Text(
-                        "DBH scanning requires the ARCore Depth API on this device",
+                        "This phone can't measure diameter",
                         style = Forestix.type.bodyBold,
                         color = colors.textPrimary,
                         textAlign = TextAlign.Center,
                     )
                     Text(
-                        "This phone doesn't provide depth sensing, so the trunk scan can't run here.",
+                        "It doesn't have the depth camera the trunk scan needs. " +
+                            "Measure this tree with a tape or calipers instead.",
                         style = Forestix.type.caption,
                         color = colors.textSecondary,
                         textAlign = TextAlign.Center,

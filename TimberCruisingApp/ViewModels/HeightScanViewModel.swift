@@ -476,7 +476,7 @@ public final class HeightScanViewModel: ObservableObject {
     public func captureBaseNow(screenCenterHit: SIMD3<Float>? = nil) {
         guard let p = currentCameraTranslation() else {
             anchorFailureReason =
-                "AR tracking not ready — wait a moment, then try Aim Base again."
+                "The camera hasn't got its bearings yet — hold still for a second, then tap + again."
             return
         }
         captureBase(at: nowForPitchBuffer(),
@@ -583,14 +583,18 @@ public final class HeightScanViewModel: ObservableObject {
         state = .manualEntry
     }
 
-    /// Unit system the manual-entry field is typed in — the field prompts for
-    /// FEET under imperial, and the number used to be stored straight into
-    /// `heightM` (a 3.28x corruption). The screen keeps this in sync.
-    public var manualEntryUnits: UnitSystem = .metric
+    /// The unit system the cruiser is working in, kept in sync by the screen.
+    ///
+    /// Two uses, and they must be the same value: the manual-entry field
+    /// prompts for FEET under imperial (the typed number used to be stored
+    /// straight into `heightM`, a 3.28x corruption), and the estimator quotes
+    /// its ± band in these units so a band never arrives in metres beside a
+    /// height in feet.
+    public var unitSystem: UnitSystem = .metric
 
     public func submitManualEntry() {
         guard let typed = TruthInput.parsePositive(manualHeightM) else { return }
-        let metres = manualEntryUnits == .imperial
+        let metres = unitSystem == .imperial
             ? Units.feetToMeters(typed) : typed
         // SAME floor as the AR path (`HeightEstimator.minHMeters`, 0.3 m),
         // read from the estimator so the two can never drift apart again.
@@ -638,7 +642,10 @@ public final class HeightScanViewModel: ObservableObject {
             // normal tracking; the remaining guards (d_h, aim angles,
             // H range, σ ratio) still gate quality.
             trackingStateWasNormalThroughout: true,
-            projectCalibration: calibration)
+            projectCalibration: calibration,
+            // Display units only — the estimator quotes its ± band in them.
+            // Nothing computed or stored changes.
+            unitSystem: unitSystem)
         let r = HeightEstimator.estimate(input: input)
         result = r
         // `.rejected` is the RED-TIER result stage, not a dead end: it

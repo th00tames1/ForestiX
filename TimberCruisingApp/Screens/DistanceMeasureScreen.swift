@@ -98,20 +98,11 @@ public struct DistanceMeasureScreen: View {
                 // no stage guidance (the readout strip carries the state).
                 MeasureTopBanner(topBannerText)
 
-                // Bottom-right LiDAR/AR toggle — Developer-mode research
-                // control only; field mode pins LiDAR devices to the mesh
-                // path (AppSettings.measurementSource).
-                if settings.developerMode {
-                    VStack {
-                        Spacer()
-                        HStack {
-                            Spacer()
-                            MeasureSourceToggleButton()
-                                .padding(.trailing, 18)
-                                .padding(.bottom, 96)
-                        }
-                    }
-                }
+                // (The bottom-right LiDAR/AR toggle is GONE — field report
+                // F5. It was developer-only chrome for a switch nobody
+                // flips; `AppSettings.measurementSource` is untouched and
+                // still decides which sensor path raycasts, so nothing
+                // about the measurement changed.)
 
                 // Floating back button — full-bleed chrome exit (the
                 // system nav bar is hidden on the AR screens).
@@ -134,8 +125,13 @@ public struct DistanceMeasureScreen: View {
                         valueStrip
                         MeasureShutterRow(
                             capture: { capture(in: proxy.size) },
+                            // The caption names the mode you are IN. "2-Pt"
+                            // was the last initialism left on this screen —
+                            // the Android sibling already ships "2 points",
+                            // and the words fit the 52 pt flank slot at
+                            // 10 pt monospaced with room to spare.
                             leading: .init(systemImage: "arrow.left.and.right",
-                                           caption: mode == .live ? "Live" : "2-Pt") {
+                                           caption: mode == .live ? "Live" : "2 points") {
                                 mode = (mode == .live) ? .twoPoint : .live
                                 resetTwoPoint()
                             })
@@ -319,7 +315,7 @@ public struct DistanceMeasureScreen: View {
                                 in: RoundedRectangle(cornerRadius: 12,
                                                      style: .continuous))
             }
-            MeasureValuePill(mode == .live ? "DEVICE → TARGET"
+            MeasureValuePill(mode == .live ? "PHONE → TARGET"
                                            : "POINT A → POINT B",
                              dimmed: true)
             MeasureValuePill(currentDistanceString, large: true)

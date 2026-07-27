@@ -177,9 +177,12 @@ object DBHEstimator {
         val lastFrame = input.frames.last()
 
         val dTap = medianDepth(input.tapX, input.tapY, lastFrame, radius = 2)
-            ?: return red("Tap pixel outside depth map")
+            ?: return red("The crosshair isn't on anything the depth camera can see — aim at the trunk and capture again.")
         if (dTap !in 0.5f..3.0f)
-            return red("Move closer or step back; tap depth ${fmt2(dTap)} m out of range")
+            // The instruction IS the whole message; the "tap depth … out of
+            // range" half echoed the depth sample under the crosshair, which
+            // a cruiser cannot act on. The 0.5–3 m gate above is unchanged.
+            return red("Stand 0.5–3 m from the trunk and capture again.")
         if (confidenceAt(input.tapX, input.tapY, lastFrame) < 1)
             return red("Trunk surface not reliably seen; try a cleaner stem area")
 
@@ -208,13 +211,19 @@ object DBHEstimator {
 
         val cleaned = OutlierRemoval.statistical(combined, k = 8, sigmaMult = 2.0)
         if (cleaned.size < 20)
-            return red("Too few points after outlier removal", nInliers = cleaned.size)
+            // Was "Too few points after outlier removal" — a pipeline step's
+            // name, asking for nothing. The COUNT gate (>= 20 after the
+            // k = 8 statistical trim) is unchanged; only the sentence is.
+            return red("Too much of that scan was noise to measure from — move closer, fill the crosshair with bark, and capture again.", nInliers = cleaned.size)
 
         val cal = input.projectCalibration
         val noiseM = cal.depthNoiseMm / 1000.0
         val inlierTol = max(0.003, 2.0 * noiseM)
         val fit = RANSACCircle.fit(cleaned, inlierTol, iterations = 500, minInliers = 20)
-            ?: return red("Could not fit a circle", nInliers = 0)
+            // Was "Could not fit a circle" — the name of the algorithm, with
+            // no instruction. RANSAC's tolerance, iteration budget and
+            // 20-inlier floor above are all unchanged.
+            ?: return red("Couldn't find a round trunk in that scan — aim at the stem, hold steadier, and capture again.", nInliers = 0)
 
         val rmse = rootMeanSquaredResidual(fit.inliers, fit.circle)
         val arcDeg = arcCoverageDeg(fit.inliers, fit.circle.cx, fit.circle.cy)
@@ -233,23 +242,33 @@ object DBHEstimator {
         }
 
         // Step 9: §7.9 sanity tree (identical thresholds to iOS Phase 18.2).
+        // REJECT reasons are the ones a cruiser reads (the banner shows
+        // `firstFailingRejectReason`), so they are written as instructions.
+        // WARN reasons stay in the estimator's own vocabulary — they never
+        // leave the struct. Every THRESHOLD below is unchanged.
         val checks = listOf(
-            check(fit.inliers.size >= 10, Severity.REJECT, "Fewer than 10 trunk surface points"),
+            check(fit.inliers.size >= 10, Severity.REJECT,
+                "Too little of the trunk was picked up — move closer, fill the crosshair with bark, and capture again."),
             check(fit.inliers.size >= 20, Severity.WARN, "Only 10\u201320 trunk surface points"),
-            check(arcDeg >= 30, Severity.REJECT, "Trunk arc coverage below 30\u00B0"),
+            check(arcDeg >= 30, Severity.REJECT,
+                "Not enough of the trunk in view — step back or centre the guide line."),
             check(arcDeg >= 45, Severity.WARN, "Trunk arc coverage 30\u00B0\u201345\u00B0"),
-            check(r >= 0.025 && r <= 1.0, Severity.REJECT, "Fitted radius outside 2.5\u2013100 cm"),
-            check(rmse / r <= 0.07, Severity.REJECT, "Fit error worse than 7% of radius"),
+            check(r >= 0.025 && r <= 1.0, Severity.REJECT,
+                "That doesn't measure like a trunk — aim at the stem and capture again."),
+            check(rmse / r <= 0.07, Severity.REJECT,
+                "The shape didn't match a trunk — hold steadier and capture again."),
             check(rmse / r <= 0.05, Severity.WARN, "Fit error 5\u20137% of radius"),
-            check(sigmaR / r <= 0.05, Severity.REJECT, "Radius precision worse than \u00B15%"),
+            check(sigmaR / r <= 0.05, Severity.REJECT,
+                "This diameter isn't settling — hold steadier and capture again."),
             check(sigmaR / r <= 0.02, Severity.WARN, "Radius precision \u00B12\u20135%"),
-            check(radiusCoV <= 0.10, Severity.REJECT, "Per-frame radius spread above 10%"),
+            check(radiusCoV <= 0.10, Severity.REJECT,
+                "The trunk width kept changing between shots — hold the phone steadier and capture again."),
             check(radiusCoV <= 0.05, Severity.WARN, "Per-frame radius spread 5\u201310%"),
             check(!chordOverride, Severity.WARN, "Fit disagreed with silhouette; using chord"),
         )
         val tier = combineChecks(checks)
         val rejectionReason = if (tier == ConfidenceTier.RED)
-            (firstFailingRejectReason(checks) ?: "Quality below threshold") else null
+            (firstFailingRejectReason(checks) ?: "This reading didn't pass the accuracy checks — retake it, or accept it and flag the tree.") else null
 
         // Step 10: cylinder calibration.
         val dbhRawCm = 2 * r * 100
@@ -861,7 +880,7 @@ object DBHEstimator {
         val dTap = medianDepth(tapX, tapY, last, 2)
             ?: return redChord("Trunk surface not seen at the crosshair", 0)
         if (dTap !in 0.4f..3.5f)
-            return redChord("Move to 0.4–3.5 m; tap depth ${fmt2(dTap)} m out of range", 0)
+            return redChord("Stand 0.4–3.5 m from the trunk and capture again.", 0)
 
         val diameters = ArrayList<Double>(frames.size)
         var clippedFrames = 0
@@ -875,7 +894,7 @@ object DBHEstimator {
             // Distinguish the FRAMING failure (silhouette ran off the image
             // border — trunk edges not visible) from a plain surface miss.
             return if (clippedFrames > frames.size / 2)
-                redChord("Edges not found — adjust framing", diameters.size)
+                redChord("Can't see both sides of the trunk — step back so the whole trunk is in view.", diameters.size)
             else redChord("Not enough trunk surface; hold steadier / move closer", diameters.size)
         }
 
@@ -888,13 +907,14 @@ object DBHEstimator {
 
         val checks = listOf(
             check(medianM in 0.025..2.0, Severity.REJECT, "Diameter outside 2.5–200 cm"),
-            check(cov <= 0.15, Severity.REJECT, "Per-frame spread above 15%"),
+            check(cov <= 0.15, Severity.REJECT,
+                "The trunk width kept changing between shots — hold the phone steadier and capture again."),
             check(cov <= 0.08, Severity.WARN, "Per-frame spread 8–15%"),
             check(diameters.size >= maxOf(3, frames.size / 2), Severity.WARN, "Few usable frames"),
         )
         val tier = combineChecks(checks)
         val reason = if (tier == ConfidenceTier.RED)
-            (checks.firstOrNull { !it.passed && it.severity == Severity.REJECT }?.reason ?: "Quality below threshold") else null
+            (checks.firstOrNull { !it.passed && it.severity == Severity.REJECT }?.reason ?: "This reading didn't pass the accuracy checks — retake it, or accept it and flag the tree.") else null
 
         return DBHResult(
             diameterCm = diaCm, centerX = 0f, centerZ = 0f, arcCoverageDeg = 0f,
@@ -1141,6 +1161,4 @@ object DBHEstimator {
         confidence = ConfidenceTier.RED, method = DBHMethod.LIDAR_PARTIAL_ARC_SINGLE_VIEW,
         rejectionReason = reason,
     )
-
-    private fun fmt2(v: Float) = String.format(Locale.US, "%.2f", v)
 }

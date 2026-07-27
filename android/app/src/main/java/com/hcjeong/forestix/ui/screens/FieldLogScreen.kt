@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
@@ -48,6 +47,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -61,6 +61,7 @@ import com.hcjeong.forestix.data.QuickMeasureEntry
 import com.hcjeong.forestix.ui.screens.plot.PlotSummaryCard
 import com.hcjeong.forestix.ui.shareFile
 import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixDenseTextScale
 import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import com.hcjeong.forestix.ui.theme.confidenceDescriptor
@@ -101,7 +102,7 @@ fun FieldLogScreen(nav: NavController) {
                             scope.launch { env.history.exportCSV()?.let { shareFile(context, it, "text/csv") } }
                         })
                     DropdownMenuItem(
-                        text = { Text("Bundle (5-file zip)") },
+                        text = { Text("All tables (zip of 5 CSVs)") },
                         leadingIcon = {
                             Icon(Icons.Filled.FolderZip, contentDescription = null, modifier = Modifier.size(18.dp))
                         },
@@ -207,13 +208,15 @@ private fun SummaryHeader(entries: List<QuickMeasureEntry>) {
     }
     val todayCount = entries.count { sameDay(it.createdAt) }
     val last = entries.firstOrNull()?.let { relativeAgo(it.createdAt) } ?: "—"
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = ForestixSpace.md, vertical = ForestixSpace.sm),
-        horizontalArrangement = Arrangement.spacedBy(ForestixSpace.lg),
-    ) {
-        Cell("${entries.size}", "TOTAL")
-        Cell("$todayCount", "TODAY")
-        Cell(last, "LAST")
+    ForestixDenseTextScale {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = ForestixSpace.md, vertical = ForestixSpace.sm),
+            horizontalArrangement = Arrangement.spacedBy(ForestixSpace.lg),
+        ) {
+            Cell("${entries.size}", "TOTAL")
+            Cell("$todayCount", "TODAY")
+            Cell(last, "LAST")
+        }
     }
 }
 
@@ -222,8 +225,13 @@ private fun Cell(value: String, label: String) {
     val colors = Forestix.colors
     val type = Forestix.type
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Text(value, style = type.dataLarge, color = colors.textPrimary)
-        Text(label, style = type.sectionHead.copy(letterSpacing = 1.2.sp), color = colors.textTertiary)
+        // Both single-line and unwrappable: these cells size to their own
+        // content, and a 26 sp count split across two lines is the same
+        // defect as "PRECISI/ON" one card down (G3).
+        Text(value, style = type.dataLarge, color = colors.textPrimary,
+            maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+        Text(label, style = type.sectionHead.copy(letterSpacing = 1.2.sp), color = colors.textTertiary,
+            maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -243,26 +251,137 @@ private fun CapacityBanner() {
     }
 }
 
+// MARK: - Column geometry -------------------------------------------------
+//
+// FIELD REPORT G3 — the table used to pin FIXED widths (TYPE 52, VALUE 96,
+// PRECISION 64) with a letter-spaced 13 sp header on top of them. No phone
+// honours that: at 360 dp the row has ~296 dp to give and those widths plus
+// the chip and three 12 dp gutters ask for ~300, so the shortfall landed on
+// whatever came last and Compose broke the WORDS to fit — "PRECISI/ON",
+// "QUALI/TY", and a quality chip reading "GOO/D".
+//
+// The columns now take WEIGHTS, so they share whatever width the device
+// actually has, and each weight is sized to the widest string its column
+// has to hold (Roboto Mono ≈ 0.6 em, Roboto SemiBold caps ≈ 0.62 em plus
+// tracking). A row has screen − 32 (list inset) − 32 (row padding) − 18
+// (three 6 dp gutters) to share:
+//
+//   column   widest content            needs    360 dp   411 dp   320 dp
+//   TYPE     "Height"                   47 dp    57 dp    68 dp    49 dp
+//   VALUE    "150.0 cm"                 82 dp    93 dp   111 dp    79 dp
+//   RANGE    "±0.08 in"                 62 dp    64 dp    77 dp    55 dp
+//   QUAL     chip "CHECK"               56 dp    64 dp    77 dp    55 dp
+//
+// Every LABEL is single-line with wrapping switched OFF, so a word can
+// never be split again. The two NUMERIC cells may take extra lines
+// instead — a composite crown or plot reading ("12.4 × 8.2 m",
+// "5.6 m radius · 98.5 m²") is wider than any phone column, and a taller
+// row is better than a measurement the cruiser cannot read in full. The
+// VALUE cell gets THREE: a sampling-plot reading is ~225 dp of text over
+// an 86.5 dp column at 360 dp, so at two lines it ellipsised and dropped
+// its area unit ("r 5.6 m" / "· 98.5…"). Three lines carry it whole. The
+// system font scale is bounded by ForestixDenseTextScale so the ~10 % of
+// headroom each column carries at 360 dp is not spent by an accessibility
+// text size — but Display size is NOT bounded, and it shrinks dp width, so
+// a heading has to survive well under 320 dp rather than only at it.
+//
+// The VALUE column was re-cut when the sampling-plot row's bare "r" was
+// spelled out. The gutters went 8 dp -> 6 dp and the whole 6 dp that frees
+// went to VALUE, with the other three weights re-derived so they keep the
+// width they had before at 360 dp AND at 320 dp — nothing is taken from a
+// column that was already at its content's size. At 360 dp: TYPE 57.1,
+// VALUE 92.5, RANGE 64.2, QUAL 64.2. At 320 dp: 48.9 / 79.2 / 55.0 /
+// 55.0, every one at or above what it had. Those four numbers are also why
+// the RANGE heading had to lose its ± rather than the columns being re-cut
+// again: at 320 dp three of the four are already within ~2 dp of their own
+// content, so there is nothing left to move.
+private const val ColTypeWeight = 1.13f
+private const val ColValueWeight = 1.83f
+private const val ColPrecisionWeight = 1.27f
+private const val ColQualityWeight = 1.27f
+private val ColGap = 6.dp
+
+/// The ONE definition of the field-log grid. The header and every row go
+/// through it, so the columns cannot drift apart again.
 @Composable
-private fun ColumnHeader() {
-    val colors = Forestix.colors
-    val type = Forestix.type
+private fun FieldLogColumns(
+    modifier: Modifier = Modifier,
+    typeSlot: @Composable () -> Unit,
+    valueSlot: @Composable () -> Unit,
+    precisionSlot: @Composable () -> Unit,
+    qualitySlot: @Composable () -> Unit,
+) {
     Row(
-        Modifier.fillMaxWidth().padding(
-            start = ForestixSpace.md, end = ForestixSpace.md,
-            top = ForestixSpace.md, bottom = ForestixSpace.xs),
-        horizontalArrangement = Arrangement.spacedBy(ForestixSpace.sm),
+        modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(ColGap),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text("TYPE", style = type.sectionHead.copy(letterSpacing = 1.2.sp), color = colors.textTertiary, modifier = Modifier.width(52.dp))
-        Text("VALUE", style = type.sectionHead.copy(letterSpacing = 1.2.sp), color = colors.textTertiary, modifier = Modifier.width(96.dp), textAlign = TextAlign.End)
-        Text("PRECISION", style = type.sectionHead.copy(letterSpacing = 1.2.sp), color = colors.textTertiary, modifier = Modifier.width(64.dp), textAlign = TextAlign.End)
-        Spacer(Modifier.weight(1f))
-        Text("QUALITY", style = type.sectionHead.copy(letterSpacing = 1.2.sp), color = colors.textTertiary)
+        Box(Modifier.weight(ColTypeWeight), contentAlignment = Alignment.CenterStart) { typeSlot() }
+        Box(Modifier.weight(ColValueWeight), contentAlignment = Alignment.CenterEnd) { valueSlot() }
+        Box(Modifier.weight(ColPrecisionWeight), contentAlignment = Alignment.CenterEnd) { precisionSlot() }
+        Box(Modifier.weight(ColQualityWeight), contentAlignment = Alignment.CenterEnd) { qualitySlot() }
     }
 }
 
+/// A column heading: one line, never wrapped, never hyphenated.
 @Composable
-private fun FieldLogRow(entry: QuickMeasureEntry, unitSystem: UnitSystem) {
+private fun HeaderLabel(text: String) {
+    Text(
+        text,
+        // 0.6 tracking, not 1.2: across a seven-letter heading the extra
+        // 0.6 sp per character is ~4 dp, which is most of the margin that
+        // decides whether the word survives at a large system font size.
+        style = Forestix.type.sectionHead.copy(letterSpacing = 0.6.sp),
+        color = Forestix.colors.textTertiary,
+        maxLines = 1,
+        softWrap = false,
+        overflow = TextOverflow.Ellipsis,
+    )
+}
+
+@Composable
+private fun ColumnHeader() = ForestixDenseTextScale {
+    FieldLogColumns(
+        Modifier.padding(
+            start = ForestixSpace.md, end = ForestixSpace.md,
+            top = ForestixSpace.md, bottom = ForestixSpace.xs),
+        typeSlot = { HeaderLabel("TYPE") },
+        valueSlot = { HeaderLabel("VALUE") },
+        // The two headings that could not fit are SHORTENED, not wrapped.
+        // "PRECISION" is nine letter-spaced capitals (~83 dp) over a column
+        // whose content needs 62, and "QUALITY" (~65 dp) is wider than the
+        // widest chip it sits over (~56 dp) — so both words, not the
+        // numbers, were setting the column widths, and both were the words
+        // the screenshot showed broken ("PRECISI/ON", "QUALI/TY"). Four
+        // letters each fit at every phone width and at the bounded font
+        // scale. Same two words on iOS.
+        //
+        // "PREC" is gone: it was a truncation of "precision", which here did
+        // not mean precision in the everyday sense but the propagated
+        // standard deviation of the estimate. "RANGE" is what the cells below
+        // it actually print ("±1.1 mm"), and every one of those cells carries
+        // the ± itself, so the heading does not have to.
+        //
+        // It is "RANGE", not "± RANGE", because the symbol did not fit. Real
+        // Roboto metrics at 13 sp SemiBold + 0.6 sp tracking (measured from
+        // the shipped font, not estimated): "± RANGE" is 57.0 dp against the
+        // 54.96 dp this column gets at 320 dp — it rendered "± RANG…" on a
+        // small phone, and on any phone whose Display size is raised, since
+        // that shrinks dp width while ForestixDenseTextScale bounds only the
+        // FONT scale. Dropping the symbol costs 11.3 dp: "RANGE" is 45.8 dp,
+        // which clears 320 dp with 9.2 dp (17 %) to spare. The weights could
+        // not buy this back — at 320 dp TYPE, ± RANGE and QUAL are all within
+        // ~2 dp of their own content, so the only donor was VALUE, and VALUE
+        // is the column the previous re-cut had to widen.
+        precisionSlot = { HeaderLabel("RANGE") },
+        qualitySlot = { HeaderLabel("QUAL") },
+    )
+}
+
+// The header and the rows carry their own scale bound, so the grid cannot
+// be composed anywhere without it.
+@Composable
+private fun FieldLogRow(entry: QuickMeasureEntry, unitSystem: UnitSystem) = ForestixDenseTextScale {
     val colors = Forestix.colors
     val type = Forestix.type
     Column(
@@ -272,19 +391,52 @@ private fun FieldLogRow(entry: QuickMeasureEntry, unitSystem: UnitSystem) {
             .padding(horizontal = ForestixSpace.md, vertical = ForestixSpace.sm),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(ForestixSpace.sm)) {
-            Text(typeLabel(entry), style = type.dataSmall, color = colors.textSecondary, modifier = Modifier.width(52.dp))
-            Text(valueText(entry, unitSystem), style = type.data, color = colors.textPrimary, modifier = Modifier.width(96.dp), textAlign = TextAlign.End)
-            Text(sigmaText(entry, unitSystem), style = type.dataSmall, color = colors.textTertiary, modifier = Modifier.width(64.dp), textAlign = TextAlign.End)
-            Spacer(Modifier.weight(1f))
-            TierChip(entry.confidenceRaw)
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(start = 52.dp + ForestixSpace.sm)) {
-            entry.treeNumber?.let {
-                Text("#$it", style = type.dataSmall, color = colors.primary,
-                    modifier = Modifier.border(0.5.dp, colors.primary.copy(alpha = 0.4f), CircleShape).padding(horizontal = 5.dp, vertical = 1.dp))
+        FieldLogColumns(
+            typeSlot = {
+                Text(
+                    typeLabel(entry), style = type.dataSmall, color = colors.textSecondary,
+                    maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+            },
+            valueSlot = {
+                Text(
+                    valueText(entry, unitSystem), style = type.data, color = colors.textPrimary,
+                    textAlign = TextAlign.End,
+                    // Three lines, not an ellipsis: a crown or plot reading
+                    // is wider than the column on any phone, and it breaks at
+                    // a space, never inside a number. At two lines the plot
+                    // reading lost its area unit to the ellipsis.
+                    maxLines = 3, overflow = TextOverflow.Ellipsis)
+            },
+            precisionSlot = {
+                Text(
+                    sigmaText(entry, unitSystem), style = type.dataSmall, color = colors.textTertiary,
+                    textAlign = TextAlign.End, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            },
+            qualitySlot = { TierChip(entry.confidenceRaw) },
+        )
+        // Meta line, aligned under the VALUE column — the same weights as
+        // the grid above rather than the old hard-coded 52 dp indent. The
+        // grid spends THREE gutters before sharing out its weights and this
+        // row spends one, so the two it does not spend come off the end;
+        // that makes the leading spacer exactly as wide as the TYPE column.
+        Row(
+            Modifier.fillMaxWidth().padding(end = ColGap * 2),
+            horizontalArrangement = Arrangement.spacedBy(ColGap),
+        ) {
+            Spacer(Modifier.weight(ColTypeWeight))
+            Row(
+                Modifier.weight(ColValueWeight + ColPrecisionWeight + ColQualityWeight),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                entry.treeNumber?.let {
+                    Text("#$it", style = type.dataSmall, color = colors.primary,
+                        maxLines = 1, softWrap = false,
+                        modifier = Modifier.border(0.5.dp, colors.primary.copy(alpha = 0.4f), CircleShape).padding(horizontal = 5.dp, vertical = 1.dp))
+                }
+                Text(relativeAgo(entry.createdAt), style = type.dataSmall, color = colors.textTertiary,
+                    maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
             }
-            Text(relativeAgo(entry.createdAt), style = type.dataSmall, color = colors.textTertiary)
         }
     }
 }
@@ -295,9 +447,17 @@ private fun TierChip(rawTier: String) {
     val type = Forestix.type
     Text(
         d.label.uppercase(),
-        style = type.sectionHead.copy(letterSpacing = 0.8.sp),
+        style = type.sectionHead.copy(letterSpacing = 0.6.sp),
         color = d.color,
-        modifier = Modifier.border(0.75.dp, d.color, ForestixRadius.chip).padding(horizontal = ForestixSpace.xs, vertical = 3.dp),
+        // A four-letter word inside a bordered chip has nowhere to wrap TO:
+        // "GOO/D" was the chip being handed less width than its own text.
+        maxLines = 1,
+        softWrap = false,
+        overflow = TextOverflow.Ellipsis,
+        // 6 dp of side padding rather than 8: the chip is the widest thing
+        // in its column, so every dp it does not spend on padding is a dp
+        // of headroom for the word inside it.
+        modifier = Modifier.border(0.75.dp, d.color, ForestixRadius.chip).padding(horizontal = 6.dp, vertical = 3.dp),
     )
 }
 
@@ -341,7 +501,7 @@ private fun valueText(e: QuickMeasureEntry, system: UnitSystem): String = when (
     MeasureKind.DISTANCE -> if (e.value < 1) String.format(Locale.US, "%.0f cm", e.value * 100) else String.format(Locale.US, "%.2f m", e.value)
     MeasureKind.SAMPLING_PLOT -> {
         val area = e.secondaryValue ?: (PI * e.value * e.value)
-        String.format(Locale.US, "r %.1f m · %.1f m²", e.value, area)
+        String.format(Locale.US, "%.1f m radius · %.1f m²", e.value, area)
     }
 }
 

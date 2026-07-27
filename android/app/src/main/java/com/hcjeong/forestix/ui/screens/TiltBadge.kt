@@ -59,7 +59,7 @@ fun TiltBadge(controller: ArController, modifier: Modifier = Modifier) {
     }
     val p = pitchDeg
     val (label, tint) = when {
-        p == null -> "Tilt —" to colors.confidenceBad
+        p == null -> "Tilt: no reading" to colors.confidenceBad
         kotlin.math.abs(p) <= 3f -> "Level" to colors.confidenceOk
         kotlin.math.abs(p) <= 8f -> "Tilted" to colors.confidenceWarn
         else -> "Tilted" to colors.confidenceBad

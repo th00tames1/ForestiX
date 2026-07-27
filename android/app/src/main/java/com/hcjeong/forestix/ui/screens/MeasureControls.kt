@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.imePadding
@@ -60,6 +61,59 @@ import androidx.compose.ui.unit.sp
 import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.theme.Forestix
 
+// MARK: - Top-strip geometry (shared by every AR screen)
+
+// Android draws edge-to-edge, so every top-anchored overlay has to inset
+// itself past the system status bar (clock / battery / notch) — the field
+// build put the GPS pill and the plot mini-map straight under the clock.
+// These constants are the offsets BELOW that inset, and match the iOS
+// safe-area offsets one for one.
+
+/// Back button: 16 below the status bar, 44 dp circle.
+val MeasureBackTop = 16.dp
+
+/// The GPS / title / mini-map row.
+val MeasureTopStripTop = 22.dp
+
+/// Horizontal space the back button claims on the leading edge
+/// (16 lead + 44 button + 12 gap).
+val MeasureBackSlot = 72.dp
+
+/// Horizontal space the plot mini-map claims on the trailing edge
+/// (116 dp card + 16 trailing). Callers reserve it on the top strip only
+/// while the card is actually up.
+val MeasureMiniMapSlot = 132.dp
+
+/// The AR screens' top strip, laid out as ONE row instead of a pile of
+/// independently-aligned overlays. The leading slot (GPS pill) and the
+/// centre slot (the cruise "Tree N" title) are siblings in the same Row,
+/// so they cannot overlap at any screen width: the centre is centred in
+/// whatever is left between the GPS pill and the reserved trailing slot,
+/// and gives way rather than colliding when the width runs out.
+///
+/// The Row registers no pointer input, so it stays transparent to the AR
+/// view's own gestures.
+@Composable
+fun BoxScope.MeasureTopStrip(
+    reserveTrailing: Dp = 0.dp,
+    leading: @Composable () -> Unit = {},
+    centre: @Composable () -> Unit = {},
+) {
+    Row(
+        modifier = Modifier
+            .align(Alignment.TopStart)
+            .fillMaxWidth()
+            .statusBarsPadding()
+            .padding(top = MeasureTopStripTop, start = MeasureBackSlot, end = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        leading()
+        Box(Modifier.weight(1f), contentAlignment = Alignment.Center) { centre() }
+        if (reserveTrailing > 0.dp) Spacer(Modifier.width(reserveTrailing))
+    }
+}
+
 // MARK: - Back button (top-left, every AR screen)
 
 /// Circular translucent back button pinned top-left so every AR screen has
@@ -72,7 +126,8 @@ fun BoxScope.MeasureBackButton(onClick: () -> Unit) {
     Box(
         Modifier
             .align(Alignment.TopStart)
-            .padding(start = 16.dp, top = 16.dp)
+            .statusBarsPadding()
+            .padding(start = 16.dp, top = MeasureBackTop)
             .size(44.dp)
             .clip(CircleShape)
             .background(Color.Black.copy(alpha = 0.55f))

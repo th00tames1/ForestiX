@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
@@ -78,8 +79,13 @@ import kotlin.math.sqrt
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
+/// `editPlotId` — FIELD REPORT F11. The same screen now serves BOTH "place
+/// the first plot" and "come back and change it": the scan screens' top-right
+/// mini-map re-opens it with the tally's plot id, and Save then rewrites THAT
+/// plot instead of minting a duplicate Plot N+1 out from under the cruiser.
+/// Empty/unknown id ⇒ the original create behaviour, unchanged.
 @Composable
-fun CruiseStartPlotScreen(nav: NavController, projectId: String) {
+fun CruiseStartPlotScreen(nav: NavController, projectId: String, editPlotId: String = "") {
     val env = LocalAppEnvironment.current
     val context = LocalContext.current
     val controller = ArSessionHub.controller
@@ -146,20 +152,63 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String) {
         if (ArSessionHub.activePlot != null) return
         val hit = controller.screenCenterHit() ?: controller.forwardPointAtHorizontalDistance(3f)
         if (hit == null || !ArSessionHub.placePlot(hit)) {
-            failure = "Couldn't read scene depth. Aim at the ground and try again."
+            failure = "Couldn't see the ground here. Aim at the ground and try again."
             return
         }
         failure = null
     }
 
+    /// F11 — apply a RE-OPENED setup session to the EXISTING plot instead of
+    /// creating a new one. Returns false when there is nothing to edit, so
+    /// Save falls through to creating.
+    ///
+    /// Radius always applies. The CENTRE deliberately does not, unless the
+    /// cruiser actually re-placed the ring: a radius-only edit that also
+    /// re-stamped the centre would silently teleport the plot to wherever the
+    /// cruiser happened to be standing, which is the worst kind of data loss
+    /// — invisible. Both `ArSessionHub.clearPlot()` (the Reset button) and
+    /// `placePlot(...)` null `linkedCruisePlotId`, so "still linked to this
+    /// plot" is exactly the test for "the centre was NOT re-placed".
+    suspend fun applyEdit(): Boolean {
+        val id = runCatching { UUID.fromString(editPlotId) }.getOrNull() ?: return false
+        val existing = runCatching { env.plotRepository.read(id) }.getOrNull() ?: return false
+        val r = ArSessionHub.plotRadiusM
+        existing.plotAreaAcres = Units.squareMetersToAcres(Units.circleAreaM2(r)).toFloat()
+        val recentred = ArSessionHub.activePlot != null &&
+            ArSessionHub.linkedCruisePlotId != id
+        if (recentred) {
+            val snap = fix ?: LocationService.lastGlobalFix
+            if (snap != null) {
+                val acc = snap.horizontalAccuracyM.toFloat()
+                existing.centerLat = snap.latitude
+                existing.centerLon = snap.longitude
+                existing.positionSource = PositionSource.GPS_AVERAGED
+                existing.gpsNSamples = 1
+                existing.gpsMedianHAccuracyM = acc
+                existing.gpsSampleStdXyM = 0f
+                // Still stored, still exported — just never shown (F9).
+                existing.positionTier = GPSAveraging.classify(acc, 0f)
+            }
+        }
+        env.plotRepository.update(existing)
+        // Re-link so the mini-map trusts the AR-anchor path for YOU again.
+        if (ArSessionHub.activePlot != null) ArSessionHub.linkPlot(id)
+        return true
+    }
+
     /// Save = create the cruise Plot row ("Plot N", centre GPS, radius),
     /// make it ACTIVE, keep the AR ring for the scan overlays, go back to
-    /// the cruise map.
+    /// the cruise map. With `editPlotId` set it REWRITES that plot instead
+    /// (F11) and leaves the active-plot pointers alone.
     fun save() {
         if (saving) return
         saving = true
         scope.launch {
             try {
+                if (applyEdit()) {
+                    nav.popBackStack()
+                    return@launch
+                }
                 val pid = UUID.fromString(projectId)
                 val snap = fix ?: LocationService.lastGlobalFix
                 val r = ArSessionHub.plotRadiusM
@@ -233,6 +282,7 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String) {
         // Top radius slider — sampling-tool layout verbatim.
         Column(
             Modifier.align(Alignment.TopCenter)
+                .statusBarsPadding()
                 .padding(top = 68.dp, start = ForestixSpace.md, end = ForestixSpace.md)
                 .clip(ForestixRadius.card).background(Color.Black.copy(alpha = 0.55f)).padding(10.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),

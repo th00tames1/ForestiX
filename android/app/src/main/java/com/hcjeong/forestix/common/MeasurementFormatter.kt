@@ -15,9 +15,16 @@ object MeasurementFormatter {
         UnitSystem.IMPERIAL -> String.format(Locale.US, "%.1f in", cm / 2.54)
     }
 
+    /// FLOORED at the smallest value each precision can print, so neither
+    /// branch can render "±0.0 mm" / "±0.00 in". A zero band claims a perfect
+    /// measurement — the one thing an uncertainty readout must never say — and
+    /// the imperial branch rounds anything under 0.127 mm to zero, which the
+    /// shipped depth-noise default can reach on a wide arc. Rounding UP to the
+    /// floor overstates the band slightly, which is the safe direction.
+    /// Matches the iOS sibling.
     fun diameterSigma(mm: Double, system: UnitSystem): String = when (system) {
-        UnitSystem.METRIC -> String.format(Locale.US, "\u00B1%.1f mm", mm)
-        UnitSystem.IMPERIAL -> String.format(Locale.US, "\u00B1%.2f in", mm / 25.4)
+        UnitSystem.METRIC -> String.format(Locale.US, "±%.1f mm", maxOf(mm, 0.1))
+        UnitSystem.IMPERIAL -> String.format(Locale.US, "±%.2f in", maxOf(mm / 25.4, 0.01))
     }
 
     // Height — stored m.
@@ -26,10 +33,17 @@ object MeasurementFormatter {
         UnitSystem.IMPERIAL -> String.format(Locale.US, "%.1f ft", m * 3.28084)
     }
 
-    fun heightSigma(m: Double, system: UnitSystem): String = when (system) {
-        UnitSystem.METRIC -> String.format(Locale.US, "\u00B1%.1f m", m)
-        UnitSystem.IMPERIAL -> String.format(Locale.US, "\u00B1%.1f ft", m * 3.28084)
-    }
+    /// Renders a height precision sigma (stored in metres).
+    ///   • metric  → "±0.4 m"  (and "±0.04 m", never "±0.0 m")
+    ///   • imperial → "±1.3 ft"
+    ///
+    /// Delegates to [UncertaintyBand] — the one place a ± band is rounded,
+    /// shared with the estimators. This used to be its own "%.1f", so the
+    /// field log's uncertainty column and the map's quick-measure detail
+    /// printed "±0.0 m" for any reading under 5 cm of σ: precisely the
+    /// readings the app is least sure about, wearing a claim of perfection.
+    fun heightSigma(m: Double, system: UnitSystem): String =
+        UncertaintyBand.text(m, system)
 
     // Distance / generic length — stored m. Metric readings under a metre
     // render in whole centimetres (field-glance precision).

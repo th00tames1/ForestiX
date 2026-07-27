@@ -65,7 +65,10 @@ public struct TiltBadge: View {
 
     private var currentTier: Tier {
         guard let p = motion.pitchDeg else {
-            return Tier(label: "Tilt —", color: ForestixPalette.confidenceBad)
+            // Was "Tilt —", which reads as a broken value rather than
+            // "no reading yet". The badge only ever says Level or Tilted
+            // otherwise, so say the third state in words too.
+            return Tier(label: "Tilt: no reading", color: ForestixPalette.confidenceBad)
         }
         let abs = Swift.abs(p)
         if abs <= 3 {

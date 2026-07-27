@@ -61,6 +61,7 @@ public final class AppSettings: ObservableObject {
         public static let currentCruiseProjectID  = "tc.currentCruiseProjectID"
         public static let mapMode                 = "tc.mapMode"
         public static let mapType                 = "tc.mapType"
+        public static let measureHeightAfterDBH   = "tc.measureHeightAfterDiameter"
     }
 
     private let defaults: UserDefaults
@@ -274,8 +275,11 @@ public final class AppSettings: ObservableObject {
     /// the scene-reconstruction mesh (`.lidar`) and devices without the
     /// scanner use the estimated-plane path (`.ar`) — there's no
     /// user-facing switch any more. Only Developer mode honours the
-    /// persisted value, so the research toggle
-    /// (`MeasureSourceToggleButton`) keeps working there.
+    /// persisted value. (The research toggle that used to flip it,
+    /// `MeasureSourceToggleButton`, is no longer rendered — field report
+    /// F5 — so in practice this now always resolves to the device default.
+    /// Deliberate: F5 required the CONTROL to go, not the sensor path to
+    /// change, and the resolution order here is unchanged.)
     public var measurementSource: MeasurementSource {
         get {
             guard ARKitSessionManager.supportsLiDAR else { return .ar }
@@ -285,6 +289,22 @@ public final class AppSettings: ObservableObject {
         }
         set {
             defaults.set(newValue.rawValue, forKey: Keys.measurementSource)
+            objectWillChange.send()
+        }
+    }
+
+    /// CRUISE — after a diameter is accepted in the cruise tally, go
+    /// straight into Height for the SAME tree. Field report F10: the tally
+    /// used to loop diameter-only, so heights were never asked for and the
+    /// cruiser had to go back through the tree peek for every one.
+    ///
+    /// Defaults to TRUE (note `object(forKey:) as? Bool`, not
+    /// `defaults.bool`, which would default to false). Cruisers running a
+    /// diameter-only tally turn it off in Settings › Measuring.
+    public var measureHeightAfterDiameter: Bool {
+        get { defaults.object(forKey: Keys.measureHeightAfterDBH) as? Bool ?? true }
+        set {
+            defaults.set(newValue, forKey: Keys.measureHeightAfterDBH)
             objectWillChange.send()
         }
     }

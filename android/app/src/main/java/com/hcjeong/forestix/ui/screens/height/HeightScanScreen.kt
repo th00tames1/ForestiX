@@ -23,6 +23,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Replay
+import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -66,14 +67,16 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hcjeong.forestix.ui.PendingTreeNumber
 import com.hcjeong.forestix.ui.Routes
 import com.hcjeong.forestix.ui.screens.cruise.CruiseCapture
+import com.hcjeong.forestix.ui.screens.cruise.CruiseRoutes
 import com.hcjeong.forestix.ui.screens.ScanMetadataSheet
-import com.hcjeong.forestix.ui.screens.DevHud
 import com.hcjeong.forestix.ui.screens.GPSAccuracyBadge
 import com.hcjeong.forestix.ui.screens.MeasureBackButton
 import com.hcjeong.forestix.ui.screens.MeasureCircleButton
 import com.hcjeong.forestix.ui.screens.MeasureShutterBar
 import com.hcjeong.forestix.ui.screens.MeasureStatusPanel
 import com.hcjeong.forestix.ui.screens.MeasureTopChrome
+import com.hcjeong.forestix.ui.screens.MeasureTopStrip
+import com.hcjeong.forestix.ui.screens.MeasureMiniMapSlot
 import com.hcjeong.forestix.ui.screens.MeasureValuePill
 import com.hcjeong.forestix.ui.screens.RawCaptureBadge
 import com.hcjeong.forestix.ui.screens.RawCaptureOffNotice
@@ -114,8 +117,19 @@ private const val ANCHOR_MAX_M = 4.0f
 /// without bound.
 private const val MAX_POSE_SAMPLES = 600
 
+/// `chainedFromDiameter` = this session was opened AUTOMATICALLY by the
+/// cruise tally right after a diameter was accepted (field report F10). It is
+/// the one case where "I don't want a height for this tree" needs its own
+/// labelled way out, so the trailing rail slot carries a "Skip" button; both
+/// Skip and a successful Accept pop back onto the tally, which is already
+/// aiming at the next tree. Everywhere else the flag is false and nothing
+/// about the screen changes.
 @Composable
-fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
+fun HeightScanScreen(
+    nav: NavController,
+    treeOverride: Int? = null,
+    chainedFromDiameter: Boolean = false,
+) {
     val env = LocalAppEnvironment.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -253,8 +267,8 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
     var truthPendingId by remember { mutableStateOf<String?>(null) }
     var truthPendingText by remember { mutableStateOf("") }
     // Storage headroom, re-read on entry and after every capture: below the
-    // guard the recorder refuses to write, so the REC pill says LOW STORAGE
-    // before a whole plot is lost.
+    // guard the recorder refuses to write, and the capture's outcome pill
+    // says so before a whole plot is lost.
     var storageLow by remember { mutableStateOf(false) }
     LaunchedEffect(rawCaptureArmed, rawStatusEpoch) {
         storageLow = rawCaptureArmed &&
@@ -367,7 +381,7 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
         // distance. NO fresh hitTest — at 10–30 m those fall back to
         // planes/garbage and put the sphere visibly off the crosshair.
         val hit = controller.forwardPointAtHorizontalDistance(crownProjDistance())
-        if (hit == null) { failure = "AR tracking not ready — try again."; return }
+        if (hit == null) { failure = "The camera hasn't got its bearings yet — hold still for a second, then tap + again."; return }
         failure = null
         when (crownStep) {
             CrownStep.LEFT -> { cL = hit; crownStep = CrownStep.RIGHT }
@@ -520,7 +534,7 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 val a = controller.cameraForwardElevationRad()
                 val s = controller.currentCameraPosition()
                 val anchor = anchorPt
-                if (a == null || s == null || anchor == null) { failure = "AR tracking not ready — try again."; return }
+                if (a == null || s == null || anchor == null) { failure = "The camera hasn't got its bearings yet — hold still for a second, then tap + again."; return }
                 // Lock the standing pose on the first aim; both angles must
                 // come from the same spot (the §7.2 formula assumes it).
                 failure = null; alphaBase = a; standingLocked = s
@@ -537,7 +551,7 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 val aTop = controller.cameraForwardElevationRad()
                 val anchor = anchorPt; val standing = standingLocked; val aBase = alphaBase
                 if (aTop == null || anchor == null || standing == null || aBase == null) {
-                    failure = "AR tracking not ready — try again."; return
+                    failure = "The camera hasn't got its bearings yet — hold still for a second, then tap + again."; return
                 }
                 failure = null; alphaTop = aTop
                 if (rawCaptureArmed) {
@@ -552,6 +566,9 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                     standingX = standing.x, standingZ = standing.z,
                     alphaTopRad = aTop, alphaBaseRad = aBase,
                     vioDriftFraction = calibration.vioDriftFraction,
+                    // So the σ sentence quotes its ± band in the cruiser's
+                    // own units, like every other number on this screen.
+                    unitSystem = settings.unitSystem,
                 )
                 result = r
                 // Raw-capture: serialize this compute for offline replay
@@ -673,12 +690,18 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                     CruiseCapture.recordHeight(env, r, photoPath = photo, fix = fix)
                 }.getOrDefault(false)
                 if (folded) {
-                    // Back to the map home in cruise mode (the chain popped
-                    // DBH already; tc.mapMode is still "cruise"); the new tree
-                    // pin appears and the tally pill ticks up.
+                    // One pop, two destinations by construction: in the
+                    // diameter → height chain (F10) the tally is directly
+                    // underneath, so this drops back onto it already aiming
+                    // at the next tree; from the tree peek / heights sheet
+                    // Height was pushed from the map, so this returns there
+                    // in cruise mode with the new pin and an updated tally.
                     nav.popBackStack()
                 } else {
-                    failure = "Height NOT saved to Tree ${cruise.treeNumber} — " +
+                    // Name the tree this SESSION is measuring, not
+                    // `CruiseCapture.target` — in the chain the tally has
+                    // already advanced its target to the next number.
+                    failure = "Height NOT saved to Tree $pendingTree — " +
                         "the tree row couldn't be updated. Tap Accept again."
                 }
             } else {
@@ -782,27 +805,41 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
         }
         if (!hidingChromeForCapture) MeasureBackButton { nav.popBackStack() }
 
-        // Same GPS-accuracy strip as the Diameter scan — leading 72 /
-        // top 22, clear of the floating back button (iOS parity).
-        if (!hidingChromeForCapture) GPSAccuracyBadge(
-            Modifier
-                .align(Alignment.TopStart)
-                .padding(start = 72.dp, top = 22.dp))
-
         // Plot mini-map — top-right, same row as the GPS badge: the active
         // cruise plot (ring + YOU + measured trees) or the quick sampling
         // ring (ring + YOU). Hidden with the rest of the 2D chrome during
         // the Accept snapshot blackout.
+        // F11 — the card is TAPPABLE in cruise: it re-opens plot setup so
+        // the radius / centre stay editable after the first placement. The
+        // session's project/plot are fixed for this screen's lifetime, so
+        // one remember is safe.
         val miniMapUp = scanPlotMiniMapVisible()
-        if (!hidingChromeForCapture) ScanPlotMiniMap()
+        val editPlotTarget = remember { CruiseCapture.target }
+        if (!hidingChromeForCapture) ScanPlotMiniMap(
+            onEditPlot = editPlotTarget?.let { c ->
+                {
+                    nav.navigate(
+                        CruiseRoutes.editPlot(c.projectId.toString(), c.plotId.toString()))
+                }
+            },
+        )
 
-        // Raw-capture recording state: a persistent REC pill while the
-        // recorder is armed, and the last attempt's outcome (saved / NOT
-        // saved) directly under it.
-        // REC reads the hub's REAL ref-counted arm, never the Settings wish:
-        // after an arm clobber the pill must not keep claiming it is
-        // recording. `requested` turns that mismatch into a loud NOT
-        // RECORDING instead of silence.
+        // Same top strip as the Diameter scan — one row, inset past the
+        // system status bar, with the mini-map's width reserved on the
+        // trailing edge. Height has no centre title of its own; the slot
+        // exists so both scans share one geometry.
+        if (!hidingChromeForCapture) {
+            MeasureTopStrip(
+                reserveTrailing = if (miniMapUp) MeasureMiniMapSlot else 0.dp,
+                leading = { GPSAccuracyBadge() },
+            )
+        }
+
+        // Raw-capture recording state: the last attempt's outcome (saved /
+        // NOT saved), plus a loud NOT RECORDING warning when Settings asked
+        // for recording and the recorder is not actually armed. There is no
+        // persistent REC pill — `armed` reads the hub's REAL ref-counted
+        // arm (never the Settings wish) so that mismatch is still caught.
         if (!hidingChromeForCapture) {
             RawCaptureBadge(
                 armed = ArSessionHub.rawDepthArmed,
@@ -812,42 +849,14 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
             )
         }
 
-        if (settings.developerMode && !hidingChromeForCapture) {
-            DevHud(
-                "HEIGHT",
-                listOfNotNull(
-                    "depth" to (if (controller.supportsDepth) "ARCore✓" else "plane"),
-                    "track" to (if (controller.trackingOk()) "OK" else "…"),
-                    // Recorder state — an explicit warning when developer
-                    // mode is on but nothing is being kept for the corpus.
-                    "rec" to when {
-                        !settings.rawCaptureEnabled -> "OFF — not recording"
-                        ArSessionHub.rawDepthArmed -> "armed"
-                        else -> "off"
-                    },
-                    "stage" to stage.name,
-                    // What the last centre raycast landed on (type + range) —
-                    // the anchor sphere is placed exactly at this hit, so a
-                    // "point"/far reading here explains an off-trunk anchor.
-                    "hit" to (devHitInfo ?: "—"),
-                    "pitch" to (controller.cameraPitchDeg()?.let { String.format(Locale.US, "%+.1f°", it) } ?: "—"),
-                    "d_h live" to String.format(Locale.US, "%.1f m", dhLive),
-                    alphaBase?.let { "α_base" to String.format(Locale.US, "%+.1f°", Math.toDegrees(it.toDouble())) },
-                    alphaTop?.let { "α_top" to String.format(Locale.US, "%+.1f°", Math.toDegrees(it.toDouble())) },
-                    // "σ n/a" (not "±0.0") when no uncertainty was derivable —
-                    // the internals HUD is the one place a developer reads
-                    // this number raw, so it must not lie about it.
-                    result?.let { r ->
-                        val sig = r.sigmaHm?.let { s -> String.format(Locale.US, "±%.1f m", s) }
-                            ?: "σ n/a"
-                        "H" to String.format(Locale.US, "%.1f m %s · %s", r.heightM, sig, r.confidence.raw)
-                    },
-                ),
-                // Below the plot mini-map when it occupies the top-right
-                // slot (22 + 116 card + 12 gap).
-                topPadding = if (miniMapUp) 150.dp else 56.dp,
-            )
-        }
+        // The developer internals HUD is NOT drawn here any more — same
+        // reason as DBH: in the field it covered the AR view and collided
+        // with the mini-map. The DevHud component is untouched
+        // (ui/screens/DevHud.kt) and so is every recording path: the
+        // research CSV row (ResearchLog.record, in the accept path above)
+        // and the raw-capture bundle are written from the measurement
+        // path, not from this overlay.
+
         // U2 — bottom-centre shutter for the capture stages: "Manual"
         // flanks left while anchoring, Retake flanks RIGHT once a
         // walk/aim stage (or crown capture) could need restarting, and
@@ -864,12 +873,24 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
             } else {
                 null
             },
+            // Right-hand rail slot. Retake wins whenever there is something
+            // to restart; before that — and only in the cruise diameter →
+            // height chain (field report F10) — the slot carries "Skip", the
+            // labelled way to say "no height for this tree" and drop back to
+            // the tally on the next tree. Elsewhere the slot is empty exactly
+            // as before.
             right = if (crownActive || stage in listOf(
                     Stage.WALKING, Stage.AIM_BASE, Stage.AIM_TOP)
             ) {
                 {
                     MeasureCircleButton(icon = Icons.Filled.Replay, caption = "Retake") {
                         resetAll()
+                    }
+                }
+            } else if (chainedFromDiameter) {
+                {
+                    MeasureCircleButton(icon = Icons.Filled.SkipNext, caption = "Skip") {
+                        nav.popBackStack()
                     }
                 }
             } else {
@@ -888,7 +909,7 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         MeasureValuePill(
-                            "Initial dist " + MeasurementFormatter.distance(
+                            "Start distance " + MeasurementFormatter.distance(
                                 (anchorInitialDistM ?: 0f).toDouble(), settings.unitSystem),
                             dimmed = true,
                         )
@@ -926,7 +947,7 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                 // Locked spec: while no gated hit exists the "+" is
                 // inert and this exact copy explains why.
                 stage == Stage.ANCHOR && !anchorAimOk ->
-                    "Move closer — anchor within 4 m of the trunk."
+                    "Move closer — stand within 4 m of the trunk, then tap +."
                 stage == Stage.ANCHOR -> "Aim at the trunk at eye level, then tap +."
                 stage == Stage.WALKING -> "Walk back, then tap + to continue."
                 stage == Stage.AIM_BASE -> "Aim at where the trunk meets the ground, then tap +."
@@ -1046,20 +1067,25 @@ fun HeightScanScreen(nav: NavController, treeOverride: Int? = null) {
                             color = Forestix.colors.confidenceBad,
                         )
                     }
-                    // Diagnostic — the raw captured inputs that fed the §7.2
-                    // formula (iOS diagnosticLine).
-                    Text(
-                        String.format(
-                            Locale.US, "α_top %+.1f° · α_base %+.1f° · d_h %.2f m",
-                            r.alphaTopRad * 180f / Math.PI.toFloat(),
-                            r.alphaBaseRad * 180f / Math.PI.toFloat(),
-                            r.dHm,
-                        ),
-                        style = type.caption,
-                        color = Color.White.copy(alpha = 0.55f),
-                    )
                     if (settings.developerMode) {
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            // Bench diagnostic — the raw captured inputs that
+                            // fed the §7.2 formula. It used to print on every
+                            // result panel: three formula variables with no
+                            // legend, on the screen where a cruiser decides
+                            // whether to keep a height. It is an author's
+                            // instrument, so it lives with the author's other
+                            // instruments, behind Developer mode.
+                            Text(
+                                String.format(
+                                    Locale.US, "α_top %+.1f° · α_base %+.1f° · d_h %.2f m",
+                                    r.alphaTopRad * 180f / Math.PI.toFloat(),
+                                    r.alphaBaseRad * 180f / Math.PI.toFloat(),
+                                    r.dHm,
+                                ),
+                                style = type.caption,
+                                color = Color.White.copy(alpha = 0.55f),
+                            )
                             ResearchFieldsRow(
                                 targetValue = settings.researchTreeId,
                                 onTargetChange = { env.settings.setResearchTreeId(it.trim()) },

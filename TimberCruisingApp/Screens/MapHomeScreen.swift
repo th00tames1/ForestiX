@@ -207,6 +207,17 @@ public struct MapHomeScreen: View {
     @State var chainTreeNumber: Int = 1
     @State var chainTreeID: UUID?
 
+    // FIELD REPORT F10 / F11 — two covers presented FROM INSIDE the cruise
+    // diameter tally rather than from the map. Nesting matters: the tally
+    // screen stays alive underneath, so Height (or plot setup) closes back
+    // onto the loop instantly instead of flashing the map and rebuilding
+    // the AR session.
+    //   • chainingHeight    — Height for the tree whose diameter was just
+    //                         accepted (`AppSettings.measureHeightAfterDiameter`).
+    //   • chainingPlotSetup — plot setup re-opened from the mini-map.
+    @State var chainingHeight = false
+    @State var chainingPlotSetup = false
+
     // Heights sheet (plot peek → "Heights · N measured") + the scoped
     // Height request staged across its dismissal.
     @State var heightsSheetTarget: HeightsSheetTarget?
@@ -1154,7 +1165,7 @@ public struct MapHomeScreen: View {
             case .samplingPlot:
                 let area = entry.secondaryValue
                     ?? (.pi * entry.value * entry.value)
-                value = String(format: "r %.1f m · %.0f m²", entry.value, area)
+                value = String(format: "%.1f m radius · %.0f m²", entry.value, area)
             }
             return PeekRow(id: kind.rawValue,
                            label: peekRowLabel(kind),
@@ -1323,21 +1334,26 @@ public struct MapHomeScreen: View {
                 pendingChoice = .fullMeasurement
                 presentingChooser = false
             }
-            chooserRow("Diameter (DBH)", "Depth · AR motion · AR caliper",
+            // Subtitles describe what the tool DOES. The old ones listed
+            // internal capture-arm names, and two of them — AR motion and
+            // AR caliper — were removed from the app (Models/Tree.swift
+            // keeps them decode-only), so the sheet was advertising
+            // measurements Forestix can no longer take.
+            chooserRow("Diameter (DBH)", "Scan the trunk with the camera",
                        icon: "ruler", accessibilityID: "mapHome.choose.dbh",
                        divided: true) {
                 pendingTreeNumber = chooserTargetTree
                 pendingChoice = .dbh
                 presentingChooser = false
             }
-            chooserRow("Height", "Walk-off tangent · crown add-on",
+            chooserRow("Height", "Walk back, aim at the base and the top",
                        icon: "arrow.up.and.down", accessibilityID: "mapHome.choose.height",
                        divided: true) {
                 pendingTreeNumber = chooserTargetTree
                 pendingChoice = .height
                 presentingChooser = false
             }
-            chooserRow("Distance", "Live · two-point",
+            chooserRow("Distance", "Point at a target, or tap two points",
                        icon: "arrow.left.and.right", accessibilityID: "mapHome.choose.distance",
                        divided: true) {
                 pendingChoice = .distance
@@ -1468,6 +1484,10 @@ public struct MapHomeScreen: View {
                     // tree number.
                     if fullMeasurementChain { chainHeightPending = true }
                     presentingDBHScan = false
+                    // Quick measure is an in-memory/JSON append that cannot
+                    // report a row-level failure — the reading is on the
+                    // history the moment this returns.
+                    return true
                 },
                 // Raw-capture join keys: without these a stored bundle can't
                 // be paired back to the tree (and its truth) it documents.
@@ -1883,7 +1903,7 @@ private struct MeasurePhotoDetailView: View {
             }
             HStack(alignment: .top, spacing: 18) {
                 metaCell("TREE", treeText)
-                metaCell("METHOD", entry.method)
+                metaCell("METHOD", methodText)
                 metaCell("GPS", gpsText)
             }
         }
@@ -1913,16 +1933,49 @@ private struct MeasurePhotoDetailView: View {
         let entry = context.entry
         switch entry.kind {
         case .dbh:
-            return "Ø " + MeasurementFormatter.diameter(cm: entry.value, in: unitSystem)
+            // The peek card this viewer opens from labels these two
+            // values "DBH" and "HEIGHT"; Ø and H were the only place
+            // they appeared as symbols.
+            return "DBH " + MeasurementFormatter.diameter(cm: entry.value, in: unitSystem)
         case .height:
-            return "H " + MeasurementFormatter.height(m: entry.value, in: unitSystem)
+            return "Height " + MeasurementFormatter.height(m: entry.value, in: unitSystem)
         case .crown:
             return String(format: "%.1f × %.1f m",
                           entry.value, entry.secondaryValue ?? 0)
         case .distance:
             return MeasurementFormatter.distance(m: entry.value, in: unitSystem)
         case .samplingPlot:
-            return String(format: "r %.1f m", entry.value)
+            return String(format: "%.1f m radius", entry.value)
+        }
+    }
+
+    /// Plain-language name for the stored capture method. `entry.method`
+    /// holds the raw enum/tag string that goes into the CSV export
+    /// ("lidarChordSilhouette", "vioWalkoffTangent", "two-point.lidar",
+    /// …); printing it verbatim put camelCase identifiers on a cruiser's
+    /// screen. The raw value is unchanged in storage and export — only
+    /// this readout is translated, and an unknown tag degrades to a
+    /// generic phrase rather than leaking the identifier.
+    private var methodText: String {
+        let raw = context.entry.method
+        switch raw {
+        case "lidarChordSilhouette", "lidarPartialArcSingleView",
+             "lidarPartialArcDualView", "lidarIrregular":
+            return "Trunk scan"
+        case "arCaliper", "arVioCircleFit":
+            return "Trunk scan (earlier app version)"
+        case "manualCaliper":       return "Measured by hand"
+        case "manualVisual":        return "Estimated by eye"
+        case "vioWalkoffTangent":   return "Walked back and sighted"
+        case "tapeTangent":         return "Tape and angle"
+        case "manualEntry":         return "Typed in"
+        case "imputedHD":           return "Estimated from the height curve"
+        case "ar.crown.dh":         return "Crown edges tapped"
+        case "ar.tap":              return "Centre dropped on the ground"
+        default:
+            if raw.hasPrefix("live.")      { return "Pointed at a target" }
+            if raw.hasPrefix("two-point.") { return "Two points on screen" }
+            return "Measured in Forestix"
         }
     }
 

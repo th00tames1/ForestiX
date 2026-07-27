@@ -43,6 +43,7 @@
 import Foundation
 import CoreGraphics
 import CoreText
+import Common
 import Models
 import InventoryEngine
 
@@ -242,7 +243,7 @@ public enum PDFReportBuilder {
         df.dateFormat = "yyyy-MM-dd HH:mm:ss"
         df.timeZone = TimeZone.current
         kv("Owner",            inputs.project.owner)
-        kv("Units",             String(describing: inputs.project.units))
+        kv("Units",             Self.unitsWord(inputs.project.units))
         kv("Generated",         df.string(from: inputs.generatedAt))
         kv("# plots (closed)",  "\(inputs.plots.filter { $0.closedAt != nil }.count)")
         kv("# plots (total)",   "\(inputs.plots.count)")
@@ -284,8 +285,13 @@ public enum PDFReportBuilder {
 
         var y = frame.maxY - 100
 
-        // Stratified stats table — three metrics × (mean, SE, CI95, df).
-        drawHeading("Stratified statistics (§7.5)",
+        // Stratified stats table — three metrics × (mean, CI95, n).
+        // The heading no longer cites an internal spec section, and the
+        // standard-error / effective-degrees-of-freedom columns are gone:
+        // they are still computed and still in the CSV, but a landowner
+        // reading this page cannot act on either, and "Eff. plots 6.3"
+        // beside "n 8" read as two contradictory plot counts.
+        drawHeading("Stand statistics",
                     at: CGPoint(x: frame.minX, y: y), width: frame.width, in: ctx)
         y -= 22
         let loc = inputs.localization
@@ -297,22 +303,20 @@ public enum PDFReportBuilder {
             ("Gross volume",
              inputs.volStand.scaledPerArea(by: loc.densityFactor), "m³\(loc.areaSuffix)")
         ]
-        drawTableRow(cells: ["Metric", "Unit", "Mean", "Std error",
-                              "95% conf ±", "Eff. plots", "n"],
+        drawTableRow(cells: ["Measure", "Unit", "Average",
+                              "± 95% range", "Plots"],
                      bold: true, at: CGPoint(x: frame.minX, y: y),
-                     colWidths: [110, 70, 80, 60, 70, 45, 40],
+                     colWidths: [140, 90, 100, 100, 60],
                      in: ctx)
         y -= 18
         for (name, stat, unit) in metricRows {
             drawTableRow(cells: [
                 name, unit,
                 String(format: "%.3f", stat.mean),
-                String(format: "%.3f", stat.seMean),
                 String(format: "%.3f", stat.ci95HalfWidth),
-                String(format: "%.1f", stat.dfSatterthwaite),
                 "\(stat.nPlots)"
             ], bold: false, at: CGPoint(x: frame.minX, y: y),
-               colWidths: [110, 70, 80, 60, 70, 45, 40], in: ctx)
+               colWidths: [140, 90, 100, 100, 60], in: ctx)
             y -= 16
         }
 
@@ -360,9 +364,13 @@ public enum PDFReportBuilder {
         df.dateFormat = "yyyy-MM-dd HH:mm"
         df.timeZone = TimeZone.current
         kv("Center",        String(format: "%.6f, %.6f", plot.centerLat, plot.centerLon))
-        kv("Position tier", String(describing: plot.positionTier))
-        kv("Source",        String(describing: plot.positionSource))
-        kv("GPS samples",   "\(plot.gpsNSamples) (H_acc med \(String(format: "%.2f", plot.gpsMedianHAccuracyM)) m)")
+        // The A/B/C/D position tier was pulled from every screen because a
+        // cruiser could neither act on a "C" nor tell what would make it a
+        // "B"; it was still printing here, next to the enum case name of
+        // the position source and an "H_acc med" code identifier. The tier
+        // and source are still stored on the Plot and still exported in the
+        // CSV — the client-facing report just states the accuracy plainly.
+        kv("GPS accuracy",  "±\(String(format: "%.2f", plot.gpsMedianHAccuracyM)) m, averaged over \(plot.gpsNSamples) fixes")
         let loc = inputs.localization
         kv("Plot area",     "\(String(format: "%.3f", loc.area(fromAcres: Double(plot.plotAreaAcres)))) \(loc.areaAbbr)")
         kv("Slope/Aspect",  "\(String(format: "%.1f", plot.slopeDeg))° / \(String(format: "%.0f", plot.aspectDeg))°")
@@ -426,37 +434,45 @@ public enum PDFReportBuilder {
                          width: frame.width, in: ctx); y -= 18
         }
         let loc = inputs.localization
-        kv("Plot type",         String(describing: inputs.design.plotType))
+        kv("Plot type",         Self.plotTypeWord(inputs.design.plotType))
         kv("Plot area",         inputs.design.plotAreaAcres.map {
             loc.isMetric
                 ? "\(String(format: "%.3f", loc.area(fromAcres: Double($0)))) \(loc.areaAbbr)"
                 : "\($0) ac"
         } ?? "—")
         kv("Basal area factor", inputs.design.baf.map { "\($0)" } ?? "—")
-        kv("Sampling scheme",   String(describing: inputs.design.samplingScheme))
+        kv("Sampling scheme",   Self.schemeWord(inputs.design.samplingScheme))
         kv("Grid spacing",      inputs.design.gridSpacingMeters.map { "\($0) m" } ?? "—")
         kv("Height subsample",  describeSubsample(inputs.design.heightSubsampleRule))
-        kv("BH convention",     String(describing: inputs.project.breastHeightConvention))
+        kv("Breast height taken", Self.breastHeightWord(inputs.project.breastHeightConvention))
         kv("Slope correction",  inputs.project.slopeCorrection ? "on" : "off")
         y -= 12
 
         drawHeading("Calibration",
                     at: CGPoint(x: frame.minX, y: y),
                     width: frame.width, in: ctx); y -= 18
-        kv("LiDAR bias",        String(format: "%.2f mm", inputs.project.lidarBiasMm))
-        kv("Depth noise (σ)",   String(format: "%.2f mm", inputs.project.depthNoiseMm))
-        kv("DBH α, β",          String(format: "α=%.3f β=%.3f",
-                                       inputs.project.dbhCorrectionAlpha,
-                                       inputs.project.dbhCorrectionBeta))
-        kv("VIO drift fraction",String(format: "%.4f", inputs.project.vioDriftFraction))
+        // Four device internals — a sensor bias, a raw σ, two Greek
+        // correction coefficients and the visual-odometry drift term —
+        // in four lines of a document a landowner reads. None of it is
+        // interpretable outside the codebase; the numbers still travel
+        // in the CSV, which is where an auditor would look for them.
+        // "cylinder" is the shape the maths fits, and the app stopped saying
+        // it out loud everywhere else — the Calibration screen's tab, header
+        // and helper text all say "round post". A client's PDF must not be
+        // the one document still using the internal name.
+        kv("Device calibration",
+           inputs.project.dbhCorrectionAlpha == 0 && inputs.project.dbhCorrectionBeta == 1
+               ? "Not calibrated on this device"
+               : "Wall and round-post calibration applied")
 
         y -= 12
         drawHeading("Species list (\(inputs.species.count))",
                     at: CGPoint(x: frame.minX, y: y),
                     width: frame.width, in: ctx); y -= 18
-        drawTableRow(cells: ["Code", "Common name", "Vol eqn", "Top DIB (cm)", "Stump (cm)"],
+        drawTableRow(cells: ["Code", "Common name", "Volume equation",
+                             "Merch. top dia. (cm)", "Stump (cm)"],
                      bold: true, at: CGPoint(x: frame.minX, y: y),
-                     colWidths: [55, 180, 80, 95, 85], in: ctx); y -= 16
+                     colWidths: [50, 150, 105, 120, 70], in: ctx); y -= 16
         for sp in inputs.species.sorted(by: { $0.code < $1.code }).prefix(20) {
             drawTableRow(cells: [
                 sp.code,
@@ -465,7 +481,7 @@ public enum PDFReportBuilder {
                 String(format: "%.1f", sp.merchTopDibCm),
                 String(format: "%.1f", sp.stumpHeightCm)
             ], bold: false, at: CGPoint(x: frame.minX, y: y),
-               colWidths: [55, 180, 80, 95, 85], in: ctx); y -= 16
+               colWidths: [50, 150, 105, 120, 70], in: ctx); y -= 16
         }
 
         drawFooter("Methodology", frame: frame, in: ctx)
@@ -480,11 +496,14 @@ public enum PDFReportBuilder {
                   at: CGPoint(x: frame.minX, y: frame.maxY - 50),
                   width: frame.width, in: ctx)
         var y = frame.maxY - 90
-        let headers = ["Plot", "#", "Species", "DBH cm", "H m",
-                       "Status", "Conf", "Flag"]
         // "Species" is wider than the old "Sp" code column so resolved common
         // names have room; the surplus comes out of the page's right margin.
-        let widths: [CGFloat] = [46, 30, 95, 50, 45, 55, 40, 55]
+        // "H", "Conf" and the del/ms/irr codes are gone: a formula letter,
+        // an abbreviation whose cells then printed raw enum names, and three
+        // three-letter codes with no key anywhere in the document.
+        let headers = ["Plot", "#", "Species", "DBH cm", "Height m",
+                       "Status", "Quality", "Flags"]
+        let widths: [CGFloat] = [38, 24, 74, 44, 46, 62, 44, 84]
         drawTableRow(cells: headers, bold: true,
                      at: CGPoint(x: frame.minX, y: y),
                      colWidths: widths, in: ctx); y -= 16
@@ -495,17 +514,17 @@ public enum PDFReportBuilder {
         for t in rows {
             let pno = plotNumberById[t.plotId].map { "\($0)" } ?? "?"
             let flagBits: [String] = [
-                t.deletedAt != nil ? "del" : nil,
-                t.isMultistem ? "ms" : nil,
-                t.dbhIsIrregular ? "irr" : nil
+                t.deletedAt != nil ? "Deleted" : nil,
+                t.isMultistem ? "Multistem" : nil,
+                t.dbhIsIrregular ? "Irregular" : nil
             ].compactMap { $0 }
             drawTableRow(cells: [
                 pno, "\(t.treeNumber)", inputs.localization.speciesName(t.speciesCode),
                 String(format: "%.1f", t.dbhCm),
                 t.heightM.map { String(format: "%.1f", $0) } ?? "—",
-                String(describing: t.status),
-                String(describing: t.dbhConfidence),
-                flagBits.joined(separator: ",")
+                Self.statusWord(t.status),
+                Self.qualityWord(t.dbhConfidence),
+                flagBits.joined(separator: ", ")
             ], bold: false,
                at: CGPoint(x: frame.minX, y: y),
                colWidths: widths, in: ctx); y -= 13
@@ -513,6 +532,66 @@ public enum PDFReportBuilder {
         }
 
         drawFooter("Tree appendix", frame: frame, in: ctx)
+    }
+
+    // MARK: - Enum → words
+
+    // Every one of these used to reach the page through
+    // `String(describing:)`, so a landowner read "fixedArea",
+    // "systematicGrid", "deadStanding" and "imperial" in camelCase. The
+    // stored values are untouched — the CSV still carries the raw cases,
+    // which is where a pipeline joins on them.
+
+    private static func unitsWord(_ u: UnitSystem) -> String {
+        switch u {
+        case .imperial: return "Imperial"
+        case .metric:   return "Metric"
+        }
+    }
+
+    private static func plotTypeWord(_ t: PlotType) -> String {
+        switch t {
+        case .fixedArea:      return "Fixed-area plots"
+        case .variableRadius: return "Variable-radius (prism) plots"
+        }
+    }
+
+    private static func schemeWord(_ s: SamplingScheme) -> String {
+        switch s {
+        case .systematicGrid:   return "Systematic grid"
+        case .stratifiedRandom: return "Stratified random"
+        case .manual:           return "Placed by hand"
+        }
+    }
+
+    /// Where on the trunk breast height is taken — NOT the breast-height
+    /// value itself, which is fixed by the region.
+    private static func breastHeightWord(_ c: BreastHeightConvention) -> String {
+        switch c {
+        case .uphill: return "On the uphill side"
+        case .mid:    return "Mid-slope"
+        case .any:    return "Any side"
+        case .custom: return "Custom"
+        }
+    }
+
+    private static func statusWord(_ s: TreeStatus) -> String {
+        switch s {
+        case .live:         return "Live"
+        case .deadStanding: return "Dead standing"
+        case .deadDown:     return "Dead down"
+        case .cull:         return "Cull"
+        }
+    }
+
+    /// The same word the confidence chip shows in the app, so the report
+    /// and the phone describe one reading the same way.
+    private static func qualityWord(_ t: ConfidenceTier) -> String {
+        switch t {
+        case .green:  return "Good"
+        case .yellow: return "Fair"
+        case .red:    return "Check"
+        }
     }
 
     // MARK: - Helper draws (text + layout)
@@ -663,7 +742,11 @@ public enum PDFReportBuilder {
     private static func describeSubsample(_ rule: HeightSubsampleRule) -> String {
         switch rule {
         case .allTrees: return "all trees"
-        case .none:     return "none (all heights imputed)"
+        // "imputed" is the statistics word the in-app twin already dropped
+        // (PlotValidation / the tree report both say "estimated from this
+        // project's height curve"); the client reading the PDF gets the
+        // same sentence. The RULE is unchanged — only its description.
+        case .none:     return "none — every height estimated from the height curve"
         case .everyKth(let k): return "every \(k)th tree"
         case .perSpeciesCount(let n): return "per species, first \(n) on plot"
         }

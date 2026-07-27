@@ -86,19 +86,23 @@ public enum PlotValidation {
             if tree.dbhConfidence == .red {
                 warnings.append(.init(
                     code: Code.redTierDbh,
-                    message: "Tree #\(tree.treeNumber): DBH measurement is red-tier.",
+                    // "Check" is the word the confidence chip already shows
+                    // for a red reading (ConfidenceStyle.descriptor); the
+                    // warning used to spell the same thing "red-tier", so
+                    // two screens described one reading in two vocabularies.
+                    message: "Tree #\(tree.treeNumber): the diameter reading is flagged Check — re-measure if you can.",
                     affectedId: tree.id))
             }
             if tree.status == .live, tree.heightConfidence == .red {
                 warnings.append(.init(
                     code: Code.redTierHeight,
-                    message: "Tree #\(tree.treeNumber): height measurement is red-tier.",
+                    message: "Tree #\(tree.treeNumber): the height reading is flagged Check — re-measure if you can.",
                     affectedId: tree.id))
             }
             if tree.status == .live, tree.heightM == nil, tree.heightSource != "imputed" {
                 warnings.append(.init(
                     code: Code.missingHeightOnLive,
-                    message: "Tree #\(tree.treeNumber): live tree has no height — volume will be imputed.",
+                    message: "Tree #\(tree.treeNumber): no height measured — the height will be estimated from this project's height curve.",
                     affectedId: tree.id))
             }
         }

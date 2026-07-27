@@ -96,15 +96,31 @@ public struct PlotSummaryCard: View {
 
     // MARK: - Top stats
 
+    /// FIELD REPORT — this row is four equal cells, so on a 360 pt phone each
+    /// one is about 64 pt wide. "BASAL/HA", "TREES/HA" and "MEAN DBH" each
+    /// want ~75 pt as spaced caps at 13 pt, so all three wrapped, and with no
+    /// padding they ran into the hairline dividers besides. The cells keep
+    /// their equal weights (they always shared the width correctly), and
+    /// every label is now single-line, tightened and scaled rather than
+    /// wrapped, so it is the SCALE that absorbs a long label instead of a
+    /// second line. That is what let "QMD" and "TPA"/"TPH" go back to
+    /// "MEAN DBH" and "TREES/AC"/"TREES/HA" — both land at ~0.85 of full
+    /// size, above the 0.8 floor below, and match the Android sibling.
     private var statsGrid: some View {
         let s = stats
         return HStack(spacing: 0) {
             statsCell("TREES", s?.distinctTrees.description ?? "—")
             divider
-            statsCell("BASAL/\(areaUnit.abbreviation.uppercased())",
+            // "BA" was the last index initialism on this card, and it
+            // disagreed with both the comment above (which already claimed
+            // "BASAL/HA") and the Android sibling (which already ships
+            // "BASAL/$suffix"). Basal area is genuine forestry vocabulary,
+            // so it is spelled rather than renamed; the per-area suffix
+            // stays in the label because this cell has no unit slot.
+            statsCell(areaUnit.densityLabel("BASAL").uppercased(),
                       s.map { String(format: "%.0f", $0.baPerAcre * densityFactor) } ?? "—")
             divider
-            statsCell("TREES/\(areaUnit.abbreviation.uppercased())",
+            statsCell(treesPerAreaLabel,
                       s.map { String(format: "%.0f", $0.tpa * densityFactor) } ?? "—")
             divider
             statsCell("MEAN DBH",
@@ -112,6 +128,16 @@ public struct PlotSummaryCard: View {
                           MeasurementFormatter.diameter(cm: qmd, in: unitSystem)
                       } } ?? "—")
         }
+    }
+
+    /// Trees per unit land area, spelled so the label says what the number
+    /// is. "TPA"/"TPH" also swapped a letter with the units setting, so the
+    /// label a cruiser learned on one project was a different label on the
+    /// next. The cell can no longer wrap (single line, tightened, scaled),
+    /// so the width argument the old abbreviation rested on is gone; the
+    /// Android sibling already ships these words.
+    private var treesPerAreaLabel: String {
+        areaUnit == .hectare ? "TREES/HA" : "TREES/AC"
     }
 
     private var divider: some View {
@@ -126,12 +152,24 @@ public struct PlotSummaryCard: View {
                 .font(ForestixType.dataLarge)
                 .foregroundStyle(ForestixPalette.textPrimary)
                 .lineLimit(1)
-                .minimumScaleFactor(0.7)
+                .allowsTightening(true)
+                // 0.7 was not enough headroom for a QMD carrying its unit:
+                // "31.4 cm" measures 113 pt at 26 pt monospaced against the
+                // ~56 pt a cell has on a 360 pt phone, so the number itself
+                // was cut off — the "12…" in the field report. A measurement
+                // that is scaled down is still right; a measurement that is
+                // truncated is wrong, so the floor clears the worst case.
+                .minimumScaleFactor(0.4)
             Text(label)
                 .font(ForestixType.sectionHead)
-                .tracking(1.2)
+                .tracking(0.8)
                 .foregroundStyle(ForestixPalette.textTertiary)
+                .lineLimit(1)
+                .allowsTightening(true)
+                .minimumScaleFactor(0.8)
         }
+        // Keeps the caps off the hairline dividers either side.
+        .padding(.horizontal, ForestixSpace.xxs)
         .frame(maxWidth: .infinity)
     }
 

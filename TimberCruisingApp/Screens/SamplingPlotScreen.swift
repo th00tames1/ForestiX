@@ -12,9 +12,10 @@
 // reopened. Reset removes the anchor and clears the store; nothing is
 // persisted across app restarts (the AR world map dies with the process).
 //
-// UI matches the shared camera-style capture layout: right-centre capture button
-// and a compact centred status panel (plus the bottom-right LiDAR/AR
-// toggle in Developer mode).
+// UI matches the shared camera-style capture layout: right-centre capture
+// button and a compact centred status panel. (The bottom-right LiDAR/AR
+// toggle was removed in field report F5 — the sensor path is decided by
+// `AppSettings.measurementSource`, not by a control.)
 
 import SwiftUI
 import Common
@@ -157,20 +158,9 @@ public struct SamplingPlotScreen: View {
             // first, else the aim string while placing.
             MeasureTopBanner(topBannerText)
 
-            // Bottom-right LiDAR/AR toggle — Developer-mode research
-            // control only; field mode pins LiDAR devices to the mesh
-            // path (AppSettings.measurementSource).
-            if settings.developerMode {
-                VStack {
-                    Spacer()
-                    HStack {
-                        Spacer()
-                        MeasureSourceToggleButton()
-                            .padding(.trailing, 18)
-                            .padding(.bottom, 96)
-                    }
-                }
-            }
+            // (The bottom-right LiDAR/AR toggle is GONE — field report F5.
+            // `AppSettings.measurementSource` is untouched and still
+            // decides which sensor path raycasts; only the control went.)
 
             // Bottom block (U2): the camera-app shutter sits bottom-
             // centre while aiming (no secondaries on this screen); once
@@ -316,7 +306,7 @@ public struct SamplingPlotScreen: View {
         guard let hit = raycaster.screenCenterHit()
                 ?? raycaster.forwardPointAtHorizontalDistance(3.0)
         else {
-            captureFailureReason = "Couldn't read scene depth. Aim at the ground and try again."
+            captureFailureReason = "Couldn't see the ground here. Aim at the ground and try again."
             return
         }
         // Pin the centre to a real ARKit anchor on the shared session —
@@ -326,7 +316,7 @@ public struct SamplingPlotScreen: View {
         guard let anchorID = session.addWorldAnchor(
             at: hit, name: "forestix.samplingPlot.center")
         else {
-            captureFailureReason = "Couldn't read scene depth. Aim at the ground and try again."
+            captureFailureReason = "Couldn't see the ground here. Aim at the ground and try again."
             return
         }
         captureFailureReason = nil
@@ -449,10 +439,13 @@ public struct SamplingPlotScreen: View {
                           shape: .sphere(radiusM: 0.07),
                           colorRGBA: SIMD4<Float>(1, 0.25, 0.25, 1),
                           worldAnchorID: anchorID),
-            // Tall white pole rising from the tapped point.
+            // Tall white pole rising from the tapped point. FIELD REPORT:
+            // 5 cm read as a fence post through the AR view and hid the
+            // trunk behind it — 3 cm still reads at plot distance without
+            // blocking anything. Kept identical to the Android sibling.
             ARSceneMarker(id: Self.poleId,
                           worldPosition: SIMD3<Float>(0, 0.6, 0),
-                          shape: .cylinder(radiusM: 0.05, heightM: 1.2),
+                          shape: .cylinder(radiusM: 0.03, heightM: 1.2),
                           colorRGBA: SIMD4<Float>(1, 1, 1, 1),
                           worldAnchorID: anchorID),
             // Bright top sphere — visible from across the plot.

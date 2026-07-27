@@ -7,7 +7,14 @@
 // project" button so calibration results actually reach
 // `Project.depthNoiseMm` / `dbhCorrectionAlpha` / `β`, and a "Use
 // sensible defaults" shortcut for cruisers who want to skip the wall
-// + cylinder ritual.
+// + round-post ritual.
+//
+// The CYLINDER procedure keeps its internal name (the maths fits a
+// cylinder), but every word on screen calls it a round-post scan: the
+// tab, the section header and the Apply helper text agree, and the
+// fitted coefficients α / β / R² are developer-mode only. This screen
+// sits in the ORDINARY Calibration group in Settings, so nothing on it
+// may assume the reader knows what a regression coefficient is.
 
 import SwiftUI
 import Models
@@ -19,6 +26,17 @@ public struct CalibrationScreen: View {
     @StateObject private var viewModel: CalibrationViewModel
     @State private var selectedProcedure: CalibrationViewModel.Procedure
     @State private var appliedToast: String?
+
+    /// The fitted coefficients (α, β, R²) are the AUTHOR's diagnostics, not
+    /// the cruiser's — this screen hangs off the ordinary Calibration group
+    /// in Settings, so they are hidden unless developer mode is on.
+    ///
+    /// Read from the key rather than an `@EnvironmentObject`: the screen is
+    /// built by `CalibrationScreen()` from a NavigationLink and by the
+    /// snapshot tests with no environment at all, and a missing
+    /// `@EnvironmentObject` is a crash, not a fallback.
+    @AppStorage(AppSettings.Keys.developerMode)
+    private var developerMode: Bool = false
 
     /// Optional — when set, the "Apply" buttons persist back into Core
     /// Data via this repository. `@State` so the projectStatusSection
@@ -51,9 +69,12 @@ public struct CalibrationScreen: View {
                 projectStatusSection
             }
             Section {
+                // The tab, the section header below it and the Apply
+                // helper text all name the same thing now: a round post.
+                // "Cylinder" was the geometry the maths uses.
                 Picker("Procedure", selection: $selectedProcedure) {
                     Text("Wall").tag(CalibrationViewModel.Procedure.wall)
-                    Text("Cylinder").tag(CalibrationViewModel.Procedure.cylinder)
+                    Text("Round post").tag(CalibrationViewModel.Procedure.cylinder)
                 }
                 .pickerStyle(.segmented)
             }
@@ -71,7 +92,7 @@ public struct CalibrationScreen: View {
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
-        .alert("Calibration applied",
+        .alert("Saved to this project",
                isPresented: Binding(
                 get: { appliedToast != nil },
                 set: { if !$0 { appliedToast = nil } })
@@ -85,18 +106,45 @@ public struct CalibrationScreen: View {
     @ViewBuilder
     private var projectStatusSection: some View {
         if let p = project {
-            Section("Current project values") {
-                LabeledContent("Depth noise") {
-                    Text(String(format: "%.2f mm", p.depthNoiseMm))
-                }
-                LabeledContent("LiDAR bias") {
-                    Text(String(format: "%.2f mm", p.lidarBiasMm))
-                }
-                LabeledContent("DBH α") {
-                    Text(String(format: "%.3f", p.dbhCorrectionAlpha))
-                }
-                LabeledContent("DBH β") {
-                    Text(String(format: "%.4f", p.dbhCorrectionBeta))
+            // This screen hangs off a NON-developer settings group, so what a
+            // cruiser reads here is words: what the two scans are for, and
+            // whether this project is running on a scan or on the standard
+            // settings. The fitted numbers themselves (α / β and the wall's
+            // mm figures) say nothing a cruiser can act on, so they moved
+            // behind developer mode. The stored fields (depthNoiseMm /
+            // lidarBiasMm / dbhCorrectionAlpha / dbhCorrectionBeta) and the
+            // export are UNCHANGED — this is a display change only.
+            Section(
+                header: Text("How this phone is set up"),
+                footer: Text("Two short scans tune the app to this phone. The wall scan learns how steady its distance readings are; the round-post scan corrects the widths it measures. Both are saved with this project.")
+            ) {
+                // Identity correction (α = 0, β = 1) is exactly the untouched /
+                // "standard settings" state — see sensibleDefaultsApplied.
+                Text(p.dbhCorrectionAlpha != 0 || p.dbhCorrectionBeta != 1
+                     ? "Widths are being corrected using your round-post scan."
+                     : "Widths are being used exactly as the phone measures them — no round-post scan has been applied yet.")
+                    .fixedSize(horizontal: false, vertical: true)
+                if developerMode {
+                    HStack {
+                        Text("Depth reading spread")
+                        Spacer()
+                        Text(String(format: "%.2f mm", p.depthNoiseMm))
+                    }
+                    HStack {
+                        Text("Depth sensor offset")
+                        Spacer()
+                        Text(String(format: "%.2f mm", p.lidarBiasMm))
+                    }
+                    HStack {
+                        Text("Fitted α (cm)")
+                        Spacer()
+                        Text(String(format: "%.3f", p.dbhCorrectionAlpha))
+                    }
+                    HStack {
+                        Text("Fitted β")
+                        Spacer()
+                        Text(String(format: "%.4f", p.dbhCorrectionBeta))
+                    }
                 }
             }
         }
@@ -106,7 +154,7 @@ public struct CalibrationScreen: View {
     private var applySection: some View {
         Section(
             header: Text("Apply"),
-            footer: Text("Applies your wall and cylinder scans to this project. No scans yet? Use defaults to start measuring now and calibrate later.")
+            footer: Text("Applies your wall and round-post scans to this project. No scans yet? Use the standard settings to start measuring now and scan later.")
         ) {
             Button {
                 applyComputed()
@@ -120,7 +168,7 @@ public struct CalibrationScreen: View {
             Button {
                 applySensibleDefaults()
             } label: {
-                Label("Use sensible defaults (skip scan)",
+                Label("Use the standard settings (skip the scans)",
                       systemImage: "wand.and.stars")
             }
             .accessibilityIdentifier("calibration.apply.defaults")
@@ -138,7 +186,13 @@ public struct CalibrationScreen: View {
         let updated = viewModel.applyTo(project: p)
         do {
             _ = try repo.update(updated)
-            appliedToast = "Calibration values written to project."
+            // The rest of this screen talks about what the two scans DO —
+            // "the wall scan learns how steady its distance readings are;
+            // the round-post scan corrects the widths it measures". The
+            // confirmation used to answer in the storage layer's voice
+            // ("values written to project"), which told the cruiser nothing
+            // about what had just changed for them.
+            appliedToast = "Your scans are now in use for this project. Widths and distances measured from here on are corrected with them."
             project = updated
         } catch {
             appliedToast = "Couldn't save: \(error.localizedDescription). Try again from Settings."
@@ -150,7 +204,7 @@ public struct CalibrationScreen: View {
         let updated = CalibrationViewModel.sensibleDefaultsApplied(to: p)
         do {
             _ = try repo.update(updated)
-            appliedToast = "Defaults applied. Run the wall and cylinder scans later for better precision."
+            appliedToast = "Standard settings applied. The app will measure with its usual allowances and will not correct this phone's widths. Run the wall and round-post scans later to tune it to this phone."
             project = updated
         } catch {
             appliedToast = "Couldn't save: \(error.localizedDescription). Try again from Settings."
@@ -161,12 +215,14 @@ public struct CalibrationScreen: View {
 
     @ViewBuilder
     private var wallSection: some View {
-        Section(header: Text("Wall plane (depth noise + bias)"),
-                footer: Text("Point the phone at a flat wall 1–2 m away and " +
-                             "hold while capturing 30 frames.")) {
+        // The footer now says what the scan is FOR, not just what to do
+        // with the phone — a cruiser standing in front of a wall had no
+        // way to tell why the app wanted this.
+        Section(header: Text("Wall scan"),
+                footer: Text("Shows the app how steady this phone's distance readings are. Point it at a flat wall 1–2 m away and hold still until the bar fills.")) {
             switch viewModel.wall {
             case .idle:
-                Text("Not calibrated yet.")
+                Text("No wall scan yet.")
                 Button {
                     viewModel.startWallScan()
                 } label: {
@@ -182,20 +238,30 @@ public struct CalibrationScreen: View {
                 Button("Cancel") { viewModel.cancelWallScan() }
                     .accessibilityIdentifier("calibration.wall.cancel")
             case .computed(let r):
-                HStack {
-                    Text("Depth noise")
-                    Spacer()
-                    Text(String(format: "%.2f mm", r.depthNoiseMm))
-                }
-                HStack {
-                    Text("Depth bias")
-                    Spacer()
-                    Text(String(format: "%.2f mm", r.depthBiasMm))
-                }
-                HStack {
-                    Text("Points")
-                    Spacer()
-                    Text("\(r.pointCount)")
+                // What the scan FOUND, in words plus the one number that is a
+                // real quantity in a real unit. depthBiasMm / pointCount are
+                // inputs to the estimator, not something a cruiser acts on,
+                // so they sit behind developer mode with the fit coefficients.
+                Text("Wall scan done. Across \(r.pointCount) points on the wall this "
+                     + "phone's distance readings varied by about "
+                     + String(format: "%.1f mm", r.depthNoiseMm) + ".")
+                    .fixedSize(horizontal: false, vertical: true)
+                if developerMode {
+                    HStack {
+                        Text("Depth reading spread")
+                        Spacer()
+                        Text(String(format: "%.2f mm", r.depthNoiseMm))
+                    }
+                    HStack {
+                        Text("Depth sensor offset")
+                        Spacer()
+                        Text(String(format: "%.2f mm", r.depthBiasMm))
+                    }
+                    HStack {
+                        Text("Points")
+                        Spacer()
+                        Text("\(r.pointCount)")
+                    }
                 }
                 Button("Reset") { viewModel.resetWall() }
             case .failed(let msg):
@@ -209,16 +275,20 @@ public struct CalibrationScreen: View {
 
     @ViewBuilder
     private var cylinderSection: some View {
-        Section(header: Text("Cylinder correction (α + β · raw DBH)"),
-                footer: Text("Scan PVC pipes of known diameter. Enter the " +
-                             "measured DBH from the scan and the true diameter.")) {
+        // Was "Cylinder correction (α + β · raw DBH)" — the fit's own
+        // formula, printed as a section header on a screen a cruiser
+        // reaches from Settings › Calibration. The header, the tab above
+        // and the Apply helper now all say "round post", and the section
+        // opens by saying what the scan buys you.
+        Section(header: Text("Round-post scan"),
+                footer: Text("Corrects the widths this phone measures. Scan round posts you have already measured by hand, then enter both widths for each one — the app works out how far the scan runs wide or narrow and takes it off every tree.")) {
             HStack {
-                TextField("Measured DBH (cm)", text: $viewModel.newMeasuredCm)
+                TextField("Scanned (cm)", text: $viewModel.newMeasuredCm)
                     #if os(iOS)
                     .keyboardType(.decimalPad)
                     #endif
                     .accessibilityIdentifier("calibration.cylinder.measured")
-                TextField("True DBH (cm)", text: $viewModel.newTrueCm)
+                TextField("By hand (cm)", text: $viewModel.newTrueCm)
                     #if os(iOS)
                     .keyboardType(.decimalPad)
                     #endif
@@ -229,16 +299,42 @@ public struct CalibrationScreen: View {
 
             switch viewModel.cylinder {
             case .idle:
-                Text("No samples yet.")
+                Text("No posts entered yet.")
             case .collecting(let s):
                 sampleList(s)
-                Button("Compute α, β") { viewModel.computeCylinderCalibration() }
-                    .disabled(s.count < 2)
+                Button("Work out the correction") {
+                    viewModel.computeCylinderCalibration()
+                }
+                .disabled(s.count < 2)
             case .computed(let r, let s):
                 sampleList(s)
-                HStack { Text("α"); Spacer(); Text(String(format: "%.3f", r.alpha)) }
-                HStack { Text("β"); Spacer(); Text(String(format: "%.4f", r.beta)) }
-                HStack { Text("R²"); Spacer(); Text(String(format: "%.4f", r.rSquared)) }
+                // α / β / R² are the fitted coefficients — nothing a cruiser
+                // can act on, and R² is a grade rather than a quantity. What
+                // a cruiser needs is how close the CORRECTED width now lands
+                // to the hand measurement, in centimetres. Display only: the
+                // fit, its thresholds and what gets stored are untouched.
+                Text("Correction worked out from \(s.count) posts. Corrected widths "
+                     + "land within "
+                     + String(format: "%.1f cm", meanAbsResidualCm(result: r, samples: s))
+                     + " of your hand measurements on average.")
+                    .fixedSize(horizontal: false, vertical: true)
+                if developerMode {
+                    HStack {
+                        Text("Fitted α")
+                        Spacer()
+                        Text(String(format: "%.3f cm", r.alpha))
+                    }
+                    HStack {
+                        Text("Fitted β")
+                        Spacer()
+                        Text(String(format: "%.4f", r.beta))
+                    }
+                    HStack {
+                        Text("R²")
+                        Spacer()
+                        Text(String(format: "%.4f", r.rSquared))
+                    }
+                }
                 Button("Reset") { viewModel.resetCylinder() }
             case .failed(let msg):
                 Text(msg).foregroundStyle(.red)
@@ -247,13 +343,32 @@ public struct CalibrationScreen: View {
         }
     }
 
+    /// Mean |corrected − hand-measured| over the entered posts, in cm — the
+    /// one number that tells a cruiser how good the correction is, in the
+    /// unit they measured in. Read-only: it re-applies the fit that was
+    /// already computed and changes no check, threshold or stored value.
+    private func meanAbsResidualCm(
+        result: CylinderCalibrationResult,
+        samples: [CylinderCalibration.Sample]
+    ) -> Double {
+        guard !samples.isEmpty else { return 0 }
+        let a = result.alpha
+        let b = result.beta
+        let total = samples.reduce(0.0) {
+            $0 + abs(a + b * $1.dbhMeasuredCm - $1.dbhTrueCm)
+        }
+        return total / Double(samples.count)
+    }
+
     @ViewBuilder
     private func sampleList(_ samples: [CylinderCalibration.Sample]) -> some View {
         ForEach(Array(samples.enumerated()), id: \.offset) { _, s in
+            // "raw" / "true" are the fit's names for the two columns; the
+            // cruiser typed a scanned diameter and a hand measurement.
             HStack {
-                Text("raw \(String(format: "%.1f", s.dbhMeasuredCm)) cm")
+                Text("scanned \(String(format: "%.1f", s.dbhMeasuredCm)) cm")
                 Spacer()
-                Text("true \(String(format: "%.1f", s.dbhTrueCm)) cm")
+                Text("by hand \(String(format: "%.1f", s.dbhTrueCm)) cm")
             }
             .font(.caption.monospacedDigit())
         }

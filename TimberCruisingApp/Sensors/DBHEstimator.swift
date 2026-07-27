@@ -130,13 +130,17 @@ public enum DBHEstimator {
             around: input.tapPixel, frame: lastFrame, radius: 2)
         else {
             return redResult(
-                reason: "Tap pixel outside depth map",
+                reason: "The crosshair isn't on anything the depth camera can see — aim at the trunk and capture again.",
                 method: .lidarPartialArcSingleView)
         }
         guard (0.5...3.0).contains(dTap) else {
             return redResult(
-                reason: "Move closer or step back; tap depth " +
-                        "\(String(format: "%.2f", dTap)) m out of range",
+                // The first clause was already the whole instruction; the
+                // "tap depth … out of range" half echoed the internal
+                // depth-map sample at the crosshair pixel and told the
+                // cruiser nothing they could act on. The RANGE is
+                // unchanged — it still reports the 0.5–3 m gate above.
+                reason: "Stand 0.5–3 m from the trunk and capture again.",
                 method: .lidarPartialArcSingleView)
         }
         guard confidenceAt(pixel: input.tapPixel, frame: lastFrame) >= 1 else {
@@ -180,8 +184,11 @@ public enum DBHEstimator {
         let cleaned = OutlierRemoval.statistical(
             points: combinedXZ, k: 8, sigmaMult: 2.0)
         guard cleaned.count >= 20 else {
+            // "Too few points after outlier removal" named a pipeline step
+            // and asked for nothing. The COUNT gate (>= 20 after the k = 8
+            // statistical trim) is unchanged; only the sentence is.
             return redResult(
-                reason: "Too few points after outlier removal",
+                reason: "Too much of that scan was noise to measure from — move closer, fill the crosshair with bark, and capture again.",
                 method: .lidarPartialArcSingleView,
                 nInliers: cleaned.count)
         }
@@ -194,8 +201,11 @@ public enum DBHEstimator {
             points: cleaned, inlierTol: inlierTol,
             iterations: 500, minInliers: 20)
         else {
+            // Was "Could not fit a circle" — the name of the algorithm,
+            // with no instruction. RANSAC's tolerance, iteration budget
+            // and 20-inlier floor above are all unchanged.
             return redResult(
-                reason: "Could not fit a circle",
+                reason: "Couldn't find a round trunk in that scan — aim at the stem, hold steadier, and capture again.",
                 method: .lidarPartialArcSingleView,
                 nInliers: 0)
         }
@@ -266,26 +276,36 @@ public enum DBHEstimator {
         // RMSE — we now match that and demote borderline fits to warn
         // (yellow) instead of red.
         let checks: [Check] = [
+            // This one reaches the scan banner (it is a .reject, and the
+            // banner shows `firstFailingRejectReason`), so it says what went
+            // wrong and what to change. "Fewer than 10 trunk surface points"
+            // was the count the code tests, in the code's words. The COUNT
+            // is unchanged.
             check(fit.inliers.count >= 10, sev: .reject,
-                  reason: "Fewer than 10 trunk surface points"),
+                  reason: "Too little of the trunk was picked up — move closer, fill the crosshair with bark, and capture again."),
             check(fit.inliers.count >= 20, sev: .warn,
                   reason: "Only 10–20 trunk surface points"),
+            // Reject reasons are the ones a cruiser reads (the banner shows
+            // `firstFailingRejectReason`), so they are written as
+            // instructions. Warn reasons stay in the estimator's own
+            // vocabulary — they never leave the struct. Every THRESHOLD
+            // below is unchanged.
             check(arcDeg >= 30, sev: .reject,
-                  reason: "Trunk arc coverage below 30°"),
+                  reason: "Not enough of the trunk in view — step back or centre the guide line."),
             check(arcDeg >= 45, sev: .warn,
                   reason: "Trunk arc coverage 30°–45°"),
             check(r >= 0.025 && r <= 1.0, sev: .reject,
-                  reason: "Fitted radius outside 2.5–100 cm"),
+                  reason: "That doesn't measure like a trunk — aim at the stem and capture again."),
             check(rmse / r <= 0.07, sev: .reject,
-                  reason: "Fit error worse than 7% of radius"),
+                  reason: "The shape didn't match a trunk — hold steadier and capture again."),
             check(rmse / r <= 0.05, sev: .warn,
                   reason: "Fit error 5–7% of radius"),
             check(sigmaR / r <= 0.05, sev: .reject,
-                  reason: "Radius precision worse than ±5%"),
+                  reason: "This diameter isn't settling — hold steadier and capture again."),
             check(sigmaR / r <= 0.02, sev: .warn,
                   reason: "Radius precision ±2–5%"),
             check(radiusCoV <= 0.10, sev: .reject,
-                  reason: "Per-frame radius spread above 10%"),
+                  reason: "The trunk width kept changing between shots — hold the phone steadier and capture again."),
             check(radiusCoV <= 0.05, sev: .warn,
                   reason: "Per-frame radius spread 5–10%"),
             // Extra warn when we had to override with the chord fallback
@@ -297,7 +317,7 @@ public enum DBHEstimator {
         let rejectionReason: String?
         if tier == .red {
             rejectionReason = firstFailingRejectReason(checks)
-                ?? "Quality below threshold"
+                ?? "This reading didn't pass the accuracy checks — retake it, or accept it and flag the tree."
         } else {
             rejectionReason = nil
         }
@@ -946,20 +966,28 @@ public enum DBHEstimator {
         let radiusM_ = radiusM     // keep a copy for capture-by-Bool checks
         let rmseRatio = radiusM_ > 0 ? rmseMm / 1000.0 / radiusM_ : Double.infinity
         let checks: [Check] = [
+            // The live HUD banner publishes these (via
+            // `DBHScanViewModel.previewStatusText`), so a cruiser reads them
+            // continuously while aiming. The first two are the SAME two
+            // failures the burst path reports above — a circle that wouldn't
+            // fit, and too few points on the trunk — so they are worded
+            // identically here. Two sentences for one failure taught the
+            // cruiser that the live view and the capture disagreed. Every
+            // PREDICATE is unchanged.
             check(!ransacFailed, sev: .reject,
-                  reason: "Couldn't fit a trunk circle — move closer or steadier"),
+                  reason: "Couldn't find a round trunk in that scan — aim at the stem, hold steadier, and capture again."),
             check(inlierCount >= 10, sev: .reject,
-                  reason: "Fewer than 10 trunk surface points"),
+                  reason: "Too little of the trunk was picked up — move closer, fill the crosshair with bark, and capture again."),
             check(inlierCount >= 18, sev: .warn,
                   reason: "Only 10–18 trunk surface points"),
             check(arcDeg >= 30, sev: .reject,
-                  reason: "Trunk arc coverage below 30°"),
+                  reason: "Not enough of the trunk in view — step back or centre the guide line."),
             check(arcDeg >= 45, sev: .warn,
                   reason: "Trunk arc coverage 30°–45°"),
             check(radiusM_ >= 0.025 && radiusM_ <= 1.0, sev: .reject,
-                  reason: "Fitted radius outside 2.5–100 cm"),
+                  reason: "That doesn't measure like a trunk — aim at the stem and capture again."),
             check(rmseRatio <= 0.07, sev: .reject,
-                  reason: "Fit error worse than 7% of radius"),
+                  reason: "The shape didn't match a trunk — hold steadier and capture again."),
             check(rmseRatio <= 0.05, sev: .warn,
                   reason: "Fit error 5–7% of radius"),
             check(!chordOverride, sev: .warn,
@@ -967,8 +995,8 @@ public enum DBHEstimator {
         ]
         // Phase 18.2 — preview-specific tier rule. The §7.9 default
         // promotes "≥2 warns" to red, which made the live HUD flap
-        // between "Stabilizing…" (yellow) and "Quality below
-        // threshold" (red) whenever two warns happened to fire on the
+        // between "Stabilizing…" (yellow) and the red "didn't pass the
+        // accuracy checks" line whenever two warns happened to fire on the
         // same frame (e.g. narrow arc + chord override). Yellow is
         // already publishable and visually silent for the cruiser, so
         // we suppress that promotion here — only an actual reject
@@ -978,7 +1006,8 @@ public enum DBHEstimator {
         let tier: ConfidenceTier = hasReject
             ? .red : (hasWarn ? .yellow : .green)
         let rejectionReason: String? = hasReject
-            ? (firstFailingRejectReason(checks) ?? "Quality below threshold")
+            ? (firstFailingRejectReason(checks)
+               ?? "This reading didn't pass the accuracy checks — retake it, or accept it and flag the tree.")
             : nil
 
         return PreviewFit(

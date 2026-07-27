@@ -104,7 +104,14 @@ public struct RecordCentreSheet: View {
                     .font(.system(size: 13, weight: .heavy))
                     .foregroundStyle(ForestixPalette.textTertiary)
                 Spacer(minLength: 4)
-                tierChip
+                // FIELD REPORT F9 — the A/B/C/D "TIER B" / "NO FIX" chip is
+                // gone. It is a GPS-averaging grade the cruiser has no way
+                // to act on and no way to interpret. The plain accuracy
+                // figure (±x.x m) is still right there in the progress ring,
+                // which is the one number that means something on a ridge.
+                // `positionTier` is UNCHANGED on the Plot record and in every
+                // export — see `save(_:)` below, which still stamps
+                // `positionTier: result.tier`.
             }
             .padding(.top, ForestixSpace.md)
             .padding(.bottom, ForestixSpace.sm)
@@ -233,14 +240,9 @@ public struct RecordCentreSheet: View {
         return "±— m"
     }
 
-    private var liveTier: PositionTier? {
-        if let r = liveResult { return r.tier }
-        if let s = viewModel.latestSample {
-            return LocationService.tier(
-                forHorizontalAccuracyM: s.horizontalAccuracyM)
-        }
-        return nil
-    }
+    // (`liveTier` went with the chip — field report F9. `LocationService.tier`
+    // and `GPSAveraging.classify` are untouched; the grade is still computed
+    // and stored on the Plot, it just isn't shown to a cruiser.)
 
     private var metaTitle: String {
         switch viewModel.phase {
@@ -257,7 +259,11 @@ public struct RecordCentreSheet: View {
         case .failed(let reason):
             return reason + "\nTry the offset link below."
         case .good(let r), .poor(let r):
-            return "\(r.nSamples) fixes · median centre locked\nσxy "
+            // σxy went the way of the TIER chip below: a Greek letter with
+            // an algebraic subscript is not something a cruiser can read,
+            // say or act on. Same number, named for what it measures —
+            // how far apart the individual GPS fixes landed.
+            return "\(r.nSamples) fixes · centre locked\nfixes spread ±"
                 + String(format: "%.1f m", r.sampleStdXyM)
         default:
             return "\(sampleCount) fixes · needs 30 good ones\nmedian converges over \(windowS) s"
@@ -294,32 +300,11 @@ public struct RecordCentreSheet: View {
         .accessibilityLabel("Averaging \(elapsedS) of \(windowS) seconds, accuracy \(accuracyText)")
     }
 
-    /// A/B/C/D collapsed onto the instrument hues the rest of the app
-    /// uses: A → ok, B/C → warn, D → bad.
-    private var tierChip: some View {
-        let tier = liveTier
-        let color: Color = {
-            switch tier {
-            case .A:        return ForestixPalette.confidenceOk
-            case .B, .C:    return ForestixPalette.confidenceWarn
-            case .D:        return ForestixPalette.confidenceBad
-            case nil:       return ForestixPalette.textTertiary
-            }
-        }()
-        return HStack(spacing: 4) {
-            Circle().fill(color).frame(width: 6, height: 6)
-            Text(tier.map { "TIER \($0.rawValue)" } ?? "NO FIX")
-                .font(.system(size: 10, weight: .bold))
-                .tracking(0.6)
-        }
-        .foregroundStyle(color)
-        .padding(.horizontal, 7)
-        .padding(.vertical, 2)
-        .background(
-            RoundedRectangle(cornerRadius: ForestixRadius.chip)
-                .fill(color.opacity(0.12)))
-        .accessibilityIdentifier("recordCentre.tier")
-    }
+    // (The A/B/C/D `tierChip` — "TIER B" / "NO FIX" — was deleted per field
+    // report F9. It graded GPS averaging on a scale nothing in the field
+    // explains, and a cruiser could neither act on a "C" nor tell what would
+    // make it a "B". The ±x.x m accuracy in the ring is the plain figure that
+    // survives. Storage and exports are untouched.)
 
     // MARK: Save (planned → real Plot, the old conversion)
 

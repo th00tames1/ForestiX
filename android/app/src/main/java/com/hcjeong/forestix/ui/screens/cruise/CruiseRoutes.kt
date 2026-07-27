@@ -8,7 +8,10 @@ package com.hcjeong.forestix.ui.screens.cruise
 
 object CruiseRoutes {
     /// AR sampling-ring plot creation, saving a cruise Plot into {projectId}.
-    const val START_PLOT = "cruiseStartPlot/{projectId}"
+    /// With `editPlotId` set (field report F11 — the scan screens' top-right
+    /// mini-map is tappable) the SAME screen re-opens an existing plot and
+    /// Save rewrites it instead of creating Plot N+1.
+    const val START_PLOT = "cruiseStartPlot/{projectId}?editPlotId={editPlotId}"
 
     /// Offset-from-Opening fallback for a planned plot centre — the
     /// "GPS weak? Use offset" link on the inline recording sheet (⑧).
@@ -21,6 +24,10 @@ object CruiseRoutes {
     const val STAND_SUMMARY = "standSummary/{projectId}"
 
     fun startPlot(projectId: String) = "cruiseStartPlot/$projectId"
+
+    /// Re-open an existing plot's setup (F11).
+    fun editPlot(projectId: String, plotId: String) =
+        "cruiseStartPlot/$projectId?editPlotId=$plotId"
     fun offset(projectId: String, plannedPlotId: String) =
         "cruiseOffset/$projectId/$plannedPlotId"
     fun standSummary(projectId: String) = "standSummary/$projectId"

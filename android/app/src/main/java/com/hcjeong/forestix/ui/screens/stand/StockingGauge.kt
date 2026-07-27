@@ -121,22 +121,11 @@ fun StockingGauge(relativeDensityPct: Double, regimeLabel: String) {
             )
         }
 
-        // Tick labels
-        Row(Modifier.fillMaxWidth()) {
-            TickLabel("0%")
-            Spacer(Modifier.weight(1f))
-            TickLabel("25%")
-            Spacer(Modifier.weight(1f))
-            TickLabel("35%")
-            Spacer(Modifier.weight(1f))
-            TickLabel("60%")
-            Spacer(Modifier.weight(1f))
-            TickLabel("100%")
-        }
+        // The percent tick row ("0% 25% 35% 60% 100%") used to sit here. The
+        // axis was a relative-density index — Reineke SDI over a hard-coded
+        // generic Max SDI of 717 — and nothing on screen named SDI, Reineke,
+        // or what the percentage was a percentage OF. The coloured bar, the
+        // marker and the word pill above say everything the gauge can
+        // honestly say, in words a cruiser can act on.
     }
-}
-
-@Composable
-private fun TickLabel(s: String) {
-    Text(s, style = Forestix.type.dataSmall, color = Forestix.colors.textTertiary)
 }

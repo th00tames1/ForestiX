@@ -54,6 +54,7 @@ public struct SettingsScreen: View {
         Form {
             regionAndUnitsSection
             displaySection
+            measuringSection
             calibrationSection
             dataBackupSection
             // Basemap tiles is ordinary field setup, not developer tooling —
@@ -271,13 +272,31 @@ public struct SettingsScreen: View {
         }
     }
 
+    // MARK: - 2b. Measuring
+    // FIELD REPORT F10 — the cruise tally chains diameter → height by
+    // default. Cruisers who only want diameters turn it off here. Strings
+    // and the stored key are identical on Android.
+    private var measuringSection: some View {
+        Section(
+            header: Text("Measuring"),
+            footer: Text("After you accept a diameter in cruise, Height opens for the same tree. Skip returns to the tally.")
+        ) {
+            Toggle("Measure height after diameter",
+                   isOn: Binding(
+                    get: { settings.measureHeightAfterDiameter },
+                    set: { settings.measureHeightAfterDiameter = $0 }))
+                .accessibilityIdentifier("settings.measureHeightAfterDiameter")
+        }
+    }
+
     // MARK: - 3. Calibration
     private var calibrationSection: some View {
         Section(
             header: Text("Calibration"),
-            footer: Text("Wall fit captures the LiDAR depth noise and bias; " +
-                         "cylinder fit estimates a linear DBH correction. " +
-                         "Run both before your first field pilot.")
+            footer: Text("Scan a flat wall, then a round post you have " +
+                         "measured. This tells Forestix how far off your " +
+                         "phone's depth sensor runs, so diameters come out " +
+                         "right. Do both before your first cruise.")
         ) {
             NavigationLink("Run Calibration") { CalibrationScreen() }
                 .accessibilityIdentifier("settings.calibrationLink")

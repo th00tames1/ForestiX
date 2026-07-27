@@ -706,7 +706,10 @@ object ArSessionHub {
         if (overlay == PlotOverlay.HIDDEN) return
         val r = plotRadiusM.toFloat()
         val centre = buildMarkerNode(view, MarkerShape.Sphere(0.07f), plotColor(CENTRE_RGB))
-        val pole = buildMarkerNode(view, MarkerShape.Cylinder(0.05f, 1.2f), plotColor(POLE_RGB))
+        // 0.03 m radius (was 0.05): field feedback called the pole too thick
+        // against the trunk it stands next to. Kept EQUAL to the iOS
+        // SamplingPlotScreen cylinder so the plot reads the same on both.
+        val pole = buildMarkerNode(view, MarkerShape.Cylinder(0.03f, 1.2f), plotColor(POLE_RGB))
         val top = buildMarkerNode(view, MarkerShape.Sphere(0.12f), plotColor(TOP_RGB))
         val halo = buildRingNode(view.engine, r, HALO_THICKNESS_M, materialFor(view, plotColor(RING_HALO_RGB)))
         val ring = buildRingNode(view.engine, r, RING_THICKNESS_M, materialFor(view, plotColor(RING_RGB)))

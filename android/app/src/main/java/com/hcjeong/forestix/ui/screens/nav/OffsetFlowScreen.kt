@@ -197,7 +197,9 @@ class OffsetFlowViewModel(
     fun anchorPlotCenter() {
         val p = session.currentCameraPosition()
         if (p == null) {
-            _step.value = Step.Failed("AR pose unavailable — tracking not started")
+            _step.value = Step.Failed(
+                "The camera hasn't found its bearings yet. Hold the phone upright and " +
+                    "move it slowly side to side, then try again.")
             return
         }
         // Heading alignment: pair a compass azimuth with the same-instant
@@ -206,7 +208,8 @@ class OffsetFlowViewModel(
         val camYaw = session.cameraWorldYawDeg()
         if (azimuth == null || camYaw == null) {
             _step.value = Step.Failed(
-                "Compass unavailable — hold the phone upright, aim level, and re-anchor.")
+                "The compass isn't reading. Hold the phone upright and aim it level, " +
+                    "then tap Restart and mark the centre again.")
             return
         }
         worldYawToNorthDeg = azimuth - camYaw
@@ -220,7 +223,9 @@ class OffsetFlowViewModel(
     fun beginOpeningAveraging() {
         val p = session.currentCameraPosition()
         if (p == null) {
-            _step.value = Step.Failed("AR pose unavailable at opening")
+            _step.value = Step.Failed(
+                "The camera hasn't found its bearings yet. Hold the phone upright and " +
+                    "move it slowly side to side, then try again.")
             return
         }
         openingPoseWorld = p
@@ -256,7 +261,12 @@ class OffsetFlowViewModel(
         val result = GPSAveraging.compute(
             GPSAveraging.Input(samples = location.buffer.value))
         if (result == null) {
-            _step.value = Step.Failed("Not enough clean samples at opening (need 30 ≤ 20 m).")
+            // GPSAveraging.compute keeps fixes accurate to 20 m or better and
+            // needs 30 of them; say both, in that order, so the message can be
+            // read. Thresholds unchanged — this is the wording only.
+            _step.value = Step.Failed(
+                "Not enough usable GPS fixes at the opening. It needs 30 fixes accurate " +
+                    "to within 20 m. Move to where more sky is open and try again.")
             return
         }
         openingFix = result
@@ -278,7 +288,9 @@ class OffsetFlowViewModel(
         val fix = openingFix
         val yawDeg = worldYawToNorthDeg
         if (plotPose == null || openingPose == null || fix == null || yawDeg == null) {
-            _step.value = Step.Failed("Missing opening fix or pose snapshots.")
+            _step.value = Step.Failed(
+                "Part of this offset wasn't recorded — the plot mark, the opening GPS " +
+                    "reading or the compass direction. Tap Restart and walk it through again.")
             return
         }
         // Rotate the AR displacement from the arbitrary-yaw ARCore world
@@ -303,7 +315,9 @@ class OffsetFlowViewModel(
             trackingStateWasNormalThroughout = session.trackingStayedNormalSinceWatch())
         val result = OffsetFromOpening.compute(input)
         if (result == null) {
-            _step.value = Step.Failed("AR tracking was interrupted — offset invalid.")
+            _step.value = Step.Failed(
+                "The phone lost track of where you walked, so this centre can't be " +
+                    "trusted. Walk back to the opening and start the offset again.")
             return
         }
         _step.value = Step.Computed(result)
@@ -447,7 +461,7 @@ fun OffsetFlowScreen(
                     val d = s.distanceFromPlotM
                     Text(
                         if (d != null) String.format(Locale.US, "%.1f m from plot", d)
-                        else "Waiting for AR pose…",
+                        else "Finding your position…",
                         style = type.data,
                         color = Color.White,
                     )
@@ -458,7 +472,14 @@ fun OffsetFlowScreen(
                         verticalArrangement = Arrangement.spacedBy(ForestixSpace.xxs),
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
-                        Text("Tier ${r.tier.raw}", style = type.title, color = colors.confidenceOk)
+                        // FIELD REPORT G2 — the last surviving A/B/C/D grade.
+                        // "Tier B" on the confirmed panel is the same
+                        // GPS-averaging grade F9 took off the record-centre
+                        // sheet that leads here: nothing a cruiser can act on
+                        // or interpret. The numbers that mean something — the
+                        // back-solved centre and the walk it came from — stay.
+                        // `r.tier` is UNCHANGED on the result, on the Plot and
+                        // in every export; it is simply not shown.
                         Text(
                             String.format(Locale.US, "%.6f, %.6f", r.lat, r.lon),
                             style = type.data,
@@ -490,13 +511,13 @@ fun OffsetFlowScreen(
             // Cancel/Restart stay plain/white so they read on the scrim)
             when (val s = step) {
                 is OffsetFlowViewModel.Step.AnchorPlot ->
-                    ForestixProminentButton(label = "Anchor here") { viewModel.anchorPlotCenter() }
+                    ForestixProminentButton(label = "Mark here") { viewModel.anchorPlotCenter() }
                 is OffsetFlowViewModel.Step.WalkToOpening ->
                     ForestixProminentButton(label = "Capture fix here") { viewModel.beginOpeningAveraging() }
                 is OffsetFlowViewModel.Step.AveragingAtOpening ->
                     TextButton(onClick = { viewModel.cancel() }) { Text("Cancel", color = Color.White) }
                 is OffsetFlowViewModel.Step.WalkBack ->
-                    ForestixProminentButton(label = "Confirm plot center") { viewModel.confirmPlotCenter() }
+                    ForestixProminentButton(label = "Confirm plot centre") { viewModel.confirmPlotCenter() }
                 is OffsetFlowViewModel.Step.Computed ->
                     ForestixProminentButton(label = "Save") { onDone(s.result) }
                 is OffsetFlowViewModel.Step.Failed ->
@@ -510,7 +531,7 @@ fun OffsetFlowScreen(
 // MARK: - Copy
 
 private fun stepName(step: OffsetFlowViewModel.Step): String = when (step) {
-    is OffsetFlowViewModel.Step.AnchorPlot -> "A · Anchor plot"
+    is OffsetFlowViewModel.Step.AnchorPlot -> "A · Mark the plot centre"
     is OffsetFlowViewModel.Step.WalkToOpening -> "B · Walk to opening"
     is OffsetFlowViewModel.Step.AveragingAtOpening -> "C · Averaging at opening"
     is OffsetFlowViewModel.Step.WalkBack -> "D · Walk back"
@@ -521,14 +542,14 @@ private fun stepName(step: OffsetFlowViewModel.Step): String = when (step) {
 private fun stepHint(step: OffsetFlowViewModel.Step, openingAveragingDurationS: Int): String =
     when (step) {
         is OffsetFlowViewModel.Step.AnchorPlot ->
-            "Stand at the plot center. Tap Anchor when steady."
+            "Stand at the plot centre. Tap Mark when the phone is steady."
         is OffsetFlowViewModel.Step.WalkToOpening ->
             "Walk to an opening with clear sky. Keep phone upright."
         is OffsetFlowViewModel.Step.AveragingAtOpening ->
             "Hold still for $openingAveragingDurationS s."
         is OffsetFlowViewModel.Step.WalkBack ->
-            "Walk back to the plot center under continuous tracking."
+            "Walk back to the plot centre. Keep the phone up and the camera pointed ahead the whole way."
         is OffsetFlowViewModel.Step.Computed ->
-            "Plot center recovered."
+            "Plot centre recovered."
         is OffsetFlowViewModel.Step.Failed -> step.reason
     }

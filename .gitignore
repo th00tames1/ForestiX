@@ -16,3 +16,14 @@ Package.resolved
 
 # Claude Code worktrees + config
 .claude/
+
+# Manuscripts, literature and internal progress reports.
+#
+# This repository is public. Unpublished drafts and third-party documents
+# do not belong in it — the literature review in particular is someone
+# else's to distribute. Kept on disk, out of git.
+paper/
+*.docx
+*.pdf
+phase*_report.md
+docs/AUDIT_PHASE_*.md

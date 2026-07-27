@@ -292,9 +292,12 @@ fun CruiseSetupSheet(
                         style = type.bodyBold.copy(fontSize = 14.5.sp),
                         color = colors.textPrimary,
                     )
+                    // FIELD REPORT F7 — the field is named, not qualified. The
+                    // word "Optional" told the cruiser nothing they could act
+                    // on; "None drawn" says what the state actually is.
                     Text(
                         if (strataCount == 0) {
-                            "Optional — none drawn, whole area"
+                            "None drawn — whole area"
                         } else {
                             "$strataCount boundar${if (strataCount == 1) "y" else "ies"} drawn"
                         },

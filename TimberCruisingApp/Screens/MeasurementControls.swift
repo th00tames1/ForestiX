@@ -9,7 +9,9 @@
 //   • Capture "+"  — 70 pt solid-white record-style button (the primary).
 //   • Secondary    — 52 pt flat-scrim circular icon buttons stacked under
 //                    the capture button (mode toggle, etc.).
-//   • Source toggle — 52 pt circular icon button pinned bottom-right.
+//   • Source toggle — 52 pt circular icon button that used to sit bottom-
+//                    right. NO LONGER RENDERED ANYWHERE (field report F5);
+//                    the type is kept, its call sites are gone.
 //   • Status panel — centred, capped-width, flat black scrim.
 //
 // Scrims are flat black 0.55 (no materials) so the chrome renders
@@ -314,9 +316,12 @@ public struct MeasureValuePill: View {
 
 /// Circular icon button that flips `AppSettings.measurementSource`. The
 /// icon + caption show the active path; disabled (and shown as AR) on
-/// devices without LiDAR. Developer-mode chrome only — field mode pins
-/// LiDAR devices to the mesh path with no user-facing switch, so the
-/// measurement screens render this solely when `settings.developerMode`.
+/// devices without LiDAR.
+///
+/// NOT RENDERED ANYWHERE ANY MORE — field report F5 pulled it off the scan,
+/// distance and sampling screens. Kept as a component so a bench session can
+/// put it back; the setting it flips is untouched, and which sensor path
+/// runs is unchanged.
 public struct MeasureSourceToggleButton: View {
     @EnvironmentObject private var settings: AppSettings
 

@@ -48,6 +48,15 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material3.Icon
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.semantics
+import com.hcjeong.forestix.ui.clickableNoRipple
+import kotlin.math.roundToInt
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -106,8 +115,12 @@ fun scanPlotMiniMapVisible(): Boolean =
 /// YOU + measured-tree dots); quick ActiveSamplingPlot-only sessions get
 /// ring + YOU with no tree dots. Emits nothing when neither exists.
 /// Callers hide it during the accept-snapshot chrome blackout.
+///
+/// `onEditPlot` (field report F11) makes the card a tappable route back into
+/// plot setup. Hosts pass it only in cruise, where there is a saved plot to
+/// edit; null leaves the card inert, as it was.
 @Composable
-fun BoxScope.ScanPlotMiniMap() {
+fun BoxScope.ScanPlotMiniMap(onEditPlot: (() -> Unit)? = null) {
     // The cruise target is armed before navigation and cleared after the
     // chain pops back to the map — constant for this screen's lifetime.
     val cruise = remember { CruiseCapture.target }
@@ -142,7 +155,15 @@ fun BoxScope.ScanPlotMiniMap() {
         requireLinkedPlotId = cruise?.plotId,
         modifier = Modifier
             .align(Alignment.TopEnd)
-            .padding(top = 22.dp, end = 16.dp),   // GPS-badge row (leading side)
+            // Below the system status bar, then onto the GPS-badge row —
+            // the same inset + offset MeasureTopStrip uses, so the card
+            // and the strip share one baseline.
+            .statusBarsPadding()
+            .padding(top = MeasureTopStripTop, end = 16.dp),
+        // Only a CRUISE session has a persisted plot whose radius/centre a
+        // setup session can rewrite; the quick sampling ring has nothing to
+        // re-open, so its card stays inert (F11).
+        onTap = onEditPlot?.takeIf { cruise != null },
     )
 }
 
@@ -162,6 +183,7 @@ fun BoxScope.SamplingPlotMiniMap(plotNumber: Int? = null) {
         requireLinkedPlotId = null,
         modifier = Modifier
             .align(Alignment.TopEnd)
+            .statusBarsPadding()
             .padding(top = 172.dp, end = 16.dp),
     )
 }
@@ -171,6 +193,11 @@ fun BoxScope.SamplingPlotMiniMap(plotNumber: Int? = null) {
 private data class MiniYou(val eastM: Float, val northM: Float, val facingDeg: Float?)
 private data class MiniTreeDot(val eastM: Float, val northM: Float, val warn: Boolean)
 
+/// `onTap` — FIELD REPORT F11. The card is a WAY BACK INTO PLOT SETUP: once
+/// the first (+) had placed the sampling plot there was no route to change
+/// its radius or centre, and tapping the preview of the thing you want to
+/// edit is the obvious one. null keeps the card inert (quick-measure, and
+/// any host with no plot to edit), exactly as it used to be.
 @Composable
 private fun PlotMiniMapCard(
     plotNumber: Int?,
@@ -180,6 +207,7 @@ private fun PlotMiniMapCard(
     radiusOverrideM: Double?,
     requireLinkedPlotId: UUID?,
     modifier: Modifier,
+    onTap: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val controller = ArSessionHub.controller
@@ -272,12 +300,37 @@ private fun PlotMiniMapCard(
     val okColor = Forestix.colors.confidenceOk
     val warnColor = Forestix.colors.confidenceWarn
 
+    val headerText =
+        if (plotNumber != null) "PLOT $plotNumber · ${trees.size}" else "PLOT"
     Box(
         modifier
             .size(CARD_SIZE)
             .clip(ForestixRadius.card)
             .background(Color.Black.copy(alpha = 0.55f))
-            .border(0.5.dp, Color.White.copy(alpha = 0.18f), ForestixRadius.card),
+            // Tappable cards carry the brighter AR-cyan edge the rest of the
+            // plot chrome uses for "this is the plot, and you can touch it";
+            // inert ones keep the old hairline.
+            .border(
+                if (onTap == null) 0.5.dp else 1.dp,
+                if (onTap == null) Color.White.copy(alpha = 0.18f) else RING_CYAN.copy(alpha = 0.75f),
+                ForestixRadius.card,
+            )
+            .then(
+                if (onTap == null) {
+                    Modifier
+                } else {
+                    Modifier
+                        .clickableNoRipple(onTap)
+                        .semantics {
+                            contentDescription =
+                                "Edit plot. ${headerText.lowercase(Locale.US)}, " +
+                                "radius ${radiusM.roundToInt()} metres"
+                            onClick(label = "Reopens plot setup to change the radius or centre") {
+                                onTap(); true
+                            }
+                        }
+                },
+            ),
     ) {
         Canvas(Modifier.fillMaxSize()) {
             val c = Offset(size.width / 2f, size.height / 2f)
@@ -323,11 +376,25 @@ private fun PlotMiniMapCard(
         // Header: "PLOT 2 · 5" (plot number · tree count); plain "PLOT"
         // for the number-less quick ring (iOS headerText).
         Text(
-            if (plotNumber != null) "PLOT $plotNumber · ${trees.size}" else "PLOT",
+            headerText,
             style = MiniMapHeaderStyle,
             color = Color.White.copy(alpha = 0.85f),
             modifier = Modifier.align(Alignment.TopStart).padding(start = 7.dp, top = 6.dp),
         )
+        // The affordance (F11): the app's standard "edit this" pencil, in the
+        // one corner the card's content never occupies. Only drawn when there
+        // is somewhere to go.
+        if (onTap != null) {
+            Icon(
+                Icons.Filled.Edit,
+                contentDescription = null,
+                tint = Color.White.copy(alpha = 0.9f),
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(end = 6.dp, top = 5.dp)
+                    .size(13.dp),
+            )
+        }
         // North tick — just inside the ring's top point (ring top sits at
         // 58 − 45.2 ≈ 13 dp; iOS centres the glyph 7 pt below that).
         Text(

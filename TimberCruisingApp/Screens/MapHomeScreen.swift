@@ -207,6 +207,17 @@ public struct MapHomeScreen: View {
     @State var chainTreeNumber: Int = 1
     @State var chainTreeID: UUID?
 
+    // FIELD REPORT F10 / F11 — two covers presented FROM INSIDE the cruise
+    // diameter tally rather than from the map. Nesting matters: the tally
+    // screen stays alive underneath, so Height (or plot setup) closes back
+    // onto the loop instantly instead of flashing the map and rebuilding
+    // the AR session.
+    //   • chainingHeight    — Height for the tree whose diameter was just
+    //                         accepted (`AppSettings.measureHeightAfterDiameter`).
+    //   • chainingPlotSetup — plot setup re-opened from the mini-map.
+    @State var chainingHeight = false
+    @State var chainingPlotSetup = false
+
     // Heights sheet (plot peek → "Heights · N measured") + the scoped
     // Height request staged across its dismissal.
     @State var heightsSheetTarget: HeightsSheetTarget?
@@ -1468,6 +1479,10 @@ public struct MapHomeScreen: View {
                     // tree number.
                     if fullMeasurementChain { chainHeightPending = true }
                     presentingDBHScan = false
+                    // Quick measure is an in-memory/JSON append that cannot
+                    // report a row-level failure — the reading is on the
+                    // history the moment this returns.
+                    return true
                 },
                 // Raw-capture join keys: without these a stored bundle can't
                 // be paired back to the tree (and its truth) it documents.

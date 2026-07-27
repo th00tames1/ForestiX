@@ -12,12 +12,21 @@
 // QUICK-TALLY LOOP (field-benchmark batch): the cruise DBH screen is a
 // DIAMETER LOOP — each Accept `recordDbh`s, then `advanceTally()` bumps
 // the target to the plot's next tree number and the screen resets to
-// aiming (no Height leg, no pop). `undoLastTally()` backs the just-saved
-// row out (hard delete; the screen deletes its photo) and steps the auto
-// number back — the Undo toast's action. Per-tree height on demand runs
-// through `beginHeight()` (tree peek / plot heights sheet): a HEIGHT-ONLY
-// session on an EXISTING Tree row, so the Height screen's cruise branch
-// folds the reading into that row and pops back to the map.
+// aiming. `undoLastTally()` backs the just-saved row out (hard delete; the
+// screen deletes its photo) and steps the auto number back — the Undo
+// toast's action. Per-tree height on demand runs through `beginHeight()`
+// (tree peek / plot heights sheet): a HEIGHT-ONLY session on an EXISTING
+// Tree row, so the Height screen's cruise branch folds the reading into
+// that row and pops back to the map.
+//
+// DIAMETER → HEIGHT CHAIN (field report F10): with
+// `AppSettings.measureHeightAfterDiameter` on (the DEFAULT) the tally's
+// Accept also PUSHES Height for the tree it just wrote, on top of the DBH
+// screen. `savedTreeId` still points at that row — `advanceTally()` only
+// moves the target NUMBER — so `recordHeight` folds into the right tree
+// even though the tally has already moved on. Height's Accept and its Skip
+// both pop straight back onto the tally, already aiming at the next tree.
+// With the setting off the loop behaves exactly as it did.
 //
 // MapHomeScreen calls `end()` on every (re)entry (every cruise capture
 // flow pops back to it), which also restores the identity scan calibration
@@ -147,6 +156,13 @@ object CruiseCapture {
     /// defaults to the plot's most recent tree (mock rule "species = last
     /// used"); bearing/distance from the plot centre are auto-computed
     /// from the fix (replaces the retired Extras step's manual fields).
+    ///
+    /// Returns the id of the row that was written, or null when there is no
+    /// session. The DIAMETER → HEIGHT chain (field report F10) uses this:
+    /// there is no point opening Height when no row exists for the height to
+    /// land on. `savedTreeId` is CLEARED before the write attempt, so a
+    /// throwing `create` can never leave the previous tree armed for the
+    /// height leg or for Undo.
     suspend fun recordDbh(
         env: AppEnvironment,
         r: DBHResult,
@@ -155,8 +171,9 @@ object CruiseCapture {
         note: String,
         photoPath: String?,
         fix: CLLocationSnapshot?,
-    ) {
-        val t = target ?: return
+    ): UUID? {
+        val t = target ?: return null
+        savedTreeId = null
         val now = System.currentTimeMillis()
         val species = speciesCode
             ?: env.treeRepository.listByPlot(t.plotId)
@@ -210,6 +227,7 @@ object CruiseCapture {
         )
         env.treeRepository.create(tree)
         savedTreeId = tree.id
+        return tree.id
     }
 
     /// Height Accept (cruise session): fold the height leg into the Tree

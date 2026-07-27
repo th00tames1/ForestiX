@@ -5,13 +5,15 @@
 // worded identically to the Android sibling.
 //
 // Rules this file exists to enforce:
-//   • While raw capture is ARMED (developerMode && rawCaptureEnabled) a red
-//     REC pill is on screen the whole time — no silent recording, and no
-//     believing you're recording when you aren't.
 //   • Every capture attempt ends in an unmistakable outcome: SAVED, or NOT
 //     SAVED in warning colour with the reason. A failure never looks like a
-//     success.
+//     success. THIS is the rule that carries the weight.
 //   • Developer mode ON with recording OFF says so, in the dev block.
+//
+// FIELD REPORT F2 — the permanent red REC pill is no longer rendered on the
+// scan screens. The cruiser found a pill that never changes to be noise, and
+// the per-capture outcome above already answers "did that one save?". The
+// component is kept (below) but has no call sites.
 
 import SwiftUI
 import Common
@@ -22,6 +24,10 @@ import Sensors
 /// Persistent "recording armed" pill. Also calls out low storage, because a
 /// full phone is the one condition that turns every later capture into a
 /// failure and there is no recovering the trees you already walked past.
+///
+/// RETIRED FROM THE SCAN SCREENS (field report F2) — kept so the indicator
+/// can come back for a bench session without rebuilding it. A phone that
+/// fills up is still reported, per capture, by `RawCaptureOutcomePill`.
 struct RawCaptureRecPill: View {
 
     /// Re-read on each capture so a phone that fills up mid-plot says so.

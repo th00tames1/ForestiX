@@ -79,12 +79,23 @@ fun ForestixRoot() {
         ) { back ->
             DBHScanScreen(nav, chainToHeight = back.arguments?.getBoolean("chain") == true)
         }
+        // `chained=true` = the cruise DIAMETER → HEIGHT chain (field report
+        // F10): Height was pushed automatically on top of the tally after a
+        // diameter, so it offers a labelled "Skip" and both Skip and Accept
+        // pop back onto the tally rather than to the map.
         composable(
-            "height?tree={tree}",
-            arguments = listOf(navArgument("tree") { type = NavType.IntType; defaultValue = -1 }),
+            "height?tree={tree}&chained={chained}",
+            arguments = listOf(
+                navArgument("tree") { type = NavType.IntType; defaultValue = -1 },
+                navArgument("chained") { type = NavType.BoolType; defaultValue = false },
+            ),
         ) { back ->
             val tree = back.arguments?.getInt("tree").takeIf { it != null && it >= 0 }
-            HeightScanScreen(nav, treeOverride = tree)
+            HeightScanScreen(
+                nav,
+                treeOverride = tree,
+                chainedFromDiameter = back.arguments?.getBoolean("chained") == true,
+            )
         }
         composable(Routes.DISTANCE) { DistanceMeasureScreen(nav) }
         composable(Routes.SAMPLING) { SamplingPlotScreen(nav) }
@@ -96,8 +107,13 @@ fun ForestixRoot() {
         // MARK: - Cruise mode (v3.1: a MODE of the map home, not a route —
         // only its pushed flows live in the graph)
 
-        composable(CruiseRoutes.START_PLOT) { back ->
-            CruiseStartPlotScreen(nav, back.arg("projectId"))
+        composable(
+            CruiseRoutes.START_PLOT,
+            arguments = listOf(
+                navArgument("editPlotId") { type = NavType.StringType; defaultValue = "" },
+            ),
+        ) { back ->
+            CruiseStartPlotScreen(nav, back.arg("projectId"), back.arg("editPlotId"))
         }
         // "GPS weak? Use offset" from the inline centre-record sheet —
         // hosts the KEPT OffsetFlowScreen and lands the centre through the

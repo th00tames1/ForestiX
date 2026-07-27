@@ -643,6 +643,19 @@ public final class DBHScanViewModel: ObservableObject {
         markLastBundleAccepted()
     }
 
+    /// The host could NOT store the accepted reading. Drop back to the result
+    /// panel so the diameter is still on screen and Accept is tappable again —
+    /// the alternative (sitting in `.accepted`, which renders no actions at
+    /// all) would hide a lost measurement behind a dead end.
+    ///
+    /// Mirrors `HeightScanViewModel.acceptFailed()`, including the routing:
+    /// back to whichever result stage the Accept came from. `accept()` refuses
+    /// a red fit, so `.rejected` is only reachable defensively.
+    public func acceptFailed() {
+        guard state == .accepted, let r = result else { return }
+        state = (r.confidence == .red) ? .rejected : .fitted
+    }
+
     /// Stamp `operator_accepted` on the bundle this Accept confirms. Distinct
     /// from the record-time `tier_ok` gate, and safe to call while the writer
     /// is still running (the store parks it and the writer folds it in).

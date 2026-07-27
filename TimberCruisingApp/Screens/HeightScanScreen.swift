@@ -55,6 +55,13 @@ public struct HeightScanScreen: View {
     /// the canopy points are forward-projected to the tree's walk-off
     /// distance d_h. No-op for hosts that don't want crown.
     public var onCrown: (Double, Double) -> Void = { _, _ in }
+    /// CRUISE DIAMETER → HEIGHT CHAIN (field report F10). Non-nil when this
+    /// session was opened automatically after a diameter was accepted, which
+    /// is the one case where "I don't want a height for this tree" needs its
+    /// own labelled way out. Renders the "Skip" rail button; the host returns
+    /// to the tally, already targeting the next tree. nil elsewhere, and the
+    /// button is not rendered at all.
+    public var onSkip: (() -> Void)?
 
     public struct ScanMetadata {
         public var speciesCode: String?
@@ -105,8 +112,10 @@ public struct HeightScanScreen: View {
     /// sidecar while its writer is still running. Queued is NOT durable, so
     /// the field keeps the text until that capture reports SAVED.
     @State private var truthQueuedForBundleID: String?
-    /// Free-space check refreshed on appear / at each capture, so the REC
-    /// pill can call out a phone that is filling up.
+    /// Free-space check refreshed on appear / at each capture. It drove the
+    /// REC pill's "LOW STORAGE" callout, which the field report retired
+    /// (F2); the sample is kept because it is cheap and a full phone still
+    /// fails every capture — the per-capture outcome pill reports that.
     @State private var storageLow = false
     /// Non-nil when the host could NOT store the accepted height. The result
     /// stays on screen with this reason instead of the cover closing as if
@@ -133,20 +142,29 @@ public struct HeightScanScreen: View {
     private let projectID: String?
     private let treeNumber: Int?
 
+    /// FIELD REPORT F11 — tapping the top-right plot mini-map re-opens plot
+    /// setup so radius / centre can be changed after the first placement.
+    /// nil on hosts with no plot to edit, and then the card stays inert.
+    private let onEditPlot: (() -> Void)?
+
     public init(viewModel: @autoclosure @escaping () -> HeightScanViewModel,
                 onResult: @escaping (HeightResult) -> Void = { _ in },
                 onAccept: @escaping (HeightResult, ScanMetadata) -> Bool = { _, _ in true },
                 onCrown: @escaping (Double, Double) -> Void = { _, _ in },
+                onSkip: (() -> Void)? = nil,
                 cruisePlotInfo: PlotMiniMapInfo? = nil,
                 projectID: String? = nil,
-                treeNumber: Int? = nil) {
+                treeNumber: Int? = nil,
+                onEditPlot: (() -> Void)? = nil) {
         _viewModel = StateObject(wrappedValue: viewModel())
         self.onResult = onResult
         self.onAccept = onAccept
         self.onCrown = onCrown
+        self.onSkip = onSkip
         self.cruisePlotInfo = cruisePlotInfo
         self.projectID = projectID
         self.treeNumber = treeNumber
+        self.onEditPlot = onEditPlot
     }
 
     /// What the top-right mini-map shows: the cruise plot when the
@@ -204,12 +222,15 @@ public struct HeightScanScreen: View {
                     HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: 6) {
                             GPSAccuracyBadge()
-                            // Recording state is never implicit: armed ⇒ a red
-                            // REC pill stays up, and the last capture's
-                            // saved / NOT-saved outcome sits under it.
-                            if viewModel.rawCaptureEnabled {
-                                RawCaptureRecPill(storageLow: storageLow)
-                            }
+                            // FIELD REPORT F2 — the permanent red REC pill is
+                            // gone; the cruiser read it as noise. The PER-
+                            // CAPTURE outcome pill stays, and it is the piece
+                            // that actually enforces "a failure never looks
+                            // like a success" ("Raw capture saved" vs
+                            // "NOT SAVED — <reason>"). Recording itself is
+                            // untouched: `viewModel.rawCaptureEnabled` and the
+                            // bundle writer are driven by
+                            // `configureRawCapture()`, not by this chrome.
                             if let outcome = viewModel.lastCaptureOutcome {
                                 RawCaptureOutcomePill(outcome: outcome)
                             }
@@ -222,13 +243,14 @@ public struct HeightScanScreen: View {
                 }
 
                 // Plot mini-map — top-right, same row as the GPS badge.
-                // Non-interactive; hidden with the rest of the 2D chrome
-                // during the Accept snapshot blackout.
+                // TAPPABLE in cruise (F11): it re-opens plot setup so the
+                // radius / centre can still be changed. Hidden with the rest
+                // of the 2D chrome during the Accept snapshot blackout.
                 if let info = miniMapInfo {
                     VStack(spacing: 0) {
                         HStack {
                             Spacer()
-                            PlotMiniMapWidget(info: info)
+                            PlotMiniMapWidget(info: info, onTap: onEditPlot)
                                 .padding(.trailing, ForestixSpace.md)
                         }
                         .padding(.top, 22)
@@ -258,20 +280,10 @@ public struct HeightScanScreen: View {
                     }
                 }
 
-                // Bottom-right LiDAR/AR toggle — Developer-mode research
-                // control only; field mode pins LiDAR devices to the mesh
-                // path (AppSettings.measurementSource).
-                if settings.developerMode {
-                    VStack {
-                        Spacer()
-                        HStack {
-                            Spacer()
-                            MeasureSourceToggleButton()
-                                .padding(.trailing, 18)
-                                .padding(.bottom, 96)
-                        }
-                    }
-                }
+                // (The bottom-right LiDAR/AR toggle is GONE — field report
+                // F5. `AppSettings.measurementSource` is untouched and
+                // still decides which sensor path raycasts; only the
+                // control went.)
 
                 // Bottom block (U2): capture stages get the camera-app
                 // shutter bottom-centre — "Manual" flanks left while
@@ -292,21 +304,23 @@ public struct HeightScanScreen: View {
                                     viewModel.enterManualEntry()
                                 }
                                 : nil,
-                            trailing: showsRetakeFlank
-                                ? .init(systemImage: "arrow.counterclockwise",
-                                        caption: "Retake") {
-                                    viewModel.retake()
-                                    resetCrown()
-                                }
-                                : nil)
+                            trailing: trailingFlank)
                     } else if showsResultPanel {
                         bottomPanel
                     }
                 }
             }
         }
-        .devHUDOverlay(settings.developerMode && !hidingChromeForCapture,
-                       title: "HEIGHT", lines: devHUDLines)
+        // FIELD REPORT F3 — the live internals HUD is NO LONGER RENDERED.
+        // It covered the AR view and collided with the mini-map. The
+        // component (`DevHUD` / `devHUDOverlay`) and the `devHUDLines`
+        // payload below are deliberately kept so it can be switched back
+        // on for a bench session; nothing else reads them.
+        //
+        // RECORDING IS INDEPENDENT OF THIS. The research CSV row is written
+        // by `recordResearchRow(r)` from the `.accepted` state change, and
+        // the raw-capture bundle by the view model's recorder (armed via
+        // `configureRawCapture()`), neither of which ever consulted the HUD.
         // Full-bleed AR chrome — no system nav bar; the floating back
         // button is the exit affordance for both presentation paths.
         #if os(iOS)
@@ -509,6 +523,8 @@ public struct HeightScanScreen: View {
         }
     }
 
+    /// HUD payload — KEPT but NOT RENDERED (field report F3; see the note
+    /// on `body`). Recording does not read any of this.
     private var devHUDLines: [(String, String)] {
         var out: [(String, String)] = [
             ("source", settings.measurementSource.displayName),
@@ -565,6 +581,27 @@ public struct HeightScanScreen: View {
         default:
             return false
         }
+    }
+
+    /// Right-hand rail button. Retake wins whenever there is something to
+    /// restart; before that — and only in the cruise diameter → height chain
+    /// (field report F10) — the slot carries "Skip", the labelled way to say
+    /// "no height for this tree" and drop back to the tally on the next tree.
+    /// Elsewhere (`onSkip == nil`) the slot is empty exactly as before.
+    private var trailingFlank: MeasureShutterRow.Flank? {
+        if showsRetakeFlank {
+            return .init(systemImage: "arrow.counterclockwise",
+                         caption: "Retake") {
+                viewModel.retake()
+                resetCrown()
+            }
+        }
+        if let onSkip {
+            return .init(systemImage: "forward.end", caption: "Skip") {
+                onSkip()
+            }
+        }
+        return nil
     }
 
     /// Live value strip above the shutter (U2): the walk stage's three

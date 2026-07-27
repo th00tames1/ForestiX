@@ -458,7 +458,14 @@ fun OffsetFlowScreen(
                         verticalArrangement = Arrangement.spacedBy(ForestixSpace.xxs),
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
-                        Text("Tier ${r.tier.raw}", style = type.title, color = colors.confidenceOk)
+                        // FIELD REPORT G2 — the last surviving A/B/C/D grade.
+                        // "Tier B" on the confirmed panel is the same
+                        // GPS-averaging grade F9 took off the record-centre
+                        // sheet that leads here: nothing a cruiser can act on
+                        // or interpret. The numbers that mean something — the
+                        // back-solved centre and the walk it came from — stay.
+                        // `r.tier` is UNCHANGED on the result, on the Plot and
+                        // in every export; it is simply not shown.
                         Text(
                             String.format(Locale.US, "%.6f, %.6f", r.lat, r.lon),
                             style = type.data,

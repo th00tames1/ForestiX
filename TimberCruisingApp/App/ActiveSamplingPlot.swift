@@ -109,10 +109,13 @@ public final class ActiveSamplingPlot: ObservableObject {
                                        thicknessM: 0.4),
                           colorRGBA: SIMD4<Float>(0.2, 0.85, 1, 0.5),
                           worldAnchorID: plot.anchorID),
-            // Centre pole — white, half alpha.
+            // Centre pole — white, half alpha. 3 cm, not 5: the same pole
+            // the sampling screen draws, thinned per field report F1 (it
+            // read as a fence post and hid the trunk behind it). The two
+            // MUST stay equal — it is one pillar seen from two screens.
             ARSceneMarker(id: overlayPoleId,
                           worldPosition: SIMD3<Float>(0, 0.6, 0),
-                          shape: .cylinder(radiusM: 0.05, heightM: 1.2),
+                          shape: .cylinder(radiusM: 0.03, heightM: 1.2),
                           colorRGBA: SIMD4<Float>(1, 1, 1, 0.5),
                           worldAnchorID: plot.anchorID),
         ]

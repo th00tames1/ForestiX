@@ -5,13 +5,18 @@
 // pieces of chrome do that here, on both DBH and Height (and identically on
 // iOS):
 //
-//  REC pill      — persistent while the recorder is armed
-//                  (developer mode + "Record raw captures"), so the cruiser
-//                  can see at a glance that the burst is being kept.
-//  Outcome pill  — after every capture attempt: what actually happened.
-//                  Saved reads in the OK colour; NOT saved reads in the
-//                  warning colour with the reason, and never looks like a
-//                  success.
+//  Outcome pill   — after every capture attempt: what actually happened.
+//                   Saved reads in the OK colour; NOT saved reads in the
+//                   warning colour with the reason, and never looks like a
+//                   success.
+//  Not-armed pill — recording was asked for but the recorder is NOT armed,
+//                   so the session is keeping nothing.
+//
+// FIELD REPORT F2 — the permanent red REC pill is no longer rendered on the
+// scan screens. The cruiser found a pill that never changes to be noise, and
+// the per-capture outcome above already answers "did that one save?". The
+// component is kept (below) but has no call sites. Removing it changes only
+// what is DRAWN — arming and recording are unchanged.
 
 package com.hcjeong.forestix.ui.screens
 
@@ -24,6 +29,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -60,8 +66,7 @@ object RawCaptureStrings {
         "Raw capture OFF — nothing is being recorded (Settings › Developer)"
 
     /// Settings ASK for recording but the recorder is not actually armed —
-    /// the state in which the REC pill used to keep glowing while nothing was
-    /// being kept. Shown in the failure colour, never as REC.
+    /// nothing is being kept. Shown in the failure colour.
     const val NOT_ARMED = "NOT RECORDING — recorder not armed"
 
     /// A typed truth that is QUEUED against a bundle still being written. It
@@ -91,16 +96,20 @@ object RawCaptureStrings {
         else "Capture NOT saved — truth $value NOT stored (field holds newer text)"
 }
 
-/// REC + outcome stack, pinned top-left under the back button. Renders
-/// nothing when the recorder is idle and there is no outcome to report.
-/// `storageLow` re-reads with each capture so a phone that fills up mid-plot
-/// says so on the pill itself.
+/// Outcome stack, pinned top-left under the back button. Renders nothing
+/// while recording is healthy and there is no outcome to report — the pills
+/// only appear when there is something to SAY.
 ///
 /// `armed` is the RECORDER's real state (ArSessionHub.rawDepthArmed), never
 /// the Settings flag: a safety indicator must not lie. `requested` is what
 /// Settings asked for — when it is on and the recorder is NOT armed (an arm
-/// token clobbered by an activity recreation, say) the pill flips to a loud
-/// NOT RECORDING instead of staying red as if it were keeping the burst.
+/// token clobbered by an activity recreation, say) a loud NOT RECORDING
+/// warning appears.
+///
+/// `storageLow` no longer decorates anything here (it fed the retired REC
+/// pill — F2); it stays on the signature so the indicator can be restored
+/// for a bench session without rewiring the callers. A phone that fills up
+/// is still reported, per capture, by the outcome pill.
 @Composable
 fun BoxScope.RawCaptureBadge(
     armed: Boolean,
@@ -117,15 +126,17 @@ fun BoxScope.RawCaptureBadge(
         settled = true
     }
     val disarmed = requested && !armed && settled
-    if (!armed && !disarmed && status == null) return
+    if (!disarmed && status == null) return
     Column(
         modifier = Modifier
             .align(Alignment.TopStart)
+            // Below the system status bar, then clear of the back button.
+            .statusBarsPadding()
             .padding(start = 16.dp, top = 68.dp)
             .widthIn(max = 260.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        if (armed) RecPill(storageLow) else if (disarmed) NotArmedPill()
+        if (disarmed) NotArmedPill()
         status?.let { OutcomePill(it) }
     }
 }
@@ -137,8 +148,16 @@ private fun NotArmedPill() {
     OutcomePill(RawCaptureStatus(RawCaptureStrings.NOT_ARMED, saved = false))
 }
 
+/// Persistent "recording armed" pill. Also calls out low storage, because a
+/// full phone is the one condition that turns every later capture into a
+/// failure and there is no recovering the trees you already walked past.
+///
+/// RETIRED FROM THE SCAN SCREENS (field report F2) — kept so the indicator
+/// can come back for a bench session without rebuilding it. A phone that
+/// fills up is still reported, per capture, by OutcomePill.
+@Suppress("unused")
 @Composable
-private fun RecPill(storageLow: Boolean) {
+internal fun RawCaptureRecPill(storageLow: Boolean) {
     val colors = Forestix.colors
     val rim = if (storageLow) colors.confidenceWarn else colors.confidenceBad
     Row(

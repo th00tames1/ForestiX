@@ -554,13 +554,73 @@ extension MapHomeScreen {
     var plotSetupCover: some View {
         NavigationStack {
             SamplingPlotScreen(onSaveCruisePlot: { radiusM in
-                createCruisePlot(radiusM: radiusM)
+                // FIELD REPORT F11 — the same screen now serves BOTH "place
+                // the first plot" and "come back and change it". Which one
+                // it is depends on whether the tally already has a plot, so
+                // re-opening from the mini-map can never mint a duplicate
+                // Plot N+1 out from under the cruiser.
+                if chainingPlotSetup, editableCruisePlot != nil {
+                    editCruisePlot(radiusM: radiusM)
+                } else {
+                    createCruisePlot(radiusM: radiusM)
+                }
             })
             .environmentObject(history)
             .environmentObject(settings)
         }
     }
     #endif
+
+    /// The plot a re-opened setup session edits: the one the tally is
+    /// measuring into, else the active plot. nil ⇒ there is nothing to edit
+    /// and Save creates instead.
+    var editableCruisePlot: Plot? {
+        if let id = chainPlotID, let hit = plots.first(where: { $0.id == id }) {
+            return hit
+        }
+        return activePlot
+    }
+
+    /// FIELD REPORT F11 — apply a re-opened setup session to the EXISTING
+    /// plot instead of creating a new one.
+    ///
+    /// Radius always applies. The CENTRE deliberately does not, unless the
+    /// cruiser actually re-placed the ring: a radius-only edit that also
+    /// re-stamped the centre would silently teleport the plot to wherever
+    /// the cruiser happened to be standing, which is the worst kind of data
+    /// loss — invisible. `ActiveSamplingPlot.place(...)` clears
+    /// `linkedCruisePlotID`, so "still linked to this plot" is exactly the
+    /// test for "the centre was not re-placed".
+    func editCruisePlot(radiusM: Double) {
+        guard var plot = editableCruisePlot else {
+            createCruisePlot(radiusM: radiusM)
+            return
+        }
+        plot.plotAreaAcres = Float(.pi * radiusM * radiusM / Units.squareMetersPerAcre)
+
+        let store = ActiveSamplingPlot.shared
+        let recentred = store.plot != nil && store.linkedCruisePlotID != plot.id
+        if recentred,
+           let fix = location.latestSnapshot ?? LocationService.lastGlobalFix {
+            plot.centerLat = fix.latitude
+            plot.centerLon = fix.longitude
+            plot.positionSource = .gpsAveraged
+            plot.gpsNSamples = 1
+            plot.gpsMedianHAccuracyM = Float(fix.horizontalAccuracyM)
+            plot.gpsSampleStdXyM = 0
+            // Still stored, still exported — just never shown (F9).
+            plot.positionTier = GPSAveraging.classify(
+                medianHAccuracyM: Float(fix.horizontalAccuracyM),
+                sampleStdXyM: 0)
+        }
+
+        if (try? environment.plotRepository.update(plot)) != nil {
+            // Re-link so the mini-map trusts the AR-anchor path for YOU
+            // against the ring the cruiser is actually looking at.
+            ActiveSamplingPlot.shared.link(cruisePlotID: plot.id)
+        }
+        reloadCruise()
+    }
 
     /// Persist the placed ring as a cruise `Plot` in the current
     /// project (creating "Project N" on the fly if none exists — the
@@ -734,24 +794,89 @@ extension MapHomeScreen {
     /// existing path (calibration / GPS / photo / metadata), reloads the
     /// snapshot so the mini-map + border chip track the new dot, and
     /// advances the target number — the screen resets itself and shows
-    /// the Undo toast. No Height hand-off, no continuation sheet; the
-    /// floating back exits the loop.
+    /// the Undo toast. The floating back exits the loop.
+    ///
+    /// FIELD REPORT F10 — with `measureHeightAfterDiameter` on (the default)
+    /// the accept ALSO opens Height for the tree just saved, presented over
+    /// this screen so the tally survives underneath. Height's Accept and its
+    /// Skip both come straight back here, already targeting the next tree.
+    /// With the setting off the loop behaves exactly as it did.
+    ///
+    /// FIELD REPORT F11 — the top-right mini-map re-opens plot setup, also
+    /// nested, so radius / centre stay editable after the first placement.
+    ///
+    /// WHY NESTED, not the dismiss-then-present two-step the quick-measure
+    /// "Full measurement" chain uses: that chain ENDS at the map, this one
+    /// has to come BACK to the tally. Re-presenting the tally cover would
+    /// rebuild `DBHScanViewModel` and restart AR for every single tree.
+    /// Nesting is safe because there is ONE AR session and it is refcounted:
+    /// `ARKitSessionManager.attach` applies the incoming screen's
+    /// configuration while the tally stays attached, and `detach` re-applies
+    /// the survivor's — so closing Height (or plot setup) puts `.dbhScan`
+    /// straight back. Each view model holds its own client token precisely
+    /// for this overlap.
     var cruiseDBHCover: some View {
         NavigationStack {
             DBHScanScreen(
                 viewModel: DBHScanViewModel(
                     calibration: calibration(from: currentProject)),
                 onAccept: { result, meta in
-                    saveChainDBH(result, meta: meta)
+                    // The save decides everything downstream. A FAILED create
+                    // reports false, and the scan screen keeps the reading on
+                    // screen under its "NOT saved" banner instead of the loop
+                    // advancing as if a tree existed.
+                    let stored = saveChainDBH(result, meta: meta)
                     reloadCruise()
                     if let plotID = chainPlotID {
                         chainTreeNumber = nextTreeNumber(in: plotID)
                     }
+                    // Chain into Height for the tree that was just written.
+                    // Gated on THIS save succeeding, not merely on
+                    // `chainTreeID` being non-nil: that id is stale after a
+                    // failure, and passing it on is how a height was recorded
+                    // against the previous tree.
+                    if stored, settings.measureHeightAfterDiameter,
+                       chainTreeID != nil {
+                        chainingHeight = true
+                    }
+                    return stored
                 },
                 cruisePlotInfo: cruiseMiniMapInfo(plotID: chainPlotID),
                 tallyTreeNumber: chainTreeNumber,
                 onUndoTally: { undoLastTally() },
-                projectID: currentProject?.id.uuidString)
+                projectID: currentProject?.id.uuidString,
+                onEditPlot: { chainingPlotSetup = true })
+            .environmentObject(settings)
+            .fullScreenCover(isPresented: $chainingHeight,
+                             onDismiss: { reloadCruise() }) {
+                cruiseChainedHeightCover
+            }
+            .fullScreenCover(isPresented: $chainingPlotSetup,
+                             onDismiss: { reloadCruise() }) { plotSetupCover }
+        }
+    }
+
+    /// Height for the tree the tally just saved (F10). Distinct from
+    /// `cruiseHeightCover` only in how it closes: this one is nested over
+    /// the diameter loop, so both Accept and Skip clear `chainingHeight`
+    /// and drop back onto the tally rather than onto the map.
+    var cruiseChainedHeightCover: some View {
+        NavigationStack {
+            HeightScanScreen(
+                viewModel: HeightScanViewModel(
+                    calibration: calibration(from: currentProject)),
+                onAccept: { result, meta in
+                    let stored = saveChainHeight(result, meta: meta)
+                    if stored { chainingHeight = false }
+                    return stored
+                },
+                onSkip: { chainingHeight = false },
+                cruisePlotInfo: cruiseMiniMapInfo(plotID: chainPlotID),
+                // Raw-capture join keys: the height session measures a KNOWN
+                // tree, so its bundle must carry that tree's number.
+                projectID: currentProject?.id.uuidString,
+                treeNumber: chainHeightTreeNumber)
+            .environmentObject(history)
             .environmentObject(settings)
         }
     }
@@ -783,9 +908,22 @@ extension MapHomeScreen {
     /// Accepted DBH → create the cruise Tree. Species defaults to the
     /// plot's most recent species when the meta sheet was skipped
     /// (zero-typing rule); GPS + auto-photo arrive on the metadata.
+    ///
+    /// Returns TRUE only when the row actually reached the repository, and
+    /// `chainTreeID` is left pointing at the created row ONLY then. FIELD FIX:
+    /// the create was a bare `try?` with no else, so a failed write left the
+    /// PREVIOUS tree's id in `chainTreeID` — harmless until the DBH → Height
+    /// chain started reading it. The chain would then open Height on the older
+    /// tree, and both `saveChainHeight` and the raw-capture join key
+    /// `chainHeightTreeNumber` resolved to it, silently recording a height
+    /// against the wrong tree. A failed diameter save must never open Height.
+    @discardableResult
     func saveChainDBH(_ result: DBHResult,
-                      meta: DBHScanScreen.ScanMetadata) {
-        guard let plotID = chainPlotID else { return }
+                      meta: DBHScanScreen.ScanMetadata) -> Bool {
+        guard let plotID = chainPlotID else {
+            chainTreeID = nil
+            return false
+        }
         let now = Date()
         let species = meta.speciesCode ?? lastSpeciesCode(in: plotID) ?? ""
         let tree = Tree(
@@ -825,8 +963,16 @@ extension MapHomeScreen {
             deletedAt: nil,
             latitude: meta.latitude,
             longitude: meta.longitude)
-        if let created = try? environment.treeRepository.create(tree) {
+        do {
+            let created = try environment.treeRepository.create(tree)
             chainTreeID = created.id
+            return true
+        } catch {
+            // The scoped tree is whatever this save wrote — and it wrote
+            // nothing. Leaving the previous id in place is what let a height
+            // land on the wrong tree.
+            chainTreeID = nil
+            return false
         }
     }
 

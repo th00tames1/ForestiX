@@ -259,8 +259,11 @@ public struct CruiseSetupSheet: View {
                 Text("Stratum polygon")
                     .font(.system(size: 14.5, weight: .bold))
                     .foregroundStyle(ForestixPalette.textPrimary)
+                // FIELD REPORT F7 — the field is named, not qualified. The
+                // word "Optional" told the cruiser nothing they could act on;
+                // "None drawn" says what the state actually is.
                 Text(strataCount == 0
-                     ? "Optional — none drawn, whole area"
+                     ? "None drawn — whole area"
                      : "\(strataCount) boundar\(strataCount == 1 ? "y" : "ies") drawn")
                     .font(.system(size: 11.5))
                     .foregroundStyle(ForestixPalette.textTertiary)

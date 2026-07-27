@@ -5,7 +5,8 @@
 // need a desktop tool to know whether to re-cruise.
 //
 // Renders:
-//   • Top-line stats — TREES, BASAL/AC, TREES/AC, MEAN DBH
+//   • Top-line stats — TREES, BASAL/AC, TREES/AC, MEAN DBH, in a 2 × 2
+//     grid so the labels and the 26 sp values fit a small phone (G3)
 //   • Stocking & Density gauge (Phase 1.2 component)
 //   • Species mix breakdown
 //
@@ -25,6 +26,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
@@ -49,6 +51,7 @@ import com.hcjeong.forestix.sensors.LogRule
 import com.hcjeong.forestix.sensors.VolumeConversion
 import com.hcjeong.forestix.ui.screens.stand.StockingGauge
 import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixDenseTextScale
 import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import java.util.Locale
@@ -63,7 +66,10 @@ fun PlotSummaryCard(
     unitSystem: UnitSystem,
     logRule: LogRule,
     areaUnit: AreaUnit = AreaUnit.ACRE,
-) {
+    // The card is a dense readout of labelled numbers, so it carries the
+    // same bound on the system font scale as the field-log table below it
+    // (G3). Nothing else on the screen is affected.
+) = ForestixDenseTextScale {
     val colors = Forestix.colors
     val type = Forestix.type
     val stats = remember(plot, entries, logRule, unitSystem) {
@@ -96,24 +102,34 @@ fun PlotSummaryCard(
         HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
 
         // MARK: - Top stats
-        Row(
-            Modifier.fillMaxWidth().height(48.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            StatsCell("TREES", stats?.distinctTrees?.toString() ?: "—",
-                Modifier.weight(1f))
-            CellDivider()
-            StatsCell("BASAL/${areaUnit.abbreviation.uppercase(Locale.US)}",
-                stats?.let { String.format(Locale.US, "%.0f", it.baPerAcre * densityFactor) } ?: "—",
-                Modifier.weight(1f))
-            CellDivider()
-            StatsCell("TREES/${areaUnit.abbreviation.uppercase(Locale.US)}",
-                stats?.let { String.format(Locale.US, "%.0f", it.tpa * densityFactor) } ?: "—",
-                Modifier.weight(1f))
-            CellDivider()
-            StatsCell("MEAN DBH",
-                stats?.qmd?.let { MeasurementFormatter.diameter(it, unitSystem) } ?: "—",
-                Modifier.weight(1f))
+        //
+        // FIELD REPORT G3 — these four used to sit in ONE row of four cells
+        // with no gutters between them. On a 360 dp phone that is ~62 dp a
+        // cell: "BASAL/HA" and "TREES/HA" ran straight into their
+        // neighbours, "MEAN DBH" clipped to "MEAN", and a 26 sp value came
+        // out as "12....". Two rows of two give each cell ~136 dp — room
+        // for the longest label AND for "12.4 cm" at full size — with a
+        // gutter around every divider. Same four labels, same wording on
+        // both platforms; only the flow changed.
+        val perAreaSuffix = areaUnit.abbreviation.uppercase(Locale.US)
+        Column(verticalArrangement = Arrangement.spacedBy(ForestixSpace.sm)) {
+            StatsRow(
+                leftLabel = "TREES",
+                leftValue = stats?.distinctTrees?.toString() ?: "—",
+                rightLabel = "BASAL/$perAreaSuffix",
+                rightValue = stats?.let {
+                    String.format(Locale.US, "%.0f", it.baPerAcre * densityFactor)
+                } ?: "—")
+            HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
+            StatsRow(
+                leftLabel = "TREES/$perAreaSuffix",
+                leftValue = stats?.let {
+                    String.format(Locale.US, "%.0f", it.tpa * densityFactor)
+                } ?: "—",
+                rightLabel = "MEAN DBH",
+                rightValue = stats?.qmd?.let {
+                    MeasurementFormatter.diameter(it, unitSystem)
+                } ?: "—")
         }
 
         if (stats != null && stats.distinctTrees >= 1) {
@@ -175,7 +191,8 @@ fun PlotSummaryCard(
                                 color = colors.textPrimary,
                                 modifier = Modifier.width(44.dp),
                                 maxLines = 1,
-                                overflow = TextOverflow.Clip)
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis)
                         }
                     }
                 }
@@ -186,6 +203,28 @@ fun PlotSummaryCard(
 
 // MARK: - Cells
 
+/// One half of the 2 × 2 stat grid. `heightIn(min = )` rather than a fixed
+/// height, so a larger system text size makes the row TALLER instead of
+/// cutting the label off, and a gutter on either side of the hairline so
+/// "TREES/HA" and "MEAN DBH" can never touch (G3).
+@Composable
+private fun StatsRow(
+    leftLabel: String,
+    leftValue: String,
+    rightLabel: String,
+    rightValue: String,
+) {
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 48.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(ForestixSpace.sm),
+    ) {
+        StatsCell(leftLabel, leftValue, Modifier.weight(1f))
+        CellDivider()
+        StatsCell(rightLabel, rightValue, Modifier.weight(1f))
+    }
+}
+
 @Composable
 private fun StatsCell(label: String, value: String, modifier: Modifier = Modifier) {
     val colors = Forestix.colors
@@ -195,17 +234,22 @@ private fun StatsCell(label: String, value: String, modifier: Modifier = Modifie
         verticalArrangement = Arrangement.spacedBy(2.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+        // Neither line may wrap: a stat split as "12.4/cm" or "BASAL//HA"
+        // is the defect this card was fixed for.
         Text(
             value,
             style = type.dataLarge,
             color = colors.textPrimary,
             maxLines = 1,
+            softWrap = false,
             overflow = TextOverflow.Ellipsis)
         Text(
             label,
             style = type.sectionHead.copy(letterSpacing = 1.2.sp),
             color = colors.textTertiary,
-            maxLines = 1)
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis)
     }
 }
 

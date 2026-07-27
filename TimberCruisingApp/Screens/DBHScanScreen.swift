@@ -36,7 +36,13 @@ public struct DBHScanScreen: View {
     /// doesn't record a measurement until Accept is tapped.
     /// `metadata` carries the species / position / damage / note the
     /// cruiser optionally attached via `ScanMetadataSheet`.
-    public var onAccept: (DBHResult, ScanMetadata) -> Void = { _, _ in }
+    ///
+    /// RETURNS whether the reading actually reached storage — same contract as
+    /// `HeightScanScreen.onAccept`. A host that could not write the tree row
+    /// returns false and this screen keeps the result on screen under a loud
+    /// "NOT saved" banner instead of resetting for the next tree, which is how
+    /// a dropped diameter used to look identical to a saved one.
+    public var onAccept: (DBHResult, ScanMetadata) -> Bool = { _, _ in true }
 
     public struct ScanMetadata {
         public var speciesCode: String?
@@ -106,7 +112,10 @@ public struct DBHScanScreen: View {
     /// the field keeps the text until that capture reports SAVED.
     @State private var truthQueuedForBundleID: String?
     /// Free-space check, refreshed when the screen appears and on each
-    /// capture, so the REC pill can call out a phone that is filling up.
+    /// capture. It drove the REC pill's "LOW STORAGE" callout, which the
+    /// field report retired (F2); the sample is kept because it is cheap
+    /// and a full phone still fails every capture — the per-capture
+    /// outcome pill reports that.
     @State private var storageLow = false
 
     /// DBH sensing path. Exactly one now (`.lidarDepth`) — the AR-motion and
@@ -141,9 +150,19 @@ public struct DBHScanScreen: View {
     private let projectID: String?
     private let quickTreeNumber: Int?
 
+    /// FIELD REPORT F11 — tapping the top-right plot mini-map re-opens plot
+    /// setup so radius / centre can be changed after the first placement.
+    /// nil on hosts with no plot to edit, and then the card stays inert.
+    private let onEditPlot: (() -> Void)?
+
     /// The tree number that goes into the bundle: the cruise tally's live
     /// target when looping, else the host's quick-measure target.
     private var captureTreeNumber: Int? { tallyTreeNumber ?? quickTreeNumber }
+
+    /// Non-nil when the host could NOT store the accepted diameter. The
+    /// result stays on screen with this reason instead of the loop resetting
+    /// (and, in cruise, chaining into Height) as if the tree had been written.
+    @State private var dbhSaveFailure: String?
 
     /// Saved-tree toast state: number shown in "Tree 7 saved · Undo".
     @State private var tallyToastNumber: Int?
@@ -158,12 +177,13 @@ public struct DBHScanScreen: View {
 
     public init(viewModel: @autoclosure @escaping () -> DBHScanViewModel,
                 onResult: @escaping (DBHResult) -> Void = { _ in },
-                onAccept: @escaping (DBHResult, ScanMetadata) -> Void = { _, _ in },
+                onAccept: @escaping (DBHResult, ScanMetadata) -> Bool = { _, _ in true },
                 cruisePlotInfo: PlotMiniMapInfo? = nil,
                 tallyTreeNumber: Int? = nil,
                 onUndoTally: (() -> Void)? = nil,
                 projectID: String? = nil,
-                quickTreeNumber: Int? = nil) {
+                quickTreeNumber: Int? = nil,
+                onEditPlot: (() -> Void)? = nil) {
         _viewModel = StateObject(wrappedValue: viewModel())
         self.onResult = onResult
         self.onAccept = onAccept
@@ -172,6 +192,7 @@ public struct DBHScanScreen: View {
         self.onUndoTally = onUndoTally
         self.projectID = projectID
         self.quickTreeNumber = quickTreeNumber
+        self.onEditPlot = onEditPlot
     }
 
     /// What the top-right mini-map shows: the cruise plot when the
@@ -335,19 +356,28 @@ public struct DBHScanScreen: View {
                     if let banner = viewModel.unsupportedBanner {
                         bannerView(banner, tint: .orange)
                     }
+                    // The accepted diameter did NOT reach a tree row. Loud,
+                    // and the value stays on screen so Accept can be retried.
+                    if let failure = dbhSaveFailure {
+                        bannerView(failure,
+                                   tint: ForestixPalette.confidenceBad,
+                                   identifier: "dbhScan.saveFailureBanner")
+                    }
                 }
 
                 // Plot mini-map — top-right, same row as the GPS badge.
-                // Non-interactive; kept up during ADJUST (it's clear of
-                // the centre handles), hidden with the rest of the 2D
-                // chrome during the Accept snapshot blackout. The cruise
-                // border chip renders directly under the card.
+                // TAPPABLE in cruise (F11): it re-opens plot setup so the
+                // radius / centre can still be changed. Kept up during
+                // ADJUST (it's clear of the centre handles), hidden with the
+                // rest of the 2D chrome during the Accept snapshot blackout.
+                // The cruise border chip renders directly under the card.
                 if let info = miniMapInfo {
                     VStack(spacing: 0) {
                         HStack {
                             Spacer()
                             VStack(alignment: .trailing, spacing: 6) {
-                                PlotMiniMapWidget(info: info)
+                                PlotMiniMapWidget(info: info,
+                                                  onTap: onEditPlot)
                                 if let signed = boundarySignedM,
                                    abs(signed) <= 2.0 {
                                     borderChip(signed)
@@ -400,8 +430,17 @@ public struct DBHScanScreen: View {
                 }
             }
         }
-        .devHUDOverlay(settings.developerMode && !hidingChromeForCapture,
-                       title: "DBH", lines: devHUDLines)
+        // FIELD REPORT F3 — the live internals HUD is NO LONGER RENDERED.
+        // It covered the AR view and collided with the mini-map / border
+        // chip. The component (`DevHUD` / `devHUDOverlay`) and the
+        // `devHUDLines` payload below are deliberately kept so it can be
+        // switched back on for a bench session; nothing else reads them.
+        //
+        // RECORDING IS INDEPENDENT OF THIS. The research CSV row is written
+        // by `recordResearchRow(r)` from the `.accepted` state change, and
+        // the raw-capture bundle by the view model's recorder (armed via
+        // `configureRawCapture()` at appear / tree change / burst start),
+        // neither of which ever consulted the HUD.
         // Cruise border chip — poll the camera's horizontal distance to
         // the plot's AR anchor at the sampling screen's 0.2 s cadence
         // (same inside/outside machinery, read not observed).
@@ -475,6 +514,16 @@ public struct DBHScanScreen: View {
             }
         }
         .onChange(of: viewModel.state) { _, newState in
+            switch newState {
+            case .idle, .aligning, .armed, .capturing, .manualEntry:
+                // Retake / a fresh aim supersedes a failed save: the banner
+                // must not hang over the NEXT tree. `.fitted` and `.rejected`
+                // are deliberately absent — `acceptFailed()` lands on
+                // `.fitted`, which is the state the warning belongs to.
+                dbhSaveFailure = nil
+            case .fitted, .accepted, .rejected:
+                break
+            }
             // Separate "accept" hook so callers that want to persist
             // only on an explicit user confirmation (Quick Measure) can
             // distinguish a fitted preview from a committed reading.
@@ -504,7 +553,12 @@ public struct DBHScanScreen: View {
                         longitude: fix?.longitude,
                         captureMode: viewModel.resultCapturedManually
                             ? "manual" : "auto")
-                    onAccept(r, meta)
+                    // The host reports whether the reading actually reached
+                    // storage. A dropped diameter used to be indistinguishable
+                    // from a saved one — the loop reset for the next tree
+                    // either way, and in cruise the chain then opened Height
+                    // against whatever tree `chainTreeID` still pointed at.
+                    let stored = onAccept(r, meta)
                     // Raw-capture (developer mode): attach the tape-measured
                     // truth to the just-recorded bundle. The bundle id is
                     // minted synchronously at burst finalize, so this works
@@ -512,6 +566,18 @@ public struct DBHScanScreen: View {
                     // field is not cleared until the value is durable.
                     recordResearchRow(r)
                     applyTypedTruth()
+                    guard stored else {
+                        dbhSaveFailure = tallyTreeNumber.map {
+                            "Diameter NOT saved as Tree \($0) — the tree row couldn't be written. Tap Accept again."
+                        } ?? "Diameter NOT saved — the tree row couldn't be written. Tap Accept again."
+                        // Back to the result panel so the value is still on
+                        // screen and Accept is tappable again. Nothing is
+                        // reset: no Undo toast for a tree that isn't there,
+                        // and the tally target still names the missing tree.
+                        viewModel.acceptFailed()
+                        return
+                    }
+                    dbhSaveFailure = nil
                     // CRUISE QUICK-TALLY LOOP — the host saved the tree
                     // and auto-incremented its target; reset this screen
                     // (scan + per-tree metadata) to aiming for the next
@@ -563,12 +629,13 @@ public struct DBHScanScreen: View {
         HStack(alignment: .top, spacing: ForestixSpace.xs) {
             VStack(alignment: .leading, spacing: 6) {
                 GPSAccuracyBadge()
-                // Recording state is never implicit: armed ⇒ a red REC pill
-                // stays on screen, and the last capture's saved / NOT-saved
-                // outcome sits right under it.
-                if viewModel.rawCaptureEnabled {
-                    RawCaptureRecPill(storageLow: storageLow)
-                }
+                // FIELD REPORT F2 — the permanent red REC pill is gone; the
+                // cruiser read it as noise. The PER-CAPTURE outcome pill
+                // stays, and it is the piece that actually enforces "a
+                // failure never looks like a success" ("Raw capture saved"
+                // vs "NOT SAVED — <reason>"). Recording itself is untouched:
+                // `viewModel.rawCaptureEnabled` and the bundle writer are
+                // driven by `configureRawCapture()`, not by this chrome.
                 if let outcome = viewModel.lastCaptureOutcome {
                     RawCaptureOutcomePill(outcome: outcome)
                 }
@@ -649,6 +716,8 @@ public struct DBHScanScreen: View {
 
     // MARK: - Chrome
 
+    /// HUD payload — KEPT but NOT RENDERED (field report F3; see the note
+    /// on `body`). Recording does not read any of this.
     private var devHUDLines: [(String, String)] {
         var out: [(String, String)] = [
             ("method", methodSource.shortTag),
@@ -1434,7 +1503,11 @@ public struct DBHScanScreen: View {
         }
     }
 
-    private func bannerView(_ text: String, tint: Color) -> some View {
+    private func bannerView(
+        _ text: String,
+        tint: Color,
+        identifier: String = "dbhScan.unsupportedBanner"
+    ) -> some View {
         Text(text)
             .font(.callout).bold()
             .foregroundStyle(.white)
@@ -1442,7 +1515,7 @@ public struct DBHScanScreen: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(tint.opacity(0.8))
             .cornerRadius(8)
-            .accessibilityIdentifier("dbhScan.unsupportedBanner")
+            .accessibilityIdentifier(identifier)
     }
 
     // Cross-platform screen width accessor — UIScreen is iOS-only.

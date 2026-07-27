@@ -54,6 +54,7 @@ public struct SettingsScreen: View {
         Form {
             regionAndUnitsSection
             displaySection
+            measuringSection
             calibrationSection
             dataBackupSection
             // Basemap tiles is ordinary field setup, not developer tooling —
@@ -268,6 +269,23 @@ public struct SettingsScreen: View {
             }
             .pickerStyle(.segmented)
             .accessibilityIdentifier("settings.appearance")
+        }
+    }
+
+    // MARK: - 2b. Measuring
+    // FIELD REPORT F10 — the cruise tally chains diameter → height by
+    // default. Cruisers who only want diameters turn it off here. Strings
+    // and the stored key are identical on Android.
+    private var measuringSection: some View {
+        Section(
+            header: Text("Measuring"),
+            footer: Text("After you accept a diameter in cruise, Height opens for the same tree. Skip returns to the tally.")
+        ) {
+            Toggle("Measure height after diameter",
+                   isOn: Binding(
+                    get: { settings.measureHeightAfterDiameter },
+                    set: { settings.measureHeightAfterDiameter = $0 }))
+                .accessibilityIdentifier("settings.measureHeightAfterDiameter")
         }
     }
 

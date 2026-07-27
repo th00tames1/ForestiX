@@ -98,20 +98,11 @@ public struct DistanceMeasureScreen: View {
                 // no stage guidance (the readout strip carries the state).
                 MeasureTopBanner(topBannerText)
 
-                // Bottom-right LiDAR/AR toggle — Developer-mode research
-                // control only; field mode pins LiDAR devices to the mesh
-                // path (AppSettings.measurementSource).
-                if settings.developerMode {
-                    VStack {
-                        Spacer()
-                        HStack {
-                            Spacer()
-                            MeasureSourceToggleButton()
-                                .padding(.trailing, 18)
-                                .padding(.bottom, 96)
-                        }
-                    }
-                }
+                // (The bottom-right LiDAR/AR toggle is GONE — field report
+                // F5. It was developer-only chrome for a switch nobody
+                // flips; `AppSettings.measurementSource` is untouched and
+                // still decides which sensor path raycasts, so nothing
+                // about the measurement changed.)
 
                 // Floating back button — full-bleed chrome exit (the
                 // system nav bar is hidden on the AR screens).

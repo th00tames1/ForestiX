@@ -96,22 +96,37 @@ public struct PlotSummaryCard: View {
 
     // MARK: - Top stats
 
+    /// FIELD REPORT — this row is four equal cells, so on a 360 pt phone each
+    /// one is about 64 pt wide. "BASAL/HA", "TREES/HA" and "MEAN DBH" each
+    /// want ~75 pt as spaced caps at 13 pt, so all three wrapped, and with no
+    /// padding they ran into the hairline dividers besides. The cells keep
+    /// their equal weights (they always shared the width correctly); the
+    /// LABELS are shortened to the standard cruiser abbreviations this file
+    /// already uses in its own header comment — BA/ac, TPA, QMD — so they fit
+    /// on one line at full size, and each cell now breathes inside its rule.
     private var statsGrid: some View {
         let s = stats
         return HStack(spacing: 0) {
             statsCell("TREES", s?.distinctTrees.description ?? "—")
             divider
-            statsCell("BASAL/\(areaUnit.abbreviation.uppercased())",
+            statsCell(areaUnit.densityLabel("BA").uppercased(),
                       s.map { String(format: "%.0f", $0.baPerAcre * densityFactor) } ?? "—")
             divider
-            statsCell("TREES/\(areaUnit.abbreviation.uppercased())",
+            statsCell(treesPerAreaLabel,
                       s.map { String(format: "%.0f", $0.tpa * densityFactor) } ?? "—")
             divider
-            statsCell("MEAN DBH",
+            statsCell("QMD",
                       s.flatMap { $0.qmd.map { qmd in
                           MeasurementFormatter.diameter(cm: qmd, in: unitSystem)
                       } } ?? "—")
         }
+    }
+
+    /// Trees per unit land area. "TPA" / "TPH" are the standard cruiser
+    /// abbreviations; "TREES/AC" is the same statistic spelled at nearly
+    /// three times the width, which is what made it wrap.
+    private var treesPerAreaLabel: String {
+        areaUnit == .hectare ? "TPH" : "TPA"
     }
 
     private var divider: some View {
@@ -126,12 +141,24 @@ public struct PlotSummaryCard: View {
                 .font(ForestixType.dataLarge)
                 .foregroundStyle(ForestixPalette.textPrimary)
                 .lineLimit(1)
-                .minimumScaleFactor(0.7)
+                .allowsTightening(true)
+                // 0.7 was not enough headroom for a QMD carrying its unit:
+                // "31.4 cm" measures 113 pt at 26 pt monospaced against the
+                // ~56 pt a cell has on a 360 pt phone, so the number itself
+                // was cut off — the "12…" in the field report. A measurement
+                // that is scaled down is still right; a measurement that is
+                // truncated is wrong, so the floor clears the worst case.
+                .minimumScaleFactor(0.4)
             Text(label)
                 .font(ForestixType.sectionHead)
-                .tracking(1.2)
+                .tracking(0.8)
                 .foregroundStyle(ForestixPalette.textTertiary)
+                .lineLimit(1)
+                .allowsTightening(true)
+                .minimumScaleFactor(0.8)
         }
+        // Keeps the caps off the hairline dividers either side.
+        .padding(.horizontal, ForestixSpace.xxs)
         .frame(maxWidth: .infinity)
     }
 

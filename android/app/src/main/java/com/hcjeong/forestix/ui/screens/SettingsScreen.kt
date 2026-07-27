@@ -296,6 +296,29 @@ fun SettingsScreen(nav: NavController) {
                 }
             }
 
+            // MARK: - 2b. Measuring
+            // FIELD REPORT F10 — the cruise tally chains diameter → height by
+            // default. Cruisers who only want diameters turn it off here.
+            // Strings and the stored key are identical on iOS.
+            FormSection(
+                header = "Measuring",
+                footer = "After you accept a diameter in cruise, Height opens for " +
+                    "the same tree. Skip returns to the tally.",
+            ) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Measure height after diameter",
+                        style = type.body,
+                        color = colors.textPrimary,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Switch(
+                        checked = settings.measureHeightAfterDiameter,
+                        onCheckedChange = { env.settings.setMeasureHeightAfterDiameter(it) },
+                    )
+                }
+            }
+
             // MARK: - 3. Calibration (navigation row, iOS NavigationLink)
             FormSection(
                 header = "Calibration",

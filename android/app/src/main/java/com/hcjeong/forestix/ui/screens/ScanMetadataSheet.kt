@@ -292,7 +292,10 @@ private fun capitalizedTag(raw: String): String =
 /// code trails as a dim secondary suffix (" · DF"). Selecting the row
 /// still stores the code — this only reshapes what's shown. Mirrors the
 /// iOS ScanMetadataSheet.pickerLabel AttributedString.
-private fun speciesPickerLabel(name: String, code: String, dim: Color): AnnotatedString =
+///
+/// `internal` because the per-tree report's species picker (F8) uses the
+/// identical treatment — one definition, not two that can drift.
+internal fun speciesPickerLabel(name: String, code: String, dim: Color): AnnotatedString =
     buildAnnotatedString {
         append(name)
         withStyle(SpanStyle(color = dim, fontSize = 12.sp)) {

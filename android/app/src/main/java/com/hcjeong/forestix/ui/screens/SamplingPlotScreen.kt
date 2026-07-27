@@ -40,6 +40,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
@@ -152,6 +153,7 @@ fun SamplingPlotScreen(nav: NavController) {
         // (16 top inset + 44 button + 8 gap ⇒ top 68), iOS topControls.
         Column(
             Modifier.align(Alignment.TopCenter)
+                .statusBarsPadding()
                 .padding(top = 68.dp, start = ForestixSpace.md, end = ForestixSpace.md)
                 .clip(ForestixRadius.card).background(Color.Black.copy(alpha = 0.55f)).padding(10.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),

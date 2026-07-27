@@ -142,8 +142,9 @@ public struct HeightScanScreen: View {
     private let projectID: String?
     private let treeNumber: Int?
 
-    /// FIELD REPORT F11 — tapping the top-right plot mini-map re-opens plot
-    /// setup so radius / centre can be changed after the first placement.
+    /// Re-open plot setup, to change radius / centre after the first
+    /// placement. Reached from the ENLARGED plot view that the top-right
+    /// mini-map now opens — the tap itself no longer jumps into re-setup.
     /// nil on hosts with no plot to edit, and then the card stays inert.
     private let onEditPlot: (() -> Void)?
 
@@ -179,7 +180,8 @@ public struct HeightScanScreen: View {
                                centerLat: nil,
                                centerLon: nil,
                                treeCount: 0,
-                               trees: [])
+                               trees: [],
+                               unitSystem: settings.unitSystem)
     }
 
     // MARK: - Crown sub-flow state
@@ -243,14 +245,14 @@ public struct HeightScanScreen: View {
                 }
 
                 // Plot mini-map — top-right, same row as the GPS badge.
-                // TAPPABLE in cruise (F11): it re-opens plot setup so the
-                // radius / centre can still be changed. Hidden with the rest
-                // of the 2D chrome during the Accept snapshot blackout.
+                // TAPPABLE in cruise: it opens the enlarged plot view, and
+                // plot re-setup is a control inside that. Hidden with the
+                // rest of the 2D chrome during the Accept snapshot blackout.
                 if let info = miniMapInfo {
                     VStack(spacing: 0) {
                         HStack {
                             Spacer()
-                            PlotMiniMapWidget(info: info, onTap: onEditPlot)
+                            PlotMiniMapWidget(info: info, onEditPlot: onEditPlot)
                                 .padding(.trailing, ForestixSpace.md)
                         }
                         .padding(.top, 22)

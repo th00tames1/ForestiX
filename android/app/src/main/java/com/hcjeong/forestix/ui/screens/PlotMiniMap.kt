@@ -20,18 +20,42 @@
 //    through a circular EMA so a single noisy compass sample can't swing
 //    the map. When the AR path is unavailable (no/foreign anchor,
 //    tracking lost, compass dead) it falls back to the GPS-ENU offset of
-//    the live fix against the plot centre lat/lon; with neither, the YOU
-//    dot is simply omitted (never drawn at a made-up angle).
-//  * TREES — GPS-ENU offsets of each measured tree's Accept-time fix
-//    against the plot centre; dots outside the ring clamp to the ring
-//    edge (YOU clamps the same way — iOS point()). Quick-plot mode
-//    (ActiveSamplingPlot without a cruise plot) shows ring + YOU only.
+//    the live fix against the plot centre lat/lon — through the SAME age
+//    gate the map's inside/outside verdict uses (freshFixOrNull), because
+//    a fix this card cannot vouch for is not a position it may draw. With
+//    neither source the YOU dot is simply omitted (never drawn at a
+//    made-up angle).
+//  * TREES — each measured tree's position in the plot's OWN local frame.
+//    Preferred source is the bearing + distance from centre stored on the
+//    tree row at Accept (that IS the plot-local frame); when that pair is
+//    missing it falls back to the ENU offset of the tree's Accept-time GPS
+//    fix against the plot centre. A tree with NEITHER source is left out
+//    rather than drawn at the centre — the enlarged view says how many
+//    were left out. Quick-plot mode (ActiveSamplingPlot without a cruise
+//    plot) shows ring + YOU only.
+//
+// NOTHING IS EVER MOVED TO MAKE IT FIT. Marks are drawn where they
+// actually are; one that falls outside what the drawing can show becomes a
+// HOLLOW EDGE MARK on the rim, pointing the true way. Both YOU and the
+// tree dots used to CLAMP onto the ring instead, which drew a cruiser a
+// valley away standing on the plot boundary — the card inventing the one
+// fact it exists to report. A direction is less than a position; a wrong
+// position is worse than either.
+//
+// TAPPING the card opens an ENLARGED, centred view of the same plot
+// drawing (PlotPreviewDialog) — a cruiser tapping the plot preview
+// normally just wants a better look at it. That happens on EVERY host with
+// a plot to show; re-setup is a separate, clearly-labelled control INSIDE
+// the view ("Edit plot"), present only where there is a saved plot to
+// re-open. So the tap can no longer throw anybody straight into changing
+// the plot they only meant to read, and a host that cannot offer re-setup
+// still gets the bigger picture.
 //
 // CHEAP: one 5 Hz tick (the same cadence as the sampling boundary check)
 // updates a single state holder, quantized to 5 cm / 2° so sub-jitter
 // movement doesn't invalidate the card (iOS parity); tree offsets are
 // derived only when the tree list changes; everything draws in one
-// Canvas. Non-interactive.
+// Canvas.
 
 package com.hcjeong.forestix.ui.screens
 
@@ -50,13 +74,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.Icon
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.semantics
 import com.hcjeong.forestix.ui.clickableNoRipple
-import kotlin.math.roundToInt
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -72,6 +94,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
@@ -82,12 +105,16 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.ar.ArSessionHub
+import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.common.Units
 import com.hcjeong.forestix.data.cruise.Tree
 import com.hcjeong.forestix.positioning.GeoMath
 import com.hcjeong.forestix.positioning.LocationService
 import com.hcjeong.forestix.sensors.ConfidenceTier
 import com.hcjeong.forestix.ui.screens.cruise.CruiseCapture
+import com.hcjeong.forestix.ui.screens.cruise.freshFixOrNull
+import com.hcjeong.forestix.ui.screens.cruise.plotLengthSpoken
+import com.hcjeong.forestix.ui.screens.cruise.plotRadiusBadge
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixRadius
 import java.util.Locale
@@ -98,6 +125,26 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.flowOf
+// Enlarged plot view (the mini-map's tap target).
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import com.hcjeong.forestix.ui.theme.ForestixBorderedButton
+import com.hcjeong.forestix.ui.theme.ForestixProminentButton
+import com.hcjeong.forestix.ui.theme.ForestixSpace
 
 // Locked geometry/palette (same values on iOS).
 private val CARD_SIZE = 116.dp
@@ -116,9 +163,11 @@ fun scanPlotMiniMapVisible(): Boolean =
 /// ring + YOU with no tree dots. Emits nothing when neither exists.
 /// Callers hide it during the accept-snapshot chrome blackout.
 ///
-/// `onEditPlot` (field report F11) makes the card a tappable route back into
-/// plot setup. Hosts pass it only in cruise, where there is a saved plot to
-/// edit; null leaves the card inert, as it was.
+/// The card is TAPPABLE wherever it appears — the tap opens the enlarged
+/// plot view, which is what somebody tapping a small picture of their plot
+/// is asking for. `onEditPlot` is a separate question: hosts pass it only in
+/// cruise, where there is a saved plot to re-open, and it decides only
+/// whether the enlarged view offers an Edit control.
 @Composable
 fun BoxScope.ScanPlotMiniMap(onEditPlot: (() -> Unit)? = null) {
     // The cruise target is armed before navigation and cleared after the
@@ -162,8 +211,8 @@ fun BoxScope.ScanPlotMiniMap(onEditPlot: (() -> Unit)? = null) {
             .padding(top = MeasureTopStripTop, end = 16.dp),
         // Only a CRUISE session has a persisted plot whose radius/centre a
         // setup session can rewrite; the quick sampling ring has nothing to
-        // re-open, so its card stays inert (F11).
-        onTap = onEditPlot?.takeIf { cruise != null },
+        // re-open, so its card stays inert.
+        onEditPlot = onEditPlot?.takeIf { cruise != null },
     )
 }
 
@@ -191,13 +240,90 @@ fun BoxScope.SamplingPlotMiniMap(plotNumber: Int? = null) {
 // MARK: - Card
 
 private data class MiniYou(val eastM: Float, val northM: Float, val facingDeg: Float?)
-private data class MiniTreeDot(val eastM: Float, val northM: Float, val warn: Boolean)
 
-/// `onTap` — FIELD REPORT F11. The card is a WAY BACK INTO PLOT SETUP: once
-/// the first (+) had placed the sampling plot there was no route to change
-/// its radius or centre, and tapping the preview of the thing you want to
-/// edit is the obvious one. null keeps the card inert (quick-measure, and
-/// any host with no plot to edit), exactly as it used to be.
+/// One measured tree, placed in the plot's own north-up local frame.
+/// `number` is the cruiser-facing tree number — the only label the
+/// enlarged view draws (no coordinates, no row ids).
+private data class MiniTreeDot(
+    val eastM: Float,
+    val northM: Float,
+    val warn: Boolean,
+    val number: Int,
+)
+
+/// Placed trees plus the count that could NOT be placed, so the enlarged
+/// view can say so instead of quietly showing fewer dots than trees.
+private data class MiniTreeDots(val dots: List<MiniTreeDot>, val omitted: Int)
+
+/// Tree positions in the plot's own local frame (north-up metres from the
+/// centre), from whichever recorded source is actually populated:
+///
+///  1. `bearingFromCenterDeg` + `distanceFromCenterM` on the tree row.
+///     These are written automatically at Accept (the manual editor was
+///     removed, the fields were not) and ARE the plot-local frame, so they
+///     are the first choice and the only one that works when the plot
+///     centre was never fixed to a real lat/lon.
+///  2. The tree's Accept-time GPS fix against the plot centre lat/lon —
+///     the source this widget used before, still the one that places a row
+///     saved while the plot centre was the (0,0) sentinel and given a real
+///     centre afterwards.
+///
+/// A tree with neither is COUNTED, not drawn: putting it at the centre
+/// would invent a position, and reading a gap that isn't there is worse
+/// than being told a tree is missing from the picture.
+private fun miniTreeDots(
+    trees: List<Tree>,
+    plotCenterLat: Double?,
+    plotCenterLon: Double?,
+): MiniTreeDots {
+    var omitted = 0
+    val dots = trees.mapNotNull { t ->
+        val local = treeLocalOffset(t, plotCenterLat, plotCenterLon)
+        if (local == null) {
+            omitted++
+            null
+        } else {
+            MiniTreeDot(
+                eastM = local.first,
+                northM = local.second,
+                warn = t.dbhConfidence != ConfidenceTier.GREEN ||
+                    (t.heightConfidence != null && t.heightConfidence != ConfidenceTier.GREEN),
+                number = t.treeNumber,
+            )
+        }
+    }
+    return MiniTreeDots(dots, omitted)
+}
+
+/// (east, north) metres from the plot centre, or null when the row carries
+/// no usable position. See [miniTreeDots] for the source order.
+private fun treeLocalOffset(
+    t: Tree,
+    plotCenterLat: Double?,
+    plotCenterLon: Double?,
+): Pair<Float, Float>? {
+    val d = t.distanceFromCenterM
+    val b = t.bearingFromCenterDeg
+    if (d != null && b != null && d.isFinite() && b.isFinite() && d >= 0f) {
+        val th = Math.toRadians(b.toDouble())
+        return Pair((d * sin(th)).toFloat(), (d * cos(th)).toFloat())
+    }
+    val lat = t.latitude
+    val lon = t.longitude
+    if (lat != null && lon != null && plotCenterLat != null && plotCenterLon != null) {
+        val dist = GeoMath.distanceM(plotCenterLat, plotCenterLon, lat, lon)
+        val bear = Math.toRadians(GeoMath.bearingDeg(plotCenterLat, plotCenterLon, lat, lon))
+        if (dist.isFinite()) return Pair((dist * sin(bear)).toFloat(), (dist * cos(bear)).toFloat())
+    }
+    return null
+}
+
+/// The card's tap always opens the ENLARGED plot view. `onEditPlot` only
+/// decides whether that view also offers "Edit plot": null means this host
+/// has no plot setup to re-open (the quick sampling ring), so the control is
+/// absent rather than present and dead. It used to gate the enlarged view
+/// itself, which meant hosts that could not offer re-setup showed no bigger
+/// picture at all.
 @Composable
 private fun PlotMiniMapCard(
     plotNumber: Int?,
@@ -207,11 +333,17 @@ private fun PlotMiniMapCard(
     radiusOverrideM: Double?,
     requireLinkedPlotId: UUID?,
     modifier: Modifier,
-    onTap: (() -> Unit)? = null,
+    onEditPlot: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val controller = ArSessionHub.controller
     val radiusM = radiusOverrideM ?: ArSessionHub.plotRadiusM
+    // The spoken radius follows the unit system, like every other length on
+    // these screens (they all read settings.unitSystem). It used to be
+    // hard-coded to metres, so a cruiser working in feet heard the plot
+    // described in a unit they had told the app they do not use.
+    val unitSystem =
+        LocalAppEnvironment.current.settings.state.collectAsStateWithLifecycle().value.unitSystem
 
     // Shared GPS (ref-counted subscriber) + camera-forward compass. No
     // permission launcher here: the scan screens' GPS badge / the cruise
@@ -260,8 +392,21 @@ private fun PlotMiniMapCard(
                 val facing = if (camYaw != null) camYaw + deltaDeg else compass.azimuthTrueDeg
                 MiniYou(quantizeM(east), quantizeM(north), facing?.let { quantizeDeg(it) })
             } else {
-                // GPS-ENU fallback: live fix vs the plot centre lat/lon.
-                val fix = location.latestSnapshot.value
+                // GPS-ENU fallback: the live fix against the plot centre —
+                // through THE SAME age gate the map's inside/outside verdict
+                // uses, evaluated fresh on every 5 Hz tick so the mark
+                // vanishes within 200 ms of the fix ageing out.
+                //
+                // This path used to take whatever the shared location
+                // service still held, with no test at all — the very fallback
+                // the verdict deliberately refuses. The service keeps its
+                // last snapshot for the life of the process and hands it to
+                // the next screen that asks, so a fix from the previous
+                // plot, a valley away and hours old, was drawn as the
+                // cruiser's position on a card that sits permanently on the
+                // AR screens.
+                val fix = freshFixOrNull(
+                    location.latestSnapshot.value, System.currentTimeMillis())
                 if (fix != null && plotCenterLat != null && plotCenterLon != null) {
                     val d = GeoMath.distanceM(plotCenterLat, plotCenterLon, fix.latitude, fix.longitude)
                     val b = Math.toRadians(GeoMath.bearingDeg(plotCenterLat, plotCenterLon, fix.latitude, fix.longitude))
@@ -279,22 +424,10 @@ private fun PlotMiniMapCard(
         }
     }
 
-    // Tree ENU offsets — derived only when the tree list / centre change
-    // (Accept-time events), never on the tick.
+    // Tree offsets in the plot's local frame — derived only when the tree
+    // list / centre change (Accept-time events), never on the tick.
     val treeDots = remember(trees, plotCenterLat, plotCenterLon) {
-        if (plotCenterLat == null || plotCenterLon == null) {
-            emptyList()
-        } else {
-            trees.mapNotNull { t ->
-                val lat = t.latitude ?: return@mapNotNull null
-                val lon = t.longitude ?: return@mapNotNull null
-                val d = GeoMath.distanceM(plotCenterLat, plotCenterLon, lat, lon)
-                val b = Math.toRadians(GeoMath.bearingDeg(plotCenterLat, plotCenterLon, lat, lon))
-                val warn = t.dbhConfidence != ConfidenceTier.GREEN ||
-                    (t.heightConfidence != null && t.heightConfidence != ConfidenceTier.GREEN)
-                MiniTreeDot((d * sin(b)).toFloat(), (d * cos(b)).toFloat(), warn)
-            }
-        }
+        miniTreeDots(trees, plotCenterLat, plotCenterLon)
     }
 
     val okColor = Forestix.colors.confidenceOk
@@ -302,62 +435,87 @@ private fun PlotMiniMapCard(
 
     val headerText =
         if (plotNumber != null) "PLOT $plotNumber · ${trees.size}" else "PLOT"
+
+    // The enlarged view the tap opens. Lives here so it reads the same live
+    // YOU tick and the same tree offsets the card already has.
+    var enlarged by remember { mutableStateOf(false) }
+
     Box(
         modifier
             .size(CARD_SIZE)
             .clip(ForestixRadius.card)
             .background(Color.Black.copy(alpha = 0.55f))
-            // Tappable cards carry the brighter AR-cyan edge the rest of the
-            // plot chrome uses for "this is the plot, and you can touch it";
-            // inert ones keep the old hairline.
-            .border(
-                if (onTap == null) 0.5.dp else 1.dp,
-                if (onTap == null) Color.White.copy(alpha = 0.18f) else RING_CYAN.copy(alpha = 0.75f),
-                ForestixRadius.card,
-            )
-            .then(
-                if (onTap == null) {
-                    Modifier
-                } else {
-                    Modifier
-                        .clickableNoRipple(onTap)
-                        .semantics {
-                            contentDescription =
-                                "Edit plot. ${headerText.lowercase(Locale.US)}, " +
-                                "radius ${radiusM.roundToInt()} metres"
-                            onClick(label = "Reopens plot setup to change the radius or centre") {
-                                onTap(); true
-                            }
-                        }
-                },
-            ),
+            // The card carries the brighter AR-cyan edge the rest of the
+            // plot chrome uses for "this is the plot, and you can touch it".
+            .border(1.dp, RING_CYAN.copy(alpha = 0.75f), ForestixRadius.card)
+            // ALWAYS tappable: the tap opens a bigger picture of the plot,
+            // which is worth having whether or not this host can also offer
+            // re-setup. It used to be gated on the edit callback, so during
+            // a height measurement the enlarged view did not open at all.
+            .clickableNoRipple { enlarged = true }
+            .semantics {
+                contentDescription =
+                    "Show a bigger plot view. ${headerText.lowercase(Locale.US)}, " +
+                        "radius ${plotLengthSpoken(radiusM, unitSystem)}"
+                onClick(label = "Opens a larger view of the plot and the trees measured so far") {
+                    enlarged = true; true
+                }
+            },
     ) {
         Canvas(Modifier.fillMaxSize()) {
             val c = Offset(size.width / 2f, size.height / 2f)
             val ringR = size.minDimension * RING_FRACTION / 2f
             val mToPx = (ringR / radiusM.coerceAtLeast(0.5)).toFloat()
+            // How far from the centre this card can honestly place a mark:
+            // the drawing box, less room for the mark itself. It is WIDER
+            // than the ring, so a position just outside the plot still draws
+            // where it really is. Past it a mark becomes an edge arrow —
+            // never a mark pulled back onto the boundary.
+            val extent = size.minDimension / 2f - 6.dp.toPx()
 
             // Plot boundary ring (AR-ring cyan) + centre dot — the map is
             // plot-relative, not user-centred.
             drawCircle(RING_CYAN.copy(alpha = 0.9f), radius = ringR, center = c, style = Stroke(width = 1.5.dp.toPx()))
             drawCircle(Color.White, radius = 1.5.dp.toPx(), center = c)
 
-            // Measured trees — confidence-tinted, clamped to the ring edge.
-            treeDots.forEach { t ->
-                val p = enToPx(t.eastM, t.northM, mToPx, ringR, c)
-                drawCircle(if (t.warn) warnColor else okColor, radius = 2.5.dp.toPx(), center = p)
+            // Measured trees — confidence-tinted, drawn where they are.
+            // One further out than the card reaches becomes a hollow mark
+            // on the rim: still that colour, still that direction, no
+            // longer claiming a spot on the boundary.
+            treeDots.dots.forEach { t ->
+                val p = enToPoint(t.eastM, t.northM, mToPx, extent, c) ?: return@forEach
+                val tint = if (t.warn) warnColor else okColor
+                if (p.beyond) {
+                    drawCircle(
+                        tint, radius = 2.5.dp.toPx(), center = p.at,
+                        style = Stroke(width = 1.dp.toPx()),
+                    )
+                } else {
+                    drawCircle(tint, radius = 2.5.dp.toPx(), center = p.at)
+                }
             }
 
             // YOU — 7 dp you-blue dot + heading wedge (iOS youMark: a
             // 7×5 triangle orbiting 6.5 dp out at the heading angle).
+            // Beyond the card's reach it is an edge arrow instead: the
+            // cruiser is off the picture in that direction, and the solid
+            // "you are here" dot would be a claim about a place they are
+            // demonstrably not standing.
             you?.let { u ->
-                val p = enToPx(u.eastM, u.northM, mToPx, ringR, c)
+                val p = enToPoint(u.eastM, u.northM, mToPx, extent, c) ?: return@let
+                if (p.beyond) {
+                    drawEdgeArrow(
+                        p.at, c, YOU_BLUE, Color.White.copy(alpha = 0.85f),
+                        sizePx = 11.dp.toPx(), strokePx = 1.5.dp.toPx(),
+                    )
+                    return@let
+                }
                 u.facingDeg?.let { f ->
                     val a = Math.toRadians(f.toDouble())
                     val dir = Offset(sin(a).toFloat(), -cos(a).toFloat())
                     val perp = Offset(-dir.y, dir.x)
-                    val tip = p + dir * 9.dp.toPx()
-                    val base = p + dir * 4.dp.toPx()
+                    val tip = p.at + dir * 9.dp.toPx()
+                    val base = p.at + dir * 4.dp.toPx()
                     val b1 = base + perp * 3.5.dp.toPx()
                     val b2 = base - perp * 3.5.dp.toPx()
                     val wedge = Path().apply {
@@ -368,8 +526,8 @@ private fun PlotMiniMapCard(
                     }
                     drawPath(wedge, YOU_BLUE)
                 }
-                drawCircle(YOU_BLUE, radius = 3.5.dp.toPx(), center = p)
-                drawCircle(Color.White.copy(alpha = 0.85f), radius = 3.5.dp.toPx(), center = p, style = Stroke(width = 1.dp.toPx()))
+                drawCircle(YOU_BLUE, radius = 3.5.dp.toPx(), center = p.at)
+                drawCircle(Color.White.copy(alpha = 0.85f), radius = 3.5.dp.toPx(), center = p.at, style = Stroke(width = 1.dp.toPx()))
             }
         }
 
@@ -381,20 +539,17 @@ private fun PlotMiniMapCard(
             color = Color.White.copy(alpha = 0.85f),
             modifier = Modifier.align(Alignment.TopStart).padding(start = 7.dp, top = 6.dp),
         )
-        // The affordance (F11): the app's standard "edit this" pencil, in the
-        // one corner the card's content never occupies. Only drawn when there
-        // is somewhere to go.
-        if (onTap != null) {
-            Icon(
-                Icons.Filled.Edit,
-                contentDescription = null,
-                tint = Color.White.copy(alpha = 0.9f),
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(end = 6.dp, top = 5.dp)
-                    .size(13.dp),
-            )
-        }
+        // The affordance: the standard "make this bigger" glyph, in the one
+        // corner the card's content never occupies.
+        Icon(
+            Icons.Filled.Fullscreen,
+            contentDescription = null,
+            tint = Color.White.copy(alpha = 0.9f),
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(end = 6.dp, top = 5.dp)
+                .size(13.dp),
+        )
         // North tick — just inside the ring's top point (ring top sits at
         // 58 − 45.2 ≈ 13 dp; iOS centres the glyph 7 pt below that).
         Text(
@@ -403,11 +558,281 @@ private fun PlotMiniMapCard(
             color = Color.White.copy(alpha = 0.75f),
             modifier = Modifier.align(Alignment.TopCenter).padding(top = 14.dp),
         )
+        // The DRAWN radius follows the unit system, exactly as the spoken
+        // one above it does. It was hard-coded to metres, so a cruiser
+        // working in feet was told feet and shown metres off one card.
         Text(
-            String.format(Locale.US, "%.0f m radius", radiusM),
+            plotRadiusBadge(radiusM, unitSystem),
             style = MiniMapLabelStyle,
             color = Color.White.copy(alpha = 0.75f),
             modifier = Modifier.align(Alignment.BottomEnd).padding(end = 7.dp, bottom = 5.dp),
+        )
+    }
+
+    // What the tap opens: the same plot, big enough to read, over whatever
+    // screen the card is floating on. Opening it needs a PLOT, not an edit
+    // destination — `canEditPlot` decides only whether the Edit control is
+    // in there with it.
+    if (enlarged) {
+        PlotPreviewDialog(
+            plotNumber = plotNumber,
+            radiusM = radiusM,
+            unitSystem = unitSystem,
+            treeCount = trees.size,
+            treeDots = treeDots,
+            you = you,
+            canEditPlot = onEditPlot != null,
+            onEditPlot = {
+                enlarged = false
+                onEditPlot?.invoke()
+            },
+            onDismiss = { enlarged = false },
+        )
+    }
+}
+
+// MARK: - Enlarged plot view
+
+/// Panel width cap — wide enough to read a 30 m plot's tree spread on a
+/// phone, narrow enough to stay a panel rather than a screen.
+private val PREVIEW_MAX_WIDTH = 380.dp
+
+/// Ring diameter vs the drawing box. Larger than the card's: the enlarged
+/// view has no header furniture crowding the corners.
+private const val PREVIEW_RING_FRACTION = 0.84f
+
+/// The AR ring's dark halo, in 2D. A wider dark stroke UNDER the bright
+/// cyan rim keeps the boundary legible on a light panel as well as a dark
+/// one — the same trick ArSessionHub uses in the AR scene, where the ring
+/// has to read on sunlit litter and in deep shade.
+private val RING_HALO = Color(red = 0.03f, green = 0.06f, blue = 0.08f, alpha = 0.55f)
+
+/// Above this many trees the numbers are dropped and only the dots are
+/// drawn — past it the labels collide and the picture reads worse, not
+/// better. Coverage (which is what the view is for) survives either way.
+private const val PREVIEW_MAX_LABELS = 30
+
+/// The enlarged plot view. The SAME drawing as the mini-map, at a size a
+/// cruiser can read at arm's length, with every measured tree that has a
+/// recorded position on it: coverage and gaps at a glance. Re-setup is one
+/// clearly-labelled control in here, so tapping the preview can no longer
+/// drop anybody into changing the plot they only meant to look at.
+@Composable
+private fun PlotPreviewDialog(
+    plotNumber: Int?,
+    radiusM: Double,
+    /// The cruiser's units — the drawn radius follows them here for the
+    /// same reason it does on the card that opened this view.
+    unitSystem: UnitSystem,
+    treeCount: Int,
+    treeDots: MiniTreeDots,
+    you: MiniYou?,
+    /// False on hosts with no re-setup destination (the quick sampling ring,
+    /// and any host that has no saved plot to re-open); the Edit plot button
+    /// is then simply absent rather than present and dead. Mirrors iOS
+    /// PlotMapEnlargedView.canEditPlot.
+    canEditPlot: Boolean,
+    onEditPlot: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val colors = Forestix.colors
+    val type = Forestix.type
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth(0.92f)
+                .widthIn(max = PREVIEW_MAX_WIDTH)
+                .clip(ForestixRadius.card)
+                .background(colors.surface)
+                .padding(ForestixSpace.md),
+            verticalArrangement = Arrangement.spacedBy(ForestixSpace.sm),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    if (plotNumber != null) "Plot $plotNumber" else "Plot",
+                    style = type.bodyBold,
+                    color = colors.textPrimary,
+                    modifier = Modifier.weight(1f),
+                )
+                // Obvious dismiss, on a full-size tap target (gloves).
+                Box(
+                    Modifier
+                        .size(44.dp)
+                        .clickableNoRipple(onDismiss)
+                        .semantics {
+                            contentDescription = "Close the plot view"
+                            onClick(label = "Closes the plot view") { onDismiss(); true }
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Filled.Close,
+                        contentDescription = null,
+                        tint = colors.textSecondary,
+                        modifier = Modifier.size(22.dp),
+                    )
+                }
+            }
+
+            PlotPreviewDiagram(
+                radiusM = radiusM,
+                dots = treeDots.dots,
+                you = you,
+                modifier = Modifier.fillMaxWidth().aspectRatio(1f),
+            )
+
+            val treeWord = if (treeCount == 1) "tree" else "trees"
+            Text(
+                "$treeCount $treeWord measured · " + plotRadiusBadge(radiusM, unitSystem),
+                style = type.caption,
+                color = colors.textSecondary,
+            )
+            // Never let the picture quietly show fewer trees than were
+            // measured: a gap the cruiser walks back to fill has to be a
+            // real gap.
+            if (treeDots.omitted > 0) {
+                val n = treeDots.omitted
+                Text(
+                    "$n ${if (n == 1) "tree isn't" else "trees aren't"} shown — " +
+                        "no position was recorded",
+                    style = type.caption,
+                    color = colors.textSecondary,
+                )
+            }
+
+            Spacer(Modifier.height(ForestixSpace.xxs))
+            if (canEditPlot) {
+                ForestixProminentButton(
+                    label = "Edit plot",
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = onEditPlot,
+                )
+            }
+            ForestixBorderedButton(
+                label = "Close",
+                modifier = Modifier.fillMaxWidth(),
+                onClick = onDismiss,
+            )
+        }
+    }
+}
+
+/// The enlarged drawing itself: north-up, plot-relative, everything in the
+/// plot's own local frame. Marks carry a casing in the panel colour so the
+/// picture stays legible whichever appearance the phone is in.
+@Composable
+private fun PlotPreviewDiagram(
+    radiusM: Double,
+    dots: List<MiniTreeDot>,
+    you: MiniYou?,
+    modifier: Modifier,
+) {
+    val colors = Forestix.colors
+    val okColor = colors.confidenceOk
+    val warnColor = colors.confidenceWarn
+    val ink = colors.textPrimary
+    val casing = colors.surface
+    val measurer = rememberTextMeasurer()
+    val labelStyle = remember(ink, casing) {
+        TextStyle(
+            fontSize = 9.sp,
+            fontWeight = FontWeight.SemiBold,
+            fontFamily = FontFamily.Monospace,
+            color = ink,
+            shadow = Shadow(casing, Offset.Zero, 4f),
+        )
+    }
+    val showLabels = dots.size <= PREVIEW_MAX_LABELS
+
+    Box(modifier) {
+        Canvas(Modifier.fillMaxSize()) {
+            val c = Offset(size.width / 2f, size.height / 2f)
+            val ringR = size.minDimension * PREVIEW_RING_FRACTION / 2f
+            val mToPx = (ringR / radiusM.coerceAtLeast(0.5)).toFloat()
+            // The furthest this panel can honestly place a mark (see the
+            // card's own `extent`): wider than the ring, so a position just
+            // outside the plot draws where it really is.
+            val extent = size.minDimension / 2f - 10.dp.toPx()
+
+            // Plot boundary: dark halo under the AR-ring cyan.
+            drawCircle(RING_HALO, radius = ringR, center = c, style = Stroke(width = 4.dp.toPx()))
+            drawCircle(RING_CYAN, radius = ringR, center = c, style = Stroke(width = 2.dp.toPx()))
+
+            // Plot centre — a CROSS, so it can never be read as one of the
+            // round tree dots.
+            val arm = 8.dp.toPx()
+            listOf(casing to 5.dp.toPx(), ink to 2.dp.toPx()).forEach { (colour, w) ->
+                drawLine(colour, Offset(c.x - arm, c.y), Offset(c.x + arm, c.y), strokeWidth = w)
+                drawLine(colour, Offset(c.x, c.y - arm), Offset(c.x, c.y + arm), strokeWidth = w)
+            }
+
+            // Measured trees — confidence-tinted, casing-ringed, drawn where
+            // they are. One beyond the panel's reach becomes a hollow rim
+            // mark, and loses its number: a label half-cut by the edge reads
+            // as a DIFFERENT tree, which is its own small lie.
+            val dotR = 4.dp.toPx()
+            dots.forEach { t ->
+                val p = enToPoint(t.eastM, t.northM, mToPx, extent, c) ?: return@forEach
+                val tint = if (t.warn) warnColor else okColor
+                if (p.beyond) {
+                    drawCircle(casing, radius = dotR + 1.5.dp.toPx(), center = p.at, style = Stroke(width = 2.dp.toPx()))
+                    drawCircle(tint, radius = dotR, center = p.at, style = Stroke(width = 1.5.dp.toPx()))
+                    return@forEach
+                }
+                drawCircle(casing, radius = dotR + 1.5.dp.toPx(), center = p.at)
+                drawCircle(tint, radius = dotR, center = p.at)
+                if (showLabels) {
+                    val layout = measurer.measure(AnnotatedString(t.number.toString()), labelStyle)
+                    drawText(
+                        layout,
+                        topLeft = Offset(
+                            p.at.x - layout.size.width / 2f,
+                            p.at.y + dotR + 2.dp.toPx(),
+                        ),
+                    )
+                }
+            }
+
+            // YOU — same mark as the card, scaled up and casing-ringed;
+            // the same edge arrow when the cruiser is off the picture.
+            you?.let { u ->
+                val p = enToPoint(u.eastM, u.northM, mToPx, extent, c) ?: return@let
+                if (p.beyond) {
+                    drawEdgeArrow(
+                        p.at, c, YOU_BLUE, casing,
+                        sizePx = 18.dp.toPx(), strokePx = 2.dp.toPx(),
+                    )
+                    return@let
+                }
+                u.facingDeg?.let { f ->
+                    val a = Math.toRadians(f.toDouble())
+                    val dir = Offset(sin(a).toFloat(), -cos(a).toFloat())
+                    val perp = Offset(-dir.y, dir.x)
+                    val tip = p.at + dir * 15.dp.toPx()
+                    val base = p.at + dir * 6.dp.toPx()
+                    val b1 = base + perp * 5.dp.toPx()
+                    val b2 = base - perp * 5.dp.toPx()
+                    val wedge = Path().apply {
+                        moveTo(tip.x, tip.y)
+                        lineTo(b1.x, b1.y)
+                        lineTo(b2.x, b2.y)
+                        close()
+                    }
+                    drawPath(wedge, YOU_BLUE)
+                }
+                drawCircle(YOU_BLUE, radius = 5.5.dp.toPx(), center = p.at)
+                drawCircle(casing, radius = 5.5.dp.toPx(), center = p.at, style = Stroke(width = 1.5.dp.toPx()))
+            }
+        }
+        // North tick, same convention as the card.
+        Text(
+            "N",
+            style = MiniMapLabelStyle,
+            color = colors.textSecondary,
+            modifier = Modifier.align(Alignment.TopCenter),
         )
     }
 }
@@ -435,24 +860,74 @@ private fun quantizeDeg(v: Double): Float {
     return (Math.round(n / 2.0) * 2.0).toFloat()
 }
 
-/// North-up ENU metres → card pixels (+E right, +N up), clamped to the
-/// ring edge when outside the plot (iOS point()).
-private fun enToPx(
+/// A placed mark: WHERE it goes, and whether that is its real position or
+/// the edge of what the drawing can show.
+private data class MiniPoint(val at: Offset, val beyond: Boolean)
+
+/// North-up ENU metres → drawing pixels (+E right, +N up).
+///
+/// NOTHING IS RELOCATED TO MAKE IT FIT. The returned point is the mark's
+/// TRUE scaled position whenever that lands inside `extentPx` (the largest
+/// radius this drawing can hold). Past that the point sits ON the extent's
+/// rim in the true direction and `beyond` is true, so the caller draws a
+/// hollow EDGE MARK — "that way, off the picture" — instead of a normal one.
+///
+/// It used to clamp to the RING, the one place it must never put anything:
+/// an offset of 800 m came back as a mark standing exactly ON the plot
+/// boundary, so a cruiser a valley away read as a cruiser at the plot edge.
+/// That is not a rounding error, it is a fabricated fact — and it was the
+/// fact the card exists to report. Null for a non-finite offset: no
+/// position at all beats a mark at an arbitrary spot.
+private fun enToPoint(
     eastM: Float,
     northM: Float,
     mToPx: Float,
-    ringR: Float,
+    extentPx: Float,
     c: Offset,
-): Offset {
-    var x = eastM * mToPx
-    var y = -northM * mToPx
+): MiniPoint? {
+    val x = eastM * mToPx
+    val y = -northM * mToPx
+    if (!x.isFinite() || !y.isFinite()) return null
     val r = sqrt(x * x + y * y)
-    if (r > ringR && r > 0f) {
-        val s = ringR / r
-        x *= s
-        y *= s
+    if (r > extentPx && r > 0f) {
+        val s = extentPx / r
+        return MiniPoint(Offset(c.x + x * s, c.y + y * s), beyond = true)
     }
-    return Offset(c.x + x, c.y + y)
+    return MiniPoint(Offset(c.x + x, c.y + y), beyond = false)
+}
+
+/// The "off the picture, that way" mark: a HOLLOW arrowhead on the rim of
+/// the drawable extent, pointing outward along the true bearing.
+///
+/// Hollow, and on the rim rather than on the ring, so it can never be read
+/// as the thing itself standing at that spot. It reports a DIRECTION and
+/// withholds a POSITION, which is exactly what is known about something
+/// further out than the drawing reaches.
+private fun DrawScope.drawEdgeArrow(
+    at: Offset,
+    centre: Offset,
+    tint: Color,
+    casing: Color,
+    sizePx: Float,
+    strokePx: Float,
+) {
+    val d = at - centre
+    val len = sqrt(d.x * d.x + d.y * d.y)
+    if (!len.isFinite() || len <= 0f) return
+    val dir = Offset(d.x / len, d.y / len)
+    val perp = Offset(-dir.y, dir.x)
+    val tip = at + dir * (sizePx * 0.55f)
+    val base = at - dir * (sizePx * 0.45f)
+    val b1 = base + perp * (sizePx * 0.45f)
+    val b2 = base - perp * (sizePx * 0.45f)
+    val head = Path().apply {
+        moveTo(tip.x, tip.y)
+        lineTo(b1.x, b1.y)
+        lineTo(b2.x, b2.y)
+        close()
+    }
+    drawPath(head, casing, style = Stroke(width = strokePx * 2.2f))
+    drawPath(head, tint, style = Stroke(width = strokePx))
 }
 
 // MARK: - AR→north alignment

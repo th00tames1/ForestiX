@@ -15,6 +15,11 @@
 // PIN markers with the title inside and D/H/C badge chips beneath, marker
 // tap hit-testing, a pulsing "you" dot, and an observable MapCameraState
 // whose visibleBounds() feeds the offline tile downloader.
+//
+// The SAMPLING PLOT overlay (MapPlotOverlay) draws the cruiser's plot at
+// true ground scale — boundary, labelled range rings, true-bearing compass
+// badges, centre cross, and the outside-the-plot warning state — between
+// the app's other overlays and its pins.
 
 package com.hcjeong.forestix.basemap
 
@@ -74,8 +79,10 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hcjeong.forestix.geo.CoordinateConversions
 import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixColors
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.atan
 import kotlin.math.ceil
 import kotlin.math.cos
@@ -85,18 +92,11 @@ import kotlin.math.ln
 import kotlin.math.log2
 import kotlin.math.pow
 import kotlin.math.roundToInt
+import kotlin.math.sin
 import kotlin.math.sinh
 import kotlin.math.tan
 
 // MARK: - Overlay models (mirror MapPolygon / Marker content on iOS)
-
-/// One closed outer ring. Defaults mirror the original iOS plot-map
-/// styling: `.green.opacity(0.18)` fill with a 2 pt green stroke.
-data class MapPolygonOverlay(
-    val ring: List<CoordinateConversions.LatLon>,
-    val fillColor: Color = Color(0xFF34C759).copy(alpha = 0.18f),
-    val strokeColor: Color = Color(0xFF34C759),
-)
 
 /// The IMPORTED SURVEY BOUNDARY (Map settings → Survey boundary). Drawn
 /// between the basemap layers and the app's own content, in WGS84 lon/lat.
@@ -116,6 +116,53 @@ data class MapPolylineOverlay(
     val points: List<CoordinateConversions.LatLon>,
     val color: Color = Color(0xFF34C759),
     val dashed: Boolean = true,
+)
+
+// MARK: - Sampling plot overlay (map home)
+
+/// One concentric RANGE RING inside the plot boundary: how far out it sits,
+/// and the label to draw on it. The label arrives ready-made because the
+/// renderer never converts units — the host owns "2 m" vs "20 ft".
+data class MapPlotRing(val radiusM: Double, val label: String)
+
+/// Where the cruiser stands relative to the plot boundary — and, crucially,
+/// the third answer: we do not know.
+///
+/// UNKNOWN is not a shade of INSIDE. It is the state whenever there is no
+/// usable live fix (none yet, or the last one is too old to stand for where
+/// the cruiser is now), and it gets its own drawing: neutral grey instead
+/// of a signal colour, a dashed boundary instead of a solid one, and the
+/// words on the map. Reading a calm accent-tinted circle as "I'm in the
+/// plot" when the app has no idea is exactly how trees end up tallied into
+/// the wrong plot.
+enum class MapPlotFix { INSIDE, OUTSIDE, UNKNOWN }
+
+/// The cruiser's SAMPLING PLOT drawn at TRUE GEOGRAPHIC SCALE, so the
+/// circle on screen is the circle on the ground: a translucent boundary
+/// disc the imagery reads through, concentric labelled range rings, N/E/S/W
+/// badges placed by TRUE BEARING (real offsets from the centre, projected
+/// like every other coordinate, so they stay right whatever the projection
+/// does), a centre cross, and — while the live fix is OUTSIDE — an
+/// emphasised boundary plus a dotted connector from the centre to that fix
+/// so the way back needs no thinking.
+///
+/// `state` UNKNOWN means NO USABLE LIVE FIX, and the drawing SAYS SO: the
+/// whole overlay goes neutral grey, the boundary turns dashed and a
+/// "No position" chip sits under the centre — the banner's own words — so
+/// the map alone can never be mistaken for "you are inside". `cruiser` is
+/// null in that state — there is no position to draw to, and the host is
+/// responsible for handing over only a position it believes (one shared
+/// freshness test decides that for the verdict and every mark alike).
+/// Colours come from the app's own tokens inside the renderer,
+/// so the plot matches the rest of the map furniture in both appearances.
+data class MapPlotOverlay(
+    val center: CoordinateConversions.LatLon,
+    val radiusM: Double,
+    val rings: List<MapPlotRing> = emptyList(),
+    val cruiser: CoordinateConversions.LatLon? = null,
+    val state: MapPlotFix = MapPlotFix.UNKNOWN,
+    /// Echoed back through MapView's onPlotTap when the boundary is tapped.
+    val id: String = "plot",
 )
 
 /// How a MapMarker renders. DOT is the original plot-map style (small
@@ -233,14 +280,22 @@ fun MapView(
     /// AppSettings.tileURLTemplate here (often transparent PNG tiles).
     overlayURLTemplate: String? = null,
     /// Imported survey boundary — over the tile layers, UNDER everything
-    /// the app itself draws (stratum polygons, pins, guide, you-dot).
+    /// the app itself draws (the plot, pins, guide, you-dot).
     boundary: List<MapBoundaryOverlay> = emptyList(),
-    polygons: List<MapPolygonOverlay> = emptyList(),
     polylines: List<MapPolylineOverlay> = emptyList(),
+    /// The cruiser's sampling plot at true ground scale — over the survey
+    /// boundary and the stratum/guide overlays, UNDER the you-dot and the
+    /// pins, so a pin is never buried in the plot's fill.
+    plot: MapPlotOverlay? = null,
     markers: List<MapMarker> = emptyList(),
     attribution: String? = null,
     /// Tap within ~24 dp of a marker's screen point → its `id`.
     onMarkerTap: ((String) -> Unit)? = null,
+    /// Tap within ~24 dp of the PLOT's boundary ring → its `id`. The ring is
+    /// the target, not the whole disc: the plot's own pin owns the centre,
+    /// and a disc-wide target would swallow every tap meant to dismiss a
+    /// peek card.
+    onPlotTap: ((String) -> Unit)? = null,
     /// Tap that hit no marker — the map home uses it to dismiss the peek card.
     onMapTap: (() -> Unit)? = null,
     /// Pulsing blue "you are here" dot (mock `.youdot`).
@@ -380,7 +435,7 @@ fun MapView(
                         }
                     }
                 }
-                .pointerInput(markers, onMarkerTap, onMapTap) {
+                .pointerInput(markers, plot, onMarkerTap, onPlotTap, onMapTap) {
                     detectTapGestures(
                         // iOS BasemapMapView doubleTapZoom: one level in,
                         // keeping the tapped point stationary.
@@ -404,7 +459,11 @@ fun MapView(
                             }
                         },
                         onTap = { tap ->
-                            if (onMarkerTap == null && onMapTap == null) return@detectTapGestures
+                            if (onMarkerTap == null && onMapTap == null &&
+                                onPlotTap == null
+                            ) {
+                                return@detectTapGestures
+                            }
                             // Same projection as the draw pass, evaluated with
                             // the camera as of the tap.
                             val worldPx = 256.0 * density * 2.0.pow(camZoom)
@@ -426,7 +485,31 @@ fun MapView(
                                 if (d <= bestDist) { bestDist = d; bestId = m.id }
                             }
                             val hit = bestId
-                            if (hit != null && onMarkerTap != null) onMarkerTap(hit) else onMapTap?.invoke()
+                            // No pin under the finger? The PLOT's boundary
+                            // ring is the next target — a band around the
+                            // circle, so the tap that opens the plot's menu
+                            // is the one that lands ON the drawn plot. Only
+                            // once the circle is bigger on screen than the
+                            // hit band itself; below that it is a blob under
+                            // its own pin and every tap would be a plot tap.
+                            val plotHit = if (hit == null && plot != null && onPlotTap != null) {
+                                val pc = Offset(
+                                    (lonToXNorm(plot.center.longitude) * worldPx - originX).toFloat(),
+                                    (latToYNorm(plot.center.latitude) * worldPx - originY).toFloat(),
+                                )
+                                val rPx = plot.radiusM.toFloat() *
+                                    pxPerMetreAt(plot.center.latitude, worldPx)
+                                val onRing = rPx.isFinite() && rPx > hitRadius &&
+                                    abs(hypot(tap.x - pc.x, tap.y - pc.y) - rPx) <= hitRadius
+                                if (onRing) plot.id else null
+                            } else {
+                                null
+                            }
+                            when {
+                                hit != null && onMarkerTap != null -> onMarkerTap(hit)
+                                plotHit != null -> onPlotTap?.invoke(plotHit)
+                                else -> onMapTap?.invoke()
+                            }
                         },
                     )
                 },
@@ -540,20 +623,7 @@ fun MapView(
                 }
             }
 
-            // MARK: Polygons (stratum outer rings)
-            for (polygon in polygons) {
-                if (polygon.ring.size < 3) continue
-                val path = Path()
-                polygon.ring.forEachIndexed { i, p ->
-                    val pt = screenPoint(p)
-                    if (i == 0) path.moveTo(pt.x, pt.y) else path.lineTo(pt.x, pt.y)
-                }
-                path.close()
-                drawPath(path, color = polygon.fillColor)
-                drawPath(path, color = polygon.strokeColor, style = Stroke(width = 2.dp.toPx()))
-            }
-
-            // MARK: Polylines (navigation guide) — over polygons, under pins
+            // MARK: Polylines (navigation guide) — over the boundary, under pins
             for (line in polylines) {
                 if (line.points.size < 2) continue
                 val path = Path()
@@ -575,6 +645,24 @@ fun MapView(
                             null
                         },
                     ),
+                )
+            }
+
+            // MARK: Sampling plot — over the survey boundary, the stratum
+            // polygons and the guide line, UNDER the you-dot and the pins.
+            if (plot != null) {
+                drawPlotOverlay(
+                    plot = plot,
+                    centre = screenPoint(plot.center),
+                    pxPerMetre = pxPerMetreAt(plot.center.latitude, worldPx),
+                    cruiser = plot.cruiser?.let { screenPoint(it) },
+                    pointAt = { metres, bearingDeg ->
+                        screenPoint(offsetLatLon(plot.center, metres, bearingDeg))
+                    },
+                    colors = colors,
+                    text = badgeText,
+                    fill = badgeFill,
+                    stroke = badgeStroke,
                 )
             }
 
@@ -867,6 +955,232 @@ private fun DrawScope.drawBadgeRow(
             )
             x += w + gap
         }
+    }
+}
+
+// MARK: - Sampling plot drawing
+
+/// Equatorial circumference used to turn the Web-Mercator world width into
+/// ground metres. Paired with the 1/cos(latitude) scale factor below it
+/// gives the plot TRUE GEOGRAPHIC SCALE at any zoom.
+private const val EARTH_CIRCUMFERENCE_M = 40_075_016.686
+
+/// Screen pixels per ground metre at `latitude` for a world `worldPx` wide.
+private fun pxPerMetreAt(latitude: Double, worldPx: Double): Float {
+    val lat = latitude.coerceIn(-85.0, 85.0) * PI / 180.0
+    return (worldPx / (EARTH_CIRCUMFERENCE_M * cos(lat))).toFloat()
+}
+
+/// `distanceM` out from `from` on a TRUE bearing (0° = north, clockwise),
+/// in local ENU. At plot scale the flat-earth approximation is good to well
+/// under a pixel, and it is the same one the cruise plot ring has always
+/// used. Projecting the RESULT is what keeps N/E/S/W on true bearings
+/// instead of assuming screen-up is north.
+private fun offsetLatLon(
+    from: CoordinateConversions.LatLon,
+    distanceM: Double,
+    bearingDeg: Double,
+): CoordinateConversions.LatLon {
+    val b = bearingDeg * PI / 180.0
+    val mPerDegLat = 111_132.0
+    val mPerDegLon = (111_320.0 * cos(from.latitude * PI / 180.0)).coerceAtLeast(1.0)
+    return CoordinateConversions.LatLon(
+        latitude = from.latitude + distanceM * cos(b) / mPerDegLat,
+        longitude = from.longitude + distanceM * sin(b) / mPerDegLon,
+    )
+}
+
+/// The sampling plot (see [MapPlotOverlay]).
+///
+/// LEGIBILITY: every tinted stroke is laid down twice — a dark casing under
+/// the tint — which is the treatment the imported survey boundary already
+/// uses, and the reason the plot stays readable on bright satellite imagery
+/// AND on the pale OpenStreetMap base. Labels ride the same surface chip as
+/// the marker badges rather than sitting as bare text on tiles.
+///
+/// THREE STATES, THREE PICTURES, so "am I in the plot?" is answered by the
+/// drawing before anybody reads the banner — and is never answered when it
+/// is not known:
+///   * INSIDE  — accent tint, solid boundary. The calm state.
+///   * OUTSIDE — warning tint, thicker solid boundary, dotted connector to
+///               the fix so the way back needs no thinking.
+///   * UNKNOWN — NEUTRAL GREY, DASHED boundary and a "No position" chip
+///               under the centre. It used to be drawn identically to INSIDE,
+///               which meant a glance at the map read as "you're in the
+///               plot" at the exact moment the app had no idea where the
+///               cruiser was.
+private fun DrawScope.drawPlotOverlay(
+    plot: MapPlotOverlay,
+    centre: Offset,
+    pxPerMetre: Float,
+    cruiser: Offset?,
+    /// (metres from centre, TRUE bearing°) → screen point.
+    pointAt: (Double, Double) -> Offset,
+    colors: ForestixColors,
+    text: Paint,
+    fill: Paint,
+    stroke: Paint,
+) {
+    val radiusPx = (plot.radiusM * pxPerMetre).toFloat()
+    if (!radiusPx.isFinite() || radiusPx <= 0f) return
+    val unknown = plot.state == MapPlotFix.UNKNOWN
+    // Grey is deliberately NOT one of the app's signal colours: the eye
+    // reads it as "no reading", the same way the GPS chip's tertiary text
+    // does, and it can't be confused with either the accent or the warning.
+    val tint = when (plot.state) {
+        MapPlotFix.OUTSIDE -> colors.confidenceBad
+        MapPlotFix.INSIDE -> colors.accent
+        MapPlotFix.UNKNOWN -> colors.textTertiary
+    }
+    val casing = Color.Black.copy(alpha = 0.45f)
+    val ringDash = PathEffect.dashPathEffect(floatArrayOf(5.dp.toPx(), 5.dp.toPx()))
+    // A ring smaller than this is closer to its neighbours than a fingertip
+    // is wide — drawing it adds ink, not information.
+    val minRingPx = 10.dp.toPx()
+
+    // Translucent fill — the imagery has to read straight through it.
+    drawCircle(tint.copy(alpha = 0.10f), radius = radiusPx, center = centre)
+
+    // Concentric range rings, inside the boundary only.
+    for (ring in plot.rings) {
+        val rPx = (ring.radiusM * pxPerMetre).toFloat()
+        if (!rPx.isFinite() || rPx < minRingPx || rPx >= radiusPx) continue
+        drawCircle(
+            casing, radius = rPx, center = centre,
+            style = Stroke(width = 2.5.dp.toPx(), pathEffect = ringDash),
+        )
+        drawCircle(
+            tint.copy(alpha = 0.85f), radius = rPx, center = centre,
+            style = Stroke(width = 1.dp.toPx(), pathEffect = ringDash),
+        )
+    }
+
+    // Boundary — emphasised while the cruiser is outside it, and BROKEN
+    // while the state is unknown. A dashed outline is the oldest
+    // cartographic convention there is for "this line is not asserted", and
+    // it survives at a glance, in sunlight, at any zoom: the one thing this
+    // circle must never do is look settled when nothing is known.
+    val boundaryWidth = if (plot.state == MapPlotFix.OUTSIDE) 3.5.dp.toPx() else 2.5.dp.toPx()
+    val boundaryDash =
+        if (unknown) PathEffect.dashPathEffect(floatArrayOf(9.dp.toPx(), 6.dp.toPx())) else null
+    drawCircle(
+        casing, radius = radiusPx, center = centre,
+        style = Stroke(width = boundaryWidth + 2.5.dp.toPx(), pathEffect = boundaryDash),
+    )
+    drawCircle(
+        tint, radius = radiusPx, center = centre,
+        style = Stroke(width = boundaryWidth, pathEffect = boundaryDash),
+    )
+
+    // Outside: a dotted connector from the centre to the cruiser, so the
+    // direction back is obvious. Same dotted 2/9 round-cap line as the
+    // navigation guide, cased so it survives both bases.
+    if (plot.state == MapPlotFix.OUTSIDE && cruiser != null) {
+        val connector = PathEffect.dashPathEffect(floatArrayOf(2.dp.toPx(), 9.dp.toPx()))
+        drawLine(
+            casing, centre, cruiser, strokeWidth = 5.dp.toPx(),
+            cap = androidx.compose.ui.graphics.StrokeCap.Round, pathEffect = connector,
+        )
+        drawLine(
+            tint, centre, cruiser, strokeWidth = 2.5.dp.toPx(),
+            cap = androidx.compose.ui.graphics.StrokeCap.Round, pathEffect = connector,
+        )
+    }
+
+    // Centre mark — a CROSS, so it can never be read as one of the round
+    // pins; the same mark the enlarged plot view draws.
+    val arm = 9.dp.toPx()
+    listOf(colors.surface to 5.dp.toPx(), colors.textPrimary to 2.dp.toPx())
+        .forEach { (colour, w) ->
+            drawLine(
+                colour, Offset(centre.x - arm, centre.y), Offset(centre.x + arm, centre.y),
+                strokeWidth = w,
+            )
+            drawLine(
+                colour, Offset(centre.x, centre.y - arm), Offset(centre.x, centre.y + arm),
+                strokeWidth = w,
+            )
+        }
+
+    // UNKNOWN says so IN WORDS, on the drawing itself. Tint and dash carry
+    // it at a glance; this removes the last shred of ambiguity for anyone
+    // who has not learned the convention (or cannot separate the hues).
+    // It sits just below the plot's own centre pin, the one place inside
+    // the circle that no ring label or compass badge ever occupies.
+    if (unknown) {
+        drawPlotPill(
+            // "No position", not "No fix": the same words the banner uses
+            // an inch above it, and plain English rather than radio jargon
+            // a cruiser has to already know. iOS draws the same string.
+            Offset(centre.x, centre.y + 26.dp.toPx()), "No position", text, fill, stroke,
+            textColor = colors.textSecondary.toArgb(),
+            fillColor = colors.surface.toArgb(),
+            strokeColor = colors.divider.toArgb(),
+            textSizePx = 10f * density,
+        )
+    }
+
+    // Ring distance labels — on the NE diagonal, clear of the four compass
+    // badges. Dropped when the circle is too small to hold them.
+    for (ring in plot.rings) {
+        val rPx = (ring.radiusM * pxPerMetre).toFloat()
+        if (!rPx.isFinite() || rPx < 24.dp.toPx() || rPx >= radiusPx) continue
+        drawPlotPill(
+            pointAt(ring.radiusM, 45.0), ring.label, text, fill, stroke,
+            textColor = colors.textSecondary.toArgb(),
+            fillColor = colors.surface.toArgb(),
+            strokeColor = colors.divider.toArgb(),
+            textSizePx = 9f * density,
+        )
+    }
+
+    // N / E / S / W on the boundary, placed by TRUE bearing so they stay
+    // correct however the map is turned or the phone is held.
+    if (radiusPx >= 26.dp.toPx()) {
+        listOf("N" to 0.0, "E" to 90.0, "S" to 180.0, "W" to 270.0).forEach { (label, bearing) ->
+            drawPlotPill(
+                pointAt(plot.radiusM, bearing), label, text, fill, stroke,
+                textColor = colors.textPrimary.toArgb(),
+                fillColor = colors.surface.toArgb(),
+                strokeColor = colors.divider.toArgb(),
+                textSizePx = 10f * density,
+            )
+        }
+    }
+}
+
+/// One small CENTRED chip — the surface fill + divider hairline the marker
+/// badge chips use, so the plot's labels read as the same family of map
+/// furniture instead of loose text on tiles.
+private fun DrawScope.drawPlotPill(
+    at: Offset,
+    label: String,
+    text: Paint,
+    fill: Paint,
+    stroke: Paint,
+    textColor: Int,
+    fillColor: Int,
+    strokeColor: Int,
+    textSizePx: Float,
+) {
+    drawIntoCanvas { canvas ->
+        text.textSize = textSizePx
+        text.color = textColor
+        fill.color = fillColor
+        stroke.color = strokeColor
+        stroke.strokeWidth = 1.dp.toPx()
+        val fm = text.fontMetrics
+        val w = text.measureText(label) + 4.dp.toPx() * 2
+        val h = (fm.descent - fm.ascent) + 1.5.dp.toPx() * 2
+        val corner = 3.dp.toPx()
+        val left = at.x - w / 2f
+        val top = at.y - h / 2f
+        canvas.nativeCanvas.drawRoundRect(
+            left, top, left + w, top + h, corner, corner, fill)
+        canvas.nativeCanvas.drawRoundRect(
+            left, top, left + w, top + h, corner, corner, stroke)
+        canvas.nativeCanvas.drawText(
+            label, at.x, at.y - (fm.ascent + fm.descent) / 2f, text)
     }
 }
 

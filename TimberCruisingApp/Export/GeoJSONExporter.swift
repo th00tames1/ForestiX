@@ -110,12 +110,23 @@ public enum GeoJSONExporter {
             "closedBy": p.closedBy ?? NSNull()
         ]
         if !p.notes.isEmpty { props["notes"] = p.notes }
+        // A plot with no recorded centre is an UNLOCATED feature, never a
+        // point. RFC 7946 §3.2 allows `"geometry": null` for exactly this
+        // — a thing that exists but has no position — and that is the
+        // honest export: the plot, its tally metadata and every tree
+        // measured in it survive the round trip, while nothing claims it
+        // was cruised at 0°N 0°E in the Gulf of Guinea.
+        //
+        // The (0, 0) sentinel used to fall straight through into
+        // `coordinates`, so a plot removed from the map (and any plot
+        // that never got a centre) landed 600 km off the coast of Ghana,
+        // dragging the file's bounding box across the Atlantic with it.
+        let geometry: Any = p.hasCentre
+            ? ["type": "Point", "coordinates": [p.centerLon, p.centerLat]]
+            : NSNull()
         return [
             "type": "Feature",
-            "geometry": [
-                "type": "Point",
-                "coordinates": [p.centerLon, p.centerLat]
-            ],
+            "geometry": geometry,
             "properties": props
         ]
     }

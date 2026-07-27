@@ -979,12 +979,14 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 }
             }
             lastRawCaptureId = null
-            // Chrome-less snapshot: hide the 2D chrome, give Compose one
-            // committed frame, capture, then restore.
+            // Chrome-less snapshot of the AR surface (camera feed + the
+            // rendered measurement geometry): hide the 2D chrome, give
+            // Compose one committed frame, capture, then restore. Null when
+            // the capture failed — the reading still saves, without a photo.
             val photo = activity?.let {
                 hidingChromeForCapture = true
                 delay(80)
-                val name = MeasurePhotoStore.captureWindow(it)
+                val name = MeasurePhotoStore.captureScene(it)
                 hidingChromeForCapture = false
                 name
             }

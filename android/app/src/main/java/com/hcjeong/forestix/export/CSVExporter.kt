@@ -23,6 +23,7 @@ import com.hcjeong.forestix.data.cruise.PlannedPlot
 import com.hcjeong.forestix.data.cruise.Plot
 import com.hcjeong.forestix.data.cruise.Stratum
 import com.hcjeong.forestix.data.cruise.Tree
+import com.hcjeong.forestix.data.cruise.hasCentre
 import com.hcjeong.forestix.inventory.PlotStats
 import com.hcjeong.forestix.inventory.StandStat
 import java.text.SimpleDateFormat
@@ -177,8 +178,19 @@ object CSVExporter {
             cells.add("${p.plotNumber}")
             cells.add(quote(p.projectId.uuidString))
             cells.add(quote(p.plannedPlotId?.uuidString ?: ""))
-            cells.add(format(p.centerLat, places = 7))
-            cells.add(format(p.centerLon, places = 7))
+            // No recorded centre → EMPTY cells, never the (0,0) sentinel.
+            // "0.0000000,0.0000000" reads as a measured position and plots
+            // in the Gulf of Guinea; two blanks read as what it is, and use
+            // the same empty-cell convention this file already gives
+            // offset_walk_m and the stats columns. Every other column —
+            // including the whole tally — is written as usual.
+            if (p.hasCentre) {
+                cells.add(format(p.centerLat, places = 7))
+                cells.add(format(p.centerLon, places = 7))
+            } else {
+                cells.add("")
+                cells.add("")
+            }
             cells.add(quote(p.positionSource.raw))
             cells.add(quote(p.positionTier.raw))
             cells.add("${p.gpsNSamples}")

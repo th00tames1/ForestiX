@@ -49,6 +49,7 @@ import com.hcjeong.forestix.data.cruise.Stratum
 import com.hcjeong.forestix.data.cruise.Tree
 import com.hcjeong.forestix.data.cruise.TreeStatus
 import com.hcjeong.forestix.data.cruise.UnitSystem
+import com.hcjeong.forestix.data.cruise.hasCentre
 import com.hcjeong.forestix.inventory.PlotStats
 import com.hcjeong.forestix.sensors.ConfidenceTier
 import com.hcjeong.forestix.inventory.StandStat
@@ -278,7 +279,23 @@ object PDFReportBuilder {
         val suffix = areaUnit.densitySuffix
         val areaWord = if (areaUnit == AreaUnit.HECTARE) "hectare" else "acre"
         val df = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US)  // local time zone
-        kv("Center",        String.format(Locale.US, "%.6f, %.6f", plot.centerLat, plot.centerLon))
+        // A plot with no recorded centre says so IN WORDS — "not recorded",
+        // the settled wording on both platforms. Printing the (0,0) sentinel
+        // put "0.000000, 0.000000" in the document handed to the client — a
+        // coordinate off West Africa, indistinguishable from a real one.
+        // Everything else on this page (the tally, the stats, the species
+        // table) is unaffected.
+        //
+        // Words, not the em dash the other "absent" rows use: those are
+        // fields that simply have no value yet, while a plot without a
+        // centre is a FACT about the plot, and the reader of a cruise
+        // report should not have to infer it from a punctuation mark.
+        kv("Center",
+            if (plot.hasCentre) {
+                String.format(Locale.US, "%.6f, %.6f", plot.centerLat, plot.centerLon)
+            } else {
+                "not recorded"
+            })
         // "Position tier" (tierB) and "Source" (vioWalk) printed the raw enum
         // cases of the A/B/C/D position grade that was pulled from the UI for
         // being unactionable — in the document handed to the client. Both

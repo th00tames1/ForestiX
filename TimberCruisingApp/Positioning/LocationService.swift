@@ -183,6 +183,62 @@ public final class LocationService: NSObject, ObservableObject {
     #endif
 }
 
+// MARK: - Fix freshness
+
+/// THE ONE RULE for "does this stored fix still describe where the phone
+/// is?", and the only place the app is allowed to decide that.
+///
+/// It lives here, beside `latestSnapshot` and `lastGlobalFix`, because
+/// those two are precisely what it exists to guard. Both are written on
+/// ingest and NEVER cleared: `latestSnapshot` survives `stop()`, and
+/// `lastGlobalFix` is a static that outlives every screen. So under
+/// canopy they freeze at the last fix that got through, and on
+/// re-entering a screen they still hold the previous session's — an hour
+/// old, a valley away. Age is the only thing that separates those from a
+/// live fix, and the snapshot carries its own timestamp.
+///
+/// Anything the app would be WRONG about — which side of a plot boundary
+/// the cruiser stands on, where to paint the you-dot, where to put the
+/// cruiser on the plot card — goes through here first. One rule means the
+/// words and the picture can never contradict each other.
+public enum FixFreshness {
+
+    /// Older than this and a fix is no longer evidence of where the
+    /// phone is.
+    ///
+    /// WHY FIVE SECONDS. A cruiser walks about 1.2–1.4 m/s in a stand, so
+    /// five seconds is at most six or seven metres of movement — the
+    /// order of one plot radius, which is the largest error that still
+    /// leaves "inside" a meaningful word. CoreLocation delivers at
+    /// roughly 1 Hz here (`distanceFilter` is none), so five seconds also
+    /// tolerates four consecutive dropped fixes before the app goes
+    /// quiet: tighter and it would flicker to "no position" on ordinary
+    /// under-canopy jitter, looser and a cruiser could walk clean out of
+    /// a plot while the map still said they were in it.
+    public static let maxUsableAge: TimeInterval = 5
+
+    /// The fix to REASON FROM and DRAW FROM, or nil when there is none
+    /// worth either.
+    ///
+    /// THE TEST IS TWO-SIDED, ON MAGNITUDE. A one-sided `now - timestamp
+    /// <= budget` passes every fix of every age the moment the clock
+    /// reading trails the timestamp's, which is not exotic: a device with
+    /// no network time, a hand-set clock, or a boot before NTP lands can
+    /// sit behind the satellite time GNSS receivers stamp fixes with, and
+    /// then a subtraction that should have been "eight hours" is negative
+    /// and sails through. `abs(age)` fails closed in both directions — a
+    /// timestamp in the future is no more evidence than one in the past.
+    /// A non-finite age (a corrupt or unset timestamp) is refused for the
+    /// same reason.
+    public static func usable(_ snapshot: CLLocationSnapshot?,
+                              asOf now: Date = Date()) -> CLLocationSnapshot? {
+        guard let snapshot else { return nil }
+        let age = now.timeIntervalSince(snapshot.timestamp)
+        guard age.isFinite, abs(age) <= maxUsableAge else { return nil }
+        return snapshot
+    }
+}
+
 // MARK: - CoreLocation delegate
 
 #if canImport(CoreLocation)

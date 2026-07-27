@@ -288,6 +288,17 @@ object ArSessionHub {
         }
     }
 
+    /// The LIVE shared AR view, or null when no AR screen has built one yet
+    /// (or the activity that owned it is gone). Unlike [obtainView] this
+    /// NEVER creates a session — it is a read-only handle for code that
+    /// wants the AR surface as it currently stands.
+    ///
+    /// The AR evidence photo is the caller that needs it: the view is a
+    /// SurfaceView (io.github.sceneview.SceneView extends it), so the only
+    /// way to read back the camera feed + rendered measurement geometry is
+    /// to copy THAT surface — see ui/MeasurePhotoStore.kt.
+    fun currentView(): ARSceneView? = sceneView?.takeIf { !it.destroyed }
+
     /// Get (or lazily build) the shared AR view. Callers have already
     /// passed the camera-permission + ARCore-availability gates.
     fun obtainView(context: Context): ARSceneView {

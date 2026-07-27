@@ -71,3 +71,29 @@ public struct Plot: Identifiable, Codable, Sendable {
         self.panoramaPath = panoramaPath
     }
 }
+
+public extension Plot {
+
+    /// TRUE when this plot has a real recorded CENTRE.
+    ///
+    /// (0, 0) is the sentinel for "no centre": it is what a Plot is born
+    /// with before a centre is captured, and what the map's "Remove
+    /// plot" writes back when a cruiser takes the plot off the map. The
+    /// two cases are deliberately indistinguishable — a plot that never
+    /// had a centre and a plot whose centre was cleared are the same
+    /// thing, and every surface must treat them the same.
+    ///
+    /// This lives on the model rather than on any one screen because the
+    /// question is asked from three different layers — the map, the
+    /// summaries and every exporter — and a second definition of "has a
+    /// centre" is how (0, 0) ends up shipping as a real coordinate in
+    /// the Gulf of Guinea.
+    ///
+    /// Non-finite coordinates count as NO centre for the same reason: a
+    /// NaN is not a position, and writing one into a GeoJSON or a
+    /// shapefile produces a file no GIS can open.
+    var hasCentre: Bool {
+        centerLat.isFinite && centerLon.isFinite
+            && (centerLat != 0 || centerLon != 0)
+    }
+}

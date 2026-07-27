@@ -143,11 +143,11 @@ public struct BasemapGuideLine: Equatable {
 ///
 /// DRAW ORDER (fixed, and the reason this is a Canvas layer rather than
 /// a SwiftUI overlay): satellite-or-OSM base → the user's XYZ overlay →
-/// THIS → the app's own content (plot pins, planned plots, the location
-/// marker) which lives in views stacked above the Canvas. Being inside
-/// the Canvas is also what makes the boundary hit-test-transparent: the
-/// pins sit in front of it, so a tap meant for a pin can never land on
-/// the boundary.
+/// THIS → the sampling plot (`BasemapPlotOverlay`) → the app's own
+/// content (plot pins, planned plots, the location marker) which lives
+/// in views stacked above the Canvas. Being inside the Canvas is also
+/// what makes the boundary hit-test-transparent: the pins sit in front
+/// of it, so a tap meant for a pin can never land on the boundary.
 public struct BasemapBoundaryOverlay: Equatable {
 
     public struct Shape: Equatable {
@@ -179,6 +179,147 @@ public struct BasemapBoundaryOverlay: Equatable {
     }
 
     public var isEmpty: Bool { shapes.isEmpty }
+}
+
+// MARK: - Sampling-plot overlay
+
+/// THE SAMPLING PLOT, drawn on the map at TRUE GEOGRAPHIC SCALE.
+///
+/// Everything here is expressed in metres on the ground, never in
+/// points: the renderer derives the on-screen scale from the camera at
+/// the plot's own latitude, so the circle grows and shrinks with the
+/// zoom exactly like the imagery under it. A cruiser can therefore read
+/// "am I standing in the plot" straight off the map.
+///
+/// DRAW ORDER: above the imported survey boundary, below every
+/// app-owned marker (the pins are views stacked on the Canvas, so a tap
+/// meant for a pin still reaches the pin).
+///
+/// The Basemap target cannot see the app design system, so every colour
+/// arrives from the host — as with `BasemapStyle` and
+/// `BasemapBoundaryOverlay`. Strokes are drawn over the same dark halo
+/// the boundary uses, because the drawing has to read on BOTH bases:
+/// bright satellite imagery and pale OpenStreetMap street tiles.
+public struct BasemapPlotOverlay: Equatable {
+
+    /// One concentric RANGE RING inside the plot boundary: how far out it
+    /// sits, and the label to draw on it. The label arrives ready-made
+    /// because the renderer never converts units — the host owns "2 m"
+    /// vs "20 ft".
+    public struct Ring: Equatable, Sendable {
+        public let radiusM: Double
+        public let label: String
+
+        public init(radiusM: Double, label: String) {
+            self.radiusM = radiusM
+            self.label = label
+        }
+    }
+
+    /// WHERE THE CRUISER IS RELATIVE TO THIS PLOT — three states, never
+    /// two.
+    ///
+    /// `unknown` is a first-class state, not a quiet fallback to
+    /// `inside`. Before it existed the drawing for "no usable fix" was
+    /// pixel-identical to `inside` — same calm tint, same solid
+    /// boundary, no connector — so a cruiser glancing at the map read
+    /// "you are in the plot" from a map that knew nothing at all. Which
+    /// trees belong to a plot is decided on that reading.
+    public enum CruiserState: Equatable, Sendable {
+        /// A usable fix, inside the boundary.
+        case inside
+        /// A usable fix, beyond the boundary.
+        case outside
+        /// NO usable fix — none yet, or the last one is too old to be
+        /// evidence of anything. The host decides what "too old" means.
+        case unknown
+    }
+
+    public let center: CoordinateConversions.LatLon
+    public let radiusM: Double
+    public let rings: [Ring]
+    /// The cruiser's LIVE fix. nil whenever `state` is `.unknown`: with
+    /// nothing trustworthy to draw, the renderer draws no you-point and
+    /// no connector.
+    public let cruiser: CoordinateConversions.LatLon?
+    /// Inside / outside / unknown. `.outside` and `.inside` are only
+    /// ever passed with a `cruiser`.
+    public let state: CruiserState
+    /// Echoed back through `onPlotTap` when the boundary is tapped.
+    public let id: String
+
+    /// Calm boundary / ring / centre ink.
+    public let stroke: Color
+    /// Boundary ink while the cruiser is OUTSIDE — the warning state.
+    public let warnStroke: Color
+    /// Boundary / ring / centre ink while the position is UNKNOWN — a
+    /// neutral, deliberately un-signal-like grey. It must not be either
+    /// of the other two inks: the whole point is that the drawing stops
+    /// looking like an answer.
+    public let unknownStroke: Color
+    /// Translucent disc fill; the imagery must read through it.
+    public let fill: Color
+    /// Label ink inside the pills.
+    public let ink: Color
+    public let pillBackground: Color
+    public let pillBorder: Color
+    /// The words the drawing itself carries in the `.unknown` state, so
+    /// the map states the gap instead of leaving it to the banner. The
+    /// host owns the wording — it is the SAME phrase the banner uses.
+    public let unknownLabel: String
+
+    public init(center: CoordinateConversions.LatLon,
+                radiusM: Double,
+                rings: [Ring] = [],
+                cruiser: CoordinateConversions.LatLon? = nil,
+                state: CruiserState = .unknown,
+                id: String = "plot",
+                stroke: Color,
+                warnStroke: Color,
+                unknownStroke: Color,
+                fill: Color,
+                ink: Color,
+                pillBackground: Color,
+                pillBorder: Color,
+                unknownLabel: String = "No position") {
+        self.center = center
+        self.radiusM = radiusM
+        self.rings = rings
+        self.cruiser = cruiser
+        self.state = state
+        self.id = id
+        self.stroke = stroke
+        self.warnStroke = warnStroke
+        self.unknownStroke = unknownStroke
+        self.fill = fill
+        self.ink = ink
+        self.pillBackground = pillBackground
+        self.pillBorder = pillBorder
+        self.unknownLabel = unknownLabel
+    }
+
+    /// True only for a live fix beyond the boundary — the ONE state that
+    /// draws the connector home.
+    var outside: Bool { state == .outside }
+
+    /// Boundary ink for the current state — the ONE place the state
+    /// changes the drawing's colour.
+    var edgeStroke: Color {
+        switch state {
+        case .inside:  return stroke
+        case .outside: return warnStroke
+        case .unknown: return unknownStroke
+        }
+    }
+
+    /// Ink for the INTERIOR detail (range rings, their labels, the
+    /// compass badges). Follows the calm stroke while the position is
+    /// known — inside and outside keep the exact drawing they shipped
+    /// with, where only the boundary carries the warning — and greys out
+    /// with everything else when it is not.
+    var detailStroke: Color {
+        state == .unknown ? unknownStroke : stroke
+    }
 }
 
 // MARK: - Style
@@ -475,6 +616,9 @@ public struct BasemapMapView: View {
     /// Imported survey boundary — drawn ABOVE both tile layers and BELOW
     /// every app-owned marker.
     private let boundary: BasemapBoundaryOverlay?
+    /// The cruiser's sampling plot at true geographic scale — drawn
+    /// directly ON TOP of the survey boundary and under the pins.
+    private let plotOverlay: BasemapPlotOverlay?
     private let markers: [BasemapMarker]
     private let selectedMarkerID: String?
     private let youLocation: CoordinateConversions.LatLon?
@@ -482,6 +626,10 @@ public struct BasemapMapView: View {
     private let style: BasemapStyle
     private let onMarkerTap: (String) -> Void
     private let onMapTap: () -> Void
+    /// A tap that landed ON the sampling plot's boundary — carries the
+    /// overlay's `id` back. Only ever fires while `plotOverlay` is
+    /// non-nil, and only when no marker took the tap first.
+    private let onPlotTap: (String) -> Void
     private let onCameraChange: (BasemapCamera, BasemapRegion) -> Void
 
     @StateObject private var baseLoader = BasemapTileLoader()
@@ -500,6 +648,7 @@ public struct BasemapMapView: View {
                 baseTileCache: TileCache?,
                 overlayTileCache: TileCache? = nil,
                 boundary: BasemapBoundaryOverlay? = nil,
+                plotOverlay: BasemapPlotOverlay? = nil,
                 markers: [BasemapMarker] = [],
                 selectedMarkerID: String? = nil,
                 youLocation: CoordinateConversions.LatLon? = nil,
@@ -507,11 +656,13 @@ public struct BasemapMapView: View {
                 style: BasemapStyle = BasemapStyle(),
                 onMarkerTap: @escaping (String) -> Void = { _ in },
                 onMapTap: @escaping () -> Void = {},
+                onPlotTap: @escaping (String) -> Void = { _ in },
                 onCameraChange: @escaping (BasemapCamera, BasemapRegion) -> Void = { _, _ in }) {
         self._camera = camera
         self.baseTileCache = baseTileCache
         self.overlayTileCache = overlayTileCache
         self.boundary = boundary
+        self.plotOverlay = plotOverlay
         self.markers = markers
         self.selectedMarkerID = selectedMarkerID
         self.youLocation = youLocation
@@ -519,6 +670,7 @@ public struct BasemapMapView: View {
         self.style = style
         self.onMarkerTap = onMarkerTap
         self.onMapTap = onMapTap
+        self.onPlotTap = onPlotTap
         self.onCameraChange = onCameraChange
     }
 
@@ -553,6 +705,14 @@ public struct BasemapMapView: View {
                         Self.drawBoundary(boundary, camera: camera,
                                           size: canvasSize, context: &context)
                     }
+                    // THE SAMPLING PLOT — directly on top of the imported
+                    // boundary and under everything the app owns, so a
+                    // plot inside an imported stand reads as being inside
+                    // it, and the pins still sit in front of both.
+                    if let plotOverlay {
+                        Self.drawPlot(plotOverlay, camera: camera,
+                                      size: canvasSize, context: &context)
+                    }
                     // Navigation guide — dashed you→plot line under the
                     // pins (they are separate views above the Canvas).
                     // Projected without clipping so the line still draws
@@ -579,7 +739,23 @@ public struct BasemapMapView: View {
                 .onTapGesture(count: 2) { point in
                     doubleTapZoom(at: point, size: size)
                 }
-                .onTapGesture { onMapTap() }
+                // A tap that lands on the sampling plot's boundary belongs
+                // to the plot, everything else clears the selection.
+                // Routed HERE rather than through a tappable circle
+                // stacked over the Canvas on purpose: a hit-testing view
+                // that size would also swallow the pan gesture, and
+                // panning across your own plot is the most ordinary thing
+                // a cruiser does. Markers are views ABOVE the Canvas, so
+                // they consume their own taps before this ever runs.
+                .onTapGesture { point in
+                    if let plotOverlay,
+                       Self.plotHitTest(plotOverlay, at: point,
+                                        camera: camera, size: size) {
+                        onPlotTap(plotOverlay.id)
+                    } else {
+                        onMapTap()
+                    }
+                }
                 .gesture(panGesture(size: size)
                     .simultaneously(with: pinchGesture(size: size)))
 
@@ -840,6 +1016,302 @@ public struct BasemapMapView: View {
         for pt in points.dropFirst() { path.addLine(to: pt) }
         if closed { path.closeSubpath() }
         return path
+    }
+
+    // MARK: Sampling plot
+
+    /// Points on screen per metre on the ground for a plot-sized circle
+    /// at `origin`. Derived by projecting a point one metre due NORTH of
+    /// the origin and measuring the drop, so the scale comes from the
+    /// live camera rather than from any hard-coded zoom assumption.
+    /// Web mercator is conformal, so over a circle a few tens of metres
+    /// across the same factor holds in every direction.
+    private static func pointsPerMetre(at origin: CoordinateConversions.LatLon,
+                                       camera: BasemapCamera,
+                                       size: CGSize) -> Double {
+        let a = screenPoint(latitude: origin.latitude,
+                            longitude: origin.longitude,
+                            camera: camera, viewportSize: size)
+        let north = CoordinateConversions.toLatLon(
+            enu: .init(east: 0, north: 1), origin: origin)
+        let b = screenPoint(latitude: north.latitude,
+                            longitude: north.longitude,
+                            camera: camera, viewportSize: size)
+        return abs(a.y - b.y)
+    }
+
+    /// Below this on-screen radius the rings, labels and compass badges
+    /// are dropped: at a whole-block zoom they collapse into an
+    /// unreadable smudge and the plot reads better as a plain disc.
+    private static let plotDetailMinRadiusPt: Double = 26
+
+    /// Minimum gap, in points, between two ring labels — and between the
+    /// centre mark and the first of them.
+    ///
+    /// The labels all sit on the same 45° ray (chosen so they never
+    /// collide with the N/E/S/W badges), so the distance between two of
+    /// them IS the difference in their on-screen radii. A pill is about
+    /// 15 pt tall and 26 pt wide; along a diagonal, clearing the taller
+    /// dimension needs ≈ 15 × √2 ≈ 21 pt. Anything closer overlaps.
+    ///
+    /// At the low end of `plotDetailMinRadiusPt` the ring interval is
+    /// only ~6 pt, which is exactly how four labels used to stack into
+    /// one illegible block. Labels are now DROPPED — greedily, outward
+    /// from the centre — until the survivors are this far apart, so a
+    /// small plot shows its dashed rings with one or two labels (or
+    /// none) instead of a smudge, and a large one is unchanged.
+    private static let plotRingLabelMinGapPt: Double = 21
+
+    /// Tap slop, in points — half a 48 pt target.
+    private static let plotHitRadiusPt: Double = 24
+
+    /// N / E / S / W, by TRUE bearing (0° = true north, clockwise). The
+    /// renderer projects each bearing into a real coordinate, so the
+    /// badges stay correct however the map is oriented and however the
+    /// phone is held.
+    private static let plotCompassBadges: [(bearingDeg: Double, text: String)] = [
+        (0, "N"), (90, "E"), (180, "S"), (270, "W")
+    ]
+
+    /// A tap is ON the plot when it lands on the BOUNDARY BAND — within
+    /// a finger's width either side of the drawn circle. Deliberately
+    /// NOT the whole disc: zoomed in, the disc covers the screen and
+    /// every tap anywhere would become a plot tap, with no way left to
+    /// dismiss a peek or just touch the map. The band is also skipped
+    /// while the circle is smaller than the band itself, where the plot
+    /// is a blob under its own pin.
+    static func plotHitTest(_ plot: BasemapPlotOverlay,
+                            at point: CGPoint,
+                            camera: BasemapCamera,
+                            size: CGSize) -> Bool {
+        let centre = screenPoint(latitude: plot.center.latitude,
+                                 longitude: plot.center.longitude,
+                                 camera: camera, viewportSize: size)
+        let radiusPt = pointsPerMetre(at: plot.center, camera: camera,
+                                      size: size) * plot.radiusM
+        guard radiusPt.isFinite, radiusPt > plotHitRadiusPt else { return false }
+        let dx = Double(point.x - centre.x)
+        let dy = Double(point.y - centre.y)
+        let d = (dx * dx + dy * dy).squareRoot()
+        return abs(d - radiusPt) <= plotHitRadiusPt
+    }
+
+    /// Draw the sampling plot: translucent disc, concentric labelled
+    /// range rings, the boundary, the centre mark, the true-bearing
+    /// compass badges, and — while the cruiser is OUTSIDE — a dotted
+    /// connector from the centre to where they are standing.
+    ///
+    /// THREE STATES, THREE DRAWINGS, no two of them alike:
+    ///   • inside  — calm ink, solid 2.4 pt boundary;
+    ///   • outside — warn ink, heavier 3.6 pt boundary, dotted connector
+    ///     back to the centre;
+    ///   • unknown — neutral grey ink, boundary DASHED (a broken line is
+    ///     the one shape neither of the other two uses), and the plot
+    ///     carries the host's "no position" words at its centre.
+    /// The unknown state used to render exactly like inside, which made
+    /// the map assert a position it did not have.
+    ///
+    /// Every stroke goes down twice: a dark halo first, the colour on
+    /// top. That is the same treatment the imported boundary uses, and
+    /// it is what keeps the plot legible on bright satellite imagery AND
+    /// on the pale OpenStreetMap street base.
+    private static func drawPlot(_ plot: BasemapPlotOverlay,
+                                 camera: BasemapCamera,
+                                 size: CGSize,
+                                 context: inout GraphicsContext) {
+        let centre = screenPoint(latitude: plot.center.latitude,
+                                 longitude: plot.center.longitude,
+                                 camera: camera, viewportSize: size)
+        let scale = pointsPerMetre(at: plot.center, camera: camera, size: size)
+        let radiusPt = scale * plot.radiusM
+        guard centre.x.isFinite, centre.y.isFinite,
+              radiusPt.isFinite, radiusPt > 0.5
+        else { return }
+
+        // Cull when neither the plot nor the cruiser is anywhere near
+        // the viewport — the connector has to survive a centre that is
+        // off-screen, so the you-point joins the culling box.
+        let pad = 80.0
+        let viewport = CGRect(x: -pad, y: -pad,
+                              width: size.width + pad * 2,
+                              height: size.height + pad * 2)
+        var bounds = CGRect(x: centre.x - radiusPt, y: centre.y - radiusPt,
+                            width: radiusPt * 2, height: radiusPt * 2)
+        let youPoint: CGPoint? = plot.cruiser.map {
+            screenPoint(latitude: $0.latitude, longitude: $0.longitude,
+                        camera: camera, viewportSize: size)
+        }
+        if let youPoint { bounds = bounds.union(CGRect(origin: youPoint, size: .zero)) }
+        guard bounds.intersects(viewport) else { return }
+
+        let halo = Color.black.opacity(0.38)
+        let edge = plot.edgeStroke
+        let detail = plot.detailStroke
+        let unknown = plot.state == .unknown
+        let boundaryWidth: Double = plot.outside ? 3.6 : 2.4
+        // A DASHED boundary is the unknown state's own shape. Colour
+        // alone would not carry it: the map is drawn over satellite
+        // imagery and over pale street tiles, and a grey ring on either
+        // can read as just a differently-lit calm ring. A broken line
+        // cannot be mistaken for a solid one at any zoom, in any light,
+        // by anyone.
+        let boundaryStyle = StrokeStyle(lineWidth: boundaryWidth,
+                                        dash: unknown ? [7, 5] : [])
+        let showDetail = radiusPt >= plotDetailMinRadiusPt
+
+        func circle(_ r: Double) -> Path {
+            Path(ellipseIn: CGRect(x: centre.x - r, y: centre.y - r,
+                                   width: r * 2, height: r * 2))
+        }
+
+        // 1. Translucent disc — the imagery has to read through it.
+        context.fill(circle(radiusPt), with: .color(plot.fill))
+
+        // 2. Range rings inside the boundary, finely dashed so they can
+        //    never be mistaken for the boundary itself.
+        if showDetail {
+            for ring in plot.rings {
+                let r = scale * ring.radiusM
+                guard r > 4, r < radiusPt - 1 else { continue }
+                context.stroke(circle(r), with: .color(halo),
+                               style: StrokeStyle(lineWidth: 2.6, dash: [5, 4]))
+                context.stroke(circle(r), with: .color(detail.opacity(0.85)),
+                               style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
+            }
+        }
+
+        // 3. The boundary. Heavier and in the warn colour when the
+        //    cruiser is outside it — the emphasis IS the warning — and
+        //    broken, in neutral grey, when there is no position to judge
+        //    it against.
+        context.stroke(circle(radiusPt), with: .color(halo),
+                       style: StrokeStyle(lineWidth: boundaryWidth + 2.2,
+                                          dash: boundaryStyle.dash))
+        context.stroke(circle(radiusPt), with: .color(edge),
+                       style: boundaryStyle)
+
+        // 4. Dotted connector back to the centre, drawn only when the
+        //    cruiser is known to be outside — the direction home.
+        if plot.outside, let youPoint {
+            var line = Path()
+            line.move(to: centre)
+            line.addLine(to: youPoint)
+            context.stroke(line, with: .color(halo),
+                           style: StrokeStyle(lineWidth: 4.4, lineCap: .round,
+                                              dash: [1, 7]))
+            context.stroke(line, with: .color(edge),
+                           style: StrokeStyle(lineWidth: 2.4, lineCap: .round,
+                                              dash: [1, 7]))
+        }
+
+        // 5. Centre mark — a cross, never a dot: a dot at this size is
+        //    indistinguishable from a tree pin.
+        var cross = Path()
+        cross.move(to: CGPoint(x: centre.x - 8, y: centre.y))
+        cross.addLine(to: CGPoint(x: centre.x + 8, y: centre.y))
+        cross.move(to: CGPoint(x: centre.x, y: centre.y - 8))
+        cross.addLine(to: CGPoint(x: centre.x, y: centre.y + 8))
+        context.stroke(cross, with: .color(halo),
+                       style: StrokeStyle(lineWidth: 4.4, lineCap: .round))
+        context.stroke(cross, with: .color(edge),
+                       style: StrokeStyle(lineWidth: 2, lineCap: .round))
+
+        // 6. THE UNKNOWN MARKING, in words, on the drawing itself —
+        //    drawn at EVERY zoom, before the `showDetail` gate, because
+        //    a plot too small for range rings is exactly the case where
+        //    the grey disc alone could still be read as "inside". Sits
+        //    just under the centre cross, where nothing else is drawn.
+        if unknown {
+            drawPlotPill(plot.unknownLabel, font: unknownLabelFont,
+                         at: CGPoint(x: centre.x, y: centre.y + 15),
+                         plot: plot, context: &context)
+        }
+
+        guard showDetail else { return }
+
+        // 7. Ring distance labels, set on the north-east diagonal so they
+        //    never collide with the N/E/S/W badges — and thinned so they
+        //    never collide with EACH OTHER. Rings arrive ascending, so
+        //    one greedy pass outward from the centre keeps the innermost
+        //    label that clears the centre mark and every later one that
+        //    clears the last one kept; the rest are dropped rather than
+        //    stacked into an unreadable pile at low zoom.
+        var lastLabelRadiusPt: Double = 0
+        for ring in plot.rings {
+            let r = scale * ring.radiusM
+            guard r > 4, r < radiusPt - 1 else { continue }
+            guard r - lastLabelRadiusPt >= plotRingLabelMinGapPt else { continue }
+            lastLabelRadiusPt = r
+            let point = pointOnRing(centre: centre, origin: plot.center,
+                                    distanceM: ring.radiusM, bearingDeg: 45,
+                                    camera: camera, size: size)
+            drawPlotPill(ring.label, font: ringLabelFont, at: point,
+                         plot: plot, context: &context)
+        }
+
+        // 8. Compass badges ON the boundary, positioned by TRUE bearing —
+        //    the projected point at that bearing and the plot radius, not
+        //    a screen angle. Correct however the map is oriented.
+        for badge in plotCompassBadges {
+            let point = pointOnRing(centre: centre, origin: plot.center,
+                                    distanceM: plot.radiusM,
+                                    bearingDeg: badge.bearingDeg,
+                                    camera: camera, size: size)
+            drawPlotPill(badge.text, font: compassBadgeFont, at: point,
+                         plot: plot, context: &context)
+        }
+    }
+
+    /// Screen point at a TRUE bearing and ground distance from the plot
+    /// centre. Falls back to the centre when the projection degenerates.
+    private static func pointOnRing(centre: CGPoint,
+                                    origin: CoordinateConversions.LatLon,
+                                    distanceM: Double,
+                                    bearingDeg: Double,
+                                    camera: BasemapCamera,
+                                    size: CGSize) -> CGPoint {
+        let rad = bearingDeg * .pi / 180
+        let target = CoordinateConversions.toLatLon(
+            enu: .init(east: distanceM * sin(rad), north: distanceM * cos(rad)),
+            origin: origin)
+        let point = screenPoint(latitude: target.latitude,
+                                longitude: target.longitude,
+                                camera: camera, viewportSize: size)
+        return (point.x.isFinite && point.y.isFinite) ? point : centre
+    }
+
+    /// Ring-distance label type — the map's own mono badge face.
+    private static let ringLabelFont =
+        Font.system(size: 9, weight: .bold, design: .monospaced)
+    /// Compass-letter type — the marker-title face, one size down.
+    private static let compassBadgeFont =
+        Font.system(size: 9.5, weight: .heavy, design: .monospaced)
+    /// The unknown-state words, a touch larger than the ring labels:
+    /// this pill is a statement about the whole plot, not a tick mark on
+    /// one ring, and it has to survive being glanced at.
+    private static let unknownLabelFont =
+        Font.system(size: 10, weight: .bold, design: .monospaced)
+
+    /// One label on the plot, in the map's existing chip treatment:
+    /// surface-filled rounded rect, hairline border, mono ink. Identical
+    /// language to `badgeChip`, so the plot's labels and the pins' badges
+    /// read as one family.
+    private static func drawPlotPill(_ text: String,
+                                     font: Font,
+                                     at point: CGPoint,
+                                     plot: BasemapPlotOverlay,
+                                     context: inout GraphicsContext) {
+        let resolved = context.resolve(
+            Text(text).font(font).foregroundStyle(plot.ink))
+        let textSize = resolved.measure(in: CGSize(width: 160, height: 40))
+        let rect = CGRect(x: point.x - textSize.width / 2 - 5,
+                          y: point.y - textSize.height / 2 - 2,
+                          width: textSize.width + 10,
+                          height: textSize.height + 4)
+        let pill = Path(roundedRect: rect, cornerRadius: 3, style: .continuous)
+        context.fill(pill, with: .color(plot.pillBackground))
+        context.stroke(pill, with: .color(plot.pillBorder), lineWidth: 1)
+        context.draw(resolved, at: point, anchor: .center)
     }
 
     // MARK: Gestures

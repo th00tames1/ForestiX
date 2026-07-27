@@ -150,8 +150,9 @@ public struct DBHScanScreen: View {
     private let projectID: String?
     private let quickTreeNumber: Int?
 
-    /// FIELD REPORT F11 — tapping the top-right plot mini-map re-opens plot
-    /// setup so radius / centre can be changed after the first placement.
+    /// Re-open plot setup, to change radius / centre after the first
+    /// placement. Reached from the ENLARGED plot view that the top-right
+    /// mini-map now opens — the tap itself no longer jumps into re-setup.
     /// nil on hosts with no plot to edit, and then the card stays inert.
     private let onEditPlot: (() -> Void)?
 
@@ -207,7 +208,8 @@ public struct DBHScanScreen: View {
                                centerLat: nil,
                                centerLon: nil,
                                treeCount: 0,
-                               trees: [])
+                               trees: [],
+                               unitSystem: settings.unitSystem)
     }
 
     public var body: some View {
@@ -366,8 +368,8 @@ public struct DBHScanScreen: View {
                 }
 
                 // Plot mini-map — top-right, same row as the GPS badge.
-                // TAPPABLE in cruise (F11): it re-opens plot setup so the
-                // radius / centre can still be changed. Kept up during
+                // TAPPABLE in cruise: it opens the enlarged plot view, and
+                // plot re-setup is a control inside that. Kept up during
                 // ADJUST (it's clear of the centre handles), hidden with the
                 // rest of the 2D chrome during the Accept snapshot blackout.
                 // The cruise border chip renders directly under the card.
@@ -377,7 +379,7 @@ public struct DBHScanScreen: View {
                             Spacer()
                             VStack(alignment: .trailing, spacing: 6) {
                                 PlotMiniMapWidget(info: info,
-                                                  onTap: onEditPlot)
+                                                  onEditPlot: onEditPlot)
                                 if let signed = boundarySignedM,
                                    abs(signed) <= 2.0 {
                                     borderChip(signed)

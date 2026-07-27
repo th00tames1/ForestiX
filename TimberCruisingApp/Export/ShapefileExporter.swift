@@ -55,11 +55,25 @@ public enum ShapefileExporter {
     /// cruise. Returns the raw bytes of a `.zip` suitable for writing
     /// directly to disk — four constituent files (`<name>.shp`, `.shx`,
     /// `.dbf`, `.prj`) plus a `.cpg` encoding sidecar.
+    ///
+    /// PLOTS WITH NO CENTRE ARE NOT IN THIS LAYER. A shapefile is a
+    /// geographic format and nothing else: every record is a location,
+    /// so a plot that has none — never captured, or cleared by the map's
+    /// "Remove plot" — has no record here rather than a record at the
+    /// (0, 0) sentinel, which used to ship as a genuine point off West
+    /// Africa. The plot and its trees are untouched and still export in
+    /// full through `plots.csv`, `trees.csv` and the PDF; only the
+    /// geometry the file exists to carry is absent.
+    ///
+    /// Geometry and attribute rows are built from the SAME filtered list
+    /// — a shapefile pairs the two by index, so filtering one without
+    /// the other would silently re-label every plot after the first gap.
     public static func plotCentersZip(
         plots: [Plot],
         layerName: String = "plots"
     ) throws -> Data {
-        let rows: [DBFRow] = plots.map { p in
+        let located = plots.filter(\.hasCentre)
+        let rows: [DBFRow] = located.map { p in
             [
                 ("plot_num", .int(p.plotNumber)),
                 ("tier",     .string(String(describing: p.positionTier), width: 1)),
@@ -69,8 +83,8 @@ public enum ShapefileExporter {
                 ("plot_id",  .string(p.id.uuidString, width: 36))
             ]
         }
-        let shapes: [ShapeGeometry] = plots.map { .point(x: $0.centerLon,
-                                                        y: $0.centerLat) }
+        let shapes: [ShapeGeometry] = located.map { .point(x: $0.centerLon,
+                                                          y: $0.centerLat) }
         guard !shapes.isEmpty else { throw ShapefileExporterError.emptyLayer }
         return try Self.zipped(layerName: layerName,
                                shapeType: .point,

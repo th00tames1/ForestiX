@@ -157,9 +157,37 @@ public final class ExportViewModel: ObservableObject {
             lastSessionFolder = result.folder
             if let art = result.artefacts.first(where: { $0.kind == kind }) {
                 appendExport(url: art.url, displayName: art.displayName)
+            } else {
+                // The cruiser asked for ONE file and it was not written.
+                // A geographic layer with nothing to put in it is the
+                // reachable case — every plot in the cruise has had its
+                // centre removed from the map, or none was ever
+                // recorded — and an empty shapefile is not a valid one.
+                // Say so: a button that silently does nothing is
+                // indistinguishable from a broken one.
+                errorMessage = Self.missingArtefactMessage(kind)
             }
         } catch {
             errorMessage = "Export failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// Why a single-artefact export produced no file. Names what is
+    /// missing and what to do, never just "failed".
+    private static func missingArtefactMessage(
+        _ kind: ExportArtefact.Kind
+    ) -> String {
+        switch kind {
+        case .shapefilePlots:
+            return "No plot in this cruise has a recorded centre, so there "
+                + "is nothing to put in the shapefile. Record a centre from "
+                + "the map, or export the plots as CSV — every tree you "
+                + "tallied is still there."
+        case .shapefileStrata:
+            return "No stratum has a usable boundary, so there is nothing "
+                + "to put in the shapefile."
+        default:
+            return "That file could not be written from this cruise."
         }
     }
 

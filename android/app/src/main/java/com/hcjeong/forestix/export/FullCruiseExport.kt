@@ -17,6 +17,7 @@ package com.hcjeong.forestix.export
 import android.content.Context
 import android.net.Uri
 import androidx.core.content.FileProvider
+import com.hcjeong.forestix.data.cruise.hasCentre
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -78,7 +79,11 @@ object FullCruiseExporter {
         steps.add("Planned plots CSV" to ExportArtefact.Kind.CSV_PLANNED)
         steps.add("Cruise GeoJSON" to ExportArtefact.Kind.GEOJSON_CRUISE)
         steps.add("Plan GeoJSON" to ExportArtefact.Kind.GEOJSON_PLAN)
-        if (bundle.plots.isNotEmpty()) {
+        // A point layer needs at least one LOCATED plot. Plots whose centre
+        // was never recorded (or was cleared from the map) are not features
+        // in it, so a cruise of nothing but centre-less plots writes no
+        // plot shapefile at all rather than a layer of (0,0) points.
+        if (bundle.plots.any { it.hasCentre }) {
             steps.add("Plot centres shapefile" to ExportArtefact.Kind.SHAPEFILE_PLOTS)
         }
         if (bundle.plannedPlots.isNotEmpty()) {
@@ -166,9 +171,13 @@ object FullCruiseExporter {
                 display = "Plan (GeoJSON)", kind = kind, folder = folder)
         }
         ExportArtefact.Kind.SHAPEFILE_PLOTS -> {
-            val data = ShapefileExporter.plotCentersZip(plots = bundle.plots)
-            writeData(data, name = "plots-shp.zip",
-                display = "Plot centres (Shapefile)", kind = kind, folder = folder)
+            try {
+                val data = ShapefileExporter.plotCentersZip(plots = bundle.plots)
+                writeData(data, name = "plots-shp.zip",
+                    display = "Plot centres (Shapefile)", kind = kind, folder = folder)
+            } catch (_: ShapefileExporterError.EmptyLayer) {
+                null  // No plot has a centre — skip, same as the strata layer.
+            }
         }
         ExportArtefact.Kind.SHAPEFILE_PLANNED -> {
             val data = ShapefileExporter.plannedPlotsZip(

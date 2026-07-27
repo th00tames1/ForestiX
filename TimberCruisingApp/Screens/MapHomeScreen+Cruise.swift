@@ -761,22 +761,29 @@ extension MapHomeScreen {
     }
 
     /// Plot mini-map payload for the plot the tally loop is measuring
-    /// into: plot number + radius + centre fix, and the live trees'
-    /// fixes tinted by confidence (warn for any yellow/red DBH or
-    /// Height tier). The loop's Accept reloads the snapshot before
-    /// advancing, so the widget gains each new dot immediately.
+    /// into: plot number + radius + centre fix, and the live trees
+    /// tinted by confidence (warn for any yellow/red DBH or Height
+    /// tier). The loop's Accept reloads the snapshot before advancing,
+    /// so the widget gains each new dot immediately.
+    ///
+    /// EVERY live tree is handed over, including ones with no position
+    /// at all. Filtering them out here is what used to make an unplaced
+    /// tree indistinguishable from a plot with fewer trees in it; the
+    /// map decides what it can draw (`PlotMiniMapInfo.placedTrees`) and
+    /// the enlarged view tells the cruiser how many it had to leave out.
     func cruiseMiniMapInfo(plotID: UUID?) -> PlotMiniMapInfo? {
         guard let plotID,
               let plot = plots.first(where: { $0.id == plotID })
         else { return nil }
         let trees = liveTrees(in: plotID)
-        let dots: [PlotMiniMapInfo.TreeDot] = trees.compactMap { tree in
-            guard let lat = tree.latitude, let lon = tree.longitude
-            else { return nil }
+        let dots: [PlotMiniMapInfo.TreeDot] = trees.map { tree in
             let heightWarn = tree.heightConfidence.map { $0 != .green } ?? false
             return PlotMiniMapInfo.TreeDot(
-                latitude: lat,
-                longitude: lon,
+                number: tree.treeNumber,
+                latitude: tree.latitude,
+                longitude: tree.longitude,
+                bearingFromCenterDeg: tree.bearingFromCenterDeg.map(Double.init),
+                distanceFromCenterM: tree.distanceFromCenterM.map(Double.init),
                 warn: tree.dbhConfidence != .green || heightWarn)
         }
         return PlotMiniMapInfo(
@@ -802,8 +809,9 @@ extension MapHomeScreen {
     /// Skip both come straight back here, already targeting the next tree.
     /// With the setting off the loop behaves exactly as it did.
     ///
-    /// FIELD REPORT F11 — the top-right mini-map re-opens plot setup, also
-    /// nested, so radius / centre stay editable after the first placement.
+    /// The top-right mini-map opens the enlarged plot view, whose "Edit
+    /// plot" button lands here — also nested, so radius / centre stay
+    /// editable after the first placement.
     ///
     /// WHY NESTED, not the dismiss-then-present two-step the quick-measure
     /// "Full measurement" chain uses: that chain ENDS at the map, this one

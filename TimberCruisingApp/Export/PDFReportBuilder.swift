@@ -363,7 +363,21 @@ public enum PDFReportBuilder {
         let df = DateFormatter()
         df.dateFormat = "yyyy-MM-dd HH:mm"
         df.timeZone = TimeZone.current
-        kv("Center",        String(format: "%.6f, %.6f", plot.centerLat, plot.centerLon))
+        // A plot with no recorded centre says so IN WORDS — "not
+        // recorded", the settled wording on both platforms. It must NOT
+        // print "0.000000, 0.000000": that is the sentinel for a centre
+        // that was never captured or was cleared from the map, and
+        // printed as a coordinate it is a claim that the plot was cruised
+        // in the Gulf of Guinea.
+        //
+        // Words, not the em dash the other "absent" rows below use: those
+        // are fields that simply have no value yet, while a plot without
+        // a centre is a FACT about the plot, and the reader of a cruise
+        // report should not have to infer it from a punctuation mark.
+        kv("Center",        plot.hasCentre
+                            ? String(format: "%.6f, %.6f",
+                                     plot.centerLat, plot.centerLon)
+                            : "not recorded")
         // The A/B/C/D position tier was pulled from every screen because a
         // cruiser could neither act on a "C" nor tell what would make it a
         // "B"; it was still printing here, next to the enum case name of

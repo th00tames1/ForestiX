@@ -146,7 +146,8 @@ public struct SamplingPlotScreen: View {
                             centerLat: nil,
                             centerLon: nil,
                             treeCount: 0,
-                            trees: []))
+                            trees: [],
+                            unitSystem: settings.unitSystem))
                             .padding(.trailing, ForestixSpace.md)
                     }
                     .padding(.top, ForestixSpace.xs)

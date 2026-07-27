@@ -260,16 +260,22 @@ extension MapHomeScreen {
     /// the mode merge: accent-amber active, ok-green closed, dashed
     /// grey planned.
     var cruiseMarkers: [BasemapMarker] {
-        var out: [BasemapMarker] = plots.map { plot in
-            BasemapMarker(
-                id: "plot-\(plot.id.uuidString)",
-                latitude: plot.centerLat,
-                longitude: plot.centerLon,
-                title: "P\(plot.plotNumber)",
-                tint: plot.closedAt == nil ? ForestixPalette.accent
-                                           : ForestixPalette.confidenceOk,
-                shape: .ring(dashed: false))
-        }
+        // A plot whose centre was cleared by the map overlay's "Remove
+        // plot" reads as (0, 0) — it has no place on the map, and a ring
+        // pin at null island would be worse than no pin at all. The plot
+        // and its trees are untouched; only the drawing goes.
+        var out: [BasemapMarker] = plots
+            .filter(\.hasCentre)
+            .map { plot in
+                BasemapMarker(
+                    id: "plot-\(plot.id.uuidString)",
+                    latitude: plot.centerLat,
+                    longitude: plot.centerLon,
+                    title: "P\(plot.plotNumber)",
+                    tint: plot.closedAt == nil ? ForestixPalette.accent
+                                               : ForestixPalette.confidenceOk,
+                    shape: .ring(dashed: false))
+            }
         // Planned plots — the mock's hollow dashed "planned" ring style.
         // Skipped (inaccessible) plots keep the dashed ring but switch to the
         // warn tint and carry a "SKIP" badge so they read distinctly from
@@ -404,7 +410,13 @@ extension MapHomeScreen {
         content
         #if os(iOS)
             .fullScreenCover(isPresented: $presentingPlotSetup,
-                             onDismiss: { reloadCruise() }) { plotSetupCover }
+                             onDismiss: {
+                                 // The map-overlay edit target is scoped to
+                                 // ONE setup session; leaving it set would
+                                 // turn the next "Start plot" into an edit.
+                                 editingMapPlotID = nil
+                                 reloadCruise()
+                             }) { plotSetupCover }
             // Cruise tally loop — the DBH cover saves tree after tree and
             // only closes via the floating back; dismissal refreshes the
             // map's pins + tally.
@@ -559,7 +571,13 @@ extension MapHomeScreen {
                 // it is depends on whether the tally already has a plot, so
                 // re-opening from the mini-map can never mint a duplicate
                 // Plot N+1 out from under the cruiser.
-                if chainingPlotSetup, editableCruisePlot != nil {
+                //
+                // The map's plot overlay (MapHomeScreen+Plot.swift) is a
+                // THIRD way in, and it means the same thing: `editingMapPlotID`
+                // names the plot being edited, so Save must not mint a
+                // duplicate here either.
+                if chainingPlotSetup || editingMapPlotID != nil,
+                   editableCruisePlot != nil {
                     editCruisePlot(radiusM: radiusM)
                 } else {
                     createCruisePlot(radiusM: radiusM)
@@ -571,10 +589,14 @@ extension MapHomeScreen {
     }
     #endif
 
-    /// The plot a re-opened setup session edits: the one the tally is
-    /// measuring into, else the active plot. nil ⇒ there is nothing to edit
-    /// and Save creates instead.
+    /// The plot a re-opened setup session edits: the one the MAP's plot
+    /// overlay named, else the one the tally is measuring into, else the
+    /// active plot. nil ⇒ there is nothing to edit and Save creates
+    /// instead.
     var editableCruisePlot: Plot? {
+        if let id = editingMapPlotID, let hit = plots.first(where: { $0.id == id }) {
+            return hit
+        }
         if let id = chainPlotID, let hit = plots.first(where: { $0.id == id }) {
             return hit
         }
@@ -786,14 +808,20 @@ extension MapHomeScreen {
                 distanceFromCenterM: tree.distanceFromCenterM.map(Double.init),
                 warn: tree.dbhConfidence != .green || heightWarn)
         }
+        // No centre (cleared by the map overlay's "Remove plot") means no
+        // ENU origin: the card falls back to the AR-anchor path for YOU
+        // and drops the GPS-positioned tree dots, rather than laying the
+        // plot out around null island.
+        let hasCentre = plot.hasCentre
         return PlotMiniMapInfo(
             plotID: plot.id,
             plotNumber: plot.plotNumber,
             radiusM: plotRadiusM(plot),
-            centerLat: plot.centerLat,
-            centerLon: plot.centerLon,
+            centerLat: hasCentre ? plot.centerLat : nil,
+            centerLon: hasCentre ? plot.centerLon : nil,
             treeCount: trees.count,
-            trees: dots)
+            trees: dots,
+            unitSystem: settings.unitSystem)
     }
 
     #if os(iOS)
@@ -956,7 +984,16 @@ extension MapHomeScreen {
             heightAlphaTopDeg: nil,
             heightAlphaBaseDeg: nil,
             heightConfidence: nil,
-            bearingFromCenterDeg: nil,
+            // PLOT-LOCAL POSITION, both halves. Everything that draws a
+            // tree relative to its plot (the mini-map card, the enlarged
+            // plot view) PREFERS this pair over the tree's own GPS fix —
+            // it is already in the plot's frame. Writing the distance and
+            // leaving the bearing nil made that preferred source dead
+            // code: the pair is only usable together, so every tree fell
+            // through to the GPS branch. Both come off the same two
+            // coordinates (the capture fix and the plot centre), which
+            // are both in hand right here.
+            bearingFromCenterDeg: bearingFromPlotCenter(plotID: plotID, meta: meta),
             distanceFromCenterM: distanceFromPlotCenter(plotID: plotID, meta: meta),
             boundaryCall: nil,
             crownClass: nil,
@@ -1041,13 +1078,37 @@ extension MapHomeScreen {
     func distanceFromPlotCenter(plotID: UUID,
                                 meta: DBHScanScreen.ScanMetadata) -> Float? {
         guard let lat = meta.latitude, let lon = meta.longitude,
-              let plot = plots.first(where: { $0.id == plotID })
+              let plot = plots.first(where: { $0.id == plotID }),
+              plot.hasCentre
         else { return nil }
         let d = CoordinateConversions.haversineMeters(
             CoordinateConversions.LatLon(latitude: lat, longitude: lon),
             CoordinateConversions.LatLon(latitude: plot.centerLat,
                                          longitude: plot.centerLon))
         return Float(d)
+    }
+
+    /// Compass bearing FROM the plot centre TO the capture fix, degrees
+    /// clockwise from true north — the other half of the plot-local
+    /// position stored on a tree, and the direction the mini-map and the
+    /// enlarged plot view lay the tree's dot out along.
+    ///
+    /// Same two coordinates as `distanceFromPlotCenter`, same nil
+    /// conditions: without a capture fix — or without a plot centre to
+    /// measure from — there is no bearing to record, and a guessed one
+    /// would place a stem somewhere it never stood.
+    func bearingFromPlotCenter(plotID: UUID,
+                               meta: DBHScanScreen.ScanMetadata) -> Float? {
+        guard let lat = meta.latitude, let lon = meta.longitude,
+              let plot = plots.first(where: { $0.id == plotID }),
+              plot.hasCentre
+        else { return nil }
+        let bearing = CoordinateConversions.initialBearingDegrees(
+            from: CoordinateConversions.LatLon(latitude: plot.centerLat,
+                                               longitude: plot.centerLon),
+            to: CoordinateConversions.LatLon(latitude: lat, longitude: lon))
+        guard bearing.isFinite else { return nil }
+        return Float(bearing)
     }
 
     // MARK: Plot peek (mock ②)
@@ -1683,12 +1744,18 @@ extension MapHomeScreen {
     // MARK: Planned-plot peek + map navigation (mock ⑦)
 
     /// The dashed you→plot guide — non-nil only while navigating AND
-    /// holding a fix. The map draws the line; the home floats the live
-    /// distance chip over it.
+    /// holding a fix the app still believes. The map draws the line; the
+    /// home floats the live distance chip over it.
+    ///
+    /// The line STARTS AT THE CRUISER, so its near end is a drawn
+    /// position and goes through the same `FixFreshness` gate as the
+    /// you-dot and the inside/outside verdict. With a stale fix the whole
+    /// guide disappears rather than anchoring itself — and printing a
+    /// live distance from — a place the cruiser left ten minutes ago.
     var navGuide: BasemapGuideLine? {
         guard let id = navTargetPlannedID,
               let planned = plannedPlots.first(where: { $0.id == id }),
-              let fix = location.latestSnapshot
+              let fix = FixFreshness.usable(location.latestSnapshot)
         else { return nil }
         return BasemapGuideLine(
             from: CoordinateConversions.LatLon(latitude: fix.latitude,
@@ -1932,9 +1999,15 @@ extension MapHomeScreen {
     }
 
     /// LOCKED row format: "X m · bearing Y°" from the current fix.
+    ///
+    /// The fix must be FRESH — this row is a walking instruction, and a
+    /// minutes-old position sends the cruiser off on a heading measured from
+    /// somewhere they no longer are. Same rule as the plot verdict and the
+    /// drawn you-dot, so nothing on the map claims a position the app has
+    /// stopped trusting; when it lapses the row says so instead.
     func plannedRangeText(_ planned: PlannedPlot) -> String {
-        guard let fix = location.latestSnapshot
-            ?? LocationService.lastGlobalFix else { return "no GPS fix" }
+        guard let fix = FixFreshness.usable(location.latestSnapshot)
+        else { return "no GPS fix" }
         let d = GeoMath.distanceM(
             fromLat: fix.latitude, fromLon: fix.longitude,
             toLat: planned.plannedLat, toLon: planned.plannedLon)

@@ -180,7 +180,8 @@ public struct HeightScanScreen: View {
                                centerLat: nil,
                                centerLon: nil,
                                treeCount: 0,
-                               trees: [])
+                               trees: [],
+                               unitSystem: settings.unitSystem)
     }
 
     // MARK: - Crown sub-flow state

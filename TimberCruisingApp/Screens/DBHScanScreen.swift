@@ -208,7 +208,8 @@ public struct DBHScanScreen: View {
                                centerLat: nil,
                                centerLon: nil,
                                treeCount: 0,
-                               trees: [])
+                               trees: [],
+                               unitSystem: settings.unitSystem)
     }
 
     public var body: some View {

@@ -94,6 +94,11 @@ public struct MapHomeScreen: View {
     /// an import lands on the map the moment the sheet closes.
     @ObservedObject var surveyBoundary = SurveyBoundaryModel.shared
 
+    /// The app-scoped AR sampling ring. Observed here only so "Remove
+    /// plot" can drop the ring standing in for a centre it just cleared
+    /// (MapHomeScreen+Plot.swift).
+    @ObservedObject var samplingPlot = ActiveSamplingPlot.shared
+
     /// Peavy Hall (OSU College of Forestry) fallback — used only when
     /// there is no fix and no located reading.
     private static let fallbackCamera = BasemapCamera(
@@ -133,6 +138,11 @@ public struct MapHomeScreen: View {
     @State private var presentingHeightScan = false
     @State private var presentingDistance = false
     @State private var presentingSampling = false
+    /// Plot-overlay tap menu (Edit / Remove) and the Remove confirmation
+    /// that always precedes an actual removal. Both name the plot, so a
+    /// reload that changes the active plot can never redirect them.
+    @State var plotMenuPlotID: UUID?
+    @State var confirmingPlotRemovalID: UUID?
     @State private var pendingTreeNumber: Int?
     /// Full-measurement chain (the chooser's first row): ONE tree number,
     /// DBH first, then the Height cover auto-opens on DBH Accept. No
@@ -151,6 +161,31 @@ public struct MapHomeScreen: View {
     /// scoped chooser opens.
     @State private var farTreeWarning: FarTreeWarning?
 
+    /// Whether the last fix has aged out — see `FixFreshness`.
+    ///
+    /// This exists so the plot's INSIDE / OUTSIDE verdict AND every
+    /// position this screen draws can expire on their own. Both are
+    /// recomputed from the fix's age on every render, which is exact, but
+    /// nothing re-renders this screen once the fixes stop arriving — and
+    /// "the fixes stopped arriving" is the entire case the age gate is
+    /// for. Without a pulse the banner would simply freeze on the last
+    /// verdict it drew and go on asserting "Inside" under canopy
+    /// indefinitely, with the you-dot still painted inside the ring to
+    /// agree with it.
+    ///
+    /// It is a TRIGGER, not a value: nothing reads it. It is written
+    /// only when the verdict actually flips, so a map with live GPS
+    /// redraws no more often than it already did.
+    @State private var fixIsStale = false
+
+    /// One-second pulse behind `fixIsStale`. Static so it is a single
+    /// publisher rather than a new one per body evaluation (which would
+    /// restart the countdown forever and never fire); `autoconnect`
+    /// still starts it only when a map is on screen and stops it when
+    /// the last one leaves.
+    private static let fixAgeTicker =
+        Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
     // MARK: Cruise-mode state
     //
     // Stored here because SwiftUI state can't live in extensions; every
@@ -168,6 +203,10 @@ public struct MapHomeScreen: View {
     // Cruise sheets / covers / pushes.
     @State var presentingProjectSheet = false
     @State var presentingPlotSetup = false
+    /// The cruise plot the MAP's plot-overlay Edit is editing. Set just
+    /// before the setup cover opens and cleared on its dismissal, so the
+    /// cover knows to EDIT that plot rather than create a new one.
+    @State var editingMapPlotID: UUID?
     @State var presentingCruiseDBH = false
     @State var presentingCruiseHeight = false
     @State var pushed: CruiseDestination?
@@ -270,6 +309,13 @@ public struct MapHomeScreen: View {
                 attributionBadge
                 VStack(spacing: ForestixSpace.xs) {
                     topChrome
+                    // The plot's own status line: INSIDE / OUTSIDE (or
+                    // "no position"), the radius, and the live distance
+                    // from the centre — all in the cruiser's units.
+                    // Absent entirely when no plot is drawn.
+                    if isCruiseMode, let plot = cruisePlotOverlay {
+                        cruisePlotBanner(plot)
+                    }
                     Spacer()
                 }
                 VStack {
@@ -291,6 +337,13 @@ public struct MapHomeScreen: View {
                         actionCluster
                     }
                 }
+                // The drawn plot's Edit / Remove menu (M2) — a dialog
+                // over the map, above the peeks, so the plot stays in
+                // view behind it.
+                if let id = plotMenuPlotID,
+                   let plot = plots.first(where: { $0.id == id }) {
+                    plotOverlayMenu(for: plot)
+                }
             })
             .background(ForestixPalette.canvas.ignoresSafeArea())
             .onAppear {
@@ -301,6 +354,15 @@ public struct MapHomeScreen: View {
             .onChange(of: location.latestSnapshot) { _, snap in
                 recenterOnFirstFix(snap)
                 if isCruiseMode { checkNavArrival(snap) }
+            }
+            // Lets the plot's inside/outside verdict AND the drawn
+            // you-dot time out on their own when the fixes stop — see
+            // `fixIsStale`. Both read the same `FixFreshness` rule, so
+            // one pulse retires both together.
+            .onReceive(Self.fixAgeTicker) { now in
+                let stale = FixFreshness.usable(location.latestSnapshot,
+                                                asOf: now) == nil
+                if stale != fixIsStale { fixIsStale = stale }
             }
             // A boundary imported from Map settings frames itself — a
             // boundary you cannot see is indistinguishable from one that
@@ -373,6 +435,22 @@ public struct MapHomeScreen: View {
             .sheet(isPresented: $presentingLayers) {
                 MapSettingsSheet(visibleRegion: visibleRegion)
                     .environmentObject(settings)
+            }
+            // REMOVE, step two. The one destructive step on the plot
+            // overlay, and it is spelled out: what goes is the centre,
+            // and everything measured in the plot stays.
+            .alert(plotMenuRemovalPlot.map(plotRemovalTitle) ?? "",
+                   isPresented: Binding(
+                       get: { confirmingPlotRemovalID != nil },
+                       set: { if !$0 { confirmingPlotRemovalID = nil } }),
+                   presenting: plotMenuRemovalPlot) { plot in
+                Button("Remove", role: .destructive) {
+                    removePlotFromMap(plot)
+                }
+                .accessibilityIdentifier("mapHome.plotRemove.confirm")
+                Button("Cancel", role: .cancel) { confirmingPlotRemovalID = nil }
+            } message: { plot in
+                Text(plotRemovalMessage(plot))
             }
             // ANY dismissal — Skip, row pick, or a plain swipe-down —
             // stamps regionPickerSeen so the picker never nags again.
@@ -462,9 +540,26 @@ public struct MapHomeScreen: View {
             // every pin/ring/you-dot (those are views over the Canvas,
             // so the boundary can never intercept a tap meant for one).
             boundary: surveyBoundary.overlay,
+            // THE SAMPLING PLOT — one layer above the imported boundary,
+            // still under every pin. Cruise-only, like every other piece
+            // of cruise content on this shared map.
+            plotOverlay: isCruiseMode ? cruisePlotOverlay?.overlay : nil,
             markers: isCruiseMode ? cruiseMarkers : markers,
             selectedMarkerID: selectedPinID,
-            youLocation: location.latestSnapshot.map {
+            // THE YOU-DOT GOES THROUGH THE SAME GATE AS THE VERDICT.
+            // It used to be handed the raw `latestSnapshot`, which is
+            // written on ingest and never cleared — so while the banner
+            // said "No position" and the plot circle went grey, the map
+            // still painted a confident blue dot from the very fix those
+            // two had just refused, quite often sitting inside a plot the
+            // app had declined to vouch for. A rejected fix now means NO
+            // dot at all: the honest picture of "I don't know where you
+            // are" is an empty one, and a greyed last-known dot would
+            // still be a position drawn on ground the app cannot stand
+            // behind. `fixAgeTicker` retires it on the same pulse that
+            // retires the verdict, so the two never disagree even when
+            // the fixes simply stop arriving.
+            youLocation: FixFreshness.usable(location.latestSnapshot).map {
                 CoordinateConversions.LatLon(latitude: $0.latitude,
                                              longitude: $0.longitude)
             },
@@ -486,6 +581,9 @@ public struct MapHomeScreen: View {
             onMapTap: {
                 withAnimation(.easeOut(duration: 0.18)) { selectedPinID = nil }
             },
+            // A tap ON the drawn plot's boundary raises its small Edit /
+            // Remove menu (M2) — the plot's own pin still owns the centre.
+            onPlotTap: { id in openPlotMenu(id) },
             onCameraChange: { _, region in
                 visibleRegion = region
             })
@@ -681,10 +779,18 @@ public struct MapHomeScreen: View {
             .overlay(Circle().stroke(ForestixPalette.divider, lineWidth: 1))
     }
 
-    /// A fix older than this reads as stale (dense canopy, canyon
+    /// A fix older than this reads as STALE (dense canopy, canyon
     /// bottom) — the chip starts counting the age and its status dot
     /// flips to the warn colour.
-    private static let staleFixAge: TimeInterval = 5
+    ///
+    /// THIS IS ALSO THE PLOT BANNER'S CUTOFF and the cutoff for every
+    /// POSITION THE APP DRAWS, and deliberately so: `FixFreshness` is the
+    /// app's one definition of a fix that can still be believed, so the
+    /// GPS chip, the inside/outside verdict, the you-dot and the plot
+    /// card can never contradict each other. The moment the chip's dot
+    /// leaves green, the plot stops asserting a side of the boundary AND
+    /// the map stops painting a position.
+    static var staleFixAge: TimeInterval { FixFreshness.maxUsableAge }
 
     /// Older than this the fix is effectively lost — the dot goes red.
     private static let lostFixAge: TimeInterval = 60
@@ -702,7 +808,13 @@ public struct MapHomeScreen: View {
             // captured — the camera already seeds from lastGlobalFix, so
             // the chip should agree with it.
             let snap = location.latestSnapshot ?? LocationService.lastGlobalFix
-            let age = snap.map { max(0, context.date.timeIntervalSince($0.timestamp)) }
+            // MAGNITUDE, not a clamped difference. A GPS timestamp is satellite
+            // UTC; a device clock running behind it makes the difference
+            // NEGATIVE, and `max(0, …)` turned that into "0 s old" — a green dot
+            // and no age suffix on a fix of any age, while the map beside it
+            // drew nothing and the plot banner read "No position". Same rule as
+            // `FixFreshness`, so the chip and the drawn position agree.
+            let age = snap.map { abs(context.date.timeIntervalSince($0.timestamp)) }
             let stale = (age ?? 0) > Self.staleFixAge
             let dot: Color = {
                 guard snap != nil, let age else { return ForestixPalette.confidenceBad }

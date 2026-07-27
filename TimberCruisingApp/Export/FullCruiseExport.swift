@@ -69,7 +69,12 @@ public enum FullCruiseExporter {
         steps.append(("Planned plots CSV",        .csvPlanned))
         steps.append(("Cruise GeoJSON",           .geojsonCruise))
         steps.append(("Plan GeoJSON",             .geojsonPlan))
-        if !bundle.plots.isEmpty {
+        // A LOCATED plot, not merely a plot: the layer carries plot
+        // CENTRES, and a plot whose centre was never recorded (or was
+        // cleared from the map) contributes no point to it. Planning the
+        // step on `plots.isEmpty` would promise the cruiser a file the
+        // writer then has nothing to put in.
+        if bundle.plots.contains(where: \.hasCentre) {
             steps.append(("Plot centres shapefile", .shapefilePlots))
         }
         if !bundle.plannedPlots.isEmpty {
@@ -149,10 +154,20 @@ public enum FullCruiseExporter {
                                  display: "Plan (GeoJSON)",
                                  kind: kind, folder: folder)
         case .shapefilePlots:
-            let data = try ShapefileExporter.plotCentersZip(plots: bundle.plots)
-            return try writeData(data, name: "plots-shp.zip",
-                                 display: "Plot centres (Shapefile)",
-                                 kind: kind, folder: folder)
+            do {
+                let data = try ShapefileExporter.plotCentersZip(plots: bundle.plots)
+                return try writeData(data, name: "plots-shp.zip",
+                                     display: "Plot centres (Shapefile)",
+                                     kind: kind, folder: folder)
+            } catch ShapefileExporterError.emptyLayer {
+                // No plot in this cruise has a centre — every one was
+                // either never positioned or removed from the map. There
+                // is no geometry to write, and an empty shapefile is not
+                // a valid one. Skip THIS artefact only: the tally still
+                // exports in full through the CSVs and the PDF, which is
+                // the whole point of Remove clearing only the centre.
+                return nil
+            }
         case .shapefilePlanned:
             let data = try ShapefileExporter.plannedPlotsZip(
                 plannedPlots: bundle.plannedPlots)

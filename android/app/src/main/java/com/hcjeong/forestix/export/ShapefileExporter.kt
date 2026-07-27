@@ -25,6 +25,7 @@ package com.hcjeong.forestix.export
 import com.hcjeong.forestix.data.cruise.PlannedPlot
 import com.hcjeong.forestix.data.cruise.Plot
 import com.hcjeong.forestix.data.cruise.Stratum
+import com.hcjeong.forestix.data.cruise.hasCentre
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Calendar
@@ -51,7 +52,15 @@ object ShapefileExporter {
         plots: List<Plot>,
         layerName: String = "plots",
     ): ByteArray {
-        val rows: List<DBFRow> = plots.map { p ->
+        // ONLY LOCATED PLOTS. A point shapefile can hold nothing but
+        // points, so a plot with no recorded centre — never set, or cleared
+        // by the map's "Remove plot" — is simply not a feature in this
+        // layer. Its full record still ships in plots.csv and cruise.geojson
+        // (there as an unlocated feature), and its trees still export in
+        // full; what it must never become is a point at (0,0) that a GIS
+        // draws off West Africa as if someone had stood there.
+        val located = plots.filter { it.hasCentre }
+        val rows: List<DBFRow> = located.map { p ->
             listOf(
                 "plot_num" to DBFValue.IntValue(p.plotNumber),
                 "tier" to DBFValue.StringValue(p.positionTier.raw, width = 1),
@@ -61,7 +70,7 @@ object ShapefileExporter {
                 "plot_id" to DBFValue.StringValue(p.id.uuidString, width = 36),
             )
         }
-        val shapes: List<ShapeGeometry> = plots.map {
+        val shapes: List<ShapeGeometry> = located.map {
             ShapeGeometry.Point(x = it.centerLon, y = it.centerLat)
         }
         if (shapes.isEmpty()) throw ShapefileExporterError.EmptyLayer()

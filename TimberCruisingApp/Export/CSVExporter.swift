@@ -154,8 +154,15 @@ public enum CSVExporter {
             cells.append("\(p.plotNumber)")
             cells.append(quote(p.projectId.uuidString))
             cells.append(quote(p.plannedPlotId?.uuidString ?? ""))
-            cells.append(format(p.centerLat, places: 7))
-            cells.append(format(p.centerLon, places: 7))
+            // No centre → EMPTY cells, never "0.0000000". The row itself
+            // stays: this file is the plot's tally and position record,
+            // and a plot whose centre was never captured (or was cleared
+            // by the map's "Remove plot") still has trees, an area and a
+            // close time worth exporting. It just has no coordinate, and
+            // a blank is how a CSV says so — zero is a place, and it is
+            // in the Gulf of Guinea.
+            cells.append(p.hasCentre ? format(p.centerLat, places: 7) : "")
+            cells.append(p.hasCentre ? format(p.centerLon, places: 7) : "")
             cells.append(quote(String(describing: p.positionSource)))
             cells.append(quote(String(describing: p.positionTier)))
             cells.append("\(p.gpsNSamples)")

@@ -98,15 +98,14 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import com.hcjeong.forestix.AppEnvironment
 import com.hcjeong.forestix.LocalAppEnvironment
+import com.hcjeong.forestix.ar.ArSessionHub
 import com.hcjeong.forestix.basemap.MapCameraState
 import com.hcjeong.forestix.basemap.MapMarker
 import com.hcjeong.forestix.basemap.MapMarkerShape
-import com.hcjeong.forestix.basemap.MapPolygonOverlay
 import com.hcjeong.forestix.basemap.MapPolylineOverlay
 import com.hcjeong.forestix.common.AreaUnit
 import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.RegionalSpecies
-import com.hcjeong.forestix.common.Units
 import com.hcjeong.forestix.data.SettingsSnapshot
 import com.hcjeong.forestix.data.cruise.BreastHeightConvention
 import com.hcjeong.forestix.data.cruise.CruiseDesign
@@ -116,6 +115,7 @@ import com.hcjeong.forestix.data.cruise.PlotType
 import com.hcjeong.forestix.data.cruise.Project
 import com.hcjeong.forestix.data.cruise.SamplingScheme
 import com.hcjeong.forestix.data.cruise.Tree
+import com.hcjeong.forestix.data.cruise.hasCentre
 import com.hcjeong.forestix.export.FullCruiseExporter
 import com.hcjeong.forestix.geo.CoordinateConversions
 import com.hcjeong.forestix.inventory.HDModel
@@ -154,10 +154,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
-import kotlin.math.PI
-import kotlin.math.cos
 import kotlin.math.roundToInt
-import kotlin.math.sqrt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -194,6 +191,9 @@ internal class CruiseModeState {
     var navTargetId by mutableStateOf<UUID?>(null)
     /// Plot whose heights sheet is open ("Heights · N measured", B).
     var heightsSheetFor by mutableStateOf<UUID?>(null)
+    /// Plot whose map-overlay menu (Edit / Remove) is open — raised by
+    /// tapping the drawn plot's boundary on the map (M2).
+    var plotMenuFor by mutableStateOf<UUID?>(null)
 
     /// Actions — wired by CruiseModeEffects (they need nav/scope/settings).
     var startPlot: () -> Unit = {}
@@ -207,6 +207,10 @@ internal class CruiseModeState {
     var deletePlot: (Plot) -> Unit = {}
     /// Hard delete a tree + its photo (tree peek "Delete tree").
     var deleteTree: (Tree) -> Unit = {}
+    /// Take the plot off the map (map-overlay menu "Remove plot"). Clears
+    /// the plot's recorded CENTRE only — the plot row, its radius and every
+    /// tree measured in it survive.
+    var removePlot: (Plot) -> Unit = {}
     /// Height on demand (tree peek "Measure height" / heights sheet).
     var measureHeight: (Tree) -> Unit = {}
 
@@ -216,6 +220,28 @@ internal class CruiseModeState {
     fun activePlot(settings: SettingsSnapshot): Plot? =
         settings.cruisePlotId?.let(::uuidOrNull)
             ?.let { id -> data.plots.firstOrNull { it.id == id && it.closedAt == null } }
+
+    /// Which units cruise surfaces render in: the PROJECT's, because a
+    /// cruise is run in the units it was set up in. Falls back to the app
+    /// setting when there is no project yet (same rule the peek cards use).
+    fun unitSystem(settings: SettingsSnapshot): com.hcjeong.forestix.common.UnitSystem =
+        when (project?.units) {
+            com.hcjeong.forestix.data.cruise.UnitSystem.METRIC ->
+                com.hcjeong.forestix.common.UnitSystem.METRIC
+            com.hcjeong.forestix.data.cruise.UnitSystem.IMPERIAL ->
+                com.hcjeong.forestix.common.UnitSystem.IMPERIAL
+            null -> settings.unitSystem
+        }
+
+    /// A tap on the plot drawn on the map (MapView's onPlotTap) — raises
+    /// that plot's Edit / Remove menu. Ignores an id that no longer names a
+    /// plot in this project.
+    fun openPlotMenu(plotId: String) {
+        val id = uuidOrNull(plotId) ?: return
+        if (data.plots.none { it.id == id }) return
+        selectedId = null
+        plotMenuFor = id
+    }
 
     fun navTarget(): PlannedPlot? =
         navTargetId?.let { id -> data.plannedPlots.firstOrNull { it.id == id } }
@@ -273,7 +299,7 @@ internal fun CruiseModeEffects(
                 .firstOrNull { it.latitude != null && it.longitude != null }
                 ?.let { CoordinateConversions.LatLon(latitude = it.latitude!!, longitude = it.longitude!!) }
                 ?: plots.sortedByDescending { it.startedAt }
-                    .firstOrNull { it.centerLat != 0.0 || it.centerLon != 0.0 }
+                    .firstOrNull { it.hasCentre }
                     ?.let { CoordinateConversions.LatLon(latitude = it.centerLat, longitude = it.centerLon) }
             if (target != null) onCentreOnCruiseGeometry(target)
         }
@@ -393,6 +419,43 @@ internal fun CruiseModeEffects(
         }
     }
 
+    /// Map-overlay menu "Remove plot": take the plot OFF THE MAP and change
+    /// nothing else.
+    ///
+    /// It clears exactly ONE thing: the recorded CENTRE, back to the (0,0)
+    /// sentinel every cruise surface already reads as "no centre". The Plot
+    /// row, its number, its radius/area and every Tree row measured in it
+    /// are untouched, so the tally still exports, still rolls up, and the
+    /// plot is one "Edit plot" away from having a centre again (re-centring
+    /// rewrites the whole position stamp in one go). Deleting the plot row
+    /// instead would leave those trees with no plot to belong to — invisible
+    /// on every screen and in every export — which is precisely the loss
+    /// this control must never cause.
+    ///
+    /// The AR ring that mirrors this plot on the scan screens is dropped
+    /// too when it is linked to it: a ring standing in for a centre that no
+    /// longer exists would be a lie about where the plot is.
+    state.removePlot = { plot ->
+        scope.launch {
+            val lat = plot.centerLat
+            val lon = plot.centerLon
+            try {
+                plot.centerLat = 0.0
+                plot.centerLon = 0.0
+                env.plotRepository.update(plot)
+                if (ArSessionHub.linkedCruisePlotId == plot.id) ArSessionHub.clearPlot()
+            } catch (_: Exception) {
+                // Storage error — put the centre back so the map keeps
+                // telling the truth; the next tap retries.
+                plot.centerLat = lat
+                plot.centerLon = lon
+            }
+            state.plotMenuFor = null
+            state.selectedId = null
+            state.refresh++
+        }
+    }
+
     /// Tree peek "Delete tree": hard delete the row + its auto-captured photo
     /// (same MeasurePhotoStore the quick world uses). Peek dismisses + reloads.
     state.deleteTree = { tree ->
@@ -437,15 +500,10 @@ internal fun cruiseModeMarkers(
     colors.confidenceOk, colors.confidenceWarn, colors.primary,
     colors.textTertiary)
 
-/// The active plot's TRUE boundary circle (mock `.plotring`).
-internal fun cruiseModePolygons(
-    state: CruiseModeState,
-    settings: SettingsSnapshot,
-    accent: Color,
-): List<MapPolygonOverlay> = state.activePlot(settings)
-    ?.takeIf { it.centerLat != 0.0 || it.centerLon != 0.0 }
-    ?.let { listOf(plotBoundaryOverlay(it, accent)) }
-    ?: emptyList()
+// The active plot's boundary is no longer a plain polygon ring: it is the
+// map's own PLOT OVERLAY (cruiseModePlotOverlay in PlotMapOverlay.kt), which
+// draws the boundary plus range rings, compass badges, the centre mark and
+// the inside/outside state at true ground scale.
 
 /// Navigate mode: dashed you-dot → planned-plot guide (mock ⑦).
 internal fun cruiseModePolylines(
@@ -722,6 +780,27 @@ internal fun CruiseModeSheets(
         )
     }
 
+    // MARK: - Plot map-overlay menu (M2 — tap the drawn plot)
+
+    val menuPlot = state.plotMenuFor
+        ?.let { id -> state.data.plots.firstOrNull { it.id == id } }
+    if (menuPlot != null) {
+        PlotOverlayMenu(
+            plot = menuPlot,
+            radiusM = plotRadiusMetres(menuPlot),
+            treeCount = state.data.treesByPlot[menuPlot.id].orEmpty().size,
+            system = state.unitSystem(settings),
+            onEdit = {
+                state.plotMenuFor = null
+                nav.navigate(
+                    CruiseRoutes.editPlot(
+                        menuPlot.projectId.toString(), menuPlot.id.toString()))
+            },
+            onRemove = { state.removePlot(menuPlot) },
+            onDismiss = { state.plotMenuFor = null },
+        )
+    }
+
     // MARK: - Inline centre recording (mock ⑧ — replaces PlotCenterScreen)
 
     val recordPlanned = state.recordCentreFor
@@ -797,32 +876,6 @@ private suspend fun createDefaultProject(
     return env.projectRepository.create(project)
 }
 
-/// Fixed-radius metres back out of the denormalized acre area.
-private fun plotRadiusM(plot: Plot): Double =
-    sqrt(Units.acresToSquareMeters(plot.plotAreaAcres.toDouble()) / PI)
-
-/// The active plot's TRUE boundary circle on the basemap (mock `.plotring`),
-/// rendered through the existing polygon overlay — accent stroke, near-clear
-/// fill. 48-segment circle in local metres → lat/lon.
-private fun plotBoundaryOverlay(plot: Plot, accent: Color): MapPolygonOverlay {
-    val r = plotRadiusM(plot)
-    val latRad = plot.centerLat * PI / 180.0
-    val mPerDegLat = 111_132.0
-    val mPerDegLon = 111_320.0 * cos(latRad)
-    val ring = (0 until 48).map { i ->
-        val a = 2.0 * PI * i / 48.0
-        CoordinateConversions.LatLon(
-            latitude = plot.centerLat + (r * kotlin.math.sin(a)) / mPerDegLat,
-            longitude = plot.centerLon + (r * cos(a)) / mPerDegLon,
-        )
-    }
-    return MapPolygonOverlay(
-        ring = ring,
-        fillColor = accent.copy(alpha = 0.07f),
-        strokeColor = accent.copy(alpha = 0.8f),
-    )
-}
-
 private fun isWarn(raw: String?) = raw == "yellow" || raw == "red"
 
 /// Plot RING pins (status colour: amber in-progress / green closed /
@@ -856,7 +909,9 @@ private fun cruiseMarkers(
         )
     }
     for (plot in data.plots) {
-        if (plot.centerLat == 0.0 && plot.centerLon == 0.0) continue
+        // No recorded centre → no pin. Same rule the plot overlay and every
+        // exporter apply: a plot with no centre is not a plot at a place.
+        if (!plot.hasCentre) continue
         val id = "plot-${plot.id}"
         markers += MapMarker(
             coordinate = CoordinateConversions.LatLon(
@@ -972,9 +1027,14 @@ private fun PlannedPeekCard(
             Spacer(Modifier.weight(1f))
         }
         Spacer(Modifier.size(6.dp))
-        // LOCKED live line "X m · bearing Y°" from the current fix (the
-        // screen's live service, else the newest global fix).
-        val rangeFix = fix ?: LocationService.lastGlobalFix
+        // LOCKED live line "X m · bearing Y°" — and the fix behind it must be
+        // FRESH. This is a walking instruction: a minutes-old position sends
+        // the cruiser off on a heading measured from somewhere they no longer
+        // are. Same gate as the plot verdict and the drawn you-dot, so nothing
+        // here claims a position the app has stopped trusting; when it lapses
+        // the row falls through to "no GPS fix" below. `lastGlobalFix` is
+        // deliberately NOT consulted — it survives across sessions.
+        val rangeFix = freshFixOrNull(fix, System.currentTimeMillis())
         Row(
             Modifier.padding(vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -1351,7 +1411,7 @@ private fun PlotPeekCard(
             Text(
                 String.format(
                     Locale.US, "%.1f m radius · %s",
-                    plotRadiusM(plot),
+                    plotRadiusMetres(plot),
                     SimpleDateFormat("HH:mm", Locale.US).format(Date(plot.startedAt)),
                 ),
                 style = type.dataSmall.copy(fontSize = 11.sp),

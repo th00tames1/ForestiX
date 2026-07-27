@@ -12,6 +12,11 @@
 //   • stored here, app-scoped, as {anchorID, radiusM, placedAt} so every
 //     AR measure screen can render it while the app runs.
 //
+// The MAP HOME draws its plot from the persisted cruise `Plot` instead —
+// an ARKit anchor is a world-session coordinate, not a place on Earth,
+// so it cannot be projected onto a map at all. This ring and that plot
+// are the same physical circle seen from two frames.
+//
 // Replaced on a new placement; cleared by Reset on the sampling screen.
 // Deliberately NOT persisted across app restarts — the anchor lives in
 // the AR session's world map, which dies with the process, so a restored

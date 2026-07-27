@@ -144,9 +144,12 @@ import com.hcjeong.forestix.ui.screens.cruise.CruiseModeBottomContent
 import com.hcjeong.forestix.ui.screens.cruise.CruiseModeEffects
 import com.hcjeong.forestix.ui.screens.cruise.CruiseModeSheets
 import com.hcjeong.forestix.ui.screens.cruise.CruiseModeState
+import com.hcjeong.forestix.ui.screens.cruise.CruisePlotBanner
 import com.hcjeong.forestix.ui.screens.cruise.cruiseModeMarkers
-import com.hcjeong.forestix.ui.screens.cruise.cruiseModePolygons
+import com.hcjeong.forestix.ui.screens.cruise.cruiseModePlotOverlay
 import com.hcjeong.forestix.ui.screens.cruise.cruiseModePolylines
+import com.hcjeong.forestix.ui.screens.cruise.freshFixOrNull
+import com.hcjeong.forestix.ui.screens.cruise.msUntilFreshnessChanges
 import com.hcjeong.forestix.ui.softDropShadow
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixRadius
@@ -326,6 +329,51 @@ fun MapHomeScreen(nav: NavController) {
         env.settings.setMapMode(mode)
     }
 
+    // The cruiser's sampling plot ON THE MAP: the active plot drawn at true
+    // ground scale (boundary, labelled range rings, compass badges, centre
+    // mark) with its live INSIDE / OUTSIDE state. Null with no open plot, no
+    // recorded centre, or outside cruise mode.
+    //
+    // The clock every position on this screen is judged against (see
+    // PLOT_FIX_MAX_AGE_MS). Losing GPS produces no new fix, so without a
+    // wake-up nothing would ever recompose this screen again and the banner
+    // would keep asserting Inside from a fix minutes old.
+    //
+    // The wake-up fires ONCE, at the moment the current fix ages out —
+    // deliberately not a free-running 1 Hz clock, which would recompose the
+    // whole map (tiles, pins, plot) every second for the sake of a value
+    // that changes twice an hour. A newer fix restarts the effect and
+    // re-arms it; the immediate re-read at the top covers arriving with an
+    // old fix already in hand.
+    //
+    // It runs in BOTH modes. The you-dot is drawn in both, and a fix too
+    // old for the cruise banner to believe is exactly as untrustworthy on
+    // the measure map — the rule is about the fix, not about the mode.
+    var fixNowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(fix) {
+        fixNowMs = System.currentTimeMillis()
+        // The slack guarantees we wake AFTER the threshold, never a
+        // millisecond short of it.
+        val wait = msUntilFreshnessChanges(fix, fixNowMs) ?: return@LaunchedEffect
+        delay(wait.coerceAtLeast(0L) + 250L)
+        fixNowMs = System.currentTimeMillis()
+    }
+
+    // THE ONE POSITION ANYTHING ON THIS SCREEN IS ALLOWED TO DRAW.
+    //
+    // The map used to be handed the RAW fix while the banner ran it through
+    // the age gate, so a rejected fix still painted a confident blue dot —
+    // often sitting inside a plot the banner had just labelled unknown. The
+    // picture contradicted the words beside it. Everything that puts a mark
+    // at the cruiser's position now starts from this value: the you-dot,
+    // the navigate guide line, and the distance chip riding it. Null means
+    // the app does not know where the cruiser is, and draws nothing that
+    // claims otherwise. (The plot overlay does its own gating through the
+    // SAME helper — it needs the raw fix and the clock to date it.)
+    val usableFix = freshFixOrNull(fix, fixNowMs)
+    val plotOverlay =
+        if (isCruise) cruiseModePlotOverlay(cruise, settings, fix, fixNowMs) else null
+
     val selectedPin = pins.firstOrNull { it.id == selectedPinId }
     // System back: cruise mode is a MODE of the home, not a destination —
     // back first dismisses a raised peek (the mode-specific handlers below
@@ -355,16 +403,18 @@ fun MapHomeScreen(nav: NavController) {
             // Mode content separation (v3.1): quick pins are measure-only,
             // cruise pins/rings/guides cruise-only — the map itself (camera,
             // zoom, base + overlay) is shared across the toggle.
-            polygons = if (isCruise) {
-                cruiseModePolygons(cruise, settings, colors.accent)
-            } else {
-                emptyList()
-            },
+            // The navigate guide is a line drawn FROM the cruiser: with no
+            // position it has no start point, and one drawn from a rejected
+            // fix points at the plot from the wrong place. It goes with the
+            // you-dot rather than outliving it.
             polylines = if (isCruise) {
-                cruiseModePolylines(cruise, fix, colors.accent)
+                cruiseModePolylines(cruise, usableFix, colors.accent)
             } else {
                 emptyList()
             },
+            // The sampling plot itself — above the survey boundary and the
+            // guide line, below the you-dot and the pins.
+            plot = plotOverlay?.overlay,
             markers = if (isCruise) {
                 cruiseModeMarkers(cruise, settings, colors)
             } else {
@@ -388,8 +438,15 @@ fun MapHomeScreen(nav: NavController) {
                     selectedPinId = if (selectedPinId == id) null else id
                 }
             },
+            // A tap ON the drawn plot's boundary raises its small Edit /
+            // Remove menu (M2) — the plot's own pin still owns the centre.
+            onPlotTap = { id -> cruise.openPlotMenu(id) },
             onMapTap = { if (isCruise) cruise.selectedId = null else selectedPinId = null },
-            youLocation = fix?.let {
+            // The you-dot, from the gated fix ONLY. A dot is the map's
+            // flattest assertion — "you are here" — so it may never outlive
+            // the evidence for it. No usable fix, no dot: the map simply
+            // does not say where the cruiser is, which is the truth.
+            youLocation = usableFix?.let {
                 CoordinateConversions.LatLon(latitude = it.latitude, longitude = it.longitude)
             },
             cameraState = camera,
@@ -443,10 +500,18 @@ fun MapHomeScreen(nav: NavController) {
             }
         }
 
+        // The plot's own status line: INSIDE / OUTSIDE (or "no position"),
+        // the radius, and the live distance from the centre — all in the
+        // cruiser's units.
+        plotOverlay?.let { CruisePlotBanner(it, settings, cruise) }
+
         // Cruise navigate mode: floating live distance chip riding the
         // dashed guide line's midpoint (mock ⑦ `.distchip`).
         if (isCruise) {
-            CruiseDistanceOverlay(cruise, camera, fix)
+            // Rides the guide line's midpoint and states a distance measured
+            // from the cruiser — same evidence, same gate, so chip and line
+            // appear and disappear together.
+            CruiseDistanceOverlay(cruise, camera, usableFix)
         }
 
         // MARK: - Bottom: action cluster ①, or peek card ② when a pin is up.
@@ -849,7 +914,13 @@ internal fun GpsChip(fix: CLLocationSnapshot?) {
             delay(1_000)
         }
     }
-    val ageSec = snap?.let { ((nowMs - it.timestamp) / 1_000).coerceAtLeast(0) }
+    // MAGNITUDE, not a clamped difference. Location.time is satellite UTC for
+    // the GPS provider, so a device clock running behind it makes this
+    // NEGATIVE, and coerceAtLeast(0) turned that into "0 s old" — a green dot
+    // and no age suffix on a fix of any age, while the map beside it drew
+    // nothing and the plot banner read "No position". Same rule the plot
+    // verdict uses, so the chip and the drawn position agree.
+    val ageSec = snap?.let { kotlin.math.abs(nowMs - it.timestamp) / 1_000 }
     val dotColor = when {
         ageSec == null -> colors.confidenceBad // no fix ever
         ageSec < 5 -> colors.confidenceOk

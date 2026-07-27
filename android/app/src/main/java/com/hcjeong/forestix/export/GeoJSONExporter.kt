@@ -6,7 +6,10 @@
 //   * PlannedPlot points with `visited: Bool` property so downstream GIS
 //     tools can distinguish visited vs. skipped plots at a glance.
 //   * Measured-Plot points for every Plot that has been recorded, with the
-//     full position-tier + tally metadata in their `properties`.
+//     full position-tier + tally metadata in their `properties`. A plot
+//     with no recorded centre is still a feature — it keeps its properties
+//     so the tally is not lost — but an UNLOCATED one, `"geometry": null`
+//     per RFC 7946 §3.2, never a Point at the (0,0) sentinel.
 //
 // All coordinates are WGS84 decimal degrees. Keys are sorted so two runs
 // with identical inputs yield byte-identical files (important for
@@ -19,6 +22,7 @@ package com.hcjeong.forestix.export
 import com.hcjeong.forestix.data.cruise.PlannedPlot
 import com.hcjeong.forestix.data.cruise.Plot
 import com.hcjeong.forestix.data.cruise.Stratum
+import com.hcjeong.forestix.data.cruise.hasCentre
 import org.json.JSONArray
 import org.json.JSONObject
 import java.math.BigDecimal
@@ -125,10 +129,21 @@ object GeoJSONExporter {
         if (p.notes.isNotEmpty()) props["notes"] = p.notes
         return mapOf(
             "type" to "Feature",
-            "geometry" to mapOf(
-                "type" to "Point",
-                "coordinates" to listOf(p.centerLon, p.centerLat),
-            ),
+            // A plot with NO RECORDED CENTRE is an UNLOCATED FEATURE:
+            // `"geometry": null`, which RFC 7946 §3.2 defines for exactly
+            // this case. The plot keeps its row and its whole tally in the
+            // file — a reader can still join it to trees.csv — but the file
+            // makes no claim about where it is. Emitting the (0,0) sentinel
+            // as a Point instead dropped the plot in the Gulf of Guinea and
+            // called it a measurement.
+            "geometry" to if (p.hasCentre) {
+                mapOf(
+                    "type" to "Point",
+                    "coordinates" to listOf(p.centerLon, p.centerLat),
+                )
+            } else {
+                null
+            },
             "properties" to props,
         )
     }

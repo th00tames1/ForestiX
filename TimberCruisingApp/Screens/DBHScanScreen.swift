@@ -974,9 +974,13 @@ public struct DBHScanScreen: View {
             }
         }
         .accessibilityIdentifier("dbhScan.crosshair")
+        // Spoken to VoiceOver on the main diameter flow: "depth stable" was
+        // the internal `crosshairIsStable` condition read aloud verbatim,
+        // and "tap to capture" named an interaction the screen no longer
+        // has — capture is the "+" shutter, not a tap on the ring.
         .accessibilityLabel(viewModel.crosshairIsStable
-                            ? "Depth stable — tap to capture"
-                            : "Aligning — move closer or steadier")
+                            ? "Locked on the trunk — press the capture button"
+                            : "Lining up — move closer or hold steadier")
     }
 
     /// Fraction of the capture burst completed (0…1) — drives the

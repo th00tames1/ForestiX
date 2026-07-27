@@ -43,7 +43,7 @@ public struct OffsetFlowScreen: View {
 
     private var stepName: String {
         switch viewModel.step {
-        case .anchorPlot:          return "A · Anchor plot"
+        case .anchorPlot:          return "A · Mark the plot centre"
         case .walkToOpening:       return "B · Walk to opening"
         case .averagingAtOpening:  return "C · Averaging at opening"
         case .walkBack:            return "D · Walk back"
@@ -55,15 +55,18 @@ public struct OffsetFlowScreen: View {
     private var stepHint: String {
         switch viewModel.step {
         case .anchorPlot:
-            return "Stand at the plot center. Tap Anchor when steady."
+            return "Stand at the plot centre. Tap Mark when the phone is steady."
         case .walkToOpening:
             return "Walk to an opening with clear sky. Keep phone upright."
         case .averagingAtOpening:
             return "Hold still for \(viewModel.openingAveragingDurationS) s."
         case .walkBack:
-            return "Walk back to the plot center under continuous tracking."
+            return "Walk back to the plot centre. Keep the phone up and the camera pointed ahead the whole way."
         case .computed:
-            return "Plot center recovered."
+            // "centre" everywhere else on this screen (and in ~190 other
+            // strings across the app); these two were the last US
+            // spellings left on a cruiser surface.
+            return "Plot centre recovered."
         case .failed(let r):
             return r
         }
@@ -88,7 +91,7 @@ public struct OffsetFlowScreen: View {
         case .walkBack(let d):
             VStack {
                 Text(d.map { String(format: "%.1f m from plot", $0) }
-                     ?? "Waiting for ARKit pose…")
+                     ?? "Finding your position…")
                     .font(.title3.monospacedDigit())
             }
         case .computed(let r):
@@ -119,7 +122,7 @@ public struct OffsetFlowScreen: View {
     private var actions: some View {
         switch viewModel.step {
         case .anchorPlot:
-            Button("Anchor here") { viewModel.anchorPlotCenter() }
+            Button("Mark here") { viewModel.anchorPlotCenter() }
                 .buttonStyle(.forestixProminent)
         case .walkToOpening:
             Button("Capture fix here") { viewModel.beginOpeningAveraging() }
@@ -127,7 +130,7 @@ public struct OffsetFlowScreen: View {
         case .averagingAtOpening:
             Button("Cancel", role: .cancel) { viewModel.cancel() }
         case .walkBack:
-            Button("Confirm plot center") { viewModel.confirmPlotCenter() }
+            Button("Confirm plot centre") { viewModel.confirmPlotCenter() }
                 .buttonStyle(.forestixProminent)
         case .computed(let r):
             Button("Save") { onDone(r) }

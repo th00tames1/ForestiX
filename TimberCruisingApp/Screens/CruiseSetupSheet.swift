@@ -101,7 +101,13 @@ public struct CruiseSetupSheet: View {
                     fieldHeader("Plot type")
                     Picker("Plot type", selection: $plotType) {
                         Text("Fixed radius").tag(PlotType.fixedArea)
-                        Text("Variable (BAF)").tag(PlotType.variableRadius)
+                        // Named for the cruising method, not the factor: the
+                        // segment is shown BEFORE the "Prism basal-area
+                        // factor" caption exists (that caption only renders
+                        // once this mode is picked), so "BAF" here asked the
+                        // cruiser to choose blind. The unit on the value
+                        // below stays "BAF", where a cruise sheet expects it.
+                        Text("Variable radius (prism)").tag(PlotType.variableRadius)
                     }
                     .pickerStyle(.segmented)
                     .accessibilityIdentifier("cruiseSetup.plotType")
@@ -131,7 +137,7 @@ public struct CruiseSetupSheet: View {
                         unit: layoutMode == .count ? "plots" : "m",
                         caption: layoutMode == .count
                             ? "How many plot centres to lay out"
-                            : "Systematic grid pitch between centres",
+                            : "Distance between plot centres",
                         accessibilityID: "cruiseSetup.layoutValue")
                     .padding(.bottom, ForestixSpace.sm)
 
@@ -256,7 +262,11 @@ public struct CruiseSetupSheet: View {
     private var stratumRow: some View {
         HStack(spacing: ForestixSpace.sm) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Stratum polygon")
+                // "polygon" is the GIS word for the shape; the button
+                // beside this row already says "Draw boundary" and the
+                // state line below says "None drawn", so the label was
+                // the only place the GIS term appeared.
+                Text("Stratum boundary")
                     .font(.system(size: 14.5, weight: .bold))
                     .foregroundStyle(ForestixPalette.textPrimary)
                 // FIELD REPORT F7 — the field is named, not qualified. The
@@ -403,7 +413,12 @@ public struct CruiseSetupSheet: View {
             }
 
             guard !planned.isEmpty else {
-                errorMessage = "No plot centres fell inside the boundary — try a tighter spacing or a larger polygon."
+                // The sheet calls this thing a "boundary" everywhere else
+                // ("Stratum boundary", "Draw boundary", "None drawn — whole
+                // area"), so the fix names the same two controls the
+                // cruiser would go back to. Nothing about the generator
+                // changed — only the sentence when it returns nothing.
+                errorMessage = "No plot centres fell inside the boundary — try a tighter spacing or a bigger area."
                 return
             }
 

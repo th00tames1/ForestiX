@@ -322,9 +322,9 @@ fun SettingsScreen(nav: NavController) {
             // MARK: - 3. Calibration (navigation row, iOS NavigationLink)
             FormSection(
                 header = "Calibration",
-                footer = "Wall fit captures the LiDAR depth noise and bias; " +
-                    "cylinder fit estimates a linear DBH correction. " +
-                    "Run both before your first field pilot.",
+                footer = "Scan a flat wall, then a round post you have measured. " +
+                    "This tells Forestix how far off your phone's depth sensor runs, " +
+                    "so diameters come out right. Do both before your first cruise.",
             ) {
                 Row(
                     Modifier.fillMaxWidth().clickableNoRipple { nav.navigate(Routes.CALIBRATION) },
@@ -429,9 +429,10 @@ fun SettingsScreen(nav: NavController) {
                         )
                     }
                     Text(
-                        "Paste an XYZ template ({z}/{x}/{y}) to draw contour or " +
-                            "forest-service tiles over the map base. It shows only after " +
-                            "you confirm the provider's usage policy above.",
+                        "Paste the address of a map-tile service (it will contain " +
+                            "{z}/{x}/{y}) to draw contour or forest-service maps over the " +
+                            "base map. It shows only after you confirm the provider's " +
+                            "usage policy above.",
                         style = type.caption, color = colors.textSecondary,
                     )
                 }

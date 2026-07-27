@@ -293,9 +293,10 @@ public struct SettingsScreen: View {
     private var calibrationSection: some View {
         Section(
             header: Text("Calibration"),
-            footer: Text("Wall fit captures the LiDAR depth noise and bias; " +
-                         "cylinder fit estimates a linear DBH correction. " +
-                         "Run both before your first field pilot.")
+            footer: Text("Scan a flat wall, then a round post you have " +
+                         "measured. This tells Forestix how far off your " +
+                         "phone's depth sensor runs, so diameters come out " +
+                         "right. Do both before your first cruise.")
         ) {
             NavigationLink("Run Calibration") { CalibrationScreen() }
                 .accessibilityIdentifier("settings.calibrationLink")

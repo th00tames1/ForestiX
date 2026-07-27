@@ -56,7 +56,7 @@ public struct TreeDetailScreen: View {
         Form {
             if viewModel.isDeleted {
                 Section {
-                    Label("This tree is soft-deleted — it is excluded from all statistics.",
+                    Label("Removed from the tally — this tree is left out of every total. You can put it back below.",
                           systemImage: "trash.circle")
                         .foregroundStyle(.secondary)
                         .font(.callout)
@@ -150,7 +150,7 @@ public struct TreeDetailScreen: View {
             .onChange(of: viewModel.status) { _, _ in viewModel.markDirty() }
 
             if viewModel.tree.isMultistem {
-                Label("Multistem child", systemImage: "arrow.branch")
+                Label("One stem of a multi-stem tree", systemImage: "arrow.branch")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -296,7 +296,10 @@ public struct TreeDetailScreen: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityHint("Explains what the confidence tiers mean")
+        // "tier" is the spec's word, not a cruiser's — and it was the only
+        // place the app still said it out loud. Byte-identical to the
+        // Android sibling's contentDescription tail.
+        .accessibilityHint("Explains what Good, Fair and Check mean")
         .accessibilityIdentifier("treeDetail.\(kind.rawValue)ConfidenceChip")
     }
 
@@ -364,7 +367,7 @@ public struct TreeDetailScreen: View {
                 Button {
                     viewModel.undelete()
                 } label: {
-                    Label("Undelete", systemImage: "arrow.uturn.backward")
+                    Label("Put back in tally", systemImage: "arrow.uturn.backward")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
@@ -373,7 +376,7 @@ public struct TreeDetailScreen: View {
                 Button(role: .destructive) {
                     viewModel.softDelete()
                 } label: {
-                    Label("Soft delete", systemImage: "trash")
+                    Label("Remove from tally", systemImage: "trash")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
@@ -382,18 +385,21 @@ public struct TreeDetailScreen: View {
         }
     }
 
+    /// The chip's WORD is the one word the app uses for that grade
+    /// everywhere else — Good / Fair / Check, from `ConfidenceStyle`. It
+    /// used to print the stored enum ("Green" / "Yellow" / "Red"), so this
+    /// chip, the field log's quality column and the sheet this chip opens
+    /// were three different vocabularies for one reading. The colour still
+    /// carries the grade too; only the naming is unified.
     private func tierBadge(_ tier: ConfidenceTier) -> some View {
-        HStack(spacing: 6) {
+        let descriptor = ConfidenceStyle.descriptor(for: tier.rawValue)
+        return HStack(spacing: 6) {
             Circle()
-                .fill(tierColor(tier))
+                .fill(descriptor.color)
                 .frame(width: 10, height: 10)
-            Text(tier.rawValue.capitalized)
+            Text(descriptor.label)
                 .font(.caption.bold())
-                .foregroundStyle(tierColor(tier))
+                .foregroundStyle(descriptor.color)
         }
-    }
-
-    private func tierColor(_ tier: ConfidenceTier) -> Color {
-        ConfidenceStyle.descriptor(for: tier.rawValue).color
     }
 }

@@ -62,7 +62,7 @@ public final class OffsetFlowViewModel: ObservableObject {
 
     public func anchorPlotCenter() {
         guard let p = session.currentCameraWorldPosition else {
-            step = .failed(reason: "ARKit pose unavailable — tracking not started")
+            step = .failed(reason: "The camera hasn't found its bearings yet. Hold the phone upright and move it slowly side to side, then try again.")
             return
         }
         plotPoseWorld = p
@@ -71,7 +71,7 @@ public final class OffsetFlowViewModel: ObservableObject {
 
     public func beginOpeningAveraging() {
         guard let p = session.currentCameraWorldPosition else {
-            step = .failed(reason: "ARKit pose unavailable at opening")
+            step = .failed(reason: "The camera hasn't found its bearings yet. Hold the phone upright and move it slowly side to side, then try again.")
             return
         }
         openingPoseWorld = p
@@ -106,8 +106,14 @@ public final class OffsetFlowViewModel: ObservableObject {
         guard let result = GPSAveraging.compute(
             input: .init(samples: location.buffer))
         else {
+            // GPSAveraging.compute keeps fixes accurate to 20 m or better and
+            // needs 30 of them; say both, in that order, so the message can be
+            // read. The old text ("need 30 ≤ 20 m") parsed as an inequality
+            // between a count and a distance. Thresholds unchanged — this is
+            // the wording only.
             step = .failed(reason:
-                "Not enough clean samples at opening (need 30 ≤ 20 m).")
+                "Not enough usable GPS fixes at the opening. It needs 30 fixes accurate "
+                + "to within 20 m. Move to where more sky is open and try again.")
             return
         }
         openingFix = result
@@ -125,7 +131,17 @@ public final class OffsetFlowViewModel: ObservableObject {
         guard let plotPose = plotPoseWorld,
               let openingPose = openingPoseWorld,
               let fix = openingFix else {
-            step = .failed(reason: "Missing opening fix or pose snapshots.")
+            // Names the things the cruiser actually did — marked the plot
+            // centre, captured the GPS reading at the opening — instead of
+            // the internal words for them ("pose snapshots", "opening fix"
+            // as a field name). The Android sibling's sentence also names a
+            // compass direction because its guard checks a heading this one
+            // doesn't (ARKit runs `.gravityAndHeading`, so there is no
+            // separate yaw to lose); naming it here would be a lie. The
+            // guard itself is unchanged.
+            step = .failed(reason:
+                "Part of this offset wasn't recorded — the plot mark or the opening GPS "
+                + "reading. Tap Restart and walk it through again.")
             return
         }
         let input = OffsetFromOpening.Input(
@@ -135,7 +151,7 @@ public final class OffsetFlowViewModel: ObservableObject {
             trackingStateWasNormalThroughout: session.trackingStayedNormal)
         guard let result = OffsetFromOpening.compute(input: input) else {
             step = .failed(reason:
-                "ARKit tracking was interrupted — offset invalid.")
+                "The phone lost track of where you walked, so this centre can't be trusted. Walk back to the opening and start the offset again.")
             return
         }
         step = .computed(result)

@@ -100,7 +100,7 @@ public struct StandSummaryScreen: View {
             if pending {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("—").font(ForestixType.dataLarge)
-                    Text("Volume for South Korea is pending official NIFoS coefficients. Trees, basal area and stocking are unaffected.")
+                    Text("Volume isn't available for this region yet. Every other metric is unaffected.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -115,13 +115,16 @@ public struct StandSummaryScreen: View {
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
-                HStack(spacing: 12) {
-                    Text("Std error \(String(format: "%.2f", stat.seMean))")
-                    Text("eff. plots \(String(format: "%.1f", stat.dfSatterthwaite))")
-                    Text("n \(stat.nPlots)")
-                }
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
+                // The ± 95% figure directly above is the only one of these
+                // four a cruiser acts on. "Std error" is a statistic they
+                // never use, "eff. plots" was the Satterthwaite effective
+                // degrees of freedom under an abbreviation that reads as a
+                // plot count and disagreed with the real one beside it, and
+                // bare "n" is notation. Both are still computed and still
+                // exported; they just stopped being shown here.
+                Text(stat.nPlots == 1 ? "from 1 plot" : "from \(stat.nPlots) plots")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
 
                 if !perPlot.isEmpty {
                     Chart {
@@ -146,7 +149,7 @@ public struct StandSummaryScreen: View {
                                 Text(viewModel.stratumName(forKey: key))
                                     .font(.caption)
                                 Spacer()
-                                Text(String(format: "n=%d  mean=%.2f  std-dev=%.2f",
+                                Text(String(format: "%d plots · average %.2f · spread ±%.2f",
                                             s.nPlots, s.mean, sqrt(max(s.variance, 0))))
                                     .font(.caption.monospacedDigit())
                                     .foregroundStyle(.secondary)

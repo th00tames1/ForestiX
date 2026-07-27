@@ -82,7 +82,7 @@ class StratumDrawViewModel(val project: Project) {
             0 -> "Tap the corners on the map"
             1 -> "1 point — need at least 3"
             2 -> "2 points — one more to go"
-            else -> "${_vertices.value.size} points · closed polygon"
+            else -> "${_vertices.value.size} points · area closed"
         }
 
     // MARK: - Save

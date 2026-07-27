@@ -202,8 +202,12 @@ fun RecordCentreSheet(
         failed ->
             "Not enough samples (need 30 with accuracy ≤ 20 m)\nTry the offset link below."
         final != null ->
-            "${final.nSamples} fixes · median centre locked\n" +
-                String.format(Locale.US, "σxy %.1f m", final.sampleStdXyM)
+            // The scatter of the GPS fixes, as a plain quantity. It used to
+            // print as "σxy 1.4 m" — a Greek letter with an algebraic
+            // subscript, on the sheet the A/B/C/D position grade was already
+            // pulled from for being unreadable.
+            "${final.nSamples} fixes · centre locked\n" +
+                String.format(Locale.US, "fixes spread ±%.1f m", final.sampleStdXyM)
         else ->
             "$sampleCount fixes · needs 30 good ones\n" +
                 "median converges over $AVERAGING_WINDOW_S s"

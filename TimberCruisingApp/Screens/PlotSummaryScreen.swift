@@ -188,25 +188,26 @@ public struct PlotSummaryScreen: View {
     // MARK: - H-D fits
 
     private var hdFitSection: some View {
-        Section("H–D fits (project)") {
+        // "H–D fits" was height–diameter compressed to two letters plus the
+        // modelling verb, and each row printed the regression coefficients
+        // raw (a, b, n, RMSE). A cruiser cannot do anything differently
+        // because b came out 0.567 — what they can use is how many trees
+        // the curve rests on and how close it usually lands. The fit itself
+        // is unchanged; only the readout is. The millisecond "Rolling
+        // update" timing was developer telemetry and is gone.
+        Section("Height curves for this project") {
             ForEach(viewModel.hdFitsByProject.keys.sorted(), id: \.self) { code in
                 if let fit = viewModel.hdFitsByProject[code] {
-                    HStack {
+                    VStack(alignment: .leading, spacing: 2) {
                         Text(RegionalSpecies.name(forCode: code))
                             .font(.body.bold())
-                        Spacer()
-                        Text(String(format: "a=%.3f b=%.3f n=%d RMSE=%.2fm",
-                                    fit.a, fit.b, fit.nObs, fit.rmse))
-                            .font(.caption.monospacedDigit())
+                        Text(String(format: "Height curve from %d trees, typically within ±%.1f m",
+                                    fit.nObs, fit.rmse))
+                            .font(.caption)
                             .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-            }
-            if viewModel.hdFitDurationMs > 0 {
-                Text(String(format: "Rolling update: %.0f ms",
-                            viewModel.hdFitDurationMs))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
             }
         }
     }

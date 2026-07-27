@@ -237,14 +237,15 @@ private fun StatCardSection(
                         String.format(Locale.US, "± %.2f (95%% confidence)", stat.ci95HalfWidth),
                         style = type.dataSmall, color = colors.textSecondary)
                 }
+                // The standard error and the Satterthwaite effective degrees
+                // of freedom used to print here as "Std error 1.42 · eff. plots
+                // 6.3 · n 8" — three statistics no cruiser acts on, one of
+                // which looks like a plot count and disagrees with the real
+                // one beside it. The ± 95% figure on the line above already
+                // carries the precision in a form that can be acted on; all
+                // that is left to say is how many plots it came from.
                 Row(horizontalArrangement = Arrangement.spacedBy(ForestixSpace.sm)) {
-                    Text(
-                        String.format(Locale.US, "Std error %.2f", stat.seMean),
-                        style = type.dataSmall, color = colors.textSecondary)
-                    Text(
-                        String.format(Locale.US, "eff. plots %.1f", stat.dfSatterthwaite),
-                        style = type.dataSmall, color = colors.textSecondary)
-                    Text("n ${stat.nPlots}", style = type.dataSmall, color = colors.textSecondary)
+                    Text("from ${stat.nPlots} plots", style = type.dataSmall, color = colors.textSecondary)
                 }
 
                 if (perPlot.isNotEmpty()) {
@@ -263,7 +264,7 @@ private fun StatCardSection(
                             Spacer(Modifier.weight(1f))
                             Text(
                                 String.format(
-                                    Locale.US, "n=%d  mean=%.2f  std-dev=%.2f",
+                                    Locale.US, "%d plots · average %.2f · spread ±%.2f",
                                     s.nPlots, s.mean, sqrt(max(s.variance, 0.0))),
                                 style = type.dataSmall, color = colors.textSecondary)
                         }

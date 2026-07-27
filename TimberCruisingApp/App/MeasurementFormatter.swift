@@ -33,13 +33,22 @@ public enum MeasurementFormatter {
     /// Renders a DBH precision sigma (stored in millimetres).
     ///   • metric  → "±2.1 mm"
     ///   • imperial → "±0.08 in"  (mm → in via /25.4)
+    /// The band is FLOORED at the smallest value the chosen precision can
+    /// print, so neither branch can render "±0.0 mm" / "±0.00 in".
+    ///
+    /// A zero band claims a perfect measurement, which is the one thing an
+    /// uncertainty readout must never say — and it is reachable: the imperial
+    /// branch rounds anything under 0.127 mm to zero, and with the shipped
+    /// depth-noise default a wide arc with a full burst lands near 0.11 mm.
+    /// Rounding UP to the floor overstates the band slightly, which is the
+    /// safe direction. Mirrors `UncertaintyBand` on the height side.
     public static func diameterSigma(mm: Double, in system: UnitSystem) -> String {
         switch system {
         case .metric:
-            return String(format: "±%.1f mm", mm)
+            return String(format: "±%.1f mm", max(mm, 0.1))
         case .imperial:
             let inches = mm / 25.4
-            return String(format: "±%.2f in", inches)
+            return String(format: "±%.2f in", max(inches, 0.01))
         }
     }
 
@@ -59,16 +68,16 @@ public enum MeasurementFormatter {
     }
 
     /// Renders a height precision sigma (stored in metres).
-    ///   • metric  → "±0.4 m"
+    ///   • metric  → "±0.4 m"  (and "±0.04 m", never "±0.0 m")
     ///   • imperial → "±1.3 ft"
+    ///
+    /// Delegates to `UncertaintyBand` — the one place a ± band is rounded,
+    /// shared with the estimators. This used to be its own `%.1f`, so the
+    /// field log's uncertainty column and the map's quick-measure detail
+    /// printed "±0.0 m" for any reading under 5 cm of σ: precisely the
+    /// readings the app is least sure about, wearing a claim of perfection.
     public static func heightSigma(m: Double, in system: UnitSystem) -> String {
-        switch system {
-        case .metric:
-            return String(format: "±%.1f m", m)
-        case .imperial:
-            let feet = m * 3.28084
-            return String(format: "±%.1f ft", feet)
-        }
+        UncertaintyBand.text(metres: m, in: system)
     }
 
     // MARK: - Distance / generic length

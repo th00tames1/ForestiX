@@ -259,7 +259,11 @@ public struct RecordCentreSheet: View {
         case .failed(let reason):
             return reason + "\nTry the offset link below."
         case .good(let r), .poor(let r):
-            return "\(r.nSamples) fixes · median centre locked\nσxy "
+            // σxy went the way of the TIER chip below: a Greek letter with
+            // an algebraic subscript is not something a cruiser can read,
+            // say or act on. Same number, named for what it measures —
+            // how far apart the individual GPS fixes landed.
+            return "\(r.nSamples) fixes · centre locked\nfixes spread ±"
                 + String(format: "%.1f m", r.sampleStdXyM)
         default:
             return "\(sampleCount) fixes · needs 30 good ones\nmedian converges over \(windowS) s"

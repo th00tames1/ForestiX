@@ -613,7 +613,7 @@ public struct HeightScanScreen: View {
         if viewModel.state == .walking {
             VStack(spacing: 4) {
                 MeasureValuePill(
-                    "Initial dist " + MeasurementFormatter.distance(
+                    "Start distance " + MeasurementFormatter.distance(
                         m: Double(viewModel.initialDistanceM),
                         in: settings.unitSystem),
                     dimmed: true)
@@ -666,7 +666,7 @@ public struct HeightScanScreen: View {
         case .idle, .anchorSet:
             return anchorWithinGate
                 ? "Aim at the trunk at eye level, then tap +."
-                : "Move closer — anchor within 4 m of the trunk."
+                : "Move closer — stand within 4 m of the trunk, then tap +."
         case .walking:            return "Walk back, then tap + to continue."
         case .aimTopArmed:        return "Aim at the treetop, then tap +."
         case .aimTopCaptured:     return "Top captured."
@@ -903,15 +903,6 @@ public struct HeightScanScreen: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("heightScan.resultReason")
             }
-            // Phase 13.2 diagnostic — Bug B persists in real-device tests
-            // (desk reads ~89.6 m). The math in HeightEstimator is correct
-            // when fed sane α / d_h, so we surface the actual captured
-            // values to find which input has gone bad on hardware.
-            // Remove once root-caused.
-            Text(diagnosticLine(r))
-                .font(ForestixType.caption)
-                .foregroundStyle(.white.opacity(0.55))
-                .accessibilityIdentifier("heightScan.diagnosticLine")
             HStack {
                 Spacer()
                 Button {
@@ -932,6 +923,16 @@ public struct HeightScanScreen: View {
             .padding(.top, 2)
             if settings.developerMode {
                 VStack(alignment: .leading, spacing: 4) {
+                    // Bench diagnostic — the raw captured inputs that fed
+                    // the §7.2 formula, so a bad pitch or a bad d_h can be
+                    // told apart from a bad formula. Developer-mode only:
+                    // it prints formula variables, which is fine for the
+                    // author's own tooling and never acceptable on a
+                    // cruiser's result panel.
+                    Text(diagnosticLine(r))
+                        .font(ForestixType.caption)
+                        .foregroundStyle(.white.opacity(0.55))
+                        .accessibilityIdentifier("heightScan.diagnosticLine")
                     HStack(spacing: 6) {
                         Text("Target")
                             .font(ForestixType.caption)
@@ -979,9 +980,11 @@ public struct HeightScanScreen: View {
         return bits.joined(separator: " · ")
     }
 
-    /// Phase 13.2 diagnostic — prints the raw captured inputs that fed
-    /// the §7.2 formula so we can see whether a bad pitch, bad d_h, or
-    /// the formula itself is producing the inflated H.
+    /// Bench diagnostic — prints the raw captured inputs that fed the
+    /// §7.2 formula so we can see whether a bad pitch, bad d_h, or the
+    /// formula itself is producing an inflated H. Rendered ONLY inside
+    /// the developer-mode block of `resultPanel`; it names α and d_h,
+    /// which must never appear on a cruiser's result panel.
     private func diagnosticLine(_ r: HeightResult) -> String {
         let topDeg  = Double(r.alphaTopRad)  * 180.0 / .pi
         let baseDeg = Double(r.alphaBaseRad) * 180.0 / .pi
@@ -1005,7 +1008,7 @@ public struct HeightScanScreen: View {
                 // The field prompts in the ACTIVE unit system; the view model
                 // converts feet → metres on submit (it used to store the typed
                 // feet straight into heightM).
-                viewModel.manualEntryUnits = settings.unitSystem
+                viewModel.unitSystem = settings.unitSystem
                 viewModel.submitManualEntry()
             }
                 .buttonStyle(.forestixProminent)
@@ -1290,8 +1293,9 @@ public struct HeightScanScreen: View {
             treeNumber: treeNumber,
             units: settings.unitSystem.rawValue)
         viewModel.rawCaptureGPS = Self.currentGPS()
-        // Manual entry is typed in whatever the active unit system is.
-        viewModel.manualEntryUnits = settings.unitSystem
+        // Manual entry is typed in whatever the active unit system is, and
+        // the estimator quotes its ± band in the same one.
+        viewModel.unitSystem = settings.unitSystem
         storageLow = viewModel.rawCaptureEnabled && RawCaptureStore.isStorageLow()
     }
 

@@ -231,7 +231,7 @@ fun CruiseSetupSheet(
             // LOCKED "Plot type" — [Fixed radius | Variable (BAF)].
             FieldHeader("Plot type")
             SetupSegmented(
-                options = listOf("Fixed radius", "Variable (BAF)"),
+                options = listOf("Fixed radius", "Variable radius (prism)"),
                 selectedIndex = if (fixedRadius) 0 else 1,
             ) { fixedRadius = it == 0 }
             Spacer(Modifier.size(ForestixSpace.sm))
@@ -273,14 +273,14 @@ fun CruiseSetupSheet(
                 onValueChange = { if (bySpacing) spacingText = it else countText = it },
                 unit = if (bySpacing) "m" else "plots",
                 caption = if (bySpacing) {
-                    "Systematic grid pitch between centres"
+                    "Distance between plot centres"
                 } else {
                     "How many plot centres to lay out"
                 },
             )
             Spacer(Modifier.size(ForestixSpace.sm))
 
-            // Optional "Stratum polygon" row → KEPT StratumDrawScreen.
+            // Optional "Stratum boundary" row → KEPT StratumDrawScreen.
             HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -288,7 +288,7 @@ fun CruiseSetupSheet(
             ) {
                 Column(Modifier.weight(1f)) {
                     Text(
-                        "Stratum polygon",
+                        "Stratum boundary",
                         style = type.bodyBold.copy(fontSize = 14.5.sp),
                         color = colors.textPrimary,
                     )
@@ -555,7 +555,7 @@ private suspend fun generateCruisePlan(
 
     if (planned.isEmpty()) {
         throw IllegalStateException(
-            "No plot centres fell inside the boundary — try a tighter spacing or a larger polygon.")
+            "No plot centres fell inside the boundary — try a tighter spacing or a bigger area.")
     }
 
     // Replace previously-generated planned plots (same semantics as the
@@ -630,13 +630,16 @@ private fun parseRings(geojson: String): List<List<CoordinateConversions.LatLon>
     val obj = try {
         JSONObject(geojson)
     } catch (_: Exception) {
-        throw IllegalArgumentException("Invalid stored polygon JSON")
+        throw IllegalArgumentException(
+            "The saved boundary couldn't be read. Draw it again, then generate the plots.")
     }
     if (obj.optString("type") != "Polygon") {
-        throw IllegalArgumentException("Stored geometry is not a Polygon")
+        throw IllegalArgumentException(
+            "The saved boundary isn't a closed area. Draw it again, then generate the plots.")
     }
     val coords = obj.optJSONArray("coordinates")
-        ?: throw IllegalArgumentException("Stored geometry is not a Polygon")
+        ?: throw IllegalArgumentException(
+            "The saved boundary isn't a closed area. Draw it again, then generate the plots.")
     val rings = mutableListOf<List<CoordinateConversions.LatLon>>()
     for (ri in 0 until coords.length()) {
         val ringArray = coords.getJSONArray(ri)

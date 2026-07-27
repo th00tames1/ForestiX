@@ -100,33 +100,44 @@ public struct PlotSummaryCard: View {
     /// one is about 64 pt wide. "BASAL/HA", "TREES/HA" and "MEAN DBH" each
     /// want ~75 pt as spaced caps at 13 pt, so all three wrapped, and with no
     /// padding they ran into the hairline dividers besides. The cells keep
-    /// their equal weights (they always shared the width correctly); the
-    /// LABELS are shortened to the standard cruiser abbreviations this file
-    /// already uses in its own header comment — BA/ac, TPA, QMD — so they fit
-    /// on one line at full size, and each cell now breathes inside its rule.
+    /// their equal weights (they always shared the width correctly), and
+    /// every label is now single-line, tightened and scaled rather than
+    /// wrapped, so it is the SCALE that absorbs a long label instead of a
+    /// second line. That is what let "QMD" and "TPA"/"TPH" go back to
+    /// "MEAN DBH" and "TREES/AC"/"TREES/HA" — both land at ~0.85 of full
+    /// size, above the 0.8 floor below, and match the Android sibling.
     private var statsGrid: some View {
         let s = stats
         return HStack(spacing: 0) {
             statsCell("TREES", s?.distinctTrees.description ?? "—")
             divider
-            statsCell(areaUnit.densityLabel("BA").uppercased(),
+            // "BA" was the last index initialism on this card, and it
+            // disagreed with both the comment above (which already claimed
+            // "BASAL/HA") and the Android sibling (which already ships
+            // "BASAL/$suffix"). Basal area is genuine forestry vocabulary,
+            // so it is spelled rather than renamed; the per-area suffix
+            // stays in the label because this cell has no unit slot.
+            statsCell(areaUnit.densityLabel("BASAL").uppercased(),
                       s.map { String(format: "%.0f", $0.baPerAcre * densityFactor) } ?? "—")
             divider
             statsCell(treesPerAreaLabel,
                       s.map { String(format: "%.0f", $0.tpa * densityFactor) } ?? "—")
             divider
-            statsCell("QMD",
+            statsCell("MEAN DBH",
                       s.flatMap { $0.qmd.map { qmd in
                           MeasurementFormatter.diameter(cm: qmd, in: unitSystem)
                       } } ?? "—")
         }
     }
 
-    /// Trees per unit land area. "TPA" / "TPH" are the standard cruiser
-    /// abbreviations; "TREES/AC" is the same statistic spelled at nearly
-    /// three times the width, which is what made it wrap.
+    /// Trees per unit land area, spelled so the label says what the number
+    /// is. "TPA"/"TPH" also swapped a letter with the units setting, so the
+    /// label a cruiser learned on one project was a different label on the
+    /// next. The cell can no longer wrap (single line, tightened, scaled),
+    /// so the width argument the old abbreviation rested on is gone; the
+    /// Android sibling already ships these words.
     private var treesPerAreaLabel: String {
-        areaUnit == .hectare ? "TPH" : "TPA"
+        areaUnit == .hectare ? "TREES/HA" : "TREES/AC"
     }
 
     private var divider: some View {

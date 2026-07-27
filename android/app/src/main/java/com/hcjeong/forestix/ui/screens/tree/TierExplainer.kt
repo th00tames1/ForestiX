@@ -1,8 +1,13 @@
 // CONFIDENCE EXPLAINER — field report F8.
 //
 // The tier chip on the per-tree report is tappable, and this is what it
-// opens. A cruiser was being shown "Green" / "Yellow" / "Red" with no way to
-// learn what moved it, so the grade read as a mood rather than a criterion.
+// opens. A cruiser was being shown a bare grade with no way to learn what
+// moved it, so it read as a mood rather than a criterion.
+//
+// ONE vocabulary, everywhere: the chip, this sheet and the plot-close
+// warnings all say Good / Fair / Check. The stored enum stays
+// green / yellow / red and every export is untouched — the enum simply
+// never reaches a cruiser's eyes.
 //
 // The copy below is written from the ACTUAL checks, so it stays true:
 //   • DBH  — DBHEstimator's §7.1 sanity tree (inlier count, arc coverage,
@@ -91,24 +96,24 @@ fun TierExplainerSheet(kind: TierExplainerKind, onDismiss: () -> Unit) {
                 Text(
                     "Every measurement is graded the moment it is computed. " +
                         "The grade travels with the record and into your exports. " +
-                        "It is never a gate — you can keep a red reading.",
+                        "It is never a gate — you can keep a Check reading.",
                     style = type.body,
                     color = colors.textSecondary,
                 )
             }
 
-            ExplainerSection("What the colours mean") {
+            ExplainerSection("What the grades mean") {
                 TierRow("green", "Every check passed. Take the number as it stands.")
                 TierRow(
                     "yellow",
                     "One check fell short. The number is usable — treat it as a " +
-                        "little softer than a green one.",
+                        "little softer than a Good one.",
                 )
                 TierRow(
                     "red",
                     "A check failed outright, or two fell short. Re-measure if the " +
-                        "tree is still in front of you; if it isn't, keep it. Red is " +
-                        "recorded honestly, not discarded.",
+                        "tree is still in front of you; if it isn't, keep it. A Check " +
+                        "reading is recorded honestly, not discarded.",
                 )
             }
 
@@ -123,8 +128,8 @@ fun TierExplainerSheet(kind: TierExplainerKind, onDismiss: () -> Unit) {
 
             ExplainerCard {
                 Text(
-                    "One caution makes it yellow. Two make it red. Anything that " +
-                        "fails outright is red on its own.",
+                    "One caution makes it Fair. Two make it Check. Anything that " +
+                        "fails outright is Check on its own.",
                     style = type.caption,
                     color = colors.textSecondary,
                 )
@@ -137,13 +142,17 @@ fun TierExplainerSheet(kind: TierExplainerKind, onDismiss: () -> Unit) {
 /// here is the one the estimator really applies.
 private fun tierDrivers(kind: TierExplainerKind): List<Pair<String, String>> = when (kind) {
     TierExplainerKind.DIAMETER -> listOf(
-        "Fit quality" to
-            "How closely a circle matches the trunk points the scanner returned. " +
-            "Leftover error above 7% of the fitted radius fails; 5–7% is a caution. " +
-            "It is judged against the radius, not in millimetres, so a small stem is " +
-            "held to a tighter tolerance than a big one.",
-        "Radius precision" to
-            "How repeatable that radius is. Worse than ±5% fails; ±2–5% is a caution.",
+        // "Fit quality" / "the fitted radius" were the estimator's own
+        // words for its circle fit — the last of that vocabulary left on a
+        // cruiser surface. The rows now say what the cruiser is looking at;
+        // every THRESHOLD quoted is still the estimator's real one.
+        "Shape match" to
+            "How closely a round trunk matches the points the scanner returned. " +
+            "Left-over error above 7% of the trunk's radius fails; 5–7% is a caution. " +
+            "It is judged against the size of the stem, not in millimetres, so a small " +
+            "stem is held to a tighter tolerance than a big one.",
+        "How much it could be out" to
+            "How repeatable that radius is. Worse than ±5% of it fails; ±2–5% is a caution.",
         "Coverage" to
             "How much of the trunk's circumference the scan actually saw. Below 30° " +
             "fails; 30–45° is a caution. Step around the stem a little, or stand " +
@@ -152,23 +161,28 @@ private fun tierDrivers(kind: TierExplainerKind): List<Pair<String, String>> = w
             "How many depth points landed on the trunk. Fewer than 10 fails; 10–20 " +
             "is a caution. Move closer and fill the crosshair with bark, not gaps.",
         "Steadiness" to
-            "How much the fitted radius swings between frames of the burst. Above " +
-            "10% fails; 5–10% is a caution. Brace the phone and let it settle before " +
-            "you capture.",
+            "How much the width wanders from shot to shot while the phone is " +
+            "capturing. Above 10% fails; 5–10% is a caution. Brace the phone and " +
+            "let it settle before you capture.",
     )
     TierExplainerKind.HEIGHT -> listOf(
-        "Precision" to
-            "The height's own uncertainty measured against the height itself. Worse " +
+        "How much it could be out" to
+            "How far the height could be off, set against the height itself. Worse " +
             "than ±5% is a caution. It grows with a long walk-back and with a steep " +
             "aim, so both of the next two feed it.",
         "Aim angle" to
             "How steeply you sighted the treetop. Steeper than 75° above level is a " +
             "caution — you are too close to the tree. Walk back until you can see the " +
             "top comfortably.",
+        // "tracking drift" is the AR-internals phrase, and "the distance may
+        // have crept" was only half a step away from it — the sheet that
+        // TEACHES the checks can't be the last place either survives. It now
+        // says what goes wrong in the cruiser's terms. Both DISTANCES are the
+        // estimator's real ones.
         "Walk-back distance" to
             "How far you moved from the trunk. More than 25 m is a caution, and past " +
-            "30 m tracking drift adds a second one — which on its own is enough to " +
-            "make the reading red.",
+            "30 m the phone is no longer sure how far you actually walked, which adds " +
+            "a second one — enough on its own to make the reading Check.",
     )
 }
 
@@ -209,8 +223,14 @@ private fun TierRow(rawTier: String, detail: String) {
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Box(Modifier.size(10.dp).clip(CircleShape).background(descriptor.color))
+            // The word the CHIP shows for this tier — Good / Fair / Check —
+            // never the stored enum ("green"/"yellow"/"red"). This sheet
+            // exists to explain the chip, so it cannot be the one place that
+            // names the same reading in a second vocabulary. The dot still
+            // carries the colour. Stored values and every export are
+            // untouched: this reads the same descriptor the chip reads.
             Text(
-                rawTier.replaceFirstChar { it.uppercase() },
+                descriptor.label,
                 style = Forestix.type.bodyBold,
                 color = descriptor.color,
             )

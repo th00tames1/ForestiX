@@ -11,6 +11,8 @@
 
 package com.hcjeong.forestix.sensors
 
+import com.hcjeong.forestix.common.UncertaintyBand
+import com.hcjeong.forestix.common.UnitSystem
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.cos
@@ -97,6 +99,11 @@ object HeightEstimator {
         standingX: Float, standingZ: Float,
         alphaTopRad: Float, alphaBaseRad: Float,
         vioDriftFraction: Float = DEFAULT_VIO_DRIFT_FRACTION,
+        /// Only the σ sentence below reads this — the band it quotes is a
+        /// LENGTH, and an imperial cruiser was being handed it in metres.
+        /// Nothing else here converts: the geometry, σ_H and every
+        /// threshold stay metric. Replay keeps the metric default.
+        unitSystem: UnitSystem = UnitSystem.METRIC,
     ): HeightResult {
         // Step 1 — horizontal distance (drop Y onto the ground plane).
         val dx = standingX - anchorX
@@ -140,14 +147,34 @@ object HeightEstimator {
         // guard above) and must not collapse into a silent zero.
         val sigma = sigmaH(dh, alphaTopRad, alphaBaseRad, vioDriftFraction)
             ?: return red(dh, alphaTopRad, alphaBaseRad, vioDriftFraction,
-                "Height uncertainty could not be derived from this geometry")
+                "Couldn't work out how accurate this height is — retake the base and top aims.")
 
         // Step 5 — tier from §7.9 check matrix.
         val checks = listOf(
-            check(sigma / h <= SIGMA_RATIO_YELLOW, Severity.WARN, "Height precision worse than \u00B15%"),
-            check(dh <= YELLOW_DH_M, Severity.WARN, "Walked back more than 25 m"),
-            check(abs(alphaTopRad) <= MAX_ALPHA_TOP_YELLOW, Severity.WARN, "Top aim angle steeper than 75\u00B0"),
-            check(dh <= HIGH_DRIFT_DH_M, Severity.WARN, "Walked back more than 30 m (tracking drift risk)"),
+            // The ± band is the propagated σ_H as a length — an amount a
+            // cruiser can act on, unlike the σ/H ratio the check itself
+            // is written in. [UncertaintyBand] renders it in the cruiser's
+            // own units (the band used to be metres inside a sentence shown
+            // beside a height in feet) and never as a zero band. The CHECK
+            // is unchanged; only the sentence that reports it is.
+            check(
+                sigma / h <= SIGMA_RATIO_YELLOW, Severity.WARN,
+                "This height could be off by about " +
+                    UncertaintyBand.text(sigma.toDouble(), unitSystem) +
+                    " — walk further back and retake for a tighter reading.",
+            ),
+            // Every height check is a WARN, and two WARNs make the tier red —
+            // so failedCheckReasons below can put ANY of these four in front of
+            // the cruiser, not just the σ one. All four therefore say what
+            // happened AND what to do about it. Predicates unchanged.
+            check(dh <= YELLOW_DH_M, Severity.WARN,
+                "You walked back more than 25 m — that far out, a small slip in aim " +
+                    "turns into a big height error. Move closer and retake if you can."),
+            check(abs(alphaTopRad) <= MAX_ALPHA_TOP_YELLOW, Severity.WARN,
+                "You aimed more than 75\u00B0 up at the top — you are too close to the " +
+                    "tree. Walk back until you can see the top comfortably, then retake."),
+            check(dh <= HIGH_DRIFT_DH_M, Severity.WARN,
+                "You walked back more than 30 m — the distance may have crept. Move closer and retake if you can."),
         )
         val tier = combineChecks(checks)
 
@@ -158,8 +185,10 @@ object HeightEstimator {
         // read the reason next to the number before committing it. Mirrors
         // DbhEstimator's red-only reason line; yellow/green stay null.
         val reason: String? =
-            if (tier == ConfidenceTier.RED) failedCheckReasons(checks) ?: "Quality below threshold"
-            else null
+            if (tier == ConfidenceTier.RED) {
+                failedCheckReasons(checks)
+                    ?: "This reading didn't pass the accuracy checks — retake it, or accept it and flag the tree."
+            } else null
 
         return HeightResult(h, dh, alphaTopRad, alphaBaseRad, sigma, tier, HeightMethod.VIO_WALKOFF_TANGENT, reason)
     }

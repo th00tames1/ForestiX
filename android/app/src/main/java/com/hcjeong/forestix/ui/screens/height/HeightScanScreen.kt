@@ -381,7 +381,7 @@ fun HeightScanScreen(
         // distance. NO fresh hitTest — at 10–30 m those fall back to
         // planes/garbage and put the sphere visibly off the crosshair.
         val hit = controller.forwardPointAtHorizontalDistance(crownProjDistance())
-        if (hit == null) { failure = "AR tracking not ready — try again."; return }
+        if (hit == null) { failure = "The camera hasn't got its bearings yet — hold still for a second, then tap + again."; return }
         failure = null
         when (crownStep) {
             CrownStep.LEFT -> { cL = hit; crownStep = CrownStep.RIGHT }
@@ -534,7 +534,7 @@ fun HeightScanScreen(
                 val a = controller.cameraForwardElevationRad()
                 val s = controller.currentCameraPosition()
                 val anchor = anchorPt
-                if (a == null || s == null || anchor == null) { failure = "AR tracking not ready — try again."; return }
+                if (a == null || s == null || anchor == null) { failure = "The camera hasn't got its bearings yet — hold still for a second, then tap + again."; return }
                 // Lock the standing pose on the first aim; both angles must
                 // come from the same spot (the §7.2 formula assumes it).
                 failure = null; alphaBase = a; standingLocked = s
@@ -551,7 +551,7 @@ fun HeightScanScreen(
                 val aTop = controller.cameraForwardElevationRad()
                 val anchor = anchorPt; val standing = standingLocked; val aBase = alphaBase
                 if (aTop == null || anchor == null || standing == null || aBase == null) {
-                    failure = "AR tracking not ready — try again."; return
+                    failure = "The camera hasn't got its bearings yet — hold still for a second, then tap + again."; return
                 }
                 failure = null; alphaTop = aTop
                 if (rawCaptureArmed) {
@@ -566,6 +566,9 @@ fun HeightScanScreen(
                     standingX = standing.x, standingZ = standing.z,
                     alphaTopRad = aTop, alphaBaseRad = aBase,
                     vioDriftFraction = calibration.vioDriftFraction,
+                    // So the σ sentence quotes its ± band in the cruiser's
+                    // own units, like every other number on this screen.
+                    unitSystem = settings.unitSystem,
                 )
                 result = r
                 // Raw-capture: serialize this compute for offline replay
@@ -906,7 +909,7 @@ fun HeightScanScreen(
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         MeasureValuePill(
-                            "Initial dist " + MeasurementFormatter.distance(
+                            "Start distance " + MeasurementFormatter.distance(
                                 (anchorInitialDistM ?: 0f).toDouble(), settings.unitSystem),
                             dimmed = true,
                         )
@@ -944,7 +947,7 @@ fun HeightScanScreen(
                 // Locked spec: while no gated hit exists the "+" is
                 // inert and this exact copy explains why.
                 stage == Stage.ANCHOR && !anchorAimOk ->
-                    "Move closer — anchor within 4 m of the trunk."
+                    "Move closer — stand within 4 m of the trunk, then tap +."
                 stage == Stage.ANCHOR -> "Aim at the trunk at eye level, then tap +."
                 stage == Stage.WALKING -> "Walk back, then tap + to continue."
                 stage == Stage.AIM_BASE -> "Aim at where the trunk meets the ground, then tap +."
@@ -1064,20 +1067,25 @@ fun HeightScanScreen(
                             color = Forestix.colors.confidenceBad,
                         )
                     }
-                    // Diagnostic — the raw captured inputs that fed the §7.2
-                    // formula (iOS diagnosticLine).
-                    Text(
-                        String.format(
-                            Locale.US, "α_top %+.1f° · α_base %+.1f° · d_h %.2f m",
-                            r.alphaTopRad * 180f / Math.PI.toFloat(),
-                            r.alphaBaseRad * 180f / Math.PI.toFloat(),
-                            r.dHm,
-                        ),
-                        style = type.caption,
-                        color = Color.White.copy(alpha = 0.55f),
-                    )
                     if (settings.developerMode) {
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            // Bench diagnostic — the raw captured inputs that
+                            // fed the §7.2 formula. It used to print on every
+                            // result panel: three formula variables with no
+                            // legend, on the screen where a cruiser decides
+                            // whether to keep a height. It is an author's
+                            // instrument, so it lives with the author's other
+                            // instruments, behind Developer mode.
+                            Text(
+                                String.format(
+                                    Locale.US, "α_top %+.1f° · α_base %+.1f° · d_h %.2f m",
+                                    r.alphaTopRad * 180f / Math.PI.toFloat(),
+                                    r.alphaBaseRad * 180f / Math.PI.toFloat(),
+                                    r.dHm,
+                                ),
+                                style = type.caption,
+                                color = Color.White.copy(alpha = 0.55f),
+                            )
                             ResearchFieldsRow(
                                 targetValue = settings.researchTreeId,
                                 onTargetChange = { env.settings.setResearchTreeId(it.trim()) },

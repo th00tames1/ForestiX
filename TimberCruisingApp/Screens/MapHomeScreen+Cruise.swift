@@ -1083,7 +1083,7 @@ extension MapHomeScreen {
                     .foregroundStyle(ForestixPalette.textPrimary)
                 statusChip(closed: isClosed)
                 Spacer(minLength: 4)
-                Text(String(format: "r %.1f m · %@",
+                Text(String(format: "%.1f m radius · %@",
                             plotRadiusM(plot),
                             Self.cruisePeekTimeFormatter.string(from: plot.startedAt)))
                     .font(.system(size: 11, design: .monospaced))
@@ -1095,12 +1095,18 @@ extension MapHomeScreen {
             // Live stats strip — the old PlotTally strip folded into
             // the peek. Per-acre expansion via the InventoryEngine.
             HStack(spacing: 0) {
+                // Labels say what the number is. "BA"/"TPA"/"QMD" are index
+                // abbreviations a cruiser is never taught anywhere in the
+                // app; basal area is kept forestry vocabulary, so it is
+                // spelled, not renamed. TPA also silently became TPH with
+                // the units setting — the label now names the unit outright.
                 statCell("TREES", "\(stats.liveTreeCount)", nil, divided: true)
-                statCell("BA", String(format: "%.1f", Double(stats.baPerAcreM2) * densityFactor),
+                statCell("BASAL AREA", String(format: "%.1f", Double(stats.baPerAcreM2) * densityFactor),
                          areaUnit.densityLabel("m²"), divided: true)
-                statCell("TPA", String(format: "%.0f", Double(stats.tpa) * densityFactor),
+                statCell(areaUnit == .hectare ? "TREES/HA" : "TREES/AC",
+                         String(format: "%.0f", Double(stats.tpa) * densityFactor),
                          areaUnit.densitySuffix, divided: true)
-                statCell("QMD", String(format: "%.1f", stats.qmdCm),
+                statCell("MEAN DBH", String(format: "%.1f", stats.qmdCm),
                          "cm", divided: false)
             }
             .background(
@@ -1243,6 +1249,12 @@ extension MapHomeScreen {
                 .font(.system(size: 9, weight: .bold))
                 .tracking(0.7)
                 .foregroundStyle(ForestixPalette.textTertiary)
+                // Spelled-out labels ("BASAL AREA", "TREES/HA") are wider
+                // than the old initialisms; scale rather than wrap so a
+                // four-cell strip stays one line on a 360 pt phone.
+                .lineLimit(1)
+                .allowsTightening(true)
+                .minimumScaleFactor(0.7)
             HStack(alignment: .firstTextBaseline, spacing: 2) {
                 Text(value)
                     .font(.system(size: 14.5, weight: .bold, design: .monospaced))
@@ -1957,7 +1969,7 @@ extension MapHomeScreen {
                 }
                 sheetChoiceRow(
                     "Cruise setup",
-                    subtitle: "Grid plots · strata · prism/BAF — optional",
+                    subtitle: "Lay out plots on a grid, set plot size, draw a boundary",
                     icon: "squareshape.split.3x3",
                     accessibilityID: "cruiseMap.project.setup",
                     disabled: currentProject == nil,
@@ -2114,7 +2126,7 @@ extension MapHomeScreen {
 
     var standSummarySubtitle: String {
         let closed = plots.filter { $0.closedAt != nil }.count
-        return "Mean ± CI · \(closed) closed plot\(closed == 1 ? "" : "s")"
+        return "Averages across \(closed) closed plot\(closed == 1 ? "" : "s")"
     }
 
     func projectRow(_ project: Project) -> some View {

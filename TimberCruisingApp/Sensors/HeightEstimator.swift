@@ -23,6 +23,13 @@ public struct HeightMeasureInput: Sendable {
     public let alphaBaseRad: Float
     public let trackingStateWasNormalThroughout: Bool
     public let projectCalibration: ProjectCalibration
+    /// The units the cruiser reads. Nothing computed here depends on it —
+    /// the maths and every stored value stay metric. It is carried so the
+    /// σ check's sentence can quote its ± band in the same unit as the
+    /// height printed next to it; an imperial cruiser was being handed a
+    /// band in metres. Defaults to metric so the replay harness and the
+    /// unit tests are unaffected.
+    public let unitSystem: UnitSystem
 
     public init(
         anchorPointWorld: SIMD3<Float>,
@@ -30,7 +37,8 @@ public struct HeightMeasureInput: Sendable {
         alphaTopRad: Float,
         alphaBaseRad: Float,
         trackingStateWasNormalThroughout: Bool,
-        projectCalibration: ProjectCalibration
+        projectCalibration: ProjectCalibration,
+        unitSystem: UnitSystem = .metric
     ) {
         self.anchorPointWorld = anchorPointWorld
         self.standingPointWorld = standingPointWorld
@@ -38,6 +46,7 @@ public struct HeightMeasureInput: Sendable {
         self.alphaBaseRad = alphaBaseRad
         self.trackingStateWasNormalThroughout = trackingStateWasNormalThroughout
         self.projectCalibration = projectCalibration
+        self.unitSystem = unitSystem
     }
 }
 
@@ -95,7 +104,7 @@ public enum HeightEstimator {
         if !input.trackingStateWasNormalThroughout {
             return red(input: input,
                        dh: dh,
-                       reason: "AR tracking lost mid-measurement")
+                       reason: "The camera lost its place while you walked back — measure this tree again, moving more slowly.")
         }
         // Degenerate geometry only — see `minDhMeters`. Everything the
         // old 3 m floor was standing in for is measured by σ_H and the
@@ -157,25 +166,43 @@ public enum HeightEstimator {
         else {
             return red(input: input,
                        dh: dh,
-                       reason: "Height uncertainty not derivable from this geometry")
+                       reason: "Couldn't work out how accurate this height is — retake the base and top aims.")
         }
 
         // Step 5. Tier from the §7.9 check matrix.
         // `d_h > 30 m` is explicitly yellow per §7.2 failure table, so we
         // fold it into the warn set rather than rejecting.
+        // EVERY reason below reaches the cruiser. Unlike DBH — where the
+        // banner shows `firstFailingRejectReason` and the warn reasons
+        // never leave the struct — a height result is graded entirely by
+        // warn checks, and `failedCheckReasons` joins all of them into
+        // `rejectionReason` for the result panel and the banner. So each
+        // one is a sentence: what happened, then what to do about it.
+        // Every THRESHOLD here is unchanged.
         let checks: [Check] = [
+            // The ± band is the propagated σ_H as a length — an amount a
+            // cruiser can act on, unlike the σ/H ratio the check itself
+            // is written in. `UncertaintyBand` renders it in the cruiser's
+            // own units (the band used to be metres inside a sentence shown
+            // beside a height in feet) and never as a zero band. The CHECK
+            // is unchanged; only the sentence that reports it is.
             check(sigmaH / H <= sigmaRatioYellow,
                   sev: .warn,
-                  reason: "Height precision worse than ±5%"),
+                  reason: "This height could be off by about "
+                          + UncertaintyBand.text(metres: Double(sigmaH),
+                                                 in: input.unitSystem)
+                          + " — walk further back and retake for a tighter reading."),
             check(dh <= yellowDhMeters,
                   sev: .warn,
-                  reason: "Walked back more than 25 m"),
+                  reason: "You walked back more than 25 m — that far out, a small slip in aim "
+                          + "turns into a big height error. Move closer and retake if you can."),
             check(abs(input.alphaTopRad) <= maxAlphaTopRadYellow,
                   sev: .warn,
-                  reason: "Top aim angle steeper than 75°"),
+                  reason: "You aimed more than 75° up at the top — you are too close to the "
+                          + "tree. Walk back until you can see the top comfortably, then retake."),
             check(dh <= highDriftDhMeters,
                   sev: .warn,
-                  reason: "Walked back more than 30 m (tracking drift risk)")
+                  reason: "You walked back more than 30 m — the distance may have crept. Move closer and retake if you can.")
         ]
         let tier = combineChecks(checks)
 
@@ -187,7 +214,8 @@ public enum HeightEstimator {
         // before committing it. Mirrors DBHEstimator's red-only
         // `rejectionReason` line; yellow/green stay nil as before.
         let reason: String? = tier == .red
-            ? (failedCheckReasons(checks) ?? "Quality below threshold")
+            ? (failedCheckReasons(checks)
+               ?? "This reading didn't pass the accuracy checks — retake it, or accept it and flag the tree.")
             : nil
 
         return HeightResult(

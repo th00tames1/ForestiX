@@ -123,7 +123,6 @@ fun PlotSummaryScreen(
     val validation by vm.validation.collectAsStateWithLifecycle()
     val stats by vm.stats.collectAsStateWithLifecycle()
     val hdFitsByProject by vm.hdFitsByProject.collectAsStateWithLifecycle()
-    val hdFitDurationMs by vm.hdFitDurationMs.collectAsStateWithLifecycle()
     val closedAt by vm.closedAt.collectAsStateWithLifecycle()
     val isClosing by vm.isClosing.collectAsStateWithLifecycle()
     val errorMessage by vm.errorMessage.collectAsStateWithLifecycle()
@@ -222,25 +221,28 @@ fun PlotSummaryScreen(
 
             // MARK: - H-D fits
             if (hdFitsByProject.isNotEmpty()) {
-                FormSection(header = "H–D fits (project)") {
+                FormSection(header = "Height curves for this project") {
                     hdFitsByProject.keys.sorted().forEach { code ->
                         val fit = hdFitsByProject[code] ?: return@forEach
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Text(RegionalSpecies.nameForCode(code), style = type.data, color = colors.textPrimary)
                             Spacer(Modifier.weight(1f))
+                            // One plain sentence per species. The row used
+                            // to print the raw regression coefficients and an
+                            // RMSE label ("a=1.234 b=0.567 n=42 RMSE=1.20m") —
+                            // nothing a cruiser can act on. The fit itself is
+                            // unchanged and still ships whole in the export.
                             Text(
-                                String.format(Locale.US, "a=%.3f b=%.3f n=%d RMSE=%.2fm",
-                                    fit.a, fit.b, fit.nObs, fit.rmse),
+                                String.format(Locale.US,
+                                    "Height curve from %d trees, typically within ±%.1f m",
+                                    fit.nObs, fit.rmse),
                                 style = type.dataSmall,
                                 color = colors.textSecondary)
                         }
                     }
-                    if (hdFitDurationMs > 0) {
-                        Text(
-                            String.format(Locale.US, "Rolling update: %.0f ms", hdFitDurationMs),
-                            style = type.caption,
-                            color = colors.textSecondary)
-                    }
+                    // The "Rolling update: 12 ms" timing that used to sit
+                    // here was developer telemetry — no cruiser decides
+                    // anything differently at 12 ms versus 40 ms.
                 }
             }
 

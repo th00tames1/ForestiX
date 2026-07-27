@@ -1350,7 +1350,7 @@ private fun PlotPeekCard(
             Spacer(Modifier.weight(1f))
             Text(
                 String.format(
-                    Locale.US, "r %.0f m · %s",
+                    Locale.US, "%.1f m radius · %s",
                     plotRadiusM(plot),
                     SimpleDateFormat("HH:mm", Locale.US).format(Date(plot.startedAt)),
                 ),
@@ -1360,7 +1360,8 @@ private fun PlotPeekCard(
             )
         }
         Spacer(Modifier.size(10.dp))
-        // Stats strip (mock `.stats`): TREES / BA / TPA / QMD. Per-area basis
+        // Stats strip (mock `.stats`): TREES / BASAL AREA / TREES-per-area /
+        // MEAN DBH — spelled out, not the BA / TPA / QMD initialisms. Per-area basis
         // follows the project's units (US per acre, metric per hectare); the
         // engine computes per acre, so scale + relabel at display only.
         val metric = project?.units == com.hcjeong.forestix.data.cruise.UnitSystem.METRIC
@@ -1376,15 +1377,16 @@ private fun PlotPeekCard(
             StatsCell("TREES", "${stats.liveTreeCount}", null, Modifier.weight(1f))
             StatsDivider()
             StatsCell(
-                "BA", String.format(Locale.US, "%.1f", stats.baPerAcreM2 * densityF),
+                "BASAL AREA", String.format(Locale.US, "%.1f", stats.baPerAcreM2 * densityF),
                 "m²$densitySuffix", Modifier.weight(1f))
             StatsDivider()
             StatsCell(
-                if (metric) "TPH" else "TPA", String.format(Locale.US, "%.0f", stats.tpa * densityF),
+                if (metric) "TREES/HA" else "TREES/AC",
+                String.format(Locale.US, "%.0f", stats.tpa * densityF),
                 densitySuffix, Modifier.weight(1f))
             StatsDivider()
             StatsCell(
-                "QMD", String.format(Locale.US, "%.1f", stats.qmdCm),
+                "MEAN DBH", String.format(Locale.US, "%.1f", stats.qmdCm),
                 "cm", Modifier.weight(1f))
         }
         // B. PLOT SAMPLE HEIGHTS — LOCKED string "Heights · N measured";
@@ -2188,14 +2190,14 @@ private fun ProjectSheet(
             SheetChoiceRow(
                 Icons.Filled.BarChart,
                 "Stand summary",
-                "Mean ± CI · per-plot table",
+                "Averages across your closed plots",
                 enabled = projectId != null,
             ) { projectId?.let { onNavigate(CruiseRoutes.standSummary(it)) } }
             HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
             SheetChoiceRow(
                 Icons.Filled.GridOn,
                 "Cruise setup",
-                "Grid plots · strata · prism/BAF — optional",
+                "Lay out plots on a grid, set plot size, draw a boundary",
                 enabled = projectId != null,
                 trailingChip = "Advanced",
             ) { if (projectId != null) onCruiseSetup() }

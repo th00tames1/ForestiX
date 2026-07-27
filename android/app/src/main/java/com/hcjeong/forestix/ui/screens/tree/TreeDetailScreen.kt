@@ -202,7 +202,8 @@ private fun TreeDetailContent(nav: NavController, viewModel: TreeDetailViewModel
                             tint = colors.textSecondary, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            "This tree is soft-deleted — it is excluded from all statistics.",
+                            "Removed from the tally — this tree is left out of every total. " +
+                                "You can put it back below.",
                             style = type.body,
                             color = colors.textSecondary,
                         )
@@ -328,7 +329,7 @@ private fun TreeDetailContent(nav: NavController, viewModel: TreeDetailViewModel
                         Icon(Icons.Filled.CallSplit, contentDescription = null,
                             tint = colors.textSecondary, modifier = Modifier.size(14.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text("Multistem child", style = type.caption, color = colors.textSecondary)
+                        Text("One stem of a multi-stem tree", style = type.caption, color = colors.textSecondary)
                     }
                 }
             }
@@ -426,14 +427,14 @@ private fun TreeDetailContent(nav: NavController, viewModel: TreeDetailViewModel
 
             if (isDeleted) {
                 ForestixBorderedButton(
-                    label = "Undelete",
+                    label = "Put back in tally",
                     icon = Icons.AutoMirrored.Filled.Undo,
                     modifier = Modifier.fillMaxWidth(),
                 ) { scope.launch { viewModel.undelete() } }
             } else {
                 // iOS `role: .destructive` bordered button — red label.
                 ForestixBorderedButton(
-                    label = "Soft delete",
+                    label = "Remove from tally",
                     icon = Icons.Filled.Delete,
                     tint = colors.confidenceBad,
                     modifier = Modifier.fillMaxWidth(),
@@ -577,7 +578,9 @@ private fun DetailConfidenceRow(
         Modifier
             .fillMaxWidth()
             .clickableNoRipple(onExplain)
-            .semantics { contentDescription = "$label. Explains what the confidence tiers mean" }
+            // Names the words the chip actually shows, so what a screen reader
+            // announces matches what a sighted cruiser taps.
+            .semantics { contentDescription = "$label. Explains what Good, Fair and Check mean" }
             .padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -595,13 +598,19 @@ private fun DetailConfidenceRow(
     }
 }
 
+/// The chip's WORD is the one word the app uses for that grade
+/// everywhere else — Good / Fair / Check, from `confidenceDescriptor`.
+/// It used to print the stored enum ("Green" / "Yellow" / "Red"), so this
+/// chip, the field log's quality column and the sheet this chip opens
+/// were three different vocabularies for one reading. The colour still
+/// carries the grade too; only the naming is unified.
 @Composable
 private fun DetailTierBadge(tier: ConfidenceTier) {
     val descriptor = confidenceDescriptor(tier.raw)
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         Box(Modifier.size(10.dp).clip(CircleShape).background(descriptor.color))
         Text(
-            tier.raw.replaceFirstChar { it.uppercase() },
+            descriptor.label,
             style = Forestix.type.caption,
             color = descriptor.color,
         )

@@ -1,6 +1,8 @@
 // Port of iOS Screens/CalibrationScreen.swift + ViewModels/CalibrationViewModel.swift.
 // Spec §7.10 + REQ-CAL-003/004. Hosts the Wall + Cylinder calibration
-// procedures under a segmented picker.
+// procedures under a segmented picker. The cylinder procedure is LABELLED
+// "Round post" throughout the UI — tab, header and Apply helper agree — while
+// the type/state names stay CYLINDER so the cross-platform port lines up.
 //
 // Wall scan: iOS subscribes to the ARKit depth-frame stream; on Android
 // the screen mounts the shared ArCameraView while scanning (ARCore needs
@@ -73,6 +75,7 @@ import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import java.util.Locale
 import java.util.UUID
+import kotlin.math.abs
 import kotlin.math.min
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -249,12 +252,22 @@ class CalibrationViewModel(
 
     private fun describe(err: Throwable): String = when (err) {
         is WallCalibration.Failure.TooFewPoints ->
-            "Need at least ${err.minimum} points (captured ${err.count})."
+            "The scan only picked up ${err.count} points on the wall and it needs " +
+                "${err.minimum}. Stand closer so the wall fills the screen, then scan again."
         is CylinderCalibration.Failure.TooFewSamples ->
-            "Need at least ${err.minimum} samples (collected ${err.count})."
+            "You have entered ${err.count} posts and it needs ${err.minimum}. " +
+                "Measure another post and add it."
         is CylinderCalibration.Failure.DegenerateX ->
-            "All diameters were identical — vary the target sizes."
-        else -> "$err"
+            "Every post you entered is the same width. Add posts of different widths " +
+                "so the app can tell how the error changes with size."
+        // A raw exception interpolated into the red line on the Calibration
+        // screen put a type name and its message in front of a cruiser —
+        // unreadable, and it named internals on a screen that sits in the
+        // ordinary Settings group. Anything that isn't one of the three
+        // cases above gets a sentence they can act on instead. Nothing
+        // about the failure itself changes.
+        else -> "The app couldn't work out a correction from that. " +
+            "Check what you entered and run the scan again."
     }
 
     companion object {
@@ -278,6 +291,7 @@ class CalibrationViewModel(
 @Composable
 fun CalibrationScreen(nav: NavController, projectId: String? = null) {
     val env = LocalAppEnvironment.current
+    val settings by env.settings.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val colors = Forestix.colors
     val type = Forestix.type
@@ -320,7 +334,9 @@ fun CalibrationScreen(nav: NavController, projectId: String? = null) {
                 viewModel.appendPatch(frame)
             } else if (!gotAnyFrame && System.currentTimeMillis() - startedAt > 15_000) {
                 viewModel.failWallScan(
-                    "No depth frames received — this device may not support the Depth API.")
+                    "This phone isn't returning any depth readings, so it probably can't " +
+                        "measure distance with its camera. Skip this scan — the app will " +
+                        "measure with its standard allowances instead.")
             }
         }
     }
@@ -337,11 +353,42 @@ fun CalibrationScreen(nav: NavController, projectId: String? = null) {
             // MARK: - Current project values
             val p = project
             if (p != null) {
-                CalSectionHeader("Current project values")
-                LabeledValueRow("Depth noise", String.format(Locale.US, "%.2f mm", p.depthNoiseMm))
-                LabeledValueRow("LiDAR bias", String.format(Locale.US, "%.2f mm", p.lidarBiasMm))
-                LabeledValueRow("DBH α", String.format(Locale.US, "%.3f", p.dbhCorrectionAlpha))
-                LabeledValueRow("DBH β", String.format(Locale.US, "%.4f", p.dbhCorrectionBeta))
+                // This screen hangs off a NON-developer settings group, so what a
+                // cruiser reads here is words: what the two scans are for, and
+                // whether this project is running on a scan or on the standard
+                // settings. The fitted numbers themselves (α / β and the wall's
+                // mm figures) say nothing a cruiser can act on, so they moved
+                // behind developer mode. The stored fields (depthNoiseMm /
+                // lidarBiasMm / dbhCorrectionAlpha / dbhCorrectionBeta) and the
+                // export are UNCHANGED — this is a display change only.
+                CalSectionHeader("How this phone is set up")
+                Text(
+                    "Two short scans tune the app to this phone. The wall scan learns how " +
+                        "steady its distance readings are; the round-post scan corrects the " +
+                        "widths it measures. Both are saved with this project.",
+                    style = type.caption,
+                    color = colors.textSecondary,
+                )
+                // Identity correction (α = 0, β = 1) is exactly the untouched /
+                // "standard settings" state — see sensibleDefaultsApplied.
+                val widthsCorrected =
+                    p.dbhCorrectionAlpha != 0f || p.dbhCorrectionBeta != 1f
+                Text(
+                    if (widthsCorrected) {
+                        "Widths are being corrected using your round-post scan."
+                    } else {
+                        "Widths are being used exactly as the phone measures them — " +
+                            "no round-post scan has been applied yet."
+                    },
+                    style = type.body,
+                    color = colors.textPrimary,
+                )
+                if (settings.developerMode) {
+                    LabeledValueRow("Depth reading spread", String.format(Locale.US, "%.2f mm", p.depthNoiseMm))
+                    LabeledValueRow("Depth sensor offset", String.format(Locale.US, "%.2f mm", p.lidarBiasMm))
+                    LabeledValueRow("Fitted α (cm)", String.format(Locale.US, "%.3f", p.dbhCorrectionAlpha))
+                    LabeledValueRow("Fitted β", String.format(Locale.US, "%.4f", p.dbhCorrectionBeta))
+                }
                 CalDivider()
             }
 
@@ -355,15 +402,18 @@ fun CalibrationScreen(nav: NavController, projectId: String? = null) {
                 FilterChip(
                     selected = selectedProcedure == CalibrationViewModel.Procedure.CYLINDER,
                     onClick = { selectedProcedure = CalibrationViewModel.Procedure.CYLINDER },
-                    label = { Text("Cylinder") },
+                    // Names the thing the cruiser actually scans, and matches the
+                    // section header ("Round-post scan") and the Apply helper below.
+                    label = { Text("Round post") },
                 )
             }
 
             when (selectedProcedure) {
                 CalibrationViewModel.Procedure.WALL ->
-                    WallSection(wall, controller, viewModel)
+                    WallSection(wall, controller, viewModel, settings.developerMode)
                 CalibrationViewModel.Procedure.CYLINDER ->
-                    CylinderSection(cylinder, newMeasuredCm, newTrueCm, viewModel)
+                    CylinderSection(cylinder, newMeasuredCm, newTrueCm, viewModel,
+                        settings.developerMode)
             }
 
             // MARK: - Apply
@@ -381,7 +431,14 @@ fun CalibrationScreen(nav: NavController, projectId: String? = null) {
                             val updated = viewModel.applyTo(p)
                             try {
                                 env.projectRepository.update(updated)
-                                appliedToast = "Calibration values written to project."
+                                // The rest of this screen talks about what the two
+                                // scans DO. The confirmation used to answer in the
+                                // storage layer's voice ("values written to project"),
+                                // which told the cruiser nothing about what had just
+                                // changed for them.
+                                appliedToast = "Your scans are now in use for this " +
+                                    "project. Widths and distances measured from here " +
+                                    "on are corrected with them."
                                 project = updated
                             } catch (e: Exception) {
                                 appliedToast =
@@ -402,9 +459,10 @@ fun CalibrationScreen(nav: NavController, projectId: String? = null) {
                             val updated = CalibrationViewModel.sensibleDefaultsApplied(to = p)
                             try {
                                 env.projectRepository.update(updated)
-                                appliedToast = "Sensible defaults applied — depth noise 5 mm, " +
-                                    "identity DBH correction. Run the wall + cylinder later " +
-                                    "for higher precision."
+                                appliedToast = "Standard settings applied. The app will measure " +
+                                    "with its usual allowances and will not correct this " +
+                                    "phone's widths. Run the wall and round-post scans later " +
+                                    "to tune it to this phone."
                                 project = updated
                             } catch (e: Exception) {
                                 appliedToast =
@@ -416,11 +474,11 @@ fun CalibrationScreen(nav: NavController, projectId: String? = null) {
                     Icon(Icons.Filled.AutoFixHigh, contentDescription = null,
                         modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
-                    Text("Use sensible defaults (skip scan)")
+                    Text("Use the standard settings (skip the scans)")
                 }
                 Text(
-                    "Applies your wall and cylinder scans to this project. No scans yet? " +
-                        "Use defaults to start measuring now and calibrate later.",
+                    "Applies your wall and round-post scans to this project. No scans yet? " +
+                        "Use the standard settings to start measuring now and scan later.",
                     style = type.caption,
                     color = colors.textSecondary,
                 )
@@ -432,7 +490,7 @@ fun CalibrationScreen(nav: NavController, projectId: String? = null) {
     if (appliedToast != null) {
         AlertDialog(
             onDismissRequest = { appliedToast = null },
-            title = { Text("Calibration applied") },
+            title = { Text("Saved to this project") },
             text = { Text(appliedToast ?: "") },
             confirmButton = {
                 TextButton(onClick = { appliedToast = null }) { Text("OK") }
@@ -448,18 +506,20 @@ private fun WallSection(
     wall: CalibrationViewModel.WallState,
     controller: ArController,
     viewModel: CalibrationViewModel,
+    developerMode: Boolean,
 ) {
     val colors = Forestix.colors
     val type = Forestix.type
-    CalSectionHeader("Wall plane (depth noise + bias)")
+    CalSectionHeader("Wall scan")
     Text(
-        "Point the phone at a flat wall 1–2 m away and hold while capturing 30 frames.",
+        "Shows the app how steady this phone's distance readings are. Point it at a " +
+            "flat wall 1–2 m away and hold still until the bar fills.",
         style = type.caption,
         color = colors.textSecondary,
     )
     when (wall) {
         is CalibrationViewModel.WallState.Idle -> {
-            Text("Not calibrated yet.", style = type.body, color = colors.textPrimary)
+            Text("No wall scan yet.", style = type.body, color = colors.textPrimary)
             ForestixProminentButton(
                 label = "Start wall scan",
                 icon = Icons.Filled.Scanner,      // iOS scanner.fill
@@ -491,9 +551,22 @@ private fun WallSection(
             TextButton(onClick = { viewModel.cancelWallScan() }) { Text("Cancel") }
         }
         is CalibrationViewModel.WallState.Computed -> {
-            LabeledValueRow("Depth noise", String.format(Locale.US, "%.2f mm", wall.result.depthNoiseMm))
-            LabeledValueRow("Depth bias", String.format(Locale.US, "%.2f mm", wall.result.depthBiasMm))
-            LabeledValueRow("Points", "${wall.result.pointCount}")
+            // What the scan FOUND, in words plus the one number that is a real
+            // quantity in a real unit. depthBiasMm / pointCount are inputs to the
+            // estimator, not something a cruiser acts on, so they sit behind
+            // developer mode with the fit coefficients.
+            Text(
+                "Wall scan done. Across ${wall.result.pointCount} points on the wall this " +
+                    "phone's distance readings varied by about " +
+                    String.format(Locale.US, "%.1f mm", wall.result.depthNoiseMm) + ".",
+                style = type.body,
+                color = colors.textPrimary,
+            )
+            if (developerMode) {
+                LabeledValueRow("Depth reading spread", String.format(Locale.US, "%.2f mm", wall.result.depthNoiseMm))
+                LabeledValueRow("Depth sensor offset", String.format(Locale.US, "%.2f mm", wall.result.depthBiasMm))
+                LabeledValueRow("Points", "${wall.result.pointCount}")
+            }
             TextButton(onClick = { viewModel.resetWall() }) { Text("Reset") }
         }
         is CalibrationViewModel.WallState.Failed -> {
@@ -511,12 +584,15 @@ private fun CylinderSection(
     newMeasuredCm: String,
     newTrueCm: String,
     viewModel: CalibrationViewModel,
+    developerMode: Boolean,
 ) {
     val colors = Forestix.colors
     val type = Forestix.type
-    CalSectionHeader("Cylinder correction (α + β · raw DBH)")
+    CalSectionHeader("Round-post scan")
     Text(
-        "Scan PVC pipes of known diameter. Enter the measured DBH from the scan and the true diameter.",
+        "Corrects the widths this phone measures. Scan round posts you have already " +
+            "measured by hand, then enter both widths for each one — the app works " +
+            "out how far the scan runs wide or narrow and takes it off every tree.",
         style = type.caption,
         color = colors.textSecondary,
     )
@@ -527,7 +603,7 @@ private fun CylinderSection(
         OutlinedTextField(
             value = newMeasuredCm,
             onValueChange = { viewModel.newMeasuredCm.value = it },
-            label = { Text("Measured (cm)") },
+            label = { Text("Scanned (cm)") },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
             singleLine = true,
             modifier = Modifier.weight(1f),
@@ -535,7 +611,7 @@ private fun CylinderSection(
         OutlinedTextField(
             value = newTrueCm,
             onValueChange = { viewModel.newTrueCm.value = it },
-            label = { Text("True (cm)") },
+            label = { Text("By hand (cm)") },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
             singleLine = true,
             modifier = Modifier.weight(1f),
@@ -545,7 +621,7 @@ private fun CylinderSection(
 
     when (cylinder) {
         is CalibrationViewModel.CylinderState.Idle -> {
-            Text("No samples yet.", style = type.body, color = colors.textPrimary)
+            Text("No posts entered yet.", style = type.body, color = colors.textPrimary)
         }
         is CalibrationViewModel.CylinderState.Collecting -> {
             SampleList(cylinder.samples)
@@ -553,13 +629,28 @@ private fun CylinderSection(
             TextButton(
                 onClick = { viewModel.computeCylinderCalibration() },
                 enabled = cylinder.samples.size >= 2,
-            ) { Text("Compute α, β") }
+            ) { Text("Work out the correction") }
         }
         is CalibrationViewModel.CylinderState.Computed -> {
             SampleList(cylinder.samples)
-            LabeledValueRow("α", String.format(Locale.US, "%.3f", cylinder.result.alpha))
-            LabeledValueRow("β", String.format(Locale.US, "%.4f", cylinder.result.beta))
-            LabeledValueRow("R²", String.format(Locale.US, "%.4f", cylinder.result.rSquared))
+            // α / β / R² are the fitted coefficients — nothing a cruiser can act
+            // on, and R² is a grade rather than a quantity. What a cruiser needs
+            // is how close the CORRECTED width now lands to the hand measurement,
+            // in centimetres. Display only: the fit, its thresholds and what gets
+            // stored are untouched.
+            Text(
+                "Correction worked out from ${cylinder.samples.size} posts. Corrected widths " +
+                    "land within " +
+                    String.format(Locale.US, "%.1f cm", meanAbsResidualCm(cylinder)) +
+                    " of your hand measurements on average.",
+                style = type.body,
+                color = colors.textPrimary,
+            )
+            if (developerMode) {
+                LabeledValueRow("Fitted α", String.format(Locale.US, "%.3f cm", cylinder.result.alpha))
+                LabeledValueRow("Fitted β", String.format(Locale.US, "%.4f", cylinder.result.beta))
+                LabeledValueRow("R²", String.format(Locale.US, "%.4f", cylinder.result.rSquared))
+            }
             TextButton(onClick = { viewModel.resetCylinder() }) { Text("Reset") }
         }
         is CalibrationViewModel.CylinderState.Failed -> {
@@ -567,6 +658,18 @@ private fun CylinderSection(
             TextButton(onClick = { viewModel.resetCylinder() }) { Text("Reset") }
         }
     }
+}
+
+/// Mean |corrected − hand-measured| over the entered posts, in cm — the one
+/// number that tells a cruiser how good the correction is, in the unit they
+/// measured in. Read-only: it re-applies the fit that was already computed
+/// and changes no check, threshold or stored value.
+private fun meanAbsResidualCm(state: CalibrationViewModel.CylinderState.Computed): Double {
+    if (state.samples.isEmpty()) return 0.0
+    val a = state.result.alpha
+    val b = state.result.beta
+    return state.samples.sumOf { abs(a + b * it.dbhMeasuredCm - it.dbhTrueCm) } /
+        state.samples.size
 }
 
 @Composable
@@ -577,12 +680,12 @@ private fun SampleList(samples: List<CylinderCalibration.Sample>) {
         for (s in samples) {
             Row(Modifier.fillMaxWidth()) {
                 Text(
-                    String.format(Locale.US, "raw %.1f cm", s.dbhMeasuredCm),
+                    String.format(Locale.US, "scanned %.1f cm", s.dbhMeasuredCm),
                     style = type.dataSmall,
                     color = colors.textPrimary)
                 Spacer(Modifier.weight(1f))
                 Text(
-                    String.format(Locale.US, "true %.1f cm", s.dbhTrueCm),
+                    String.format(Locale.US, "by hand %.1f cm", s.dbhTrueCm),
                     style = type.dataSmall,
                     color = colors.textPrimary)
             }

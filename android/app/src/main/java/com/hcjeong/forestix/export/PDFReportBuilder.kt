@@ -37,15 +37,20 @@ import android.graphics.Typeface
 import android.graphics.pdf.PdfDocument
 import com.hcjeong.forestix.common.AreaUnit
 import com.hcjeong.forestix.common.RegionalSpecies
+import com.hcjeong.forestix.data.cruise.BreastHeightConvention
 import com.hcjeong.forestix.data.cruise.CruiseDesign
 import com.hcjeong.forestix.data.cruise.HeightSubsampleRule
 import com.hcjeong.forestix.data.cruise.Plot
+import com.hcjeong.forestix.data.cruise.PlotType
 import com.hcjeong.forestix.data.cruise.Project
+import com.hcjeong.forestix.data.cruise.SamplingScheme
 import com.hcjeong.forestix.data.cruise.SpeciesConfig
 import com.hcjeong.forestix.data.cruise.Stratum
 import com.hcjeong.forestix.data.cruise.Tree
+import com.hcjeong.forestix.data.cruise.TreeStatus
 import com.hcjeong.forestix.data.cruise.UnitSystem
 import com.hcjeong.forestix.inventory.PlotStats
+import com.hcjeong.forestix.sensors.ConfidenceTier
 import com.hcjeong.forestix.inventory.StandStat
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -163,7 +168,7 @@ object PDFReportBuilder {
         val areaUnit = areaUnitFor(inputs.project)
         val df = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)  // local time zone
         kv("Owner",             inputs.project.owner)
-        kv("Units",             inputs.project.units.raw)
+        kv("Units",             unitsLabel(inputs.project.units))
         kv("Generated",         df.format(Date(inputs.generatedAt)))
         kv("# plots (closed)",  "${inputs.plots.count { it.closedAt != null }}")
         kv("# plots (total)",   "${inputs.plots.size}")
@@ -207,7 +212,7 @@ object PDFReportBuilder {
         val areaWord = if (areaUnit == AreaUnit.HECTARE) "hectare" else "acre"
 
         // Stratified stats table — three metrics × (mean, SE, CI95, df).
-        drawHeading(canvas, "Stratified statistics (§7.5)", frame.left, y, frame.width())
+        drawHeading(canvas, "Stand statistics", frame.left, y, frame.width())
         y += 22f
         val baStandScaled = inputs.baStand.scaledPerArea(f)
         val metricRows = listOf(
@@ -215,18 +220,19 @@ object PDFReportBuilder {
             Triple("Basal area",          baStandScaled,                    "m²$suffix"),
             Triple("Gross volume",        inputs.volStand.scaledPerArea(f),  "m³$suffix"),
         )
-        val colWidths = listOf(110f, 70f, 80f, 60f, 70f, 45f, 40f)
+        // The standard-error and Satterthwaite effective-degrees-of-freedom
+        // columns are gone: this page is read by a landowner, and neither is a
+        // figure anyone acts on. The ± 95% range carries the precision.
+        val colWidths = listOf(140f, 80f, 90f, 100f, 50f)
         drawTableRow(canvas,
-            listOf("Metric", "Unit", "Mean", "Std error", "95% conf ±", "Eff. plots", "n"),
+            listOf("Measure", "Unit", "Average", "± 95% range", "Plots"),
             bold = true, frame.left, y, colWidths)
         y += 18f
         for ((name, stat, unit) in metricRows) {
             drawTableRow(canvas, listOf(
                 name, unit,
                 String.format(Locale.US, "%.3f", stat.mean),
-                String.format(Locale.US, "%.3f", stat.seMean),
                 String.format(Locale.US, "%.3f", stat.ci95HalfWidth),
-                String.format(Locale.US, "%.1f", stat.dfSatterthwaite),
                 "${stat.nPlots}",
             ), bold = false, frame.left, y, colWidths)
             y += 16f
@@ -242,7 +248,7 @@ object PDFReportBuilder {
         val chartRect = RectF(frame.left, y + 10f, frame.left + frame.width(), y + 140f)
         drawBarChart(canvas,
             values = strataBars.map { it.second },
-            labels = strataBars.map { shortLabel(it.first) },
+            labels = strataBars.map { shortLabel(stratumName(inputs, it.first)) },
             rect = chartRect)
         y = chartRect.bottom + 20f
 
@@ -273,9 +279,13 @@ object PDFReportBuilder {
         val areaWord = if (areaUnit == AreaUnit.HECTARE) "hectare" else "acre"
         val df = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US)  // local time zone
         kv("Center",        String.format(Locale.US, "%.6f, %.6f", plot.centerLat, plot.centerLon))
-        kv("Position tier", plot.positionTier.raw)
-        kv("Source",        plot.positionSource.raw)
-        kv("GPS samples",   "${plot.gpsNSamples} (H_acc med ${String.format(Locale.US, "%.2f", plot.gpsMedianHAccuracyM)} m)")
+        // "Position tier" (tierB) and "Source" (vioWalk) printed the raw enum
+        // cases of the A/B/C/D position grade that was pulled from the UI for
+        // being unactionable — in the document handed to the client. Both
+        // fields are UNCHANGED on the Plot and in the CSV export; they are
+        // simply not printed here. What is left is the accuracy, as a quantity.
+        kv("GPS accuracy",  String.format(Locale.US, "±%.2f m, averaged over %d fixes",
+                                plot.gpsMedianHAccuracyM, plot.gpsNSamples))
         kv("Plot area",     "${String.format(Locale.US, "%.3f", areaUnit.fromAcres(plot.plotAreaAcres.toDouble()))} ${areaUnit.abbreviation}")
         kv("Slope/Aspect",  "${String.format(Locale.US, "%.1f", plot.slopeDeg)}° / ${String.format(Locale.US, "%.0f", plot.aspectDeg)}°")
         kv("Started",       df.format(Date(plot.startedAt)))
@@ -332,35 +342,39 @@ object PDFReportBuilder {
             y += 18f
         }
         val areaUnit = areaUnitFor(inputs.project)
-        kv("Plot type",         inputs.design.plotType.raw)
+        kv("Plot type",         plotTypeLabel(inputs.design.plotType))
         kv("Plot area",         inputs.design.plotAreaAcres?.let {
                                     if (areaUnit == AreaUnit.HECTARE)
                                         String.format(Locale.US, "%.3f ha", areaUnit.fromAcres(it.toDouble()))
                                     else "$it ac"
                                 } ?: "—")
         kv("Basal area factor", inputs.design.baf?.let { "$it" } ?: "—")
-        kv("Sampling scheme",   inputs.design.samplingScheme.raw)
+        kv("Sampling scheme",   samplingSchemeLabel(inputs.design.samplingScheme))
         kv("Grid spacing",      inputs.design.gridSpacingMeters?.let { "$it m" } ?: "—")
         kv("Height subsample",  describeSubsample(inputs.design.heightSubsampleRule))
-        kv("BH convention",     inputs.project.breastHeightConvention.raw)
+        kv("Breast height",     breastHeightLabel(inputs.project.breastHeightConvention))
         kv("Slope correction",  if (inputs.project.slopeCorrection) "on" else "off")
         y += 12f
 
         drawHeading(canvas, "Calibration", frame.left, y, frame.width())
         y += 18f
-        kv("LiDAR bias",         String.format(Locale.US, "%.2f mm", inputs.project.lidarBiasMm))
-        kv("Depth noise (σ)",    String.format(Locale.US, "%.2f mm", inputs.project.depthNoiseMm))
-        kv("DBH α, β",           String.format(Locale.US, "α=%.3f β=%.3f",
-                                     inputs.project.dbhCorrectionAlpha,
-                                     inputs.project.dbhCorrectionBeta))
-        kv("VIO drift fraction", String.format(Locale.US, "%.4f", inputs.project.vioDriftFraction))
+        // The four device internals that used to print here — a sensor bias, a
+        // raw σ, the two Greek correction coefficients and the visual-odometry
+        // drift term — are interpretable by neither a cruiser nor a client.
+        // Every one of them still ships in full in the CSV export.
+        kv("Device calibration", if (inputs.project.lidarBiasMm != 0f ||
+                                     inputs.project.dbhCorrectionBeta != 1f) {
+                                     "Wall and round-post calibration applied"
+                                 } else {
+                                     "Not calibrated on this device"
+                                 })
 
         y += 12f
         drawHeading(canvas, "Species list (${inputs.species.size})", frame.left, y, frame.width())
         y += 18f
-        val colWidths = listOf(55f, 180f, 80f, 95f, 85f)
+        val colWidths = listOf(50f, 150f, 110f, 110f, 75f)
         drawTableRow(canvas,
-            listOf("Code", "Common name", "Vol eqn", "Top DIB (cm)", "Stump (cm)"),
+            listOf("Code", "Common name", "Volume equation", "Merch. top dia. (cm)", "Stump (cm)"),
             bold = true, frame.left, y, colWidths)
         y += 16f
         for (sp in inputs.species.sortedBy { it.code }.take(20)) {
@@ -387,8 +401,8 @@ object PDFReportBuilder {
         drawTitle(canvas, "Appendix — tree-level (page $page/$totalPages)",
             frame.left, frame.top + 50f, frame.width())
         var y = frame.top + 90f
-        val headers = listOf("Plot", "#", "Sp", "DBH cm", "H m", "Status", "Conf", "Flag")
-        val widths = listOf(55f, 35f, 35f, 55f, 55f, 55f, 45f, 60f)
+        val headers = listOf("Plot", "Tree", "Species", "DBH cm", "Height m", "Status", "Quality", "Flags")
+        val widths = listOf(40f, 40f, 55f, 50f, 55f, 60f, 50f, 90f)
         drawTableRow(canvas, headers, bold = true, frame.left, y, widths)
         y += 16f
 
@@ -396,18 +410,20 @@ object PDFReportBuilder {
 
         for (t in rows) {
             val pno = plotNumberById[t.plotId]?.let { "$it" } ?: "?"
+            // Spelled out. "del / ms / irr" was three codes with no key
+            // anywhere in the document.
             val flagBits = listOfNotNull(
-                if (t.deletedAt != null) "del" else null,
-                if (t.isMultistem) "ms" else null,
-                if (t.dbhIsIrregular) "irr" else null,
+                if (t.deletedAt != null) "Removed" else null,
+                if (t.isMultistem) "Multistem" else null,
+                if (t.dbhIsIrregular) "Irregular" else null,
             )
             drawTableRow(canvas, listOf(
                 pno, "${t.treeNumber}", speciesLabel(inputs, t.speciesCode),
                 String.format(Locale.US, "%.1f", t.dbhCm),
                 t.heightM?.let { String.format(Locale.US, "%.1f", it) } ?: "—",
-                t.status.raw,
-                t.dbhConfidence.raw,
-                flagBits.joinToString(","),
+                statusLabel(t.status),
+                qualityLabel(t.dbhConfidence),
+                flagBits.joinToString(", "),
             ), bold = false, frame.left, y, widths)
             y += 13f
             if (y > frame.bottom - 60f) break
@@ -578,9 +594,60 @@ object PDFReportBuilder {
     }
 
     private fun shortLabel(s: String): String {
-        // Stratum keys are often UUIDs; trim for axis labels.
-        if (s.length > 8) return s.take(6) + "…"
+        // A length cap on a REAL name — the bar chart used to be labelled with
+        // the first six characters of a stratum UUID.
+        if (s.length > 14) return s.take(13) + "…"
         return s
+    }
+
+    /// Stratum key -> the name the cruiser gave it. Falls back to the word the
+    /// in-app stand summary uses for the unstratified bucket, never to a UUID.
+    private fun stratumName(inputs: PDFReportInputs, key: String): String {
+        if (key.isEmpty()) return "Unstratified"
+        return inputs.strata.firstOrNull { it.id.toString() == key }?.name
+            ?.takeIf { it.isNotBlank() }
+            ?: "Unstratified"
+    }
+
+    // Enum cases are stored (and exported) as camelCase identifiers so the two
+    // platforms' files join. They are not English, so the report prints words.
+    private fun unitsLabel(u: UnitSystem): String = when (u) {
+        UnitSystem.IMPERIAL -> "Imperial"
+        UnitSystem.METRIC -> "Metric"
+    }
+
+    private fun plotTypeLabel(t: PlotType): String = when (t) {
+        PlotType.FIXED_AREA -> "Fixed-area plots"
+        PlotType.VARIABLE_RADIUS -> "Variable radius (prism)"
+    }
+
+    private fun samplingSchemeLabel(sc: SamplingScheme): String = when (sc) {
+        SamplingScheme.SYSTEMATIC_GRID -> "Systematic grid"
+        SamplingScheme.STRATIFIED_RANDOM -> "Stratified random"
+        SamplingScheme.MANUAL -> "Placed by hand"
+    }
+
+    private fun breastHeightLabel(c: BreastHeightConvention): String = when (c) {
+        BreastHeightConvention.UPHILL -> "Uphill side"
+        BreastHeightConvention.MID -> "Mid-slope"
+        BreastHeightConvention.ANY -> "Any side"
+        BreastHeightConvention.CUSTOM -> "Custom"
+    }
+
+    private fun statusLabel(st: TreeStatus): String = when (st) {
+        TreeStatus.LIVE -> "Live"
+        TreeStatus.DEAD_STANDING -> "Dead standing"
+        TreeStatus.DEAD_DOWN -> "Dead down"
+        TreeStatus.CULL -> "Cull"
+    }
+
+    /// The same word the confidence chip shows in the app, so the report and
+    /// the screen cannot disagree about the same reading.
+    private fun qualityLabel(t: ConfidenceTier): String = when (t.raw) {
+        "green" -> "Good"
+        "yellow" -> "Fair"
+        "red" -> "Check"
+        else -> t.raw
     }
 
     // MARK: - Pager

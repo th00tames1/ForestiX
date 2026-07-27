@@ -211,14 +211,28 @@ public final class CalibrationViewModel: ObservableObject {
 
     private func describe(_ err: Error) -> String {
         switch err {
+        // All three were "Need at least N …" with the shortfall in
+        // brackets and no instruction. They now say what happened and what
+        // to do, and the cruiser enters POSTS on this screen, not samples.
+        // Every MINIMUM is the fit's own and unchanged.
         case WallCalibration.Failure.tooFewPoints(let c, let m):
-            return "Need at least \(m) points (captured \(c))."
+            return "The scan only picked up \(c) points on the wall and it needs "
+                 + "\(m). Stand closer so the wall fills the screen, then scan again."
         case CylinderCalibration.Failure.tooFewSamples(let c, let m):
-            return "Need at least \(m) samples (collected \(c))."
+            return "You have entered \(c) posts and it needs \(m). "
+                 + "Measure another post and add it."
         case CylinderCalibration.Failure.degenerateX:
-            return "All diameters were identical — vary the target sizes."
+            return "Every post you entered is the same width. Add posts of different widths "
+                 + "so the app can tell how the error changes with size."
         default:
-            return "\(err)"
+            // A raw Swift error interpolated into the red line on the
+            // Calibration screen put a type name and its associated values in
+            // front of a cruiser — unreadable, and it named internals on a
+            // screen that sits in the ordinary Settings group. Anything that
+            // isn't one of the three cases above gets a sentence they can act
+            // on instead. Nothing about the failure itself changes.
+            return "The app couldn't work out a correction from that. "
+                 + "Check what you entered and run the scan again."
         }
     }
 }

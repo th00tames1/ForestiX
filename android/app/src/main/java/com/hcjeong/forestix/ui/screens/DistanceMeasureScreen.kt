@@ -260,7 +260,7 @@ fun DistanceMeasureScreen(nav: NavController) {
             MeasureShutterBar(
                 onCapture = { capture() },
                 left = {
-                    MeasurePill(if (mode == DistMode.LIVE) "Live" else "2-Pt") {
+                    MeasurePill(if (mode == DistMode.LIVE) "Live" else "2 points") {
                         mode = if (mode == DistMode.LIVE) DistMode.TWO_POINT else DistMode.LIVE
                         resetTwoPoint()
                     }
@@ -289,7 +289,7 @@ fun DistanceMeasureScreen(nav: NavController) {
                             }
                         }
                         MeasureValuePill(
-                            if (mode == DistMode.LIVE) "DEVICE → TARGET" else "POINT A → POINT B",
+                            if (mode == DistMode.LIVE) "PHONE → TARGET" else "POINT A → POINT B",
                             dimmed = true,
                         )
                         val value = if (mode == DistMode.LIVE) liveDistance else twoPointDistance

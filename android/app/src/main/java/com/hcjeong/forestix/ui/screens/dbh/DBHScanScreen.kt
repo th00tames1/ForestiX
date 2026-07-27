@@ -1521,7 +1521,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     // the image — the trunk's edges aren't in frame, so no
                     // fit can lock. Honest guidance instead of a lock.
                     preview?.edgesClipped == true ->
-                        "Edges not found — adjust framing."
+                        "Can't see both sides of the trunk — step back so the whole trunk is in view."
                     else -> "Align the guide to the trunk's uphill side; hold steady."
                 }
                 // Depth burst: the under-crosshair capture pill carries the
@@ -1697,13 +1697,14 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         modifier = Modifier.size(44.dp),
                     )
                     Text(
-                        "DBH scanning requires the ARCore Depth API on this device",
+                        "This phone can't measure diameter",
                         style = Forestix.type.bodyBold,
                         color = colors.textPrimary,
                         textAlign = TextAlign.Center,
                     )
                     Text(
-                        "This phone doesn't provide depth sensing, so the trunk scan can't run here.",
+                        "It doesn't have the depth camera the trunk scan needs. " +
+                            "Measure this tree with a tape or calipers instead.",
                         style = Forestix.type.caption,
                         color = colors.textSecondary,
                         textAlign = TextAlign.Center,

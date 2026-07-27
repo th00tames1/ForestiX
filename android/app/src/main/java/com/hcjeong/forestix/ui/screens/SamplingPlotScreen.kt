@@ -120,7 +120,7 @@ fun SamplingPlotScreen(nav: NavController) {
         if (ArSessionHub.activePlot != null) return
         val hit = controller.screenCenterHit() ?: controller.forwardPointAtHorizontalDistance(3f)
         if (hit == null || !ArSessionHub.placePlot(hit)) {
-            failure = "Couldn't read scene depth. Aim at the ground and try again."
+            failure = "Couldn't see the ground here. Aim at the ground and try again."
             return
         }
         failure = null

@@ -404,7 +404,7 @@ private fun PlotMiniMapCard(
             modifier = Modifier.align(Alignment.TopCenter).padding(top = 14.dp),
         )
         Text(
-            String.format(Locale.US, "r %.0f m", radiusM),
+            String.format(Locale.US, "%.0f m radius", radiusM),
             style = MiniMapLabelStyle,
             color = Color.White.copy(alpha = 0.75f),
             modifier = Modifier.align(Alignment.BottomEnd).padding(end = 7.dp, bottom = 5.dp),

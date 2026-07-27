@@ -223,7 +223,7 @@ public struct PlotMiniMapWidget: View {
             }
         }
         .overlay(alignment: .bottomTrailing) {
-            Text(String(format: "r %.0f m", info.radiusM))
+            Text(String(format: "%.0f m radius", info.radiusM))
                 .font(.system(size: 8, weight: .medium, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.75))
                 .padding(.trailing, 7)

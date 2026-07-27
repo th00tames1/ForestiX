@@ -102,7 +102,7 @@ fun FieldLogScreen(nav: NavController) {
                             scope.launch { env.history.exportCSV()?.let { shareFile(context, it, "text/csv") } }
                         })
                     DropdownMenuItem(
-                        text = { Text("Bundle (5-file zip)") },
+                        text = { Text("All tables (zip of 5 CSVs)") },
                         leadingIcon = {
                             Icon(Icons.Filled.FolderZip, contentDescription = null, modifier = Modifier.size(18.dp))
                         },
@@ -263,27 +263,43 @@ private fun CapacityBanner() {
 // The columns now take WEIGHTS, so they share whatever width the device
 // actually has, and each weight is sized to the widest string its column
 // has to hold (Roboto Mono ≈ 0.6 em, Roboto SemiBold caps ≈ 0.62 em plus
-// tracking). A row has screen − 32 (list inset) − 32 (row padding) − 24
-// (three 8 dp gutters) to share:
+// tracking). A row has screen − 32 (list inset) − 32 (row padding) − 18
+// (three 6 dp gutters) to share:
 //
 //   column   widest content            needs    360 dp   411 dp   320 dp
 //   TYPE     "Height"                   47 dp    57 dp    68 dp    49 dp
-//   VALUE    "150.0 cm"                 82 dp    86 dp   103 dp    74 dp
-//   PREC     "±0.08 in"                 62 dp    64 dp    76 dp    55 dp
-//   QUAL     chip "CHECK"               56 dp    64 dp    76 dp    55 dp
+//   VALUE    "150.0 cm"                 82 dp    93 dp   111 dp    79 dp
+//   RANGE    "±0.08 in"                 62 dp    64 dp    77 dp    55 dp
+//   QUAL     chip "CHECK"               56 dp    64 dp    77 dp    55 dp
 //
 // Every LABEL is single-line with wrapping switched OFF, so a word can
-// never be split again. The two NUMERIC cells may take a second line
+// never be split again. The two NUMERIC cells may take extra lines
 // instead — a composite crown or plot reading ("12.4 × 8.2 m",
-// "r 5.6 m · 98.5 m²") is wider than any phone column, and a taller row is
-// better than a measurement the cruiser cannot read in full. The system
-// font scale is bounded by ForestixDenseTextScale so the ~10 % of headroom
-// each column carries at 360 dp is not spent by an accessibility text size.
-private const val ColTypeWeight = 1.15f
-private const val ColValueWeight = 1.75f
-private const val ColPrecisionWeight = 1.30f
-private const val ColQualityWeight = 1.30f
-private val ColGap = ForestixSpace.xs
+// "5.6 m radius · 98.5 m²") is wider than any phone column, and a taller
+// row is better than a measurement the cruiser cannot read in full. The
+// VALUE cell gets THREE: a sampling-plot reading is ~225 dp of text over
+// an 86.5 dp column at 360 dp, so at two lines it ellipsised and dropped
+// its area unit ("r 5.6 m" / "· 98.5…"). Three lines carry it whole. The
+// system font scale is bounded by ForestixDenseTextScale so the ~10 % of
+// headroom each column carries at 360 dp is not spent by an accessibility
+// text size — but Display size is NOT bounded, and it shrinks dp width, so
+// a heading has to survive well under 320 dp rather than only at it.
+//
+// The VALUE column was re-cut when the sampling-plot row's bare "r" was
+// spelled out. The gutters went 8 dp -> 6 dp and the whole 6 dp that frees
+// went to VALUE, with the other three weights re-derived so they keep the
+// width they had before at 360 dp AND at 320 dp — nothing is taken from a
+// column that was already at its content's size. At 360 dp: TYPE 57.1,
+// VALUE 92.5, RANGE 64.2, QUAL 64.2. At 320 dp: 48.9 / 79.2 / 55.0 /
+// 55.0, every one at or above what it had. Those four numbers are also why
+// the RANGE heading had to lose its ± rather than the columns being re-cut
+// again: at 320 dp three of the four are already within ~2 dp of their own
+// content, so there is nothing left to move.
+private const val ColTypeWeight = 1.13f
+private const val ColValueWeight = 1.83f
+private const val ColPrecisionWeight = 1.27f
+private const val ColQualityWeight = 1.27f
+private val ColGap = 6.dp
 
 /// The ONE definition of the field-log grid. The header and every row go
 /// through it, so the columns cannot drift apart again.
@@ -339,7 +355,25 @@ private fun ColumnHeader() = ForestixDenseTextScale {
         // the screenshot showed broken ("PRECISI/ON", "QUALI/TY"). Four
         // letters each fit at every phone width and at the bounded font
         // scale. Same two words on iOS.
-        precisionSlot = { HeaderLabel("PREC") },
+        //
+        // "PREC" is gone: it was a truncation of "precision", which here did
+        // not mean precision in the everyday sense but the propagated
+        // standard deviation of the estimate. "RANGE" is what the cells below
+        // it actually print ("±1.1 mm"), and every one of those cells carries
+        // the ± itself, so the heading does not have to.
+        //
+        // It is "RANGE", not "± RANGE", because the symbol did not fit. Real
+        // Roboto metrics at 13 sp SemiBold + 0.6 sp tracking (measured from
+        // the shipped font, not estimated): "± RANGE" is 57.0 dp against the
+        // 54.96 dp this column gets at 320 dp — it rendered "± RANG…" on a
+        // small phone, and on any phone whose Display size is raised, since
+        // that shrinks dp width while ForestixDenseTextScale bounds only the
+        // FONT scale. Dropping the symbol costs 11.3 dp: "RANGE" is 45.8 dp,
+        // which clears 320 dp with 9.2 dp (17 %) to spare. The weights could
+        // not buy this back — at 320 dp TYPE, ± RANGE and QUAL are all within
+        // ~2 dp of their own content, so the only donor was VALUE, and VALUE
+        // is the column the previous re-cut had to widen.
+        precisionSlot = { HeaderLabel("RANGE") },
         qualitySlot = { HeaderLabel("QUAL") },
     )
 }
@@ -367,10 +401,11 @@ private fun FieldLogRow(entry: QuickMeasureEntry, unitSystem: UnitSystem) = Fore
                 Text(
                     valueText(entry, unitSystem), style = type.data, color = colors.textPrimary,
                     textAlign = TextAlign.End,
-                    // Two lines, not an ellipsis: a crown or plot reading is
-                    // wider than the column on any phone, and it breaks at a
-                    // space, never inside a number.
-                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    // Three lines, not an ellipsis: a crown or plot reading
+                    // is wider than the column on any phone, and it breaks at
+                    // a space, never inside a number. At two lines the plot
+                    // reading lost its area unit to the ellipsis.
+                    maxLines = 3, overflow = TextOverflow.Ellipsis)
             },
             precisionSlot = {
                 Text(
@@ -466,7 +501,7 @@ private fun valueText(e: QuickMeasureEntry, system: UnitSystem): String = when (
     MeasureKind.DISTANCE -> if (e.value < 1) String.format(Locale.US, "%.0f cm", e.value * 100) else String.format(Locale.US, "%.2f m", e.value)
     MeasureKind.SAMPLING_PLOT -> {
         val area = e.secondaryValue ?: (PI * e.value * e.value)
-        String.format(Locale.US, "r %.1f m · %.1f m²", e.value, area)
+        String.format(Locale.US, "%.1f m radius · %.1f m²", e.value, area)
     }
 }
 

@@ -29,7 +29,7 @@ import CoreLocation
 public final class LocationService: NSObject, ObservableObject {
 
     /// App-scoped instance for PASSIVE consumers — the map home's GPS
-    /// chip + camera seeding, the scan screens' GPSAccuracyBadge, the
+    /// chip + camera seeding, the scan screens' GPSFixChip, the
     /// plot mini-map, and the cruise-mode navigation reads. One shared
     /// CLLocationManager instead of one per screen; subscriber
     /// ref-counting (`acquire()`/`release()`) keeps it running while at
@@ -216,6 +216,18 @@ public enum FixFreshness {
     /// under-canopy jitter, looser and a cruiser could walk clean out of
     /// a plot while the map still said they were in it.
     public static let maxUsableAge: TimeInterval = 5
+
+    /// Past this, the fix is not merely stale — the phone has had no
+    /// contact with the sky for a minute.
+    ///
+    /// This is the line the GPS chip draws between AMBER and RED, and the
+    /// distinction is a real one in the field: under a closed canopy a fix
+    /// drops for a few seconds constantly and comes straight back, which is
+    /// worth showing but not worth alarming about. A whole minute with
+    /// nothing is a different situation — the cruiser should stop trusting
+    /// any position on screen and step out for sky. Both platforms read
+    /// this constant.
+    public static let lostAge: TimeInterval = 60
 
     /// The fix to REASON FROM and DRAW FROM, or nil when there is none
     /// worth either.

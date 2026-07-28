@@ -27,6 +27,32 @@ private extension View {
     }
 }
 
+// MARK: - Text fields on the scan panels
+
+public extension View {
+
+    /// A text field the cruiser TYPES INTO, sitting on one of the scan
+    /// screens' dark result panels.
+    ///
+    /// FIELD REPORT 6 — those panels set `.foregroundStyle(.white)` so
+    /// their readouts stand off the camera feed, and a `.roundedBorder`
+    /// field inherits it. The system draws that field on its own light
+    /// fill, so the Target and ground-truth boxes were white glyphs on
+    /// white: input boxes that looked empty however much was typed into
+    /// them. The colour is set back to the app's ordinary text colour,
+    /// which is the colour the system field background is drawn for, and
+    /// which follows light/dark.
+    ///
+    /// Use this on EVERY typed field on a scan panel rather than fixing
+    /// them one at a time — the defect is inheritance, so it comes back
+    /// on the next field somebody adds.
+    func scanPanelTextField() -> some View {
+        textFieldStyle(.roundedBorder)
+            .foregroundStyle(ForestixPalette.textPrimary)
+            .tint(ForestixPalette.primary)
+    }
+}
+
 // MARK: - Back button (top-left, every AR screen)
 
 /// Circular floating back button pinned top-left so every full-bleed AR

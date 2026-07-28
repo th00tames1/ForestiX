@@ -189,7 +189,7 @@ fun MapHomeScreen(nav: NavController) {
     // chain always pops back here) disarms it. Idempotent.
     LaunchedEffect(Unit) { CruiseCapture.end(env) }
 
-    // MARK: - Live GPS (GPSAccuracyBadge pattern: shared service + launcher)
+    // MARK: - Live GPS (GpsFixChip pattern: shared service + launcher)
 
     val location = remember { LocationService.shared(context) }
     val launcher = rememberLauncherForActivityResult(
@@ -472,8 +472,12 @@ fun MapHomeScreen(nav: NavController) {
                 // the trailing round buttons off-screen. Shared by both modes
                 // (the cruise project chip is gone — the project lives in the
                 // bottom cluster's PROJECT circle + strip now).
+                // THE SAME CHIP the two measurement screens show. It used to
+                // be defined in this file, which is how the scan screens
+                // ended up with a different GPS widget saying a different
+                // thing (FIELD REPORT 11).
                 Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-                    GpsChip(fix)
+                    GpsFixChip(fix)
                 }
                 // My-location: recentre on the freshest fix (this screen's
                 // live service, else the last global fix) without ever
@@ -892,121 +896,6 @@ private fun buildTreePins(entries: List<QuickMeasureEntry>): List<TreePin> {
 }
 
 // MARK: - Top chrome pieces ---------------------------------------------------
-
-/// GPS chip — labelled coordinate block of the last known fix behind a
-/// freshness dot: green < 5 s, yellow 5–60 s, red past 60 s or when no
-/// fix ever arrived ("no fix"). Three short rows: X = latitude, Y =
-/// longitude, Z = altitude (5-decimal mono, field-requested axis
-/// convention), with a live age suffix on the Z row once stale. No
-/// bearing / accuracy — the coloured dot carries freshness.
-/// Internal: shared by both map modes' top chrome.
-@Composable
-internal fun GpsChip(fix: CLLocationSnapshot?) {
-    val colors = Forestix.colors
-    val type = Forestix.type
-    // This screen's live service, else the newest fix any screen captured.
-    val snap = fix ?: LocationService.lastGlobalFix
-    // 1 s clock so the age suffix + dot tier tick while the chip is on screen.
-    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            nowMs = System.currentTimeMillis()
-            delay(1_000)
-        }
-    }
-    // MAGNITUDE, not a clamped difference. Location.time is satellite UTC for
-    // the GPS provider, so a device clock running behind it makes this
-    // NEGATIVE, and coerceAtLeast(0) turned that into "0 s old" — a green dot
-    // and no age suffix on a fix of any age, while the map beside it drew
-    // nothing and the plot banner read "No position". Same rule the plot
-    // verdict uses, so the chip and the drawn position agree.
-    val ageSec = snap?.let { kotlin.math.abs(nowMs - it.timestamp) / 1_000 }
-    val dotColor = when {
-        ageSec == null -> colors.confidenceBad // no fix ever
-        ageSec < 5 -> colors.confidenceOk
-        ageSec <= 60 -> colors.confidenceWarn
-        else -> colors.confidenceBad
-    }
-    val stale = ageSec != null && ageSec > 5
-    Column(
-        verticalArrangement = Arrangement.spacedBy(2.dp),
-        modifier = Modifier
-            .clip(ForestixRadius.control)
-            .background(colors.surface)
-            .border(1.dp, colors.divider, ForestixRadius.control)
-            .padding(horizontal = 11.dp, vertical = 7.dp),
-    ) {
-        if (snap != null) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Box(Modifier.size(7.dp).clip(CircleShape).background(dotColor))
-                GpsCoordRow("X", String.format(Locale.US, "%.5f", snap.latitude))
-            }
-            Box(Modifier.padding(start = 13.dp)) {
-                GpsCoordRow("Y", String.format(Locale.US, "%.5f", snap.longitude))
-            }
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                modifier = Modifier.padding(start = 13.dp),
-            ) {
-                GpsCoordRow(
-                    "Z",
-                    snap.altitudeM?.let { String.format(Locale.US, "%.0f m", it) } ?: "—",
-                )
-                if (stale) {
-                    val age = if (ageSec!! < 60) "$ageSec s ago" else "${ageSec / 60} min ago"
-                    Text(
-                        "· $age",
-                        style = type.dataSmall.copy(fontSize = 11.sp),
-                        color = colors.textTertiary,
-                        maxLines = 1,
-                    )
-                }
-            }
-        } else {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Box(Modifier.size(7.dp).clip(CircleShape).background(dotColor))
-                Text(
-                    "no fix",
-                    style = type.dataSmall.copy(fontSize = 11.sp, fontWeight = FontWeight.SemiBold),
-                    color = colors.textTertiary,
-                    maxLines = 1,
-                )
-            }
-        }
-    }
-}
-
-/// One labelled coordinate line — dim mono axis label, semibold mono
-/// value (iOS `coordRow` 1:1).
-@Composable
-private fun GpsCoordRow(label: String, value: String) {
-    val colors = Forestix.colors
-    val type = Forestix.type
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        Text(
-            label,
-            style = type.dataSmall.copy(fontSize = 11.sp),
-            color = colors.textTertiary,
-            maxLines = 1,
-        )
-        Text(
-            value,
-            style = type.dataSmall.copy(fontSize = 11.sp, fontWeight = FontWeight.SemiBold),
-            color = colors.textPrimary,
-            maxLines = 1,
-        )
-    }
-}
 
 /// Mock `.roundbtn`, sized to the 44 dp hit-target rule, with the shared
 /// map-chrome pressed feedback (iOS MapPressableStyle). `enabled = false`

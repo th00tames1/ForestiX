@@ -9,6 +9,7 @@ package com.hcjeong.forestix.data
 
 import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -32,6 +33,13 @@ enum class DBHMeasurementMethod(val raw: String) {
     companion object { fun fromRaw(s: String?) = entries.firstOrNull { it.raw == s } ?: CHORD }
 }
 
+/// The DBH bracket's legal half-width range. 0.02 is half the fit's 0.04
+/// minimum handle gap; 0.48 puts the handles 2 % in from each screen edge,
+/// where they are still grabbable. Mirror of iOS
+/// `AppSettings.clampBracketHalfWidth`.
+fun clampBracketHalfWidth(value: Float): Float =
+    if (!value.isFinite()) 0.25f else value.coerceIn(0.02f, 0.48f)
+
 
 data class SettingsSnapshot(
     val unitSystem: UnitSystem = UnitSystem.IMPERIAL,
@@ -42,6 +50,32 @@ data class SettingsSnapshot(
     /// Maps to sensors.ChordAlgorithm. Default silhouette so Android matches
     /// iOS out of the box.
     val dbhChordAlgorithm: String = "silhouette",
+    /// Whether the diameter scan opens with the edge bracket (ADJUST) up.
+    ///
+    /// FIELD REPORT 4 — DEFAULTS TO TRUE. Automatic edge-finding jitters
+    /// left and right on a real stem: bark texture, a stick against the
+    /// trunk, a second stem behind it, and the found edges move between
+    /// frames. The cruiser's verdict on it was that the automatic path was
+    /// not usable in the stand. Placing the bracket by hand takes one drag
+    /// and is stable, so that is what the screen opens on.
+    ///
+    /// It is the LAST-USED mode, not a hard default: the Auto pill still
+    /// exists and a cruiser who prefers automatic edges gets it back on the
+    /// next scan without hunting for a Settings row. Mirror of iOS
+    /// tc.dbhEdgeAdjustDefault.
+    val dbhEdgeAdjustDefault: Boolean = true,
+    /// HALF the bracket width, as a fraction of the view's walk axis, so a
+    /// bracket set on one tree opens at the same width on the next.
+    ///
+    /// FIELD REPORT 4 — a cruise walks a plot at roughly one standing
+    /// distance from stem to stem, so consecutive trees subtend nearly the
+    /// same on-screen width. Re-dragging from ±25 % every time was work the
+    /// previous tree had already done.
+    ///
+    /// HALF-width, not two edges, because the bracket is symmetric about
+    /// the crosshair by construction — one number is the whole state.
+    /// Mirror of iOS tc.dbhBracketHalfWidth.
+    val dbhBracketHalfWidth: Float = 0.25f,
     /// Which BUILT-IN base layer the map draws — "satellite" (Esri World
     /// Imagery) or "normal" (OpenStreetMap standard). Default satellite so
     /// nothing changes for existing installs (mirror of iOS tc.mapType).
@@ -139,6 +173,8 @@ class AppSettings(private val context: Context) {
         // so the DBH scan is depth-only. The key is no longer read, which
         // migrates any stored "motion"/"caliper" value to the depth method.
         val dbhChordAlgorithm = stringPreferencesKey("tc.dbhChordAlgorithm")
+        val dbhEdgeAdjustDefault = booleanPreferencesKey("tc.dbhEdgeAdjustDefault")
+        val dbhBracketHalfWidth = floatPreferencesKey("tc.dbhBracketHalfWidth")
         val measureHeightAfterDBH = booleanPreferencesKey("tc.measureHeightAfterDiameter")
         val developerMode = booleanPreferencesKey("tc.developerMode")
         val researchTreeId = stringPreferencesKey("tc.researchTreeId")
@@ -177,6 +213,9 @@ class AppSettings(private val context: Context) {
             logRule = LogRule.fromRaw(p[Keys.logRule] ?: "scribner"),
             dbhMeasurementMethod = DBHMeasurementMethod.fromRaw(p[Keys.dbhMethod]),
             dbhChordAlgorithm = p[Keys.dbhChordAlgorithm] ?: "silhouette",
+            dbhEdgeAdjustDefault = p[Keys.dbhEdgeAdjustDefault] ?: true,
+            dbhBracketHalfWidth = clampBracketHalfWidth(
+                p[Keys.dbhBracketHalfWidth] ?: 0.25f),
             // Anything unrecognised falls back to the satellite default.
             mapType = if (p[Keys.mapType] == "normal") "normal" else "satellite",
             tileURLTemplate = p[Keys.tileURLTemplate]?.takeIf { it.isNotBlank() },
@@ -263,6 +302,20 @@ class AppSettings(private val context: Context) {
     fun setDbhChordAlgorithm(raw: String) = update {
         _state.value = _state.value.copy(dbhChordAlgorithm = raw)
         it[Keys.dbhChordAlgorithm] = raw
+    }
+
+    fun setDbhEdgeAdjustDefault(value: Boolean) = update {
+        _state.value = _state.value.copy(dbhEdgeAdjustDefault = value)
+        it[Keys.dbhEdgeAdjustDefault] = value
+    }
+
+    /// Clamped on write AND on read (see the loader): a value from a future
+    /// build, or a corrupt preference, must not be able to produce a bracket
+    /// wider than the screen or narrower than the fit's minimum gap.
+    fun setDbhBracketHalfWidth(value: Float) = update {
+        val clamped = clampBracketHalfWidth(value)
+        _state.value = _state.value.copy(dbhBracketHalfWidth = clamped)
+        it[Keys.dbhBracketHalfWidth] = clamped
     }
 
     fun setMapType(value: String) = update {

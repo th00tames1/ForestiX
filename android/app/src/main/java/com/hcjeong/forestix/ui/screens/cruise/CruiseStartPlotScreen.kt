@@ -78,6 +78,8 @@ import java.util.UUID
 import kotlin.math.sqrt
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import com.hcjeong.forestix.ar.Vec3
+import com.hcjeong.forestix.ui.screens.plotPillarPreviewMarkers
 
 /// `editPlotId` — FIELD REPORT F11. The same screen now serves BOTH "place
 /// the first plot" and "come back and change it": the scan screens' top-right
@@ -125,12 +127,24 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String, editPlotId: Str
     var distanceFromCenter by remember { mutableStateOf<Double?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
     var saving by remember { mutableStateOf(false) }
+    /// Live crosshair hit while aiming — where the pillar would land.
+    /// Null once the plot is placed, or before the first successful ray.
+    var previewCentre by remember { mutableStateOf<Vec3?>(null) }
 
     // 5 Hz boundary check + haptics (sampling-tool parity).
     LaunchedEffect(Unit) {
         var tick = 0
         while (true) {
             delay(200)
+            // Where the pillar WOULD be planted if the cruiser tapped now
+            // (FIELD REPORT 8). The SAME ray and fallback `place()` uses, so
+            // the ghost cannot promise a placement the tap would refuse or
+            // put somewhere else. Cleared once the plot is down — the real
+            // pillar is on screen and a second translucent one is noise.
+            previewCentre =
+                if (ArSessionHub.activePlot != null) null
+                else controller.screenCenterHit()
+                    ?: controller.forwardPointAtHorizontalDistance(3f)
             val c = ArSessionHub.plotCenterWorld()
             val cam = controller.currentCameraPosition()
             if (c == null || cam == null) {
@@ -266,7 +280,9 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String, editPlotId: Str
         // SamplingPlotScreen / ArSessionHub).
         ArCameraView(
             controller,
-            emptyList<ArSceneMarker>(),
+            // The hub draws the PLACED plot; the only screen markers are the
+            // translucent preview of the pillar the next tap would plant.
+            plotPillarPreviewMarkers(previewCentre, radiusM.toFloat()),
             modifier = Modifier.fillMaxSize(),
             enableDepth = !placed,
             planeRenderer = !placed,

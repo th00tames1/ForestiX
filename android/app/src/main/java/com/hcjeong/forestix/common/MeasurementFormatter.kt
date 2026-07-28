@@ -28,9 +28,18 @@ object MeasurementFormatter {
     }
 
     // Height — stored m.
+    //
+    /// TWO decimals, field-requested. One was a rounding coarser than the
+    /// measurement: a walk-off tangent fit resolves well inside a decimetre
+    /// on a clean sightline, and the validation study compares these numbers
+    /// against a hand-measured truth typed to the centimetre. At one decimal
+    /// two heights 6 cm apart printed the same string, which made a real
+    /// difference between algorithms invisible on the screen that shows it.
+    /// The ± band beside it ([heightSigma]) is what says how much of the
+    /// second decimal to believe. iOS prints the identical string.
     fun height(m: Double, system: UnitSystem): String = when (system) {
-        UnitSystem.METRIC -> String.format(Locale.US, "%.1f m", m)
-        UnitSystem.IMPERIAL -> String.format(Locale.US, "%.1f ft", m * 3.28084)
+        UnitSystem.METRIC -> String.format(Locale.US, "%.2f m", m)
+        UnitSystem.IMPERIAL -> String.format(Locale.US, "%.2f ft", m * 3.28084)
     }
 
     /// Renders a height precision sigma (stored in metres).

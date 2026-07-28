@@ -198,7 +198,7 @@ class QuickMeasureHistory private constructor(
             parts.add(String.format(Locale.US, "DBH %.1f cm", it.value))
         }
         owned.firstOrNull { it.kind == MeasureKind.HEIGHT }?.let {
-            parts.add(String.format(Locale.US, "Height %.1f m", it.value))
+            parts.add(String.format(Locale.US, "Height %.2f m", it.value))
         }
         return if (parts.isEmpty()) "\u2014" else parts.joinToString(" \u00B7 ")
     }

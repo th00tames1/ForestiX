@@ -153,17 +153,42 @@ public struct ARCameraView: UIViewRepresentable {
         var updateSub: (any Cancellable)?
     }
 
-    /// Apparent-size-constant marker scaling: factor = distance / 2.5,
-    /// clamped to [scaleMin, scaleMax] — so the marker LOOKS the same
-    /// size at any range (1 m → 0.4×, 2.5 m → 1×, 20 m → 8×, 35 m → 14×).
-    /// The old scheme (natural size inside 3 m, capped ×6) read ~2× too
-    /// big up close and ~2× too small at height-walk-off distances.
+    /// Distance scaling for markers flagged `scalesWithDistance`:
+    /// `factor = (distance / 2.5) ^ 0.65`, clamped to [scaleMin, scaleMax].
+    ///
+    /// THE EXPONENT IS THE POINT. This used to be a plain `distance / 2.5`,
+    /// i.e. exactly apparent-size-CONSTANT: a marker took up the same
+    /// fraction of the screen at 20 m as at arm's length. That fixed a real
+    /// defect — before it, a natural-size 8 cm sphere was invisible from a
+    /// height walk-off — but it overshot. FIELD REPORT 2: standing back to
+    /// sight a treetop, the ball covered the crown it was supposed to be
+    /// marking.
+    ///
+    /// A marker should get smaller with distance, just far more slowly than
+    /// perspective alone would take it. At 0.65 the apparent size falls off
+    /// as d^-0.35: relative to the near-field size a marker reads 78 % at
+    /// 5 m, 61 % at 10 m and 48 % at 20 m — still an unmissable dot from
+    /// across a stand, no longer a blob over the target. Inside the
+    /// reference distance nothing changes (2.5 m is exactly 1×).
     private static let scaleReferenceM: Float = 2.5
+    /// How sharply apparent size falls off with range. 1.0 = constant
+    /// on-screen size; 0 = no scaling at all (raw perspective).
+    private static let scaleExponent: Float = 0.65
     /// Clamp floor — a point-blank marker shrinks no further than this.
     private static let scaleMin: Float = 0.4
     /// Clamp cap — a marker seen from across a stand stops growing here
-    /// so it never balloons absurdly.
-    private static let scaleMax: Float = 14.0
+    /// so it never balloons absurdly. 6× is ~40 m at the exponent above.
+    private static let scaleMax: Float = 6.0
+
+    /// The world-space scale a marker at `distance` metres should carry.
+    static func distanceScale(_ distance: Float) -> Float {
+        // A non-finite or non-positive distance can only come from a pose
+        // that has not resolved; draw the marker at its natural size rather
+        // than at whatever `pow` returns for it.
+        guard distance.isFinite, distance > 0 else { return 1 }
+        let raw = pow(distance / scaleReferenceM, scaleExponent)
+        return min(scaleMax, max(scaleMin, raw))
+    }
 
     public func makeUIView(context: Context) -> ARView {
         let view = ARView(frame: .zero,
@@ -191,9 +216,7 @@ public struct ARCameraView: UIViewRepresentable {
                 // world-pinned anchors (equals the stored position) and
                 // ARAnchor-pinned ones (tracks the anchor transform).
                 let pos = anchor.position(relativeTo: nil)
-                let d = simd_distance(cam, pos)
-                let factor = min(Self.scaleMax,
-                                 max(Self.scaleMin, d / Self.scaleReferenceM))
+                let factor = Self.distanceScale(simd_distance(cam, pos))
                 for child in anchor.children {
                     child.scale = SIMD3<Float>(repeating: factor)
                 }

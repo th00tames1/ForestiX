@@ -722,7 +722,11 @@ public struct MapHomeScreen: View {
             // round buttons on the right always stay on screen. Shared by
             // both modes; cruise carries no separate project chip here
             // anymore (the project lives on the bottom cluster now).
-            gpsChip
+            //
+            // THE SAME CHIP the two measurement screens show. It used to be
+            // inlined here, which is how the scan screens ended up with a
+            // different GPS widget saying a different thing.
+            GPSFixChip()
             Spacer(minLength: ForestixSpace.xs)
             // My-location — jump the camera back to the newest fix (this
             // screen's live service, else the last fix any screen saved).
@@ -777,121 +781,6 @@ public struct MapHomeScreen: View {
             .frame(width: 44, height: 44)
             .background(Circle().fill(ForestixPalette.surfaceRaised))
             .overlay(Circle().stroke(ForestixPalette.divider, lineWidth: 1))
-    }
-
-    /// A fix older than this reads as STALE (dense canopy, canyon
-    /// bottom) — the chip starts counting the age and its status dot
-    /// flips to the warn colour.
-    ///
-    /// THIS IS ALSO THE PLOT BANNER'S CUTOFF and the cutoff for every
-    /// POSITION THE APP DRAWS, and deliberately so: `FixFreshness` is the
-    /// app's one definition of a fix that can still be believed, so the
-    /// GPS chip, the inside/outside verdict, the you-dot and the plot
-    /// card can never contradict each other. The moment the chip's dot
-    /// leaves green, the plot stops asserting a side of the boundary AND
-    /// the map stops painting a position.
-    static var staleFixAge: TimeInterval { FixFreshness.maxUsableAge }
-
-    /// Older than this the fix is effectively lost — the dot goes red.
-    private static let lostFixAge: TimeInterval = 60
-
-    /// THE GPS chip — a single-line live fix readout with a
-    /// leading freshness dot: green < 5 s, yellow 5–60 s, red past 60 s
-    /// or before the first fix ("no fix"). Three short labelled rows —
-    /// X = latitude, Y = longitude, Z = altitude (5-decimal mono), the
-    /// axis convention field-requested — with a live age suffix on the
-    /// Z row once the fix goes stale. No bearing / accuracy (freshness
-    /// is the coloured dot).
-    private var gpsChip: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            // This screen's live service, else the newest fix any screen
-            // captured — the camera already seeds from lastGlobalFix, so
-            // the chip should agree with it.
-            let snap = location.latestSnapshot ?? LocationService.lastGlobalFix
-            // MAGNITUDE, not a clamped difference. A GPS timestamp is satellite
-            // UTC; a device clock running behind it makes the difference
-            // NEGATIVE, and `max(0, …)` turned that into "0 s old" — a green dot
-            // and no age suffix on a fix of any age, while the map beside it
-            // drew nothing and the plot banner read "No position". Same rule as
-            // `FixFreshness`, so the chip and the drawn position agree.
-            let age = snap.map { abs(context.date.timeIntervalSince($0.timestamp)) }
-            let stale = (age ?? 0) > Self.staleFixAge
-            let dot: Color = {
-                guard snap != nil, let age else { return ForestixPalette.confidenceBad }
-                if age > Self.lostFixAge { return ForestixPalette.confidenceBad }
-                if age > Self.staleFixAge { return ForestixPalette.confidenceWarn }
-                return ForestixPalette.confidenceOk
-            }()
-            let a11y: String = {
-                guard let snap else { return "No GPS fix" }
-                var out = String(format: "GPS fix %.5f, %.5f",
-                                 snap.latitude, snap.longitude)
-                if let alt = snap.altitudeM {
-                    out += String(format: ", altitude %.0f metres", alt)
-                }
-                if stale, let age { out += ", " + Self.fixAgeText(age) }
-                return out
-            }()
-            Group {
-                if let snap {
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 6) {
-                            Circle().fill(dot).frame(width: 7, height: 7)
-                            coordRow("X", String(format: "%.5f", snap.latitude))
-                        }
-                        coordRow("Y", String(format: "%.5f", snap.longitude))
-                            .padding(.leading, 13)
-                        HStack(spacing: 4) {
-                            coordRow("Z", snap.altitudeM.map {
-                                String(format: "%.0f m", $0)
-                            } ?? "—")
-                            if stale, let age {
-                                Text("· \(Self.fixAgeText(age))")
-                                    .font(.system(size: 11, weight: .medium, design: .monospaced))
-                                    .foregroundStyle(ForestixPalette.textTertiary)
-                            }
-                        }
-                        .padding(.leading, 13)
-                    }
-                } else {
-                    HStack(spacing: 6) {
-                        Circle().fill(dot).frame(width: 7, height: 7)
-                        Text("no fix")
-                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(ForestixPalette.textTertiary)
-                    }
-                }
-            }
-            .lineLimit(1)
-            .padding(.horizontal, 11)
-            .padding(.vertical, 7)
-            .background(
-                RoundedRectangle(cornerRadius: ForestixRadius.control, style: .continuous)
-                    .fill(ForestixPalette.surface))
-            .overlay(
-                RoundedRectangle(cornerRadius: ForestixRadius.control, style: .continuous)
-                    .stroke(ForestixPalette.divider, lineWidth: 1))
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(a11y)
-            .accessibilityIdentifier("mapHome.gps")
-        }
-    }
-
-    /// One labelled coordinate line — dim mono axis label, semibold
-    /// mono value.
-    private func coordRow(_ label: String, _ value: String) -> some View {
-        HStack(spacing: 4) {
-            Text(label)
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
-                .foregroundStyle(ForestixPalette.textTertiary)
-            Text(value)
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                .foregroundStyle(ForestixPalette.textPrimary)
-        }
-    }
-
-    private static func fixAgeText(_ age: TimeInterval) -> String {
-        age < 60 ? "\(Int(age)) s ago" : "\(Int(age / 60)) min ago"
     }
 
     /// Base-layer attribution — a licence obligation, not decoration, so

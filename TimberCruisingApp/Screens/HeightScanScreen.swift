@@ -217,13 +217,15 @@ public struct HeightScanScreen: View {
             // shows only the AR feed + measurement overlays.
             if !hidingChromeForCapture {
                 VStack(spacing: 0) {
-                    // Same GPS-accuracy strip as the Diameter scan — gives
-                    // the cruiser a single-glance read on canopy quality
-                    // before they anchor. Leading 72 / top 22 clears the
-                    // floating back button (same offsets as Android).
+                    // The same GPS chip the map and the Diameter scan show
+                    // (FIELD REPORT 11) — one readout for "can the app see
+                    // where I am right now?", including at the moment a fix
+                    // is written onto the stored reading. Leading 72 / top
+                    // 22 clears the floating back button (same offsets as
+                    // Android).
                     HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: 6) {
-                            GPSAccuracyBadge()
+                            GPSFixChip(acquiresService: true)
                             // FIELD REPORT F2 — the permanent red REC pill is
                             // gone; the cruiser read it as noise. The PER-
                             // CAPTURE outcome pill stays, and it is the piece
@@ -905,6 +907,18 @@ public struct HeightScanScreen: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("heightScan.resultReason")
             }
+            // The instrument moved between the two sightings, so the tangent
+            // pair no longer shares an origin and the height is soft by
+            // roughly this much. Said plainly and with the number, at the
+            // moment the cruiser decides whether to keep the reading.
+            if let drift = viewModel.aimDriftM,
+               drift > HeightScanViewModel.aimDriftWarnM {
+                Text("You moved \(MeasurementFormatter.distance(m: Double(drift), in: settings.unitSystem)) between the base and top sightings. Both have to be taken from one spot — retake for a firm number.")
+                    .font(ForestixType.caption)
+                    .foregroundStyle(ForestixPalette.confidenceWarn)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("heightScan.aimDrift")
+            }
             HStack {
                 Spacer()
                 Button {
@@ -942,7 +956,7 @@ public struct HeightScanScreen: View {
                         TextField("T1", text: Binding(
                             get: { settings.researchTreeId },
                             set: { settings.researchTreeId = $0 }))
-                            .textFieldStyle(.roundedBorder)
+                            .scanPanelTextField()
                             .frame(width: 70)
                             .accessibilityIdentifier("heightScan.researchTarget")
                         Text("True H (m)")
@@ -951,7 +965,7 @@ public struct HeightScanScreen: View {
                         // ',' is accepted and normalised to '.' on submit.
                         TextField("clinometer", text: $researchTrueM)
                             .keyboardType(.decimalPad)
-                            .textFieldStyle(.roundedBorder)
+                            .scanPanelTextField()
                             .frame(width: 90)
                             .accessibilityIdentifier("heightScan.researchTrue")
                     }
@@ -973,13 +987,11 @@ public struct HeightScanScreen: View {
     }
 
     private var metadataChipLabel: String {
-        var bits: [String] = []
-        if let s = metaSpecies, !s.isEmpty {
-            bits.append(RegionalSpecies.name(forCode: s))
-        }
-        if !metaDamage.isEmpty { bits.append("\(metaDamage.count) tag") }
-        if bits.isEmpty { return "Add details" }
-        return bits.joined(separator: " · ")
+        // Shared with the diameter scan (FIELD REPORT 7) — one label rule
+        // for one chip, on both screens.
+        ScanMetadataChip.label(speciesCode: metaSpecies,
+                               damageCodes: metaDamage,
+                               note: metaNote)
     }
 
     /// Bench diagnostic — prints the raw captured inputs that fed the
@@ -1001,7 +1013,7 @@ public struct HeightScanScreen: View {
                       ? "Height in metres"
                       : "Height in feet",
                       text: $viewModel.manualHeightM)
-                .textFieldStyle(.roundedBorder)
+                .scanPanelTextField()
                 #if os(iOS)
                 .keyboardType(.decimalPad)
                 #endif

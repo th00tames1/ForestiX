@@ -952,7 +952,7 @@ final class PlotMiniMapLiveModel: ObservableObject {
     private var timer: Timer?
     /// App-shared service for fix + compass heading (refcounted
     /// acquire/release) — same self-contained pattern as
-    /// GPSAccuracyBadge, so the widget lights up on every host screen
+    /// GPSFixChip, so the widget lights up on every host screen
     /// without AppEnvironment plumbing. Never observed.
     private let location = LocationService.shared
 

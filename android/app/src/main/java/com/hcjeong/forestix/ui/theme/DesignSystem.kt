@@ -73,6 +73,15 @@ data class ForestixColors(
     val confidenceOk: Color,
     val confidenceWarn: Color,
     val confidenceBad: Color,
+    /// GPS-fix status dots. A separate pair from the confidence family on
+    /// purpose: [confidenceWarn] is deepened to #9A6414 so it can carry
+    /// TEXT on paper, and at the size of a 7 dp dot that deepening reads as
+    /// BROWN rather than as a warning — field-reported. These two are never
+    /// used for text, so they can stay in the hue a glance actually names.
+    /// The dot carries a hairline ring (see GpsFixChip) which is what keeps
+    /// the amber legible on a white surface. iOS values 1:1.
+    val fixStale: Color,
+    val fixLost: Color,
     val canvas: Color,
     val surface: Color,
     val surfaceRaised: Color,
@@ -98,6 +107,8 @@ private val FieldDark = ForestixColors(
     confidenceOk = Color(0xFF55D07A),
     confidenceWarn = Color(0xFFFFB454),
     confidenceBad = Color(0xFFFF7A6B),
+    fixStale = Color(0xFFFFC65C),
+    fixLost = Color(0xFFFF7A6B),
     canvas = Color(0xFF0C0F10),
     surface = Color(0xFF171B1D),
     surfaceRaised = Color(0xFF21272A),
@@ -116,6 +127,8 @@ private val FieldLight = ForestixColors(
     confidenceOk = Color(0xFF1D7A43),
     confidenceWarn = Color(0xFF9A6414),
     confidenceBad = Color(0xFFB03A2E),
+    fixStale = Color(0xFFE8A020),
+    fixLost = Color(0xFFD93025),
     canvas = Color(0xFFF4F6F4),
     surface = Color(0xFFFFFFFF),
     surfaceRaised = Color(0xFFE9EDE9),

@@ -535,7 +535,9 @@ public enum PDFReportBuilder {
             drawTableRow(cells: [
                 pno, "\(t.treeNumber)", inputs.localization.speciesName(t.speciesCode),
                 String(format: "%.1f", t.dbhCm),
-                t.heightM.map { String(format: "%.1f", $0) } ?? "—",
+                // Two decimals, matching every on-screen height readout —
+                // the appendix is what the client checks the app against.
+                t.heightM.map { String(format: "%.2f", $0) } ?? "—",
                 Self.statusWord(t.status),
                 Self.qualityWord(t.dbhConfidence),
                 flagBits.joined(separator: ", ")

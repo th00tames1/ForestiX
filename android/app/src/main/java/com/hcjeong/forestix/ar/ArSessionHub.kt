@@ -506,9 +506,7 @@ object ArSessionHub {
             val cam = frame.camera.pose
             val camPos = Vec3(cam.tx(), cam.ty(), cam.tz())
             scalingNodes.forEach { (node, worldPos) ->
-                val d = distance(camPos, worldPos)
-                val factor = (d / MARKER_SCALE_REFERENCE_M)
-                    .coerceIn(MARKER_SCALE_MIN, MARKER_SCALE_MAX)
+                val factor = markerDistanceScale(distance(camPos, worldPos))
                 node.scale = Float3(factor, factor, factor)
             }
         }
@@ -799,13 +797,42 @@ object ArSessionHub {
     }
 }
 
-/// Distance-compensated marker scaling: natural (1×) size AT this range,
-/// factor = distance / reference — 1 m → 0.4×, 2.5 m → 1×, 20 m → 8×,
-/// 35 m → 14×. (Moved here from ArCameraView with the shared-session hub;
-/// same values, mirror of iOS ARCameraView.)
+/// Distance scaling for markers flagged `scalesWithDistance`:
+/// `factor = (distance / 2.5) ^ 0.65`, clamped to [MIN, MAX].
+///
+/// THE EXPONENT IS THE POINT. This used to be a plain `distance / 2.5`,
+/// i.e. exactly apparent-size-CONSTANT: a marker took up the same fraction
+/// of the screen at 20 m as at arm's length. That fixed a real defect —
+/// before it, a natural-size 8 cm sphere was invisible from a height
+/// walk-off — but it overshot. FIELD REPORT 2: standing back to sight a
+/// treetop, the ball covered the crown it was supposed to be marking.
+///
+/// A marker should get smaller with distance, just far more slowly than
+/// perspective alone would take it. At 0.65 the apparent size falls off as
+/// d^-0.35: relative to the near-field size a marker reads 78 % at 5 m,
+/// 61 % at 10 m and 48 % at 20 m — still an unmissable dot from across a
+/// stand, no longer a blob over the target. Inside the reference distance
+/// nothing changes (2.5 m is exactly 1×). Mirror of iOS ARCameraView.
 private const val MARKER_SCALE_REFERENCE_M = 2.5f
+/// How sharply apparent size falls off with range. 1.0 = constant on-screen
+/// size; 0 = no scaling at all (raw perspective).
+private const val MARKER_SCALE_EXPONENT = 0.65f
 private const val MARKER_SCALE_MIN = 0.4f
-private const val MARKER_SCALE_MAX = 14f
+/// 6× is ~40 m at the exponent above.
+private const val MARKER_SCALE_MAX = 6f
+
+/// The world-space scale a marker at [distance] metres should carry.
+internal fun markerDistanceScale(distance: Float): Float {
+    // A non-finite or non-positive distance can only come from a pose that
+    // has not resolved; draw the marker at its natural size rather than at
+    // whatever pow() returns for it.
+    if (!distance.isFinite() || distance <= 0f) return 1f
+    val raw = Math.pow(
+        (distance / MARKER_SCALE_REFERENCE_M).toDouble(),
+        MARKER_SCALE_EXPONENT.toDouble(),
+    ).toFloat()
+    return raw.coerceIn(MARKER_SCALE_MIN, MARKER_SCALE_MAX)
+}
 
 /// Sampling-plot ring geometry — the rim only, mirroring the iOS
 /// generateRing(). Cheap vs a filled translucent disk, so a 30 m boundary

@@ -73,6 +73,7 @@ import com.hcjeong.forestix.ui.theme.ForestixWhiteButton
 import kotlinx.coroutines.delay
 import java.util.Locale
 import kotlin.math.sqrt
+import com.hcjeong.forestix.ar.Vec3
 
 @Composable
 fun SamplingPlotScreen(nav: NavController) {
@@ -91,6 +92,9 @@ fun SamplingPlotScreen(nav: NavController) {
     var isOutside by remember { mutableStateOf(false) }
     var distanceFromCenter by remember { mutableStateOf<Double?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
+    /// Live crosshair hit while aiming — where the pillar would land.
+    /// Null once the plot is placed, or before the first successful ray.
+    var previewCentre by remember { mutableStateOf<Vec3?>(null) }
 
     // 5 Hz boundary check + haptics. Does NOT drive any animation/flash, so
     // it doesn't recompose the AR view — only the small readouts that read
@@ -99,6 +103,15 @@ fun SamplingPlotScreen(nav: NavController) {
         var tick = 0
         while (true) {
             delay(200)
+            // Where the pillar WOULD be planted if the cruiser tapped now
+            // (FIELD REPORT 8). The SAME ray and fallback `place()` uses, so
+            // the ghost cannot promise a placement the tap would refuse or
+            // put somewhere else. Cleared once the plot is down — the real
+            // pillar is on screen and a second translucent one is noise.
+            previewCentre =
+                if (ArSessionHub.activePlot != null) null
+                else controller.screenCenterHit()
+                    ?: controller.forwardPointAtHorizontalDistance(3f)
             val c = ArSessionHub.plotCenterWorld()
             val cam = controller.currentCameraPosition()
             if (c == null || cam == null) {
@@ -136,7 +149,9 @@ fun SamplingPlotScreen(nav: NavController) {
         // for the whole session.
         ArCameraView(
             controller,
-            emptyList<ArSceneMarker>(),
+            // The hub draws the PLACED plot; the only screen markers are the
+            // translucent preview of the pillar the next tap would plant.
+            plotPillarPreviewMarkers(previewCentre, radiusM.toFloat()),
             modifier = Modifier.fillMaxSize(),
             enableDepth = !placed,
             planeRenderer = !placed,

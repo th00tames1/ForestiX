@@ -74,6 +74,7 @@ import com.hcjeong.forestix.common.TruthInput
 import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.common.Units
 import com.hcjeong.forestix.data.MeasureKind
+import com.hcjeong.forestix.data.clampBracketHalfWidth
 import com.hcjeong.forestix.data.QuickMeasureEntry
 import com.hcjeong.forestix.data.ResearchLog
 import com.hcjeong.forestix.data.StemPosition
@@ -91,7 +92,7 @@ import com.hcjeong.forestix.ui.Routes
 import com.hcjeong.forestix.ui.screens.cruise.CruiseCapture
 import com.hcjeong.forestix.ui.screens.cruise.CruiseRoutes
 import com.hcjeong.forestix.ui.screens.ScanMetadataSheet
-import com.hcjeong.forestix.ui.screens.GPSAccuracyBadge
+import com.hcjeong.forestix.ui.screens.GpsFixChip
 import com.hcjeong.forestix.ui.screens.MeasureBackButton
 import com.hcjeong.forestix.ui.screens.MeasureCircleButton
 import com.hcjeong.forestix.ui.screens.MeasureShutterBar
@@ -245,9 +246,17 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // ADJUST edge-bracket mode (manual edge placement, depth method only):
     // two draggable handles bracket the trunk on the guide line; the
     // constrained estimate uses the handle span as the silhouette width.
-    var adjustMode by remember { mutableStateOf(false) }
-    var adjustLeftFrac by remember { mutableStateOf(0.25f) }
-    var adjustRightFrac by remember { mutableStateOf(0.75f) }
+    //
+    // FIELD REPORT 4 — the screen OPENS on the bracket unless the cruiser
+    // last chose Auto. Automatic edge-finding was the default and the
+    // cruiser's verdict on it was that it jumped left and right on a real
+    // stem badly enough to be unusable in the stand; the bracket is one drag
+    // and holds still. The bracket is also SYMMETRIC about the crosshair and
+    // opens at the width the last tree was measured at, so a plot walked at
+    // one standing distance needs no drag at all after the first tree.
+    var adjustMode by remember { mutableStateOf(settings.dbhEdgeAdjustDefault) }
+    var adjustLeftFrac by remember { mutableStateOf(0.5f - settings.dbhBracketHalfWidth) }
+    var adjustRightFrac by remember { mutableStateOf(0.5f + settings.dbhBracketHalfWidth) }
     var adjustPreview by remember { mutableStateOf<DBHEstimator.DbhPreview?>(null) }
     // Whether the on-screen result came from the ADJUST bracket — recorded
     // as captureMode "manual" vs "auto" on Accept.
@@ -1155,34 +1164,40 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             plotOverlay = ArSessionHub.PlotOverlay.SUBDUED,
         )
 
-        // ADJUST-mode drag catcher: a drag grabs whichever handle is nearer
-        // at drag start (hit target = the nearer half of the screen, well
-        // over 44 dp). Early in the Box so the rail / status panel (later
-        // children) still win their own touches.
+        // ADJUST-mode drag catcher. Early in the Box so the rail / status
+        // panel (later children) still win their own touches.
+        //
+        // SYMMETRIC — a drag moves BOTH handles, mirrored about the
+        // crosshair (FIELD REPORT 4). They used to move independently, which
+        // made fitting a trunk a two-handed job: drag the left edge on, drag
+        // the right edge on, then find that the crosshair no longer sat on
+        // the stem centre and the chord had picked up whatever was behind
+        // the tree on one side. A stem is symmetric about where it is aimed
+        // at, so one drag is enough — the cruiser sets the WIDTH and the app
+        // keeps the centre. Which handle was grabbed no longer matters, so
+        // the drag reads the FINGER's distance from centre directly rather
+        // than accumulating deltas (which drifted when a drag crossed the
+        // centre line).
         if (adjustMode && stage == Stage.AIMING) {
             Box(
                 Modifier
                     .fillMaxSize()
                     .pointerInput(Unit) {
-                        var draggingLeft = true
                         detectDragGestures(
-                            onDragStart = { pos ->
-                                val w = size.width.toFloat().coerceAtLeast(1f)
-                                draggingLeft =
-                                    kotlin.math.abs(pos.x - adjustLeftFrac * w) <=
-                                    kotlin.math.abs(pos.x - adjustRightFrac * w)
+                            // Persisted on release, not on every frame of
+                            // the drag: the next tree opens at the width
+                            // this one ended on.
+                            onDragEnd = {
+                                env.settings.setDbhBracketHalfWidth(
+                                    (adjustRightFrac - adjustLeftFrac) / 2f)
                             },
-                        ) { change, dragAmount ->
+                        ) { change, _ ->
                             change.consume()
                             val w = size.width.toFloat().coerceAtLeast(1f)
-                            val df = dragAmount.x / w
-                            if (draggingLeft) {
-                                adjustLeftFrac = (adjustLeftFrac + df)
-                                    .coerceIn(0.02f, adjustRightFrac - 0.04f)
-                            } else {
-                                adjustRightFrac = (adjustRightFrac + df)
-                                    .coerceIn(adjustLeftFrac + 0.04f, 0.98f)
-                            }
+                            val half = clampBracketHalfWidth(
+                                kotlin.math.abs(change.position.x / w - 0.5f))
+                            adjustLeftFrac = 0.5f - half
+                            adjustRightFrac = 0.5f + half
                         }
                     },
             )
@@ -1218,7 +1233,13 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         if (!hidingChromeForCapture) {
             MeasureTopStrip(
                 reserveTrailing = if (miniMapUp) MeasureMiniMapSlot else 0.dp,
-                leading = { GPSAccuracyBadge() },
+                // FIELD REPORT 11 — this is the map's chip, not a scan-only
+                // variant. It used to be GPSAccuracyBadge ("GPS good / fair
+                // / check"), a second vocabulary for the same question,
+                // shown at the exact moment a position gets written onto a
+                // stored measurement. The cruiser asked for the readout they
+                // already trust; the badge is gone.
+                leading = { GpsFixChip(acquiresService = true) },
                 centre = {
                     cruiseTreeNumber?.let { n ->
                         Text(
@@ -1434,6 +1455,12 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                             AutoModePill {
                                 adjustMode = false
                                 adjustPreview = null
+                                // Remembered, so a cruiser who prefers the
+                                // automatic edges is not handed the bracket
+                                // again on the next tree. This pill and the
+                                // Adjust rail button are the whole control —
+                                // the preference has no Settings row.
+                                env.settings.setDbhEdgeAdjustDefault(false)
                             }
                         }
                     }
@@ -1463,20 +1490,26 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                             caption = "Adjust",
                             iconRotation = 90f,
                         ) {
-                            // Handles start at the current auto edges when
-                            // a fit is up, else ±25% of the screen width
-                            // around centre.
-                            val p = preview
-                            if (p != null && p.locked &&
-                                p.stripRightFraction > p.stripLeftFraction
-                            ) {
-                                adjustLeftFrac = p.stripLeftFraction.coerceIn(0.02f, 0.90f)
-                                adjustRightFrac = p.stripRightFraction
-                                    .coerceIn(adjustLeftFrac + 0.04f, 0.98f)
-                            } else {
-                                adjustLeftFrac = 0.25f
-                                adjustRightFrac = 0.75f
-                            }
+                            // Open the bracket at the width the LAST tree
+                            // was measured at, centred on the crosshair.
+                            //
+                            // FIELD REPORT 4 — this used to seed from the
+                            // automatic fit's edges when it had any. That
+                            // sounded helpful and was not: the automatic
+                            // edges are the thing the cruiser reached for
+                            // ADJUST to get away from, so the bracket opened
+                            // already wrong and asymmetric, and the first
+                            // drag was spent undoing it. A plot is walked at
+                            // roughly one standing distance, so the previous
+                            // tree's width is the better guess — and when it
+                            // is wrong it is wrong symmetrically, which one
+                            // drag fixes. On a fresh install the stored
+                            // width is 0.25, i.e. the ±25 % this used to
+                            // fall back to.
+                            val half = clampBracketHalfWidth(settings.dbhBracketHalfWidth)
+                            adjustLeftFrac = 0.5f - half
+                            adjustRightFrac = 0.5f + half
+                            env.settings.setDbhEdgeAdjustDefault(true)
                             adjustPreview = null
                             // Park the auto preview so its chrome (chord,
                             // badge, cylinder) can't linger under the

@@ -46,6 +46,8 @@ public final class AppSettings: ObservableObject {
         public static let regionPickerSeen        = "tc.regionPickerSeen"
         public static let logRule                 = "tc.logRule"
         public static let dbhMeasurementMethod    = "tc.dbhMeasurementMethod"
+        public static let dbhEdgeAdjustDefault    = "tc.dbhEdgeAdjustDefault"
+        public static let dbhBracketHalfWidth     = "tc.dbhBracketHalfWidth"
         public static let measurementSource       = "tc.measurementSource"
         public static let developerMode           = "tc.developerMode"
         public static let rawCaptureEnabled       = "tc.rawCaptureEnabled"
@@ -323,6 +325,62 @@ public final class AppSettings: ObservableObject {
             defaults.set(newValue.rawValue, forKey: Keys.dbhMeasurementMethod)
             objectWillChange.send()
         }
+    }
+
+    /// Whether the diameter scan opens with the edge bracket (ADJUST) up.
+    ///
+    /// FIELD REPORT 4 — DEFAULTS TO TRUE. Automatic edge-finding jitters
+    /// left and right on a real stem: bark texture, a stick against the
+    /// trunk, a second stem behind it, and the found edges move between
+    /// frames. The cruiser's verdict on it was that the automatic path was
+    /// not usable in the stand. Placing the bracket by hand takes one drag
+    /// and is stable, so that is what the screen opens on.
+    ///
+    /// It is the LAST-USED mode, not a hard default: the Auto pill still
+    /// exists and a cruiser who prefers automatic edges gets it back on the
+    /// next scan without hunting for a Settings row. Note `object(forKey:)
+    /// as? Bool` rather than `defaults.bool`, which would default to false.
+    public var dbhEdgeAdjustDefault: Bool {
+        get { defaults.object(forKey: Keys.dbhEdgeAdjustDefault) as? Bool ?? true }
+        set {
+            defaults.set(newValue, forKey: Keys.dbhEdgeAdjustDefault)
+            objectWillChange.send()
+        }
+    }
+
+    /// HALF the bracket width, as a fraction of the view's walk axis, so a
+    /// bracket set on one tree opens at the same width on the next.
+    ///
+    /// FIELD REPORT 4 — a cruise walks a plot at roughly one standing
+    /// distance from stem to stem, so consecutive trees subtend nearly the
+    /// same on-screen width. Re-dragging from ±25 % every time was work the
+    /// previous tree had already done.
+    ///
+    /// HALF-width, not two edges, because the bracket is symmetric about
+    /// the crosshair by construction (see `DBHScanScreen.adjustHandle`) —
+    /// one number is the whole state.
+    ///
+    /// Clamped on read as well as write: a value from a future build, or a
+    /// corrupt default, must not be able to produce a bracket wider than
+    /// the screen or narrower than the fit's minimum gap.
+    public var dbhBracketHalfWidth: Double {
+        get {
+            let stored = defaults.object(forKey: Keys.dbhBracketHalfWidth) as? Double
+            return Self.clampBracketHalfWidth(stored ?? 0.25)
+        }
+        set {
+            defaults.set(Self.clampBracketHalfWidth(newValue),
+                         forKey: Keys.dbhBracketHalfWidth)
+            objectWillChange.send()
+        }
+    }
+
+    /// The bracket's legal half-width range. 0.02 is half the fit's 0.04
+    /// minimum gap; 0.48 puts the handles 2 % in from each screen edge,
+    /// where they are still grabbable.
+    public static func clampBracketHalfWidth(_ value: Double) -> Double {
+        guard value.isFinite else { return 0.25 }
+        return min(max(value, 0.02), 0.48)
     }
 
     /// DBH sensing path. There is exactly ONE now: the LiDAR depth path.

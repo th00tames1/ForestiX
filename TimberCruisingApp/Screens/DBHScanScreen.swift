@@ -327,16 +327,21 @@ public struct DBHScanScreen: View {
             if adjustOverlayVisible && !hidingChromeForCapture {
                 GeometryReader { geo in
                     adjustHandleLayer(in: geo.size)
-                        // The handles are fractions of THIS width, and the
-                        // estimator needs the width to map them into depth
-                        // pixels. Published on every layout so a rotation or
-                        // a split-view resize cannot leave the mapping
+                        // The handles are fractions of THIS rect, and the
+                        // view→depth affine is built from it too, so the two
+                        // describe the same rectangle. Published on every
+                        // layout, so a rotation cannot leave the mapping
                         // reading against a stale viewport.
                         .onAppear { viewModel.viewSize = geo.size }
                         .onChange(of: geo.size) { _, new in
                             viewModel.viewSize = new
                         }
                 }
+                // FULL-BLEED, matching the camera view. Without this the
+                // overlay stops at the safe area while the AR view runs
+                // under it, so the same fraction would mean two different
+                // places and the guide row would sample the wrong height.
+                .ignoresSafeArea()
                 .coordinateSpace(name: Self.adjustSpaceName)
             }
 

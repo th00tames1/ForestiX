@@ -133,6 +133,11 @@ public final class DBHScanViewModel: ObservableObject {
     /// showing nothing.
     @Published public private(set) var bracketMappingReady: Bool = true
 
+    /// Set by the scan screen from AppSettings. Only effect: the bracket's
+    /// failure line carries the mapped geometry so a field report can name
+    /// the numbers instead of describing a blank screen.
+    public var developerMode: Bool = false
+
     /// The AR view's size in points, published by the scan screen. The
     /// bracket handles are fractions of THIS, and mapping them into depth
     /// pixels needs the size they are fractions of.
@@ -451,17 +456,39 @@ public final class DBHScanViewModel: ObservableObject {
             previewFit = fit
             previewDbhCm = fit?.diameterCm
             previewTier = fit?.tier
-            // Name the step that failed. "Nothing on screen" was the whole
-            // problem the last two attempts at this could not diagnose from
-            // a field report; a specific line means the next one pins it in
-            // one sentence.
+            // EVERY nil ends with a sentence on screen.
+            //
+            // The previous attempt at this only spoke when the view→depth
+            // BOUNDARY failed, and returned nil the moment it succeeded — so
+            // a bracket that mapped fine and then found no depth produced no
+            // number AND no message, which is the silent dead screen this
+            // was supposed to abolish. That is the case the field actually
+            // hit, three builds running.
             previewStatusText = {
-                if geom != nil { return nil }
-                if viewSize.width <= 1 { return "No view size yet — reopen the scan." }
+                if fit != nil { return nil }
+                if viewSize.width <= 1 {
+                    return "No view size yet — leave the scan and come back."
+                }
                 if frame.viewMapping == nil {
                     return "Camera geometry not ready — hold still a second."
                 }
-                return "Bracket is off the depth map — widen it a little."
+                guard let g = geom else {
+                    return "Bracket is off the depth map — widen it a little."
+                }
+                // Mapped, but the fit still refused. In developer mode print
+                // what it saw, because this is the state no amount of
+                // reading the source has explained.
+                if developerMode {
+                    let ax: String
+                    switch g.axis {
+                    case .row(let y): ax = "row \(y)"
+                    case .col(let x): ax = "col \(x)"
+                    }
+                    return String(
+                        format: "no depth in bracket · %@ · %.3f–%.3f · grid %dx%d",
+                        ax, g.left, g.right, frame.width, frame.height)
+                }
+                return "Can't read depth across the bracket — move a little closer."
             }()
             let pose = frame.cameraPoseWorld
             guideRowWorldY = pose.columns.3.y

@@ -503,6 +503,7 @@ public struct DBHScanScreen: View {
             // so flipping the picker in Settings takes effect on the
             // next return without leaving the scan screen.
             viewModel.dbhMeasurementMethod = settings.dbhMeasurementMethod
+            viewModel.developerMode = settings.developerMode
             // FIELD REPORT 4 — the screen opens on the edge bracket unless
             // the cruiser last chose Auto. Automatic edge-finding was the
             // default and the cruiser's verdict on it was that it jumped

@@ -84,6 +84,10 @@ public struct DBHScanScreen: View {
     /// every piece of 2D chrome so the captured JPEG shows only the AR
     /// feed and the measurement overlays (crosshair, chord, markers).
     @State private var hidingChromeForCapture = false
+    /// Whether the bracket has already been armed from an auto fit during
+    /// this appearance. Stops the arming from fighting a cruiser who taps
+    /// Auto — one arm per visit, then the pill decides.
+    @State private var adjustArmedThisAppearance = false
 
     /// Bridge that turns SwiftUI screen taps into world-space rays / hits
     /// against the live ARView; also the source of the camera pitch logged
@@ -504,22 +508,53 @@ public struct DBHScanScreen: View {
             // next return without leaving the scan screen.
             viewModel.dbhMeasurementMethod = settings.dbhMeasurementMethod
             viewModel.developerMode = settings.developerMode
-            // FIELD REPORT 4 — the screen opens on the edge bracket unless
-            // the cruiser last chose Auto. Automatic edge-finding was the
-            // default and the cruiser's verdict on it was that it jumped
-            // left and right on a real stem badly enough to be unusable in
-            // the stand; the bracket is one drag and holds still.
-            if settings.dbhEdgeAdjustDefault {
-                // No fit exists yet on appear, so this is always the
-                // remembered width; the auto-fit seed applies when the
-                // cruiser taps Adjust with a fit up (see enterAdjustMode).
-                setBracketHalfWidth(settings.dbhBracketHalfWidth)
-                viewModel.edgeAdjustActive = true
-            }
+            // ADJUST IS NOT ARMED HERE. It waits for a fit — see
+            // `armAdjustOnFirstFit`.
+            //
+            // THIS BLOCK WAS THE BUG, and it survived three attempts to find
+            // it because it looks harmless. It opened the bracket at a fixed
+            // 0.25/0.75 of the SCREEN and handed those two numbers to
+            // `bracketChordFit`, which reads them as fractions of the DEPTH
+            // map's walk axis. Half of a 192-px axis is a 96-px span, and
+            // with the depth-scaled focal (~210) that is a diameter of
+            // roughly 59·z centimetres — 119 cm at two metres. The
+            // estimator's own sanity gate refuses anything over 100 cm, so
+            // every frame returned nil: no diameter, no chord, and a "+"
+            // that could not fire because capture requires a fit. Auto kept
+            // working because its only view-space input is the centre pixel.
+            //
+            // Worse, arming here PRE-EMPTED the auto path: with the bracket
+            // already active on the first depth frame the auto branch never
+            // ran, so no fit ever existed for `enterAdjustMode` to seed
+            // from, and the Adjust rail button is hidden while the bracket
+            // is up. The one correct seeding path was unreachable.
+            adjustArmedThisAppearance = false
             configureRawCapture()
             viewModel.onAppear()
         }
-        .onDisappear { viewModel.onDisappear() }
+        // FIELD REPORT 4 asked the diameter scan to OPEN on the bracket.
+        // It does — just not before there is something to open it ON. The
+        // auto path runs first, and the moment it has a fit the bracket
+        // takes over seeded from that fit's own DEPTH-space edges, which is
+        // the seeding that round-trips exactly through `bracketChordFit` and
+        // the reason the pre-regression build measured a stand correctly.
+        // In practice that is the second or so the cruiser spends raising
+        // the phone, and it costs nothing: the handles arrive already on the
+        // trunk instead of at an arbitrary half-screen span.
+        .onChange(of: viewModel.previewFit?.stripRightFraction) { _, _ in
+            guard settings.dbhEdgeAdjustDefault,
+                  !adjustArmedThisAppearance,
+                  !viewModel.edgeAdjustActive,
+                  let fit = viewModel.previewFit,
+                  fit.stripRightFraction > fit.stripLeftFraction
+            else { return }
+            adjustArmedThisAppearance = true
+            enterAdjustMode()
+        }
+        .onDisappear {
+            adjustArmedThisAppearance = false
+            viewModel.onDisappear()
+        }
         // CRUISE TALLY — the loop reuses this one screen and advances its
         // target without re-appearing, so the recording context has to follow
         // the number (belt-and-braces with the rebuild at burst start).

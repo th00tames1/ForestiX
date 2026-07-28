@@ -499,7 +499,18 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
             .concatenating(dt.inverted())
             .concatenating(CGAffineTransform(scaleX: CGFloat(depthWidth),
                                              y: CGFloat(depthHeight)))
-        let coeffs = [m.a, m.b, m.tx, m.c, m.d, m.ty].map(Double.init)
+        // b AND c CROSS. CGAffineTransform applies x' = a·x + c·y + tx and
+        // y' = b·x + d·y + ty, while `DepthViewMapping.viewToDepth` reads
+        // its second coefficient as the y term of the FIRST row. Extracting
+        // them in field order transposes the linear part — and in portrait
+        // the display transform is anti-diagonal, so a transpose negates it
+        // and throws every mapped point clean off the depth grid. Nothing
+        // measures through this today, but it is written into every
+        // raw-capture manifest as `view_to_depth`, which is the artefact
+        // kept precisely so the screen-space-versus-depth-space question can
+        // be settled later against a tape. A transposed affine would settle
+        // it wrong.
+        let coeffs = [m.a, m.c, m.tx, m.b, m.d, m.ty].map(Double.init)
         guard coeffs.allSatisfy({ $0.isFinite }) else { return nil }
         return DepthViewMapping(a: coeffs[0], b: coeffs[1], tx: coeffs[2],
                                 c: coeffs[3], d: coeffs[4], ty: coeffs[5])

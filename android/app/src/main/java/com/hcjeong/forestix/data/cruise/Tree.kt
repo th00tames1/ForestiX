@@ -47,6 +47,17 @@ data class Tree(
     var dbhNInliers: Int?,
     var dbhConfidence: ConfidenceTier,
     var dbhIsIrregular: Boolean,
+    /// HOW the diameter's edges were found: "auto" (silhouette edge-finder),
+    /// "manual" (the ADJUST bracket the cruiser placed), or "typed" (hand
+    /// entered, no sensor involved).
+    ///
+    /// The cruise tree row used to record no provenance at all — dbhMethod
+    /// reads the same for a bracket and an auto fit — so a corpus mixing the
+    /// two could not be split at analysis time. That matters now that the
+    /// bracket is the default path: the algorithm comparison this data is
+    /// collected for needs to know which estimator produced each diameter.
+    /// Null for rows written before the column existed.
+    var dbhCaptureMode: String? = null,
 
     // Height
     var heightM: Float?,

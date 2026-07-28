@@ -33,6 +33,17 @@ public final class ResearchLog {
         "pitch_deg", "alpha_top_deg", "alpha_base_deg",
         "fx", "depth_w", "depth_h", "depth_noise_mm",
         "raw_points_path", "species", "note",
+        // aim_drift_m — how far the instrument moved between the base and
+        // the top sighting on a walk-off height. The tangent identity
+        // H = d_h(tan a_top - tan a_base) assumes ONE origin, so this is the
+        // size of the assumption violation, and the error it implies is
+        // roughly the vertical component one-for-one plus the radial
+        // component scaled by H/d_h. It used to be shown to the cruiser at
+        // accept time and then discarded, which left the analyst unable to
+        // flag, weight or exclude a drifted row — including every row that
+        // stayed under the warning threshold and so was never announced at
+        // all. Empty for non-height rows and when no pose was available.
+        "aim_drift_m",
     ]
 
     private let queue = DispatchQueue(label: "forestix.researchlog")

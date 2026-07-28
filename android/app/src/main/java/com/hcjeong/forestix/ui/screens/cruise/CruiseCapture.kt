@@ -46,6 +46,7 @@ import com.hcjeong.forestix.sensors.DBHResult
 import com.hcjeong.forestix.sensors.HeightResult
 import com.hcjeong.forestix.sensors.ProjectCalibration
 import com.hcjeong.forestix.ui.PendingTreeNumber
+import com.hcjeong.forestix.sensors.DBHMethod
 import java.util.UUID
 import kotlin.math.PI
 
@@ -171,6 +172,8 @@ object CruiseCapture {
         note: String,
         photoPath: String?,
         fix: CLLocationSnapshot?,
+        /// "auto" | "manual" | "typed" — which estimator found the edges.
+        captureMode: String? = null,
     ): UUID? {
         val t = target ?: return null
         savedTreeId = null
@@ -195,12 +198,20 @@ object CruiseCapture {
             status = TreeStatus.LIVE,
             dbhCm = r.diameterCm,
             dbhMethod = r.method,
-            dbhSigmaMm = r.sigmaRmm,
+            // A TYPED diameter has no propagated uncertainty — there is no
+            // geometry to propagate. Recording 0 would claim a perfect
+            // measurement and poison the sigma column the accuracy work
+            // reads. Same rule as the height path.
+            dbhSigmaMm = if (r.method == DBHMethod.MANUAL_VISUAL) null else r.sigmaRmm,
             dbhRmseMm = r.rmseMm,
             dbhCoverageDeg = r.arcCoverageDeg,
             dbhNInliers = r.nInliers,
             dbhConfidence = r.confidence,
             dbhIsIrregular = false,
+            // Which estimator produced this diameter. Without it a corpus
+            // mixing bracket and auto fits cannot be split at analysis time,
+            // and the bracket is now the default path.
+            dbhCaptureMode = captureMode,
             heightM = null,
             heightMethod = null,
             heightSource = null,

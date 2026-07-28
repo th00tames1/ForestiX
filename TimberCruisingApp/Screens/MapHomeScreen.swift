@@ -141,6 +141,10 @@ public struct MapHomeScreen: View {
     /// Plot-overlay tap menu (Edit / Remove) and the Remove confirmation
     /// that always precedes an actual removal. Both name the plot, so a
     /// reload that changes the active plot can never redirect them.
+    /// Why a plot centre could not be saved. Non-nil raises an alert — a
+    /// refusal the cruiser has to see, because the alternative was writing a
+    /// plot centre the app had guessed.
+    @State var plotSaveRefusal: String?
     @State var plotMenuPlotID: UUID?
     @State var confirmingPlotRemovalID: UUID?
     @State private var pendingTreeNumber: Int?
@@ -417,6 +421,7 @@ public struct MapHomeScreen: View {
             }
             // Far-GPS guard — confirm before measuring a tree whose pin
             // is > 30 m from the current fix (usually a wrong-pin tap).
+            .modifier(PlotSaveRefusalAlert(message: $plotSaveRefusal))
             .alert(farTreeWarning.map {
                        "Tree \($0.treeNumber) is \($0.distanceM) m away"
                    } ?? "",
@@ -1467,7 +1472,14 @@ public struct MapHomeScreen: View {
                     history.append(QuickMeasureEntry(
                         kind: .dbh,
                         value: Double(result.diameterCm),
-                        sigma: Double(result.sigmaRmm),
+                        // A TYPED diameter has no propagated uncertainty —
+                        // there is no geometry to propagate. Recording 0
+                        // would claim a perfect measurement and poison the
+                        // sigma column the accuracy work reads, so it is
+                        // left unset. Exactly what the height path already
+                        // does for a typed height.
+                        sigma: result.method == .manualVisual
+                            ? nil : Double(result.sigmaRmm),
                         confidenceRaw: result.confidence.rawValue,
                         method: result.method.rawValue,
                         treeNumber: pendingTreeNumber,
@@ -2009,5 +2021,28 @@ private struct MeasurePhotoDetailView: View {
         guard let lat = context.entry.latitude,
               let lon = context.entry.longitude else { return "—" }
         return String(format: "%.5f, %.5f", lat, lon)
+    }
+}
+
+/// The "we refused to save a plot centre" alert.
+///
+/// Its own modifier rather than another `.alert` on the map body: that body
+/// is already at the Swift type-checker's limit, and one more inline alert
+/// tipped it over ("unable to type-check this expression in reasonable
+/// time"). Behaviourally identical, and it keeps the refusal next to its own
+/// copy.
+private struct PlotSaveRefusalAlert: ViewModifier {
+    @Binding var message: String?
+
+    func body(content: Content) -> some View {
+        content.alert(
+            "Can't save the plot centre",
+            isPresented: Binding(get: { message != nil },
+                                 set: { if !$0 { message = nil } })
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(message ?? "")
+        }
     }
 }

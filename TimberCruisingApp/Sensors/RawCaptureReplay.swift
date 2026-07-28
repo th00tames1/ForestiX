@@ -647,10 +647,21 @@ public enum RawCaptureRecorder {
                 tapPx: [tapPixel.x, tapPixel.y],
                 axis: axisString(axis),
                 cameraPose: RawCaptureMatrix.flat(f.cameraPoseWorld),
-                // iOS captures the crosshair already in depth-pixel space
-                // (no view→depth affine is applied), so the mapping is
-                // identity. Android carries a real display-rotation affine.
-                viewToDepth: [1, 0, 0, 0, 1, 0]))
+                // The REAL view→depth affine this frame was measured
+                // through, in the same six-coefficient order Android
+                // writes, so a pooled corpus reads one way.
+                //
+                // This used to be hard-coded to the identity with a comment
+                // asserting that iOS "captures the crosshair already in
+                // depth-pixel space". That was true of the crosshair — the
+                // auto path only ever reads the centre pixel, which a
+                // centred crop leaves alone — and false of the ADJUST
+                // bracket, which is a screen-space SPAN. Writing the
+                // identity there recorded the assumption instead of the
+                // measurement, so a bundle could not be used to detect the
+                // error either. Bundles recorded before this carry
+                // `[1,0,0,0,1,0]` and cannot be trusted for bracket replay.
+                viewToDepth: f.viewMapping?.flattened ?? [1, 0, 0, 0, 1, 0]))
         }
 
         // Reference RGB (first burst frame's camera image, ~80% quality).

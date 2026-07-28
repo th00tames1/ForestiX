@@ -654,25 +654,39 @@ extension MapHomeScreen {
     func createCruisePlot(radiusM: Double) {
         let project = currentProject ?? autoCreateProject()
         guard let project else { return }
-        let fix = location.latestSnapshot ?? LocationService.lastGlobalFix
+        // FRESHNESS-GATED, and REFUSED when there is nothing usable.
+        //
+        // This used to fall through to the MAP CAMERA position, which is
+        // worse than an obviously-wrong coordinate: it is a real place, near
+        // enough to look right, and every tree tallied into the plot
+        // inherits it. A plot centre is the anchor for everything measured
+        // in the plot, so the only honest answer when the app does not know
+        // where it is, is to refuse. Android now refuses for the same
+        // reason (it used to save (0, 0) tagged as the best GPS tier).
+        guard let fix = FixFreshness.usable(
+            location.latestSnapshot ?? LocationService.lastGlobalFix)
+        else {
+            plotSaveRefusal = "No GPS fix — the plot centre would be saved "
+                + "in the wrong place. Step out for sky and try again."
+            return
+        }
         let number = ((try? environment.plotRepository
             .listByProject(project.id))?.map(\.plotNumber).max() ?? 0) + 1
         let areaAcres = Float(.pi * radiusM * radiusM / Units.squareMetersPerAcre)
-        let tier: PositionTier = fix.map {
-            GPSAveraging.classify(medianHAccuracyM: Float($0.horizontalAccuracyM),
-                                  sampleStdXyM: 0)
-        } ?? .D
+        let tier = GPSAveraging.classify(
+            medianHAccuracyM: Float(fix.horizontalAccuracyM),
+            sampleStdXyM: 0)
         let plot = Plot(
             id: UUID(),
             projectId: project.id,
             plannedPlotId: nil,
             plotNumber: number,
-            centerLat: fix?.latitude ?? camera.latitude,
-            centerLon: fix?.longitude ?? camera.longitude,
-            positionSource: fix == nil ? .manual : .gpsAveraged,
+            centerLat: fix.latitude,
+            centerLon: fix.longitude,
+            positionSource: .gpsAveraged,
             positionTier: tier,
-            gpsNSamples: fix == nil ? 0 : 1,
-            gpsMedianHAccuracyM: Float(fix?.horizontalAccuracyM ?? 0),
+            gpsNSamples: 1,
+            gpsMedianHAccuracyM: Float(fix.horizontalAccuracyM),
             gpsSampleStdXyM: 0,
             offsetWalkM: nil,
             slopeDeg: 0,
@@ -976,6 +990,10 @@ extension MapHomeScreen {
             dbhNInliers: result.nInliers,
             dbhConfidence: result.confidence,
             dbhIsIrregular: false,
+            // Which estimator produced this diameter. Without it a corpus
+            // mixing bracket and auto fits cannot be split at analysis time,
+            // and the bracket is now the default path.
+            dbhCaptureMode: meta.captureMode,
             heightM: nil,
             heightMethod: nil,
             heightSource: nil,

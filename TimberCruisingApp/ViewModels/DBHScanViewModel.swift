@@ -73,9 +73,7 @@ public final class DBHScanViewModel: ObservableObject {
     /// edge handles instead of the automatic edge-finder. Depth method
     /// only — the screen never enables it for the AR caliper/motion
     /// developer modes.
-    @Published public var edgeAdjustActive: Bool = false {
-        didSet { if !edgeAdjustActive { adjustAxisLatch = nil } }
-    }
+    @Published public var edgeAdjustActive: Bool = false
     /// Handle positions as fractions (0…1) of the on-screen walk axis —
     /// the same normalisation `PreviewFit.stripLeftFraction` uses, so
     /// screen x-fraction ↔ depth walk-axis fraction is the existing
@@ -87,20 +85,42 @@ public final class DBHScanViewModel: ObservableObject {
     /// ("manual" vs "auto").
     @Published public private(set) var resultCapturedManually: Bool = false
 
-    /// Guide axis latched on the first ADJUST preview tick and held for
-    /// the whole ADJUST session. `pickGuideAxis` votes per frame on the
-    /// wider silhouette chord, which can flip row↔col on the cluttered
-    /// scenes ADJUST exists for — and a flip changes the walk-axis
-    /// extent the handle fractions map onto, jumping the value. One
-    /// deterministic axis per session keeps the bracket stable.
-    private var adjustAxisLatch: GuideAxis?
+    /// THE GUIDE-AXIS LATCH IS GONE. It used to be set on the first ADJUST
+    /// preview tick and held for the whole session, to stop `pickGuideAxis`
+    /// flipping row↔col between frames and jumping the value. The flip was
+    /// real, but latching was the wrong cure and became a worse bug: the
+    /// axis decides whether the handle span is read against a 256-wide or a
+    /// 192-tall extent, so a latch taken before the cruiser had even aimed
+    /// (the screen now opens straight into ADJUST) could scale every tree in
+    /// a plot by 4:3 — and in the cruise tally the screen is reused across
+    /// trees without the latch ever clearing. `bracketChordFit` now derives
+    /// the walk axis from the MAPPED bracket span itself, which is stable by
+    /// construction because it follows the display transform rather than the
+    /// scene's depth content. Same rule as Android.
+    ///
     /// Bracket state latched at the moment the capture "+" started the
     /// burst, so dragging a handle (or leaving ADJUST) mid-burst can't
     /// change what the in-flight capture measures.
     private var burstUsedBracket = false
     private var burstBracketLeft: Double = 0
     private var burstBracketRight: Double = 0
+    /// Walk axis for the CURRENT burst only, derived from the mapped
+    /// bracket at the moment "+" was tapped. Not a session latch — see the
+    /// note above.
     private var burstBracketAxis: GuideAxis?
+    /// Newest depth frame, kept so the tap handler can map the bracket at
+    /// the instant of capture.
+    private var latestFrameForBracket: ARDepthFrame?
+
+    /// True while the live bracket has a usable view→depth mapping. False
+    /// puts a plain-language reason on the status line instead of silently
+    /// showing nothing.
+    @Published public private(set) var bracketMappingReady: Bool = true
+
+    /// The AR view's size in points, published by the scan screen. The
+    /// bracket handles are fractions of THIS, and mapping them into depth
+    /// pixels needs the pixel width they are fractions of.
+    public var viewSize: CGSize = .zero
 
     // MARK: - Dependencies
 
@@ -300,6 +320,9 @@ public final class DBHScanViewModel: ObservableObject {
     }
 
     private func handleDepthFrame(_ frame: ARDepthFrame) {
+        // Kept so the capture tap can map the bracket against the frame the
+        // cruiser was actually looking at.
+        latestFrameForBracket = frame
         // REQ-DBH-003 crosshair transitions green when center depth
         // is stable and < 3 m.
         let cx = frame.width / 2
@@ -367,15 +390,27 @@ public final class DBHScanViewModel: ObservableObject {
         // edge-finding and the stability/EMA machinery: the live value
         // and the chord bar must track the user's handles exactly, so
         // the raw bracket fit is published on every preview tick. The
-        // guide axis is latched for the whole ADJUST session (see
-        // `adjustAxisLatch`).
+        // walk axis comes from the mapped bracket span, per frame — see
+        // the note where the old latch used to live.
         if edgeAdjustActive {
-            if adjustAxisLatch == nil { adjustAxisLatch = axis }
-            let fit = DBHEstimator.bracketChordFit(
+            // Convert the on-screen handles into depth-map geometry ONCE,
+            // here, and measure in depth space below. nil means this frame
+            // carries no view→depth mapping — no fit is published, because
+            // the only alternative is the 1:1 assumption that was inflating
+            // every bracketed diameter.
+            let geom = DBHEstimator.bracketDepthGeometry(
                 frame: frame,
-                guideAxis: adjustAxisLatch ?? axis,
                 leftFraction: edgeBracketLeftFraction,
-                rightFraction: edgeBracketRightFraction)
+                rightFraction: edgeBracketRightFraction,
+                viewSize: viewSize)
+            let fit = geom.flatMap {
+                DBHEstimator.bracketChordFit(
+                    frame: frame,
+                    guideAxis: $0.axis,
+                    leftFraction: $0.left,
+                    rightFraction: $0.right)
+            }
+            bracketMappingReady = geom != nil
             smoothedPreviewDbhCm = nil
             smoothedCenterWorldXZ = nil
             lastTapDepthHint = nil
@@ -385,7 +420,9 @@ public final class DBHScanViewModel: ObservableObject {
             previewFit = fit
             previewDbhCm = fit?.diameterCm
             previewTier = fit?.tier
-            previewStatusText = nil
+            previewStatusText = geom == nil
+                ? "Getting the camera geometry — hold still for a second."
+                : nil
             let pose = frame.cameraPoseWorld
             guideRowWorldY = pose.columns.3.y
             if let stem = fit?.centerWorldXZ {
@@ -589,10 +626,24 @@ public final class DBHScanViewModel: ObservableObject {
         guard let fit = previewFit, fit.tier != .red else { return }
         // Latch the bracket so mid-burst handle drags / mode exits can't
         // change what this capture measures.
+        // Latch the bracket AS DEPTH GEOMETRY. The raw-capture manifest
+        // stores depth-space fractions + axis (the same schema Android
+        // writes), so latching here means the recorded bundle replays
+        // through exactly the code that produced the live number.
         burstUsedBracket = edgeAdjustActive
-        burstBracketLeft = edgeBracketLeftFraction
-        burstBracketRight = edgeBracketRightFraction
-        burstBracketAxis = adjustAxisLatch
+        if edgeAdjustActive, let f = latestFrameForBracket,
+           let geom = DBHEstimator.bracketDepthGeometry(
+               frame: f,
+               leftFraction: edgeBracketLeftFraction,
+               rightFraction: edgeBracketRightFraction,
+               viewSize: viewSize) {
+            burstBracketAxis = geom.axis
+            burstBracketLeft = geom.left
+            burstBracketRight = geom.right
+        } else if edgeAdjustActive {
+            // No mapping ⇒ no bracket capture. Refusing is the point.
+            return
+        }
         burstBuffer.removeAll(keepingCapacity: true)
         burstTap = tapPixel
         subSamples.removeAll(keepingCapacity: true)

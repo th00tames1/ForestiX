@@ -94,6 +94,13 @@ import Sensors
 public struct ARCameraView: UIViewRepresentable {
 
     public let session: ARSession
+    /// The manager that OWNS `session`, when the view was built through the
+    /// convenience initialiser. Needed only to report the viewport: every
+    /// frame's view→depth mapping is built from the AR view's bounds, and
+    /// the DBH bracket is measured through that mapping. nil on the
+    /// non-ARKit stand-in and on any raw-session call site, where no bracket
+    /// is measured either.
+    public var sessionManager: ARKitSessionManager?
     public var debugMeshOverlay: Bool
     /// RealityKit scene-understanding occlusion: virtual content is
     /// hidden where the reconstructed world mesh sits in front of it,
@@ -190,6 +197,22 @@ public struct ARCameraView: UIViewRepresentable {
         return min(scaleMax, max(scaleMin, raw))
     }
 
+    /// Publishes the AR view's bounds + interface orientation to the
+    /// session manager. Both are needed by `ARFrame.displayTransform`, and
+    /// the orientation has to come from the window scene the view is
+    /// actually in — a hard-coded `.portrait` would silently transpose the
+    /// mapping on a landscape device.
+    private func reportViewport(for view: ARView) {
+        let size = view.bounds.size
+        guard size.width > 1, size.height > 1 else { return }
+        let orientation = view.window?.windowScene?.interfaceOrientation
+            ?? UIApplication.shared.connectedScenes
+                .compactMap { ($0 as? UIWindowScene)?.interfaceOrientation }
+                .first
+            ?? .portrait
+        sessionManager?.reportViewport(size: size, orientation: orientation)
+    }
+
     public func makeUIView(context: Context) -> ARView {
         let view = ARView(frame: .zero,
                           cameraMode: .ar,
@@ -203,6 +226,7 @@ public struct ARCameraView: UIViewRepresentable {
         // Camera background fills behind any SwiftUI overlay we put
         // above this view — no need to set background colour.
         raycaster?.arview = view
+        reportViewport(for: view)
         // Per-frame distance scaling for markers flagged
         // `scalesWithDistance` — keeps their apparent size readable when
         // the cruiser walks away (height walk-off can be 15–20 m out).
@@ -229,6 +253,12 @@ public struct ARCameraView: UIViewRepresentable {
         if view.session !== session {
             view.session = session
         }
+        // Tell the session what viewport its frames are being displayed in.
+        // Every frame's view→depth mapping is built from this, and the DBH
+        // bracket is measured through that mapping — so a stale or missing
+        // viewport is a wrong diameter, not a cosmetic issue. Reported on
+        // every update so a rotation or a resize is picked up.
+        reportViewport(for: view)
         applyDebugOptions(to: view)
         applyOcclusion(to: view)
         // Rebind on every update in case the binding instance changed
@@ -504,6 +534,7 @@ extension ARCameraView {
                   realWorldOcclusion: realWorldOcclusion,
                   sceneMarkers: sceneMarkers,
                   raycaster: raycaster)
+        self.sessionManager = manager
     }
 }
 #else
@@ -518,6 +549,7 @@ extension ARCameraView {
                   realWorldOcclusion: realWorldOcclusion,
                   sceneMarkers: sceneMarkers,
                   raycaster: raycaster)
+        self.sessionManager = manager as? ARKitSessionManager
     }
 }
 #endif

@@ -327,6 +327,15 @@ public struct DBHScanScreen: View {
             if adjustOverlayVisible && !hidingChromeForCapture {
                 GeometryReader { geo in
                     adjustHandleLayer(in: geo.size)
+                        // The handles are fractions of THIS width, and the
+                        // estimator needs the width to map them into depth
+                        // pixels. Published on every layout so a rotation or
+                        // a split-view resize cannot leave the mapping
+                        // reading against a stale viewport.
+                        .onAppear { viewModel.viewSize = geo.size }
+                        .onChange(of: geo.size) { _, new in
+                            viewModel.viewSize = new
+                        }
                 }
                 .coordinateSpace(name: Self.adjustSpaceName)
             }
@@ -553,7 +562,14 @@ public struct DBHScanScreen: View {
                     try? await Task.sleep(for: .milliseconds(80))
                     let photo = MeasurePhotoStore.captureWindow()
                     hidingChromeForCapture = false
-                    let fix = LocationService.lastGlobalFix
+                    // FRESHNESS-GATED. `lastGlobalFix` is the newest fix ANY screen ever saw,
+                    // with no age check, so a red GPS chip and a green one used to produce
+                    // byte-identical records: a cruiser under heavy canopy stamped every tree in
+                    // the plot with the position they had when they walked in. The same rule the
+                    // map, the plot verdict and the chip itself use decides here — an unusable
+                    // fix stores NO position rather than a confident wrong one.
+                    let fix = FixFreshness.usable(
+                        LocationService.lastGlobalFix)
                     let meta = ScanMetadata(
                         speciesCode: metaSpecies,
                         position: metaPosition,
@@ -562,8 +578,14 @@ public struct DBHScanScreen: View {
                         photoPath: photo,
                         latitude: fix?.latitude,
                         longitude: fix?.longitude,
-                        captureMode: viewModel.resultCapturedManually
-                            ? "manual" : "auto")
+                        // Edge provenance. "typed" is its OWN value, not
+                        // "auto": a hand-entered diameter had no edge-finder
+                        // and no bracket, and filing it under "auto" put a
+                        // number the sensors never produced into the same
+                        // bucket the algorithm comparison draws from.
+                        captureMode: r.method == .manualVisual
+                            ? "typed"
+                            : (viewModel.resultCapturedManually ? "manual" : "auto"))
                     // The host reports whether the reading actually reached
                     // storage. A dropped diameter used to be indistinguishable
                     // from a saved one — the loop reset for the next tree
@@ -722,7 +744,10 @@ public struct DBHScanScreen: View {
     }
 
     static func currentGPS() -> RawCaptureGPS? {
-        guard let fix = LocationService.lastGlobalFix else { return nil }
+        // Same freshness gate as the accept path — a bundle must not
+        // claim a position the app would refuse to draw.
+        guard let fix = FixFreshness.usable(LocationService.lastGlobalFix)
+        else { return nil }
         return RawCaptureGPS(lat: fix.latitude, lon: fix.longitude,
                              accM: fix.horizontalAccuracyM)
     }
@@ -1309,7 +1334,9 @@ public struct DBHScanScreen: View {
             "depth_source": settings.dbhMethodSource.rawValue,
             "measured_value": String(format: "%.2f", r.diameterCm),
             "unit": "cm",
-            "sigma": String(format: "%.1f", r.sigmaRmm),
+            // Blank for a typed diameter — see the note at the accept site.
+            "sigma": r.method == .manualVisual
+                ? "" : String(format: "%.1f", r.sigmaRmm),
             "confidence_tier": r.confidence.rawValue,
             "n_points": "\(r.nInliers)",
             "arc_deg": String(format: "%.1f", r.arcCoverageDeg),

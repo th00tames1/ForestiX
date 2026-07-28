@@ -76,7 +76,9 @@ public final class DBHScanViewModel: ObservableObject {
     /// edge handles instead of the automatic edge-finder. Depth method
     /// only — the screen never enables it for the AR caliper/motion
     /// developer modes.
-    @Published public var edgeAdjustActive: Bool = false
+    @Published public var edgeAdjustActive: Bool = false {
+        didSet { if !edgeAdjustActive { adjustAxisLatch = nil } }
+    }
     /// Handle positions as fractions (0…1) of the on-screen walk axis —
     /// the same normalisation `PreviewFit.stripLeftFraction` uses, so
     /// screen x-fraction ↔ depth walk-axis fraction is the existing
@@ -88,7 +90,22 @@ public final class DBHScanViewModel: ObservableObject {
     /// ("manual" vs "auto").
     @Published public private(set) var resultCapturedManually: Bool = false
 
-    /// THE GUIDE-AXIS LATCH IS GONE. It used to be set on the first ADJUST
+    /// Guide axis latched on the first ADJUST preview tick and held for the
+    /// whole session. `pickGuideAxis` votes per frame on the wider
+    /// silhouette chord, which can flip row↔col on the cluttered scenes
+    /// ADJUST exists for, and a flip changes the extent the handle fractions
+    /// are read against — so the value jumps. One deterministic axis per
+    /// session keeps the bracket stable.
+    ///
+    /// It was removed once, on the argument that a latch taken before the
+    /// cruiser has aimed can fix the WRONG axis for a whole plot. That
+    /// argument still stands and is worth revisiting with a device. It is
+    /// not worth revisiting from a keyboard: the removal shipped alongside
+    /// the mapping rewrite and the pair left the screen blank.
+    private var adjustAxisLatch: GuideAxis?
+
+    /// THE OLD NOTE, kept because the reasoning is sound and only the
+    /// evidence was missing. It used to be set on the first ADJUST
     /// preview tick and held for the whole session, to stop `pickGuideAxis`
     /// flipping row↔col between frames and jumping the value. The flip was
     /// real, but latching was the wrong cure and became a worse bug: the
@@ -429,24 +446,26 @@ public final class DBHScanViewModel: ObservableObject {
         // walk axis comes from the mapped bracket span, per frame — see
         // the note where the old latch used to live.
         if edgeAdjustActive {
-            // Convert the on-screen handles into depth-map geometry ONCE,
-            // here, and measure in depth space below. nil means this frame
-            // carries no view→depth mapping — no fit is published, because
-            // the only alternative is the 1:1 assumption that was inflating
-            // every bracketed diameter.
-            let geom = DBHEstimator.bracketDepthGeometry(
+            // THE HANDLE FRACTIONS GO STRAIGHT IN, against a guide axis
+            // latched for the session — restored verbatim from the version
+            // the field used and verified.
+            //
+            // A view→depth affine was inserted here on the reasoning that a
+            // screen fraction and a depth fraction cannot be the same
+            // number under an aspect-fill crop. That reasoning produced a
+            // screen with no diameter on it for three builds, and the
+            // cruiser had already measured a stand with the code it
+            // replaced. Field evidence outranks the derivation, so the
+            // derivation goes. The mapping is still computed and recorded in
+            // the raw-capture manifest, where it costs nothing and can
+            // settle the question later against a tape.
+            if adjustAxisLatch == nil { adjustAxisLatch = axis }
+            let fit = DBHEstimator.bracketChordFit(
                 frame: frame,
+                guideAxis: adjustAxisLatch ?? axis,
                 leftFraction: edgeBracketLeftFraction,
-                rightFraction: edgeBracketRightFraction,
-                viewSize: viewSize)
-            let fit = geom.flatMap {
-                DBHEstimator.bracketChordFit(
-                    frame: frame,
-                    guideAxis: $0.axis,
-                    leftFraction: $0.left,
-                    rightFraction: $0.right)
-            }
-            bracketMappingReady = geom != nil
+                rightFraction: edgeBracketRightFraction)
+            bracketMappingReady = true
             smoothedPreviewDbhCm = nil
             smoothedCenterWorldXZ = nil
             lastTapDepthHint = nil
@@ -456,39 +475,24 @@ public final class DBHScanViewModel: ObservableObject {
             previewFit = fit
             previewDbhCm = fit?.diameterCm
             previewTier = fit?.tier
-            // EVERY nil ends with a sentence on screen.
-            //
-            // The previous attempt at this only spoke when the view→depth
-            // BOUNDARY failed, and returned nil the moment it succeeded — so
-            // a bracket that mapped fine and then found no depth produced no
-            // number AND no message, which is the silent dead screen this
-            // was supposed to abolish. That is the case the field actually
-            // hit, three builds running.
+            // EVERY nil ends with a sentence on screen. Nothing on the
+            // bracket path may fail silently again: three builds went out
+            // with a blank strip because the only failure this line spoke
+            // about was the one the code happened to be looking at.
             previewStatusText = {
                 if fit != nil { return nil }
-                if viewSize.width <= 1 {
-                    return "No view size yet — leave the scan and come back."
-                }
-                if frame.viewMapping == nil {
-                    return "Camera geometry not ready — hold still a second."
-                }
-                guard let g = geom else {
-                    return "Bracket is off the depth map — widen it a little."
-                }
-                // Mapped, but the fit still refused. In developer mode print
-                // what it saw, because this is the state no amount of
-                // reading the source has explained.
                 if developerMode {
                     let ax: String
-                    switch g.axis {
+                    switch (adjustAxisLatch ?? axis) {
                     case .row(let y): ax = "row \(y)"
                     case .col(let x): ax = "col \(x)"
                     }
                     return String(
-                        format: "no depth in bracket · %@ · %.3f–%.3f · grid %dx%d",
-                        ax, g.left, g.right, frame.width, frame.height)
+                        format: "no fit · %@ · %.3f–%.3f · grid %dx%d",
+                        ax, edgeBracketLeftFraction, edgeBracketRightFraction,
+                        frame.width, frame.height)
                 }
-                return "Can't read depth across the bracket — move a little closer."
+                return "Can't read depth across the bracket — move a little closer, or widen it."
             }()
             let pose = frame.cameraPoseWorld
             guideRowWorldY = pose.columns.3.y
@@ -698,19 +702,9 @@ public final class DBHScanViewModel: ObservableObject {
         // writes), so latching here means the recorded bundle replays
         // through exactly the code that produced the live number.
         burstUsedBracket = edgeAdjustActive
-        if edgeAdjustActive, let f = latestFrameForBracket,
-           let geom = DBHEstimator.bracketDepthGeometry(
-               frame: f,
-               leftFraction: edgeBracketLeftFraction,
-               rightFraction: edgeBracketRightFraction,
-               viewSize: viewSize) {
-            burstBracketAxis = geom.axis
-            burstBracketLeft = geom.left
-            burstBracketRight = geom.right
-        } else if edgeAdjustActive {
-            // No mapping ⇒ no bracket capture. Refusing is the point.
-            return
-        }
+        burstBracketLeft = edgeBracketLeftFraction
+        burstBracketRight = edgeBracketRightFraction
+        burstBracketAxis = adjustAxisLatch
         burstBuffer.removeAll(keepingCapacity: true)
         burstTap = tapPixel
         subSamples.removeAll(keepingCapacity: true)

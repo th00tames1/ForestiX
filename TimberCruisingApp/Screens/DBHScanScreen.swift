@@ -510,6 +510,9 @@ public struct DBHScanScreen: View {
             // left and right on a real stem badly enough to be unusable in
             // the stand; the bracket is one drag and holds still.
             if settings.dbhEdgeAdjustDefault {
+                // No fit exists yet on appear, so this is always the
+                // remembered width; the auto-fit seed applies when the
+                // cruiser taps Adjust with a fit up (see enterAdjustMode).
                 setBracketHalfWidth(settings.dbhBracketHalfWidth)
                 viewModel.edgeAdjustActive = true
             }
@@ -1353,7 +1356,18 @@ public struct DBHScanScreen: View {
     /// On the very first scan of a fresh install the stored width is 0.25,
     /// i.e. the ±25 % this used to fall back to.
     private func enterAdjustMode() {
-        setBracketHalfWidth(settings.dbhBracketHalfWidth)
+        // Seed from the auto fit when one is on screen, else from the width
+        // the last tree ended on. The auto-fit seed is how the version the
+        // field verified opened, and it puts the handles on the trunk before
+        // the first drag; the remembered width is the fallback and is what
+        // the cruiser asked for when there is no fit to borrow from.
+        if let fit = viewModel.previewFit,
+           fit.stripRightFraction > fit.stripLeftFraction {
+            viewModel.edgeBracketLeftFraction = fit.stripLeftFraction
+            viewModel.edgeBracketRightFraction = fit.stripRightFraction
+        } else {
+            setBracketHalfWidth(settings.dbhBracketHalfWidth)
+        }
         viewModel.edgeAdjustActive = true
         settings.dbhEdgeAdjustDefault = true
     }

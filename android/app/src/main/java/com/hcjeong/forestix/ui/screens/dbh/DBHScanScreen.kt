@@ -1215,7 +1215,33 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 Modifier
                     .fillMaxSize()
                     .pointerInput(Unit) {
+                        // INDEPENDENT HANDLES. Each one moves on its own.
+
+                    // They were briefly symmetric about the crosshair, which
+                    // is what "move one side and both match" was read to
+                    // mean. It measured wrong. A stem is only symmetric
+                    // about the crosshair if the crosshair is exactly on its
+                    // centre, and in the stand it usually is not — so to
+                    // cover the trunk the cruiser had to open the bracket
+                    // until BOTH edges cleared it, and the span came out
+                    // wider than the tree. Centre off by half a radius and
+                    // the symmetric span is 2*(1.5r) = 3r against a true
+                    // diameter of 2r: a 1.5x over-read, which is what the
+                    // field measured.
+                    //
+                    // Placing each edge where the edge actually is has no
+                    // such failure mode, and it is what worked before. The
+                    // width still carries over to the next tree, which was
+                    // the other half of the request and the part that
+                    // actually saves the cruiser time.
+                        var draggingLeft = true
                         detectDragGestures(
+                            onDragStart = { pos ->
+                                val w = size.width.toFloat().coerceAtLeast(1f)
+                                draggingLeft =
+                                    kotlin.math.abs(pos.x - adjustLeftFrac * w) <=
+                                    kotlin.math.abs(pos.x - adjustRightFrac * w)
+                            },
                             // Persisted on release, not on every frame of
                             // the drag: the next tree opens at the width
                             // this one ended on.
@@ -1223,13 +1249,17 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                                 env.settings.setDbhBracketHalfWidth(
                                     (adjustRightFrac - adjustLeftFrac) / 2f)
                             },
-                        ) { change, _ ->
+                        ) { change, dragAmount ->
                             change.consume()
                             val w = size.width.toFloat().coerceAtLeast(1f)
-                            val half = clampBracketHalfWidth(
-                                kotlin.math.abs(change.position.x / w - 0.5f))
-                            adjustLeftFrac = 0.5f - half
-                            adjustRightFrac = 0.5f + half
+                            val df = dragAmount.x / w
+                            if (draggingLeft) {
+                                adjustLeftFrac = (adjustLeftFrac + df)
+                                    .coerceIn(0.02f, adjustRightFrac - 0.04f)
+                            } else {
+                                adjustRightFrac = (adjustRightFrac + df)
+                                    .coerceIn(adjustLeftFrac + 0.04f, 0.98f)
+                            }
                         }
                     },
             )

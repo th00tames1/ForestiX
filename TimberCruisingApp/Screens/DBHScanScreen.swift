@@ -965,21 +965,38 @@ public struct DBHScanScreen: View {
         .gesture(
             DragGesture(minimumDistance: 0,
                         coordinateSpace: .named(Self.adjustSpaceName))
-                // SYMMETRIC — dragging either handle moves BOTH, mirrored
-                // about the crosshair (FIELD REPORT 4).
+                // INDEPENDENT HANDLES. Each one moves on its own.
                 //
-                // The two handles used to move independently, which made
-                // fitting a trunk a two-handed job: drag the left edge on,
-                // drag the right edge on, then find that the crosshair no
-                // longer sat on the stem centre and the chord had picked up
-                // whatever was behind the tree on one side. A stem is
-                // symmetric about where it is aimed at, so one drag is
-                // enough — the cruiser sets the WIDTH and the app keeps the
-                // centre.
+                // They were briefly symmetric about the crosshair, which is
+                // what "move one side and both match" was read to mean. It
+                // measured wrong. A stem is only symmetric about the
+                // crosshair if the crosshair is exactly on its centre, and
+                // in the stand it usually is not — so to cover the trunk the
+                // cruiser had to open the bracket until BOTH edges cleared
+                // it, and the span came out wider than the tree. Centre off
+                // by half a radius and the symmetric span is 2·(1.5r) = 3r
+                // against a true diameter of 2r: a 1.5× over-read, which is
+                // what the field measured.
+                //
+                // Placing each edge where the edge actually is has no such
+                // failure mode, and it is what worked before. The width
+                // still carries over to the next tree, which was the other
+                // half of the request and the part that saves real time.
                 .onChanged { v in
                     guard viewWidth > 1 else { return }
-                    let frac = Double(v.location.x / viewWidth)
-                    setBracketHalfWidth(abs(frac - 0.5))
+                    let frac = min(max(Double(v.location.x / viewWidth),
+                                       0.02), 0.98)
+                    if isLeft {
+                        viewModel.edgeBracketLeftFraction = min(
+                            frac,
+                            viewModel.edgeBracketRightFraction
+                                - Self.adjustMinGapFraction)
+                    } else {
+                        viewModel.edgeBracketRightFraction = max(
+                            frac,
+                            viewModel.edgeBracketLeftFraction
+                                + Self.adjustMinGapFraction)
+                    }
                 }
                 // Persisted on release, not on every frame of the drag: the
                 // next tree opens at the width this one ended on.
@@ -993,11 +1010,21 @@ public struct DBHScanScreen: View {
         .accessibilityHint("Drag to set the trunk width. Both edges move together.")
         // VoiceOver cannot drag, so the width is also reachable in steps.
         .accessibilityAdjustableAction { direction in
+            // Widen / narrow by moving THIS edge outward or inward.
             let step = 0.01
-            switch direction {
-            case .increment: setBracketHalfWidth(bracketHalfWidth + step)
-            case .decrement: setBracketHalfWidth(bracketHalfWidth - step)
-            @unknown default: break
+            let outward = direction == .increment
+            if isLeft {
+                viewModel.edgeBracketLeftFraction = min(
+                    max(viewModel.edgeBracketLeftFraction
+                            + (outward ? -step : step), 0.02),
+                    viewModel.edgeBracketRightFraction
+                        - Self.adjustMinGapFraction)
+            } else {
+                viewModel.edgeBracketRightFraction = max(
+                    min(viewModel.edgeBracketRightFraction
+                            + (outward ? step : -step), 0.98),
+                    viewModel.edgeBracketLeftFraction
+                        + Self.adjustMinGapFraction)
             }
             settings.dbhBracketHalfWidth = bracketHalfWidth
         }

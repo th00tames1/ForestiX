@@ -8,6 +8,9 @@
 // Tests drive the state machine directly through the `preview` factory.
 
 import Foundation
+#if canImport(UIKit)
+import UIKit
+#endif
 import Combine
 import Models
 import Common
@@ -112,6 +115,19 @@ public final class DBHScanViewModel: ObservableObject {
     /// the instant of capture.
     private var latestFrameForBracket: ARDepthFrame?
 
+    /// The window's interface orientation. `displayTransform` needs it, and
+    /// a hard-coded `.portrait` would transpose the mapping on a landscape
+    /// device.
+    private static func currentInterfaceOrientation() -> UIInterfaceOrientation {
+        #if canImport(UIKit) && os(iOS)
+        UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.interfaceOrientation }
+            .first ?? .portrait
+        #else
+        .portrait
+        #endif
+    }
+
     /// True while the live bracket has a usable view→depth mapping. False
     /// puts a plain-language reason on the status line instead of silently
     /// showing nothing.
@@ -119,8 +135,23 @@ public final class DBHScanViewModel: ObservableObject {
 
     /// The AR view's size in points, published by the scan screen. The
     /// bracket handles are fractions of THIS, and mapping them into depth
-    /// pixels needs the pixel width they are fractions of.
-    public var viewSize: CGSize = .zero
+    /// pixels needs the size they are fractions of.
+    ///
+    /// Setting it also tells the session, because THIS is the size that must
+    /// build the view→depth affine — the same one the handles are fractions
+    /// of. Pushing it from `ARCameraView.updateUIView` instead looked
+    /// equivalent and was not: the ARView is created at `.zero` and laid out
+    /// afterwards, so the mapping could stay unbuilt and ADJUST would show
+    /// no diameter at all while Auto (which needs no mapping) carried on
+    /// working. A SwiftUI GeometryReader always has a real size.
+    public var viewSize: CGSize = .zero {
+        didSet {
+            guard viewSize != oldValue,
+                  viewSize.width > 1, viewSize.height > 1 else { return }
+            session.reportViewport(size: viewSize,
+                                   orientation: Self.currentInterfaceOrientation())
+        }
+    }
 
     // MARK: - Dependencies
 

@@ -329,37 +329,28 @@ public final class AppSettings: ObservableObject {
 
     /// Whether the diameter scan opens with the edge bracket (ADJUST) up.
     ///
-    /// DEFAULTS TO FALSE — Auto, not the bracket.
-    ///
-    /// It shipped as true for one round and the field found two things wrong
-    /// with the bracket in a single day: on iOS it produced no diameter at
-    /// all, and on Android it read about 1.5x high. The iOS half was a
-    /// mapping that was never built (fixed); the Android over-read is NOT
-    /// yet explained, and an unexplained 1.5x on the path every tree goes
-    /// through is not something to hand a cruiser collecting validation
-    /// data.
-    ///
-    /// Auto is the path the cruiser confirms works on both phones, and it is
-    /// the one whose geometry is settled: it reads only the depth map's
-    /// centre pixel and walks in depth space, so no view→depth question
-    /// arises. The bracket is still one tap away for a stem the edge-finder
-    /// cannot hold, and the choice is still remembered — it is just no
-    /// longer the default anyone gets without asking for it.
-    ///
-    /// The original reason for the bracket stands and is why it is still
-    /// here: automatic edge-finding jitters
+    /// DEFAULTS TO TRUE. Automatic edge-finding jitters
     /// left and right on a real stem: bark texture, a stick against the
     /// trunk, a second stem behind it, and the found edges move between
     /// frames. The cruiser's verdict on it was that the automatic path was
     /// not usable in the stand. Placing the bracket by hand takes one drag
     /// and is stable, so that is what the screen opens on.
     ///
+    /// IT BRIEFLY WENT BACK TO AUTO, for one commit, after the field
+    /// reported the bracket reading 1.5× high on Android and showing nothing
+    /// at all on iOS. Both were faults in this round's own changes — a
+    /// symmetric-about-the-crosshair drag that over-reads whenever the aim
+    /// is not exactly on the stem centre, and a view→depth mapping that was
+    /// never built because it was pushed from a view that had not been laid
+    /// out. With those fixed the bracket is back to what the field had
+    /// already confirmed works, so it is the default again.
+    ///
     /// It is the LAST-USED mode, not a hard default: the Auto pill still
     /// exists and a cruiser who prefers automatic edges gets it back on the
     /// next scan without hunting for a Settings row. Note `object(forKey:)
     /// as? Bool` rather than `defaults.bool`, which would default to false.
     public var dbhEdgeAdjustDefault: Bool {
-        get { defaults.object(forKey: Keys.dbhEdgeAdjustDefault) as? Bool ?? false }
+        get { defaults.object(forKey: Keys.dbhEdgeAdjustDefault) as? Bool ?? true }
         set {
             defaults.set(newValue, forKey: Keys.dbhEdgeAdjustDefault)
             objectWillChange.send()

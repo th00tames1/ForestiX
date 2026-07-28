@@ -8,7 +8,7 @@
 //
 // Self-contained on purpose: owns its own CMMotionManager so any
 // scan screen can drop one in without plumbing IMU through its
-// view model. Pairs with GPSAccuracyBadge in the same `topStrip`.
+// view model. Pairs with GPSFixChip in the same `topStrip`.
 //
 // Tier mapping uses the existing confidence palette so the colour
 // language matches the rest of the app:

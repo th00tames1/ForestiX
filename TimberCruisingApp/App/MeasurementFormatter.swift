@@ -55,15 +55,24 @@ public enum MeasurementFormatter {
     // MARK: - Height
 
     /// Renders a stored height (in metres) for display.
-    ///   • metric  → "28.2 m"
-    ///   • imperial → "92.5 ft"
+    ///   • metric  → "28.24 m"
+    ///   • imperial → "92.65 ft"
+    ///
+    /// TWO decimals, field-requested. One was a rounding coarser than the
+    /// measurement: a walk-off tangent fit resolves well inside a decimetre
+    /// on a clean sightline, and the validation study compares these numbers
+    /// against a hand-measured truth typed to the centimetre. At one decimal
+    /// two heights 6 cm apart printed the same string, which made a real
+    /// difference between algorithms invisible on the screen that shows it.
+    /// The ± band beside it (`heightSigma`) is what says how much of the
+    /// second decimal to believe. Android prints the identical string.
     public static func height(m: Double, in system: UnitSystem) -> String {
         switch system {
         case .metric:
-            return String(format: "%.1f m", m)
+            return String(format: "%.2f m", m)
         case .imperial:
             let feet = m * 3.28084
-            return String(format: "%.1f ft", feet)
+            return String(format: "%.2f ft", feet)
         }
     }
 

@@ -70,6 +70,18 @@ public enum ForestixPalette {
     public static let confidenceBad  = dyn(rgb(0.690, 0.227, 0.180),   // #B03A2E
                                            rgb(1.000, 0.478, 0.420))   // #FF7A6B
 
+    /// GPS-fix status dots. A separate pair from the confidence family on
+    /// purpose: `confidenceWarn` is deepened to #9A6414 so it can carry
+    /// TEXT on paper, and at the size of a 7 pt dot that deepening reads as
+    /// BROWN rather than as a warning — field-reported. These two are never
+    /// used for text, so they can stay in the hue a glance actually names.
+    /// The dot carries a hairline ring (see `GPSFixChip`) which is what
+    /// keeps the amber legible on a white surface.
+    public static let fixStale       = dyn(rgb(0.910, 0.627, 0.125),   // #E8A020
+                                           rgb(1.000, 0.776, 0.361))   // #FFC65C
+    public static let fixLost        = dyn(rgb(0.851, 0.188, 0.145),   // #D93025
+                                           rgb(1.000, 0.478, 0.420))   // #FF7A6B
+
     /// Surfaces — green-cast paper / green-cast slate.
     public static let canvas         = dyn(rgb(0.957, 0.965, 0.957),   // #F4F6F4
                                            rgb(0.047, 0.059, 0.063))   // #0C0F10
@@ -97,6 +109,8 @@ public enum ForestixPalette {
     public static let confidenceOk   = Color(red: 0.114, green: 0.478, blue: 0.263)
     public static let confidenceWarn = Color(red: 0.604, green: 0.392, blue: 0.078)
     public static let confidenceBad  = Color(red: 0.690, green: 0.227, blue: 0.180)
+    public static let fixStale       = Color(red: 0.910, green: 0.627, blue: 0.125)
+    public static let fixLost        = Color(red: 0.851, green: 0.188, blue: 0.145)
     public static let canvas         = Color(red: 0.957, green: 0.965, blue: 0.957)
     public static let surface        = Color.white
     public static let surfaceRaised  = Color(red: 0.914, green: 0.929, blue: 0.914)

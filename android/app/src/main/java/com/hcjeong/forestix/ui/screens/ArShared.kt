@@ -20,6 +20,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import com.hcjeong.forestix.ar.ArSceneMarker
+import com.hcjeong.forestix.ar.MarkerShape
+import com.hcjeong.forestix.ar.Vec3
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 
@@ -39,3 +42,37 @@ fun CenterCrosshair(modifier: Modifier = Modifier) {
     }
 }
 
+
+/// The plot pillar the tap WOULD plant, drawn translucent at the live
+/// crosshair hit (FIELD REPORT 8).
+///
+/// The aiming state used to be a crosshair and nothing else, so the cruiser
+/// was placing the plot centre blind and only found out where it had landed
+/// after the tap. Both plot-centre screens (quick sampling and the cruise
+/// plot start) call this, so the ghost cannot drift from one to the other.
+///
+/// Same four pieces, same sizes, same colours as the placed assembly the hub
+/// builds in rebuildPlotNodes — a preview that looked different would be
+/// teaching the cruiser the wrong thing. Only the alpha changes, and the
+/// ring is included because the radius slider is right there: the cruiser
+/// can see how much ground a 5.6 m plot actually covers before committing to
+/// a centre, which is the part that is hardest to judge by eye.
+///
+/// These are plain world positions, not anchored — there is no ARCore anchor
+/// yet, that is what the tap creates — so the ghost rides the aim.
+fun plotPillarPreviewMarkers(centre: Vec3?, radiusM: Float): List<ArSceneMarker> {
+    if (centre == null) return emptyList()
+    val ghost = 0.35f
+    return listOf(
+        ArSceneMarker(centre, MarkerShape.Sphere(0.07f), floatArrayOf(1f, 0.25f, 0.25f, ghost)),
+        ArSceneMarker(
+            Vec3(centre.x, centre.y + 0.6f, centre.z),
+            MarkerShape.Cylinder(0.03f, 1.2f), floatArrayOf(1f, 1f, 1f, ghost)),
+        ArSceneMarker(
+            Vec3(centre.x, centre.y + 1.2f, centre.z),
+            MarkerShape.Sphere(0.12f), floatArrayOf(1f, 0.85f, 0.15f, ghost)),
+        ArSceneMarker(
+            Vec3(centre.x, centre.y + 0.02f, centre.z),
+            MarkerShape.Ring(radiusM, 0.4f), floatArrayOf(0.2f, 0.85f, 1f, ghost)),
+    )
+}

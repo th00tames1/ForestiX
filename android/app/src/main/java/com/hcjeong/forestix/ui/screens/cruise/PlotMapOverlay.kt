@@ -203,6 +203,17 @@ internal fun plotRangeRings(radiusM: Double, system: UnitSystem): List<MapPlotRi
 /// in the same branch as no fix at all.
 internal const val PLOT_FIX_MAX_AGE_MS: Long = 5_000L
 
+/// Past this, the fix is not merely stale — the phone has had no contact
+/// with the sky for a minute.
+///
+/// This is the line the GPS chip draws between AMBER and RED, and the
+/// distinction is a real one in the field: under a closed canopy a fix drops
+/// for a few seconds constantly and comes straight back, which is worth
+/// showing but not worth alarming about. A whole minute with nothing is a
+/// different situation — the cruiser should stop trusting any position on
+/// screen and step out for sky. iOS `FixFreshness.lostAge`.
+internal const val PLOT_FIX_LOST_AGE_MS: Long = 60_000L
+
 /// THE ONE FRESHNESS TEST. Every fact AND every MARK the app derives from a
 /// live position goes through this function — the inside/outside verdict,
 /// the banner, the you-dot on the map, the navigate guide line and its

@@ -39,6 +39,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.rememberCoroutineScope
 import com.hcjeong.forestix.ui.MeasurePhotoStore
@@ -69,7 +70,7 @@ import com.hcjeong.forestix.ui.Routes
 import com.hcjeong.forestix.ui.screens.cruise.CruiseCapture
 import com.hcjeong.forestix.ui.screens.cruise.CruiseRoutes
 import com.hcjeong.forestix.ui.screens.ScanMetadataSheet
-import com.hcjeong.forestix.ui.screens.GPSAccuracyBadge
+import com.hcjeong.forestix.ui.screens.GpsFixChip
 import com.hcjeong.forestix.ui.screens.MeasureBackButton
 import com.hcjeong.forestix.ui.screens.MeasureCircleButton
 import com.hcjeong.forestix.ui.screens.MeasureShutterBar
@@ -116,6 +117,28 @@ private const val ANCHOR_MAX_M = 4.0f
 /// walk-off. Without it a session parked on the aim stage grew the manifest
 /// without bound.
 private const val MAX_POSE_SAMPLES = 600
+
+/// Radius of the anchor / top / base aim spheres, at the scaling reference
+/// distance (ArSessionHub's 2.5 m).
+///
+/// FIELD REPORT 2 — was 0.08. Together with the sub-linear distance scaling
+/// this makes the far-field marker roughly a third of the on-screen area it
+/// used to cover, which is the difference between pointing AT a treetop and
+/// painting over it. Near-field it is a quarter smaller and still an easy
+/// target to see against foliage. iOS value 1:1.
+private const val AIM_MARKER_RADIUS_M = 0.06f
+
+/// How far the phone may move between the base sighting and the top
+/// sighting before the reading is worth a warning.
+///
+/// The §7.2 formula takes both angles from ONE point. 0.25 m clears
+/// ordinary hand and wrist movement while tilting up — measured against a
+/// held phone, that is a few centimetres — and catches the two cases that
+/// actually bias the number: raising the phone overhead to clear a crown,
+/// and taking a step. It WARNS rather than refuses: a cruiser who has
+/// already walked the off-distance should be told the reading is soft, not
+/// sent back to the start by an arm's-length wobble.
+private const val AIM_DRIFT_WARN_M = 0.25f
 
 /// `chainedFromDiameter` = this session was opened AUTOMATICALLY by the
 /// cruise tally right after a diameter was accepted (field report F10). It is
@@ -164,6 +187,10 @@ fun HeightScanScreen(
     var alphaTop by remember { mutableStateOf<Float?>(null) }
     var topMarker by remember { mutableStateOf<Vec3?>(null) }
     var baseMarker by remember { mutableStateOf<Vec3?>(null) }
+    /// How far the camera moved between the base sighting and the top
+    /// sighting. Null until a height has been computed. See the AIM_TOP
+    /// handler for why this is a measurement fact and not a nicety.
+    var aimDriftM by remember { mutableStateOf<Float?>(null) }
     var dhLive by remember { mutableStateOf(0f) }
     // Walk-panel triplet (locked spec): camera→anchor horizontal distance
     // at the MOMENT of anchoring, and the camera's displacement since then
@@ -351,13 +378,15 @@ fun HeightScanScreen(
 
     fun markers(): List<ArSceneMarker> {
         // scalesWithDistance keeps every sphere readable from across the
-        // walk-off — natural size up close, grows with camera distance.
+        // walk-off — it grows with camera distance, but sub-linearly, so a
+        // marker seen from 20 m no longer covers what it is marking
+        // (FIELD REPORT 2, ArSessionHub.markerDistanceScale).
         val out = mutableListOf<ArSceneMarker>()
-        anchorPt?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.08f), floatArrayOf(1f, 0.30f, 0.30f, 1f), scalesWithDistance = true)) }
-        // Tree top (yellow) + base (green) spheres on the anchor's vertical
-        // axis at the alpha-derived height — same as iOS rebuildSceneMarkers.
-        topMarker?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.08f), floatArrayOf(1f, 0.85f, 0.15f, 1f), scalesWithDistance = true)) }
-        baseMarker?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.08f), floatArrayOf(0.25f, 0.85f, 0.35f, 1f), scalesWithDistance = true)) }
+        anchorPt?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(AIM_MARKER_RADIUS_M), floatArrayOf(1f, 0.30f, 0.30f, 1f), scalesWithDistance = true)) }
+        // Tree top (yellow) + base (green) spheres, each on the aim ray it
+        // was sighted along (see the AIM_BASE / AIM_TOP handlers).
+        topMarker?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(AIM_MARKER_RADIUS_M), floatArrayOf(1f, 0.85f, 0.15f, 1f), scalesWithDistance = true)) }
+        baseMarker?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(AIM_MARKER_RADIUS_M), floatArrayOf(0.25f, 0.85f, 0.35f, 1f), scalesWithDistance = true)) }
         // Crown L/R yellow matches iOS exactly (1, 0.85, 0, 1); crown T/B cyan.
         val yellow = floatArrayOf(1f, 0.85f, 0f, 1f); val cyan = floatArrayOf(0.2f, 0.7f, 1f, 1f)
         cL?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.05f), yellow, scalesWithDistance = true)) }
@@ -544,7 +573,22 @@ fun HeightScanScreen(
                     baseAimFrame = fr; baseAimRgb = rgb
                 }
                 val dh = kotlin.math.sqrt((s.x - anchor.x) * (s.x - anchor.x) + (s.z - anchor.z) * (s.z - anchor.z))
-                baseMarker = Vec3(anchor.x, s.y + dh * kotlin.math.tan(a), anchor.z)
+                // ON THE AIM RAY, not on the anchor's vertical axis
+                // (FIELD REPORT 3). The marker is a receipt for "this is
+                // the point you sighted", so it has to be built from the
+                // SAME camera pose the angle came from. Placing it at
+                // (anchor.x, standing.y + dh·tanα, anchor.z) used the
+                // locked standing HEIGHT while α came from the live camera,
+                // so any change in how the phone was held between the two —
+                // and raising it to find a treetop is the normal way to
+                // sight one — dropped the sphere below the crosshair.
+                //
+                // This is the same construction crown capture already uses,
+                // and for the same reason: no fresh hit-test, because at
+                // 10–30 m those fall back to planes and land nowhere near
+                // the aim.
+                baseMarker = controller.forwardPointAtHorizontalDistance(dh)
+                    ?: Vec3(anchor.x, s.y + dh * kotlin.math.tan(a), anchor.z)
                 stage = Stage.AIM_TOP
             }
             Stage.AIM_TOP -> {
@@ -560,7 +604,29 @@ fun HeightScanScreen(
                     topAimFrame = fr; topAimRgb = rgb
                 }
                 val dh = kotlin.math.sqrt((standing.x - anchor.x) * (standing.x - anchor.x) + (standing.z - anchor.z) * (standing.z - anchor.z))
-                topMarker = Vec3(anchor.x, standing.y + dh * kotlin.math.tan(aTop), anchor.z)
+                // On the aim ray — see the AIM_BASE handler for why.
+                topMarker = controller.forwardPointAtHorizontalDistance(dh)
+                    ?: Vec3(anchor.x, standing.y + dh * kotlin.math.tan(aTop), anchor.z)
+                // HOW FAR THE INSTRUMENT MOVED between the two sightings.
+                //
+                // The §7.2 tangent formula assumes both angles were taken
+                // from ONE point: H = d_h(tan α_top − tan α_base). The
+                // screen locks that point at the base aim and reads α_top
+                // from wherever the camera is now, so a cruiser who raises
+                // or steps while finding the treetop measures a tree that
+                // does not exist. The error is roughly the vertical
+                // movement one-for-one, plus the horizontal movement scaled
+                // by (tree height / d_h) — at 10 m from a 20 m tree, a 20 cm
+                // step is a 40 cm error, which is inside nothing this app
+                // claims. It is reported, not swallowed: the cruiser can
+                // retake, and a recorded run carries the number.
+                val drift = controller.currentCameraPosition()?.let { now ->
+                    val dx = now.x - standing.x
+                    val dy = now.y - standing.y
+                    val dz = now.z - standing.z
+                    kotlin.math.sqrt(dx * dx + dy * dy + dz * dz)
+                }
+                aimDriftM = drift
                 val r = HeightEstimator.estimate(
                     anchorX = anchor.x, anchorZ = anchor.z,
                     standingX = standing.x, standingZ = standing.z,
@@ -584,6 +650,7 @@ fun HeightScanScreen(
     fun resetAll() {
         stage = Stage.ANCHOR; anchorPt = null; standingLocked = null
         alphaBase = null; alphaTop = null; topMarker = null; baseMarker = null
+        aimDriftM = null
         dhLive = 0f; anchorInitialDistM = null; standingAtAnchor = null
         walkedLive = 0f; anchorAimOk = false
         result = null; failure = null; resetCrown()
@@ -798,6 +865,32 @@ fun HeightScanScreen(
             controller,
             markers(),
             modifier = Modifier.fillMaxSize(),
+            // FIELD REPORT 10 — THIS SCREEN USED TO TAKE THE DEFAULTS, and
+            // the defaults are `enableDepth = true, planeRenderer = true`.
+            //
+            // The height measurement reads NOTHING from depth: both angles
+            // come from the camera pose and d_h from pose translation. Depth
+            // is used in exactly two places — the anchor stage's gated hit
+            // test, and the aim frames a recording run keeps — so outside
+            // those it was a per-frame cost with no consumer.
+            //
+            // The plane renderer was worse, and it is why the stutter came
+            // on PARTWAY THROUGH rather than at the start. ARCore keeps
+            // finding new planes as the device moves, and this is the one
+            // flow that walks 10–20 m across a forest floor: by the time the
+            // cruiser turns to sight the top, SceneView is tessellating and
+            // drawing every patch of leaf litter ARCore has decided is a
+            // plane. The grid is not an aid here — the cruiser is lining a
+            // crosshair up on a trunk and a treetop — so it is off. Plane
+            // DETECTION is untouched, which is what the anchor hit test
+            // needs; only the drawing stops.
+            //
+            // The two plot screens have done exactly this since the plot
+            // overlay landed (`enableDepth = !placed, planeRenderer =
+            // !placed`); the height screen was simply never given the same
+            // treatment.
+            enableDepth = stage == Stage.ANCHOR || rawCaptureArmed,
+            planeRenderer = false,
             // Active sampling plot (if any) as a subdued, non-interactive
             // overlay under the height markers.
             plotOverlay = ArSessionHub.PlotOverlay.SUBDUED,
@@ -833,7 +926,11 @@ fun HeightScanScreen(
         if (!hidingChromeForCapture) {
             MeasureTopStrip(
                 reserveTrailing = if (miniMapUp) MeasureMiniMapSlot else 0.dp,
-                leading = { GPSAccuracyBadge() },
+                // The same GPS chip the map and the Diameter scan show
+                // (FIELD REPORT 11) — one readout for "can the app see where
+                // I am right now?", including at the moment a fix is written
+                // onto the stored reading.
+                leading = { GpsFixChip(acquiresService = true) },
             )
         }
 
@@ -1137,6 +1234,22 @@ fun HeightScanScreen(
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
+                        // The instrument moved between the two sightings, so
+                        // the tangent pair no longer shares an origin and the
+                        // height is soft by roughly this much. Said plainly
+                        // and with the number, above the Accept button —
+                        // this is the moment the cruiser decides whether to
+                        // keep it.
+                        aimDriftM?.takeIf { it > AIM_DRIFT_WARN_M }?.let { d ->
+                            Text(
+                                "You moved " + MeasurementFormatter.distance(
+                                    d.toDouble(), settings.unitSystem) +
+                                    " between the base and top sightings. Both have to be taken from one spot — retake for a firm number.",
+                                style = type.caption,
+                                color = Forestix.colors.confidenceWarn,
+                                textAlign = TextAlign.Center,
+                            )
+                        }
                         // Crown control: start it, or restart it once done.
                         if (crownStep == CrownStep.NONE) {
                             ForestixWhiteButton("Measure crown", modifier = Modifier.fillMaxWidth()) {

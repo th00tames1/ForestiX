@@ -437,7 +437,9 @@ object PDFReportBuilder {
             drawTableRow(canvas, listOf(
                 pno, "${t.treeNumber}", speciesLabel(inputs, t.speciesCode),
                 String.format(Locale.US, "%.1f", t.dbhCm),
-                t.heightM?.let { String.format(Locale.US, "%.1f", it) } ?: "—",
+                // Two decimals, matching every on-screen height readout —
+                // the appendix is what the client checks the app against.
+                t.heightM?.let { String.format(Locale.US, "%.2f", it) } ?: "—",
                 statusLabel(t.status),
                 qualityLabel(t.dbhConfidence),
                 flagBits.joinToString(", "),

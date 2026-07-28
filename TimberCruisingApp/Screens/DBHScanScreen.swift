@@ -473,6 +473,15 @@ public struct DBHScanScreen: View {
             // so flipping the picker in Settings takes effect on the
             // next return without leaving the scan screen.
             viewModel.dbhMeasurementMethod = settings.dbhMeasurementMethod
+            // FIELD REPORT 4 — the screen opens on the edge bracket unless
+            // the cruiser last chose Auto. Automatic edge-finding was the
+            // default and the cruiser's verdict on it was that it jumped
+            // left and right on a real stem badly enough to be unusable in
+            // the stand; the bracket is one drag and holds still.
+            if settings.dbhEdgeAdjustDefault {
+                setBracketHalfWidth(settings.dbhBracketHalfWidth)
+                viewModel.edgeAdjustActive = true
+            }
             configureRawCapture()
             viewModel.onAppear()
         }
@@ -623,14 +632,20 @@ public struct DBHScanScreen: View {
 
     // MARK: - Top status strip
 
-    /// GPS accuracy pill at leading 72 / top 22 — clear of the floating
-    /// back button, same offsets as Android. TiltBadge floats right
-    /// above the crosshair so the cruiser sees device level at the same
-    /// focal point as the trunk circle they're aiming at.
+    /// GPS chip at leading 72 / top 22 — clear of the floating back
+    /// button, same offsets as Android. TiltBadge floats right above the
+    /// crosshair so the cruiser sees device level at the same focal point
+    /// as the trunk circle they're aiming at.
+    ///
+    /// FIELD REPORT 11 — this is the map's chip, not a scan-only variant.
+    /// It used to be `GPSAccuracyBadge` ("GPS good / fair / check"), a
+    /// second vocabulary for the same question, shown at the exact moment
+    /// a position gets written onto a stored measurement. The cruiser
+    /// asked for the readout they already trust; the badge is gone.
     private var topStrip: some View {
         HStack(alignment: .top, spacing: ForestixSpace.xs) {
             VStack(alignment: .leading, spacing: 6) {
-                GPSAccuracyBadge()
+                GPSFixChip(acquiresService: true)
                 // FIELD REPORT F2 — the permanent red REC pill is gone; the
                 // cruiser read it as noise. The PER-CAPTURE outcome pill
                 // stays, and it is the piece that actually enforces "a
@@ -847,6 +862,23 @@ public struct DBHScanScreen: View {
     /// Smallest allowed handle separation (fraction of view width).
     private static let adjustMinGapFraction: Double = 0.04
 
+    /// The bracket's half-width, read off the two published fractions.
+    ///
+    /// They stay the source of truth — the estimator and the chord overlay
+    /// both consume them — but since FIELD REPORT 4 they are always
+    /// symmetric about 0.5, so this one number describes the whole bracket.
+    private var bracketHalfWidth: Double {
+        (viewModel.edgeBracketRightFraction
+            - viewModel.edgeBracketLeftFraction) / 2
+    }
+
+    /// Sets both handles from one half-width, mirrored about the crosshair.
+    private func setBracketHalfWidth(_ half: Double) {
+        let clamped = AppSettings.clampBracketHalfWidth(half)
+        viewModel.edgeBracketLeftFraction  = 0.5 - clamped
+        viewModel.edgeBracketRightFraction = 0.5 + clamped
+    }
+
     /// True while the ADJUST chrome (handles, band, Auto pill, tracked
     /// chord bar) is on screen: ADJUST active and a state where the live
     /// estimate runs (plus `.capturing`, so the frozen bracket stays
@@ -903,25 +935,42 @@ public struct DBHScanScreen: View {
         .gesture(
             DragGesture(minimumDistance: 0,
                         coordinateSpace: .named(Self.adjustSpaceName))
+                // SYMMETRIC — dragging either handle moves BOTH, mirrored
+                // about the crosshair (FIELD REPORT 4).
+                //
+                // The two handles used to move independently, which made
+                // fitting a trunk a two-handed job: drag the left edge on,
+                // drag the right edge on, then find that the crosshair no
+                // longer sat on the stem centre and the chord had picked up
+                // whatever was behind the tree on one side. A stem is
+                // symmetric about where it is aimed at, so one drag is
+                // enough — the cruiser sets the WIDTH and the app keeps the
+                // centre.
                 .onChanged { v in
                     guard viewWidth > 1 else { return }
-                    let frac = min(max(Double(v.location.x / viewWidth),
-                                       0.02), 0.98)
-                    if isLeft {
-                        viewModel.edgeBracketLeftFraction = min(
-                            frac,
-                            viewModel.edgeBracketRightFraction
-                                - Self.adjustMinGapFraction)
-                    } else {
-                        viewModel.edgeBracketRightFraction = max(
-                            frac,
-                            viewModel.edgeBracketLeftFraction
-                                + Self.adjustMinGapFraction)
-                    }
+                    let frac = Double(v.location.x / viewWidth)
+                    setBracketHalfWidth(abs(frac - 0.5))
+                }
+                // Persisted on release, not on every frame of the drag: the
+                // next tree opens at the width this one ended on.
+                .onEnded { _ in
+                    settings.dbhBracketHalfWidth = bracketHalfWidth
                 }
         )
         .accessibilityIdentifier(isLeft ? "dbhScan.adjustHandleLeft"
                                         : "dbhScan.adjustHandleRight")
+        .accessibilityLabel(isLeft ? "Left trunk edge" : "Right trunk edge")
+        .accessibilityHint("Drag to set the trunk width. Both edges move together.")
+        // VoiceOver cannot drag, so the width is also reachable in steps.
+        .accessibilityAdjustableAction { direction in
+            let step = 0.01
+            switch direction {
+            case .increment: setBracketHalfWidth(bracketHalfWidth + step)
+            case .decrement: setBracketHalfWidth(bracketHalfWidth - step)
+            @unknown default: break
+            }
+            settings.dbhBracketHalfWidth = bracketHalfWidth
+        }
     }
 
     /// Way back to automatic edge-finding — black-scrim capsule pill
@@ -929,6 +978,11 @@ public struct DBHScanScreen: View {
     private var autoPillButton: some View {
         Button {
             viewModel.edgeAdjustActive = false
+            // Remembered, so a cruiser who prefers the automatic edges is
+            // not handed the bracket again on the next tree. This pill and
+            // the ADJUST rail button are the whole control — the preference
+            // has no Settings row of its own.
+            settings.dbhEdgeAdjustDefault = false
         } label: {
             Text("Auto")
                 .font(.system(size: 12, weight: .semibold))
@@ -1211,18 +1265,23 @@ public struct DBHScanScreen: View {
         !viewModel.edgeAdjustActive
     }
 
-    /// Seed the handles from the current auto edges when the fit has
-    /// them; else ±25 % of the screen width around centre.
+    /// Open the bracket at the width the LAST tree was measured at, centred
+    /// on the crosshair.
+    ///
+    /// FIELD REPORT 4 — this used to seed from the automatic fit's edges
+    /// when it had any. That sounded helpful and was not: the automatic
+    /// edges are the thing the cruiser reached for ADJUST to get away from,
+    /// so the bracket opened already wrong and asymmetric, and the first
+    /// drag was spent undoing it. A plot is walked at roughly one standing
+    /// distance, so the previous tree's width is the better guess — and
+    /// when it is wrong it is wrong symmetrically, which one drag fixes.
+    ///
+    /// On the very first scan of a fresh install the stored width is 0.25,
+    /// i.e. the ±25 % this used to fall back to.
     private func enterAdjustMode() {
-        if let fit = viewModel.previewFit,
-           fit.stripRightFraction > fit.stripLeftFraction {
-            viewModel.edgeBracketLeftFraction = fit.stripLeftFraction
-            viewModel.edgeBracketRightFraction = fit.stripRightFraction
-        } else {
-            viewModel.edgeBracketLeftFraction = 0.25
-            viewModel.edgeBracketRightFraction = 0.75
-        }
+        setBracketHalfWidth(settings.dbhBracketHalfWidth)
         viewModel.edgeAdjustActive = true
+        settings.dbhEdgeAdjustDefault = true
     }
 
     private var statusText: String {
@@ -1410,6 +1469,31 @@ public struct DBHScanScreen: View {
                     .foregroundStyle(.white)
                 Spacer()
             }
+            // FIELD REPORT 7 — the details chip, identical to the height
+            // scan's. The sheet, the four bound values and the write into
+            // `ScanMetadata` were all already here; there was simply
+            // nothing that opened it, so species / stem position / damage /
+            // note could only be attached to a tree the cruiser also
+            // measured the HEIGHT of. That made the richer record an
+            // accident of which tool was used, not a decision.
+            HStack {
+                Spacer()
+                Button {
+                    presentingMetadata = true
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "tag")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text(metadataChipLabel)
+                            .font(ForestixType.dataSmall)
+                    }
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .overlay(Capsule().stroke(.white.opacity(0.4), lineWidth: 0.5))
+                    .foregroundStyle(.white)
+                }
+                .accessibilityIdentifier("dbhScan.editMetadata")
+            }
+            .padding(.top, 2)
             if settings.developerMode {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
@@ -1419,7 +1503,7 @@ public struct DBHScanScreen: View {
                         TextField("T1", text: Binding(
                             get: { settings.researchTreeId },
                             set: { settings.researchTreeId = $0 }))
-                            .textFieldStyle(.roundedBorder)
+                            .scanPanelTextField()
                             .frame(width: 70)
                             .accessibilityIdentifier("dbhScan.researchTarget")
                         Text("True Ø (cm)")
@@ -1428,7 +1512,7 @@ public struct DBHScanScreen: View {
                         // ',' is accepted and normalised to '.' on submit.
                         TextField("tape", text: $researchTrueCm)
                             .keyboardType(.decimalPad)
-                            .textFieldStyle(.roundedBorder)
+                            .scanPanelTextField()
                             .frame(width: 90)
                             .accessibilityIdentifier("dbhScan.researchTrue")
                     }
@@ -1449,6 +1533,16 @@ public struct DBHScanScreen: View {
         .accessibilityIdentifier("dbhScan.resultPanel")
     }
 
+    private var metadataChipLabel: String {
+        // Shared with the height scan (FIELD REPORT 7) — one label rule for
+        // one chip, on both screens. The diameter scan is the one that also
+        // carries stem position, so it passes it.
+        ScanMetadataChip.label(speciesCode: metaSpecies,
+                               position: metaPosition,
+                               damageCodes: metaDamage,
+                               note: metaNote)
+    }
+
     @ViewBuilder
     private var manualEntryPanel: some View {
         HStack {
@@ -1456,7 +1550,7 @@ public struct DBHScanScreen: View {
                       ? "Diameter in cm"
                       : "Diameter in inches",
                       text: $viewModel.manualDbhCm)
-                .textFieldStyle(.roundedBorder)
+                .scanPanelTextField()
                 #if os(iOS)
                 .keyboardType(.decimalPad)
                 #endif

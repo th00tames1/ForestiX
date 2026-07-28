@@ -95,7 +95,7 @@ class LocationService(
 
     /// On iOS this pops the system dialog. Android permission requests
     /// need an Activity result launcher, which lives in the composable
-    /// layer (see GpsAccuracyBadge) — here we just re-read the current
+    /// layer (see GpsFixChip) — here we just re-read the current
     /// grant state so callers observing `authStatus` stay fresh.
     fun requestAuthorization() {
         refreshAuthStatus()
@@ -255,7 +255,7 @@ class LocationService(
 
     companion object {
         /// App-scoped instance for PASSIVE consumers — the map home's GPS
-        /// chip + camera seeding, the scan screens' GPSAccuracyBadge, the
+        /// chip + camera seeding, the scan screens' GpsFixChip, the
         /// plot mini-map, the cruise-mode navigation reads, and the plot
         /// start / stratum-draw single-fix stamps. One LocationManager
         /// client instead of one per screen; subscriber ref-counting

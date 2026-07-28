@@ -72,6 +72,15 @@ public struct SamplingPlotScreen: View {
     private static let poleId       = UUID(uuidString: "00000000-5A11-0000-0000-000000000002") ?? UUID()
     private static let topSphereId  = UUID(uuidString: "00000000-5A11-0000-0000-000000000003") ?? UUID()
     private static let ringId       = UUID(uuidString: "00000000-5A11-0000-0000-000000000004") ?? UUID()
+    // Ghost twins of the four, drawn while aiming (FIELD REPORT 8).
+    private static let ghostBaseId  = UUID(uuidString: "00000000-5A11-0000-0000-000000000011") ?? UUID()
+    private static let ghostPoleId  = UUID(uuidString: "00000000-5A11-0000-0000-000000000012") ?? UUID()
+    private static let ghostTopId   = UUID(uuidString: "00000000-5A11-0000-0000-000000000013") ?? UUID()
+    private static let ghostRingId  = UUID(uuidString: "00000000-5A11-0000-0000-000000000014") ?? UUID()
+
+    /// Live crosshair hit while aiming — where the pillar would land.
+    /// nil once the plot is placed, or before the first successful ray.
+    @State private var previewCentre: SIMD3<Float>?
 
     /// CRUISE MODE — when set, Save hands the placed ring (radius in
     /// metres) to the caller instead of appending a QuickMeasureEntry;
@@ -364,6 +373,7 @@ public struct SamplingPlotScreen: View {
         pollTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in
             Task { @MainActor in
                 tickOutsideCheck()
+                tickPreviewCentre()
                 hapticTick.toggle()
             }
         }
@@ -372,6 +382,30 @@ public struct SamplingPlotScreen: View {
     private func stopPolling() {
         pollTimer?.invalidate()
         pollTimer = nil
+    }
+
+    /// Where the pillar WOULD be planted if the cruiser tapped now.
+    ///
+    /// FIELD REPORT 8 — the aiming state used to be a crosshair and
+    /// nothing else, so the cruiser was placing the plot centre blind and
+    /// only found out where it had actually landed after the tap. This
+    /// raycasts the same point `placePlotIfNeeded` will, on the poll that
+    /// is already running, and the ghost assembly below draws there.
+    ///
+    /// Only while aiming: once the plot is placed, the real pillar is on
+    /// screen and a second translucent one would just be noise.
+    @MainActor
+    private func tickPreviewCentre() {
+        guard !hasPlot else {
+            previewCentre = nil
+            return
+        }
+        raycaster.preferLiDARMesh = settings.measurementSource == .lidar
+        // The SAME fallback the tap uses (a hit, else 3 m along the aim),
+        // so the ghost cannot promise a placement the tap would refuse or
+        // put somewhere else.
+        previewCentre = raycaster.screenCenterHit()
+            ?? raycaster.forwardPointAtHorizontalDistance(3.0)
     }
 
     @MainActor
@@ -422,7 +456,7 @@ public struct SamplingPlotScreen: View {
     // MARK: - Scene markers
 
     private var markers: [ARSceneMarker] {
-        guard let plot = activePlot.plot else { return [] }
+        guard let plot = activePlot.plot else { return previewMarkers }
         // Stable ids → ARCameraView only rebuilds a marker when its shape
         // changes (e.g. radius), never on the flash timer. The ring colour
         // is kept constant (in/out is shown by the red border flash + the
@@ -461,6 +495,41 @@ public struct SamplingPlotScreen: View {
                           shape: .ring(radiusM: Float(radiusM), thicknessM: 0.4),
                           colorRGBA: SIMD4<Float>(0.2, 0.85, 1, 1),
                           worldAnchorID: anchorID),
+        ]
+    }
+
+    /// The pillar the tap WOULD plant, drawn translucent at the live
+    /// crosshair hit (FIELD REPORT 8).
+    ///
+    /// Same four pieces, same sizes, same colours as the placed assembly —
+    /// a preview that looked different would be teaching the cruiser the
+    /// wrong thing. Only the alpha changes, and the ring is included
+    /// because the radius slider is right there: the cruiser can see how
+    /// much ground a 5.6 m plot actually covers before committing to a
+    /// centre, which is the part that is hardest to judge by eye.
+    ///
+    /// NOT anchored. There is no ARAnchor yet — that is what the tap
+    /// creates — so these are plain world positions that move with the aim.
+    private var previewMarkers: [ARSceneMarker] {
+        guard let centre = previewCentre else { return [] }
+        let ghost: Float = 0.35
+        return [
+            ARSceneMarker(id: Self.ghostBaseId,
+                          worldPosition: centre,
+                          shape: .sphere(radiusM: 0.07),
+                          colorRGBA: SIMD4<Float>(1, 0.25, 0.25, ghost)),
+            ARSceneMarker(id: Self.ghostPoleId,
+                          worldPosition: centre + SIMD3<Float>(0, 0.6, 0),
+                          shape: .cylinder(radiusM: 0.03, heightM: 1.2),
+                          colorRGBA: SIMD4<Float>(1, 1, 1, ghost)),
+            ARSceneMarker(id: Self.ghostTopId,
+                          worldPosition: centre + SIMD3<Float>(0, 1.2, 0),
+                          shape: .sphere(radiusM: 0.12),
+                          colorRGBA: SIMD4<Float>(1, 0.85, 0.15, ghost)),
+            ARSceneMarker(id: Self.ghostRingId,
+                          worldPosition: centre + SIMD3<Float>(0, 0.02, 0),
+                          shape: .ring(radiusM: Float(radiusM), thicknessM: 0.4),
+                          colorRGBA: SIMD4<Float>(0.2, 0.85, 1, ghost)),
         ]
     }
 }

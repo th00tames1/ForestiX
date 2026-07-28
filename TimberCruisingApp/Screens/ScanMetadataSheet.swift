@@ -15,6 +15,41 @@
 import SwiftUI
 import Models
 
+/// The label on the scan screens' details chip — what has been attached so
+/// far, or the invitation when nothing has.
+///
+/// FIELD REPORT 7 — this used to be a private computed property on the
+/// height screen, which is part of why only the height screen offered the
+/// chip at all. Both scans call this now, so the two cannot drift.
+public enum ScanMetadataChip {
+
+    public static func label(speciesCode: String?,
+                             position: QuickMeasureEntry.StemPosition? = nil,
+                             damageCodes: [String] = [],
+                             note: String = "") -> String {
+        var bits: [String] = []
+        if let s = speciesCode, !s.isEmpty {
+            bits.append(RegionalSpecies.name(forCode: s))
+        }
+        // `.dbh` is the default the diameter scan starts on, so it is not
+        // something the cruiser attached — only a deliberate move off it
+        // (butt, upper stem, stump) is worth a word here.
+        if let p = position, p != .dbh {
+            bits.append(p.displayName)
+        }
+        if !damageCodes.isEmpty {
+            bits.append(damageCodes.count == 1
+                        ? "1 tag" : "\(damageCodes.count) tags")
+        }
+        // A note used to leave the chip reading "Add details", which told
+        // the cruiser their typing had gone nowhere.
+        if !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            bits.append("note")
+        }
+        return bits.isEmpty ? "Add details" : bits.joined(separator: " · ")
+    }
+}
+
 public struct ScanMetadataSheet: View {
 
     @EnvironmentObject private var settings: AppSettings

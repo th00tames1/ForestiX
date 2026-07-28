@@ -579,7 +579,7 @@ public final class QuickMeasureHistory: ObservableObject {
             parts.append(String(format: "DBH %.1f cm", d.value))
         }
         if let h = hgt {
-            parts.append(String(format: "Height %.1f m", h.value))
+            parts.append(String(format: "Height %.2f m", h.value))
         }
         if parts.isEmpty { return "—" }
         return parts.joined(separator: " · ")

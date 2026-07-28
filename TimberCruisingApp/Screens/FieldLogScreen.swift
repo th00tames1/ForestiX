@@ -1,22 +1,36 @@
 // Field log — dedicated screen that owns the full measurement history.
 //
-// Moved out of the Quick Measure hub as part of the hub-and-spoke
-// redesign: the home used to stack masthead + capacity warning +
-// instrument panel + log table all on one screen ("때려박은 느낌"),
-// which made the first impression feel like a dashboard rather than
-// a tool. The hub now only routes; each spoke owns its own screen.
+// FIELD REPORT 5 — the log is now ONE ROW PER TREE.
 //
-// This screen:
+// It used to be one row per MEASUREMENT, so a tree the cruiser had
+// diametered and then measured the height of appeared twice, in two
+// places in the list, joined only by a small "#12" on each row's meta
+// line. Reading back a plot meant scanning for pairs. The table now leads
+// with the tree number and puts that tree's diameter and height beside it,
+// which is the shape of the paper tally sheet this replaces.
+//
+// The ± RANGE and QUALITY columns are gone with it. Four columns on a
+// phone had every cell scaling to fit, and the two that were dropped were
+// the two a cruiser was not reading in the field. Neither number is lost:
+// σ is still recorded on the entry, still exported, and now shown in the
+// detail sheet — which is what a tap on a row opens, and which carries the
+// whole record (species, stem position, damage, note, position, photo, and
+// in developer mode the ground truth typed against that tree).
+//
+// Readings that were never attached to a tree — a sampling-plot record, a
+// standalone crown or distance — still get their own row. They are real
+// records; grouping by tree must not make them disappear.
+//
+// The screen otherwise keeps its shape:
+//   • Plot summary card for the active plot
 //   • Summary header — total count + readings-today + "last" timestamp
 //   • Capacity banner — only when the log is near its cap
-//   • Native iOS List — swipe-to-delete works, Dynamic Type respected,
-//     VoiceOver row traversal is standard. (The old VStack-in-panel
-//     version couldn't host `.swipeActions`.)
-//   • Export CSV in the toolbar
-//   • Empty state sized for the whole screen, not a slim card row
+//   • Native iOS List, so swipe-to-delete and VoiceOver traversal are
+//     standard
+//   • Export CSV / bundle in the toolbar
 //
-// The same `QuickMeasureEntry` / `QuickMeasureHistory` backing store
-// powers the screen — no changes to the durability / schema layer.
+// The same `QuickMeasureEntry` / `QuickMeasureHistory` backing store powers
+// it — no changes to the durability / schema layer.
 
 import SwiftUI
 import Models
@@ -27,8 +41,17 @@ public struct FieldLogScreen: View {
     @EnvironmentObject private var history: QuickMeasureHistory
     @EnvironmentObject private var settings: AppSettings
     @State private var shareURL: URL?
+    /// The row whose detail sheet is open. nil = closed.
+    @State private var inspecting: FieldLogRowModel?
+    /// The row a swipe asked to delete, held until the cruiser confirms.
+    /// Only multi-reading rows go through here (see `requestDelete`).
+    @State private var pendingDelete: FieldLogRowModel?
 
     public init() {}
+
+    private var rows: [FieldLogRowModel] {
+        FieldLogRowModel.rows(from: history.entries)
+    }
 
     public var body: some View {
         Group {
@@ -64,6 +87,32 @@ public struct FieldLogScreen: View {
                     }
                     .accessibilityIdentifier("fieldLog.exportMenu")
                 }
+            }
+        }
+        .sheet(item: $inspecting) { row in
+            FieldLogDetailSheet(row: row, unitSystem: settings.unitSystem)
+                .environmentObject(settings)
+        }
+        // A tree row can carry more than one reading, and a swipe is a
+        // cheap gesture — so a swipe that would take BOTH the diameter and
+        // the height says what it is about to take first. Single-reading
+        // rows delete straight away, as they always have.
+        .confirmationDialog(
+            pendingDelete.map { "Delete \($0.title)?" } ?? "",
+            isPresented: Binding(get: { pendingDelete != nil },
+                                 set: { if !$0 { pendingDelete = nil } }),
+            titleVisibility: .visible
+        ) {
+            if let row = pendingDelete {
+                Button("Delete \(row.entries.count) readings", role: .destructive) {
+                    for entry in row.entries { history.delete(id: entry.id) }
+                    pendingDelete = nil
+                }
+            }
+            Button("Cancel", role: .cancel) { pendingDelete = nil }
+        } message: {
+            if let row = pendingDelete {
+                Text(row.deleteWarning)
             }
         }
         #if os(iOS)
@@ -121,17 +170,19 @@ public struct FieldLogScreen: View {
             }
 
             Section {
-                ForEach(history.entries) { entry in
-                    FieldLogRow(entry: entry,
-                                unitSystem: settings.unitSystem)
-                        .listRowBackground(ForestixPalette.surface)
-                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                            Button(role: .destructive) {
-                                history.delete(id: entry.id)
-                            } label: {
-                                Label("Delete", systemImage: "trash")
-                            }
+                ForEach(rows) { row in
+                    Button { inspecting = row } label: {
+                        FieldLogRow(row: row, unitSystem: settings.unitSystem)
+                    }
+                    .buttonStyle(.plain)
+                    .listRowBackground(ForestixPalette.surface)
+                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                        Button(role: .destructive) {
+                            requestDelete(row)
+                        } label: {
+                            Label("Delete", systemImage: "trash")
                         }
+                    }
                 }
             } header: {
                 FieldLogColumnHeader()
@@ -142,6 +193,15 @@ public struct FieldLogScreen: View {
         .listStyle(.insetGrouped)
         #endif
         .scrollContentBackground(.hidden)
+    }
+
+    /// One reading goes immediately; a tree carrying several asks first.
+    private func requestDelete(_ row: FieldLogRowModel) {
+        if row.entries.count == 1 {
+            history.delete(id: row.entries[0].id)
+        } else {
+            pendingDelete = row
+        }
     }
 
     // MARK: - Summary header
@@ -228,6 +288,95 @@ public struct FieldLogScreen: View {
     }
 }
 
+// MARK: - Row model
+
+/// One row of the log: everything recorded against one tree, or a single
+/// reading that was never attached to one.
+///
+/// GROUPING IS BY (plot, tree number), not by tree number alone. Tree
+/// numbering restarts on each plot, so keying on the number by itself would
+/// have merged plot 1's tree 4 with plot 2's tree 4 into a row claiming a
+/// diameter and a height that came off two different trees.
+public struct FieldLogRowModel: Identifiable, Equatable {
+
+    public enum Subject: Equatable {
+        case tree(number: Int)
+        /// A reading with no tree number — a sampling-plot record, or a
+        /// standalone crown / distance measurement.
+        case loose(kind: QuickMeasureEntry.Kind)
+    }
+
+    public let id: String
+    public let subject: Subject
+    /// Newest diameter and height on this tree. Earlier re-measurements
+    /// stay in `entries` and are listed in the detail sheet.
+    public let dbh: QuickMeasureEntry?
+    public let height: QuickMeasureEntry?
+    /// Every reading behind this row, newest first.
+    public let entries: [QuickMeasureEntry]
+    /// Sort key — the most recent reading in the group.
+    public let latest: Date
+
+    public var title: String {
+        switch subject {
+        case .tree(let n):     return "Tree #\(n)"
+        case .loose(let kind): return FieldLogRowModel.kindWord(kind)
+        }
+    }
+
+    /// What a destructive swipe is actually about to remove.
+    public var deleteWarning: String {
+        let kinds = entries.map { FieldLogRowModel.kindWord($0.kind).lowercased() }
+        let listed = Array(Set(kinds)).sorted().joined(separator: " and ")
+        return "This removes the \(listed) recorded against it. It cannot be undone."
+    }
+
+    static func kindWord(_ kind: QuickMeasureEntry.Kind) -> String {
+        switch kind {
+        case .dbh:          return "DBH"
+        case .height:       return "Height"
+        case .crown:        return "Crown"
+        case .distance:     return "Dist"
+        case .samplingPlot: return "Plot"
+        }
+    }
+
+    /// Collapses the flat entry list into rows, newest tree first.
+    ///
+    /// `entries` arrives newest-first from the history, and that order is
+    /// preserved inside each group, so `dbh` / `height` pick up the latest
+    /// reading of each kind without a second sort.
+    public static func rows(from entries: [QuickMeasureEntry]) -> [FieldLogRowModel] {
+        var order: [String] = []
+        var grouped: [String: [QuickMeasureEntry]] = [:]
+
+        for entry in entries {
+            let key: String
+            if let n = entry.treeNumber {
+                key = "t|\(entry.plotID?.uuidString ?? "-")|\(n)"
+            } else {
+                // Never merged with anything: one row, this reading.
+                key = "e|\(entry.id.uuidString)"
+            }
+            if grouped[key] == nil { order.append(key) }
+            grouped[key, default: []].append(entry)
+        }
+
+        return order.compactMap { key in
+            guard let group = grouped[key], let first = group.first else { return nil }
+            let subject: Subject = first.treeNumber
+                .map { Subject.tree(number: $0) } ?? .loose(kind: first.kind)
+            return FieldLogRowModel(
+                id: key,
+                subject: subject,
+                dbh: group.first { $0.kind == .dbh },
+                height: group.first { $0.kind == .height },
+                entries: group,
+                latest: group.map(\.createdAt).max() ?? first.createdAt)
+        }
+    }
+}
+
 // MARK: - Table geometry
 
 /// Splits the proposed width across its subviews on fixed WEIGHTS. Both the
@@ -287,51 +436,30 @@ private struct WeightedColumns: Layout {
 
 /// Shared geometry for the field-log table.
 ///
-/// FIELD REPORT — the columns used to be pinned to 52 / 96 / 64 pt with QUALITY
-/// unsized. On a 360 pt phone a list row has ~288 pt of content, and those four
-/// columns plus their 12 pt gaps demanded 314 (measured): "PRECISION" wrapped to
-/// "PRECISI/ON", "QUALITY" to "QUALI/TY", and the GOOD chip broke to "GOO/D".
-/// A sampling-plot VALUE ("r 5.6 m · 98.5 m²") never fitted 96 pt either and
-/// truncated mid-number.
-///
-/// Now the four columns share whatever width the row has, on these weights.
-/// At 288 pt of content the shares are TYPE 45.9 / VALUE 107.9 / ± RANGE 47.1 /
-/// QUALITY 63.1, against measured demands of "Height" 48.2, "31.4 cm" 73.6,
-/// "±1.1 mm" 56.3 and a CHECK chip 65.6 — every ordinary cell fits or scales
-/// only slightly, and the widest chip label sits at 0.96. Every cell is
-/// single-line, so nothing can break mid-word; the scale floors below are a
-/// backstop for the rare long value, not the layout.
-///
-/// VALUE was widened from 8 to 9.4 when the plot row's "r" was spelled out:
-/// "5.6 m radius · 98.5 m²" wants ~232 pt against the 91.8 pt the old split
-/// gave it (0.40 scale — exactly the floor, i.e. a truncated measurement).
-/// The width comes off TYPE and ± RANGE, whose contents had the most slack;
-/// QUALITY is untouched because the tier chip cannot scale.
+/// THREE columns now, not four. Dropping ± RANGE and QUALITY gave back
+/// roughly 110 pt on a 360 pt phone, which is why every cell here sits well
+/// inside its column instead of scaling to fit as the four-column table did:
+/// at 288 pt of content the shares are TREE 58.3 / DBH 106.9 / HEIGHT 106.9,
+/// against measured demands of "#128" 32, "150.0 cm" 82 and "150.00 ft" 88.
+/// The scale floors below are a backstop for an unusually long value, not
+/// the layout.
 private enum FieldLogTable {
-    /// TYPE · VALUE · ± RANGE · QUALITY. VALUE carries the longest strings,
-    /// so it gets the biggest share.
-    static let weights: [CGFloat] = [4.0, 9.4, 4.1, 5.5]
-    /// 8 pt, not the 12 pt row default: three 12 pt gaps cost 36 pt of column
-    /// width on the phone that could least afford it.
+    /// TREE · DBH · HEIGHT. The two measurement columns are equal — either
+    /// can carry the longest string depending on the unit system.
+    static let weights: [CGFloat] = [3.0, 5.5, 5.5]
+    /// 8 pt, not the 12 pt row default: gaps are width the numbers could
+    /// have had.
     static let gap: CGFloat = ForestixSpace.xs
     /// ALL-CAPS header tracking. The house `sectionHead` value is 1.2, which
-    /// adds ~8 pt to a seven-letter header — on its own enough to push QUALITY
-    /// out of its column at 360 pt. 0.8 keeps the spaced-caps look and fits.
+    /// adds ~8 pt to a seven-letter header. 0.8 keeps the spaced-caps look
+    /// and leaves the headings comfortably inside their columns.
     static let headerTracking: CGFloat = 0.8
-    /// `ForestixType` is a FIXED-size ramp (`Font.system(size:)`), so the
-    /// system text-size setting does not stretch these columns on iOS the way
-    /// it does on Android. What bounds the remaining variation is this floor:
-    /// a cell shrinks a little rather than truncating, and never below it.
-    /// 0.72 rather than 0.8: "± RANGE" is four glyphs wider than the "PREC"
-    /// it replaced and lands at ~0.75 in the narrowed column. Nothing else
-    /// in the table comes near this floor.
+    /// A cell shrinks a little rather than truncating, and never below this.
     static let labelScaleFloor: CGFloat = 0.72
-    /// Values may be much longer than their column: measured at 13/17 pt, a
-    /// sampling-plot row ("5.6 m radius · 98.5 m²") wants ~232 pt against the
-    /// 108 pt VALUE gets on a 360 pt phone, i.e. 0.47 scale. The floor sits
-    /// well under that so the string always lands whole — a truncated
-    /// measurement is a wrong measurement, and it is only ever the plot/crown
-    /// rows that scale at all.
+    /// Values may run long — a sampling-plot row's "5.6 m radius · 98.5 m²"
+    /// is wider than any phone column, and a truncated measurement is a
+    /// wrong measurement. That row spans two columns (see `FieldLogRow`), so
+    /// this floor is only ever reached by an extreme reading.
     static let valueScaleFloor: CGFloat = 0.35
 }
 
@@ -362,20 +490,14 @@ private struct FieldLogCell: View {
 /// The column header lives as the List `Section` header, which gets
 /// inset-grouped styling for free. It's a separate view, so it shares the
 /// column weights with the row below — update `FieldLogTable` or neither.
-///
-/// "± RANGE", not "PREC": the column holds a propagated standard deviation,
-/// which "precision" named in its statistics sense and "PREC" then truncated
-/// into an abbreviation of a word that was already wrong. The cells under it
-/// already print the honest thing ("±1.1 mm"), so the header just names it.
-/// Android uses the identical string.
+/// Android uses the identical strings.
 private struct FieldLogColumnHeader: View {
     var body: some View {
         WeightedColumns(weights: FieldLogTable.weights,
                         spacing: FieldLogTable.gap) {
-            cell("TYPE", alignment: .leading)
-            cell("VALUE")
-            cell("± RANGE")
-            cell("QUALITY")
+            cell("TREE", alignment: .leading)
+            cell("DBH")
+            cell("HEIGHT")
         }
     }
 
@@ -392,7 +514,7 @@ private struct FieldLogColumnHeader: View {
 // MARK: - Row
 
 private struct FieldLogRow: View {
-    let entry: QuickMeasureEntry
+    let row: FieldLogRowModel
     let unitSystem: UnitSystem
 
     var body: some View {
@@ -400,96 +522,373 @@ private struct FieldLogRow: View {
             // Same weights as the column header — the two are one table.
             WeightedColumns(weights: FieldLogTable.weights,
                             spacing: FieldLogTable.gap) {
-                FieldLogCell(text: typeLabel,
-                             font: ForestixType.dataSmall,
-                             color: ForestixPalette.textSecondary,
-                             alignment: .leading)
-
-                FieldLogCell(text: valueText,
+                FieldLogCell(text: row.title.replacingOccurrences(of: "Tree ", with: ""),
                              font: ForestixType.data,
                              color: ForestixPalette.textPrimary,
-                             scaleFloor: FieldLogTable.valueScaleFloor)
+                             alignment: .leading)
 
-                FieldLogCell(text: sigmaText,
-                             font: ForestixType.dataSmall,
-                             color: ForestixPalette.textTertiary)
+                if case .loose(let kind) = row.subject {
+                    // A plot record or a standalone crown / distance has no
+                    // diameter-and-height shape to fill. Its reading spans
+                    // the two measurement columns rather than being forced
+                    // into one of them under a heading it does not match.
+                    FieldLogCell(text: looseValue(kind),
+                                 font: ForestixType.data,
+                                 color: ForestixPalette.textPrimary,
+                                 scaleFloor: FieldLogTable.valueScaleFloor)
+                    Color.clear.frame(height: 0)
+                } else {
+                    FieldLogCell(text: row.dbh.map {
+                                    MeasurementFormatter.diameter(
+                                        cm: $0.value, in: unitSystem)
+                                 } ?? "—",
+                                 font: ForestixType.data,
+                                 color: row.dbh == nil
+                                    ? ForestixPalette.textTertiary
+                                    : ForestixPalette.textPrimary,
+                                 scaleFloor: FieldLogTable.valueScaleFloor)
 
-                TierChip(rawTier: entry.confidenceRaw)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    FieldLogCell(text: row.height.map {
+                                    MeasurementFormatter.height(
+                                        m: $0.value, in: unitSystem)
+                                 } ?? "—",
+                                 font: ForestixType.data,
+                                 color: row.height == nil
+                                    ? ForestixPalette.textTertiary
+                                    : ForestixPalette.textPrimary,
+                                 scaleFloor: FieldLogTable.valueScaleFloor)
+                }
             }
             HStack(spacing: 6) {
-                if let n = entry.treeNumber {
-                    Text("#\(n)")
-                        .font(ForestixType.dataSmall)
-                        .foregroundStyle(ForestixPalette.primary)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .overlay(
-                            Capsule()
-                                .stroke(ForestixPalette.primary.opacity(0.4),
-                                        lineWidth: 0.5))
+                if case .loose = row.subject {} else {
+                    // The kind words that used to be the TYPE column, kept
+                    // here only when a row carries something other than the
+                    // two named columns (a crown on the same tree).
+                    ForEach(extraKinds, id: \.self) { word in
+                        Text(word)
+                            .font(ForestixType.dataSmall)
+                            .foregroundStyle(ForestixPalette.textTertiary)
+                    }
                 }
-                Text(timestampText)
+                if let species = speciesName {
+                    Text(species)
+                        .font(ForestixType.dataSmall)
+                        .foregroundStyle(ForestixPalette.textSecondary)
+                        .lineLimit(1)
+                }
+                Text(compactRelativeAgo(row.latest))
                     .font(ForestixType.dataSmall)
                     .foregroundStyle(ForestixPalette.textTertiary)
                     .lineLimit(1)
+                Spacer(minLength: 0)
+                // The standard "there is more behind this" affordance —
+                // the row is a button and this says so.
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(ForestixPalette.textTertiary)
             }
-            // No indent: the old one was "52 + gap", i.e. hard-coded to the
-            // width the TYPE column no longer has. The meta line is a
-            // sub-label of the row, so it reads from the row's own edge.
         }
         .padding(.vertical, 2)
+        .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(
-            (entry.treeNumber.map { "Tree \($0). " } ?? "") +
-            "\(typeLabel) \(valueText), give or take \(sigmaText), "
-            + ConfidenceStyle.descriptor(for: entry.confidenceRaw).label)
+        .accessibilityLabel(accessibilityText)
+        .accessibilityHint("Opens the full record")
     }
 
-    private var typeLabel: String {
-        switch entry.kind {
-        case .dbh:          return "DBH"
-        case .height:       return "Height"
-        case .crown:        return "Crown"
-        case .distance:     return "Dist"
-        case .samplingPlot: return "Plot"
-        }
+    /// Kinds on this tree beyond the two the table names.
+    private var extraKinds: [String] {
+        let extras = row.entries
+            .filter { $0.kind != .dbh && $0.kind != .height }
+            .map { FieldLogRowModel.kindWord($0.kind) }
+        return Array(Set(extras)).sorted()
     }
 
-    private var valueText: String {
-        switch entry.kind {
+    private var speciesName: String? {
+        guard let code = row.entries.compactMap(\.speciesCode)
+            .first(where: { !$0.isEmpty }) else { return nil }
+        return RegionalSpecies.name(forCode: code)
+    }
+
+    private func looseValue(_ kind: QuickMeasureEntry.Kind) -> String {
+        guard let entry = row.entries.first else { return "—" }
+        switch kind {
         case .dbh:
             return MeasurementFormatter.diameter(cm: entry.value, in: unitSystem)
         case .height:
-            return MeasurementFormatter.height(m:  entry.value, in: unitSystem)
+            return MeasurementFormatter.height(m: entry.value, in: unitSystem)
         case .crown:
-            // Show width × height in metres for compactness.
-            let h = entry.secondaryValue ?? 0
-            return String(format: "%.1f × %.1f m", entry.value, h)
+            return String(format: "%.1f × %.1f m",
+                          entry.value, entry.secondaryValue ?? 0)
         case .distance:
-            if entry.value < 1 {
-                return String(format: "%.0f cm", entry.value * 100)
-            }
-            return String(format: "%.2f m", entry.value)
+            return MeasurementFormatter.distance(m: entry.value, in: unitSystem)
         case .samplingPlot:
-            let area = entry.secondaryValue
-                ?? (.pi * entry.value * entry.value)
+            let area = entry.secondaryValue ?? (.pi * entry.value * entry.value)
             return String(format: "%.1f m radius · %.1f m²", entry.value, area)
         }
     }
 
-    private var sigmaText: String {
-        guard let s = entry.sigma, s > 0 else { return "—" }
+    private var accessibilityText: String {
+        var parts: [String] = [row.title]
+        if let d = row.dbh {
+            parts.append("DBH " + MeasurementFormatter.diameter(
+                cm: d.value, in: unitSystem))
+        }
+        if let h = row.height {
+            parts.append("Height " + MeasurementFormatter.height(
+                m: h.value, in: unitSystem))
+        }
+        if case .loose(let kind) = row.subject {
+            parts.append(looseValue(kind))
+        }
+        if let species = speciesName { parts.append(species) }
+        return parts.joined(separator: ", ")
+    }
+}
+
+// MARK: - Detail sheet
+
+/// The whole record behind one row.
+///
+/// FIELD REPORT 5 asked for this: the log table now shows the two numbers a
+/// cruiser reads while walking, and everything else — what was typed into
+/// the details sheet at capture time, the species, the ± band, where the
+/// reading was taken, and in developer mode the ground truth entered against
+/// this tree — lives one tap away instead of being squeezed into columns.
+private struct FieldLogDetailSheet: View {
+
+    let row: FieldLogRowModel
+    let unitSystem: UnitSystem
+
+    @EnvironmentObject private var settings: AppSettings
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                measurementsSection
+                detailsSection
+                contextSection
+                if settings.developerMode, !groundTruths.isEmpty {
+                    groundTruthSection
+                }
+            }
+            .navigationTitle(row.title)
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+
+    // MARK: Measurements
+
+    private var measurementsSection: some View {
+        Section("Measurements") {
+            ForEach(row.entries) { entry in
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack {
+                        Text(FieldLogRowModel.kindWord(entry.kind))
+                            .foregroundStyle(ForestixPalette.textSecondary)
+                        Spacer(minLength: 8)
+                        Text(value(entry))
+                            .font(ForestixType.data)
+                            .foregroundStyle(ForestixPalette.textPrimary)
+                    }
+                    // The ± band the table used to carry. It is the
+                    // measurement's own precision, so it belongs with the
+                    // measurement rather than in a column being scaled to
+                    // fit on a phone.
+                    if let band = sigma(entry) {
+                        Text(band)
+                            .font(ForestixType.dataSmall)
+                            .foregroundStyle(ForestixPalette.textTertiary)
+                    }
+                }
+            }
+        }
+    }
+
+    private func value(_ entry: QuickMeasureEntry) -> String {
+        switch entry.kind {
+        case .dbh:
+            return MeasurementFormatter.diameter(cm: entry.value, in: unitSystem)
+        case .height:
+            return MeasurementFormatter.height(m: entry.value, in: unitSystem)
+        case .crown:
+            return String(format: "%.1f × %.1f m",
+                          entry.value, entry.secondaryValue ?? 0)
+        case .distance:
+            return MeasurementFormatter.distance(m: entry.value, in: unitSystem)
+        case .samplingPlot:
+            let area = entry.secondaryValue ?? (.pi * entry.value * entry.value)
+            return String(format: "%.1f m radius · %.1f m²", entry.value, area)
+        }
+    }
+
+    private func sigma(_ entry: QuickMeasureEntry) -> String? {
+        guard let s = entry.sigma, s > 0 else { return nil }
         switch entry.kind {
         case .dbh:    return MeasurementFormatter.diameterSigma(mm: s, in: unitSystem)
-        case .height: return MeasurementFormatter.heightSigma(m:  s, in: unitSystem)
+        case .height: return MeasurementFormatter.heightSigma(m: s, in: unitSystem)
         case .crown, .distance, .samplingPlot:
             return String(format: "±%.2f m", s)
         }
     }
 
+    // MARK: What the cruiser typed
+
+    private var detailsSection: some View {
+        Section("Details") {
+            row(label: "Species", value: speciesText)
+            if let position = row.entries.compactMap(\.position).first {
+                self.row(label: "Stem position", value: position.displayName)
+            }
+            if !damageCodes.isEmpty {
+                self.row(label: "Damage", value: damageCodes.joined(separator: ", "))
+            }
+            if let note = notes {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Note")
+                        .foregroundStyle(ForestixPalette.textSecondary)
+                    Text(note)
+                        .font(ForestixType.body)
+                        .foregroundStyle(ForestixPalette.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            if speciesText == "—" && damageCodes.isEmpty && notes == nil
+                && row.entries.allSatisfy({ $0.position == nil }) {
+                Text("Nothing was attached to this reading.")
+                    .font(ForestixType.caption)
+                    .foregroundStyle(ForestixPalette.textTertiary)
+            }
+        }
+    }
+
+    private var speciesText: String {
+        guard let code = row.entries.compactMap(\.speciesCode)
+            .first(where: { !$0.isEmpty }) else { return "—" }
+        return "\(RegionalSpecies.name(forCode: code)) · \(code)"
+    }
+
+    private var damageCodes: [String] {
+        Array(Set(row.entries.flatMap(\.damageCodes))).sorted()
+    }
+
+    private var notes: String? {
+        let all = row.entries.compactMap(\.note)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return all.isEmpty ? nil : all.joined(separator: "\n")
+    }
+
+    // MARK: Where and when
+
+    private var contextSection: some View {
+        Section("Recorded") {
+            row(label: "When", value: timestampText)
+            if let fix = row.entries.first(where: {
+                $0.latitude != nil && $0.longitude != nil
+            }) {
+                self.row(label: "Position",
+                         value: String(format: "%.5f, %.5f",
+                                       fix.latitude ?? 0, fix.longitude ?? 0))
+            } else {
+                // Said out loud rather than left blank: a reading with no
+                // fix is a different thing from one whose fix was not shown.
+                self.row(label: "Position", value: "not recorded")
+            }
+            if let mode = row.entries.compactMap(\.captureMode).first {
+                self.row(label: "Capture",
+                         value: mode == "manual" ? "Adjusted by hand" : "Automatic")
+            }
+            if let photo = row.entries.compactMap(\.photoPath).first {
+                FieldLogPhotoRow(name: photo)
+            }
+        }
+    }
+
     private var timestampText: String {
-        compactRelativeAgo(entry.createdAt)
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "en_US")
+        fmt.dateFormat = "MMM d, HH:mm"
+        return fmt.string(from: row.latest)
+    }
+
+    // MARK: Ground truth (developer mode)
+
+    /// Hand-measured values typed against this tree number, read back from
+    /// the raw-capture bundles — which is where the truth is actually
+    /// stored. Developer-mode only, because that is the only mode in which
+    /// the field exists to type into.
+    private var groundTruths: [(kind: String, value: Double)] {
+        guard case .tree(let number) = row.subject else { return [] }
+        return RawCaptureStore.list().compactMap { summary in
+            guard summary.manifest.context.treeNumber == number,
+                  let truth = summary.manifest.truth.value else { return nil }
+            return (summary.manifest.kind, truth)
+        }
+    }
+
+    private var groundTruthSection: some View {
+        Section("Ground truth") {
+            ForEach(groundTruths.indices, id: \.self) { index in
+                let item = groundTruths[index]
+                row(label: item.kind == "dbh" ? "Tape diameter" : "Measured height",
+                    value: item.kind == "dbh"
+                        ? String(format: "%.1f cm", item.value)
+                        : String(format: "%.2f m", item.value))
+            }
+        }
+    }
+
+    // MARK: Row helper
+
+    private func row(label: String, value: String) -> some View {
+        HStack {
+            Text(label)
+                .foregroundStyle(ForestixPalette.textSecondary)
+            Spacer(minLength: 8)
+            Text(value)
+                .foregroundStyle(ForestixPalette.textPrimary)
+                .multilineTextAlignment(.trailing)
+        }
+    }
+}
+
+/// The capture photo, if the file is still there. A missing file says so
+/// rather than leaving an empty box — the container can move between
+/// installs, and a blank row would read as "no photo was taken".
+private struct FieldLogPhotoRow: View {
+    let name: String
+
+    var body: some View {
+        #if canImport(UIKit)
+        if let image = UIImage(contentsOfFile:
+                                MeasurePhotoStore.url(for: name).path) {
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFit()
+                .frame(maxHeight: 220)
+                .clipShape(RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                            style: .continuous))
+                .accessibilityLabel("Capture photo")
+        } else {
+            HStack {
+                Text("Photo")
+                    .foregroundStyle(ForestixPalette.textSecondary)
+                Spacer(minLength: 8)
+                Text("file missing")
+                    .foregroundStyle(ForestixPalette.textTertiary)
+            }
+        }
+        #else
+        EmptyView()
+        #endif
     }
 }
 
@@ -512,32 +911,6 @@ private func compactRelativeAgo(_ date: Date, now: Date = Date()) -> String {
     fmt.locale = Locale(identifier: "en_US")
     fmt.dateFormat = "MMM d"
     return fmt.string(from: date)
-}
-
-// MARK: - Tier chip (shared pattern)
-
-private struct TierChip: View {
-    let rawTier: String
-    var body: some View {
-        let d = ConfidenceStyle.descriptor(for: rawTier)
-        return Text(d.label.uppercased())
-            .font(ForestixType.sectionHead)
-            .tracking(0.8)
-            // One line, always: a squeezed column used to break the chip
-            // mid-word ("GOO/D") rather than let it stay a word.
-            .lineLimit(1)
-            .allowsTightening(true)
-            .minimumScaleFactor(FieldLogTable.labelScaleFloor)
-            .fixedSize(horizontal: true, vertical: false)
-            .padding(.horizontal, ForestixSpace.xs)
-            .padding(.vertical, 3)
-            .overlay(
-                RoundedRectangle(cornerRadius: ForestixRadius.chip,
-                                 style: .continuous)
-                    .stroke(d.color, lineWidth: 0.75)
-            )
-            .foregroundStyle(d.color)
-    }
 }
 
 // MARK: - Share sheet plumbing

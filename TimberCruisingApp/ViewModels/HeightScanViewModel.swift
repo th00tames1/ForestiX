@@ -108,6 +108,21 @@ public final class HeightScanViewModel: ObservableObject {
     /// for both taps, so we lock it on the first tap and reuse it.
     private var standingPointWorldAtAimTop: SIMD3<Float>?
 
+    /// How far the camera moved between the base sighting and the top
+    /// sighting. nil until a height has been computed (or when the pose was
+    /// unavailable). See `captureTopNow` for why this is a measurement fact
+    /// and not a nicety.
+    @Published public private(set) var aimDriftM: Float?
+
+    /// How far the phone may move between the two sightings before the
+    /// reading is worth a warning.
+    ///
+    /// 0.25 m clears ordinary hand and wrist movement while tilting up —
+    /// a few centimetres on a held phone — and catches the two cases that
+    /// actually bias the number: raising the phone overhead to clear a
+    /// crown, and taking a step. Android uses the identical value.
+    public static let aimDriftWarnM: Float = 0.25
+
     /// World hit point for the Aim Top / Aim Base taps, if the host
     /// supplied one (e.g. from a screen-centre raycast). Purely for
     /// marker visualisation — height math still runs on α_top / α_base
@@ -297,6 +312,7 @@ public final class HeightScanViewModel: ObservableObject {
         alphaTopRad = nil
         alphaBaseRad = nil
         standingPointWorldAtAimTop = nil
+        aimDriftM = nil
         topAimedWorld = nil
         baseAimedWorld = nil
         anchorFailureReason = nil
@@ -466,6 +482,26 @@ public final class HeightScanViewModel: ObservableObject {
     /// 10–100× and produced absurd heights (e.g. a desk at 2 m showing
     /// up as 100 m+) instead of an honest "tracking not ready" message.
     public func captureTopNow(screenCenterHit: SIMD3<Float>? = nil) {
+        // HOW FAR THE INSTRUMENT MOVED between the two sightings.
+        //
+        // The §7.2 tangent formula assumes both angles were taken from ONE
+        // point: H = d_h(tan α_top − tan α_base). The standing pose is
+        // locked at the BASE aim and α_top is read from wherever the camera
+        // is now, so a cruiser who raises the phone or shifts a foot while
+        // finding the treetop measures a tree that does not exist. The error
+        // is roughly the vertical movement one-for-one, plus the horizontal
+        // movement scaled by (tree height / d_h) — at 10 m from a 20 m tree
+        // a 20 cm step is a 40 cm error, which is inside nothing this app
+        // claims. Measured here and reported on the result panel; the
+        // reading is not refused, because a cruiser who has already walked
+        // the off-distance should be told it is soft rather than sent back
+        // by an arm's-length wobble.
+        if let locked = standingPointWorldAtAimTop,
+           let now = currentCameraTranslation() {
+            aimDriftM = simd_distance(locked, now)
+        } else {
+            aimDriftM = nil
+        }
         captureTop(at: nowForPitchBuffer(),
                    aimedAtWorld: screenCenterHit)
     }
@@ -519,6 +555,7 @@ public final class HeightScanViewModel: ObservableObject {
         alphaTopRad = nil
         alphaBaseRad = nil
         standingPointWorldAtAimTop = nil
+        aimDriftM = nil
         topAimedWorld = nil
         baseAimedWorld = nil
         result = nil
@@ -727,6 +764,16 @@ public final class HeightScanViewModel: ObservableObject {
     ///   position; only the Y differs by the instrument-triangle rise.
     /// • Base marker — same shape, using `α_base`. Lands near ground
     ///   level when the cruiser correctly aimed at the tree base.
+    /// Radius of the anchor / top / base aim spheres, at the scaling
+    /// reference distance (`ARCameraView.scaleReferenceM`, 2.5 m).
+    ///
+    /// FIELD REPORT 2 — was 0.08. Together with the sub-linear distance
+    /// scaling this makes the far-field marker roughly a third of the
+    /// on-screen area it used to cover, which is the difference between
+    /// pointing AT a treetop and painting over it. Near-field it is a
+    /// quarter smaller and still an easy target to see against foliage.
+    private static let aimMarkerRadiusM: Float = 0.06
+
     private func rebuildSceneMarkers() {
         var markers: [ARSceneMarker] = []
 
@@ -734,7 +781,7 @@ public final class HeightScanViewModel: ObservableObject {
             markers.append(ARSceneMarker(
                 id: Self.anchorMarkerId,
                 worldPosition: anchor,
-                shape: .sphere(radiusM: 0.08),
+                shape: .sphere(radiusM: Self.aimMarkerRadiusM),
                 colorRGBA: SIMD4(1.00, 0.30, 0.30, 1.00),
                 scalesWithDistance: true))  // red
         }
@@ -758,7 +805,7 @@ public final class HeightScanViewModel: ObservableObject {
                 markers.append(ARSceneMarker(
                     id: Self.topMarkerId,
                     worldPosition: p,
-                    shape: .sphere(radiusM: 0.08),
+                    shape: .sphere(radiusM: Self.aimMarkerRadiusM),
                     colorRGBA: SIMD4(1.00, 0.85, 0.15, 1.00),
                     scalesWithDistance: true))  // yellow
             }
@@ -779,7 +826,7 @@ public final class HeightScanViewModel: ObservableObject {
                 markers.append(ARSceneMarker(
                     id: Self.baseMarkerId,
                     worldPosition: p,
-                    shape: .sphere(radiusM: 0.08),
+                    shape: .sphere(radiusM: Self.aimMarkerRadiusM),
                     colorRGBA: SIMD4(0.25, 0.85, 0.35, 1.00),
                     scalesWithDistance: true))  // green
             }

@@ -1586,17 +1586,15 @@ public enum DBHEstimator {
         let z = Double(depths[depths.count / 2])
         guard (0.3...5.0).contains(z) else { return nil }
 
-        // AXIS-MATCHED focal — fx when the bracket walks the depth grid's
-        // rows, fy when it walks columns. This used to be fx either way,
-        // which is a 4:3 error on a column walk (the auto chord path picks
-        // by axis; this one did not). Android does the same match.
-        let fAxis: Double
-        switch guideAxis {
-        case .row: fAxis = Double(frame.intrinsics[0, 0])
-        case .col: fAxis = Double(frame.intrinsics[1, 1])
-        }
-        guard fAxis - widthPx / 2.0 > 1.0 else { return nil }
-        let diameterM = widthPx * z / (fAxis - widthPx / 2.0)
+        // fx on BOTH axes, which is what the version the field verified
+        // used. Switching a column walk to fy is defensible on paper and is
+        // NOT being done here: this path is being restored to the code that
+        // measured correctly in the stand, and every change to it made from
+        // reasoning alone has been wrong. Revisit with a device and a tape,
+        // not from a reading of the geometry.
+        let fx = Double(frame.intrinsics[0, 0])
+        guard fx - widthPx / 2.0 > 1.0 else { return nil }
+        let diameterM = widthPx * z / (fx - widthPx / 2.0)
         let diameterCm = diameterM * 100.0
         guard (2.5...100.0).contains(diameterCm) else { return nil }
 

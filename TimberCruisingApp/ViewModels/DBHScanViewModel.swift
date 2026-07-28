@@ -492,7 +492,11 @@ public final class DBHScanViewModel: ObservableObject {
                         ax, edgeBracketLeftFraction, edgeBracketRightFraction,
                         frame.width, frame.height)
                 }
-                return "Can't read depth across the bracket — move a little closer, or widen it."
+                // NOT "widen it". A wider bracket raises the computed
+                // diameter, which pushes it further past the estimator's
+                // 100 cm ceiling — the advice guaranteed the failure it was
+                // trying to clear.
+                return "Can't read depth across the bracket — narrow it onto the trunk, or step closer."
             }()
             let pose = frame.cameraPoseWorld
             guideRowWorldY = pose.columns.3.y

@@ -88,9 +88,11 @@ import com.hcjeong.forestix.ui.screens.TruthFieldNote
 import com.hcjeong.forestix.ui.screens.TruthFieldWarning
 import com.hcjeong.forestix.ui.screens.ScanPlotMiniMap
 import com.hcjeong.forestix.ui.screens.scanPlotMiniMapVisible
+import com.hcjeong.forestix.ui.screens.scanPanelTextFieldColors
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixProminentButton
 import com.hcjeong.forestix.ui.theme.ForestixWhiteButton
+import com.hcjeong.forestix.ui.screens.cruise.freshFixOrNull
 import kotlinx.coroutines.delay
 import java.io.File
 import java.util.Locale
@@ -458,7 +460,11 @@ fun HeightScanScreen(
             projectId = cruise?.projectId?.toString(),
             plotId = cruise?.plotId?.toString() ?: env.history.activePlotID.value?.toString(),
             treeNumber = cruise?.treeNumber ?: pendingTree,
-            gps = com.hcjeong.forestix.positioning.LocationService.lastGlobalFix,
+            // Same freshness gate as the accept path — a bundle must not
+            // claim a position the app would refuse to draw.
+            gps = freshFixOrNull(
+                com.hcjeong.forestix.positioning.LocationService.lastGlobalFix,
+                System.currentTimeMillis()),
         )
         val samples = poseSamples.toList()
         val hitType = anchorHitType
@@ -598,6 +604,15 @@ fun HeightScanScreen(
                     failure = "The camera hasn't got its bearings yet — hold still for a second, then tap + again."; return
                 }
                 failure = null; alphaTop = aTop
+                // Sampled HERE, immediately after the angle and BEFORE the
+                // raw-capture block. captureAim() acquires a depth frame and
+                // writes a JPEG, and ArController.frame is replaced by the
+                // render thread while that runs — reading the position after
+                // it attributed the cruiser's hand movement during a disk
+                // round-trip to drift that never touched the angle, and only
+                // in developer mode, which is exactly the configuration the
+                // study data is collected in.
+                val topPosNow = controller.currentCameraPosition()
                 if (rawCaptureArmed) {
                     topPose = controller.currentCameraPose()
                     val (fr, rgb) = captureAim()
@@ -620,7 +635,7 @@ fun HeightScanScreen(
                 // step is a 40 cm error, which is inside nothing this app
                 // claims. It is reported, not swallowed: the cruiser can
                 // retake, and a recorded run carries the number.
-                val drift = controller.currentCameraPosition()?.let { now ->
+                val drift = topPosNow?.let { now ->
                     val dx = now.x - standing.x
                     val dy = now.y - standing.y
                     val dz = now.z - standing.z
@@ -748,7 +763,16 @@ fun HeightScanScreen(
                 hidingChromeForCapture = false
                 name
             }
-            val fix = com.hcjeong.forestix.positioning.LocationService.lastGlobalFix
+            // FRESHNESS-GATED. lastGlobalFix is the newest fix ANY screen
+            // ever saw, with no age check, so a red GPS chip and a green one
+            // used to produce byte-identical records: a cruiser under heavy
+            // canopy stamped every tree in the plot with the position they
+            // had when they walked in. The same rule the map, the plot
+            // verdict and the chip itself use decides here — an unusable fix
+            // stores NO position rather than a confident wrong one.
+            val fix = freshFixOrNull(
+                com.hcjeong.forestix.positioning.LocationService.lastGlobalFix,
+                System.currentTimeMillis())
             if (cruise != null) {
                 // The height leg must actually land on the tree row. It used
                 // to be a bare `runCatching {}` followed by an unconditional
@@ -823,6 +847,9 @@ fun HeightScanScreen(
                 "distance_m" to String.format(Locale.US, "%.2f", r.dHm),
                 "alpha_top_deg" to String.format(Locale.US, "%.2f", r.alphaTopRad * 180f / Math.PI.toFloat()),
                 "alpha_base_deg" to String.format(Locale.US, "%.2f", r.alphaBaseRad * 180f / Math.PI.toFloat()),
+                // Blank, not 0, when there was no pose to compare — an
+                // unmeasured drift and a zero drift are different facts.
+                "aim_drift_m" to (aimDriftM?.let { String.format(Locale.US, "%.3f", it) } ?: ""),
                 "species" to (metaSpecies ?: ""),
                 "note" to metaNote,
             )
@@ -1078,6 +1105,10 @@ fun HeightScanScreen(
                         },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        // White on the dark panel — the Material default is
+                        // near-black, i.e. invisible here (see
+                        // scanPanelTextFieldColors).
+                        colors = scanPanelTextFieldColors(),
                         modifier = Modifier.weight(1f),
                     )
                     // The field is typed in the ACTIVE unit system: under
@@ -1166,6 +1197,27 @@ fun HeightScanScreen(
                             color = Forestix.colors.confidenceBad,
                         )
                     }
+                    // THE INSTRUMENT MOVED between the two sightings, so the
+                    // tangent pair no longer shares an origin and the height
+                    // is soft by roughly this much.
+                    //
+                    // This lives in the SHARED panel, not in the COMPUTED
+                    // action row where it started, because a RED fit is
+                    // Accept-able here: a cruiser who stepped half a metre
+                    // and got a red result would have read the rejection
+                    // reason, decided the tree was just awkward, and accepted
+                    // a badly drifted height with no warning at all. iOS has
+                    // always rendered it for both stages, because its
+                    // resultPanel is shared; this is the same placement.
+                    aimDriftM?.takeIf { it > AIM_DRIFT_WARN_M }?.let { d ->
+                        Text(
+                            "You moved " + MeasurementFormatter.distance(
+                                d.toDouble(), settings.unitSystem) +
+                                " between the base and top sightings. Both have to be taken from one spot — retake for a firm number.",
+                            style = type.caption,
+                            color = Forestix.colors.confidenceWarn,
+                        )
+                    }
                     if (settings.developerMode) {
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             // Bench diagnostic — the raw captured inputs that
@@ -1234,22 +1286,6 @@ fun HeightScanScreen(
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
-                        // The instrument moved between the two sightings, so
-                        // the tangent pair no longer shares an origin and the
-                        // height is soft by roughly this much. Said plainly
-                        // and with the number, above the Accept button —
-                        // this is the moment the cruiser decides whether to
-                        // keep it.
-                        aimDriftM?.takeIf { it > AIM_DRIFT_WARN_M }?.let { d ->
-                            Text(
-                                "You moved " + MeasurementFormatter.distance(
-                                    d.toDouble(), settings.unitSystem) +
-                                    " between the base and top sightings. Both have to be taken from one spot — retake for a firm number.",
-                                style = type.caption,
-                                color = Forestix.colors.confidenceWarn,
-                                textAlign = TextAlign.Center,
-                            )
-                        }
                         // Crown control: start it, or restart it once done.
                         if (crownStep == CrownStep.NONE) {
                             ForestixWhiteButton("Measure crown", modifier = Modifier.fillMaxWidth()) {

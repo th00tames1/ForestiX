@@ -91,7 +91,7 @@ object CSVExporter {
     fun treesCSV(trees: List<Tree>): String {
         val header = listOf(
             "id", "plot_id", "tree_number", "species_code", "status",
-            "dbh_cm", "dbh_method",
+            "dbh_cm", "dbh_method", "dbh_capture_mode",
             "dbh_sigma_mm", "dbh_rmse_mm", "dbh_coverage_deg",
             "dbh_n_inliers", "dbh_confidence", "dbh_is_irregular",
             "height_m", "height_method", "height_source",
@@ -116,6 +116,7 @@ object CSVExporter {
             cells.add(quote(t.status.raw))
             cells.add(format(t.dbhCm.toDouble(), places = 2))
             cells.add(quote(t.dbhMethod.raw))
+            cells.add(quote(t.dbhCaptureMode ?: ""))
             cells.add(optional(t.dbhSigmaMm, places = 2))
             cells.add(optional(t.dbhRmseMm, places = 2))
             cells.add(optional(t.dbhCoverageDeg, places = 2))

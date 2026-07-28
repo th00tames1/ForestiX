@@ -38,6 +38,8 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Height
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -484,3 +486,32 @@ private fun ResearchField(
         },
     )
 }
+
+/// Colours for a text field the cruiser TYPES INTO on one of the scan
+/// screens' dark result panels.
+///
+/// FIELD REPORT — Material's OutlinedTextField defaults its text to
+/// `onSurface`, which in this app's palette is near-black. On the scan
+/// panels (black 0.55 over the camera feed) that is black on black: the
+/// manual-entry field looked empty however much was typed into it, so the
+/// cruiser could not read back the diameter or height they had just entered.
+/// The PLACEHOLDER looked fine, which is what made it easy to miss — it is
+/// drawn by the control at a different alpha.
+///
+/// Mirror of the iOS `scanPanelTextField()` modifier. Use this on EVERY
+/// typed field on a dark Compose panel rather than fixing them one at a
+/// time: the defect is a default, so it comes back on the next field
+/// somebody adds.
+@Composable
+fun scanPanelTextFieldColors() = OutlinedTextFieldDefaults.colors(
+    focusedTextColor = Color.White,
+    unfocusedTextColor = Color.White,
+    disabledTextColor = Color.White.copy(alpha = 0.6f),
+    cursorColor = Color.White,
+    focusedBorderColor = Color.White.copy(alpha = 0.7f),
+    unfocusedBorderColor = Color.White.copy(alpha = 0.4f),
+    focusedPlaceholderColor = Color.White.copy(alpha = 0.6f),
+    unfocusedPlaceholderColor = Color.White.copy(alpha = 0.6f),
+    focusedLabelColor = Color.White.copy(alpha = 0.7f),
+    unfocusedLabelColor = Color.White.copy(alpha = 0.6f),
+)

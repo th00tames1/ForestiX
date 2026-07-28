@@ -391,7 +391,11 @@ public struct HeightScanScreen: View {
                     try? await Task.sleep(for: .milliseconds(80))
                     let photo = MeasurePhotoStore.captureWindow()
                     hidingChromeForCapture = false
-                    let fix = LocationService.lastGlobalFix
+                    // Freshness-gated — see the note on the diameter
+                    // scan's accept path. A stale fix stores no position
+                    // rather than a confident wrong one.
+                    let fix = FixFreshness.usable(
+                        LocationService.lastGlobalFix)
                     let meta = ScanMetadata(
                         speciesCode: metaSpecies,
                         damageCodes: metaDamage,
@@ -754,6 +758,10 @@ public struct HeightScanScreen: View {
             "distance_m": String(format: "%.2f", r.dHm),
             "alpha_top_deg": String(format: "%.2f", r.alphaTopRad * 180 / .pi),
             "alpha_base_deg": String(format: "%.2f", r.alphaBaseRad * 180 / .pi),
+            // Blank, not 0, when there was no pose to compare — an
+            // unmeasured drift and a zero drift are different facts.
+            "aim_drift_m": viewModel.aimDriftM
+                .map { String(format: "%.3f", $0) } ?? "",
             "species": metaSpecies ?? "",
             "note": metaNote,
         ]
@@ -1314,7 +1322,10 @@ public struct HeightScanScreen: View {
     }
 
     static func currentGPS() -> RawCaptureGPS? {
-        guard let fix = LocationService.lastGlobalFix else { return nil }
+        // Same freshness gate as the accept path — a bundle must not
+        // claim a position the app would refuse to draw.
+        guard let fix = FixFreshness.usable(LocationService.lastGlobalFix)
+        else { return nil }
         return RawCaptureGPS(lat: fix.latitude, lon: fix.longitude,
                              accM: fix.horizontalAccuracyM)
     }

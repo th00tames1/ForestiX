@@ -64,7 +64,7 @@ public enum CSVExporter {
     public static func treesCSV(trees: [Tree]) -> String {
         let header = [
             "id", "plot_id", "tree_number", "species_code", "status",
-            "dbh_cm", "dbh_method",
+            "dbh_cm", "dbh_method", "dbh_capture_mode",
             "dbh_sigma_mm", "dbh_rmse_mm", "dbh_coverage_deg",
             "dbh_n_inliers", "dbh_confidence", "dbh_is_irregular",
             "height_m", "height_method", "height_source",
@@ -92,6 +92,7 @@ public enum CSVExporter {
             cells.append(quote(String(describing: t.status)))
             cells.append(format(Double(t.dbhCm), places: 2))
             cells.append(quote(String(describing: t.dbhMethod)))
+            cells.append(quote(t.dbhCaptureMode ?? ""))
             cells.append(optional(t.dbhSigmaMm, places: 2))
             cells.append(optional(t.dbhRmseMm, places: 2))
             cells.append(optional(t.dbhCoverageDeg, places: 2))

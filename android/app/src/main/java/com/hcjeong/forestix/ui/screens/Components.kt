@@ -32,6 +32,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -96,11 +97,31 @@ fun SwipeToDeleteRow(
     content: @Composable () -> Unit,
 ) {
     val colors = Forestix.colors
+    // The handler is read at gesture time, not captured from the first
+    // composition — the field log recycles these rows across trees, so a
+    // swipe must delete the tree the row is showing NOW.
+    val delete = rememberUpdatedState(onDelete)
     val state = rememberSwipeToDismissBoxState(
         confirmValueChange = { value ->
             if (value == SwipeToDismissBoxValue.EndToStart) {
-                onDelete()
-                true
+                delete.value()
+                // FALSE — the swipe FIRES the action but never settles the
+                // box dismissed.
+                //
+                // It used to return true, which left the row permanently
+                // collapsed to its red "Delete" background. That was
+                // survivable while every swipe deleted immediately, and
+                // became a data-integrity problem when the field log started
+                // asking for confirmation on a tree carrying more than one
+                // reading: the cruiser swipes, reads the dialog, taps
+                // Cancel, and is left looking at a red bar where a tree with
+                // a diameter and a height used to be. The readings are safe
+                // on disk and still export, but in the stand the rational
+                // response is to walk back and re-measure — which is how a
+                // duplicate of that tree gets into an accuracy-validation
+                // dataset. Refusing the settle keeps the row on screen and
+                // lets the confirmation dialog decide.
+                false
             } else {
                 false
             }

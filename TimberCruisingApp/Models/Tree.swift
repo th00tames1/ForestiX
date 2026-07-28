@@ -58,6 +58,17 @@ public struct Tree: Identifiable, Codable, Sendable {
     public var dbhCoverageDeg: Float?
     public var dbhNInliers: Int?
     public var dbhConfidence: ConfidenceTier
+    /// HOW the diameter's edges were found: "auto" (silhouette edge-finder),
+    /// "manual" (the ADJUST bracket the cruiser placed), or "typed" (hand
+    /// entered, no sensor involved).
+    ///
+    /// The cruise tree row used to record no provenance at all — `dbhMethod`
+    /// reads the same for a bracket and an auto fit — so a corpus mixing the
+    /// two could not be split at analysis time. That matters now that the
+    /// bracket is the default path: the algorithm comparison this data is
+    /// collected for needs to know which estimator produced each diameter.
+    /// nil for rows written before the field existed.
+    public var dbhCaptureMode: String?
     public var dbhIsIrregular: Bool
 
     // Height
@@ -108,6 +119,7 @@ public struct Tree: Identifiable, Codable, Sendable {
         dbhNInliers: Int?,
         dbhConfidence: ConfidenceTier,
         dbhIsIrregular: Bool,
+        dbhCaptureMode: String? = nil,
         heightM: Float?,
         heightMethod: HeightMethod?,
         heightSource: String?,
@@ -145,6 +157,7 @@ public struct Tree: Identifiable, Codable, Sendable {
         self.dbhNInliers = dbhNInliers
         self.dbhConfidence = dbhConfidence
         self.dbhIsIrregular = dbhIsIrregular
+        self.dbhCaptureMode = dbhCaptureMode
         self.heightM = heightM
         self.heightMethod = heightMethod
         self.heightSource = heightSource

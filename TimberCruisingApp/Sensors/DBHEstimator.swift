@@ -1456,6 +1456,78 @@ public enum DBHEstimator {
     }
 
     // MARK: - Manual edge-bracket (ADJUST) fits
+    //
+    // TWO ENTRY POINTS, and the split is the whole point of this section.
+    //
+    //   `bracketDepthGeometry` is the BOUNDARY. It takes the handles as the
+    //   cruiser placed them — fractions of the VIEW — and converts them ONCE
+    //   into depth-map fractions plus the walk axis, using the frame's
+    //   view→depth affine.
+    //
+    //   `bracketChordFit` / `bracketChordEstimate` work purely in DEPTH
+    //   space below that boundary, which is also the space the raw-capture
+    //   manifest stores, so a recorded bracket replays through exactly the
+    //   code that produced it.
+    //
+    // WHY THE BOUNDARY EXISTS (field report, follow-up to a3a2a91). The view
+    // fractions used to be handed straight to the depth grid as if the two
+    // shared a scale. They do not: a 4:3 sensor aspect-FILLED into a
+    // ~19.5:9 portrait view shows only about 60 % of the image's short axis.
+    // The crop is CENTRED, so the middle pixel is unaffected — which is why
+    // the auto path, whose only view-space input is the centre, has always
+    // been right — but a SPAN off the screen was inflated by the crop
+    // factor. Every bracketed diameter read high by roughly a third to a
+    // half, and it never looked wrong, because a fixed bracket agrees
+    // frame-to-frame and so earns a small σ and a GREEN tier.
+    //
+    // Android's `DbhEstimator.constrainedEstimate` has always had this
+    // boundary; this is the same rule, so a bracket now measures the same on
+    // both platforms.
+
+    /// The bracket as the DEPTH MAP sees it: which axis it walks, and where
+    /// its two ends fall along that axis as fractions.
+    ///
+    /// Returns nil when the frame carries no view mapping. FAIL CLOSED is
+    /// deliberate — the fallback that used to be here (assume 1:1) is the
+    /// defect.
+    public static func bracketDepthGeometry(
+        frame: ARDepthFrame,
+        leftFraction: Double,
+        rightFraction: Double,
+        guideFractionY: Double = 0.5,
+        viewSize: CGSize
+    ) -> (axis: GuideAxis, left: Double, right: Double)? {
+        guard let mapping = frame.viewMapping,
+              viewSize.width > 1, viewSize.height > 1,
+              frame.width > 0, frame.height > 0 else { return nil }
+        let lo = min(leftFraction, rightFraction)
+        let hi = max(leftFraction, rightFraction)
+        let gy = guideFractionY * Double(viewSize.height)
+        let pL = mapping.viewToDepth(x: lo * Double(viewSize.width), y: gy)
+        let pR = mapping.viewToDepth(x: hi * Double(viewSize.width), y: gy)
+        let dx = abs(pR.x - pL.x)
+        let dy = abs(pR.y - pL.y)
+        // The walk axis is whichever depth axis the screen-horizontal
+        // bracket covers more of — they sit 90° apart in portrait. Derived
+        // per frame from the display transform, which is stable, rather than
+        // voted on the scene's depth content, which is not: the old
+        // `pickGuideAxis` latch could fix the wrong axis for a whole plot
+        // and rescale it by 4:3.
+        let rowWalk = dx >= dy
+        let midX = (pL.x + pR.x) / 2
+        let midY = (pL.y + pR.y) / 2
+        let axis: GuideAxis = rowWalk
+            ? .row(y: min(max(Int(midY.rounded()), 0), frame.height - 1))
+            : .col(x: min(max(Int(midX.rounded()), 0), frame.width - 1))
+        let extent = Double(rowWalk ? frame.width : frame.height)
+        guard extent > 1 else { return nil }
+        let a = (rowWalk ? pL.x : pL.y) / extent
+        let b = (rowWalk ? pR.x : pR.y) / extent
+        let left = min(a, b)
+        let right = max(a, b)
+        guard left.isFinite, right.isFinite, right > left else { return nil }
+        return (axis, left, right)
+    }
 
     /// Single-frame DBH estimate constrained by two user-placed edge
     /// handles instead of the automatic silhouette walk — the DBH
@@ -1514,10 +1586,17 @@ public enum DBHEstimator {
         let z = Double(depths[depths.count / 2])
         guard (0.3...5.0).contains(z) else { return nil }
 
-        // Same focal the auto chord path uses.
-        let fx = Double(frame.intrinsics[0, 0])
-        guard fx - widthPx / 2.0 > 1.0 else { return nil }
-        let diameterM = widthPx * z / (fx - widthPx / 2.0)
+        // AXIS-MATCHED focal — fx when the bracket walks the depth grid's
+        // rows, fy when it walks columns. This used to be fx either way,
+        // which is a 4:3 error on a column walk (the auto chord path picks
+        // by axis; this one did not). Android does the same match.
+        let fAxis: Double
+        switch guideAxis {
+        case .row: fAxis = Double(frame.intrinsics[0, 0])
+        case .col: fAxis = Double(frame.intrinsics[1, 1])
+        }
+        guard fAxis - widthPx / 2.0 > 1.0 else { return nil }
+        let diameterM = widthPx * z / (fAxis - widthPx / 2.0)
         let diameterCm = diameterM * 100.0
         guard (2.5...100.0).contains(diameterCm) else { return nil }
 
@@ -1560,10 +1639,7 @@ public enum DBHEstimator {
             effectiveTapDepth: z)
     }
 
-    /// Burst-mode manual-bracket measurement: `bracketChordFit` on every
-    /// frame, median diameter across frames, cylinder calibration applied
-    /// — mirrors `chordEstimate` with the user's bracket span in place of
-    /// the silhouette walk. Confidence follows the same CoV rule.
+
     public static func bracketChordEstimate(
         frames: [ARDepthFrame],
         guideAxis: GuideAxis,

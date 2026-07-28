@@ -224,23 +224,42 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String, editPlotId: Str
                     return@launch
                 }
                 val pid = UUID.fromString(projectId)
-                val snap = fix ?: LocationService.lastGlobalFix
+                // FRESHNESS-GATED, and REFUSED when there is nothing usable.
+                //
+                // This used to fall through to `snap?.latitude ?: 0.0` and
+                // still stamp the row PositionSource.GPS_AVERAGED with a
+                // tier off the accuracy table — so a plot placed with no fix
+                // was saved at (0, 0), off West Africa, wearing the app's
+                // best position label. Every tree tallied into it inherited
+                // that centre, and nothing downstream could tell it from a
+                // real one. A plot centre is the anchor for everything
+                // measured in the plot; refusing to save is the only honest
+                // answer when the app does not know where it is.
+                val snap = freshFixOrNull(
+                    fix ?: LocationService.lastGlobalFix,
+                    System.currentTimeMillis())
+                if (snap == null) {
+                    failure = "No GPS fix — the plot centre would be saved " +
+                        "in the wrong place. Step out for sky and try again."
+                    saving = false
+                    return@launch
+                }
                 val r = ArSessionHub.plotRadiusM
                 val number = (env.plotRepository.listByProject(pid)
                     .maxOfOrNull { it.plotNumber } ?: 0) + 1
-                val acc = (snap?.horizontalAccuracyM ?: 0.0).toFloat()
+                val acc = snap.horizontalAccuracyM.toFloat()
                 val newPlot = Plot(
                     id = UUID.randomUUID(),
                     projectId = pid,
                     plannedPlotId = null,
                     plotNumber = number,
-                    centerLat = snap?.latitude ?: 0.0,
-                    centerLon = snap?.longitude ?: 0.0,
+                    centerLat = snap.latitude,
+                    centerLon = snap.longitude,
                     positionSource = PositionSource.GPS_AVERAGED,
                     // Honest single-fix stamp: spec tier table on the
                     // accuracy axis, nSamples = 1 records the shortcut.
                     positionTier = GPSAveraging.classify(acc, 0f),
-                    gpsNSamples = if (snap != null) 1 else 0,
+                    gpsNSamples = 1,
                     gpsMedianHAccuracyM = acc,
                     gpsSampleStdXyM = 0f,
                     offsetWalkM = null,

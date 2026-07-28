@@ -101,6 +101,43 @@ public struct ARScreenConfiguration: Equatable, Sendable {
 /// camera intrinsics, pose in world frame, timestamp. Stored in the
 /// depth map's native orientation (landscape for iOS), which is the
 /// basis for all coordinate math in §7.1 Steps 3–4.
+/// VIEW pixels → DEPTH pixels, as a 2D affine.
+///
+/// WHY THIS EXISTS (field report, commit a3a2a91 follow-up). The camera
+/// image is aspect-FILLED into the ARView: a 4:3 sensor in a ~19.5:9
+/// portrait view shows only about 60 % of the image's short axis. A centred
+/// crop preserves the CENTRE, which is why every depth consumer that only
+/// reads the middle pixel (the auto chord path's `cx = width/2`) has always
+/// been correct without a transform. It does NOT preserve a SPAN — and the
+/// ADJUST bracket is a span, taken from the screen and previously applied to
+/// the depth grid as if the two were the same scale. That over-read every
+/// bracketed diameter by the crop factor, silently, with a green tier,
+/// because a fixed bracket agrees frame-to-frame and so carries a tiny σ.
+///
+/// Mirror of the Android `ArDepthFrame.depthFromViewAffine`, which has
+/// always built this from ARCore's `transformCoordinates2d`. Here it comes
+/// from `ARFrame.displayTransform(for:viewportSize:)` inverted.
+public struct DepthViewMapping: Sendable, Equatable {
+    /// Row-major [a b tx ; c d ty].
+    public let a: Double, b: Double, tx: Double
+    public let c: Double, d: Double, ty: Double
+
+    public init(a: Double, b: Double, tx: Double,
+                c: Double, d: Double, ty: Double) {
+        self.a = a; self.b = b; self.tx = tx
+        self.c = c; self.d = d; self.ty = ty
+    }
+
+    public func viewToDepth(x: Double, y: Double) -> SIMD2<Double> {
+        SIMD2(a * x + b * y + tx, c * x + d * y + ty)
+    }
+
+    /// The six coefficients in the raw-capture manifest's `view_to_depth`
+    /// order — the same order Android writes, so a pooled corpus reads one
+    /// way.
+    public var flattened: [Double] { [a, b, tx, c, d, ty] }
+}
+
 public struct ARDepthFrame: Sendable {
     public let width: Int
     public let height: Int
@@ -113,6 +150,14 @@ public struct ARDepthFrame: Sendable {
     /// T_world_camera (homogeneous, column-major).
     public let cameraPoseWorld: simd_float4x4
     public let timestamp: TimeInterval
+    /// VIEW px → DEPTH px for the viewport this frame was displayed in.
+    ///
+    /// nil when the viewport was never reported (no AR view on screen yet)
+    /// or the transform was degenerate. Consumers that need it MUST FAIL
+    /// CLOSED — a bracket with no mapping is not a measurement, and there is
+    /// no safe default: the identity is exactly the wrong answer this field
+    /// exists to stop.
+    public let viewMapping: DepthViewMapping?
 
     public init(
         width: Int,
@@ -121,7 +166,8 @@ public struct ARDepthFrame: Sendable {
         confidence: [UInt8],
         intrinsics: simd_float3x3,
         cameraPoseWorld: simd_float4x4,
-        timestamp: TimeInterval
+        timestamp: TimeInterval,
+        viewMapping: DepthViewMapping? = nil
     ) {
         precondition(depth.count == width * height)
         precondition(confidence.count == width * height)
@@ -132,6 +178,7 @@ public struct ARDepthFrame: Sendable {
         self.intrinsics = intrinsics
         self.cameraPoseWorld = cameraPoseWorld
         self.timestamp = timestamp
+        self.viewMapping = viewMapping
     }
 
     @inlinable
@@ -206,6 +253,25 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
     private struct StreamGate { var depth: Bool; var features: Bool }
     private let streamGate = OSAllocatedUnfairLock(
         initialState: StreamGate(depth: true, features: true))
+
+    /// The AR view's size and interface orientation, reported by
+    /// `ARCameraView` whenever its bounds change. Read by the (nonisolated)
+    /// session delegate to build each frame's view→depth mapping, so it
+    /// lives behind the same lock as the stream gate.
+    ///
+    /// Starts EMPTY on purpose. Until a real AR view has reported its
+    /// bounds there is no honest mapping, and `DepthViewMapping` has no
+    /// safe default — see the note on `ARDepthFrame.viewMapping`.
+    private struct Viewport { var size: CGSize; var orientation: UIInterfaceOrientation }
+    private let viewport = OSAllocatedUnfairLock(
+        initialState: Viewport(size: .zero, orientation: .portrait))
+
+    /// Called by `ARCameraView` on layout. Cheap and idempotent.
+    public nonisolated func reportViewport(size: CGSize,
+                                           orientation: UIInterfaceOrientation) {
+        guard size.width > 1, size.height > 1 else { return }
+        viewport.withLock { $0 = Viewport(size: size, orientation: orientation) }
+    }
 
     public override init() {
         self.session = ARSession()
@@ -367,7 +433,12 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
         // feature-point array copy is skipped unless the DBH AR-motion
         // method is on screen.
         let gate = streamGate.withLock { $0 }
-        let converted = gate.depth ? Self.convert(frame: frame) : nil
+        let vp = viewport.withLock { $0 }
+        let converted = gate.depth
+            ? Self.convert(frame: frame,
+                           viewportSize: vp.size,
+                           orientation: vp.orientation)
+            : nil
         let status = Self.mapTrackingState(frame.camera.trackingState)
         let t = frame.camera.transform
         let camPos = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
@@ -395,7 +466,50 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
         }
     }
 
-    private nonisolated static func convert(frame: ARFrame) -> ARDepthFrame? {
+    /// VIEW px → DEPTH px for this frame, or nil when it cannot be built
+    /// honestly.
+    ///
+    /// `displayTransform(for:viewportSize:)` maps NORMALISED IMAGE space to
+    /// NORMALISED VIEW space, so the mapping wanted here is its inverse,
+    /// pre-scaled by the viewport and post-scaled by the depth grid:
+    ///
+    ///     view px --(1/viewport)--> norm view --(dt⁻¹)--> norm image
+    ///             --(× depth size)--> depth px
+    ///
+    /// The depth map and the captured image share an orientation and an
+    /// aspect, so normalised image coordinates land on the depth grid by a
+    /// plain scale.
+    private nonisolated static func viewMapping(
+        frame: ARFrame,
+        viewportSize: CGSize,
+        orientation: UIInterfaceOrientation,
+        depthWidth: Int,
+        depthHeight: Int
+    ) -> DepthViewMapping? {
+        guard viewportSize.width > 1, viewportSize.height > 1,
+              depthWidth > 0, depthHeight > 0 else { return nil }
+        let dt = frame.displayTransform(for: orientation,
+                                        viewportSize: viewportSize)
+        // A singular transform would silently collapse the bracket to zero
+        // width; refuse it rather than publish a mapping that cannot be
+        // inverted.
+        guard abs(dt.a * dt.d - dt.b * dt.c) > 1e-9 else { return nil }
+        let m = CGAffineTransform(scaleX: 1 / viewportSize.width,
+                                  y: 1 / viewportSize.height)
+            .concatenating(dt.inverted())
+            .concatenating(CGAffineTransform(scaleX: CGFloat(depthWidth),
+                                             y: CGFloat(depthHeight)))
+        let coeffs = [m.a, m.b, m.tx, m.c, m.d, m.ty].map(Double.init)
+        guard coeffs.allSatisfy({ $0.isFinite }) else { return nil }
+        return DepthViewMapping(a: coeffs[0], b: coeffs[1], tx: coeffs[2],
+                                c: coeffs[3], d: coeffs[4], ty: coeffs[5])
+    }
+
+    private nonisolated static func convert(
+        frame: ARFrame,
+        viewportSize: CGSize = .zero,
+        orientation: UIInterfaceOrientation = .portrait
+    ) -> ARDepthFrame? {
         guard let sceneDepth = frame.sceneDepth ?? frame.smoothedSceneDepth
         else { return nil }
         let depthMap = sceneDepth.depthMap
@@ -460,7 +574,12 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
             confidence: confidence,
             intrinsics: K,
             cameraPoseWorld: frame.camera.transform,
-            timestamp: frame.timestamp
+            timestamp: frame.timestamp,
+            viewMapping: viewMapping(frame: frame,
+                                     viewportSize: viewportSize,
+                                     orientation: orientation,
+                                     depthWidth: width,
+                                     depthHeight: height)
         )
     }
 }

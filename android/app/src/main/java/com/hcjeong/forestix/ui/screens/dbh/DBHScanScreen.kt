@@ -111,11 +111,13 @@ import com.hcjeong.forestix.ui.screens.TruthFieldWarning
 import com.hcjeong.forestix.ui.screens.ScanPlotMiniMap
 import com.hcjeong.forestix.ui.screens.TiltBadge
 import com.hcjeong.forestix.ui.screens.scanPlotMiniMapVisible
+import com.hcjeong.forestix.ui.screens.scanPanelTextFieldColors
 import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixProminentButton
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import com.hcjeong.forestix.ui.theme.ForestixWhiteButton
+import com.hcjeong.forestix.ui.screens.cruise.freshFixOrNull
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -340,7 +342,11 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             projectId = cruise?.projectId?.toString(),
             plotId = cruise?.plotId?.toString() ?: env.history.activePlotID.value?.toString(),
             treeNumber = cruise?.treeNumber ?: pendingTree,
-            gps = com.hcjeong.forestix.positioning.LocationService.lastGlobalFix,
+            // Same freshness gate as the accept path — a bundle must not
+            // claim a position the app would refuse to draw.
+            gps = freshFixOrNull(
+                com.hcjeong.forestix.positioning.LocationService.lastGlobalFix,
+                System.currentTimeMillis()),
         )
         // Mint the id NOW so Accept has something to attach truth to even if
         // the write is still running (RawCaptureStore queues edits per id).
@@ -999,7 +1005,16 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 hidingChromeForCapture = false
                 name
             }
-            val fix = com.hcjeong.forestix.positioning.LocationService.lastGlobalFix
+            // FRESHNESS-GATED. lastGlobalFix is the newest fix ANY screen
+            // ever saw, with no age check, so a red GPS chip and a green one
+            // used to produce byte-identical records: a cruiser under heavy
+            // canopy stamped every tree in the plot with the position they
+            // had when they walked in. The same rule the map, the plot
+            // verdict and the chip itself use decides here — an unusable fix
+            // stores NO position rather than a confident wrong one.
+            val fix = freshFixOrNull(
+                com.hcjeong.forestix.positioning.LocationService.lastGlobalFix,
+                System.currentTimeMillis())
             if (cruise != null) {
                 // Cruise mode: the SAME accept pedigree (value + σ + meta +
                 // GPS + photo) lands on a cruise Tree row in the active
@@ -1014,6 +1029,11 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         note = metaNote,
                         photoPath = photo,
                         fix = fix,
+                        captureMode = when {
+                            r.method == DBHMethod.MANUAL_VISUAL -> "typed"
+                            resultFromAdjust -> "manual"
+                            else -> "auto"
+                        },
                     )
                 }.getOrNull()
                 // A. QUICK-TALLY LOOP: no pop, no continuation — bump the
@@ -1046,7 +1066,13 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 env.history.append(
                     QuickMeasureEntry(
                         kind = MeasureKind.DBH, value = r.diameterCm.toDouble(),
-                        sigma = r.sigmaRmm.toDouble(), confidenceRaw = r.confidence.raw,
+                        // A TYPED diameter has no propagated uncertainty —
+                        // there is no geometry to propagate. Recording 0
+                        // would claim a perfect measurement and poison the
+                        // sigma column the accuracy work reads.
+                        sigma = if (r.method == DBHMethod.MANUAL_VISUAL) null
+                                else r.sigmaRmm.toDouble(),
+                        confidenceRaw = r.confidence.raw,
                         method = r.method.raw, treeNumber = pendingTree,
                         plotID = env.history.activePlotID.value,
                         speciesCode = metaSpecies,
@@ -1056,10 +1082,16 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         latitude = fix?.latitude,
                         longitude = fix?.longitude,
                         photoPath = photo,
-                        // Edge provenance: "manual" when the ADJUST bracket
-                        // supplied the edges, "auto" otherwise (other measure
-                        // kinds leave the column null).
-                        captureMode = if (resultFromAdjust) "manual" else "auto",
+                        // Edge provenance. "typed" is its OWN value, not
+                        // "auto": a hand-entered diameter had no edge-finder
+                        // and no bracket, and filing it under "auto" put a
+                        // number the sensors never produced into the same
+                        // bucket the algorithm comparison draws from.
+                        captureMode = when {
+                            r.method == DBHMethod.MANUAL_VISUAL -> "typed"
+                            resultFromAdjust -> "manual"
+                            else -> "auto"
+                        },
                     )
                 )
                 // Full-measurement chain (quick-measure world): skip the
@@ -1591,6 +1623,10 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        // White on the dark panel — the Material default is
+                        // near-black, i.e. invisible here (see
+                        // scanPanelTextFieldColors).
+                        colors = scanPanelTextFieldColors(),
                         modifier = Modifier.weight(1f),
                     )
                     // The field is typed in the ACTIVE unit system: under

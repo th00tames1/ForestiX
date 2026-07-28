@@ -280,6 +280,20 @@ public struct DBHScanScreen: View {
 
             GeometryReader { geo in
                 ZStack {
+                    // THE VIEWPORT THE BRACKET IS MEASURED AGAINST.
+                    //
+                    // Reported from here because this reader is
+                    // UNCONDITIONAL — it renders in every state. The ADJUST
+                    // overlay is not: it appears only once the bracket is up
+                    // and the state is right, and the bracket needs the
+                    // mapping in order to produce the fit that gets it
+                    // there. Reporting from inside it was circular, which is
+                    // why the diameter never appeared.
+                    Color.clear
+                        .onAppear { viewModel.viewSize = geo.size }
+                        .onChange(of: geo.size) { _, new in
+                            viewModel.viewSize = new
+                        }
                     guideLine(height: geo.size.height)
                     fitChord(in: geo.size)
                     // Crosshair ring is now positioned by GeometryReader
@@ -315,6 +329,14 @@ public struct DBHScanScreen: View {
                 }
                 .frame(width: geo.size.width, height: geo.size.height)
             }
+            // FULL-BLEED, matching the camera view. This rect is what the
+            // view→depth affine is built from and what the bracket handles
+            // are fractions of, so it has to be the rect the camera actually
+            // occupies. It also puts the crosshair and the guide line on the
+            // AR view's true centre — which is where the automatic path
+            // measures (the depth map's centre pixel) — instead of the
+            // safe-area centre a dozen points above it.
+            .ignoresSafeArea()
             .accessibilityElement(children: .ignore)
 
             // (The screen-wide tap catcher went with the AR caliper. Capture
@@ -326,16 +348,10 @@ public struct DBHScanScreen: View {
             // hides them.
             if adjustOverlayVisible && !hidingChromeForCapture {
                 GeometryReader { geo in
+                    // Handles only. The rect they are fractions of is
+                    // published by the chrome reader above, which exists in
+                    // every state — see the note there.
                     adjustHandleLayer(in: geo.size)
-                        // The handles are fractions of THIS rect, and the
-                        // view→depth affine is built from it too, so the two
-                        // describe the same rectangle. Published on every
-                        // layout, so a rotation cannot leave the mapping
-                        // reading against a stale viewport.
-                        .onAppear { viewModel.viewSize = geo.size }
-                        .onChange(of: geo.size) { _, new in
-                            viewModel.viewSize = new
-                        }
                 }
                 // FULL-BLEED, matching the camera view. Without this the
                 // overlay stops at the safe area while the AR view runs

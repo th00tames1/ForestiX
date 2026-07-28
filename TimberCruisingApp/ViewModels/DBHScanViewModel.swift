@@ -451,9 +451,18 @@ public final class DBHScanViewModel: ObservableObject {
             previewFit = fit
             previewDbhCm = fit?.diameterCm
             previewTier = fit?.tier
-            previewStatusText = geom == nil
-                ? "Getting the camera geometry — hold still for a second."
-                : nil
+            // Name the step that failed. "Nothing on screen" was the whole
+            // problem the last two attempts at this could not diagnose from
+            // a field report; a specific line means the next one pins it in
+            // one sentence.
+            previewStatusText = {
+                if geom != nil { return nil }
+                if viewSize.width <= 1 { return "No view size yet — reopen the scan." }
+                if frame.viewMapping == nil {
+                    return "Camera geometry not ready — hold still a second."
+                }
+                return "Bracket is off the depth map — widen it a little."
+            }()
             let pose = frame.cameraPoseWorld
             guideRowWorldY = pose.columns.3.y
             if let stem = fit?.centerWorldXZ {

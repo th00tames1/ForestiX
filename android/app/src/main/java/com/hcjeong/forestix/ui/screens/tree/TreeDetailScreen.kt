@@ -88,6 +88,7 @@ import com.hcjeong.forestix.common.CountrySpecies
 import com.hcjeong.forestix.common.Region
 import com.hcjeong.forestix.common.RegionalSpecies
 import com.hcjeong.forestix.data.cruise.TreeStatus
+import com.hcjeong.forestix.data.cruise.displayTitle
 import com.hcjeong.forestix.sensors.ConfidenceTier
 import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.screens.ForestixScaffold
@@ -186,7 +187,7 @@ private fun TreeDetailContent(nav: NavController, viewModel: TreeDetailViewModel
         mutableStateOf(trimmedCode.isNotEmpty() && presetCode == null)
     }
 
-    ForestixScaffold(nav, title = "Tree #${tree.treeNumber}") { padding ->
+    ForestixScaffold(nav, title = tree.displayTitle) { padding ->
         Column(
             Modifier
                 .padding(padding)

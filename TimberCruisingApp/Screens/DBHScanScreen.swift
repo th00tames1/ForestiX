@@ -172,9 +172,16 @@ public struct DBHScanScreen: View {
     /// diameter loop: each Accept saves the tree via `onAccept`, then the
     /// screen RESETS to aiming for the next tree instead of dismissing.
     /// The value is the tree number currently being aimed at (the host
-    /// auto-increments it after every save) and drives the "Tree 8"
-    /// target pill. Quick-measure call sites pass nothing.
+    /// auto-increments it after every save) and, with `tallyTreeName`,
+    /// drives the "Tree #8" target pill. Quick-measure sites pass nothing.
     private let tallyTreeNumber: Int?
+    /// The name the host will save the next tallied tree under, when the
+    /// cruiser has a series running in this plot. nil keeps the pill on the
+    /// number alone — the zero-typing default.
+    private let tallyTreeName: String?
+    /// Tally pill tapped — the host opens its rename field. nil leaves the
+    /// pill inert, which is what every quick-measure call site wants.
+    private let onRenameTally: (() -> Void)?
     /// Undo tap on the tally toast — the host deletes the just-saved
     /// tree row (and its photo) and steps the auto number back.
     private let onUndoTally: (() -> Void)?
@@ -196,13 +203,24 @@ public struct DBHScanScreen: View {
     /// target when looping, else the host's quick-measure target.
     private var captureTreeNumber: Int? { tallyTreeNumber ?? quickTreeNumber }
 
+    /// What the tally chrome calls the tree being aimed at — the cruiser's
+    /// name for it when there is one, else "Tree #<target>". nil outside the
+    /// cruise loop, where there is no tally at all.
+    private var tallyTreeTitle: String? {
+        tallyTreeNumber.map { TreeLabel.title(name: tallyTreeName, number: $0) }
+    }
+
     /// Non-nil when the host could NOT store the accepted diameter. The
     /// result stays on screen with this reason instead of the loop resetting
     /// (and, in cruise, chaining into Height) as if the tree had been written.
     @State private var dbhSaveFailure: String?
 
-    /// Saved-tree toast state: number shown in "Tree 7 saved · Undo".
-    @State private var tallyToastNumber: Int?
+    /// Saved-tree toast state: what the just-saved tree was called, shown in
+    /// "Tree #7 saved · Undo". Held as the finished LABEL rather than a
+    /// number, because the host advances both the number and the name the
+    /// instant the save lands — by the time the toast renders, recomputing it
+    /// would name the NEXT tree instead of the one Undo would remove.
+    @State private var tallyToastLabel: String?
     /// Bumps on every toast show so the 3 s auto-hide task restarts.
     @State private var tallyToastGeneration = 0
 
@@ -217,6 +235,8 @@ public struct DBHScanScreen: View {
                 onAccept: @escaping (DBHResult, ScanMetadata) -> Bool = { _, _ in true },
                 cruisePlotInfo: PlotMiniMapInfo? = nil,
                 tallyTreeNumber: Int? = nil,
+                tallyTreeName: String? = nil,
+                onRenameTally: (() -> Void)? = nil,
                 onUndoTally: (() -> Void)? = nil,
                 projectID: String? = nil,
                 quickTreeNumber: Int? = nil,
@@ -231,6 +251,8 @@ public struct DBHScanScreen: View {
         self.onAccept = onAccept
         self.cruisePlotInfo = cruisePlotInfo
         self.tallyTreeNumber = tallyTreeNumber
+        self.tallyTreeName = tallyTreeName
+        self.onRenameTally = onRenameTally
         self.onUndoTally = onUndoTally
         self.projectID = projectID
         self.quickTreeNumber = quickTreeNumber
@@ -435,7 +457,7 @@ public struct DBHScanScreen: View {
 
                 // Cruise tally target — small top-centre pill naming the
                 // tree the loop is aiming at, updating on every save.
-                if let target = tallyTreeNumber {
+                if let target = tallyTreeTitle {
                     VStack(spacing: 0) {
                         tallyTargetPill(target)
                             .padding(.top, 22)
@@ -500,7 +522,7 @@ public struct DBHScanScreen: View {
                 // the bottom controls.
                 VStack(spacing: 12) {
                     Spacer()
-                    if let saved = tallyToastNumber {
+                    if let saved = tallyToastLabel {
                         tallyUndoToast(saved)
                     }
                     if adjustOverlayVisible {
@@ -569,11 +591,11 @@ public struct DBHScanScreen: View {
         // Tally toast auto-hide — 3 s per show; the generation id
         // restarts the clock when a new save replaces the toast.
         .task(id: tallyToastGeneration) {
-            guard tallyToastNumber != nil else { return }
+            guard tallyToastLabel != nil else { return }
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             if !Task.isCancelled {
                 withAnimation(.easeOut(duration: 0.18)) {
-                    tallyToastNumber = nil
+                    tallyToastLabel = nil
                 }
             }
         }
@@ -745,8 +767,8 @@ public struct DBHScanScreen: View {
                     recordResearchRow(r)
                     applyTypedTruth()
                     guard stored else {
-                        dbhSaveFailure = tallyTreeNumber.map {
-                            "Diameter NOT saved as Tree \($0) — the tree row couldn't be written. Tap Accept again."
+                        dbhSaveFailure = tallyTreeTitle.map {
+                            "Diameter NOT saved as \($0) — the tree row couldn't be written. Tap Accept again."
                         } ?? "Diameter NOT saved — the tree row couldn't be written. Tap Accept again."
                         // Back to the result panel so the value is still on
                         // screen and Accept is tappable again. Nothing is
@@ -760,15 +782,16 @@ public struct DBHScanScreen: View {
                     // and auto-incremented its target; reset this screen
                     // (scan + per-tree metadata) to aiming for the next
                     // trunk and offer Undo. (The struct copy that built
-                    // this task still carries the just-saved number.)
-                    if let saved = tallyTreeNumber {
+                    // this task still carries the just-saved tree's label —
+                    // the host has already advanced to the next one.)
+                    if let saved = tallyTreeTitle {
                         viewModel.retake()
                         metaSpecies = nil
                         metaPosition = .dbh
                         metaDamage = []
                         metaNote = ""
                         withAnimation(.easeOut(duration: 0.18)) {
-                            tallyToastNumber = saved
+                            tallyToastLabel = saved
                         }
                         tallyToastGeneration += 1
                     }
@@ -1297,31 +1320,47 @@ public struct DBHScanScreen: View {
 
     // MARK: - Cruise tally chrome (target pill, undo toast, border chip)
 
-    /// Top-centre target pill — which tree number the tally loop is
-    /// aiming at right now. Updates as the host auto-increments.
+    /// Top-centre target pill — which tree the tally loop is aiming at right
+    /// now. Updates as the host auto-increments.
     /// (13 semibold on black 0.55 — Android parity.)
-    private func tallyTargetPill(_ number: Int) -> some View {
-        Text("Tree \(number)")
-            .font(.system(size: 13, weight: .semibold))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(Color.black.opacity(0.55), in: Capsule())
-            .overlay(Capsule().stroke(.white.opacity(0.18), lineWidth: 0.5))
-            .accessibilityIdentifier("dbhScan.tallyTarget")
+    ///
+    /// TAPPABLE in the cruise loop: this is where the tree gets its name, and
+    /// it is deliberately the pill rather than a step in front of the scan.
+    /// The cruiser is already aiming at the trunk; the name is offered
+    /// pre-filled by `TreeNameSequence` and only has to be touched when the
+    /// series starts or breaks, so the loop stays zero-typing per tree.
+    private func tallyTargetPill(_ title: String) -> some View {
+        Button {
+            onRenameTally?()
+        } label: {
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.black.opacity(0.55), in: Capsule())
+                .overlay(Capsule().stroke(.white.opacity(0.18), lineWidth: 0.5))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(onRenameTally == nil)
+        .accessibilityLabel(onRenameTally == nil ? title : "\(title). Rename")
+        .accessibilityIdentifier("dbhScan.tallyTarget")
     }
 
-    /// "Tree 7 saved · Undo" — dark-glass toast above the bottom
+    /// "Tree #7 saved · Undo" — dark-glass toast above the bottom
     /// controls for 3 s after every tally Accept; Undo is the tappable
     /// bold segment. Metrics mirror Android's snackbar-equivalent pill.
-    private func tallyUndoToast(_ number: Int) -> some View {
+    private func tallyUndoToast(_ title: String) -> some View {
         HStack(spacing: 0) {
-            Text("Tree \(number) saved · ")
+            Text("\(title) saved · ")
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(.white)
+                .lineLimit(1)
             Button {
                 onUndoTally?()
-                tallyToastNumber = nil
+                tallyToastLabel = nil
             } label: {
                 Text("Undo")
                     .font(.system(size: 14, weight: .bold))

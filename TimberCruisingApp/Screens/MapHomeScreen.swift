@@ -266,6 +266,17 @@ public struct MapHomeScreen: View {
     @State var chainPlotID: UUID?
     @State var chainTreeNumber: Int = 1
     @State var chainTreeID: UUID?
+    /// The name the NEXT tallied tree will be saved under, stepped on by
+    /// `TreeNameSequence` after every save exactly as the number is. nil on a
+    /// plot nobody has named — the loop then stays zero-typing and the trees
+    /// are labelled by number, which is what cruise mode has always done.
+    /// The tally pill is where the cruiser sets or clears it.
+    @State var chainTreeName: String?
+    /// Tally pill tapped — the rename field for `chainTreeName` is up, holding
+    /// the text being edited. Separate from `chainTreeName` so cancelling
+    /// leaves the pending name untouched.
+    @State var renamingTallyTree = false
+    @State var tallyNameDraft = ""
 
     // FIELD REPORT F10 / F11 — two covers presented FROM INSIDE the cruise
     // diameter tally rather than from the map. Nesting matters: the tally

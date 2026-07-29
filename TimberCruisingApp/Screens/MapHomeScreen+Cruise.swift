@@ -147,6 +147,44 @@ extension MapHomeScreen {
         (liveTrees(in: plotID).map(\.treeNumber).max() ?? 0) + 1
     }
 
+    /// The name to offer for the next tree in this plot — the HIGHEST name in
+    /// the series the cruiser is using here, stepped on by `TreeNameSequence`.
+    /// nil on a plot whose trees have never been named, and the tally then
+    /// stays zero-typing and labels by number, exactly as cruise always has.
+    ///
+    /// The SAME rule the quick-measure chooser offers
+    /// (`QuickMeasureHistory.suggestedNextTreeName`), through the same helper
+    /// rather than a second copy of it: the two worlds have to agree on what
+    /// follows "Plot3-T07", because a split cruise joins on the name.
+    /// `nextInSeries` wants the names newest-first, so the plot's trees are
+    /// ordered by creation before their names are read — repository order is
+    /// not a promise.
+    func nextTreeName(in plotID: UUID) -> String? {
+        let trees = liveTrees(in: plotID).sorted { $0.createdAt > $1.createdAt }
+        guard let proposed =
+                TreeNameSequence.nextInSeries(trees.compactMap(\.treeName))
+        else { return nil }
+        // NEVER propose a name a stem in this plot already wears.
+        //
+        // `TreeNameSequence.next` deliberately hands a name with no trailing
+        // number back UNCHANGED rather than inventing "Big oak2" — the app
+        // cannot tell whether "Big oak" starts a series, so the quick-measure
+        // chooser shows it again and the cruiser retypes it. The tally loop
+        // never stops to ask: it would accept "Big oak", "Big oak", "Big oak"
+        // down the whole plot, and tree_name is the column a cruise split
+        // across two phones joins on. Dropping back to nil labels the next
+        // stem "Tree #<n>" instead, and the pill is one tap away.
+        guard !trees.contains(where: { $0.treeName == proposed }) else { return nil }
+        return proposed
+    }
+
+    /// What the tally loop calls the tree it is ABOUT to write — the pending
+    /// name when there is one, else "Tree #<target>". One rule, shared with
+    /// every saved tree's `displayTitle`.
+    var chainTreeTitle: String {
+        TreeLabel.title(name: chainTreeName, number: chainTreeNumber)
+    }
+
     /// Tree number of the tree the SCOPED HEIGHT session is measuring — the
     /// raw-capture join key for a height bundle. Read from the tree row
     /// (`chainTreeID`), not from `chainTreeNumber`, which is the diameter
@@ -154,6 +192,15 @@ extension MapHomeScreen {
     var chainHeightTreeNumber: Int? {
         guard let plotID = chainPlotID, let treeID = chainTreeID else { return nil }
         return liveTrees(in: plotID).first(where: { $0.id == treeID })?.treeNumber
+    }
+
+    /// The scoped height session's tree NAME, read from the same row as
+    /// `chainHeightTreeNumber` and for the same reason: `chainTreeName` is the
+    /// diameter loop's NEXT name and would label the height screen with a tree
+    /// that has not been measured yet. nil when the tree was never named.
+    var chainHeightTreeName: String? {
+        guard let plotID = chainPlotID, let treeID = chainTreeID else { return nil }
+        return liveTrees(in: plotID).first(where: { $0.id == treeID })?.treeName
     }
 
     /// The unvisited planned plot the (+) "Set plot centre" targets:
@@ -559,7 +606,7 @@ extension MapHomeScreen {
             } message: { id in
                 if let tree = treesByPlot.values.joined()
                     .first(where: { $0.id == id }) {
-                    Text("Delete Tree \(tree.treeNumber)? This removes it and its photo from the map. This can't be undone.")
+                    Text("Delete \(tree.displayTitle)? This removes it and its photo from the map. This can't be undone.")
                 }
             }
     }
@@ -878,9 +925,35 @@ extension MapHomeScreen {
     func startAddTree(in plot: Plot) {
         chainPlotID = plot.id
         chainTreeNumber = nextTreeNumber(in: plot.id)
+        // Picked up from the plot the loop is entering, not carried over from
+        // whatever was tallied last: re-entering Plot 2 after naming trees in
+        // Plot 1 must continue PLOT 2's series. nil when this plot has never
+        // been named, and the loop stays nameless until the pill is tapped.
+        chainTreeName = nextTreeName(in: plot.id)
         chainTreeID = nil
         withAnimation(.easeOut(duration: 0.18)) { selectedPinID = nil }
         presentingCruiseDBH = true
+    }
+
+    /// Tally pill → rename. Opens the field on the name the next tree would be
+    /// saved under, so the common edit is a tweak rather than a retype.
+    func beginTallyRename() {
+        tallyNameDraft = chainTreeName ?? ""
+        renamingTallyTree = true
+    }
+
+    /// Rename committed. An emptied field CLEARS the name rather than storing
+    /// "": the tree then falls back to "Tree #<n>", which is the only way back
+    /// to an unnamed tally once a series has been started.
+    ///
+    /// Trimmed before it is stored, exactly as the quick-measure chooser does
+    /// in `lockChooserTree()` — the name is a join key for a split cruise, and
+    /// a gloved thumb must not create " Plot3-T07" here and "Plot3-T07" there.
+    func commitTallyRename() {
+        let trimmed = tallyNameDraft
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        chainTreeName = trimmed.isEmpty ? nil : trimmed
+        renamingTallyTree = false
     }
 
     /// Height screen scoped to one EXISTING tree (tree peek / heights
@@ -907,6 +980,12 @@ extension MapHomeScreen {
         reloadCruise()
         if let plotID = chainPlotID {
             chainTreeNumber = nextTreeNumber(in: plotID)
+            // Stepped back with the number, and re-derived from the plot for
+            // the same reason: the undone row is gone from `liveTrees`, so the
+            // series resolves to the name that row had. Reusing the name the
+            // loop had already advanced to would leave a gap in the series
+            // that nothing ever fills.
+            chainTreeName = nextTreeName(in: plotID)
         }
     }
 
@@ -1004,6 +1083,16 @@ extension MapHomeScreen {
                     reloadCruise()
                     if let plotID = chainPlotID {
                         chainTreeNumber = nextTreeNumber(in: plotID)
+                        // ONLY on a save that landed, and for the same reason
+                        // the number can be recomputed unconditionally: a
+                        // failed Accept wrote no row, so re-deriving from the
+                        // plot would resolve the series WITHOUT the name the
+                        // cruiser typed and quietly throw it away. Leaving it
+                        // alone means the next Accept reuses it, which is what
+                        // the pill is still promising on screen.
+                        if stored {
+                            chainTreeName = nextTreeName(in: plotID)
+                        }
                     }
                     // Chain into Height for the tree that was just written.
                     // Gated on THIS save succeeding, not merely on
@@ -1018,10 +1107,24 @@ extension MapHomeScreen {
                 },
                 cruisePlotInfo: cruiseMiniMapInfo(plotID: chainPlotID),
                 tallyTreeNumber: chainTreeNumber,
+                tallyTreeName: chainTreeName,
+                onRenameTally: { beginTallyRename() },
                 onUndoTally: { undoLastTally() },
                 projectID: currentProject?.id.uuidString,
                 onEditPlot: { chainingPlotSetup = true })
             .environmentObject(settings)
+            // Tally pill → rename. An alert rather than a sheet: it is one
+            // field, it must not disturb the AR session running underneath,
+            // and it keeps the cruiser on the trunk they are already aiming
+            // at. LOCKED strings — Android's dialog says the same words.
+            .alert("Name this tree", isPresented: $renamingTallyTree) {
+                TextField("Tree name", text: $tallyNameDraft)
+                    .autocorrectionDisabled()
+                Button("Save") { commitTallyRename() }
+                Button("Cancel", role: .cancel) { renamingTallyTree = false }
+            } message: {
+                Text("Leave it empty and this tree goes back to \(TreeLabel.title(name: nil, number: chainTreeNumber)).")
+            }
             .fullScreenCover(isPresented: $chainingHeight,
                              onDismiss: { reloadCruise() }) {
                 cruiseChainedHeightCover
@@ -1051,6 +1154,7 @@ extension MapHomeScreen {
                 // tree, so its bundle must carry that tree's number.
                 projectID: currentProject?.id.uuidString,
                 treeNumber: chainHeightTreeNumber,
+                treeName: chainHeightTreeName,
                 onEditPlot: { heightPlotSetup = true })
             .environmentObject(history)
             .environmentObject(settings)
@@ -1078,6 +1182,7 @@ extension MapHomeScreen {
                 // tree, so its bundle must carry that tree's number.
                 projectID: currentProject?.id.uuidString,
                 treeNumber: chainHeightTreeNumber,
+                treeName: chainHeightTreeName,
                 onEditPlot: { heightPlotSetup = true })
             .environmentObject(history)
             .environmentObject(settings)
@@ -1111,6 +1216,10 @@ extension MapHomeScreen {
             id: UUID(),
             plotId: plotID,
             treeNumber: chainTreeNumber,
+            // The name the pill was showing when the cruiser accepted. nil is
+            // the norm and stays the norm — an unnamed cruise tree is labelled
+            // by number and exports an empty tree_name, as it always has.
+            treeName: chainTreeName,
             speciesCode: species,
             status: .live,
             dbhCm: result.diameterCm,
@@ -1337,9 +1446,15 @@ extension MapHomeScreen {
                     Button {
                         startAddTree(in: plot)
                     } label: {
-                        Text("Add tree · Tree \(nextTreeNumber(in: plot.id))")
+                        // Names the tree the button is about to open the tally
+                        // on — the auto-incremented name when this plot has a
+                        // series running, else "Tree #<next>".
+                        Text("Add tree · " + TreeLabel.title(
+                            name: nextTreeName(in: plot.id),
+                            number: nextTreeNumber(in: plot.id)))
                             .font(.system(size: 15, weight: .bold))
                             .foregroundStyle(ForestixPalette.primaryInk)
+                            .lineLimit(1)
                             .frame(maxWidth: .infinity, minHeight: 54)
                             .background(
                                 RoundedRectangle(cornerRadius: ForestixRadius.card,
@@ -1651,8 +1766,8 @@ extension MapHomeScreen {
 
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(tree.speciesCode.isEmpty
-                     ? "Tree \(tree.treeNumber)"
-                     : "Tree \(tree.treeNumber) · \(RegionalSpecies.name(forCode: tree.speciesCode))")
+                     ? tree.displayTitle
+                     : "\(tree.displayTitle) · \(RegionalSpecies.name(forCode: tree.speciesCode))")
                     .font(.system(size: 16, weight: .bold))
                     .foregroundStyle(ForestixPalette.textPrimary)
                     .lineLimit(1)
@@ -1672,8 +1787,8 @@ extension MapHomeScreen {
                         cruisePhotoContext = CruisePhotoContext(
                             photoPath: path,
                             title: tree.speciesCode.isEmpty
-                                ? "Tree \(tree.treeNumber)"
-                                : "Tree \(tree.treeNumber) · \(RegionalSpecies.name(forCode: tree.speciesCode))",
+                                ? tree.displayTitle
+                                : "\(tree.displayTitle) · \(RegionalSpecies.name(forCode: tree.speciesCode))",
                             subtitle: peekTreeSubtitle(tree, plot: plot))
                     }
                 } label: {
@@ -2820,10 +2935,15 @@ struct PlotHeightsSheet: View {
     private func heightRow(_ tree: Tree) -> some View {
         let system = settings.unitSystem
         return HStack(spacing: ForestixSpace.xs) {
-            Text("Tree \(tree.treeNumber)")
+            // A cruiser's name is longer than "Tree #7" and this column was
+            // sized for the number alone; it gets room to grow, and truncates
+            // rather than shoving the diameter and height out of the row.
+            Text(tree.displayTitle)
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(ForestixPalette.textPrimary)
-                .frame(width: 76, alignment: .leading)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(minWidth: 76, alignment: .leading)
             Text(MeasurementFormatter.diameter(cm: Double(tree.dbhCm),
                                                in: system))
                 .font(.system(size: 12.5, weight: .medium,
@@ -2863,7 +2983,7 @@ struct PlotHeightsSheet: View {
         }
         .accessibilityIdentifier("cruiseMap.heightsSheet.picker")
 
-        primaryButton(selected.map { "Measure Tree \($0.treeNumber)" }
+        primaryButton(selected.map { "Measure \($0.displayTitle)" }
                         ?? "Measure height",
                       enabled: selected != nil) {
             if let tree = selected { onMeasure(tree) }
@@ -2872,11 +2992,11 @@ struct PlotHeightsSheet: View {
         .accessibilityIdentifier("cruiseMap.heightsSheet.confirm")
     }
 
-    /// One pickable tree chip — "Tree N · DBH" plus a check when it
-    /// already carries a height.
+    /// One pickable tree chip — "Tree #N · DBH" (or the cruiser's name for
+    /// it) plus a check when it already carries a height.
     private func numberChip(_ tree: Tree) -> some View {
         let isSelected = tree.id == selectedTreeID
-        let label = "Tree \(tree.treeNumber) · "
+        let label = tree.displayTitle + " · "
             + MeasurementFormatter.diameter(cm: Double(tree.dbhCm),
                                             in: settings.unitSystem)
             + (tree.heightM != nil ? " ✓" : "")

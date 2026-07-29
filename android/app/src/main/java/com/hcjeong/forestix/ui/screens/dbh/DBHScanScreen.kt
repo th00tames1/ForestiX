@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -32,9 +33,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.UnfoldMore
 import androidx.compose.material.icons.outlined.ViewInAr
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -58,6 +61,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -90,6 +94,7 @@ import com.hcjeong.forestix.sensors.RawCaptureStore
 import com.hcjeong.forestix.ui.MeasurePhotoStore
 import com.hcjeong.forestix.ui.PendingTreeNumber
 import com.hcjeong.forestix.ui.Routes
+import com.hcjeong.forestix.data.cruise.TreeLabel
 import com.hcjeong.forestix.ui.screens.cruise.CruiseCapture
 import com.hcjeong.forestix.ui.screens.cruise.CruiseRoutes
 import com.hcjeong.forestix.ui.screens.ScanMetadataSheet
@@ -227,9 +232,20 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // shown in the top pill, mirrored into Compose state so advance/undo
     // recompose (CruiseCapture.target is a plain @Volatile holder).
     var cruiseTreeNumber by remember { mutableStateOf(CruiseCapture.target?.treeNumber) }
-    // Undo toast (F): the just-saved tree number, cleared 3 s after the
-    // epoch it was raised in (epoch restarts the timer on rapid tallies).
-    var undoToast by remember { mutableStateOf<Int?>(null) }
+    /// What the pill calls that tree — the cruiser's name for it when they
+    /// have a series running, else "Tree #<n>". Mirrored alongside the number
+    /// rather than derived from it, because the number is also the raw-capture
+    /// join key and must stay a plain Int.
+    var cruiseTreeTitle by remember { mutableStateOf(CruiseCapture.target?.treeTitle) }
+    /// Tally pill tapped — the rename field is up, holding the text being
+    /// edited. Null means closed; cancelling leaves the pending name untouched.
+    var renameDraft by remember { mutableStateOf<String?>(null) }
+    // Undo toast (F): what the just-saved tree was called, cleared 3 s after
+    // the epoch it was raised in (epoch restarts the timer on rapid tallies).
+    // Held as the finished LABEL, not a number: the session advances both the
+    // number and the name the instant the save lands, so recomputing it at
+    // render time would name the NEXT tree instead of the one Undo removes.
+    var undoToast by remember { mutableStateOf<String?>(null) }
     var undoEpoch by remember { mutableStateOf(0) }
     LaunchedEffect(undoEpoch) {
         if (undoToast != null) {
@@ -1219,8 +1235,12 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 // screen to aiming, with the Undo toast (F) offering a 3 s
                 // take-back.
                 val measuredTreeNumber = cruise.treeNumber
-                CruiseCapture.advanceTally()
+                // The label BEFORE the advance — the toast names the tree that
+                // was just written, which is the one Undo would take back.
+                val measuredTreeTitle = cruise.treeTitle
+                CruiseCapture.advanceTally(env, saved = savedTreeId != null)
                 cruiseTreeNumber = CruiseCapture.target?.treeNumber
+                cruiseTreeTitle = CruiseCapture.target?.treeTitle
                 pendingTree = CruiseCapture.target?.treeNumber ?: pendingTree
                 result = null
                 failure = null
@@ -1229,7 +1249,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 metaDamage = emptyList()
                 metaNote = ""
                 stage = Stage.AIMING
-                undoToast = measuredTreeNumber
+                undoToast = measuredTreeTitle
                 undoEpoch += 1
                 // F10 — DIAMETER → HEIGHT CHAIN, on by default. Push Height
                 // for the tree just written, ON TOP of this tally (so its
@@ -1376,6 +1396,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     runCatching { MeasurePhotoStore.delete(activity, name) }
                 }
                 cruiseTreeNumber = CruiseCapture.target?.treeNumber
+                cruiseTreeTitle = CruiseCapture.target?.treeTitle
                 pendingTree = CruiseCapture.target?.treeNumber ?: pendingTree
             }
             undoToast = null
@@ -1506,8 +1527,8 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         } ?: { nav.navigate(Routes.SAMPLING) }
         if (!hidingChromeForCapture) ScanPlotMiniMap(onEditPlot = onEditPlot)
 
-        // Top strip: GPS pill leading, the cruise tally target ("Tree 8",
-        // the auto number the next Accept saves to) centred in what is left.
+        // Top strip: GPS pill leading, the cruise tally target ("Tree #8", or
+        // the cruiser's name for it) centred in what is left.
         // ONE row, inset past the status bar, with the mini-map's width
         // reserved on the trailing edge — the two used to be independently
         // aligned overlays and collided on narrow screens.
@@ -1523,9 +1544,16 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 // already trust; the badge is gone.
                 leading = { GpsFixChip(acquiresService = true) },
                 centre = {
-                    cruiseTreeNumber?.let { n ->
+                    cruiseTreeTitle?.let { title ->
+                        // TAPPABLE: this is where a cruise tree gets its name,
+                        // and it is deliberately the pill rather than a step in
+                        // front of the scan. The cruiser is already aiming at
+                        // the trunk; the name arrives pre-filled by
+                        // TreeNameSequence and only has to be touched when the
+                        // series starts or breaks, so the loop stays
+                        // zero-typing per tree. iOS taps the same pill.
                         Text(
-                            "Tree $n",
+                            title,
                             style = TextStyle(
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold,
@@ -1533,11 +1561,16 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                             ),
                             color = Color.White,
                             maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                             modifier = Modifier
                                 .shadow(3.dp, CircleShape, clip = false)
                                 .clip(CircleShape)
                                 .background(Color.Black.copy(alpha = 0.65f))
                                 .border(0.5.dp, Color.White.copy(alpha = 0.18f), CircleShape)
+                                .clickableNoRipple {
+                                    renameDraft =
+                                        CruiseCapture.target?.treeName.orEmpty()
+                                }
                                 .padding(horizontal = 12.dp, vertical = 7.dp),
                         )
                     }
@@ -1730,8 +1763,8 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        undoToast?.let { savedTree ->
-                            UndoToastPill(savedTree) { undoTally() }
+                        undoToast?.let { savedTitle ->
+                            UndoToastPill(savedTitle) { undoTally() }
                         }
                         if (showAutoPill) {
                             AutoModePill {
@@ -1868,6 +1901,43 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             },
             failure = failure,
         )
+
+        // Tally pill → rename. A dialog rather than a sheet: it is one field,
+        // it must not disturb the AR session running underneath, and it keeps
+        // the cruiser on the trunk they are already aiming at. LOCKED strings
+        // — the iOS alert says the same words.
+        renameDraft?.let { draft ->
+            AlertDialog(
+                onDismissRequest = { renameDraft = null },
+                title = { Text("Name this tree") },
+                text = {
+                    Column {
+                        Text(
+                            "Leave it empty and this tree goes back to " +
+                                TreeLabel.title(null, cruiseTreeNumber ?: 0) + ".",
+                        )
+                        Spacer(Modifier.size(ForestixSpace.sm))
+                        OutlinedTextField(
+                            value = draft,
+                            onValueChange = { renameDraft = it },
+                            placeholder = { Text("Tree name") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        CruiseCapture.renameTarget(draft)
+                        cruiseTreeTitle = CruiseCapture.target?.treeTitle
+                        renameDraft = null
+                    }) { Text("Save") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { renameDraft = null }) { Text("Cancel") }
+                },
+            )
+        }
 
         // Manual entry — typed diameter for trees the sensors can't read
         // (mirrors the iOS .manualEntry state, method "manualVisual").
@@ -2137,10 +2207,10 @@ private fun CapturingPill(k: Int) {
 }
 
 /// F. Undo toast — dark-glass pill above the bottom controls after each
-/// cruise tally Accept: "Tree 7 saved · Undo" with Undo as a tappable bold
+/// cruise tally Accept: "Tree #7 saved · Undo" with Undo as a tappable bold
 /// segment; the caller clears it after 3 s (locked, matches iOS).
 @Composable
-private fun UndoToastPill(treeNumber: Int, onUndo: () -> Unit) {
+private fun UndoToastPill(treeTitle: String, onUndo: () -> Unit) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
@@ -2151,9 +2221,11 @@ private fun UndoToastPill(treeNumber: Int, onUndo: () -> Unit) {
             .padding(start = 16.dp, end = 4.dp),
     ) {
         Text(
-            "Tree $treeNumber saved · ",
+            "$treeTitle saved · ",
             style = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.Medium),
             color = Color.White,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
         // Undo — the tappable bold segment, ≥ 44 dp hit target (iOS
         // tallyUndoToast 1:1).

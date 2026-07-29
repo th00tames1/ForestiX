@@ -118,6 +118,24 @@ public struct DBHScanInput: Sendable {
 
 public enum DBHEstimator {
 
+    /// Plausible-diameter window for any single-frame fit, in centimetres.
+    ///
+    /// THE CEILING USED TO BE 100 cm, WHICH IS 39.4 INCHES. The stand at McDunn
+    /// has Douglas-fir over 40 in, so the gate refused them outright: the bracket
+    /// would be placed correctly on a 42 in stem, the arithmetic would return
+    /// ~107 cm, and the fit would come back nil with nothing on screen. It also
+    /// explains why a deliberately wide bracket "stopped working" past about half
+    /// the screen, and why the automatic path could not hold a big tree from a
+    /// distance — all three were the same number.
+    ///
+    /// 300 cm is chosen to clear any stem this app will meet (the largest known
+    /// Douglas-fir is ~440 cm, and a hand-held phone is not measuring that) while
+    /// still refusing the degenerate cases the gate exists for: a bracket dragged
+    /// across the whole depth axis at arm's length computes tens of metres and is
+    /// still rejected. The floor stays at 2.5 cm.
+    public static let plausibleDiameterCm: ClosedRange<Double> = 2.5...300.0
+
+
     /// Full §7.1 pipeline. Returns nil only if the input cannot be
     /// attempted at all (e.g. burst too small). Quality failures return
     /// a `.red` `DBHResult` carrying `rejectionReason`.
@@ -1231,7 +1249,7 @@ public enum DBHEstimator {
         guard fx - halfWidth > 1.0 else { return nil }
         let diameterM = Double(medianWidth) * Double(dTap) / (fx - halfWidth)
         let diameterCm = diameterM * 100.0
-        guard (2.5...100.0).contains(diameterCm) else { return nil }
+        guard plausibleDiameterCm.contains(diameterCm) else { return nil }
 
         // Confidence: width consistency. Tight CoV ⇒ green; otherwise
         // yellow (renders as a silent / "gray" chip in the HUD per
@@ -1406,7 +1424,7 @@ public enum DBHEstimator {
             let chordM = chordDiameterFromCloud(pts)
             guard chordM > 0 else { continue }
             let diameterCm = chordM * 100.0
-            guard (2.5...100.0).contains(diameterCm) else { continue }
+            guard plausibleDiameterCm.contains(diameterCm) else { continue }
             diameters.append(diameterCm)
             var minX = Double.infinity, maxX = -Double.infinity
             var minZ = Double.infinity, maxZ = -Double.infinity
@@ -1596,7 +1614,7 @@ public enum DBHEstimator {
         guard fx - widthPx / 2.0 > 1.0 else { return nil }
         let diameterM = widthPx * z / (fx - widthPx / 2.0)
         let diameterCm = diameterM * 100.0
-        guard (2.5...100.0).contains(diameterCm) else { return nil }
+        guard plausibleDiameterCm.contains(diameterCm) else { return nil }
 
         // Centre for the cylinder overlay + distance HUD — bracket
         // midpoint back-projected at its depth, pushed one radius behind

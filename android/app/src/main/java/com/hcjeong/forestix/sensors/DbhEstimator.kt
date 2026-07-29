@@ -171,6 +171,20 @@ data class DbhScanInput(
 
 object DBHEstimator {
 
+    /// Plausible-diameter window for any single-frame fit, in centimetres.
+    ///
+    /// THE CEILING USED TO BE 100 cm, WHICH IS 39.4 INCHES. The stand at McDunn
+    /// has Douglas-fir over 40 in, so the gate refused them outright: the bracket
+    /// would be placed correctly on a 42 in stem, the arithmetic would return
+    /// ~107 cm, and the fit would come back null with nothing on screen. It also
+    /// explains why a deliberately wide bracket "stopped working" past about half
+    /// the screen. Same number, three symptoms.
+    ///
+    /// 300 cm clears any stem this app will meet while still refusing the
+    /// degenerate cases the gate exists for. Floor stays at 2.5 cm. iOS value 1:1.
+    val PLAUSIBLE_DIAMETER_CM = 2.5..300.0
+
+
     /// Full §7.1 pipeline. Returns null only if the burst is too small.
     fun estimate(input: DbhScanInput): DBHResult? {
         if (input.frames.size < 5) return null
@@ -755,7 +769,7 @@ object DBHEstimator {
         if (focal - halfW <= 1.0) return null
         val diameterM = w * z / (focal - halfW)
         val rawCm = diameterM * 100.0
-        if (rawCm !in 2.5..100.0) return null
+        if (rawCm !in PLAUSIBLE_DIAMETER_CM) return null
         val dia = (cal.dbhCorrectionAlpha + cal.dbhCorrectionBeta * rawCm).toFloat()
         // A returned fit IS capturable (the user vouches for the edges) —
         // iOS tap-gate parity. nPoints carries the bracket span in
@@ -817,7 +831,7 @@ object DBHEstimator {
         if (focal - halfW <= 1.0) return null
         val diameterM = w * z.toDouble() / (focal - halfW)
         val rawCm = diameterM * 100.0
-        if (rawCm !in 2.5..100.0) return null
+        if (rawCm !in PLAUSIBLE_DIAMETER_CM) return null
         return BracketFit(rawCm, w)
     }
 

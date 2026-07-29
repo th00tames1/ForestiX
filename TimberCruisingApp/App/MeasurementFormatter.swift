@@ -69,10 +69,10 @@ public enum MeasurementFormatter {
     public static func height(m: Double, in system: UnitSystem) -> String {
         switch system {
         case .metric:
-            return String(format: "%.2f m", m)
+            return String(format: "%.1f m", m)
         case .imperial:
             let feet = m * 3.28084
-            return String(format: "%.2f ft", feet)
+            return String(format: "%.1f ft", feet)
         }
     }
 

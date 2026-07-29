@@ -27,3 +27,9 @@ paper/
 *.pdf
 phase*_report.md
 docs/AUDIT_PHASE_*.md
+
+# Field data and its analysis.
+#
+# 390 MB of raw depth captures from McDunn, plus unpublished accuracy
+# results that belong in the manuscript before they belong in public.
+val/

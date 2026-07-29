@@ -57,6 +57,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.ListAlt
 import androidx.compose.material.icons.filled.Adjust
 import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.filled.Folder
@@ -140,6 +141,7 @@ import com.hcjeong.forestix.ui.pressableNoRipple
 import com.hcjeong.forestix.ui.screens.CaptureColumn
 import com.hcjeong.forestix.ui.screens.ClusterSlots
 import com.hcjeong.forestix.ui.screens.ExportViewModel
+import com.hcjeong.forestix.ui.screens.FieldLogWords
 import com.hcjeong.forestix.ui.screens.Haptics
 import com.hcjeong.forestix.ui.screens.PeekActionButton
 import com.hcjeong.forestix.ui.screens.PhotoThumb
@@ -845,6 +847,10 @@ internal fun CruiseModeSheets(
         ProjectSheet(
             env = env,
             currentProject = state.project,
+            // FIELD REPORT 5 — the plot in hand, so the sheet can offer that
+            // plot's field log. Same `activePlot` the (+) scopes "Add tree ·
+            // Plot N" to, so the two can never name different plots.
+            activePlot = state.activePlot(settings),
             settings = settings,
             onDismiss = { state.projectSheetOpen = false; state.refresh++ },
             onSwitch = { id ->
@@ -1549,7 +1555,17 @@ private fun PlotPeekCard(
     // B. Pooled sample heights — "N measured" counts the live trees
     // carrying a height (iOS measuredHeightCount parity; the pooled FIT
     // additionally applies the engine's > 1.3 m cleaning).
+    //
+    // THE COUNT IS ONLY SHOWN WHEN THERE IS A COUNT. Heights are a
+    // subsample — most plots carry none, so the row spent almost all of its
+    // life saying "· 0 measured", which is the word "none" dressed up as a
+    // statistic and read as clutter in the stand. The row itself stays: it
+    // is the only door to the heights sheet, and hiding it at zero would
+    // take away the way to measure the first one. iOS `plotHeightsLabel`
+    // returns the same two strings.
     val heightsCount = trees.count { it.deletedAt == null && it.heightM != null }
+    val heightsLabel =
+        if (heightsCount > 0) "Heights · $heightsCount measured" else "Heights"
 
     Column(
         modifier
@@ -1622,9 +1638,9 @@ private fun PlotPeekCard(
                 "MEAN DBH", String.format(Locale.US, "%.1f", stats.qmdCm),
                 "cm", Modifier.weight(1f))
         }
-        // B. PLOT SAMPLE HEIGHTS — LOCKED string "Heights · N measured";
-        // list-row into the heights sheet (iOS plotPeek row 1:1), shown
-        // for open AND closed plots.
+        // B. PLOT SAMPLE HEIGHTS — LOCKED strings "Heights" /
+        // "Heights · N measured"; list-row into the heights sheet (iOS
+        // plotPeek row 1:1), shown for open AND closed plots.
         Row(
             Modifier
                 .fillMaxWidth()
@@ -1634,7 +1650,7 @@ private fun PlotPeekCard(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
-                "Heights · $heightsCount measured",
+                heightsLabel,
                 style = type.bodyBold.copy(fontSize = 13.sp, fontWeight = FontWeight.SemiBold),
                 color = colors.textPrimary,
             )
@@ -2291,6 +2307,10 @@ private data class ProjectRowInfo(
 private fun ProjectSheet(
     env: AppEnvironment,
     currentProject: Project?,
+    /// The open plot, when there is one — the sheet's "Field log · Plot N"
+    /// row scopes to it. Null hides that row: with no plot in hand there is
+    /// nothing to scope to.
+    activePlot: Plot?,
     settings: SettingsSnapshot,
     onDismiss: () -> Unit,
     onSwitch: (String) -> Unit,
@@ -2455,6 +2475,17 @@ private fun ProjectSheet(
 
             // Project tool rows — all target EXISTING screens.
             val projectId = currentProject?.id?.toString()
+            // FIELD REPORT (item 4) — the door beside "New project". The
+            // switcher rows above can only SWITCH; browsing is where a
+            // project can be read properly and where it can be deleted.
+            // Enabled with no projects too: the empty state is itself the
+            // answer to "which ones exist?".
+            SheetChoiceRow(
+                Icons.Filled.Folder,
+                "Browse projects",
+                "Open, review or delete a saved project",
+            ) { onNavigate(CruiseRoutes.PROJECT_BROWSER) }
+            HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
             SheetChoiceRow(
                 Icons.Filled.BarChart,
                 "Stand summary",
@@ -2469,6 +2500,20 @@ private fun ProjectSheet(
                 enabled = projectId != null,
                 trailingChip = "Advanced",
             ) { if (projectId != null) onCruiseSetup() }
+
+            // FIELD REPORT 5 — read back THIS plot's trees without leaving
+            // the project. Only offered when a plot is actually open: with no
+            // plot in hand there is nothing to scope to, and the footer's
+            // plain "Field log" already shows everything. The subtitle names
+            // the plot so the row cannot be mistaken for that unscoped link.
+            if (activePlot != null) {
+                HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
+                SheetChoiceRow(
+                    Icons.AutoMirrored.Filled.ListAlt,
+                    "Field log",
+                    FieldLogWords.plotName(activePlot.plotNumber),
+                ) { onNavigate(Routes.fieldLogPlot(activePlot.id.toString())) }
+            }
 
             // Export collapse (mock ⑤ `.sheetcol`): one primary "Export
             // all" through the existing bundle path, the 11-row picker

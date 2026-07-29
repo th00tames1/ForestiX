@@ -151,11 +151,13 @@ import com.hcjeong.forestix.ui.screens.cruise.CruiseModeEffects
 import com.hcjeong.forestix.ui.screens.cruise.CruiseModeSheets
 import com.hcjeong.forestix.ui.screens.cruise.CruiseModeState
 import com.hcjeong.forestix.ui.screens.cruise.CruisePlotBanner
+import com.hcjeong.forestix.ui.screens.cruise.PendingPlotFraming
 import com.hcjeong.forestix.ui.screens.cruise.cruiseModeMarkers
 import com.hcjeong.forestix.ui.screens.cruise.cruiseModePlotOverlay
 import com.hcjeong.forestix.ui.screens.cruise.cruiseModePolylines
 import com.hcjeong.forestix.ui.screens.cruise.freshFixOrNull
 import com.hcjeong.forestix.ui.screens.cruise.msUntilFreshnessChanges
+import com.hcjeong.forestix.ui.screens.cruise.plotFramingZoom
 import com.hcjeong.forestix.ui.softDropShadow
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixRadius
@@ -171,10 +173,21 @@ import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /// Peavy Hall (OSU College of Forestry) fallback — used only when there is
 /// no fix and no located reading. Mirrors iOS `fallbackCamera`.
 private val DefaultCenter = CoordinateConversions.LatLon(latitude = 44.56417, longitude = -123.28556)
+
+/// WHERE THE MAP OPENS. Two steps closer than the 16 it used to be: at 16 a
+/// phone viewport is the better part of a kilometre across, which is a road
+/// map. A cruiser opening this screen is standing in the stand they are
+/// working, and what they need to see is their own plots and pins — 18 puts
+/// roughly 150 m across the short side, so a plot and its neighbours are on
+/// screen at arm's length without a pinch. Every camera move that has no
+/// better idea of a scale uses this one constant. iOS `MapHomeScreen
+/// .defaultZoom` is the same 18.
+private const val DefaultZoom = 18.0
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -222,7 +235,7 @@ fun MapHomeScreen(nav: NavController) {
     val pins = remember(entries) { buildTreePins(entries) }
 
     // Last fix → else newest located reading → else the Peavy Hall fallback,
-    // always at zoom 16 (iOS startUp()).
+    // always at DefaultZoom (iOS startUp()).
     val initialCamera = remember {
         val fromFix = LocationService.lastGlobalFix?.let {
             CoordinateConversions.LatLon(latitude = it.latitude, longitude = it.longitude)
@@ -246,6 +259,40 @@ fun MapHomeScreen(nav: NavController) {
         }
     }
     val camera = rememberMapCameraState()
+
+    // A plot that has just been created gets FRAMED: the camera goes to its
+    // centre at a zoom derived from its own radius, close enough that the
+    // BOUNDARY is on screen. The question a cruiser asks the moment a plot
+    // exists is "am I in it?", and at the default zoom an 11 m ring is a few
+    // pixels across — unreadable, and no answer at all.
+    //
+    // The request is left by whichever surface created the plot (the AR
+    // "Start plot" destination, or the planned-pin conversion) because none
+    // of them owns this camera; see PendingPlotFraming. Consumed once — a
+    // standing instruction would fight the cruiser's own panning. With no
+    // measured viewport yet the zoom is left alone and only the centre
+    // moves: a frame computed from nothing would be a guess.
+    val framingRequest = PendingPlotFraming.request
+    LaunchedEffect(framingRequest) {
+        val r = framingRequest ?: return@LaunchedEffect
+        // WAIT FOR THE VIEWPORT. The AR "Start plot" screen is its own nav
+        // destination, so popping back re-composes this screen from scratch
+        // and the camera has not been measured yet at this instant — and a
+        // zoom cannot be derived from a viewport whose size is not known.
+        // Poll until it is, then give up after a couple of seconds and just
+        // centre on the plot: late is better than wrong, and doing nothing at
+        // all would leave the cruiser looking at the wrong ground.
+        val zoom = withTimeoutOrNull(2_000L) {
+            var z = plotFramingZoom(camera, r.radiusM)
+            while (z == null) {
+                delay(50)
+                z = plotFramingZoom(camera, r.radiusM)
+            }
+            z
+        }
+        camera.moveTo(r.centre, zoom ?: camera.zoom)
+        PendingPlotFraming.consume()
+    }
 
     // Imported survey boundary (Map settings → Survey boundary). Read once
     // per process off the main thread; the store's flow keeps the map and
@@ -395,7 +442,7 @@ fun MapHomeScreen(nav: NavController) {
         MapView(
             center = mapCenter,
             modifier = Modifier.fillMaxSize(),
-            initialZoom = 16.0,
+            initialZoom = DefaultZoom,
             // Base = the built-in layer the Map settings sheet selected
             // (satellite / normal); the user template is an overlay on top,
             // honouring its toggle AND the provider usage-policy
@@ -489,7 +536,7 @@ fun MapHomeScreen(nav: NavController) {
                 }
                 // My-location: recentre on the freshest fix (this screen's
                 // live service, else the last global fix) without ever
-                // zooming OUT past 16. Dimmed no-op until any fix exists.
+                // zooming OUT past DefaultZoom. Dimmed no-op until any fix exists.
                 val locateSnap = fix ?: LocationService.lastGlobalFix
                 RoundChromeButton(
                     Icons.Filled.MyLocation,
@@ -500,7 +547,7 @@ fun MapHomeScreen(nav: NavController) {
                         camera.moveTo(
                             CoordinateConversions.LatLon(
                                 latitude = it.latitude, longitude = it.longitude),
-                            zoom = max(camera.zoom, 16.0),
+                            zoom = max(camera.zoom, DefaultZoom),
                         )
                     }
                 }

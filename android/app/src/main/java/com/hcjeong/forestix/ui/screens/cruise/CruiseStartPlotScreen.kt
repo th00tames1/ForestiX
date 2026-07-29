@@ -58,6 +58,7 @@ import com.hcjeong.forestix.common.ForestixLogger
 import com.hcjeong.forestix.common.Units
 import com.hcjeong.forestix.data.cruise.Plot
 import com.hcjeong.forestix.data.cruise.PositionSource
+import com.hcjeong.forestix.geo.CoordinateConversions
 import com.hcjeong.forestix.positioning.GPSAveraging
 import com.hcjeong.forestix.positioning.LocationService
 import com.hcjeong.forestix.ui.screens.CenterCrosshair
@@ -329,6 +330,16 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String, editPlotId: Str
                 // screens' mini-map may use the (accurate) anchor path
                 // for YOU while measuring into this plot.
                 ArSessionHub.linkPlot(newPlot.id)
+                // A plot that has just come into existence is the one thing
+                // on the map worth looking at, and the first question about
+                // it is whether the cruiser is inside its boundary. Ask the
+                // map home — which owns the camera this screen cannot reach
+                // — to frame the ring when it comes back up.
+                PendingPlotFraming.requestFraming(
+                    CoordinateConversions.LatLon(
+                        latitude = snap.latitude, longitude = snap.longitude),
+                    r,
+                )
                 nav.popBackStack()
             } catch (e: Exception) {
                 failure = "Couldn't save the plot: ${e.message ?: e}"

@@ -193,6 +193,14 @@ data class MapMarker(
 
 // MARK: - Camera state (map home / offline downloader)
 
+/// Zoom the camera is clamped to, everywhere it can be changed — gesture,
+/// double-tap, and a host's `moveTo`. Past the tile source's native maximum
+/// the z-19 tiles simply draw scaled (overzoom), which is what lets a plot
+/// ring a few tens of metres across be framed at all. iOS
+/// `BasemapMapView.zoomRange` is the same 3…24.
+const val MAP_ZOOM_MIN: Double = 3.0
+const val MAP_ZOOM_MAX: Double = 24.0
+
 /// Live camera holder a host can pass to MapView to observe the viewport.
 /// MapView writes `center`/`zoom` after every gesture and the viewport size
 /// on layout; the map home's offline sheet calls `visibleBounds()` when the
@@ -324,7 +332,7 @@ fun MapView(
     LaunchedEffect(cameraState?.pendingMove) {
         val move = cameraState?.pendingMove ?: return@LaunchedEffect
         camCenter = move.first
-        camZoom = move.second.coerceIn(3.0, 24.0)
+        camZoom = move.second.coerceIn(MAP_ZOOM_MIN, MAP_ZOOM_MAX)
         cameraState.pendingMove = null
     }
 
@@ -420,7 +428,7 @@ fun MapView(
                         if (gestureZoom != 1f && gestureZoom > 0f) {
                             // 24, not the native tile max (19): past 19 the
                             // renderer overzooms so dense stands separate.
-                            camZoom = (camZoom + log2(gestureZoom.toDouble())).coerceIn(3.0, 24.0)
+                            camZoom = (camZoom + log2(gestureZoom.toDouble())).coerceIn(MAP_ZOOM_MIN, MAP_ZOOM_MAX)
                         }
                         if (pan != Offset.Zero) {
                             val worldPx = 256.0 * density * 2.0.pow(camZoom)
@@ -441,7 +449,7 @@ fun MapView(
                         // keeping the tapped point stationary.
                         onDoubleTap = { tap ->
                             val oldZoom = camZoom
-                            val newZoom = (oldZoom + 1.0).coerceIn(3.0, 24.0)
+                            val newZoom = (oldZoom + 1.0).coerceIn(MAP_ZOOM_MIN, MAP_ZOOM_MAX)
                             if (newZoom != oldZoom) {
                                 val worldPx = 256.0 * density * 2.0.pow(oldZoom)
                                 val scale = 2.0.pow(newZoom - oldZoom)

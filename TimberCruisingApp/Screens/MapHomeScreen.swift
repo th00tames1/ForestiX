@@ -99,10 +99,20 @@ public struct MapHomeScreen: View {
     /// (MapHomeScreen+Plot.swift).
     @ObservedObject var samplingPlot = ActiveSamplingPlot.shared
 
+    /// WHERE THE MAP OPENS. Two steps closer than the 16 it used to be:
+    /// at 16 a phone viewport is the better part of a kilometre across,
+    /// which is a road map. A cruiser opening this screen is standing in
+    /// the stand they are working, and what they need to see is their own
+    /// plots and pins — 18 puts roughly 150 m across the short side, so
+    /// a plot and its neighbours are on screen at arm's length without a
+    /// pinch. Every camera move that has no better idea of a scale uses
+    /// this one constant.
+    static let defaultZoom: Double = 18
+
     /// Peavy Hall (OSU College of Forestry) fallback — used only when
     /// there is no fix and no located reading.
     private static let fallbackCamera = BasemapCamera(
-        latitude: 44.56417, longitude: -123.28556, zoom: 16)
+        latitude: 44.56417, longitude: -123.28556, zoom: MapHomeScreen.defaultZoom)
 
     /// SHARED camera — one map serves both modes, so flipping the mode
     /// toggle never snaps position or zoom.
@@ -111,7 +121,10 @@ public struct MapHomeScreen: View {
     /// True while the camera still sits on the hardcoded fallback — the
     /// first real GPS fix recenters exactly once.
     @State private var awaitingFirstFix = false
-    @State private var visibleRegion: BasemapRegion?
+    /// What the map is currently showing. Read by the offline downloader and
+    /// by `frameCamera(onPlotAt:radiusM:)`, which needs a measured ground
+    /// span to turn a plot radius into a zoom — hence not private.
+    @State var visibleRegion: BasemapRegion?
     /// Shared selection — measure ids ("tree-…"/"entry-…") and cruise
     /// ids ("plot-…"/"pplot-…"/"ctree-…") are prefix-disjoint, and the
     /// toggle clears it, so a selection never leaks across modes.
@@ -732,11 +745,13 @@ public struct MapHomeScreen: View {
         cameraInitialised = true
         if let fix = LocationService.lastGlobalFix ?? location.latestSnapshot {
             camera = BasemapCamera(latitude: fix.latitude,
-                                   longitude: fix.longitude, zoom: 16)
+                                   longitude: fix.longitude,
+                                   zoom: Self.defaultZoom)
         } else if let entry = history.entries.first(where: {
             $0.latitude != nil && $0.longitude != nil
         }), let lat = entry.latitude, let lon = entry.longitude {
-            camera = BasemapCamera(latitude: lat, longitude: lon, zoom: 16)
+            camera = BasemapCamera(latitude: lat, longitude: lon,
+                                   zoom: Self.defaultZoom)
         } else {
             camera = Self.fallbackCamera
             awaitingFirstFix = true
@@ -750,7 +765,8 @@ public struct MapHomeScreen: View {
         awaitingFirstFix = false
         withAnimation(.easeOut(duration: 0.3)) {
             camera = BasemapCamera(latitude: snap.latitude,
-                                   longitude: snap.longitude, zoom: 16)
+                                   longitude: snap.longitude,
+                                   zoom: Self.defaultZoom)
         }
     }
 
@@ -778,7 +794,8 @@ public struct MapHomeScreen: View {
                 withAnimation(.easeOut(duration: 0.3)) {
                     camera = BasemapCamera(latitude: fix.latitude,
                                            longitude: fix.longitude,
-                                           zoom: max(camera.zoom, 16))
+                                           zoom: max(camera.zoom,
+                                                     Self.defaultZoom))
                 }
             } label: {
                 chromeButtonGlyph("location.fill")

@@ -87,6 +87,7 @@ import com.hcjeong.forestix.data.cruise.PlotCenterResult
 import com.hcjeong.forestix.data.cruise.PositionSource
 import com.hcjeong.forestix.data.cruise.PositionTier
 import com.hcjeong.forestix.data.cruise.Project
+import com.hcjeong.forestix.geo.CoordinateConversions
 import com.hcjeong.forestix.positioning.CLLocationSnapshot
 import com.hcjeong.forestix.positioning.GPSAveraging
 import com.hcjeong.forestix.positioning.GeoMath
@@ -581,6 +582,15 @@ internal suspend fun convertPlannedToActivePlot(
     env.settings.setCruiseProjectId(project.id.toString())
     env.settings.setCruisePlotId(plot.id.toString())
     ForestixLogger.plotOpened(plot.id, plot.projectId)
+    // Same framing as the AR "Start plot" path — a planned plot that has just
+    // become real is still a new plot to stand inside. Raised HERE, in the one
+    // conversion all three planned-pin doors go through (the averaging sheet's
+    // Save centre, the peek's Start plot now, and the offset host), so no door
+    // can be added later that quietly skips it.
+    PendingPlotFraming.requestFraming(
+        CoordinateConversions.LatLon(latitude = plot.centerLat, longitude = plot.centerLon),
+        plotRadiusMetres(plot),
+    )
     return plot
 }
 

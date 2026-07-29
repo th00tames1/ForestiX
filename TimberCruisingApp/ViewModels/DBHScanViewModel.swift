@@ -166,8 +166,18 @@ public final class DBHScanViewModel: ObservableObject {
     /// the same normalisation `PreviewFit.stripLeftFraction` uses, so
     /// screen x-fraction ↔ depth walk-axis fraction is the existing
     /// view↔depth mapping the fit-chord overlay already relies on.
-    @Published public var edgeBracketLeftFraction: Double = 0.25
-    @Published public var edgeBracketRightFraction: Double = 0.75
+    ///
+    /// These initial values are a PLACEHOLDER, not the first-run bracket:
+    /// `DBHScanScreen.onAppear` seeds both handles from the remembered
+    /// width (`AppSettings.dbhBracketHalfWidth`) before depth is
+    /// subscribed, and that is the number the cruiser sees. They are
+    /// written from the same constant so a unit test or a preview that
+    /// drives the view model directly starts somewhere sane rather than at
+    /// a bracket across half the screen.
+    @Published public var edgeBracketLeftFraction: Double
+        = 0.5 - AppSettings.defaultBracketHalfWidth
+    @Published public var edgeBracketRightFraction: Double
+        = 0.5 + AppSettings.defaultBracketHalfWidth
     /// True when the most recently committed result was captured in
     /// ADJUST mode — recorded as the entry's "capture_mode" tag
     /// ("manual" vs "auto").
@@ -185,6 +195,19 @@ public final class DBHScanViewModel: ObservableObject {
     /// argument still stands and is worth revisiting with a device. It is
     /// not worth revisiting from a keyboard: the removal shipped alongside
     /// the mapping rewrite and the pair left the screen blank.
+    ///
+    /// WHAT CHANGED WITH "NO AUTO INTERLUDE" (field report, this round).
+    /// ADJUST used to arm only after the automatic path had produced a fit,
+    /// so the first ADJUST tick — the one that latched — was always taken on
+    /// a frame with a stem in it. The screen now opens on the bracket, so
+    /// the first tick lands while the phone is still coming up off the
+    /// cruiser's side. Latching THAT vote is exactly the failure the
+    /// paragraph above warns about, and it is silent: the wrong axis swaps
+    /// the extent the fractions are read against (256 vs 192 px), which
+    /// scales every diameter of the plot by 4:3 without any visible symptom.
+    /// So the latch now waits for a tick that actually MEASURED something —
+    /// see `handleDepthFrame`. That is the same condition the interlude used
+    /// to guarantee, restored without the interlude.
     private var adjustAxisLatch: GuideAxis?
 
     /// Bracket state latched at the moment the capture "+" started the
@@ -560,9 +583,9 @@ public final class DBHScanViewModel: ObservableObject {
         // ADJUST (edge-bracket) mode bypasses BOTH the automatic
         // edge-finding and the stability/EMA machinery: the live value
         // and the chord bar must track the user's handles exactly, so
-        // the raw bracket fit is published on every preview tick. The
-        // walk axis comes from the mapped bracket span, per frame — see
-        // the note where the old latch used to live.
+        // the raw bracket fit is published on every preview tick. The walk
+        // axis is voted per frame until the bracket first measures, then
+        // latched — see `adjustAxisLatch`.
         if edgeAdjustActive {
             // THE HANDLE FRACTIONS GO STRAIGHT IN, against a guide axis
             // latched for the session — restored verbatim from the version
@@ -577,13 +600,27 @@ public final class DBHScanViewModel: ObservableObject {
             // derivation goes. The mapping is still computed and recorded in
             // the raw-capture manifest, where it costs nothing and can
             // settle the question later against a tape.
-            if adjustAxisLatch == nil { adjustAxisLatch = votedGuideAxis() }
+            //
+            // The axis is VOTED per tick until the bracket first measures
+            // something, and latched from that tick onwards. Two reasons for
+            // the delay, both in `adjustAxisLatch`: the screen now opens on
+            // the bracket, so an unconditional latch would fix the axis off
+            // whatever the phone was pointed at while being raised; and a
+            // wrong axis is silent — it rescales the whole plot by 4:3.
+            // Voting until then costs no more than the auto interlude it
+            // replaces, which called `votedGuideAxis()` on every tick for
+            // exactly the same stretch of time; once latched it costs
+            // nothing, which is what field report 9 asked for.
             let bracketAxis = adjustAxisLatch ?? votedGuideAxis()
             let fit = DBHEstimator.bracketChordFit(
                 frame: frame,
                 guideAxis: bracketAxis,
                 leftFraction: edgeBracketLeftFraction,
                 rightFraction: edgeBracketRightFraction)
+            // A fit means the walk crossed real depth at the guide line, so
+            // this vote was taken on an aimed frame. Latch it and stop
+            // voting.
+            if adjustAxisLatch == nil, fit != nil { adjustAxisLatch = bracketAxis }
             bracketMappingReady = true
             smoothedPreviewDbhCm = nil
             smoothedCenterWorldXZ = nil

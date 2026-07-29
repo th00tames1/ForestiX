@@ -184,11 +184,6 @@ public struct HeightScanScreen: View {
     /// line. nil while the raycast misses (sky, no mesh/plane yet,
     /// tracking not ready), which also counts as "gate not satisfied".
     @State private var anchorAimDistanceM: Float?
-    /// AIM-OFFSET INSTRUMENT (developer mode only) — the latest reading of
-    /// where the camera optical axis projects onto the view. nil when the
-    /// probe has no honest answer, and nil at all times outside developer
-    /// mode, where the poll below never runs.
-    @State private var opticalAxis: OpticalAxisProbe?
     /// (mesh overlay removed — the Height scan uses the plane/tangent walk-off
     /// and the LiDAR reconstruction wireframe was just visual noise.)
     /// PLACEHOLDER-COMMENT
@@ -294,14 +289,6 @@ public struct HeightScanScreen: View {
                          raycaster: raycaster)
                 .ignoresSafeArea()
             overlayChrome
-            // Developer instrument, drawn ON TOP of the ring so one
-            // screenshot carries the ring, the projected optical axis and the
-            // numbers together. Hidden with the rest of the 2D chrome for the
-            // Accept snapshot, so the stored photo is identical to a
-            // non-developer run's.
-            if settings.developerMode && !hidingChromeForCapture {
-                opticalAxisInstrument
-            }
             // Everything below is 2D chrome — hidden as one block while
             // the Accept-time window snapshot is captured so the JPEG
             // shows only the AR feed + measurement overlays.
@@ -452,23 +439,6 @@ public struct HeightScanScreen: View {
                     anchorAimDistanceM = nil
                 }
                 try? await Task.sleep(nanoseconds: 100_000_000)
-            }
-        }
-        // AIM-OFFSET INSTRUMENT (developer mode only) — where the camera
-        // optical axis actually projects onto the view, against the view
-        // centre the aim ring is drawn at. See
-        // `ARCenterRaycaster.opticalAxisProbe()` for the geometry and for why
-        // this measures rather than corrects. The value only moves when the
-        // display geometry does, so a quarter-second poll is ample; with
-        // developer mode off the loop never starts and nothing is computed.
-        .task(id: settings.developerMode) {
-            guard settings.developerMode else {
-                opticalAxis = nil
-                return
-            }
-            while !Task.isCancelled {
-                opticalAxis = raycaster.opticalAxisProbe()
-                try? await Task.sleep(nanoseconds: 250_000_000)
             }
         }
         // FIELD REPORT 14 — the plot's tracked centre, refreshed off the
@@ -829,109 +799,6 @@ public struct HeightScanScreen: View {
                 .cornerRadius(4)
                 .offset(y: Self.crosshairLabelOffset)
         }
-    }
-
-    // MARK: - Aim-offset instrument (developer mode)
-
-    /// Cyan — deliberately NOT the amber the aim ring is drawn in, so a
-    /// screenshot can never be read with the two marks confused.
-    private static let opticalAxisTint = Color(red: 0.20, green: 0.85, blue: 1.0)
-        .opacity(0.85)
-    /// Optical-axis marker box, and the corner-to-corner X inside it.
-    private static let opticalAxisMarkSize: CGFloat = 22
-    private static let opticalAxisMarkDiagonal: CGFloat = 31
-    /// Readout block CENTRE, measured down from the view centre: clear of the
-    /// aim label pill (centre at 40, ≈ 11 half-height), a gap, then half of a
-    /// four-line block.
-    private static let opticalAxisReadoutOffset: CGFloat = 96
-
-    /// AIM-OFFSET INSTRUMENT (developer mode only) — draws where the camera
-    /// optical axis projects onto the view, and reports its offset from the
-    /// view centre in device pixels and in degrees. See
-    /// `ARCenterRaycaster.opticalAxisProbe()`: the elevation the height
-    /// tangent uses and the base/top spheres both live on the optical axis,
-    /// while the aim ring and the anchor raycast use the view centre, and this
-    /// says how far apart those two references actually are. It measures only
-    /// — the ring is not moved, the raycast is not moved, and no stored value
-    /// can reach this code.
-    ///
-    /// Full-bleed, exactly like `overlayChrome` and for the same reason: the
-    /// probe reports points in the AR VIEW's space, and that view ignores the
-    /// safe area, so a reader laid out inside the safe area would place the
-    /// mark ~12 pt off on a notched phone — an error of the very kind this
-    /// instrument exists to measure.
-    @ViewBuilder
-    private var opticalAxisInstrument: some View {
-        GeometryReader { geo in
-            if let probe = opticalAxis {
-                opticalAxisMark
-                    .position(x: probe.viewPoint.x, y: probe.viewPoint.y)
-                    .accessibilityIdentifier("heightScan.opticalAxisMark")
-            }
-            opticalAxisReadout
-                .position(x: geo.size.width / 2,
-                          y: geo.size.height / 2 + Self.opticalAxisReadoutOffset)
-                .accessibilityIdentifier("heightScan.opticalAxisReadout")
-        }
-        .ignoresSafeArea()
-        // Chrome only: it must never intercept a tap meant for the AR view.
-        .allowsHitTesting(false)
-    }
-
-    /// X + open circle. Dark halo under a thin tint, the same sun-glare
-    /// treatment the aim ring gets — a bare cyan line vanishes against sky.
-    private var opticalAxisMark: some View {
-        let mark = Self.opticalAxisMarkSize
-        let diag = Self.opticalAxisMarkDiagonal
-        let halo = Color.black.opacity(0.55)
-        return ZStack {
-            Rectangle().fill(halo)
-                .frame(width: diag, height: 3)
-                .rotationEffect(.degrees(45))
-            Rectangle().fill(halo)
-                .frame(width: diag, height: 3)
-                .rotationEffect(.degrees(-45))
-            Circle().strokeBorder(halo, lineWidth: 3)
-                .frame(width: mark * 0.6, height: mark * 0.6)
-            Rectangle().fill(Self.opticalAxisTint)
-                .frame(width: diag, height: 1.5)
-                .rotationEffect(.degrees(45))
-            Rectangle().fill(Self.opticalAxisTint)
-                .frame(width: diag, height: 1.5)
-                .rotationEffect(.degrees(-45))
-            Circle().strokeBorder(Self.opticalAxisTint, lineWidth: 1.5)
-                .frame(width: mark * 0.6, height: mark * 0.6)
-        }
-        .frame(width: mark, height: mark)
-    }
-
-    /// The numbers. A missing probe prints WHY there is no reading rather
-    /// than a zero offset, which would read as "the two references coincide".
-    private var opticalAxisReadout: some View {
-        VStack(spacing: 0) {
-            Text("Optical axis vs view centre")
-                .foregroundStyle(.white)
-            if let probe = opticalAxis {
-                Text(String(format: "dx %+.1f px  %+.2f°",
-                            Double(probe.dxPx), probe.dxDeg))
-                    .foregroundStyle(Self.opticalAxisTint)
-                Text(String(format: "dy %+.1f px  %+.2f°",
-                            Double(probe.dyPx), probe.dyDeg))
-                    .foregroundStyle(Self.opticalAxisTint)
-                Text(String(format: "r %.1f px  %.2f°",
-                            Double(probe.rPx), probe.rDeg))
-                    .foregroundStyle(Self.opticalAxisTint)
-            } else {
-                Text("not available — no camera frame or display mapping yet")
-                    .foregroundStyle(.white)
-            }
-        }
-        .font(ForestixType.dataSmall)
-        .multilineTextAlignment(.center)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Color.black.opacity(0.65))
-        .cornerRadius(4)
     }
 
     /// HUD payload — KEPT but NOT RENDERED (field report F3; see the note

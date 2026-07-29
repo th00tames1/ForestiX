@@ -20,6 +20,7 @@ import androidx.navigation.navArgument
 import com.hcjeong.forestix.ui.screens.CalibrationScreen
 import com.hcjeong.forestix.ui.screens.DistanceMeasureScreen
 import com.hcjeong.forestix.ui.screens.ExportScreen
+import com.hcjeong.forestix.ui.screens.FieldLogScope
 import com.hcjeong.forestix.ui.screens.FieldLogScreen
 import com.hcjeong.forestix.ui.screens.MapHomeScreen
 import com.hcjeong.forestix.ui.screens.RawCapturesScreen
@@ -29,6 +30,7 @@ import com.hcjeong.forestix.ui.screens.SettingsScreen
 import com.hcjeong.forestix.ui.screens.cruise.CruiseOffsetHostScreen
 import com.hcjeong.forestix.ui.screens.cruise.CruiseRoutes
 import com.hcjeong.forestix.ui.screens.cruise.CruiseStartPlotScreen
+import com.hcjeong.forestix.ui.screens.cruise.ProjectBrowserScreen
 import com.hcjeong.forestix.ui.screens.dbh.DBHScanScreen
 import com.hcjeong.forestix.ui.screens.height.HeightScanScreen
 import com.hcjeong.forestix.ui.screens.plot.PlotFlowRoutes
@@ -44,6 +46,13 @@ object Routes {
     /// cluster, and the offline-basemap sheet. The app's start destination.
     const val MAP_HOME = "mapHome"
     const val FIELD_LOG = "fieldLog"
+    /// The field log opened already narrowed to ONE cruise plot — the one
+    /// the cruiser has open (cruise project sheet → "Field log · Plot N").
+    /// Separate from [FIELD_LOG] so the unscoped entries keep showing
+    /// everything.
+    const val FIELD_LOG_PLOT = "fieldLog/plot/{plotId}"
+
+    fun fieldLogPlot(plotId: String) = "fieldLog/plot/$plotId"
     const val DBH = "dbh"
     /// Registered DBH route pattern. The optional `chain` flag
     /// ("dbh?chain=true" — the map-home Full measurement row) makes DBH
@@ -73,6 +82,15 @@ fun ForestixRoot() {
     NavHost(navController = nav, startDestination = Routes.MAP_HOME) {
         composable(Routes.MAP_HOME) { MapHomeScreen(nav) }
         composable(Routes.FIELD_LOG) { FieldLogScreen(nav) }
+        composable(Routes.FIELD_LOG_PLOT) { back ->
+            // A malformed id would be a bug in the caller, not something the
+            // cruiser can produce — but parse it defensively and fall back to
+            // the unscoped log rather than crashing on the way to a read-back.
+            val plotId = runCatching { UUID.fromString(back.arg("plotId")) }.getOrNull()
+            val scope: FieldLogScope =
+                if (plotId != null) FieldLogScope.CruisePlot(plotId) else FieldLogScope.Everything
+            FieldLogScreen(nav, initialScope = scope)
+        }
         composable(
             Routes.DBH_PATTERN,
             arguments = listOf(navArgument("chain") { type = NavType.BoolType; defaultValue = false }),
@@ -124,6 +142,7 @@ fun ForestixRoot() {
         composable(CruiseRoutes.STAND_SUMMARY) { back ->
             StandSummaryScreen(nav, UUID.fromString(back.arg("projectId")))
         }
+        composable(CruiseRoutes.PROJECT_BROWSER) { ProjectBrowserScreen(nav) }
 
         // MARK: - Kept detail/tool screens
 

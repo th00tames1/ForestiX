@@ -366,12 +366,23 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // last chose Auto. Automatic edge-finding was the default and the
     // cruiser's verdict on it was that it jumped left and right on a real
     // stem badly enough to be unusable in the stand; the bracket is one drag
-    // and holds still. The bracket is also SYMMETRIC about the crosshair and
-    // opens at the width the last tree was measured at, so a plot walked at
-    // one standing distance needs no drag at all after the first tree.
+    // and holds still. It OPENS CENTRED on the crosshair at the width the
+    // last tree was measured at, so a plot walked at one standing distance
+    // needs no drag at all after the first tree. (Centred only at open —
+    // each handle then moves on its own; see the drag gesture.)
+    //
+    // NO AUTO INTERLUDE, and this is where iOS was brought into line: both
+    // values are read from the persisted settings at first composition, so
+    // the bracket is live on the first frame at a known width. The settings
+    // snapshot is loaded synchronously in `AppSettings.loadSnapshot`, so
+    // these `remember`s see the cruiser's stored width, not the defaults.
     var adjustMode by remember { mutableStateOf(settings.dbhEdgeAdjustDefault) }
-    var adjustLeftFrac by remember { mutableStateOf(0.5f - settings.dbhBracketHalfWidth) }
-    var adjustRightFrac by remember { mutableStateOf(0.5f + settings.dbhBracketHalfWidth) }
+    var adjustLeftFrac by remember {
+        mutableStateOf(0.5f - clampBracketHalfWidth(settings.dbhBracketHalfWidth))
+    }
+    var adjustRightFrac by remember {
+        mutableStateOf(0.5f + clampBracketHalfWidth(settings.dbhBracketHalfWidth))
+    }
     var adjustPreview by remember { mutableStateOf<DBHEstimator.DbhPreview?>(null) }
     // Whether the on-screen result came from the ADJUST bracket — recorded
     // as captureMode "manual" vs "auto" on Accept.
@@ -2007,8 +2018,10 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                             // tree's width is the better guess — and when it
                             // is wrong it is wrong symmetrically, which one
                             // drag fixes. On a fresh install the stored
-                            // width is 0.25, i.e. the ±25 % this used to
-                            // fall back to.
+                            // width is DEFAULT_BRACKET_HALF_WIDTH, derived
+                            // there from the field corpus rather than picked
+                            // for symmetry. iOS now opens the same way (it
+                            // seeded from the auto fit until this round).
                             val half = clampBracketHalfWidth(settings.dbhBracketHalfWidth)
                             adjustLeftFrac = 0.5f - half
                             adjustRightFrac = 0.5f + half

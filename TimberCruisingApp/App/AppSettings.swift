@@ -352,17 +352,21 @@ public final class AppSettings: ObservableObject {
         }
     }
 
-    /// HALF the bracket width, as a fraction of the view's walk axis, so a
-    /// bracket set on one tree opens at the same width on the next.
+    /// HALF the bracket width, as a fraction of the walk axis, so a bracket
+    /// set on one tree opens at the same width on the next — and so the
+    /// diameter screen can open ON the bracket without an Auto interlude.
     ///
     /// FIELD REPORT 4 — a cruise walks a plot at roughly one standing
     /// distance from stem to stem, so consecutive trees subtend nearly the
-    /// same on-screen width. Re-dragging from ±25 % every time was work the
-    /// previous tree had already done.
+    /// same on-screen width. Re-dragging every time was work the previous
+    /// tree had already done.
     ///
-    /// HALF-width, not two edges, because the bracket is symmetric about
-    /// the crosshair by construction (see `DBHScanScreen.adjustHandle`) —
-    /// one number is the whole state.
+    /// ONE number, not two edges: the handles move INDEPENDENTLY once the
+    /// bracket is up (see `DBHScanScreen.adjustHandle` — making them
+    /// symmetric caused a 1.5× over-read and was reverted), but a re-opened
+    /// bracket has nothing better than the crosshair to centre on, so the
+    /// width is the only part of a previous tree's bracket worth carrying.
+    /// What is stored is therefore the half-SPAN, `(right − left) / 2`.
     ///
     /// Clamped on read as well as write: a value from a future build, or a
     /// corrupt default, must not be able to produce a bracket wider than
@@ -370,7 +374,7 @@ public final class AppSettings: ObservableObject {
     public var dbhBracketHalfWidth: Double {
         get {
             let stored = defaults.object(forKey: Keys.dbhBracketHalfWidth) as? Double
-            return Self.clampBracketHalfWidth(stored ?? 0.25)
+            return Self.clampBracketHalfWidth(stored ?? Self.defaultBracketHalfWidth)
         }
         set {
             defaults.set(Self.clampBracketHalfWidth(newValue),
@@ -379,11 +383,51 @@ public final class AppSettings: ObservableObject {
         }
     }
 
+    /// FIRST-RUN bracket half-width — half the fraction of the walk axis a
+    /// typical stem covers at a typical working distance. Replaced by the
+    /// cruiser's own width the first time a handle is released.
+    ///
+    /// DERIVED, not picked for symmetry. The old value was 0.25 (a bracket
+    /// across half the screen), and it is what made ADJUST look dead: half
+    /// of a 192-px walk axis is a 96-px span, which against the depth-scaled
+    /// focal is ≈ 59·z cm — over the 100 cm plausibility ceiling of the day
+    /// past about 1.7 m, so every frame returned nil. The ceiling is 300 cm
+    /// now and that particular failure is gone, but the number was never
+    /// right: it opens the bracket at roughly twice a real stem.
+    ///
+    /// WHERE 0.135 COMES FROM. `val/analysis/relayer.py` replays 97
+    /// tape-verified McDunn captures through the shipped ADJUST path and
+    /// reproduces the stored diameter to a median of 0.00 cm, so its numbers
+    /// describe this code. Median k = w/(2f) on iOS is 0.130, where w is the
+    /// bracket span in walk-axis pixels and f the depth-scaled focal. Hence
+    ///
+    ///     span fraction = w / extent = 2k · (f / extent)
+    ///
+    /// `bracketChordFit` divides by fx and walks the depth map's short axis
+    /// in portrait, so f/extent = (fx_full · depthW/imgW) / depthH =
+    /// fx_full / imgH — the downsample cancels, and on a 1920×1440 capture
+    /// with fx_full ≈ 1480 that is ≈ 1.03. So span ≈ 0.26 · 1.03 ≈ 0.27, and
+    /// half of it is 0.135. (It is device-dependent at the few-per-cent
+    /// level through fx_full; a seed does not need better than that.)
+    ///
+    /// CROSS-CHECK against the identity d = w·z/(f − w/2): a 0.135 half-width
+    /// is a 35 cm stem at 1.2 m, which is the middle of the range the field
+    /// protocol asks for — DBH accuracy degrades measurably past ~1.5 m.
+    ///
+    /// The same constant seeds Android (`AppSettings.kt`), where the number
+    /// is a fraction of the VIEW that ARCore converts to depth space rather
+    /// than the 1:1 identification iOS uses. It is kept identical because
+    /// the two platforms share this key, and because on-screen a stem of a
+    /// given size at a given range covers a similar fraction of either
+    /// phone's preview. Android's own median k cannot be inverted into a
+    /// view fraction without the device's display transform.
+    public static let defaultBracketHalfWidth: Double = 0.135
+
     /// The bracket's legal half-width range. 0.02 is half the fit's 0.04
     /// minimum gap; 0.48 puts the handles 2 % in from each screen edge,
     /// where they are still grabbable.
     public static func clampBracketHalfWidth(_ value: Double) -> Double {
-        guard value.isFinite else { return 0.25 }
+        guard value.isFinite else { return defaultBracketHalfWidth }
         return min(max(value, 0.02), 0.48)
     }
 

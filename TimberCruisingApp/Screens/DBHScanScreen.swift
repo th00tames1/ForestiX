@@ -115,10 +115,6 @@ public struct DBHScanScreen: View {
     /// outlives the screen, and a shot taken after the screen is gone is both
     /// the wrong picture and an undeletable file.
     @State private var hasLeftScreen = false
-    /// Whether the bracket has already been armed from an auto fit during
-    /// this appearance. Stops the arming from fighting a cruiser who taps
-    /// Auto — one arm per visit, then the pill decides.
-    @State private var adjustArmedThisAppearance = false
     /// True once this screen has produced a fit — the switch that turns the
     /// scene-reconstruction wireframe off. See `showsScanMesh`.
     @State private var hasProducedFit = false
@@ -662,48 +658,40 @@ public struct DBHScanScreen: View {
             // next return without leaving the scan screen.
             viewModel.dbhMeasurementMethod = settings.dbhMeasurementMethod
             viewModel.developerMode = settings.developerMode
-            // ADJUST IS NOT ARMED HERE. It waits for a fit — see
-            // `armAdjustOnFirstFit`.
+            // ADJUST IS LIVE FROM THE FIRST FRAME when the cruiser's last
+            // choice was the bracket. No Auto interlude: they chose Adjust,
+            // so they get Adjust, at the width they were already using.
             //
-            // THIS BLOCK WAS THE BUG, and it survived three attempts to find
-            // it because it looks harmless. It opened the bracket at a fixed
-            // 0.25/0.75 of the SCREEN and handed those two numbers to
-            // `bracketChordFit`, which reads them as fractions of the DEPTH
-            // map's walk axis. Half of a 192-px axis is a 96-px span, and
-            // with the depth-scaled focal (~210) that is a diameter of
-            // roughly 59·z centimetres — 119 cm at two metres. The
-            // estimator's own sanity gate refuses anything over 100 cm, so
-            // every frame returned nil: no diameter, no chord, and a "+"
-            // that could not fire because capture requires a fit. Auto kept
-            // working because its only view-space input is the centre pixel.
+            // This is deliberately BEFORE `viewModel.onAppear()`, which is
+            // what subscribes to depth — so there is no window, not even one
+            // tick, in which the automatic edge-finder owns the screen and
+            // publishes a fit the bracket would then have to be re-seeded
+            // from. That flicker (a couple of seconds of Auto, then a
+            // bracket at whatever width the auto fit happened to find) is
+            // the report this fixes: "폭이 들쭉날쭉한 상태로 Adjust 모드가
+            // 실행".
             //
-            // Worse, arming here PRE-EMPTED the auto path: with the bracket
-            // already active on the first depth frame the auto branch never
-            // ran, so no fit ever existed for `enterAdjustMode` to seed
-            // from, and the Adjust rail button is hidden while the bracket
-            // is up. The one correct seeding path was unreachable.
-            adjustArmedThisAppearance = false
+            // THE HISTORY, because this exact line has been wrong twice in
+            // opposite directions. Arming on appear used to open the bracket
+            // at a hard-coded 0.25/0.75 — half the walk axis, ~96 px of 192,
+            // which against the depth-scaled focal is ≈ 59·z cm and so blew
+            // the 100 cm plausibility ceiling of the day at any realistic
+            // distance: no fit, no diameter, a dead "+". Two things make the
+            // same arming safe now. The ceiling is 300 cm. And the width is
+            // no longer a constant chosen for symmetry: it is the cruiser's
+            // own remembered half-span, or on a fresh install
+            // `AppSettings.defaultBracketHalfWidth`, which is derived from
+            // the field corpus and is about half the old number.
+            //
+            // NOT a preference write. Appearing is not a choice — only the
+            // Adjust rail button and the Auto pill move
+            // `settings.dbhEdgeAdjustDefault`.
+            if settings.dbhEdgeAdjustDefault {
+                seedBracketFromRememberedWidth()
+                viewModel.edgeAdjustActive = true
+            }
             configureRawCapture()
             viewModel.onAppear()
-        }
-        // FIELD REPORT 4 asked the diameter scan to OPEN on the bracket.
-        // It does — just not before there is something to open it ON. The
-        // auto path runs first, and the moment it has a fit the bracket
-        // takes over seeded from that fit's own DEPTH-space edges, which is
-        // the seeding that round-trips exactly through `bracketChordFit` and
-        // the reason the pre-regression build measured a stand correctly.
-        // In practice that is the second or so the cruiser spends raising
-        // the phone, and it costs nothing: the handles arrive already on the
-        // trunk instead of at an arbitrary half-screen span.
-        .onChange(of: viewModel.previewFit?.stripRightFraction) { _, _ in
-            guard settings.dbhEdgeAdjustDefault,
-                  !adjustArmedThisAppearance,
-                  !viewModel.edgeAdjustActive,
-                  let fit = viewModel.previewFit,
-                  fit.stripRightFraction > fit.stripLeftFraction
-            else { return }
-            adjustArmedThisAppearance = true
-            enterAdjustMode()
         }
         // The wireframe's off-switch — see `showsScanMesh`. Latched, never
         // released: it answers a question that only gets asked once.
@@ -711,7 +699,6 @@ public struct DBHScanScreen: View {
             if has, !hasProducedFit { hasProducedFit = true }
         }
         .onDisappear {
-            adjustArmedThisAppearance = false
             hasLeftScreen = true
             // Leaving without accepting: the held frame belongs to a
             // measurement that was never stored, so the file goes with it.
@@ -1144,11 +1131,13 @@ public struct DBHScanScreen: View {
     /// Smallest allowed handle separation (fraction of view width).
     private static let adjustMinGapFraction: Double = 0.04
 
-    /// The bracket's half-width, read off the two published fractions.
+    /// The bracket's half-SPAN, read off the two published fractions.
     ///
     /// They stay the source of truth — the estimator and the chord overlay
-    /// both consume them — but since FIELD REPORT 4 they are always
-    /// symmetric about 0.5, so this one number describes the whole bracket.
+    /// both consume them, and each handle moves independently — so this is
+    /// not the whole bracket, only the part worth carrying to the next tree:
+    /// a re-opened bracket has nothing but the crosshair to centre on, and
+    /// the width is what the cruiser would otherwise re-drag.
     private var bracketHalfWidth: Double {
         (viewModel.edgeBracketRightFraction
             - viewModel.edgeBracketLeftFraction) / 2
@@ -1259,7 +1248,10 @@ public struct DBHScanScreen: View {
         .accessibilityIdentifier(isLeft ? "dbhScan.adjustHandleLeft"
                                         : "dbhScan.adjustHandleRight")
         .accessibilityLabel(isLeft ? "Left trunk edge" : "Right trunk edge")
-        .accessibilityHint("Drag to set the trunk width. Both edges move together.")
+        // The hint used to say "Both edges move together", which is what the
+        // symmetric bracket did before it was reverted for over-reading by
+        // 1.5x. VoiceOver was describing a behaviour the code no longer has.
+        .accessibilityHint("Drag to set this edge of the trunk. Each edge moves on its own.")
         // VoiceOver cannot drag, so the width is also reachable in steps.
         .accessibilityAdjustableAction { direction in
             // Widen / narrow by moving THIS edge outward or inward.
@@ -1686,29 +1678,54 @@ public struct DBHScanScreen: View {
     /// Open the bracket at the width the LAST tree was measured at, centred
     /// on the crosshair.
     ///
-    /// FIELD REPORT 4 — this used to seed from the automatic fit's edges
-    /// when it had any. That sounded helpful and was not: the automatic
-    /// edges are the thing the cruiser reached for ADJUST to get away from,
-    /// so the bracket opened already wrong and asymmetric, and the first
-    /// drag was spent undoing it. A plot is walked at roughly one standing
-    /// distance, so the previous tree's width is the better guess — and
-    /// when it is wrong it is wrong symmetrically, which one drag fixes.
+    /// WHICH SPACE THE SEED IS IN, and how I know. Getting this wrong is the
+    /// bug that cost three field rounds, so it is written out rather than
+    /// assumed.
     ///
-    /// On the very first scan of a fresh install the stored width is 0.25,
-    /// i.e. the ±25 % this used to fall back to.
+    /// `DBHEstimator.bracketChordFit` reads its two handle arguments as
+    /// fractions of the DEPTH MAP's walk axis: `leftPx = lo · extent`, with
+    /// `extent` = `frame.width` for a row walk and `frame.height` for a col
+    /// walk. `DBHScanViewModel` passes `edgeBracketLeftFraction` /
+    /// `…RightFraction` in UNCONVERTED, and those two are written by the
+    /// drag handler as `v.location.x / viewWidth` — a fraction of the VIEW.
+    /// So the app identifies view-x fraction with depth walk-axis fraction
+    /// 1:1, with no affine in between, and the same identity runs in reverse
+    /// when the auto fit's `stripLeftFraction` is drawn at `size.width · f`.
+    ///
+    /// That identity is NOT to be "corrected" here. It was checked against
+    /// 48 tape-measured stems: the span the app uses is 1.028× the span the
+    /// trunk actually subtends (median). Two separate derivations argued for
+    /// a 1.4–1.6× aspect-crop inflation and the field data falsified both;
+    /// changing the mapping would put every iOS reading out by the size of
+    /// the change.
+    ///
+    /// The consequence for the SEED is the whole point: what gets persisted
+    /// is `(right − left) / 2` read straight off those same two published
+    /// fractions (see `adjustHandle`'s `onEnded`), so putting it back is an
+    /// exact round trip into the space the estimator consumes. There is no
+    /// conversion on the way out, so there must be none on the way in.
+    ///
+    /// WHY NOT SEED FROM THE AUTO FIT — it did, once. The automatic edges
+    /// are the thing the cruiser reached for ADJUST to get away from, so the
+    /// bracket opened already wrong and asymmetric and the first drag was
+    /// spent undoing it; worse, once the screen opens on the bracket there
+    /// is no auto fit to borrow from anyway, and waiting for one is the Auto
+    /// interlude this round removed. A plot is walked at roughly one
+    /// standing distance, so the previous tree's width is the better guess,
+    /// and when it is wrong it is wrong symmetrically — one drag fixes it.
+    /// This is also what the Android sibling has always done.
+    ///
+    /// On the very first scan of a fresh install the width comes from
+    /// `AppSettings.defaultBracketHalfWidth`, which is derived there from
+    /// the field corpus rather than chosen for symmetry.
+    private func seedBracketFromRememberedWidth() {
+        setBracketHalfWidth(settings.dbhBracketHalfWidth)
+    }
+
+    /// The Adjust rail button: same seeding, plus the preference write —
+    /// this one IS a choice, so it is remembered for the next tree.
     private func enterAdjustMode() {
-        // Seed from the auto fit when one is on screen, else from the width
-        // the last tree ended on. The auto-fit seed is how the version the
-        // field verified opened, and it puts the handles on the trunk before
-        // the first drag; the remembered width is the fallback and is what
-        // the cruiser asked for when there is no fit to borrow from.
-        if let fit = viewModel.previewFit,
-           fit.stripRightFraction > fit.stripLeftFraction {
-            viewModel.edgeBracketLeftFraction = fit.stripLeftFraction
-            viewModel.edgeBracketRightFraction = fit.stripRightFraction
-        } else {
-            setBracketHalfWidth(settings.dbhBracketHalfWidth)
-        }
+        seedBracketFromRememberedWidth()
         viewModel.edgeAdjustActive = true
         settings.dbhEdgeAdjustDefault = true
     }

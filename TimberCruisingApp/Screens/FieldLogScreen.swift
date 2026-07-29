@@ -29,8 +29,22 @@
 //     standard
 //   • Export CSV / bundle in the toolbar
 //
-// The same `QuickMeasureEntry` / `QuickMeasureHistory` backing store powers
-// it — no changes to the durability / schema layer.
+// FIELD REPORT 5 (second half) — the log is now READ PER PROJECT AND PER
+// PLOT. See FieldLogScope.swift for why that needed a closed enum: cruise
+// trees and quick measurements live in two separate stores whose plot ids
+// are not interchangeable, so the screen shows them in separate sections
+// under a heading naming the project and the plot, and never interleaves
+// them. Quick rows keep every edit path they had; cruise rows are read-only
+// here, because TreeDetailScreen owns that store's writes.
+//
+// The three-column table did NOT grow two more columns for project and
+// plot: the whole point of the one-row-per-tree change above was that four
+// columns on a phone had every cell scaling to fit. The section heading
+// carries the project and the plot for every row beneath it instead.
+//
+// The `QuickMeasureEntry` / `QuickMeasureHistory` backing store is unchanged
+// — no changes to the durability / schema layer, and nothing here writes to
+// the cruise store at all.
 
 import SwiftUI
 import Common
@@ -41,11 +55,19 @@ public struct FieldLogScreen: View {
 
     @EnvironmentObject private var history: QuickMeasureHistory
     @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var environment: AppEnvironment
+    /// Cruise trees, read once on appear. See FieldLogCruiseFeed.
+    @StateObject private var cruiseFeed = FieldLogCruiseFeed()
+    /// What the log is showing. Seeded from the caller — the cruise project
+    /// sheet opens it already narrowed to the plot in hand — and changed
+    /// from the filter sheet.
+    @State private var scope: FieldLogScope
+    @State private var choosingScope = false
     @State private var shareURL: URL?
     /// The row whose detail sheet is open. nil = closed.
     @State private var inspecting: FieldLogRowModel?
     /// The row a swipe asked to delete, held until the cruiser confirms.
-    /// Only multi-reading rows go through here (see `requestDelete`).
+    /// EVERY row a swipe reaches goes through here (see `requestDelete`).
     @State private var pendingDelete: FieldLogRowModel?
     /// A "measure again" the detail sheet asked for. Held here, not in the
     /// sheet, because the scan is a full-screen cover: it has to present
@@ -68,21 +90,84 @@ public struct FieldLogScreen: View {
     /// The "add a tree" the toolbar or the empty state raised. nil = closed.
     @State private var newTree: FieldLogNewTree?
 
-    public init() {}
+    /// `scope` defaults to everything; the cruise project sheet passes the
+    /// plot in hand so the log opens on it.
+    public init(scope: FieldLogScope = .everything) {
+        _scope = State(initialValue: scope)
+    }
 
-    private var rows: [FieldLogRowModel] {
-        FieldLogRowModel.rows(from: history.entries)
+    /// Quick-measure rows in scope. `.everything` is every plot, a quick
+    /// plot is that plot, and a CRUISE scope is none of them — a cruise
+    /// project has no quick plots under it, and pretending otherwise is
+    /// exactly the conflation this feature exists to avoid.
+    private var quickSections: [FieldLogSection] {
+        let entries: [QuickMeasureEntry]
+        switch scope {
+        case .everything:            entries = history.entries
+        case .quickPlot(let id):     entries = history.entries.filter { $0.plotID == id }
+        case .cruiseProject, .cruisePlot: return []
+        }
+        // One section per quick plot, so a heading names the plot every row
+        // under it belongs to. Entries whose plot row is missing (a plot
+        // deleted out from under them) are grouped under their own id and
+        // labelled with what is actually known, never re-homed silently.
+        var order: [UUID?] = []
+        var grouped: [UUID?: [QuickMeasureEntry]] = [:]
+        for entry in entries {
+            if grouped[entry.plotID] == nil { order.append(entry.plotID) }
+            grouped[entry.plotID, default: []].append(entry)
+        }
+        return order.compactMap { plotID -> FieldLogSection? in
+            guard let group = grouped[plotID], !group.isEmpty else { return nil }
+            let rows = FieldLogRowModel.rows(from: group)
+            return FieldLogSection(
+                id: "q|\(plotID?.uuidString ?? "-")",
+                projectLabel: FieldLogWords.noProject,
+                plotLabel: plotID.flatMap { history.plot(id: $0)?.name }
+                    ?? FieldLogWords.unknownPlot,
+                quickRows: rows,
+                cruiseRows: [],
+                latest: group.map(\.createdAt).max() ?? Date.distantPast)
+        }
+        .sorted { $0.latest > $1.latest }
+    }
+
+    private var cruiseSections: [FieldLogSection] {
+        cruiseFeed.sections(for: scope)
+    }
+
+    private var sections: [FieldLogSection] {
+        (quickSections + cruiseSections).sorted { $0.latest > $1.latest }
+    }
+
+    /// True when the whole log — both worlds — holds nothing at all, which
+    /// is the only case the "no readings yet" empty state describes. A scope
+    /// that merely happens to be empty gets `FieldLogWords.emptyScope`
+    /// instead, so "you have measured nothing" and "nothing in THIS plot"
+    /// never read the same.
+    private var logIsEmpty: Bool {
+        history.entries.isEmpty
+            && cruiseFeed.rowsByPlot.values.allSatisfy(\.isEmpty)
+            && cruiseFeed.failure == nil
     }
 
     public var body: some View {
         Group {
-            if history.entries.isEmpty {
+            if logIsEmpty {
                 emptyState
             } else {
                 populatedList
             }
         }
         .background(ForestixPalette.canvas.ignoresSafeArea())
+        .onAppear { cruiseFeed.load(environment: environment) }
+        .sheet(isPresented: $choosingScope) {
+            FieldLogScopeSheet(
+                scope: $scope,
+                quickPlots: history.plots,
+                projects: cruiseFeed.projects,
+                plotsByProject: cruiseFeed.plotsByProject)
+        }
         .navigationTitle("Field log")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
@@ -99,7 +184,12 @@ public struct FieldLogScreen: View {
                 }
                 .accessibilityIdentifier("fieldLog.newTree")
             }
-            if !history.entries.isEmpty {
+            // Export writes the QUICK-MEASURE tables. Under a cruise scope
+            // none of the rows on screen are in them, so the button is not
+            // offered: a file that silently holds different trees than the
+            // list above it is worse than no button. The cruise bundle has
+            // its own "Export all" on the project screen.
+            if quickWorldVisible, !history.entries.isEmpty {
                 ToolbarItem(placement: .primaryAction) {
                     Menu {
                         Button {
@@ -159,10 +249,16 @@ public struct FieldLogScreen: View {
             }
         }
         #endif
-        // A tree row can carry more than one reading, and a swipe is a
-        // cheap gesture — so a swipe that would take BOTH the diameter and
-        // the height says what it is about to take first. Single-reading
-        // rows delete straight away, as they always have.
+        // EVERY swipe asks, and names what it is about to take.
+        //
+        // This used to confirm only for a row carrying several readings and
+        // delete a single-reading row on the spot. Most rows ARE a single
+        // reading, so in practice a swipe — a cheap, easily-misfired gesture
+        // on a list the cruiser scrolls one-handed — destroyed a measurement
+        // with nothing in the way. What it destroys is field data: getting it
+        // back means walking to the tree again, and in an accuracy-validation
+        // set the tree that gets re-measured is not the same observation.
+        // One tap of friction is nothing against that.
         .confirmationDialog(
             pendingDelete.map { "Delete \($0.title)?" } ?? "",
             isPresented: Binding(get: { pendingDelete != nil },
@@ -170,7 +266,8 @@ public struct FieldLogScreen: View {
             titleVisibility: .visible
         ) {
             if let row = pendingDelete {
-                Button("Delete \(row.entries.count) readings", role: .destructive) {
+                Button(FieldLogRowModel.deleteActionTitle(row.entries.count),
+                       role: .destructive) {
                     for entry in row.entries { history.delete(id: entry.id) }
                     pendingDelete = nil
                 }
@@ -195,10 +292,22 @@ public struct FieldLogScreen: View {
 
     private var populatedList: some View {
         List {
-            // Plot summary card — shows BA / TPA / QMD + stocking
-            // gauge + species mix for the active plot. Hidden on
-            // hosts with fewer than two readings (gauge needs data).
-            if let plotID = history.activePlotID,
+            Section {
+                scopeBar
+                    .listRowInsets(EdgeInsets(top: ForestixSpace.sm,
+                                              leading: ForestixSpace.md,
+                                              bottom: ForestixSpace.sm,
+                                              trailing: ForestixSpace.md))
+                    .listRowBackground(ForestixPalette.surface)
+            }
+
+            // Plot summary card — BA / TPA / QMD + stocking gauge + species
+            // mix for the active QUICK plot. It reads the quick-measure
+            // store, so it is shown only while the quick world is on screen:
+            // under a cruise scope it would be a card about a different plot
+            // than every row beneath it.
+            if quickWorldVisible,
+               let plotID = history.activePlotID,
                let plot = history.plot(id: plotID) {
                 let plotEntries = history.entries(forPlot: plotID)
                 if plotEntries.count >= 1 {
@@ -218,15 +327,31 @@ public struct FieldLogScreen: View {
                     }
                 }
             }
-            Section {
-                summaryHeader
-                    .listRowInsets(EdgeInsets(top: ForestixSpace.sm,
-                                              leading: ForestixSpace.md,
-                                              bottom: ForestixSpace.sm,
-                                              trailing: ForestixSpace.md))
-                    .listRowBackground(ForestixPalette.surface)
-                if history.isNearCapacity {
-                    capacityBanner
+            if quickWorldVisible {
+                Section {
+                    summaryHeader
+                        .listRowInsets(EdgeInsets(top: ForestixSpace.sm,
+                                                  leading: ForestixSpace.md,
+                                                  bottom: ForestixSpace.sm,
+                                                  trailing: ForestixSpace.md))
+                        .listRowBackground(ForestixPalette.surface)
+                    if history.isNearCapacity {
+                        capacityBanner
+                            .listRowInsets(EdgeInsets(top: ForestixSpace.xs,
+                                                      leading: ForestixSpace.md,
+                                                      bottom: ForestixSpace.xs,
+                                                      trailing: ForestixSpace.md))
+                            .listRowBackground(ForestixPalette.surface)
+                    }
+                }
+            }
+
+            // The cruise store refused to read. Say so where the missing
+            // rows would have been — an empty cruise side and an unreadable
+            // database look identical, and only one of them means "no trees".
+            if let failure = cruiseFeed.failure {
+                Section {
+                    noticeBanner(failure)
                         .listRowInsets(EdgeInsets(top: ForestixSpace.xs,
                                                   leading: ForestixSpace.md,
                                                   bottom: ForestixSpace.xs,
@@ -235,30 +360,142 @@ public struct FieldLogScreen: View {
                 }
             }
 
-            Section {
-                ForEach(rows) { row in
-                    Button { inspecting = row } label: {
-                        FieldLogRow(row: row, unitSystem: settings.unitSystem)
-                    }
-                    .buttonStyle(.plain)
-                    .listRowBackground(ForestixPalette.surface)
-                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                        Button(role: .destructive) {
-                            requestDelete(row)
-                        } label: {
-                            Label("Delete", systemImage: "trash")
+            if sections.isEmpty {
+                Section {
+                    Text(FieldLogWords.emptyScope)
+                        .font(ForestixType.caption)
+                        .foregroundStyle(ForestixPalette.textSecondary)
+                        .listRowBackground(ForestixPalette.surface)
+                }
+            }
+
+            ForEach(sections) { section in
+                Section {
+                    // Quick rows keep every path they had: tap to inspect,
+                    // swipe to delete, re-measure from the detail sheet.
+                    ForEach(section.quickRows) { row in
+                        Button { inspecting = row } label: {
+                            FieldLogRow(row: row, unitSystem: settings.unitSystem)
+                        }
+                        .buttonStyle(.plain)
+                        .listRowBackground(ForestixPalette.surface)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            Button(role: .destructive) {
+                                requestDelete(row)
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
                         }
                     }
-                }
-            } header: {
-                FieldLogColumnHeader()
+                    // Cruise rows are READ-ONLY: no tap target, no swipe.
+                    // The cruise flow owns that store's writes, and a second
+                    // save path onto the same row is how two numbers for one
+                    // tree get created.
+                    ForEach(section.cruiseRows) { row in
+                        FieldLogCruiseRowView(row: row,
+                                              unitSystem: settings.unitSystem)
+                            .listRowBackground(ForestixPalette.surface)
+                    }
+                    if section.isEmpty {
+                        Text(FieldLogWords.emptyScope)
+                            .font(ForestixType.caption)
+                            .foregroundStyle(ForestixPalette.textSecondary)
+                            .listRowBackground(ForestixPalette.surface)
+                    }
+                } header: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        // The heading is where a row says which project and
+                        // which plot it belongs to — it is true of every row
+                        // beneath it, and it costs the table no column width.
+                        Text(section.heading)
+                            .font(ForestixType.sectionHead)
+                            .tracking(FieldLogTable.headerTracking)
+                            .foregroundStyle(ForestixPalette.textSecondary)
+                            .lineLimit(2)
+                        FieldLogColumnHeader()
+                    }
                     .textCase(nil)
+                }
             }
         }
         #if os(iOS)
         .listStyle(.insetGrouped)
         #endif
         .scrollContentBackground(.hidden)
+    }
+
+    /// True while quick-measure rows can appear under the current scope.
+    private var quickWorldVisible: Bool {
+        switch scope {
+        case .everything, .quickPlot:     return true
+        case .cruiseProject, .cruisePlot: return false
+        }
+    }
+
+    // MARK: - Scope bar
+
+    /// What the log is showing, and the way to change it.
+    private var scopeBar: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                choosingScope = true
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "line.3.horizontal.decrease.circle")
+                        .foregroundStyle(ForestixPalette.primary)
+                    Text(scopeLabel)
+                        .font(ForestixType.bodyBold)
+                        .foregroundStyle(ForestixPalette.textPrimary)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(ForestixPalette.textTertiary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("fieldLog.scope")
+            // The cruiser's own question was "서브플롯? 스탠드?? 플롯??" — this
+            // is the answer, in one sentence, where they will be looking.
+            Text(FieldLogWords.worldsCaption)
+                .font(ForestixType.caption)
+                .foregroundStyle(ForestixPalette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var scopeLabel: String {
+        switch scope {
+        case .everything:
+            return FieldLogWords.everything
+        case .cruiseProject(let id):
+            guard let project = cruiseFeed.projects.first(where: { $0.id == id })
+            else { return FieldLogWords.everything }
+            return project.name
+        case .cruisePlot(let id):
+            guard let plot = cruiseFeed.plot(id: id) else {
+                return FieldLogWords.everything
+            }
+            let projectName = cruiseFeed.project(ofPlot: id)?.name
+            let plotName = FieldLogWords.plotName(number: plot.plotNumber)
+            return projectName.map { $0 + FieldLogWords.headingSeparator + plotName }
+                ?? plotName
+        case .quickPlot(let id):
+            return history.plot(id: id)?.name ?? FieldLogWords.unknownPlot
+        }
+    }
+
+    private func noticeBanner(_ text: String) -> some View {
+        HStack(spacing: ForestixSpace.xs) {
+            Image(systemName: "exclamationmark.triangle")
+                .foregroundStyle(ForestixPalette.confidenceWarn)
+            Text(text)
+                .font(ForestixType.caption)
+                .foregroundStyle(ForestixPalette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
     }
 
     // MARK: - Measure again
@@ -439,13 +676,10 @@ public struct FieldLogScreen: View {
         }
     }
 
-    /// One reading goes immediately; a tree carrying several asks first.
+    /// EVERY swipe asks first — see the dialog attached to `body` for why a
+    /// single-reading row is the dangerous case, not the safe one.
     private func requestDelete(_ row: FieldLogRowModel) {
-        if row.entries.count == 1 {
-            history.delete(id: row.entries[0].id)
-        } else {
-            pendingDelete = row
-        }
+        pendingDelete = row
     }
 
     // MARK: - Summary header
@@ -584,6 +818,14 @@ public struct FieldLogRowModel: Identifiable, Equatable {
         case .tree(let n):     return "Tree #\(n)"
         case .loose(let kind): return FieldLogRowModel.kindWord(kind)
         }
+    }
+
+    /// The destructive button, counting what it will take. Singular when
+    /// there is one — "Delete 1 readings" is the sentence a cruiser reads
+    /// while deciding whether to destroy a measurement. Android's
+    /// `deleteActionTitle` returns the same strings.
+    static func deleteActionTitle(_ count: Int) -> String {
+        count == 1 ? "Delete 1 reading" : "Delete \(count) readings"
     }
 
     /// What a destructive swipe is actually about to remove.
@@ -1039,6 +1281,139 @@ private struct FieldLogRow: View {
         }
         if let species = speciesName { parts.append(species) }
         return parts.joined(separator: ", ")
+    }
+}
+
+// MARK: - Cruise row (read-only)
+
+/// A cruise tree in the log's table. Same three columns as a quick row so
+/// the two read as one sheet of paper, but with no button and no swipe:
+/// this store is written by the cruise flow and edited on TreeDetailScreen.
+private struct FieldLogCruiseRowView: View {
+    let row: FieldLogCruiseRow
+    let unitSystem: UnitSystem
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            WeightedColumns(weights: FieldLogTable.weights,
+                            spacing: FieldLogTable.gap) {
+                FieldLogCell(text: row.treeLabel,
+                             font: ForestixType.data,
+                             color: ForestixPalette.textPrimary,
+                             alignment: .leading)
+                FieldLogCell(text: MeasurementFormatter.diameter(
+                                cm: row.dbhCm, in: unitSystem),
+                             font: ForestixType.data,
+                             color: ForestixPalette.textPrimary,
+                             scaleFloor: FieldLogTable.valueScaleFloor)
+                FieldLogCell(text: row.heightM.map {
+                                MeasurementFormatter.height(m: $0, in: unitSystem)
+                             } ?? "—",
+                             font: ForestixType.data,
+                             color: row.heightM == nil
+                                ? ForestixPalette.textTertiary
+                                : ForestixPalette.textPrimary,
+                             scaleFloor: FieldLogTable.valueScaleFloor)
+            }
+            HStack(spacing: 6) {
+                if !row.speciesCode.isEmpty {
+                    Text(RegionalSpecies.name(forCode: row.speciesCode))
+                        .font(ForestixType.dataSmall)
+                        .foregroundStyle(ForestixPalette.textSecondary)
+                        .lineLimit(1)
+                }
+                Text(compactRelativeAgo(row.recordedAt))
+                    .font(ForestixType.dataSmall)
+                    .foregroundStyle(ForestixPalette.textTertiary)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(.vertical, 2)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+// MARK: - Scope sheet
+
+/// The filter. Lists every scope the two stores can actually answer for —
+/// no free text, so the cruiser cannot ask for a project a quick reading
+/// could never be under.
+private struct FieldLogScopeSheet: View {
+    @Binding var scope: FieldLogScope
+    let quickPlots: [QuickMeasurePlot]
+    let projects: [Project]
+    let plotsByProject: [UUID: [Plot]]
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    choice(FieldLogWords.everything, target: .everything)
+                }
+                if !projects.isEmpty {
+                    Section(FieldLogWords.cruiseProjectsHeader) {
+                        ForEach(projects) { project in
+                            choice(project.name,
+                                   detail: FieldLogWords.allPlots,
+                                   target: .cruiseProject(project.id))
+                            ForEach(plotsByProject[project.id] ?? []) { plot in
+                                choice(FieldLogWords.plotName(number: plot.plotNumber),
+                                       target: .cruisePlot(plot.id),
+                                       indented: true)
+                            }
+                        }
+                    }
+                }
+                if !quickPlots.isEmpty {
+                    Section(FieldLogWords.quickPlotsHeader) {
+                        ForEach(quickPlots) { plot in
+                            choice(plot.name, target: .quickPlot(plot.id))
+                        }
+                    }
+                }
+            }
+            .navigationTitle(FieldLogWords.filterTitle)
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func choice(_ title: String,
+                        detail: String? = nil,
+                        target: FieldLogScope,
+                        indented: Bool = false) -> some View {
+        Button {
+            scope = target
+            dismiss()
+        } label: {
+            HStack(spacing: ForestixSpace.xs) {
+                Text(title)
+                    .font(ForestixType.body)
+                    .foregroundStyle(ForestixPalette.textPrimary)
+                    .lineLimit(1)
+                if let detail {
+                    Text(detail)
+                        .font(ForestixType.caption)
+                        .foregroundStyle(ForestixPalette.textTertiary)
+                }
+                Spacer(minLength: 0)
+                if scope == target {
+                    Image(systemName: "checkmark")
+                        .foregroundStyle(ForestixPalette.primary)
+                }
+            }
+            .padding(.leading, indented ? ForestixSpace.md : 0)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 

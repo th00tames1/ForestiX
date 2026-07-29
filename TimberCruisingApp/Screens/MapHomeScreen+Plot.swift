@@ -56,6 +56,52 @@ func plotLengthLabel(_ metres: Double, _ system: UnitSystem) -> String {
            lengthInDisplayUnit(metres, system), plotUnitSuffix(system))
 }
 
+// MARK: - Framing a new plot
+
+/// How much wider than the plot's DIAMETER the viewport should be when the
+/// map is asked to frame a plot. 1.6 leaves ~30 % of the plot's radius of
+/// ground visible outside the ring on the short side — enough to see which
+/// side of the boundary the you-dot is on, and to see the ring's own labels,
+/// without shrinking the circle to a dot.
+private let plotFramingHeadroom: Double = 1.6
+
+/// The zoom at which a plot of `radiusM` fills the viewport with headroom.
+///
+/// Derived from the RADIUS, never from a hardcoded level: a 1/10-acre fixed
+/// plot is ~11.3 m radius, a variable-radius or a large plot is not, and a
+/// level that framed one would lose the other off-screen or leave it a dot.
+///
+/// The viewport's size in points is not needed — only how much GROUND it
+/// currently shows. `region` is what the map is displaying at `currentZoom`,
+/// so the SHORT side's ground span against the span we want is exactly the
+/// scale change to apply, and zoom is log2 of scale. Returns nil rather than
+/// a guess when there is no measured region yet (the map has not laid out) or
+/// the radius is not a real length — the caller then leaves the camera alone
+/// instead of flinging it to an invented zoom.
+func plotFramingZoom(radiusM: Double,
+                     currentZoom: Double,
+                     region: BasemapRegion?) -> Double? {
+    guard let region, radiusM.isFinite, radiusM > 0 else { return nil }
+    let midLat = (region.minLatitude + region.maxLatitude) / 2
+    let widthM = CoordinateConversions.haversineMeters(
+        CoordinateConversions.LatLon(latitude: midLat,
+                                     longitude: region.minLongitude),
+        CoordinateConversions.LatLon(latitude: midLat,
+                                     longitude: region.maxLongitude))
+    let heightM = CoordinateConversions.haversineMeters(
+        CoordinateConversions.LatLon(latitude: region.minLatitude,
+                                     longitude: region.minLongitude),
+        CoordinateConversions.LatLon(latitude: region.maxLatitude,
+                                     longitude: region.minLongitude))
+    let shownM = min(widthM, heightM)
+    let wantM = 2 * radiusM * plotFramingHeadroom
+    guard shownM.isFinite, shownM > 0, wantM > 0 else { return nil }
+    let zoom = currentZoom + log2(shownM / wantM)
+    guard zoom.isFinite else { return nil }
+    return min(max(zoom, BasemapMapView.zoomRange.lowerBound),
+               BasemapMapView.zoomRange.upperBound)
+}
+
 // MARK: - Range rings
 
 /// Round intervals a distance label may use, IN THE ACTIVE UNIT. The same
@@ -104,6 +150,32 @@ func plotRangeRings(radiusM: Double,
 }
 
 extension MapHomeScreen {
+
+    // MARK: - Framing a new plot
+
+    /// Put the camera on a plot the cruiser has just created, close enough
+    /// that the BOUNDARY is on screen.
+    ///
+    /// The question a cruiser asks the moment a plot exists is "am I in it?",
+    /// and at the map's default zoom an 11 m ring is a few points across —
+    /// unreadable, and no answer at all. `plotFramingZoom` derives the level
+    /// from the plot's own radius, so a variable-radius or a large plot
+    /// frames on the same rule.
+    ///
+    /// With no measured region yet the zoom is left exactly as it is and
+    /// only the centre moves: a frame computed from nothing would be a
+    /// guess, and this is the screen that answers "where am I standing".
+    func frameCamera(onPlotAt centre: CoordinateConversions.LatLon,
+                     radiusM: Double) {
+        let zoom = plotFramingZoom(radiusM: radiusM,
+                                   currentZoom: camera.zoom,
+                                   region: visibleRegion) ?? camera.zoom
+        withAnimation(.easeOut(duration: 0.35)) {
+            camera = BasemapCamera(latitude: centre.latitude,
+                                   longitude: centre.longitude,
+                                   zoom: zoom)
+        }
+    }
 
     // MARK: - The plot the map draws
 

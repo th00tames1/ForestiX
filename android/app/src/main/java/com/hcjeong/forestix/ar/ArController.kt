@@ -25,26 +25,11 @@ import java.nio.ByteOrder
 import java.util.Locale
 import kotlin.math.sqrt
 
-/// Where the camera OPTICAL AXIS lands on the view, and how far that is from
-/// the geometric view centre the aim ring is drawn at. Developer instrument
-/// only — see `ArController.opticalAxisProbe`. Nothing measured, stored or
-/// exported reads any of these numbers.
-///
-/// `viewX/viewY`, `dxPx/dyPx` and `rPx` are VIEW PIXELS (the same pixels
-/// `viewWidthPx`/`viewHeightPx` count, i.e. what a screenshot's ruler reads).
-/// `dxDeg/dyDeg/rDeg` are the same offset as an ANGLE: `rDeg` is the angle
-/// between the ray through the view centre and the optical axis, and dx/dy
-/// split it along the view axes in the same proportion as the pixel offset.
-data class OpticalAxisProbe(
-    val viewX: Float,
-    val viewY: Float,
-    val dxPx: Float,
-    val dyPx: Float,
-    val rPx: Float,
-    val dxDeg: Float,
-    val dyDeg: Float,
-    val rDeg: Float,
-)
+// The aim-offset instrument that used to live here (an `OpticalAxisProbe`
+// reporting where the lens principal point lands against the view centre) is
+// gone: it was built to settle whether the height anchor sphere sits off the
+// crosshair, it was tested on device, and the answer was that it does not.
+// Nothing measured, stored or exported ever read it.
 
 class ArController {
 
@@ -313,87 +298,6 @@ class ArController {
     /// Camera-forward elevation in degrees (the dev-HUD readout of the
     /// pitch the height tangent uses).
     fun cameraPitchDeg(): Float? = cameraForwardElevationRad()?.let { it * 180f / Math.PI.toFloat() }
-
-    /// WHERE THE OPTICAL AXIS LANDS ON THE VIEW — a developer-mode
-    /// INSTRUMENT. It measures a discrepancy; it does not correct one, and
-    /// no caller may feed it into a measurement.
-    ///
-    /// The aim ring is drawn at the geometric centre of the view. But the
-    /// elevation the height tangent consumes is the elevation of the CAMERA
-    /// OPTICAL AXIS (`cameraForwardElevationRad`, off pose.zAxis), and the
-    /// base/top marker spheres are placed along that same axis
-    /// (`forwardPointAtHorizontalDistance`) — while the anchor sphere comes
-    /// from a hit test fired at the view centre. The optical axis projects to
-    /// the lens PRINCIPAL POINT, not to the image centre, and the camera
-    /// image is then rotated and aspect-cropped into a tall view, so the axis
-    /// need not land on the view centre at all. Field measurement (screenshot,
-    /// device held still) put the height anchor sphere ~8 px below a 28 px
-    /// crosshair radius, ~0.5°, with zero horizontal error; a capture
-    /// manifest's intrinsics account for only ~0.19° of that. This reports
-    /// what the geometry actually is so the remainder stops being argued.
-    ///
-    /// BOTH steps go through ARCore's own `transformCoordinates2d`, the
-    /// mapping the camera texture is drawn with — display rotation and crop
-    /// included — rather than a hand-rolled projection:
-    ///   • principal point (IMAGE_PIXELS) → VIEW gives the point to draw and
-    ///     the pixel offset from the view centre;
-    ///   • view centre (VIEW) → IMAGE_PIXELS gives the ANGLE, straight off
-    ///     the intrinsics (atan of the image offset over the focal length).
-    ///     Converting the pixel offset to an angle instead would need a focal
-    ///     length expressed in VIEW pixels — i.e. the crop factor that is
-    ///     precisely what is in question here.
-    ///
-    /// Deliberately NOT gated on tracking state: this is lens + display
-    /// geometry, not pose, so a TrackingState of PAUSED does not make it
-    /// wrong — and blanking the readout mid-screenshot would only cost the
-    /// cruiser the reading. Returns null (never a plausible zero) when there
-    /// is no frame, no measured viewport, no intrinsics, or when ARCore
-    /// declines the transform — the output arrays are seeded with NaN so a
-    /// stale-frame call, which ARCore answers by leaving them UNCHANGED, is
-    /// caught as "no reading" instead of read as an offset of zero.
-    fun opticalAxisProbe(): OpticalAxisProbe? {
-        val f = frame ?: return null
-        val vw = viewWidthPx.toFloat()
-        val vh = viewHeightPx.toFloat()
-        if (vw <= 1f || vh <= 1f) return null
-        // IMAGE_PIXELS is the CPU-image space, so the CPU-image intrinsics
-        // are the matching pair (textureIntrinsics belong to TEXTURE_*).
-        val ii = try { f.camera.imageIntrinsics } catch (_: Throwable) { return null }
-        val fl = ii.focalLength
-        val pp = ii.principalPoint
-        if (fl.size < 2 || pp.size < 2) return null
-        val fx = fl[0]
-        val fy = fl[1]
-        if (!(fx > 1f) || !(fy > 1f)) return null
-        val axis = floatArrayOf(Float.NaN, Float.NaN)
-        val centreImage = floatArrayOf(Float.NaN, Float.NaN)
-        try {
-            f.transformCoordinates2d(
-                Coordinates2d.IMAGE_PIXELS, floatArrayOf(pp[0], pp[1]),
-                Coordinates2d.VIEW, axis,
-            )
-            f.transformCoordinates2d(
-                Coordinates2d.VIEW, floatArrayOf(vw / 2f, vh / 2f),
-                Coordinates2d.IMAGE_PIXELS, centreImage,
-            )
-        } catch (_: Throwable) { return null }
-        if (!axis.all { it.isFinite() } || !centreImage.all { it.isFinite() }) return null
-        val dx = axis[0] - vw / 2f
-        val dy = axis[1] - vh / 2f
-        val rPx = sqrt(dx * dx + dy * dy)
-        // Angle between the view-centre ray and the optical axis, in the
-        // image frame where the intrinsics are defined.
-        val tx = (centreImage[0] - pp[0]) / fx
-        val ty = (centreImage[1] - pp[1]) / fy
-        val rDeg = Math.toDegrees(
-            kotlin.math.atan(sqrt(tx * tx + ty * ty).toDouble())).toFloat()
-        if (!rDeg.isFinite()) return null
-        // The angle is a scalar; its DIRECTION on screen is the pixel
-        // offset's, which keeps the per-axis degrees signed like the pixels.
-        val dxDeg = if (rPx > 1e-6f) rDeg * dx / rPx else 0f
-        val dyDeg = if (rPx > 1e-6f) rDeg * dy / rPx else 0f
-        return OpticalAxisProbe(axis[0], axis[1], dx, dy, rPx, dxDeg, dyDeg, rDeg)
-    }
 
     /// Acquire the ARCore Depth-API frame as the platform-independent
     /// ArDepthFrame the DBH estimator consumes — the Android analogue of

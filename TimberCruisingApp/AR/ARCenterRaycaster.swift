@@ -22,27 +22,11 @@
 
 import Foundation
 
-/// Where the camera OPTICAL AXIS lands on the view, and how far that is from
-/// the geometric view centre the aim ring is drawn at. Developer instrument
-/// only — see `ARCenterRaycaster.opticalAxisProbe()`. Nothing measured,
-/// stored or exported reads any of these numbers.
-///
-/// `viewPoint` is in POINTS, because that is what a SwiftUI overlay is
-/// positioned in. `dxPx`, `dyPx` and `rPx` are DEVICE PIXELS (points ×
-/// the view's content scale) so the readout agrees with a ruler laid on a
-/// screenshot, and so the number means the same thing as its Android twin.
-/// `dxDeg/dyDeg/rDeg` are the same offset as an ANGLE: `rDeg` is the angle
-/// between the ray through the view centre and the optical axis, and dx/dy
-/// split it along the view axes in the same proportion as the pixel offset.
-public struct OpticalAxisProbe: Equatable {
-    public let viewPoint: CGPoint
-    public let dxPx: CGFloat
-    public let dyPx: CGFloat
-    public let rPx: CGFloat
-    public let dxDeg: Double
-    public let dyDeg: Double
-    public let rDeg: Double
-}
+// The aim-offset instrument that used to live here (an `OpticalAxisProbe`
+// reporting where the lens principal point lands against the view centre) is
+// gone: it was built to settle whether the height anchor sphere sits off the
+// crosshair, it was tested on device, and the answer was that it does not.
+// Nothing measured, stored or exported ever read it.
 
 #if canImport(ARKit) && os(iOS)
 import ARKit
@@ -197,105 +181,6 @@ public final class ARCenterRaycaster: ObservableObject {
         let fwd = SIMD3<Float>(-t.columns.2.x, -t.columns.2.y, -t.columns.2.z)
         let horiz = (fwd.x * fwd.x + fwd.z * fwd.z).squareRoot()
         return Double(atan2(fwd.y, horiz)) * 180.0 / .pi
-    }
-
-    /// WHERE THE OPTICAL AXIS LANDS ON THE VIEW — a developer-mode
-    /// INSTRUMENT. It measures a discrepancy; it does not correct one, and no
-    /// caller may feed it into a measurement.
-    ///
-    /// The aim ring is drawn at the geometric centre of the view. But the
-    /// elevation the height tangent consumes is the elevation of the CAMERA
-    /// OPTICAL AXIS (the IMU pitch buffer, and `cameraPitchDeg` above), and
-    /// the base/top marker spheres are placed along that same axis
-    /// (`forwardPointAtHorizontalDistance`) — while the anchor sphere comes
-    /// from `screenCenterHit()`, fired at the view centre. The optical axis
-    /// projects to the lens PRINCIPAL POINT, not to the image centre, and the
-    /// captured image is then rotated and aspect-cropped into a tall view, so
-    /// the axis need not land on the view centre at all. Field measurement on
-    /// the Android twin (screenshot, device held still) put the height anchor
-    /// sphere ~8 px below a 28 px crosshair radius, ~0.5°, with zero
-    /// horizontal error; a capture manifest's intrinsics account for only
-    /// ~0.19° of that. This reports what the geometry actually is so the
-    /// remainder stops being argued.
-    ///
-    /// BOTH steps go through ARKit's own `displayTransform`, the mapping the
-    /// camera background is drawn with — display rotation and crop included —
-    /// rather than a hand-rolled projection:
-    ///   • principal point (normalised image) → view gives the point to draw
-    ///     and the pixel offset from the view centre;
-    ///   • view centre → normalised image gives the ANGLE, straight off the
-    ///     intrinsics (atan of the image offset over the focal length).
-    ///     Converting the pixel offset to an angle instead would need a focal
-    ///     length expressed in VIEW pixels — i.e. the crop factor that is
-    ///     precisely what is in question here.
-    ///
-    /// Returns nil, never a plausible zero, when there is no frame, no laid-
-    /// out view, no usable intrinsics, or a display transform that cannot be
-    /// inverted.
-    public func opticalAxisProbe() -> OpticalAxisProbe? {
-        guard let view = arview else { return nil }
-        let size = view.bounds.size
-        guard size.width > 1, size.height > 1 else { return nil }
-        guard let frame = view.session.currentFrame else { return nil }
-        let resolution = frame.camera.imageResolution
-        guard resolution.width > 1, resolution.height > 1 else { return nil }
-        // Intrinsics are for the captured image at `imageResolution`, in the
-        // same (unrotated, capture-orientation) space `displayTransform`
-        // takes its input in.
-        let k = frame.camera.intrinsics
-        let fx = CGFloat(k.columns.0.x)
-        let fy = CGFloat(k.columns.1.y)
-        let cx = CGFloat(k.columns.2.x)
-        let cy = CGFloat(k.columns.2.y)
-        guard fx > 1, fy > 1, cx.isFinite, cy.isFinite else { return nil }
-        // The orientation has to come from the window scene the view is
-        // actually in — a hard-coded `.portrait` silently transposes the
-        // mapping on a landscape device (same reasoning as
-        // `ARCameraView.reportViewport`).
-        let orientation = view.window?.windowScene?.interfaceOrientation
-            ?? UIApplication.shared.connectedScenes
-                .compactMap { ($0 as? UIWindowScene)?.interfaceOrientation }
-                .first
-            ?? .portrait
-        let dt = frame.displayTransform(for: orientation, viewportSize: size)
-        guard abs(dt.a * dt.d - dt.b * dt.c) > 1e-9 else { return nil }
-
-        // Principal point → view points: the mark to draw.
-        let axisNorm = CGPoint(x: cx / resolution.width,
-                               y: cy / resolution.height).applying(dt)
-        let axisPoint = CGPoint(x: axisNorm.x * size.width,
-                                y: axisNorm.y * size.height)
-        guard axisPoint.x.isFinite, axisPoint.y.isFinite else { return nil }
-
-        // View centre → image pixels: the angle, off the intrinsics.
-        let centreNorm = CGPoint(x: 0.5, y: 0.5).applying(dt.inverted())
-        let u = centreNorm.x * resolution.width
-        let v = centreNorm.y * resolution.height
-        guard u.isFinite, v.isFinite else { return nil }
-        let tx = Double((u - cx) / fx)
-        let ty = Double((v - cy) / fy)
-        let rDeg = atan((tx * tx + ty * ty).squareRoot()) * 180 / .pi
-        guard rDeg.isFinite else { return nil }
-
-        let scale = view.contentScaleFactor
-        let dx = (axisPoint.x - size.width / 2) * scale
-        let dy = (axisPoint.y - size.height / 2) * scale
-        let rPx = (dx * dx + dy * dy).squareRoot()
-        // The angle is a scalar; its DIRECTION on screen is the pixel
-        // offset's, which keeps the per-axis degrees signed like the pixels.
-        var dxDeg = 0.0
-        var dyDeg = 0.0
-        if rPx > 1e-6 {
-            dxDeg = rDeg * Double(dx / rPx)
-            dyDeg = rDeg * Double(dy / rPx)
-        }
-        return OpticalAxisProbe(viewPoint: axisPoint,
-                                dxPx: dx,
-                                dyPx: dy,
-                                rPx: rPx,
-                                dxDeg: dxDeg,
-                                dyDeg: dyDeg,
-                                rDeg: rDeg)
     }
 
     private func worldTranslation(from hit: ARRaycastResult) -> SIMD3<Float> {
@@ -723,7 +608,6 @@ public final class ARCenterRaycaster: ObservableObject {
     public func rayDirection(at screenPoint: CGPoint) -> SIMD3<Float>? { nil }
     public var cameraWorldPosition: SIMD3<Float>? { nil }
     public var cameraPitchDeg: Double? { nil }
-    public func opticalAxisProbe() -> OpticalAxisProbe? { nil }
 }
 
 #endif

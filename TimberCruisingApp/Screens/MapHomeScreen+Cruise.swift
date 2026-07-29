@@ -78,12 +78,43 @@ import Export
 enum CruiseDestination: Hashable, Identifiable {
     case plotDetails(UUID)
     case treeDetails(UUID)
+    case projectBrowser
     case standSummary
     case export
     case fieldLog
+    /// The field log opened already narrowed to ONE cruise plot — the one
+    /// the cruiser has open. Separate from `.fieldLog` so the unscoped
+    /// footer link keeps showing everything.
+    case fieldLogPlot(UUID)
     case reference
     case settings
     var id: Self { self }
+}
+
+/// The CruiseDesign a project's roll-ups are computed against.
+///
+/// Cruise setup is optional, so a project can be tallied to completion with
+/// no CruiseDesign row at all; the informal path must still summarise and
+/// still export, which is why the miss synthesises a fixed-area / manual
+/// design rather than refusing. One rule, called from the map's
+/// `effectiveDesign()` and from the project browser's Stand summary, so the
+/// two can never disagree about what a design-less project is worth.
+enum CruiseDesignFallback {
+    static func effective(forProjectID projectID: UUID?,
+                          repository: any CruiseDesignRepository) -> CruiseDesign {
+        if let projectID,
+           let design = (try? repository.forProject(projectID))?.first {
+            return design
+        }
+        return CruiseDesign(
+            id: UUID(),
+            projectId: projectID ?? UUID(),
+            plotType: .fixedArea,
+            plotAreaAcres: nil,
+            baf: nil,
+            samplingScheme: .manual,
+            gridSpacingMeters: nil)
+    }
 }
 
 /// Identifiable URL wrapper for the export share sheet's `.sheet(item:)`.
@@ -607,6 +638,12 @@ extension MapHomeScreen {
                             withAnimation(.easeOut(duration: 0.18)) {
                                 selectedPinID = "plot-\(plot.id.uuidString)"
                             }
+                            // Third and last way a plot is created — frame
+                            // the new ring exactly as the other two do.
+                            frameCamera(onPlotAt: CoordinateConversions.LatLon(
+                                latitude: plot.centerLat,
+                                longitude: plot.centerLon),
+                                        radiusM: plotRadiusM(plot))
                             reloadCruise()
                         })
                     .environmentObject(environment)
@@ -901,6 +938,12 @@ extension MapHomeScreen {
             // the scan screens' mini-map may use the anchor path (the
             // accurate one) for YOU while measuring into this plot.
             ActiveSamplingPlot.shared.link(cruisePlotID: plot.id)
+            // A plot that has just come into existence is the one thing on
+            // the map worth looking at, and the first question about it is
+            // whether the cruiser is inside its boundary. Frame the ring.
+            frameCamera(onPlotAt: CoordinateConversions.LatLon(
+                latitude: fix.latitude, longitude: fix.longitude),
+                        radiusM: radiusM)
         } catch {
             storeError = "Couldn't save the plot: \(error.localizedDescription)"
         }
@@ -938,6 +981,11 @@ extension MapHomeScreen {
             withAnimation(.easeOut(duration: 0.18)) {
                 selectedPinID = "plot-\(created.id.uuidString)"
             }
+            // Same framing as the AR "Start plot" path — a planned plot that
+            // has just become real is still a new plot to stand inside.
+            frameCamera(onPlotAt: CoordinateConversions.LatLon(
+                latitude: created.centerLat, longitude: created.centerLon),
+                        radiusM: plotRadiusM(created))
         } catch {
             plotSaveRefusal =
                 "Storage error: \(error.localizedDescription). The centre was not saved — try again."
@@ -1555,11 +1603,19 @@ extension MapHomeScreen {
                 // PLOT SAMPLE HEIGHTS — full-width secondary into the
                 // heights sheet: the plot's measured (tree, DBH, height)
                 // pairs + on-demand height measurement + the pooled-curve
-                // status. LOCKED string "Heights · N measured".
+                // status. LOCKED strings "Heights" / "Heights · N measured".
+                //
+                // THE COUNT IS ONLY SHOWN WHEN THERE IS A COUNT. Heights are
+                // a subsample — most plots carry none, so the row spent
+                // almost all of its life saying "· 0 measured", which is the
+                // word "none" dressed up as a statistic and read as clutter
+                // in the stand. The row itself stays: it is the only door to
+                // the heights sheet, and hiding it at zero would take away
+                // the way to measure the first one.
                 Button {
                     heightsSheetTarget = HeightsSheetTarget(plotID: plot.id)
                 } label: {
-                    Text("Heights · \(plotHeightsPairCount(in: plot.id)) measured")
+                    Text(plotHeightsLabel(in: plot.id))
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(ForestixPalette.textPrimary)
                         .frame(maxWidth: .infinity, minHeight: 44)
@@ -1719,6 +1775,15 @@ extension MapHomeScreen {
         Self.hdPairs(liveTrees(in: plotID)).count
     }
 
+    /// The plot peek's heights row. A zero count is not information — heights
+    /// are a subsample and most plots have none — so it is simply not said;
+    /// from the first measured height on, the number is worth reading.
+    /// Android's `plotHeightsLabel` returns the same two strings.
+    func plotHeightsLabel(in plotID: UUID) -> String {
+        let n = plotHeightsPairCount(in: plotID)
+        return n > 0 ? "Heights · \(n) measured" : "Heights"
+    }
+
     /// Fit-eligible (DBH, height) pairs — the same cleaning the engine
     /// applies (positive DBH, height above breast height).
     static func hdPairs(_ trees: [Tree]) -> [(dbhCm: Float, heightM: Float)] {
@@ -1773,19 +1838,9 @@ extension MapHomeScreen {
     }
 
     func effectiveDesign() -> CruiseDesign {
-        if let project = currentProject,
-           let design = (try? environment.cruiseDesignRepository
-               .forProject(project.id))?.first {
-            return design
-        }
-        return CruiseDesign(
-            id: UUID(),
-            projectId: currentProject?.id ?? UUID(),
-            plotType: .fixedArea,
-            plotAreaAcres: nil,
-            baf: nil,
-            samplingScheme: .manual,
-            gridSpacingMeters: nil)
+        CruiseDesignFallback.effective(
+            forProjectID: currentProject?.id,
+            repository: environment.cruiseDesignRepository)
     }
 
     /// Toggle a planned plot's `skipped` flag (inaccessible — cliff, water,
@@ -2417,6 +2472,21 @@ extension MapHomeScreen {
 
                 Rectangle().fill(ForestixPalette.divider).frame(height: 0.5)
 
+                // FIELD REPORT (item 4) — the door beside "New project".
+                // The switcher rows above can only SWITCH; browsing is where
+                // a project can be read properly and where it can be
+                // deleted. Enabled with no projects too: the empty state is
+                // itself the answer to "which ones exist?".
+                sheetChoiceRow(
+                    "Browse projects",
+                    subtitle: "Open, review or delete a saved project",
+                    icon: "folder",
+                    accessibilityID: "cruiseMap.project.browse",
+                    disabled: false
+                ) {
+                    pendingDestination = .projectBrowser
+                    presentingProjectSheet = false
+                }
                 sheetChoiceRow(
                     "Stand summary",
                     subtitle: standSummarySubtitle,
@@ -2437,6 +2507,25 @@ extension MapHomeScreen {
                 ) {
                     pendingCruiseSetup = true
                     presentingProjectSheet = false
+                }
+
+                // FIELD REPORT 5 — read back THIS plot's trees without
+                // leaving the project. Only offered when a plot is actually
+                // open: with no plot in hand there is nothing to scope to,
+                // and the footer's plain "Field log" already shows
+                // everything. The subtitle names the plot so the row cannot
+                // be mistaken for that unscoped link.
+                if let plot = activePlot {
+                    sheetChoiceRow(
+                        "Field log",
+                        subtitle: FieldLogWords.plotName(number: plot.plotNumber),
+                        icon: "list.bullet.rectangle",
+                        accessibilityID: "cruiseMap.project.plotFieldLog",
+                        disabled: false
+                    ) {
+                        pendingDestination = .fieldLogPlot(plot.id)
+                        presentingProjectSheet = false
+                    }
                 }
 
                 // Export collapse (mock ⑤): ONE primary button runs the
@@ -2826,6 +2915,8 @@ extension MapHomeScreen {
                     tree: tree,
                     treeRepo: environment.treeRepository))
             }
+        case .projectBrowser:
+            ProjectBrowserScreen()
         case .standSummary:
             if let project = currentProject {
                 StandSummaryScreen(viewModel: StandSummaryViewModel(
@@ -2847,6 +2938,8 @@ extension MapHomeScreen {
             }
         case .fieldLog:
             FieldLogScreen()
+        case .fieldLogPlot(let plotID):
+            FieldLogScreen(scope: .cruisePlot(plotID))
         case .reference:
             ReferenceLibraryScreen()
         case .settings:

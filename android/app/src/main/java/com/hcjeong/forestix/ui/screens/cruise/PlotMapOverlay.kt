@@ -51,6 +51,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.hcjeong.forestix.basemap.MAP_ZOOM_MAX
+import com.hcjeong.forestix.basemap.MAP_ZOOM_MIN
+import com.hcjeong.forestix.basemap.MapCameraState
 import com.hcjeong.forestix.basemap.MapPlotFix
 import com.hcjeong.forestix.basemap.MapPlotOverlay
 import com.hcjeong.forestix.basemap.MapPlotRing
@@ -60,6 +63,7 @@ import com.hcjeong.forestix.data.SettingsSnapshot
 import com.hcjeong.forestix.data.cruise.Plot
 import com.hcjeong.forestix.data.cruise.hasCentre
 import com.hcjeong.forestix.geo.CoordinateConversions
+import com.hcjeong.forestix.geo.CoordinateConversions.LatLon
 import com.hcjeong.forestix.positioning.CLLocationSnapshot
 import com.hcjeong.forestix.positioning.GeoMath
 import com.hcjeong.forestix.ui.pressableNoRipple
@@ -74,6 +78,8 @@ import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.ln
+import kotlin.math.log2
+import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
@@ -131,6 +137,81 @@ internal fun plotRadiusBadge(metres: Double, system: UnitSystem): String =
         Locale.US, "%.0f %s radius",
         lengthInDisplayUnit(metres, system), unitSuffix(system),
     )
+
+// MARK: - Framing a new plot --------------------------------------------------
+
+/// A plot that has just been created, waiting for the map to frame it.
+///
+/// The map home owns the camera, but a plot is created on OTHER surfaces —
+/// the AR "Start plot" screen (its own nav destination) and the planned-pin
+/// conversion (a sheet, and a peek button). Rather than thread a camera
+/// through all three, each creation site leaves the ring's centre and radius
+/// here and the map picks it up on its next composition. Compose snapshot
+/// state, so the map recomposes when it is set.
+///
+/// ONE SHOT: the map clears it after moving. It is a request to look at a new
+/// plot, not a standing instruction, and re-framing on every recomposition
+/// would fight the cruiser's own panning.
+object PendingPlotFraming {
+
+    data class Request(val centre: LatLon, val radiusM: Double)
+
+    var request: Request? by mutableStateOf(null)
+        private set
+
+    /// Ask the map to frame a plot. Silently ignores a radius that is not a
+    /// real length — a frame computed from nothing is a guess, and the map's
+    /// existing camera is a better answer than one.
+    fun requestFraming(centre: LatLon, radiusM: Double) {
+        if (!radiusM.isFinite() || radiusM <= 0.0) return
+        request = Request(centre, radiusM)
+    }
+
+    fun consume() { request = null }
+}
+
+/// How much wider than the plot's DIAMETER the viewport should be when the
+/// map is asked to frame a plot. 1.6 leaves ~30 % of the plot's radius of
+/// ground visible outside the ring on the short side — enough to see which
+/// side of the boundary the you-dot is on, and to see the ring's own labels,
+/// without shrinking the circle to a dot. iOS uses the same number.
+private const val PLOT_FRAMING_HEADROOM = 1.6
+
+/// The zoom at which a plot of [radiusM] fills the viewport with headroom.
+///
+/// Derived from the RADIUS, never from a hardcoded level: a 1/10-acre fixed
+/// plot is ~11.3 m radius, a variable-radius or a large plot is not, and a
+/// level that framed one would lose the other off-screen or leave it a dot.
+///
+/// The viewport's size in pixels is not needed — only how much GROUND it
+/// currently shows. [camera] reports the bounds it is displaying at its
+/// current zoom, so the SHORT side's ground span against the span we want is
+/// exactly the scale change to apply, and zoom is log2 of scale. Returns null
+/// rather than a guess when the map has not laid out yet; the caller then
+/// leaves the zoom alone. iOS `plotFramingZoom` is the same computation.
+internal fun plotFramingZoom(camera: MapCameraState, radiusM: Double): Double? {
+    if (!radiusM.isFinite() || radiusM <= 0.0) return null
+    val bounds = camera.visibleBounds() ?: return null
+    val minLat = bounds.minOf { it.latitude }
+    val maxLat = bounds.maxOf { it.latitude }
+    val minLon = bounds.minOf { it.longitude }
+    val maxLon = bounds.maxOf { it.longitude }
+    val midLat = (minLat + maxLat) / 2
+    val widthM = CoordinateConversions.haversineMeters(
+        LatLon(latitude = midLat, longitude = minLon),
+        LatLon(latitude = midLat, longitude = maxLon),
+    )
+    val heightM = CoordinateConversions.haversineMeters(
+        LatLon(latitude = minLat, longitude = minLon),
+        LatLon(latitude = maxLat, longitude = minLon),
+    )
+    val shownM = min(widthM, heightM)
+    val wantM = 2 * radiusM * PLOT_FRAMING_HEADROOM
+    if (!shownM.isFinite() || shownM <= 0.0) return null
+    val zoom = camera.zoom + log2(shownM / wantM)
+    if (!zoom.isFinite()) return null
+    return zoom.coerceIn(MAP_ZOOM_MIN, MAP_ZOOM_MAX)
+}
 
 // MARK: - Range rings ---------------------------------------------------------
 

@@ -67,6 +67,8 @@ import androidx.compose.ui.unit.sp
 import com.hcjeong.forestix.common.TruthInput
 import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixProminentButton
+import com.hcjeong.forestix.ui.theme.ForestixWhiteButton
 
 // MARK: - Top-strip geometry (shared by every AR screen)
 
@@ -158,6 +160,43 @@ const val PLOT_TRACKING_LOST_HINT =
     "Tracking lost — the plot is hidden rather than drawn in the wrong place. Hold still until the camera picks the scene back up."
 const val PLOT_TRACKING_LOST_STATUS = "TRACKING LOST — inside or outside is unknown"
 
+/// Every screen that plants a plot centre by raycasting the crosshair says
+/// this when the ray finds nothing. Hoisted out of the two plot screens
+/// because the scan screens' "Pin centre" now fires the SAME raycast and
+/// must fail in the same words. Byte-identical to iOS
+/// `MeasurementCopy.plotGroundNotSeen`.
+const val PLOT_GROUND_NOT_SEEN =
+    "Couldn't see the ground here. Aim at the ground and try again."
+
+// MARK: - Plot centre known only as GPS (field report 14 × 17)
+
+/// FIELD REPORT 14 vs 17. The subdued ring + pillar are drawn from an AR
+/// ANCHOR, and only the AR "Start plot" route creates one. A plot opened
+/// from a planned pin ("Start plot now" / "Set plot centre (GPS)" — the
+/// one-tap route report 17 made the recommended one) and any plot carried
+/// across an app restart have a centre that is a LAT/LON and nothing else,
+/// so the scan screens showed a bare camera feed with a plot active.
+///
+/// The ring is NOT synthesised from the GPS centre. A fix under canopy is
+/// worth several metres and an ARCore anchor is worth centimetres; drawing
+/// one as the other would put a boundary on screen that is not where the
+/// boundary is, and the ring's whole job is answering "am I inside?". So the
+/// screen says what it has and offers the one act that produces a
+/// centimetre-grade centre — the cruiser standing at the centre and pinning
+/// it, exactly what the AR route does.
+///
+/// Byte-identical to the iOS `MeasurementCopy.plotCentreNotPinned*` set.
+const val PLOT_CENTRE_NOT_PINNED_HINT =
+    "No ring: this plot's centre is a GPS position, not an AR pin. Stand at the plot centre, aim at the ground, and tap Pin centre."
+
+/// Said on the same card, because a control that quietly rewrote the
+/// recorded centre would be the invisible data loss the plot-edit path
+/// already refuses. Pinning is a DRAWING act only.
+const val PLOT_PIN_CENTRE_NOTE =
+    "Pinning draws the ring only — the plot's recorded centre does not change."
+const val PLOT_PIN_CENTRE_BUTTON = "Pin centre"
+const val PLOT_PIN_CENTRE_DISMISS = "Not now"
+
 // MARK: - Top instruction banner (U1 — all four AR screens)
 
 /// Stage-guidance banner, top-centre: black 0.65 fill, white 14 sp medium,
@@ -166,13 +205,21 @@ const val PLOT_TRACKING_LOST_STATUS = "TRACKING LOST — inside or outside is un
 /// `failure` renders the shared amber banner directly beneath it, so the
 /// AIMING states (which no longer have a bottom panel) keep a failure
 /// surface. Callers hide the whole thing during the capture blackout.
+///
+/// `below` is the mirror of the iOS `MeasureTopBanner`'s `extra` slot: an
+/// INTERACTIVE card rendered in the same 340 dp column under the guidance,
+/// so an offer the cruiser can act on travels with the guidance instead of
+/// fighting the bottom block for room. Used by the scan screens' "Pin
+/// centre" card; it alone is enough to make the column render, because a
+/// card with nothing to say above it still has to be reachable.
 @Composable
 fun BoxScope.MeasureTopChrome(
     instruction: String?,
     failure: String? = null,
     onDismissFailure: (() -> Unit)? = null,
+    below: (@Composable () -> Unit)? = null,
 ) {
-    if (instruction == null && failure == null) return
+    if (instruction == null && failure == null && below == null) return
     Column(
         modifier = Modifier
             .align(Alignment.TopCenter)
@@ -197,6 +244,78 @@ fun BoxScope.MeasureTopChrome(
             )
         }
         failure?.let { MeasureFailureBanner(it, onDismissFailure) }
+        if (below != null) below()
+    }
+}
+
+// MARK: - "Pin centre" offer (plot centre known only as GPS)
+
+/// The offer the DBH / Height screens make when a plot is being tallied but
+/// no AR anchor marks its centre, so there is no ring to draw. Rendered in
+/// `MeasureTopChrome`'s `below` slot.
+///
+/// Both scan screens use this ONE composable so the offer cannot drift
+/// between them, and it is byte-identical to the iOS `PlotPinCentreCard`.
+///
+/// `failure` carries the raycast refusal ([PLOT_GROUND_NOT_SEEN]) so a tap
+/// that found no ground says so here rather than leaving the button looking
+/// broken. A mis-aimed pin is not trapped: the ring appears immediately, and
+/// the mini-map's enlarged view → "Edit plot" re-opens the full placement
+/// screen (ghost preview + Reset) to put it right.
+@Composable
+fun PlotPinCentreCard(
+    failure: String? = null,
+    onPin: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val warn = Forestix.colors.confidenceWarn
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .shadow(3.dp, RoundedCornerShape(10.dp), clip = false)
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color.Black.copy(alpha = 0.65f))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            PLOT_CENTRE_NOT_PINNED_HINT,
+            style = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.Medium),
+            color = Color.White,
+            textAlign = TextAlign.Center,
+        )
+        Text(
+            PLOT_PIN_CENTRE_NOTE,
+            style = TextStyle(fontSize = 12.sp),
+            color = Color.White.copy(alpha = 0.75f),
+            textAlign = TextAlign.Center,
+        )
+        if (failure != null) {
+            Text(
+                failure,
+                style = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.SemiBold),
+                color = warn,
+                textAlign = TextAlign.Center,
+            )
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(top = 2.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            // White / prominent, the same pair the plot screens' Reset and
+            // Save wear — iOS `.forestixARSecondary` and `.forestixProminent`.
+            ForestixWhiteButton(
+                PLOT_PIN_CENTRE_DISMISS,
+                modifier = Modifier.weight(1f),
+                onClick = onDismiss,
+            )
+            ForestixProminentButton(
+                PLOT_PIN_CENTRE_BUTTON,
+                modifier = Modifier.weight(1f),
+                onClick = onPin,
+            )
+        }
     }
 }
 

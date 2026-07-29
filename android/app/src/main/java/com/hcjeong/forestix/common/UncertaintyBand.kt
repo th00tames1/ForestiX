@@ -22,8 +22,6 @@
 
 package com.hcjeong.forestix.common
 
-import java.util.Locale
-
 object UncertaintyBand {
 
     /// Floor, in the display unit, below which a band would read as zero.
@@ -36,9 +34,12 @@ object UncertaintyBand {
         val value = if (system == UnitSystem.METRIC) metres else metres * 3.28084
         val unit = if (system == UnitSystem.METRIC) "m" else "ft"
         val shown = maxOf(value, PRINT_FLOOR)
+        // Rounded through [fixedDecimals], not String.format: iOS rounds these
+        // half-to-even on the exact binary value and Kotlin's formatter rounds
+        // half-up, which is how one σ can print as two different bands.
         val digits =
-            if (shown < 0.1) String.format(Locale.US, "%.2f", shown)
-            else String.format(Locale.US, "%.1f", shown)
+            if (shown < 0.1) fixedDecimals(shown, 2)
+            else fixedDecimals(shown, 1)
         return "±$digits $unit"
     }
 }

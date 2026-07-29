@@ -22,6 +22,15 @@
 // the AR session's world map, which dies with the process, so a restored
 // plot would have no anchor to attach to.
 //
+// AND IT DIES WITH ITS PLOT (field report 7). Once `linkedCruisePlotID`
+// names a cruise plot, the ring is that plot's boundary and nothing else:
+// closing the plot, deleting it, or walking to the next one drops the ring
+// (`dropIfLinkedElsewhere(than:)`, driven from the cruise map — see
+// `MapHomeScreen+Cruise.reconcileSamplingRing`). It used to survive all
+// three, so the plot-2 setup screen opened already "placed", on plot 1's
+// ring, tens of metres away. A ring drawn for a plot the cruiser has left
+// is a boundary in the wrong place, which is worse than no boundary.
+//
 // DBH + Height render the active plot as a subdued (≈0.5 alpha) ring +
 // centre pole under their own measurement markers via
 // `subduedOverlayMarkers(for:centre:)`. Distance deliberately does not.
@@ -188,6 +197,42 @@ public final class ActiveSamplingPlot: ObservableObject {
         centreWorld = nil
         trackingLost = false   // nothing left to have lost track OF
         poseStaleSince = nil
+    }
+
+    /// Drop the ring AND the ARAnchor it hangs on, in one call.
+    ///
+    /// `clear()` leaves the anchor to the caller because the sampling
+    /// screen's Reset holds the session it must be removed from. The
+    /// plot-lifetime rule (FIELD REPORT 7) fires from the MAP instead —
+    /// close/delete/start-another, none of which are near an AR session —
+    /// and an anchor left behind at each of those would accumulate in the
+    /// app-shared session for the rest of the process with nobody holding
+    /// its id. Android's `ArSessionHub.clearPlot()` has always detached the
+    /// anchor itself; this is the same act under the same name-in-spirit.
+    public func drop() {
+        if let ring = plot {
+            ARKitSessionManager.shared.removeWorldAnchor(id: ring.anchorID)
+        }
+        clear()
+    }
+
+    /// FIELD REPORT 7 — the ring must not outlive the plot it was drawn for.
+    ///
+    /// Drops the ring when it is linked to a cruise plot OTHER than
+    /// `cruisePlotID` — the plot the cruiser is about to measure. A ring
+    /// linked to nothing is a quick-measure ring (or one placed and not yet
+    /// saved) and is left alone: it belongs to no cruise plot, so no cruise
+    /// plot's lifetime governs it.
+    ///
+    /// Returns true when the ring was dropped, so a caller that also holds
+    /// screen state can say so.
+    @discardableResult
+    public func dropIfLinkedElsewhere(than cruisePlotID: UUID?) -> Bool {
+        guard let linked = linkedCruisePlotID, linked != cruisePlotID else {
+            return false
+        }
+        drop()
+        return true
     }
 
     // MARK: - Session pause

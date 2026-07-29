@@ -1720,7 +1720,20 @@ private fun QuickEntryEditSheet(
 ) {
     val colors = Forestix.colors
     val type = Forestix.type
-    var valueField by remember(entry.id) { mutableStateOf(editFormatNumber(entry.value)) }
+    // The text the value field opens with: the stored reading at the SAME
+    // precision the row above it prints — one decimal for a diameter or a
+    // height, two for a distance — so the peek and its editor never show one
+    // reading as two numbers. iOS builds the identical string. `save` compares
+    // the field against this STRING, which is what tells an untouched form
+    // from a retyped one.
+    val valuePrefill = MeasurementFormatter.entryText(
+        entry.value, if (entry.kind == MeasureKind.DISTANCE) 2 else 1)
+    var valueField by remember(entry.id) { mutableStateOf(valuePrefill) }
+    // False when the cruiser has typed something that is not a usable reading.
+    // Save is held off and the field says why, rather than the sheet quietly
+    // keeping the old number and closing.
+    val valueEntryValid =
+        valueField == valuePrefill || TruthInput.parsePositive(valueField) != null
     var species by remember(entry.id) { mutableStateOf(entry.speciesCode ?: "") }
     var note by remember(entry.id) { mutableStateOf(entry.note ?: "") }
     var confirmDelete by remember(entry.id) { mutableStateOf(false) }
@@ -1753,6 +1766,22 @@ private fun QuickEntryEditSheet(
                 Spacer(Modifier.width(8.dp))
                 Text(entry.valueUnit, style = type.body, color = colors.textSecondary)
             }
+            if (!valueEntryValid) {
+                // Diameter and height reuse the field log's sentences word for
+                // word; the other kinds get the same sentence about a reading.
+                Text(
+                    when (entry.kind) {
+                        MeasureKind.DBH ->
+                            "A typed diameter must be a number greater than zero."
+                        MeasureKind.HEIGHT ->
+                            "A typed height must be a number greater than zero."
+                        else ->
+                            "A typed reading must be a number greater than zero."
+                    },
+                    style = type.body.copy(fontSize = 13.sp),
+                    color = colors.confidenceBad,
+                )
+            }
             OutlinedTextField(
                 value = species,
                 onValueChange = { species = it },
@@ -1781,17 +1810,29 @@ private fun QuickEntryEditSheet(
                 maxLines = 4,
                 modifier = Modifier.fillMaxWidth(),
             )
-            PeekActionButton("Save changes", primary = true, modifier = Modifier.fillMaxWidth()) {
-                val newValue = TruthInput.parse(valueField) ?: entry.value
+            PeekActionButton(
+                "Save changes",
+                primary = true,
+                enabled = valueEntryValid,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
                 // A value the cruiser retyped is a TYPED reading from here on:
                 // it keeps neither the sensor's sigma nor its edge provenance.
                 // Carrying those across left a hand-entered number wearing the
-                // precision of a measurement it has nothing to do with. The
-                // tolerance absorbs the field's own four-decimal rendering.
+                // precision of a measurement it has nothing to do with.
+                //
+                // "Retyped" is decided on the TEXT against the prefill, not on
+                // the numbers. The prefill is the reading ROUNDED for display,
+                // so a sensor value of 18.274 opened as "18.3" and every
+                // numeric test — the old 0.001 tolerance included, at any
+                // tolerance — called that a change: opening the sheet and
+                // pressing Save rounded the reading AND demoted it to a hand
+                // entry with no sigma. Comparing the strings is the only test
+                // an untouched form passes.
                 val base =
-                    if (kotlin.math.abs(newValue - entry.value) > 0.001)
-                        entry.typedValue(newValue)
-                    else entry
+                    if (valueField == valuePrefill) entry
+                    else TruthInput.parsePositive(valueField)
+                        ?.let { entry.typedValue(it) } ?: entry
                 onSave(
                     base.copy(
                         speciesCode = species.trim().ifEmpty { null },
@@ -1834,13 +1875,6 @@ private fun QuickEntryEditSheet(
         )
     }
 }
-
-private fun editFormatNumber(v: Double): String =
-    if (v == v.toLong().toDouble()) {
-        v.toLong().toString()
-    } else {
-        String.format(Locale.US, "%.2f", v).trimEnd('0').trimEnd('.')
-    }
 
 // MARK: - Full-screen image viewer --------------------------------------------
 

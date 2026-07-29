@@ -192,6 +192,8 @@ extension MapHomeScreen {
             plannedPlots = []
             navTargetPlannedID = nil
             treesByPlot = [:]
+            // No project ⇒ no plot the ring could still belong to.
+            reconcileSamplingRing()
             return
         }
         plots = (try? environment.plotRepository.listByProject(project.id)) ?? []
@@ -210,6 +212,77 @@ extension MapHomeScreen {
                                                             includeDeleted: false)) ?? []
         }
         treesByPlot = byPlot
+        reconcileSamplingRing()
+    }
+
+    // MARK: The AR ring's lifetime (field report 7)
+
+    /// FIELD REPORT 7 — "the plot edge is still visible long after leaving
+    /// it". The AR ring was dropped only by Reset, by a new placement, by
+    /// tracking loss, or by the app dying: NOTHING dropped it when the
+    /// cruiser closed a plot and walked to the next one. Plot 1 → Close plot
+    /// → walk → Start plot opened the setup screen already "placed", on plot
+    /// 1's ring, tens of metres away — no crosshair, no shutter, and a
+    /// boundary drawn around the wrong ground.
+    ///
+    /// The rule: once the ring is linked to a cruise plot it IS that plot's
+    /// boundary, and it lives exactly as long as the plot is one the cruiser
+    /// can still be measuring — i.e. OPEN, and in the current project.
+    /// Closed, deleted, or left behind by a project switch ⇒ dropped, anchor
+    /// and all.
+    ///
+    /// It runs from `reloadCruise`, which is the funnel EVERY plot mutation
+    /// already goes through — the map peek's Close and Delete, the plot
+    /// summary screen's Close / Reopen / Delete (via the `pushed` change),
+    /// the setup cover's dismiss, a project switch — so a new way to close a
+    /// plot cannot be added without this seeing it. Patching the two paths
+    /// the report named would have left the summary screen's Close still
+    /// leaking the ring.
+    ///
+    /// A ring linked to NOTHING is untouched: it is a quick-measure sampling
+    /// ring, or one just placed and not yet saved, and no cruise plot's
+    /// lifetime governs it. `armPlotSetup` handles that half.
+    ///
+    /// An unreadable plot list lands here as an empty one and drops the ring.
+    /// That is the right way to be wrong: a boundary we can no longer prove
+    /// belongs to an open plot is exactly the boundary the cruiser must not
+    /// be shown.
+    ///
+    /// Android runs the same test in `CruiseModeEffects`' cruise-data effect,
+    /// alongside the stale active-plot guard it already had.
+    func reconcileSamplingRing() {
+        guard let linked = samplingPlot.linkedCruisePlotID else { return }
+        // `plots` is this project's, so a ring from another project fails
+        // this test too — which is right: it is not a boundary here.
+        if plots.contains(where: { $0.id == linked && $0.closedAt == nil }) {
+            return
+        }
+        samplingPlot.drop()
+    }
+
+    /// Open the plot-setup cover, dropping a ring that belongs to a DIFFERENT
+    /// cruise plot first. `editing` names the plot the session will rewrite,
+    /// or nil for a fresh "Start plot".
+    ///
+    /// Two things go wrong when a foreign ring survives into this screen.
+    /// The visible one is the report: the screen opens already "placed", so
+    /// there is no crosshair and no shutter, and the cruiser is shown the
+    /// previous plot's boundary while standing in the new one. The invisible
+    /// one is worse — `editCruisePlot` reads "ring placed but not linked to
+    /// THIS plot" as "the cruiser re-placed the centre", so a radius-only
+    /// edit made with plot 1's ring still up would re-stamp plot 2's centre
+    /// at wherever the cruiser happened to be standing.
+    ///
+    /// On a CREATE there is no plot yet, so ANY ring is foreign — including
+    /// an unlinked one, which on this path is the ring left over from a plot
+    /// whose Save was refused for want of a GPS fix. The cruiser asked to
+    /// place a new centre; the screen owes them a crosshair.
+    func armPlotSetup(editing plotID: UUID?) {
+        if let plotID {
+            samplingPlot.dropIfLinkedElsewhere(than: plotID)
+        } else if samplingPlot.plot != nil {
+            samplingPlot.drop()
+        }
     }
 
     // MARK: Crash recovery (resume an in-progress plot)
@@ -363,6 +436,8 @@ extension MapHomeScreen {
             withAnimation(.easeOut(duration: 0.18)) { selectedPinID = nil }
             recordingTarget = planned
         } else {
+            // A fresh plot: whatever ring is up belongs to somewhere else.
+            armPlotSetup(editing: nil)
             presentingPlotSetup = true
         }
     }
@@ -876,6 +951,13 @@ extension MapHomeScreen {
     /// map until the floating back. Per-tree height on demand lives on
     /// the tree peek / heights sheet instead.
     func startAddTree(in plot: Plot) {
+        // The tally is switching to THIS plot, so a ring belonging to any
+        // other one stops being the boundary being measured — and the DBH /
+        // Height screens draw whatever ring is placed as their subdued
+        // overlay. An "Add tree" from a plot peek can target an OLDER open
+        // plot than the last-placed ring, which is exactly the case that
+        // survives `reconcileSamplingRing` (both plots are open).
+        samplingPlot.dropIfLinkedElsewhere(than: plot.id)
         chainPlotID = plot.id
         chainTreeNumber = nextTreeNumber(in: plot.id)
         chainTreeID = nil
@@ -1020,7 +1102,14 @@ extension MapHomeScreen {
                 tallyTreeNumber: chainTreeNumber,
                 onUndoTally: { undoLastTally() },
                 projectID: currentProject?.id.uuidString,
-                onEditPlot: { chainingPlotSetup = true })
+                onEditPlot: {
+                    // The setup session about to open rewrites the plot the
+                    // tally is measuring into — a ring linked to any other
+                    // plot is not this plot's centre and must not be read as
+                    // a re-placement (see `armPlotSetup`).
+                    armPlotSetup(editing: chainPlotID)
+                    chainingPlotSetup = true
+                })
             .environmentObject(settings)
             .fullScreenCover(isPresented: $chainingHeight,
                              onDismiss: { reloadCruise() }) {
@@ -1051,7 +1140,10 @@ extension MapHomeScreen {
                 // tree, so its bundle must carry that tree's number.
                 projectID: currentProject?.id.uuidString,
                 treeNumber: chainHeightTreeNumber,
-                onEditPlot: { heightPlotSetup = true })
+                onEditPlot: {
+                    armPlotSetup(editing: chainPlotID)
+                    heightPlotSetup = true
+                })
             .environmentObject(history)
             .environmentObject(settings)
             .fullScreenCover(isPresented: $heightPlotSetup,
@@ -1078,7 +1170,10 @@ extension MapHomeScreen {
                 // tree, so its bundle must carry that tree's number.
                 projectID: currentProject?.id.uuidString,
                 treeNumber: chainHeightTreeNumber,
-                onEditPlot: { heightPlotSetup = true })
+                onEditPlot: {
+                    armPlotSetup(editing: chainPlotID)
+                    heightPlotSetup = true
+                })
             .environmentObject(history)
             .environmentObject(settings)
             .fullScreenCover(isPresented: $heightPlotSetup,

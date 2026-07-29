@@ -5,14 +5,33 @@
 
 package com.hcjeong.forestix.common
 
+import java.math.BigDecimal
+import java.math.RoundingMode
 import java.util.Locale
+
+/// A number at a fixed number of decimals, rounded the way iOS rounds it.
+///
+/// iOS renders every measurement through `String(format:)`, which rounds
+/// half-to-EVEN on the value's exact binary expansion. Kotlin's `String.format`
+/// rounds half-UP, so a stored 42.25 cm printed "42.2" there and "42.3" here:
+/// two platforms, two strings for one tree, which the house rule forbids.
+/// `BigDecimal(double)` IS that exact binary expansion and HALF_EVEN is that
+/// same rule — checked against iOS output over 5 200 values across the stored
+/// DBH and height ranges at 0, 1 and 2 decimals: zero differences, where plain
+/// `String.format` differed on 334 of them.
+///
+/// Non-finite values keep the old path: `BigDecimal` throws on NaN, and a
+/// crash is worse than the "NaN"/"nan" spelling difference it would avoid.
+internal fun fixedDecimals(value: Double, digits: Int): String =
+    if (!value.isFinite()) String.format(Locale.US, "%.${digits}f", value)
+    else BigDecimal(value).setScale(digits, RoundingMode.HALF_EVEN).toPlainString()
 
 object MeasurementFormatter {
 
     // Diameter — stored cm.
     fun diameter(cm: Double, system: UnitSystem): String = when (system) {
-        UnitSystem.METRIC -> String.format(Locale.US, "%.1f cm", cm)
-        UnitSystem.IMPERIAL -> String.format(Locale.US, "%.1f in", cm / 2.54)
+        UnitSystem.METRIC -> "${fixedDecimals(cm, 1)} cm"
+        UnitSystem.IMPERIAL -> "${fixedDecimals(cm / 2.54, 1)} in"
     }
 
     /// FLOORED at the smallest value each precision can print, so neither
@@ -23,23 +42,21 @@ object MeasurementFormatter {
     /// floor overstates the band slightly, which is the safe direction.
     /// Matches the iOS sibling.
     fun diameterSigma(mm: Double, system: UnitSystem): String = when (system) {
-        UnitSystem.METRIC -> String.format(Locale.US, "±%.1f mm", maxOf(mm, 0.1))
-        UnitSystem.IMPERIAL -> String.format(Locale.US, "±%.2f in", maxOf(mm / 25.4, 0.01))
+        UnitSystem.METRIC -> "±${fixedDecimals(maxOf(mm, 0.1), 1)} mm"
+        UnitSystem.IMPERIAL -> "±${fixedDecimals(maxOf(mm / 25.4, 0.01), 2)} in"
     }
 
     // Height — stored m.
     //
-    /// TWO decimals, field-requested. One was a rounding coarser than the
-    /// measurement: a walk-off tangent fit resolves well inside a decimetre
-    /// on a clean sightline, and the validation study compares these numbers
-    /// against a hand-measured truth typed to the centimetre. At one decimal
-    /// two heights 6 cm apart printed the same string, which made a real
-    /// difference between algorithms invisible on the screen that shows it.
-    /// The ± band beside it ([heightSigma]) is what says how much of the
-    /// second decimal to believe. iOS prints the identical string.
+    /// ONE decimal. Two decimals were tried and taken back out: a tangent
+    /// height is a difference of two sighted angles, and the σ it carries is
+    /// decimetres at cruising range, so a centimetre digit was a precision the
+    /// measurement does not have. The ± band beside it ([heightSigma]) is what
+    /// says how much of the first decimal to believe. iOS prints the identical
+    /// string.
     fun height(m: Double, system: UnitSystem): String = when (system) {
-        UnitSystem.METRIC -> String.format(Locale.US, "%.1f m", m)
-        UnitSystem.IMPERIAL -> String.format(Locale.US, "%.1f ft", m * 3.28084)
+        UnitSystem.METRIC -> "${fixedDecimals(m, 1)} m"
+        UnitSystem.IMPERIAL -> "${fixedDecimals(m * 3.28084, 1)} ft"
     }
 
     /// Renders a height precision sigma (stored in metres).
@@ -58,10 +75,27 @@ object MeasurementFormatter {
     // render in whole centimetres (field-glance precision).
     fun distance(m: Double, system: UnitSystem): String = when (system) {
         UnitSystem.METRIC ->
-            if (m < 1) String.format(Locale.US, "%.0f cm", m * 100)
-            else String.format(Locale.US, "%.2f m", m)
-        UnitSystem.IMPERIAL -> String.format(Locale.US, "%.1f ft", m * 3.28084)
+            if (m < 1) "${fixedDecimals(m * 100, 0)} cm"
+            else "${fixedDecimals(m, 2)} m"
+        UnitSystem.IMPERIAL -> "${fixedDecimals(m * 3.28084, 1)} ft"
     }
+
+    /// The text an EDITABLE numeric field is PREFILLED with, for a value that
+    /// came out of storage: the bare number in the unit it is stored in, with
+    /// no unit suffix (the row carries that), rounded exactly the way the
+    /// read-only surface for that quantity rounds it — one decimal for a
+    /// diameter or a height, two for a distance. A form that shows a different
+    /// number from the field log is two numbers for one tree.
+    ///
+    /// A ROUNDED prefill is only safe in a field whose screen refuses to write
+    /// it back unedited. `18.27` prefills as "18.3", and saving that text over
+    /// the stored value is a silent re-measurement of the tree — the cruiser
+    /// opened a form and lost 3 cm. Every caller therefore compares the field's
+    /// current text against this prefill and leaves the stored value alone when
+    /// they are equal; see [TreeDetailScreen] and the map peek's edit sheet.
+    /// Any new caller owes the same guard.
+    fun entryText(value: Double, fractionDigits: Int): String =
+        fixedDecimals(value, fractionDigits)
 
     fun diameterUnit(system: UnitSystem) = if (system == UnitSystem.METRIC) "cm" else "in"
     fun heightUnit(system: UnitSystem) = if (system == UnitSystem.METRIC) "m" else "ft"

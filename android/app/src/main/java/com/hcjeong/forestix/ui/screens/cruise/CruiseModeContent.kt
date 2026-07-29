@@ -313,6 +313,39 @@ internal fun CruiseModeEffects(
         if (active != null && plots.none { it.id == active && it.closedAt == null }) {
             env.settings.setCruisePlotId(null)
         }
+        // FIELD REPORT 7 — and the same guard for the AR RING, which had no
+        // such rule at all: nothing dropped it when the cruiser closed a plot
+        // and walked to the next one, so the plot-2 setup screen opened
+        // already "placed", on plot 1's ring, tens of metres away.
+        //
+        // Once the ring is linked to a cruise plot it IS that plot's
+        // boundary, and it lives exactly as long as the plot is one the
+        // cruiser can still be measuring — OPEN, and in the current project.
+        // Closed, deleted, or left behind by a project switch ⇒ dropped,
+        // anchor and all.
+        //
+        // This effect is the funnel EVERY plot mutation already goes through
+        // (`state.refresh++`), and returning from a pushed destination
+        // recomposes cruise mode and re-runs it — so the plot summary
+        // screen's Close / Reopen / Delete are covered without a second copy
+        // of the rule there. Patching the two paths the report named would
+        // have left that screen still leaking the ring.
+        //
+        // A ring linked to NOTHING is untouched: it is a quick-measure
+        // sampling ring, or one just placed and not yet saved, and no cruise
+        // plot's lifetime governs it. `ArSessionHub.armPlotSetup` covers that
+        // half at the setup-screen doors.
+        //
+        // An unreadable plot list lands here as an empty one and drops the
+        // ring. That is the right way to be wrong: a boundary we can no
+        // longer prove belongs to an open plot is exactly the boundary the
+        // cruiser must not be shown.
+        val linkedRing = ArSessionHub.linkedCruisePlotId
+        if (linkedRing != null &&
+            plots.none { it.id == linkedRing && it.closedAt == null }
+        ) {
+            ArSessionHub.clearPlot()
+        }
         if (awaitingFirstFix && fix == null) {
             val target = trees.values.flatten()
                 .sortedByDescending { it.createdAt }
@@ -353,6 +386,10 @@ internal fun CruiseModeEffects(
                 val p = state.project ?: createDefaultProject(env, settings).also {
                     env.settings.setCruiseProjectId(it.id.toString())
                 }
+                // A fresh plot: whatever ring is up belongs to somewhere else
+                // (field report 7). Without this the setup screen opens
+                // already "placed" and there is no crosshair to aim with.
+                ArSessionHub.armPlotSetup(null)
                 nav.navigate(CruiseRoutes.startPlot(p.id.toString()))
             } catch (_: Exception) {
                 // Project auto-create failed (storage) — stay on the map;
@@ -369,6 +406,13 @@ internal fun CruiseModeEffects(
     state.addTree = addTree@{ plot ->
         val p = state.project ?: return@addTree
         scope.launch {
+            // The tally is switching to THIS plot, so a ring belonging to any
+            // other one stops being the boundary being measured — and the DBH
+            // / Height screens draw whatever ring is placed as their subdued
+            // overlay. An "Add tree" from a plot peek can target an OLDER open
+            // plot than the last-placed ring, which is exactly the case that
+            // survives the open-plot reconcile above (both plots are open).
+            ArSessionHub.dropPlotIfLinkedElsewhere(plot.id)
             if (settings.cruisePlotId != plot.id.toString()) {
                 env.settings.setCruisePlotId(plot.id.toString())
             }
@@ -859,6 +903,12 @@ internal fun CruiseModeSheets(
             system = state.unitSystem(settings),
             onEdit = {
                 state.plotMenuFor = null
+                // Any ring belonging to a DIFFERENT plot goes first. This
+                // door can open on an older open plot while the ring still
+                // marks the newest one, and applyEdit would read that ring as
+                // "the cruiser re-placed this plot's centre" and move the plot
+                // onto today's fix (field report 7).
+                ArSessionHub.armPlotSetup(menuPlot.id)
                 nav.navigate(
                     CruiseRoutes.editPlot(
                         menuPlot.projectId.toString(), menuPlot.id.toString()))

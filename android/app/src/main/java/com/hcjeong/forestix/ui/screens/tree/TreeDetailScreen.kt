@@ -85,8 +85,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.common.CountrySpecies
+import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.Region
 import com.hcjeong.forestix.common.RegionalSpecies
+import com.hcjeong.forestix.common.TruthInput
 import com.hcjeong.forestix.data.cruise.TreeStatus
 import com.hcjeong.forestix.sensors.ConfidenceTier
 import com.hcjeong.forestix.ui.clickableNoRipple
@@ -149,8 +151,10 @@ private fun TreeDetailContent(nav: NavController, viewModel: TreeDetailViewModel
     val tree by viewModel.tree.collectAsState()
     val speciesCode by viewModel.speciesCode.collectAsState()
     val status by viewModel.status.collectAsState()
-    val dbhCm by viewModel.dbhCm.collectAsState()
-    val heightM by viewModel.heightM.collectAsState()
+    // No collectAsState for dbhCm / heightM: the numeric rows are driven by
+    // their own TEXT and the STORED tree, never by the edit mirrors. Feeding
+    // the mirror back into the field is what re-formats a half-typed number
+    // under the cruiser's thumb.
     val notes by viewModel.notes.collectAsState()
     val isSaving by viewModel.isSaving.collectAsState()
     val errorMessage by viewModel.errorMessage.collectAsState()
@@ -160,6 +164,22 @@ private fun TreeDetailContent(nav: NavController, viewModel: TreeDetailViewModel
 
     // Which measurement's tier explainer is open. null = closed.
     var explaining by remember { mutableStateOf<TierExplainerKind?>(null) }
+
+    // The stored measurements at the precision the rest of the app prints
+    // them — MeasurementFormatter's one decimal, without the unit the row
+    // already carries. iOS builds the identical strings. A tree with no
+    // height prefills empty, so the placeholder shows and clearing the field
+    // stays meaningful.
+    val dbhPrefill = MeasurementFormatter.entryText(tree.dbhCm.toDouble(), 1)
+    val heightPrefill = tree.heightM?.let {
+        MeasurementFormatter.entryText(it.toDouble(), 1)
+    } ?: ""
+
+    // False while a numeric field holds something that is not a usable
+    // measurement. The row says so and Save stays off, rather than the form
+    // picking a number the tree never had.
+    var dbhEntryValid by remember { mutableStateOf(true) }
+    var heightEntryValid by remember { mutableStateOf(true) }
 
     // Species offered by the ACTIVE country (and, for the US, region), plus
     // the same "OT · Other" catch-all the scan-time sheet carries.
@@ -340,14 +360,42 @@ private fun TreeDetailContent(nav: NavController, viewModel: TreeDetailViewModel
             DetailSection(header = "Measurements") {
                 DetailValueRow(
                     label = "DBH",
-                    value = dbhCm.takeIf { it > 0f },
-                    onValue = {
-                        viewModel.dbhCm.value = it ?: 0f
-                        viewModel.markDirty()
-                    },
+                    prefill = dbhPrefill,
                     placeholder = "0.0",
                     unit = "cm",
-                )
+                ) { entered ->
+                    // Text still EQUAL to the prefill restores the stored
+                    // Float verbatim. The prefill is rounded — a tree stored
+                    // at 18.27 cm prefills "18.3" — so parsing the prefill
+                    // back and saving it would coarsen a measurement nobody
+                    // asked to change: open the form, press Save, lose 3 mm.
+                    // The comparison is on the STRING for that reason, not on
+                    // the number.
+                    val typed = TruthInput.parsePositive(entered)
+                    when {
+                        entered == dbhPrefill -> {
+                            viewModel.dbhCm.value = tree.dbhCm
+                            dbhEntryValid = true
+                        }
+                        typed != null -> {
+                            viewModel.dbhCm.value = typed.toFloat()
+                            dbhEntryValid = true
+                        }
+                        else -> {
+                            // Blank or not a number. Leave the stored
+                            // diameter alone and say so on the row: writing
+                            // 0 cm here would be a measurement this tree
+                            // never had, and every tally downstream would
+                            // believe it.
+                            viewModel.dbhCm.value = tree.dbhCm
+                            dbhEntryValid = false
+                        }
+                    }
+                    viewModel.markDirty()
+                }
+                if (!dbhEntryValid) {
+                    DetailEntryWarning("A typed diameter must be a number greater than zero.")
+                }
                 DetailConfidenceRow(
                     label = "DBH confidence",
                     tier = tree.dbhConfidence,
@@ -355,14 +403,38 @@ private fun TreeDetailContent(nav: NavController, viewModel: TreeDetailViewModel
 
                 DetailValueRow(
                     label = "Height",
-                    value = heightM,
-                    onValue = {
-                        viewModel.heightM.value = if (it != null && it > 0f) it else null
-                        viewModel.markDirty()
-                    },
+                    prefill = heightPrefill,
                     placeholder = "—",
                     unit = "m",
-                )
+                ) { entered ->
+                    // Same rule as the DBH row, with one difference: emptying
+                    // the field is how a cruiser says this tree has no
+                    // height, so blank is a valid entry that clears the
+                    // stored value rather than a refusal.
+                    val typed = TruthInput.parsePositive(entered)
+                    when {
+                        entered == heightPrefill -> {
+                            viewModel.heightM.value = tree.heightM
+                            heightEntryValid = true
+                        }
+                        TruthInput.normalized(entered).isEmpty() -> {
+                            viewModel.heightM.value = null
+                            heightEntryValid = true
+                        }
+                        typed != null -> {
+                            viewModel.heightM.value = typed.toFloat()
+                            heightEntryValid = true
+                        }
+                        else -> {
+                            viewModel.heightM.value = tree.heightM
+                            heightEntryValid = false
+                        }
+                    }
+                    viewModel.markDirty()
+                }
+                if (!heightEntryValid) {
+                    DetailEntryWarning("A typed height must be a number greater than zero.")
+                }
                 tree.heightConfidence?.let { tier ->
                     DetailConfidenceRow(
                         label = "Height confidence",
@@ -414,7 +486,7 @@ private fun TreeDetailContent(nav: NavController, viewModel: TreeDetailViewModel
             // MARK: Actions
             ForestixProminentButton(
                 label = "Save changes",
-                enabled = dirty && !isSaving,
+                enabled = dirty && !isSaving && dbhEntryValid && heightEntryValid,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 scope.launch {
@@ -519,27 +591,24 @@ private fun MetaRow(label: String, value: String?) {
 /// One measured quantity: label left, editable value + unit right (F8).
 /// Every row in the Measurements group gets this treatment, so the eye reads
 /// one column of labels and one column of numbers.
+///
+/// The row owns the TEXT and hands it back untouched; it never formats a
+/// number back into the field. That is what lets the caller tell "the cruiser
+/// retyped this" from "this is still the prefill", which is the whole defence
+/// against a rounded prefill overwriting the measurement behind it.
 @Composable
 private fun DetailValueRow(
     label: String,
-    value: Float?,
-    onValue: (Float?) -> Unit,
+    prefill: String,
     placeholder: String,
     unit: String,
+    onText: (String) -> Unit,
 ) {
     val colors = Forestix.colors
     val type = Forestix.type
-    var text by remember { mutableStateOf(value?.let { detailFormatNumber(it) } ?: "") }
-    LaunchedEffect(value) {
-        val parsed = text.toFloatOrNull()
-        val matches = when {
-            value == null -> parsed == null || parsed == 0f
-            else -> parsed != null && kotlin.math.abs(parsed - value) < 1e-4f
-        }
-        if (!matches) {
-            text = value?.let { detailFormatNumber(it) } ?: ""
-        }
-    }
+    // Keyed on the prefill: it changes only when the STORED tree changes
+    // (a save landed), which is the one time the field should re-seed.
+    var text by remember(prefill) { mutableStateOf(prefill) }
     Row(
         Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -551,7 +620,7 @@ private fun DetailValueRow(
             value = text,
             onValueChange = {
                 text = it
-                onValue(it.toFloatOrNull())
+                onText(it)
             },
             placeholder = { Text(placeholder, textAlign = TextAlign.End, modifier = Modifier.fillMaxWidth()) },
             singleLine = true,
@@ -617,6 +686,9 @@ private fun DetailTierBadge(tier: ConfidenceTier) {
     }
 }
 
-private fun detailFormatNumber(v: Float): String =
-    if (v == v.toLong().toFloat()) String.format(Locale.US, "%d", v.toLong())
-    else String.format(Locale.US, "%.2f", v).trimEnd('0').trimEnd('.')
+/// Why a numeric row can't be saved. Same sentences the field log's editor
+/// uses for the same refusal, so the app says one thing.
+@Composable
+private fun DetailEntryWarning(text: String) {
+    Text(text, style = Forestix.type.caption, color = Forestix.colors.confidenceBad)
+}

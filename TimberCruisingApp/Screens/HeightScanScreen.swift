@@ -104,6 +104,12 @@ public struct HeightScanScreen: View {
     /// every piece of 2D chrome so the captured JPEG shows only the AR
     /// feed and the measurement overlays (crosshair + scene markers).
     @State private var hidingChromeForCapture = false
+
+    /// "Pin centre" offer, waved off for this visit — see the DBH twin for
+    /// why it is not persisted.
+    @State private var pinOfferDismissed = false
+    /// Why the last "Pin centre" tap planted nothing. Shown on the card.
+    @State private var pinCentreFailure: String?
     /// Developer-mode research capture: the clinometer / Vertex true height AS
     /// TYPED, logged to the research CSV. The unit is `activeTruthUnit` below,
     /// never assumed — the field used to be named (and read) as metres
@@ -315,6 +321,18 @@ public struct HeightScanScreen: View {
                     if let failure = heightSaveFailure {
                         bannerView(failure, tint: ForestixPalette.confidenceBad)
                             .accessibilityIdentifier("heightScan.saveFailureBanner")
+                    }
+                    // FIELD REPORT 14 × 17 — a plot is being tallied but no
+                    // AR anchor marks its centre, so there is no ring to
+                    // draw. Same card, same words, same act as DBH.
+                    if showsPinCentreOffer {
+                        PlotPinCentreCard(
+                            failure: pinCentreFailure,
+                            onPin: pinPlotCentre,
+                            onDismiss: {
+                                pinCentreFailure = nil
+                                pinOfferDismissed = true
+                            })
                     }
                 }
 
@@ -1264,6 +1282,65 @@ public struct HeightScanScreen: View {
         else { return [] }
         return ActiveSamplingPlot.subduedOverlayMarkers(for: plot,
                                                         centre: centre)
+    }
+
+    // MARK: - "Pin centre" offer (field report 14 × 17)
+
+    /// A cruise plot is being tallied but NO AR anchor marks its centre, so
+    /// `plotOverlayMarkers` is empty and the cruiser is looking at a bare
+    /// camera feed with a plot open. See the DBH twin for the full note —
+    /// the rule, the words and the act are one thing in two screens.
+    private var plotCentreNeedsPin: Bool {
+        guard let plotID = cruisePlotInfo?.plotID,
+              pinnableRadiusM != nil
+        else { return false }
+        if activePlot.plot != nil, activePlot.linkedCruisePlotID == plotID {
+            return false
+        }
+        return true
+    }
+
+    /// The plot's OWN radius, or nil when its stored area can't produce a
+    /// sane one — see the DBH twin.
+    private var pinnableRadiusM: Double? {
+        guard let r = cruisePlotInfo?.radiusM, r.isFinite, r > 0.5 else {
+            return nil
+        }
+        return r
+    }
+
+    /// Whether the offer is on screen right now — the same test as the DBH
+    /// twin, deliberately: the cruiser decides when to aim at the ground and
+    /// tap, and a card that appeared on one scan screen but not the other
+    /// would be a third rule to learn.
+    private var showsPinCentreOffer: Bool {
+        plotCentreNeedsPin && !pinOfferDismissed && !hidingChromeForCapture
+    }
+
+    /// Plant the plot centre where the crosshair meets the ground and hand
+    /// the ring to THIS cruise plot. Identical to the DBH twin, including
+    /// the refusal instead of a forward-ray fallback; see it for why.
+    private func pinPlotCentre() {
+        guard let plotID = cruisePlotInfo?.plotID,
+              let radiusM = pinnableRadiusM
+        else { return }
+        raycaster.preferLiDARMesh = settings.measurementSource == .lidar
+        guard let hit = raycaster.screenCenterHit() else {
+            pinCentreFailure = MeasurementCopy.plotGroundNotSeen
+            return
+        }
+        if let previous = activePlot.plot {
+            viewModel.session.removeWorldAnchor(id: previous.anchorID)
+        }
+        guard let anchorID = viewModel.session.addWorldAnchor(
+            at: hit, name: "forestix.samplingPlot.center")
+        else {
+            pinCentreFailure = MeasurementCopy.plotGroundNotSeen
+            return
+        }
+        pinCentreFailure = nil
+        activePlot.place(anchorID: anchorID, radiusM: radiusM)
+        activePlot.link(cruisePlotID: plotID)
     }
 
     private var crownMarkers: [ARSceneMarker] {

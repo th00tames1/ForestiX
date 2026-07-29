@@ -111,6 +111,47 @@ public final class DBHScanViewModel: ObservableObject {
     /// frame block for exactly this reason (DBHScanScreen.kt).
     private var stallTicker: Timer?
 
+    // MARK: - Auto arm gate
+
+    /// Depth window the Auto crosshair may arm in.
+    ///
+    /// IT IS THE ESTIMATOR'S WINDOW, not a second opinion about it. The gate
+    /// was written in Phase 2 against the partial-arc pipeline, whose own
+    /// tap-depth window was 0.5–3.0 m, and the two matched exactly. Phase 19
+    /// widened the chord estimator to 0.3–5.0 m (`chordPreviewFit` /
+    /// `chordEstimate`, both of which run this capture) and nobody moved the
+    /// gate, so between 3 and 5 m the cruiser got a live diameter in the
+    /// badge, a red crosshair, and a "+" that did nothing — a refusal of
+    /// readings the estimator behind it would have made correctly.
+    ///
+    /// Widening the gate does not widen what the estimator will accept: a
+    /// stem at 5 m subtends few enough pixels that the silhouette walk drops
+    /// the rows (`w < 5`) and the fit fails on its own, and the plausibility
+    /// ceiling is unchanged. This only stops the app refusing before the
+    /// estimator has been asked.
+    public static let armDepthRangeM: ClosedRange<Float> = 0.3...5.0
+
+    /// Why the last "+" did nothing. A capture button that refuses in silence
+    /// is indistinguishable from a broken one — the same defect that was
+    /// fixed on the height anchor tap (`HeightScanViewModel.cameraNotReadyText`).
+    /// Cleared as soon as the condition it describes lifts, so it can never
+    /// outlive its own truth.
+    @Published public private(set) var captureRefusalReason: String?
+
+    /// Tap refusals. Byte identical to the Android `DBHScanScreen.kt`
+    /// constants of the same names.
+    ///
+    /// None of them names the metres of the window: iOS arms over its
+    /// estimator's 0.3–5.0 m and Android over its own 0.4–3.5 m, so a
+    /// sentence quoting a number could not be the same sentence on both. The
+    /// direction to walk is what the cruiser can act on anyway.
+    public static let tooFarText =
+        "Too far from the trunk to read depth — step closer, then tap + again."
+    public static let tooCloseText =
+        "Too close to the trunk to read depth — step back, then tap + again."
+    public static let noTrunkLockText =
+        "No trunk lock yet — hold the crosshair on the bark until a diameter shows, then tap + again."
+
     // MARK: - Manual edge-bracket (ADJUST) mode
 
     /// True while the DBH ADJUST mode is active: the live estimate and
@@ -365,7 +406,9 @@ public final class DBHScanViewModel: ObservableObject {
         subscribeToDepth()
 
         // A fresh appearance gets a fresh acquisition clock, so the hint
-        // reflects THIS tree rather than however the last one ended.
+        // reflects THIS tree rather than however the last one ended. The
+        // refusal goes with it — it described a tap on the previous screen.
+        captureRefusalReason = nil
         acquisitionStalled = false
         lastFitTime = ProcessInfo.processInfo.systemUptime
         startStallTicker()
@@ -413,13 +456,33 @@ public final class DBHScanViewModel: ObservableObject {
         // Kept so the capture tap can map the bracket against the frame the
         // cruiser was actually looking at.
         latestFrameForBracket = frame
-        // REQ-DBH-003 crosshair transitions green when center depth
-        // is stable and < 3 m.
+        // REQ-DBH-003 crosshair transitions green when the centre pixel
+        // carries depth the estimator can work from. The window is
+        // `armDepthRangeM` — see the note there for why the spec's literal
+        // "< 3 m" is no longer the estimator's answer and stopped being it
+        // three rounds ago.
         let cx = frame.width / 2
         let cy = frame.height / 2
         let d = frame.depth(atX: cx, y: cy)
         let c = frame.confidence(atX: cx, y: cy)
-        let stable = d > 0.5 && d < 3.0 && c >= 1
+        let centrePixelUsable = Self.armDepthRangeM.contains(d) && c >= 1
+        // ...OR the estimator's own verdict, which is the one the capture
+        // actually runs on. This gate samples ONE pixel; `chordPreviewFit`
+        // samples a 5×5 median, so a hole at dead centre held the crosshair
+        // red and the "+" inert while a diameter was already on the badge.
+        //
+        // It cannot arm the app anywhere the estimator would not: `previewFit`
+        // is nil outside the estimator's own window, so this only ever
+        // recovers a frame the estimator has already measured. Auto only —
+        // ADJUST does not arm from the crosshair (its tap accepts `.aligning`)
+        // and its ring keeps meaning what it has always meant.
+        //
+        // Reading the estimator's median directly would be better still, but
+        // `DBHEstimator.medianDepth` is internal to the Sensors module and
+        // widening it is a change to the estimator file.
+        let liveFitUsable = !edgeAdjustActive
+            && (previewFit.map { $0.tier != .red } ?? false)
+        let stable = centrePixelUsable || liveFitUsable
         // ONLY ON CHANGE. `@Published` fires `objectWillChange` on every
         // assignment, equal value or not, and this one runs on every depth
         // frame — so writing it unconditionally re-evaluated the whole scan
@@ -839,9 +902,22 @@ public final class DBHScanViewModel: ObservableObject {
         // flag and re-seeds the clock on its own, and a tick during a burst
         // would raise a "no depth lock" hint over a capture that is going
         // fine. Mirrors the `previewable` set in `handleDepthFrame`.
+        //
+        // The tap refusal is taken down from HERE, not from `handleDepthFrame`:
+        // that method has four early returns (not previewable, the 100 ms
+        // throttle, the ADJUST branch, no frame at all), so a clear written
+        // inside it would be skipped in exactly the states the cruiser sits in
+        // while reading the banner. This ticker runs on wall time and always
+        // sees the current published state.
         switch state {
-        case .aligning, .armed, .rejected: break
-        case .idle, .capturing, .fitted, .accepted, .manualEntry: return
+        case .aligning, .armed, .rejected:
+            // No longer true the moment a tap would be honoured.
+            if captureRefusalReason != nil, canCaptureNow { captureRefusalReason = nil }
+        case .idle, .capturing, .fitted, .accepted, .manualEntry:
+            // Left the aiming phase — the refusal describes a tap that no
+            // longer applies to what is on screen.
+            if captureRefusalReason != nil { captureRefusalReason = nil }
+            return
         }
         let now = ProcessInfo.processInfo.systemUptime
         updateAcquisitionStall(hasFit: false, now: now)
@@ -885,9 +961,18 @@ public final class DBHScanViewModel: ObservableObject {
             // is allowed too — centre-pixel depth stability is an
             // auto-path concept, and the bracket's own median depth
             // already validated inside `bracketChordFit`.
-            guard state == .armed || state == .aligning else { return }
+            guard state == .armed || state == .aligning else {
+                captureRefusalReason = Self.noTrunkLockText
+                return
+            }
         } else {
-            guard state == .armed else { return }
+            // EVERY REFUSAL SPEAKS. This returned in silence, which is how
+            // "cannot capture from a distance" reached the field with no
+            // message about distance anywhere on the screen.
+            guard state == .armed else {
+                captureRefusalReason = armRefusalReason()
+                return
+            }
         }
         // Phase 18.4 — the tap is now the *only* way to start the
         // burst, so we keep the gate loose: any fit visible on screen
@@ -896,7 +981,11 @@ public final class DBHScanViewModel: ObservableObject {
         // the previous auto-capture flow feel sluggish; if the cruiser
         // is committed enough to tap, the burst's own §7.1 tree will
         // catch a fit that's too noisy to record.
-        guard let fit = previewFit, fit.tier != .red else { return }
+        guard let fit = previewFit, fit.tier != .red else {
+            captureRefusalReason = Self.noTrunkLockText
+            return
+        }
+        captureRefusalReason = nil
         // Latch the bracket so mid-burst handle drags / mode exits can't
         // change what this capture measures.
         // Latch the bracket AS DEPTH GEOMETRY. The raw-capture manifest
@@ -933,7 +1022,40 @@ public final class DBHScanViewModel: ObservableObject {
         }
     }
 
+    /// Why the Auto crosshair is not armed, in terms the cruiser can walk on.
+    ///
+    /// Reads the SAME centre pixel of the SAME frame the gate read, so the
+    /// sentence and the refusal can never be describing different frames. A
+    /// centre pixel with no return at all reads 0 m, which is not a distance
+    /// to talk about — that case, and a low-confidence reading inside the
+    /// window, both get the lock sentence instead.
+    private func armRefusalReason() -> String {
+        guard let frame = latestFrameForBracket else { return Self.noTrunkLockText }
+        let d = frame.depth(atX: frame.width / 2, y: frame.height / 2)
+        if d > Self.armDepthRangeM.upperBound { return Self.tooFarText }
+        if d > 0, d < Self.armDepthRangeM.lowerBound { return Self.tooCloseText }
+        return Self.noTrunkLockText
+    }
+
+    /// Exactly the condition `tap(at:)` requires, kept as one expression so a
+    /// refusal banner cannot outlive the state it describes.
+    private var canCaptureNow: Bool {
+        let stageOK = edgeAdjustActive
+            ? (state == .armed || state == .aligning)
+            : state == .armed
+        guard stageOK, let fit = previewFit, fit.tier != .red else { return false }
+        return true
+    }
+
+    /// Dismiss the refusal by hand. The banner also clears itself the moment a
+    /// tap would be honoured; this is for the cruiser who has read it and
+    /// wants the screen back.
+    public func clearCaptureRefusal() {
+        if captureRefusalReason != nil { captureRefusalReason = nil }
+    }
+
     public func retake() {
+        captureRefusalReason = nil
         burstBuffer.removeAll()
         subSamples.removeAll(keepingCapacity: true)
         recordFrames.removeAll(keepingCapacity: true)

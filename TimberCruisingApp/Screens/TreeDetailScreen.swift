@@ -44,6 +44,18 @@ public struct TreeDetailScreen: View {
     /// free-text row under the picker.
     @State private var freeTextCode = false
 
+    /// What the two numeric fields currently HOLD, as text. They are seeded on
+    /// appear from `dbhPrefill` / `heightPrefill` and never written back from a
+    /// number afterwards — see `applyDBH`.
+    @State private var dbhText = ""
+    @State private var heightText = ""
+
+    /// False while a numeric field holds something that is not a usable
+    /// measurement. The row says so and Save stays off, rather than the form
+    /// picking a number the tree never had.
+    @State private var dbhEntryValid = true
+    @State private var heightEntryValid = true
+
     /// Picker tag for "a code that isn't in the list". Not a legal species
     /// code, so it can never collide with a real one.
     private static let otherTag = "\u{1}other"
@@ -81,6 +93,12 @@ public struct TreeDetailScreen: View {
             // typed on another region's setting) must stay editable rather
             // than silently snapping to the first preset.
             freeTextCode = !trimmedCode.isEmpty && presetCode(matching: trimmedCode) == nil
+            // Seeded here and nowhere else. Assigning the text does NOT run
+            // the bindings' setters, so seeding can never be mistaken for the
+            // cruiser typing — which is what keeps an unedited field from
+            // writing its rounded self back over the stored measurement.
+            dbhText = dbhPrefill
+            heightText = heightPrefill
         }
         .sheet(item: $explaining) { kind in
             TierExplainer(kind: kind)
@@ -226,8 +244,10 @@ public struct TreeDetailScreen: View {
         Section("Measurements") {
             valueRow(label: "DBH", unit: "cm",
                      identifier: "treeDetail.dbh") {
-                TextField("0.0", value: $viewModel.dbhCm, format: .number)
-                    .onChange(of: viewModel.dbhCm) { _, _ in viewModel.markDirty() }
+                TextField("0.0", text: dbhBinding)
+            }
+            if !dbhEntryValid {
+                entryWarning("A typed diameter must be a number greater than zero.")
             }
             confidenceRow(label: "DBH confidence",
                           tier: viewModel.tree.dbhConfidence,
@@ -235,15 +255,10 @@ public struct TreeDetailScreen: View {
 
             valueRow(label: "Height", unit: "m",
                      identifier: "treeDetail.height") {
-                TextField(
-                    "—",
-                    value: Binding(
-                        get: { viewModel.heightM ?? 0 },
-                        set: {
-                            viewModel.heightM = $0 > 0 ? $0 : nil
-                            viewModel.markDirty()
-                        }),
-                    format: .number)
+                TextField("—", text: heightBinding)
+            }
+            if !heightEntryValid {
+                entryWarning("A typed height must be a number greater than zero.")
             }
             if let tier = viewModel.tree.heightConfidence {
                 confidenceRow(label: "Height confidence",
@@ -251,6 +266,94 @@ public struct TreeDetailScreen: View {
                               kind: .height)
             }
         }
+    }
+
+    // MARK: - Prefilling an editable measurement, without truncating it
+
+    /// The stored DBH at the precision the rest of the app prints it —
+    /// `MeasurementFormatter.diameter`'s one decimal, without the " cm" the
+    /// row already carries. Android builds the identical string.
+    private var dbhPrefill: String {
+        MeasurementFormatter.entryText(Double(viewModel.tree.dbhCm), fractionDigits: 1)
+    }
+
+    /// The stored height, same rule. A tree with no height prefills empty, so
+    /// the placeholder shows and clearing the field stays meaningful.
+    private var heightPrefill: String {
+        viewModel.tree.heightM.map {
+            MeasurementFormatter.entryText(Double($0), fractionDigits: 1)
+        } ?? ""
+    }
+
+    /// Both fields go through a hand-rolled Binding rather than `.onChange`:
+    /// a Binding's setter runs ONLY when the text field itself changes the
+    /// text, so seeding the state in `.onAppear` cannot be mistaken for an
+    /// edit.
+    private var dbhBinding: Binding<String> {
+        Binding(get: { dbhText }, set: { new in
+            dbhText = new
+            applyDBH(new)
+        })
+    }
+
+    private var heightBinding: Binding<String> {
+        Binding(get: { heightText }, set: { new in
+            heightText = new
+            applyHeight(new)
+        })
+    }
+
+    /// Text the cruiser typed → the DBH that will be saved.
+    ///
+    /// Text still EQUAL to the prefill restores the stored Float verbatim. The
+    /// prefill is rounded — a tree stored at 18.27 cm prefills "18.3" — so
+    /// parsing the prefill back and saving it would coarsen a measurement
+    /// nobody asked to change: open the form, press Save, lose 3 mm. The
+    /// comparison is on the STRING for that reason, not on the number.
+    private func applyDBH(_ text: String) {
+        if text == dbhPrefill {
+            viewModel.dbhCm = viewModel.tree.dbhCm
+            dbhEntryValid = true
+        } else if let typed = TruthInput.parsePositive(text) {
+            viewModel.dbhCm = Float(typed)
+            dbhEntryValid = true
+        } else {
+            // Blank or not a number. Leave the stored diameter alone and say
+            // so on the row: writing 0 cm here would be a measurement this
+            // tree never had, and every tally downstream would believe it.
+            viewModel.dbhCm = viewModel.tree.dbhCm
+            dbhEntryValid = false
+        }
+        viewModel.markDirty()
+    }
+
+    /// Same rule for the height, with one difference: emptying the field is
+    /// how a cruiser says this tree has no height, so blank is a valid entry
+    /// that clears the stored value rather than a refusal.
+    private func applyHeight(_ text: String) {
+        if text == heightPrefill {
+            viewModel.heightM = viewModel.tree.heightM
+            heightEntryValid = true
+        } else if TruthInput.normalized(text).isEmpty {
+            viewModel.heightM = nil
+            heightEntryValid = true
+        } else if let typed = TruthInput.parsePositive(text) {
+            viewModel.heightM = Float(typed)
+            heightEntryValid = true
+        } else {
+            viewModel.heightM = viewModel.tree.heightM
+            heightEntryValid = false
+        }
+        viewModel.markDirty()
+    }
+
+    /// Why a numeric row can't be saved. Same sentences the field log's
+    /// editor uses for the same refusal, so the app says one thing.
+    private func entryWarning(_ text: String) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(ForestixPalette.confidenceBad)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     /// One measured quantity: label left, editable value + unit right.
@@ -361,7 +464,8 @@ public struct TreeDetailScreen: View {
             }
             .buttonStyle(.forestixProminent)
             .controlSize(.large)
-            .disabled(!viewModel.dirty || viewModel.isSaving)
+            .disabled(!viewModel.dirty || viewModel.isSaving
+                      || !dbhEntryValid || !heightEntryValid)
 
             if viewModel.isDeleted {
                 Button {

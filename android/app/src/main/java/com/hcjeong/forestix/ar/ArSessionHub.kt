@@ -26,6 +26,15 @@
 // persisted across app restarts (the ARCore world it is defined in is
 // gone) and clears itself if its anchor stops tracking permanently.
 //
+// AND IT DIES WITH ITS PLOT (field report 7). Once [linkedCruisePlotId]
+// names a cruise plot, the ring is that plot's boundary and nothing else:
+// closing the plot, deleting it, or walking to the next one drops the ring
+// ([dropPlotIfLinkedElsewhere] / [armPlotSetup], driven from cruise mode —
+// see CruiseModeEffects). It used to survive all three, so the plot-2 setup
+// screen opened already "placed", on plot 1's ring, tens of metres away. A
+// ring drawn for a plot the cruiser has left is a boundary in the wrong
+// place, which is worse than no boundary.
+//
 // RENDERING: the hub owns the plot's scene nodes directly and repositions
 // them from the anchor pose every frame — screens don't carry the plot in
 // their marker lists. Per-screen style: OWNER (sampling, full alpha),
@@ -181,6 +190,50 @@ object ArSessionHub {
     fun linkPlot(cruisePlotId: java.util.UUID) {
         if (activePlot == null) return
         linkedCruisePlotId = cruisePlotId
+    }
+
+    /// FIELD REPORT 7 — the ring must not outlive the plot it was drawn for.
+    ///
+    /// Drops the plot when its ring is linked to a cruise plot OTHER than
+    /// [cruisePlotId] — the plot the cruiser is about to measure. A ring
+    /// linked to nothing is a quick-measure ring (or one placed and not yet
+    /// saved) and is left alone: it belongs to no cruise plot, so no cruise
+    /// plot's lifetime governs it.
+    ///
+    /// Returns true when the ring was dropped. Main thread only — it edits
+    /// Compose state and the scene graph, like [clearPlot] itself. Mirror of
+    /// iOS ActiveSamplingPlot.dropIfLinkedElsewhere(than:).
+    fun dropPlotIfLinkedElsewhere(cruisePlotId: java.util.UUID?): Boolean {
+        val linked = linkedCruisePlotId ?: return false
+        if (linked == cruisePlotId) return false
+        clearPlot()
+        return true
+    }
+
+    /// About to open the plot-setup screen: drop a ring that belongs to a
+    /// DIFFERENT cruise plot. [cruisePlotId] names the plot the session will
+    /// rewrite, or null for a fresh "Start plot".
+    ///
+    /// Two things go wrong when a foreign ring survives into that screen. The
+    /// visible one is the field report: the screen opens already "placed", so
+    /// there is no crosshair and no shutter, and the cruiser is shown the
+    /// previous plot's boundary while standing in the new one. The invisible
+    /// one is worse — CruiseStartPlotScreen.applyEdit reads "ring placed but
+    /// not linked to THIS plot" as "the cruiser re-placed the centre", so a
+    /// radius-only edit made with plot 1's ring still up would re-stamp plot
+    /// 2's centre at wherever the cruiser happened to be standing.
+    ///
+    /// On a CREATE there is no plot yet, so ANY ring is foreign — including
+    /// an unlinked one, which on this path is the ring left over from a plot
+    /// whose Save was refused for want of a GPS fix. The cruiser asked to
+    /// place a new centre; the screen owes them a crosshair. Mirror of iOS
+    /// MapHomeScreen+Cruise.armPlotSetup(editing:).
+    fun armPlotSetup(cruisePlotId: java.util.UUID?) {
+        if (cruisePlotId != null) {
+            dropPlotIfLinkedElsewhere(cruisePlotId)
+        } else if (activePlot != null) {
+            clearPlot()
+        }
     }
 
     /// Quick-measure history row this ring was saved as, null until the

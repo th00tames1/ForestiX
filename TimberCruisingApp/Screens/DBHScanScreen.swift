@@ -107,6 +107,15 @@ public struct DBHScanScreen: View {
     /// with every research row.
     @StateObject private var raycaster = ARCenterRaycaster()
 
+    /// "Pin centre" offer, waved off for this visit. Not persisted: the
+    /// offer is an offer, and a cruiser who is measuring from outside the
+    /// plot (or simply does not want the ring) should not be nagged for a
+    /// whole tally. Re-entering the screen asks once more, which is right —
+    /// by then they may be standing at the centre.
+    @State private var pinOfferDismissed = false
+    /// Why the last "Pin centre" tap planted nothing. Shown on the card.
+    @State private var pinCentreFailure: String?
+
     /// Developer-mode research capture: the tape-measured true diameter AS
     /// TYPED, logged with the scan context to the research CSV so error can be
     /// analysed against distance / aim angle. The unit is `activeTruthUnit`
@@ -451,12 +460,37 @@ public struct DBHScanScreen: View {
                     if let banner = viewModel.unsupportedBanner {
                         bannerView(banner, tint: .orange)
                     }
+                    // A "+" that refused says why. Same surface and the same
+                    // tap-to-clear as the height screen's anchor-failure
+                    // banner, because it is the same defect: a capture button
+                    // that does nothing is indistinguishable from a broken
+                    // one. It also clears itself once the tap would be
+                    // honoured, so it can't sit there after the cruiser has
+                    // acted on it.
+                    if let refusal = viewModel.captureRefusalReason {
+                        bannerView(refusal, tint: .orange,
+                                   identifier: "dbhScan.captureRefusalBanner")
+                            .onTapGesture { viewModel.clearCaptureRefusal() }
+                    }
                     // The accepted diameter did NOT reach a tree row. Loud,
                     // and the value stays on screen so Accept can be retried.
                     if let failure = dbhSaveFailure {
                         bannerView(failure,
                                    tint: ForestixPalette.confidenceBad,
                                    identifier: "dbhScan.saveFailureBanner")
+                    }
+                    // FIELD REPORT 14 × 17 — a plot is being tallied but no
+                    // AR anchor marks its centre, so there is no ring to
+                    // draw. Say that, and offer the one act that produces a
+                    // centre worth drawing. See `plotCentreNeedsPin`.
+                    if showsPinCentreOffer {
+                        PlotPinCentreCard(
+                            failure: pinCentreFailure,
+                            onPin: pinPlotCentre,
+                            onDismiss: {
+                                pinCentreFailure = nil
+                                pinOfferDismissed = true
+                            })
                     }
                 }
 
@@ -1426,6 +1460,96 @@ public struct DBHScanScreen: View {
         else { return [] }
         return ActiveSamplingPlot.subduedOverlayMarkers(for: plot,
                                                         centre: centre)
+    }
+
+    // MARK: - "Pin centre" offer (field report 14 × 17)
+
+    /// A cruise plot is being tallied but NO AR anchor marks its centre, so
+    /// `plotOverlayMarkers` is empty and the cruiser is looking at a bare
+    /// camera feed with a plot open.
+    ///
+    /// That is every plot opened from a planned pin ("Start plot now" /
+    /// "Set plot centre (GPS)" — the fast route report 17 introduced) and
+    /// every plot carried across an app restart, because the ARKit world
+    /// map dies with the process. The linked-id test is the same one the
+    /// border chip and the mini-map use: an "Add tree" can target an OLDER
+    /// open plot than the last-placed ring, and that ring is not this
+    /// plot's centre.
+    ///
+    /// Deliberately NOT gated on tracking loss. A tracking dip hides a ring
+    /// that EXISTS and already says so in its own words
+    /// (`plotTrackingLostHint`); this card would be a second, wrong
+    /// explanation for it.
+    private var plotCentreNeedsPin: Bool {
+        guard let plotID = cruisePlotInfo?.plotID,
+              pinnableRadiusM != nil
+        else { return false }
+        if activePlot.plot != nil, activePlot.linkedCruisePlotID == plotID {
+            return false
+        }
+        return true
+    }
+
+    /// The plot's OWN radius, or nil when its stored area can't produce a
+    /// sane one. There is no honest radius to invent in its place, so the
+    /// offer stands down rather than drawing a ring of a made-up size.
+    /// Same > 0.5 m floor Android's plot mini-map applies to the same field.
+    private var pinnableRadiusM: Double? {
+        guard let r = cruisePlotInfo?.radiusM, r.isFinite, r > 0.5 else {
+            return nil
+        }
+        return r
+    }
+
+    /// Whether the offer is on screen right now.
+    private var showsPinCentreOffer: Bool {
+        plotCentreNeedsPin && !pinOfferDismissed && !hidingChromeForCapture
+    }
+
+    /// Plant the plot centre where the crosshair meets the ground and hand
+    /// the ring to THIS cruise plot.
+    ///
+    /// The act is the AR "Start plot" act: the cruiser stands at the centre
+    /// and pins it, so the ring is worth what that ring has always been
+    /// worth. The stored `Plot.centerLat/centerLon` are deliberately NOT
+    /// rewritten — the card says so — because a control that silently moved
+    /// a plot centre to wherever the cruiser was standing is exactly the
+    /// invisible data loss `editCruisePlot` refuses.
+    ///
+    /// NO forward-ray fallback, unlike the two placement screens. There the
+    /// ghost preview shows the cruiser where a 3 m-forward fallback point
+    /// lands before they commit; here there is no preview (a mesh raycast
+    /// on a poll is the cost field report 9 was about), so a fallback would
+    /// plant the centre in mid-air with nothing to warn them. Refusing is
+    /// the honest half of that trade, and the message says what to do.
+    private func pinPlotCentre() {
+        guard let plotID = cruisePlotInfo?.plotID,
+              let radiusM = pinnableRadiusM
+        else { return }
+        raycaster.preferLiDARMesh = settings.measurementSource == .lidar
+        guard let hit = raycaster.screenCenterHit() else {
+            pinCentreFailure = MeasurementCopy.plotGroundNotSeen
+            return
+        }
+        // Replace any earlier ring's anchor rather than leaving it in the
+        // session — `ActiveSamplingPlot.place` drops the reference and only
+        // the caller can still name the anchor to remove.
+        if let previous = activePlot.plot {
+            viewModel.session.removeWorldAnchor(id: previous.anchorID)
+        }
+        guard let anchorID = viewModel.session.addWorldAnchor(
+            at: hit, name: "forestix.samplingPlot.center")
+        else {
+            pinCentreFailure = MeasurementCopy.plotGroundNotSeen
+            return
+        }
+        pinCentreFailure = nil
+        // The plot's OWN radius, not whatever the sampling slider was last
+        // left at — this ring stands for a saved cruise plot.
+        activePlot.place(anchorID: anchorID, radiusM: radiusM)
+        // `place` clears the link (a fresh ring belongs to nobody), so the
+        // stamp has to come after it.
+        activePlot.link(cruisePlotID: plotID)
     }
 
     // MARK: - Bottom panel

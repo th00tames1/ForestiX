@@ -336,7 +336,7 @@ public struct SamplingPlotScreen: View {
         guard let hit = raycaster.screenCenterHit()
                 ?? raycaster.forwardPointAtHorizontalDistance(3.0)
         else {
-            captureFailureReason = "Couldn't see the ground here. Aim at the ground and try again."
+            captureFailureReason = MeasurementCopy.plotGroundNotSeen
             return
         }
         // Pin the centre to a real ARKit anchor on the shared session —
@@ -346,7 +346,7 @@ public struct SamplingPlotScreen: View {
         guard let anchorID = session.addWorldAnchor(
             at: hit, name: "forestix.samplingPlot.center")
         else {
-            captureFailureReason = "Couldn't see the ground here. Aim at the ground and try again."
+            captureFailureReason = MeasurementCopy.plotGroundNotSeen
             return
         }
         captureFailureReason = nil

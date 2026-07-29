@@ -368,6 +368,11 @@ extension MapHomeScreen {
     /// beside it.
     func editPlotFromMap(_ plot: Plot) {
         plotMenuPlotID = nil
+        // Any ring belonging to a DIFFERENT plot goes first. This door can
+        // open on an older open plot while the ring still marks the newest
+        // one, and `editCruisePlot` would read that ring as "the cruiser
+        // re-placed this plot's centre" and move the plot onto today's fix.
+        armPlotSetup(editing: plot.id)
         editingMapPlotID = plot.id
         presentingPlotSetup = true
     }
@@ -423,11 +428,10 @@ extension MapHomeScreen {
             // telling the truth; the next tap retries.
             return
         }
+        // One way to drop a ring, anchor included — two ways is how the next
+        // caller forgets the anchor half (`ActiveSamplingPlot.drop`).
         if samplingPlot.linkedCruisePlotID == plot.id {
-            if let ring = samplingPlot.plot {
-                ARKitSessionManager.shared.removeWorldAnchor(id: ring.anchorID)
-            }
-            samplingPlot.clear()
+            samplingPlot.drop()
         }
         withAnimation(.easeOut(duration: 0.18)) { selectedPinID = nil }
         reloadCruise()

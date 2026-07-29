@@ -67,6 +67,7 @@ import com.hcjeong.forestix.ui.screens.MeasureBackButton
 import com.hcjeong.forestix.ui.screens.MeasureShutterBar
 import com.hcjeong.forestix.ui.screens.MeasureStatusPanel
 import com.hcjeong.forestix.ui.screens.MeasureTopChrome
+import com.hcjeong.forestix.ui.screens.PLOT_GROUND_NOT_SEEN
 import com.hcjeong.forestix.ui.screens.PLOT_TRACKING_LOST_HINT
 import com.hcjeong.forestix.ui.screens.PLOT_TRACKING_LOST_STATUS
 import com.hcjeong.forestix.ui.screens.SamplingPlotMiniMap
@@ -172,7 +173,7 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String, editPlotId: Str
         if (ArSessionHub.activePlot != null) return
         val hit = controller.screenCenterHit() ?: controller.forwardPointAtHorizontalDistance(3f)
         if (hit == null || !ArSessionHub.placePlot(hit)) {
-            failure = "Couldn't see the ground here. Aim at the ground and try again."
+            failure = PLOT_GROUND_NOT_SEEN
             return
         }
         failure = null

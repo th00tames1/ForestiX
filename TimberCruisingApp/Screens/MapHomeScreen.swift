@@ -1754,7 +1754,7 @@ private struct QuickEntryEditSheet: View {
     init(entry: QuickMeasureEntry, history: QuickMeasureHistory) {
         self.entry = entry
         _history = ObservedObject(wrappedValue: history)
-        _valueText = State(initialValue: Self.formatValue(entry.value))
+        _valueText = State(initialValue: Self.prefillText(entry))
         _speciesText = State(initialValue: entry.speciesCode ?? "")
         _noteText = State(initialValue: entry.note ?? "")
     }
@@ -1784,6 +1784,13 @@ private struct QuickEntryEditSheet: View {
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(ForestixPalette.textSecondary)
                     .frame(width: 32, alignment: .leading)
+            }
+            if !valueEntryValid {
+                Text(valueEntryWarning)
+                    .font(.system(size: 13))
+                    .foregroundStyle(ForestixPalette.confidenceBad)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("mapHome.editSheet.valueWarning")
             }
 
             // Species — the short FIA code (free text; uppercased on save).
@@ -1839,6 +1846,8 @@ private struct QuickEntryEditSheet: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(MapPressableStyle())
+            .disabled(!valueEntryValid)
+            .opacity(valueEntryValid ? 1 : 0.45)
             .accessibilityIdentifier("mapHome.editSheet.save")
 
             Button(role: .destructive) {
@@ -1889,13 +1898,21 @@ private struct QuickEntryEditSheet: View {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedNote = noteText
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let newValue = TruthInput.parse(valueText) ?? entry.value
         // A value the cruiser retyped is a TYPED reading from here on: it
         // keeps neither the sensor's σ nor its edge provenance. Carrying
         // those across left a hand-entered number wearing the precision of
         // a measurement it has nothing to do with.
-        let base = abs(newValue - entry.value) > 0.001
-            ? entry.typedValue(newValue) : entry
+        //
+        // "Retyped" is decided on the TEXT against the prefill, not on the
+        // numbers. The prefill is the reading ROUNDED for display, so a
+        // sensor value of 18.274 opened as "18.3" and every numeric test —
+        // this one included, at any tolerance — called that a change: opening
+        // the sheet and pressing Save rounded the reading AND demoted it to a
+        // hand entry with no σ. Comparing the strings is the only test that
+        // an untouched form passes.
+        let base = valueText == valuePrefill
+            ? entry
+            : (TruthInput.parsePositive(valueText).map { entry.typedValue($0) } ?? entry)
         history.update(QuickMeasureEntry(
             id: base.id,
             kind: base.kind,
@@ -1947,12 +1964,36 @@ private struct QuickEntryEditSheet: View {
             .fill(ForestixPalette.surfaceRaised)
     }
 
-    /// Show the stored value compactly: integers with no decimals, else
-    /// up to two decimals with a lone trailing zero trimmed.
-    private static func formatValue(_ v: Double) -> String {
-        if v == v.rounded() { return String(format: "%.0f", v) }
-        return String(format: "%.2f", v)
-            .replacingOccurrences(of: "0$", with: "", options: .regularExpression)
+    /// The text the value field opens with: the stored reading at the SAME
+    /// precision the row above it prints — one decimal for a diameter or a
+    /// height, two for a distance — so the peek and its editor never show one
+    /// reading as two numbers. Android builds the identical string.
+    private static func prefillText(_ entry: QuickMeasureEntry) -> String {
+        MeasurementFormatter.entryText(entry.value,
+                                       fractionDigits: entry.kind == .distance ? 2 : 1)
+    }
+
+    /// What the field was prefilled with. `save()` compares the current text
+    /// against this STRING, not against the number it parses to.
+    private var valuePrefill: String { Self.prefillText(entry) }
+
+    /// False when the cruiser has typed something that is not a usable
+    /// reading. Save is held off and the field says why, rather than the
+    /// sheet quietly keeping the old number and closing.
+    private var valueEntryValid: Bool {
+        valueText == valuePrefill || TruthInput.parsePositive(valueText) != nil
+    }
+
+    /// The refusal for this reading's kind. Diameter and height reuse the
+    /// field log's sentences word for word; the other kinds get the same
+    /// sentence about a reading.
+    private var valueEntryWarning: String {
+        switch entry.kind {
+        case .dbh:    return "A typed diameter must be a number greater than zero."
+        case .height: return "A typed height must be a number greater than zero."
+        case .crown, .distance, .samplingPlot:
+            return "A typed reading must be a number greater than zero."
+        }
     }
 }
 

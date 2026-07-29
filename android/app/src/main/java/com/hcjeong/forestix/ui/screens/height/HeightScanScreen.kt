@@ -81,6 +81,8 @@ import com.hcjeong.forestix.ui.screens.MeasureTopChrome
 import com.hcjeong.forestix.ui.screens.MeasureTopStrip
 import com.hcjeong.forestix.ui.screens.MeasureMiniMapSlot
 import com.hcjeong.forestix.ui.screens.MeasureValuePill
+import com.hcjeong.forestix.ui.screens.PlotPinCentreCard
+import com.hcjeong.forestix.ui.screens.rememberPlotPinCentreOffer
 import com.hcjeong.forestix.ui.screens.RawCaptureBadge
 import com.hcjeong.forestix.ui.screens.RawCaptureOffNotice
 import com.hcjeong.forestix.ui.screens.RawCaptureStatus
@@ -280,6 +282,11 @@ fun HeightScanScreen(
     // hidden so the captured JPEG shows only the AR feed + measurement
     // overlays (captured buttons read as real buttons in the photo viewer).
     var hidingChromeForCapture by remember { mutableStateOf(false) }
+    // FIELD REPORT 14 × 17 — a cruise plot is being tallied but no AR anchor
+    // marks its centre, so `PlotOverlay.SUBDUED` has nothing to draw and the
+    // cruiser is looking at a bare camera feed with a plot open. Non-null
+    // exactly while that is true; see rememberPlotPinCentreOffer.
+    val pinCentreOffer = rememberPlotPinCentreOffer(controller)
     // Scan metadata (species / damage / note) attached on Accept — iOS
     // ScanMetadataSheet(kind: .height); no stem position for heights.
     // Seeded from the chooser's species control when it was used, so the
@@ -1280,6 +1287,11 @@ fun HeightScanScreen(
         val editPlotTarget = remember { CruiseCapture.target }
         val onEditPlot: () -> Unit = editPlotTarget?.let { c ->
             {
+                // The setup session about to open rewrites the plot this
+                // session is measuring into — a ring linked to any OTHER plot
+                // is not this plot's centre and must not be read there as a
+                // re-placement (field report 7; see ArSessionHub.armPlotSetup).
+                ArSessionHub.armPlotSetup(c.plotId)
                 nav.navigate(
                     CruiseRoutes.editPlot(c.projectId.toString(), c.plotId.toString()))
             }
@@ -1440,6 +1452,18 @@ fun HeightScanScreen(
             },
             failure = failure,
             onDismissFailure = { failure = null },
+            // FIELD REPORT 14 × 17 — a plot is being tallied but no AR
+            // anchor marks its centre, so there is no ring to draw. Same
+            // card, same words, same act as the DBH twin.
+            below = pinCentreOffer?.let { offer ->
+                {
+                    PlotPinCentreCard(
+                        failure = offer.failure,
+                        onPin = { offer.pin() },
+                        onDismiss = { offer.dismiss() },
+                    )
+                }
+            },
         )
 
         // Manual entry — typed height (iOS .manualEntry: field + Save,

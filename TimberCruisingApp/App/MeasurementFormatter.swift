@@ -55,17 +55,15 @@ public enum MeasurementFormatter {
     // MARK: - Height
 
     /// Renders a stored height (in metres) for display.
-    ///   • metric  → "28.24 m"
-    ///   • imperial → "92.65 ft"
+    ///   • metric  → "28.2 m"
+    ///   • imperial → "92.7 ft"
     ///
-    /// TWO decimals, field-requested. One was a rounding coarser than the
-    /// measurement: a walk-off tangent fit resolves well inside a decimetre
-    /// on a clean sightline, and the validation study compares these numbers
-    /// against a hand-measured truth typed to the centimetre. At one decimal
-    /// two heights 6 cm apart printed the same string, which made a real
-    /// difference between algorithms invisible on the screen that shows it.
-    /// The ± band beside it (`heightSigma`) is what says how much of the
-    /// second decimal to believe. Android prints the identical string.
+    /// ONE decimal. Two decimals were tried and taken back out: a tangent
+    /// height is a difference of two sighted angles, and the σ it carries is
+    /// decimetres at cruising range, so a centimetre digit was a precision
+    /// the measurement does not have. The ± band beside it (`heightSigma`)
+    /// is what says how much of the first decimal to believe. Android prints
+    /// the identical string.
     public static func height(m: Double, in system: UnitSystem) -> String {
         switch system {
         case .metric:
@@ -104,6 +102,31 @@ public enum MeasurementFormatter {
         case .imperial:
             return String(format: "%.1f ft", m * 3.28084)
         }
+    }
+
+    // MARK: - Editable fields
+
+    /// The text an EDITABLE numeric field is PREFILLED with, for a value that
+    /// came out of storage: the bare number in the unit it is stored in, with
+    /// no unit suffix (the row carries that), rounded exactly the way the
+    /// read-only surface for that quantity rounds it — one decimal for a
+    /// diameter or a height, two for a distance. A form that shows a different
+    /// number from the field log is two numbers for one tree.
+    ///
+    /// A ROUNDED prefill is only safe in a field whose screen refuses to write
+    /// it back unedited. `18.27` prefills as "18.3", and saving that text over
+    /// the stored value is a silent re-measurement of the tree — the cruiser
+    /// opened a form and lost 3 cm. Every caller therefore compares the field's
+    /// current text against this prefill and leaves the stored value alone when
+    /// they are equal; see `TreeDetailScreen` and the map peek's edit sheet.
+    /// Any new caller owes the same guard.
+    ///
+    /// `String(format:)` rounds half-to-EVEN on the value's exact binary
+    /// expansion. The Android sibling reproduces that with BigDecimal
+    /// HALF_EVEN rather than its own `String.format`, which rounds half-UP and
+    /// printed "42.3" for a stored 42.25 where this prints "42.2".
+    public static func entryText(_ value: Double, fractionDigits: Int) -> String {
+        String(format: "%.\(fractionDigits)f", value)
     }
 
     /// Returns the unit suffix only — for table columns that already

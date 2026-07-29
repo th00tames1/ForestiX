@@ -137,7 +137,7 @@ fun SamplingPlotScreen(nav: NavController) {
         if (ArSessionHub.activePlot != null) return
         val hit = controller.screenCenterHit() ?: controller.forwardPointAtHorizontalDistance(3f)
         if (hit == null || !ArSessionHub.placePlot(hit)) {
-            failure = "Couldn't see the ground here. Aim at the ground and try again."
+            failure = PLOT_GROUND_NOT_SEEN
             return
         }
         failure = null

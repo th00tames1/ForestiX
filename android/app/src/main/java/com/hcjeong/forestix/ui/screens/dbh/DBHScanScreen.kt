@@ -102,6 +102,8 @@ import com.hcjeong.forestix.ui.screens.MeasureTopChrome
 import com.hcjeong.forestix.ui.screens.MeasureTopStrip
 import com.hcjeong.forestix.ui.screens.MeasureMiniMapSlot
 import com.hcjeong.forestix.ui.screens.MeasureValuePill
+import com.hcjeong.forestix.ui.screens.PlotPinCentreCard
+import com.hcjeong.forestix.ui.screens.rememberPlotPinCentreOffer
 import com.hcjeong.forestix.ui.screens.RawCaptureBadge
 import com.hcjeong.forestix.ui.screens.RawCaptureOffNotice
 import com.hcjeong.forestix.ui.screens.RawCaptureStatus
@@ -155,6 +157,38 @@ private const val ACQUISITION_STALL_MS = 2_000L
 /// (`DBHScanScreen.acquisitionStallHint`).
 private const val ACQUISITION_STALL_HINT =
     "No depth lock yet — move the phone gently side to side, or change your distance."
+
+/// The tap-depth window `DBHEstimator.livePreview` will produce a lock in.
+/// The screen only READS it — to pick which sentence a refused "+" gets, and
+/// to label the dev HUD's range miss. The estimator stays the single place
+/// that decides whether a frame can be measured; this must not become a
+/// second gate in front of it (that is precisely the bug being fixed on iOS,
+/// where a screen-side 0.5–3.0 m arm gate outlived the estimator window it
+/// was written to match).
+private val PREVIEW_RANGE_M: ClosedFloatingPointRange<Float> = 0.4f..3.5f
+
+/// A "+" that refuses must say why: a capture button that does nothing is
+/// indistinguishable from a broken one, which is the same defect that was
+/// fixed on the height anchor tap (`HeightScanScreen.CAMERA_NOT_READY`).
+/// Byte-identical to the iOS `DBHScanViewModel` constants of the same names.
+///
+/// None of them names the metres of the window. iOS arms over its estimator's
+/// 0.3–5.0 m and this screen over `PREVIEW_RANGE_M`, so a sentence quoting a
+/// number could not be the same sentence on both platforms — and the
+/// direction to walk is the part the cruiser can act on.
+private const val TOO_FAR_TEXT =
+    "Too far from the trunk to read depth — step closer, then tap + again."
+private const val TOO_CLOSE_TEXT =
+    "Too close to the trunk to read depth — step back, then tap + again."
+private const val NO_TRUNK_LOCK_TEXT =
+    "No trunk lock yet — hold the crosshair on the bark until a diameter shows, then tap + again."
+
+/// The silhouette walk ran off the image: the trunk's edges aren't in frame.
+/// Hoisted out of the instruction banner so a refused "+" can repeat the
+/// banner's sentence WORD FOR WORD — two different remedies on screen for one
+/// failure is worse than one.
+private const val EDGES_CLIPPED_TEXT =
+    "Can't see both sides of the trunk — step back so the whole trunk is in view."
 
 /// How long without a single depth frame before everything the banner could
 /// say about `preview` / `adjustPreview` is treated as describing a frame that
@@ -238,6 +272,11 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         }
     }
     val colors = Forestix.colors
+    // FIELD REPORT 14 × 17 — a cruise plot is being tallied but no AR anchor
+    // marks its centre, so `PlotOverlay.SUBDUED` has nothing to draw and the
+    // cruiser is looking at a bare camera feed with a plot open. Non-null
+    // exactly while that is true; see rememberPlotPinCentreOffer.
+    val pinCentreOffer = rememberPlotPinCentreOffer(controller)
 
     val settings by env.settings.state.collectAsStateWithLifecycle()
     // Project calibration — identity for plain quick-measure (iOS parity),
@@ -258,6 +297,11 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     var stage by remember { mutableStateOf(Stage.AIMING) }
     var result by remember { mutableStateOf<DBHResult?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
+    /// Why the last "+" did nothing. Held separately from `failure` so it can
+    /// be taken down the moment the gate would honour a tap, without touching
+    /// a real capture failure. Rendered on the same amber surface, behind
+    /// `failure`, so it can never hide one.
+    var captureRefusal by remember { mutableStateOf<String?>(null) }
     var preview by remember { mutableStateOf<DBHEstimator.DbhPreview?>(null) }
     // Last RAW per-frame preview distance (m) — the un-smoothed dTap the
     // estimator actually used. `preview.distanceM` is EMA-smoothed for the
@@ -726,7 +770,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                             Locale.US, "L✓R✓ w%d r%d%s%s", raw.widthPx, raw.cleanRows,
                             if (raw.clippedRows > 0) " c${raw.clippedRows}" else "", ema,
                         )
-                        raw.distanceM !in 0.4f..3.5f ->
+                        raw.distanceM !in PREVIEW_RANGE_M ->
                             String.format(Locale.US, "miss range %.1fm", raw.distanceM)
                         else -> String.format(
                             Locale.US, "miss r%d/5 c%d%s", raw.cleanRows, raw.clippedRows, ema,
@@ -776,6 +820,12 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             val nowMs = SystemClock.elapsedRealtime()
             depthSilent = nowMs - lastFrameAt >= DEPTH_SILENT_MS
             if (!depthSilent && preview?.locked == true) lastLockAt = nowMs
+            // The refusal describes a "+" that was refused. Once the gate
+            // would honour a tap it is no longer true, so it comes down
+            // without waiting for a second tap. (iOS clears it from its stall
+            // ticker, for the same reason: the frame handler has too many
+            // early returns to be trusted with this.)
+            if (captureRefusal != null && preview?.locked == true) captureRefusal = null
             acquisitionStalled = nowMs - lastLockAt >= ACQUISITION_STALL_MS
             delay(150)
         }
@@ -806,6 +856,9 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             val nowMs = SystemClock.elapsedRealtime()
             depthSilent = nowMs - lastFrameAt >= DEPTH_SILENT_MS
             if (!depthSilent && adjustPreview?.locked == true) lastLockAt = nowMs
+            // Same rule as the auto loop — a refusal outlives its own truth
+            // the moment the bracket resolves.
+            if (captureRefusal != null && adjustPreview?.locked == true) captureRefusal = null
             acquisitionStalled = nowMs - lastLockAt >= ACQUISITION_STALL_MS
             delay(150)
         }
@@ -852,12 +905,39 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // seconds; the 3 closest to the median diameter are averaged (so with
     // 5 samples the 2 largest deviations are trimmed). Mirrors the iOS
     // DBHScanViewModel multi-sample burst.
+    /// The sentence for a "+" the gate will not honour.
+    ///
+    /// `livePreview` hands back a preview carrying the tap depth even on the
+    /// ticks it refuses to lock, so a cruiser standing outside the window is
+    /// told WHICH WAY TO WALK rather than getting a generic miss. A tap depth
+    /// of 0 means the centre pixel had no return at all — not a distance
+    /// worth talking about — so it falls through to the lock sentence, as
+    /// does an in-range frame the walk simply couldn't read.
+    fun refusalFor(p: DBHEstimator.DbhPreview?): String {
+        val d = p?.distanceM ?: return NO_TRUNK_LOCK_TEXT
+        if (p.edgesClipped) return EDGES_CLIPPED_TEXT
+        return when {
+            d > PREVIEW_RANGE_M.endInclusive -> TOO_FAR_TEXT
+            d > 0f && d < PREVIEW_RANGE_M.start -> TOO_CLOSE_TEXT
+            else -> NO_TRUNK_LOCK_TEXT
+        }
+    }
+
     fun capture() {
         if (stage == Stage.CAPTURING) return
         // Require a locked live fit before starting the burst — mirrors the
         // iOS armed + non-red gate, so a capture can't run on an unresolved
         // trunk and immediately reject.
-        if (preview?.locked != true) return
+        //
+        // AND SAY SO. This returned in silence, so at a range the preview
+        // would not lock at, the cruiser got a live badge, a red crosshair
+        // and a "+" that did nothing, with no sentence on screen mentioning
+        // distance at all.
+        if (preview?.locked != true) {
+            captureRefusal = refusalFor(preview)
+            return
+        }
+        captureRefusal = null
         stage = Stage.CAPTURING
         failure = null
         resultFromAdjust = false
@@ -946,7 +1026,14 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // mid-burst drag can't change what this capture measures.
     fun captureAdjust() {
         if (stage == Stage.CAPTURING) return
-        if (adjustPreview?.locked != true) return
+        // Same silence, same fix. `constrainedEstimate` returns null rather
+        // than an unlocked preview, so the bracket can only ever report the
+        // lock sentence — it has no tap depth to name a direction from.
+        if (adjustPreview?.locked != true) {
+            captureRefusal = refusalFor(adjustPreview)
+            return
+        }
+        captureRefusal = null
         stage = Stage.CAPTURING
         failure = null
         resultFromAdjust = true
@@ -1500,6 +1587,11 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         val editPlotTarget = remember { CruiseCapture.target }
         val onEditPlot: () -> Unit = editPlotTarget?.let { c ->
             {
+                // The setup session about to open rewrites the plot this
+                // session is measuring into — a ring linked to any OTHER plot
+                // is not this plot's centre and must not be read there as a
+                // re-placement (field report 7; see ArSessionHub.armPlotSetup).
+                ArSessionHub.armPlotSetup(c.plotId)
                 nav.navigate(
                     CruiseRoutes.editPlot(c.projectId.toString(), c.plotId.toString()))
             }
@@ -1737,6 +1829,8 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                             AutoModePill {
                                 adjustMode = false
                                 adjustPreview = null
+                                // The refusal was about the OTHER path's gate.
+                                captureRefusal = null
                                 // Remembered, so a cruiser who prefers the
                                 // automatic edges is not handed the bracket
                                 // again on the next tree. This pill and the
@@ -1803,6 +1897,8 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                             shownTier = ConfidenceTier.YELLOW; tierStreak = 0
                             cylinderMarker = null
                             carryWidths.clear(); tapJumpStreak = 0
+                            // The refusal was about the OTHER path's gate.
+                            captureRefusal = null
                             adjustMode = true
                         }
                     }
@@ -1854,8 +1950,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     // the image — the trunk's edges aren't in frame, so no
                     // fit can lock. Honest guidance instead of a lock. More
                     // specific than the stall hint, so it wins.
-                    preview?.edgesClipped == true ->
-                        "Can't see both sides of the trunk — step back so the whole trunk is in view."
+                    preview?.edgesClipped == true -> EDGES_CLIPPED_TEXT
                     acquisitionStalled -> ACQUISITION_STALL_HINT
                     else -> "Align the guide to the trunk's uphill side; hold steady."
                 }
@@ -1866,7 +1961,22 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     result?.rejectionReason ?: "Scan rejected. Try again."
                 else -> "Scan complete. Accept, retake, or add a second view."
             },
-            failure = failure,
+            // A refused "+" gets the same amber surface a failed capture gets.
+            // A real failure outranks it, so the refusal can never hide one.
+            failure = failure ?: captureRefusal,
+            // FIELD REPORT 14 × 17 — a plot is being tallied but no AR
+            // anchor marks its centre, so there is no ring to draw. Say
+            // that, and offer the one act that produces a centre worth
+            // drawing. Same card, same words, same act on the Height twin.
+            below = pinCentreOffer?.let { offer ->
+                {
+                    PlotPinCentreCard(
+                        failure = offer.failure,
+                        onPin = { offer.pin() },
+                        onDismiss = { offer.dismiss() },
+                    )
+                }
+            },
         )
 
         // Manual entry — typed diameter for trees the sensors can't read

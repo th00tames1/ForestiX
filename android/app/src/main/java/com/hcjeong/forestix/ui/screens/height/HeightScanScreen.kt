@@ -395,11 +395,18 @@ fun HeightScanScreen(
         hidingChromeForCapture = true
         // LEAVING THE SCREEN INSIDE THIS SETTLE writes nothing: the caller
         // runs in `rememberCoroutineScope`, whose job is cancelled when the
-        // composition goes, and both suspension points below (this delay and
-        // the PixelCopy await) are cancellation points ahead of the file
-        // write. So there is no window where a photo lands on disk with no
-        // live screen left to hold or delete it. (iOS needs an explicit
-        // has-left check there — its capture task is unstructured.)
+        // composition goes, and the suspension points below (this delay, the
+        // PixelCopy await, the hop to the IO dispatcher) are all cancellation
+        // points ahead of the file write. A cancellation that lands DURING
+        // the write — the one case the store cannot be pre-empted out of —
+        // is cleaned up inside `captureScene`, which deletes its own bytes
+        // rather than leave a file no screen is left to hold or delete.
+        // (iOS needs an explicit has-left check there — its capture task is
+        // unstructured.)
+        //
+        // The suspension is no longer main-thread time: everything after the
+        // surface copy — the emptiness check, the JPEG encode, the write —
+        // runs on Dispatchers.IO. The screen stays live throughout.
         delay(80)
         heldPhoto = MeasurePhotoStore.captureScene(activity)
         hidingChromeForCapture = false

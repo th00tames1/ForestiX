@@ -2034,6 +2034,13 @@ public struct DBHScanScreen: View {
     /// included. What deliberately stays is the guide line, the fit chord, the
     /// crosshair and the AR cylinder: those are the measurement, and they are
     /// the whole evidentiary value of the photo.
+    ///
+    /// ONLY THE RENDER BLOCKS. The store hands the filename back as soon as
+    /// the picture exists in memory and finishes the JPEG on its own queue,
+    /// so the screen is unresponsive for the render alone (~10-20 ms) instead
+    /// of for the render plus the encode plus the write (160-250 ms) — which
+    /// is what the cruiser was reporting as a freeze, once per diameter and
+    /// again per height.
     @MainActor
     private func captureHeldPhoto() async {
         // A fresh capture supersedes whatever was held — never leave the
@@ -2050,8 +2057,26 @@ public struct DBHScanScreen: View {
             hidingChromeForCapture = false
             return
         }
-        heldPhoto = MeasurePhotoStore.captureWindow()
+        let shot = MeasurePhotoStore.captureWindow()
+        // Held IMMEDIATELY, before the bytes are on disk: an Accept tapped
+        // while the JPEG is still encoding must attach this frame, not
+        // nothing. The store keeps writing under this name regardless of who
+        // ends up owning it.
+        heldPhoto = shot?.name
         hidingChromeForCapture = false
+        guard let shot else { return }
+        // The write can still fail (a full container, a refused write). If it
+        // does, drop the name rather than leave a reading pointing at a file
+        // that will never exist — the same "no photo" outcome the old
+        // synchronous failure produced. Only if this screen is still holding
+        // THIS frame: once Accept released it to a stored reading, or a
+        // Retake superseded it, `heldPhoto` no longer names it and nothing
+        // here may touch it. (A reading that took the name and then lost the
+        // write shows "Photo unavailable" in the viewer — it never pretends
+        // to have a picture.)
+        if await shot.written.value == false, heldPhoto == shot.name {
+            heldPhoto = nil
+        }
     }
 
     /// Drop the held frame AND delete the file. Called on retake, on a

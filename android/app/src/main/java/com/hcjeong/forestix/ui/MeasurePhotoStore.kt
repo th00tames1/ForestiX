@@ -38,6 +38,31 @@
 // evidence that a picture came back — the window copy reported SUCCESS for
 // every black frame in the field report — so the copied bitmap is sampled
 // before it is written and an empty frame is treated as a failure.
+//
+// WHAT THIS COSTS, AND WHERE IT IS SPENT. The shutter fires at the exact
+// instant the cruiser is watching the result land, so every millisecond on
+// the main thread is a millisecond of frozen screen. PixelCopy itself is
+// async and cheap here — but it delivers on the main looper, so everything
+// AFTER it used to run in a main-thread continuation:
+//
+//     hasContent, 289 getPixel        ~0.5-1 ms   (JNI per call, not "a few
+//                                                  hundred microseconds")
+//     compress JPEG at 2.6 Mpx        40-80 ms
+//     write                            2-5 ms
+//
+// The same 40-80 ms stall iOS had, on the same screen, at the same instant.
+// Two changes below: the destination bitmap is HALF-SIZE (PixelCopy scales
+// into whatever it is given, so a quarter of the pixels costs a quarter of
+// the encode), and the sampling, the encode and the write all move to
+// Dispatchers.IO. Nothing measurable is left on the main thread.
+//
+// This still hands the caller a name only once the bytes are down, where
+// iOS hands its name over early. The asymmetry is deliberate: iOS renders
+// the picture synchronously and therefore KNOWS it exists before it names
+// it, while here the frame's existence is only known when the copy resolves
+// — and a blank frame, the bug this file is built around, is a real
+// outcome. Naming a photo before the copy has answered would be claiming
+// evidence that may never arrive.
 
 package com.hcjeong.forestix.ui
 
@@ -52,7 +77,10 @@ import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
 import kotlin.coroutines.resume
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 
 object MeasurePhotoStore {
 
@@ -89,10 +117,30 @@ object MeasurePhotoStore {
         File(directory(activity), name).delete()
     }
 
+    /// Half-size destination for the copy: PixelCopy scales the surface into
+    /// whatever bitmap it is handed, and both the JPEG encode and the
+    /// transient allocation fall with the pixel count. A 1080x2400 surface
+    /// becomes 540x1200 — a quarter of the pixels, ~2.5 MB of bitmap instead
+    /// of ~10 MB, and a quarter of the encode.
+    ///
+    /// The photo is EVIDENCE, not a print — a cruiser looking back at the log
+    /// to confirm the cylinder sat on the tree they think they measured, on a
+    /// phone screen, usually as a 96 dp thumbnail first. The viewer decodes
+    /// for a ~1600 px long edge anyway. Nothing measures this image, so its
+    /// resolution enters no computation: the reading, its sigma and its
+    /// capture mode are identical either way. Matches the iOS render scale
+    /// (native 3.0 -> 1.5), so the two platforms' photos stay comparable.
+    private const val CAPTURE_DOWNSCALE = 2
+
     /// Snapshot the AR surface and save it as JPEG (quality 80). Returns the
     /// stored filename, or null when there is nothing to copy, the copy
     /// fails, the copied frame carries no picture, or the write fails.
-    /// Safe to call from the main thread — PixelCopy is async.
+    ///
+    /// Safe to call from the main thread: PixelCopy is async, and everything
+    /// after it — the emptiness check, the encode, the write — is dispatched
+    /// to Dispatchers.IO. The suspension costs the caller wall-clock time,
+    /// not main-thread time, which is the difference between waiting and
+    /// freezing.
     suspend fun captureScene(activity: Activity): String? {
         // The AR view, not the window. Null while no AR screen owns the
         // shared session — nothing to photograph.
@@ -114,7 +162,11 @@ object MeasurePhotoStore {
             Log.w(TAG, "no photo: the AR surface is not ready")
             return null
         }
-        val bitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
+        val bitmap = Bitmap.createBitmap(
+            (view.width / CAPTURE_DOWNSCALE).coerceAtLeast(1),
+            (view.height / CAPTURE_DOWNSCALE).coerceAtLeast(1),
+            Bitmap.Config.ARGB_8888,
+        )
         val status = suspendCancellableCoroutine { cont ->
             try {
                 PixelCopy.request(
@@ -134,25 +186,45 @@ object MeasurePhotoStore {
             Log.w(TAG, "no photo: the AR surface copy failed (PixelCopy status $status)")
             return null
         }
-        // SUCCESS with nothing in it is exactly the bug being fixed here, so
-        // it is a failure, not a photo.
-        if (!hasContent(bitmap)) {
-            bitmap.recycle()
-            Log.w(TAG, "no photo: the copied AR frame was empty (blank/black) — " +
-                "nothing had been rendered into the surface")
-            return null
-        }
         val name = "m-${UUID.randomUUID()}.jpg"
-        return try {
-            FileOutputStream(file(activity, name)).use { out ->
-                bitmap.compress(Bitmap.CompressFormat.JPEG, 80, out)
+        // OFF THE MAIN THREAD FROM HERE. The PixelCopy callback is delivered
+        // on the main looper, so this continuation resumes on the main
+        // thread; the pixel sampling, the JPEG encode and the write used to
+        // run there, 40-80 ms of frozen screen at the moment the result
+        // panel appeared. None of it needs the main thread.
+        return withContext(Dispatchers.IO) {
+            try {
+                // SUCCESS with nothing in it is exactly the bug being fixed
+                // here, so it is a failure, not a photo.
+                if (!hasContent(bitmap)) {
+                    Log.w(TAG, "no photo: the copied AR frame was empty (blank/black) — " +
+                        "nothing had been rendered into the surface")
+                    return@withContext null
+                }
+                // Resolved here rather than on the way in: `file` creates the
+                // directory, and that is a filesystem call the main thread
+                // has no reason to make.
+                val target = file(activity, name)
+                FileOutputStream(target).use { out ->
+                    bitmap.compress(Bitmap.CompressFormat.JPEG, 80, out)
+                }
+                // THE SCREEN CAN BE LEFT WHILE THE BYTES ARE GOING DOWN. The
+                // caller's scope is cancelled with the composition, so this
+                // name would never reach `heldPhoto` and no `onDispose` could
+                // ever delete the file — an orphan in the photo store. The
+                // write has no suspension point inside it, so cancellation
+                // cannot interrupt it; clean up after ourselves instead.
+                if (!isActive) {
+                    target.delete()
+                    return@withContext null
+                }
+                name
+            } catch (t: Exception) {
+                Log.w(TAG, "no photo: writing $name failed", t)
+                null
+            } finally {
+                bitmap.recycle()
             }
-            name
-        } catch (t: Exception) {
-            Log.w(TAG, "no photo: writing $name failed", t)
-            null
-        } finally {
-            bitmap.recycle()
         }
     }
 
@@ -160,8 +232,10 @@ object MeasurePhotoStore {
     ///
     /// A black JPEG and a good one are both valid JPEGs, and both come from
     /// a PixelCopy that said SUCCESS, so the only way to tell them apart is
-    /// to look at the pixels. Sample a coarse grid (289 points, a few
-    /// hundred microseconds) and count the ones that were actually drawn:
+    /// to look at the pixels. Sample a coarse grid (289 points — a JNI hop
+    /// each, so of the order of half a millisecond, not the "few hundred
+    /// microseconds" once claimed here; it runs off the main thread now
+    /// either way) and count the ones that were actually drawn:
     /// not transparent, not pure black. Anything that clears the bar is a
     /// picture; a frame where nothing was rendered cannot.
     private fun hasContent(bitmap: Bitmap): Boolean {

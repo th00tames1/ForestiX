@@ -65,6 +65,23 @@ public final class ARCenterRaycaster: ObservableObject {
 
     public init() {}
 
+    /// Per-ARFrame memo of `localBounds(of:)`, keyed by anchor identifier,
+    /// with the timestamp of the frame it was built from.
+    ///
+    /// THE ONLY CACHE KEY THAT CANNOT GO STALE. Two raycasts that read the
+    /// same `ARFrame` are looking at the same vended geometry by definition —
+    /// ARKit built that frame's anchor snapshot once — so a box computed for
+    /// frame T is exact for every other call that also reads frame T, and is
+    /// thrown away the instant the timestamp moves. It buys nothing across
+    /// frames and is not meant to; see the note in `meshRaycastHit` for why
+    /// a cross-frame cache is refused.
+    ///
+    /// What it does buy: a TAP that lands in the same frame as a poll tick no
+    /// longer pays the vertex walk twice. That is the stall the cruiser feels,
+    /// because the tap is the moment they are waiting on.
+    private var boundsMemo: [UUID: (min: SIMD3<Float>, max: SIMD3<Float>)] = [:]
+    private var boundsMemoFrameTime: TimeInterval?
+
     /// Raycasts from the centre of the current view bounds. Tries paths
     /// in this order:
     ///   1. LiDAR scene-mesh raycast — deterministic on every reconstructed
@@ -300,6 +317,13 @@ public final class ARCenterRaycaster: ObservableObject {
                                 in view: ARView) -> SIMD3<Float>? {
         guard let frame = view.session.currentFrame else { return nil }
 
+        // Frame-scoped bounds memo — see `boundsMemo`. A new frame means new
+        // vended geometry, so every box from the old one is dropped whole.
+        if boundsMemoFrameTime != frame.timestamp {
+            boundsMemoFrameTime = frame.timestamp
+            boundsMemo.removeAll(keepingCapacity: true)
+        }
+
         // Build the world-space ray. ARFrame.raycastQuery gives the
         // exact origin/direction ARKit would use for its own raycast
         // through the supplied screen point — same camera intrinsics,
@@ -338,9 +362,24 @@ public final class ARCenterRaycaster: ObservableObject {
         var bestHit: SIMD3<Float>?
 
         // FIELD REPORT 9 — this used to walk every triangle of every mesh
-        // anchor, fired at 10 Hz by the height anchor-aim sampler and the
-        // sampling-plot preview poll, so by the tenth tree of a plot a
-        // screen-centre raycast was tens of thousands of ray/triangle tests.
+        // anchor. NAME THE CALLERS HONESTLY, because the earlier version of
+        // this note named two of the four and picked the slower one:
+        //   • DistanceMeasureScreen live readout — a 0.05 s timer, 20 Hz,
+        //     the highest rate in the app. It is not in the old list at all.
+        //     It is now throttled to 10 Hz on this path; see the note on
+        //     `lidarLivePollIntervalSec` there for why the timer itself could
+        //     not simply be re-rated.
+        //   • HeightScanScreen anchor-aim sampler — 10 Hz while aiming.
+        //   • SamplingPlotScreen ghost-centre preview — 5 Hz while aiming.
+        //   • DBHScanScreen — on TAP only. Not a poll.
+        // And the volume was understated by orders of magnitude, not by a
+        // little: a shared session that is never reset (deliberately — see
+        // ARKitSessionManager.applyConfiguration) accumulates mesh from app
+        // launch across every tree, plot and walk of the day. Reconstruction
+        // carries roughly two triangles per vertex, so a hundred thousand
+        // accumulated vertices is a couple of HUNDRED thousand ray/triangle
+        // tests per call, and a million vertices is a couple of MILLION —
+        // not "tens of thousands", and not per plot but per raycast.
         //
         // Two rejections, no change to which surface is reported:
         //   1. Per-anchor slab test against a local-space AABB, rebuilt on
@@ -363,23 +402,42 @@ public final class ARCenterRaycaster: ObservableObject {
         // of them. A large constant factor, not a change of order.
         //
         // Making it O(changed anchors) means caching the box per
-        // `anchor.identifier` and invalidating it when ARKit refines that
-        // anchor's geometry. That is the right fix and it is deliberately
-        // NOT done here: this class holds a weak ARView and is not the
-        // session delegate, so it has no update signal to invalidate on,
-        // and ARKit's mesh buffers are documented as valid only for the
-        // frame they were vended in. A box that silently goes stale rejects
-        // an anchor the ray does hit, and this function then returns a
-        // farther surface — or nil — with no way for the caller to know.
-        // That is the exact anchor bias the class was written to remove, so
-        // it does not get reintroduced without a device to verify it on.
+        // `anchor.identifier` ACROSS frames and invalidating it when ARKit
+        // refines that anchor's geometry. That is still deliberately NOT done,
+        // and the reason is now stronger than "no signal is wired up":
+        //
+        //   • `ARMeshAnchor` carries no revision, version or generation — the
+        //     anchor cannot tell you its geometry changed. Checked; there is
+        //     no honest key on the object itself.
+        //   • The one documented refinement signal is the session delegate's
+        //     `session(_:didUpdate:anchors:)`. `ARKitSessionManager` IS the
+        //     delegate, so it could be forwarded here. It still does not help,
+        //     because nothing orders that callback against `session.currentFrame`.
+        //     `currentFrame` advances on ARKit's own queue; the callback waits
+        //     its turn on the delegate queue. A poll that reads `currentFrame`
+        //     can therefore see refined geometry several frames before the
+        //     invalidation arrives — and the lag is LONGEST exactly when the
+        //     main thread is stalling, which is the only situation the cache
+        //     would have been worth having.
+        //
+        // A box that silently goes stale rejects an anchor the ray does hit,
+        // and this function then returns a farther surface — or nil — with no
+        // way for the caller to know. That is the exact anchor bias the class
+        // was written to remove. A correct walk beats a fast wrong one.
+        //
+        // What IS taken is the cache that cannot go stale: the frame-scoped
+        // memo in `boundsMemo`, plus a constant-factor cut inside the vertex
+        // pass itself (`localBounds`). Neither changes which surface is
+        // reported. The Θ(accumulated vertices) growth per call survives both,
+        // and it cannot be removed here — its cause is the never-reset shared
+        // session, which is a deliberate trade made elsewhere.
         var candidates: [(anchor: ARMeshAnchor, tNear: Float)] = []
         candidates.reserveCapacity(meshAnchors.count)
         for anchor in meshAnchors {
             guard let inv = invertibleInverse(anchor.transform) else { continue }
             let localOrigin = transform(rayOrigin, by: inv)
             let localDir = rotate(rayDirection, by: inv)
-            guard let box = localBounds(of: anchor) else { continue }
+            guard let box = memoizedLocalBounds(of: anchor) else { continue }
             guard let tNear = slabIntersection(origin: localOrigin,
                                                direction: localDir,
                                                boxMin: box.min,
@@ -459,25 +517,86 @@ public final class ARCenterRaycaster: ObservableObject {
 
     // MARK: - Bounding-volume rejection
 
+    /// `localBounds(of:)` behind the frame-scoped memo. Within one ARFrame
+    /// the answer cannot change, so the second and later raycasts against
+    /// that frame read it back instead of re-walking every vertex.
+    private func memoizedLocalBounds(
+        of anchor: ARMeshAnchor
+    ) -> (min: SIMD3<Float>, max: SIMD3<Float>)? {
+        if let cached = boundsMemo[anchor.identifier] { return cached }
+        // An empty anchor costs nothing to re-answer, so it is not stored —
+        // that keeps the memo a plain non-optional dictionary.
+        guard let box = localBounds(of: anchor) else { return nil }
+        boundsMemo[anchor.identifier] = box
+        return box
+    }
+
     /// Axis-aligned bounds of an anchor's vertices, in the anchor's own
-    /// local frame. One linear pass over the vertex buffer — cheap next to
-    /// the face walk it guards, but NOT free: this pass is what keeps the
-    /// raycast's cost proportional to the accumulated reconstruction. It is
-    /// recomputed every call on purpose, so a refined mesh can never be
-    /// tested against a stale box; see the note at the call site for why
-    /// the cache that would remove the growth is not taken from here.
+    /// local frame. One linear pass over the vertex buffer.
+    ///
+    /// DO NOT read "cheap next to the face walk it guards" into this, which
+    /// is what the previous note said and it is backwards in the case that
+    /// matters. The pruning at the call site exists precisely because the ray
+    /// misses nearly every anchor in a forest — and for every anchor it
+    /// misses, this pass is not an adjunct to the cost, it IS the whole cost.
+    /// Summed over a day's accumulated reconstruction that is the entire
+    /// remaining Θ(all vertices) term of a raycast.
+    ///
+    /// So it is worth the constant factor below, and it is recomputed on
+    /// every new frame on purpose: a refined mesh can never be tested against
+    /// a stale box. See the note at the call site for why the cross-frame
+    /// cache that would remove the growth is still refused.
     private func localBounds(
         of anchor: ARMeshAnchor
     ) -> (min: SIMD3<Float>, max: SIMD3<Float>)? {
         let vertices = anchor.geometry.vertices
-        guard vertices.count > 0 else { return nil }
+        let count = vertices.count
+        guard count > 0 else { return nil }
+        let stride = vertices.stride
+        let base = UnsafeRawPointer(vertices.buffer.contents())
+            .advanced(by: vertices.offset)
+
+        // FAST PATH — one 16-byte vector load per vertex instead of a
+        // 12-byte memcpy through a stack tuple. This is the innermost loop of
+        // the whole raycast; the memcpy form does not reliably stay in
+        // registers, and the difference is a small multiple per vertex over
+        // millions of vertices.
+        //
+        // Both preconditions are CHECKED, never assumed:
+        //   • `stride == 16` — the shipping ARKit float3 layout pads each
+        //     vertex to 16 bytes, so a 16-byte load lands exactly on one
+        //     vertex slot and lane w is that slot's own padding.
+        //   • the buffer really is long enough for `count` whole slots, so
+        //     reading the last slot's padding is in bounds rather than
+        //     "probably fine because Metal rounds up to a page".
+        // Lane w is padding — it may be anything, including a NaN, and it is
+        // discarded. simd_min/simd_max are lanewise, so x/y/z are unaffected
+        // by whatever w holds. The result is bit-identical to the exact path.
+        if stride == 16,
+           vertices.buffer.length >= vertices.offset + count * stride {
+            var lo4 = base.loadUnaligned(as: SIMD4<Float>.self)
+            var hi4 = lo4
+            for i in 1..<count {
+                let v = base.loadUnaligned(fromByteOffset: i * stride,
+                                           as: SIMD4<Float>.self)
+                lo4 = simd_min(lo4, v)
+                hi4 = simd_max(hi4, v)
+            }
+            return (SIMD3<Float>(lo4.x, lo4.y, lo4.z),
+                    SIMD3<Float>(hi4.x, hi4.y, hi4.z))
+        }
+
+        // EXACT PATH — the original 12-byte-copy walk: any stride, any
+        // alignment, no over-read past the last vertex. Kept as the fallback
+        // rather than deleted, because if a future device vends a layout the
+        // fast path's checks reject, the raycast must still be right.
         let ptr = vertices.buffer.contents()
             .advanced(by: vertices.offset)
             .assumingMemoryBound(to: UInt8.self)
-        var lo = readVertex(ptr, index: 0, stride: vertices.stride)
+        var lo = readVertex(ptr, index: 0, stride: stride)
         var hi = lo
-        for i in 1..<vertices.count {
-            let v = readVertex(ptr, index: i, stride: vertices.stride)
+        for i in 1..<count {
+            let v = readVertex(ptr, index: i, stride: stride)
             lo = simd_min(lo, v)
             hi = simd_max(hi, v)
         }
@@ -545,7 +664,8 @@ public final class ARCenterRaycaster: ObservableObject {
                             index: Int,
                             stride: Int) -> SIMD3<Float> {
         // ONE unaligned 12-byte copy, not three 4-byte ones: this is the
-        // innermost read of both the bounds pass and the face walk.
+        // innermost read of the face walk and of `localBounds`' exact
+        // fallback path.
         // SIMD3<Float> is 16 bytes wide in memory, so it can't be the memcpy
         // destination — the tuple is exactly the packed 3 × Float the mesh
         // buffer stores.

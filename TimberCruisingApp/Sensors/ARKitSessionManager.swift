@@ -48,43 +48,49 @@ import os
 ///
 /// The flags exist because the expensive per-frame work is CPU-side:
 /// converting the LiDAR depth map into `ARDepthFrame` copies ~50 k floats
-/// per frame at 60 Hz. Screens that never read depth (sampling plot,
-/// distance) turn `depthStream` off and the delegate skips the copy
-/// entirely — the single biggest lag reduction on those screens.
+/// plus ~50 k confidence bytes and allocates two arrays for them. Screens
+/// that never read depth (sampling plot, distance) turn `depthStream` off
+/// and the delegate skips the copy entirely — the single biggest lag
+/// reduction on those screens. Screens that DO read depth get it at
+/// `depthMinIntervalSec` (30 Hz), not at ARKit's 60 Hz delivery rate; the
+/// "per frame at 60 Hz" this comment used to claim stopped being true when
+/// that floor went in.
+///
+/// There was a third flag, `featurePoints`, gating a per-frame publish of
+/// ARKit's sparse VIO cloud. Its only stated consumer was the DBH AR-motion
+/// (VIO circle-fit) research method, and that method was removed — see
+/// `Tree.swift` and the `tc.dbhMethodSource` migration in `AppSettings`.
+/// The flag, the publish and the per-frame array copy behind it went with
+/// it; nothing read the property.
 public struct ARScreenConfiguration: Equatable, Sendable {
     /// Enable LiDAR `sceneDepth` frame semantics AND convert + publish
-    /// `latestDepthFrame` every frame. Needed by the DBH depth pipeline
-    /// and the Height walking readout.
+    /// `latestDepthFrame`. Needed by the DBH depth pipeline and the Height
+    /// walking readout.
     public var depthStream: Bool
-    /// Publish `latestRawFeaturePoints` (VIO sparse cloud) every frame.
-    /// Only the DBH AR-motion research method consumes these.
-    public var featurePoints: Bool
     /// LiDAR scene reconstruction (mesh anchors) — drives the mesh
     /// raycasts every measure screen uses plus the DBH mesh overlay.
     public var sceneReconstruction: Bool
 
     public init(depthStream: Bool = true,
-                featurePoints: Bool = true,
                 sceneReconstruction: Bool = true) {
         self.depthStream = depthStream
-        self.featurePoints = featurePoints
         self.sceneReconstruction = sceneReconstruction
     }
 
     /// Everything on — legacy `run()` behaviour.
     public static let full = ARScreenConfiguration()
-    /// DBH scan: depth burst + VIO features + mesh overlay/raycasts.
+    /// DBH scan: depth burst + mesh overlay/raycasts.
     public static let dbhScan = ARScreenConfiguration(
-        depthStream: true, featurePoints: true, sceneReconstruction: true)
+        depthStream: true, sceneReconstruction: true)
     /// Height scan: depth (walking readout reads the depth-frame pose),
-    /// mesh raycasts for anchor/base taps; no VIO feature stream.
+    /// mesh raycasts for anchor/base taps.
     public static let heightScan = ARScreenConfiguration(
-        depthStream: true, featurePoints: false, sceneReconstruction: true)
-    /// Distance: raycasts only — no depth copies, no feature stream.
+        depthStream: true, sceneReconstruction: true)
+    /// Distance: raycasts only — no depth copies.
     public static let distanceMeasure = ARScreenConfiguration(
-        depthStream: false, featurePoints: false, sceneReconstruction: true)
+        depthStream: false, sceneReconstruction: true)
     /// Sampling plot: raycast on placement + camera pose polling — no
-    /// depth copies, no feature stream (the screen's lag fix).
+    /// depth copies (the screen's lag fix).
     /// `sceneReconstruction` stays ON here for a second reason: the
     /// sampling screen's ARView enables RealityKit scene-understanding
     /// OCCLUSION (ring/pole pass behind real trunks), which consumes
@@ -92,7 +98,7 @@ public struct ARScreenConfiguration: Equatable, Sendable {
     /// render option, so it never carries over to the other screens'
     /// views when the shared session switches configuration.
     public static let samplingPlot = ARScreenConfiguration(
-        depthStream: false, featurePoints: false, sceneReconstruction: true)
+        depthStream: false, sceneReconstruction: true)
 }
 
 // MARK: - ARDepthFrame (platform-independent shape)
@@ -247,11 +253,23 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
     /// and relocalization is the iOS analogue of the ARCore PAUSED that the
     /// height walk-off's dropout warning was written for.
     @Published public private(set) var isRelocalizing = false
-    /// Latest ARKit sparse VIO feature points in world space (metric).
-    /// Published every frame; the AR-motion DBH method accumulates these
-    /// over a short capture window and circle-fits them. Available on every
-    /// device (no LiDAR required) — these come from visual-inertial odometry.
-    @Published public private(set) var latestRawFeaturePoints: [SIMD3<Float>]?
+
+    // REMOVED: `latestRawFeaturePoints` (ARKit's sparse VIO cloud, published
+    // every frame while `.dbhScan` was attached). Its doc comment named the
+    // DBH AR-motion (VIO circle-fit) method as the consumer; that method no
+    // longer exists — `Tree.swift` records the AR-motion and AR-caliper arms
+    // being removed and `AppSettings` migrates any stored "arMotion" /
+    // "arCaliper" selection onto the depth path. Nothing read the property:
+    // a grep found the declaration, two nil-outs and the write, and no
+    // reader anywhere in either target. So the per-frame cost was pure
+    // waste on the DBH screen — `ARPointCloud.points` bridges into a FRESH
+    // `[SIMD3<Float>]` on every delivered frame (hundreds to a couple of
+    // thousand points), hopped to the main actor and assigned to an
+    // `@Published`, which fires `objectWillChange` on every assignment
+    // whether or not anyone is listening. Small per frame; 60 times a
+    // second, for the whole time the cruiser is on the screen they live in.
+    // Deleted rather than re-commented: a correct comment on work nobody
+    // wants is still work nobody wants.
 
     public static var supportsLiDAR: Bool {
         ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
@@ -284,11 +302,10 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
     /// actually converted — see `depthMinIntervalSec`.
     private struct StreamGate {
         var depth: Bool
-        var features: Bool
         var lastDepthConversion: TimeInterval = 0
     }
     private let streamGate = OSAllocatedUnfairLock(
-        initialState: StreamGate(depth: true, features: true))
+        initialState: StreamGate(depth: true))
 
     /// False from the moment the session pauses until the delegate delivers
     /// the first frame of the NEXT run. Every read of `session.currentFrame`
@@ -439,7 +456,6 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
             // a config switch, twenty lines below), and absent is the truth
             // here: the session is paused, so nobody knows.
             latestDepthFrame = nil
-            latestRawFeaturePoints = nil
             currentCameraWorldPosition = nil
             trackingStatus = .notAvailable
             onSessionPaused?()
@@ -472,12 +488,11 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
             config.sceneReconstruction = .mesh
         }
         streamGate.withLock {
-            $0 = StreamGate(depth: cfg.depthStream, features: cfg.featurePoints)
+            $0 = StreamGate(depth: cfg.depthStream)
         }
         // Drop stale stream values the new screen will never refresh —
         // a DBH HUD must not read a depth frame captured minutes ago.
         if !cfg.depthStream { latestDepthFrame = nil }
-        if !cfg.featurePoints { latestRawFeaturePoints = nil }
         trackedStateWasAlwaysNormal = true
         // Deliberately NO reset options (.resetTracking /
         // .removeExistingAnchors): the whole point of the shared session
@@ -610,12 +625,67 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
         return SIMD3<Float>(c.x, c.y, c.z)
     }
 
+    /// ONE CoreImage context for the whole process, not one per encode.
+    ///
+    /// A `CIContext` owns a Metal device, a command queue, the compiled
+    /// shader pipeline state and a GPU texture cache. Apple's guidance is
+    /// explicit — create one and reuse it — and building one costs roughly
+    /// 20–50 ms on whichever thread asks. It was being built inside
+    /// `currentCameraImageJPEG` below, i.e. THREE TIMES PER FULLY MEASURED
+    /// TREE (one DBH burst, two height sightings), on the main actor, inside
+    /// tap handlers, in the field: the raw-capture gate is developer-mode
+    /// only but the study runs with it ON, ~390 MB of captures in a day.
+    ///
+    /// `static let` is Swift's lazy once-only initialiser, so a cruiser who
+    /// never records raw captures never pays for this at all, and a cruiser
+    /// who does pays it on the first capture of the run instead of on every
+    /// capture of every tree.
+    ///
+    /// Output is byte-identical: same `nil` options, same colour space, same
+    /// quality, same source pixels. `CIContext` is documented thread-safe,
+    /// which is what makes sharing one correct and not merely convenient.
+    private static let jpegContext = CIContext(options: nil)
+
+    /// sRGB, resolved once. Small next to the context, but it is the same
+    /// constant on every call and the fallback branch is easier to trust
+    /// when it cannot be re-taken part-way through a run.
+    private static let jpegColorSpace: CGColorSpace =
+        CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+
     /// Reference RGB of the current camera image as JPEG, for the
     /// raw-capture recorder (developer mode only). Reads the live
     /// `ARFrame.capturedImage` (YCbCr CVPixelBuffer) and encodes it via
     /// CoreImage — no UIKit, no orientation rewrite (stored sensor-native,
     /// matching the depth buffers). Returns nil when no frame is available
-    /// or encoding fails. Cheap enough to call once per burst.
+    /// or encoding fails.
+    ///
+    /// NOT CHEAP. The comment here used to say "cheap enough to call once
+    /// per burst" and was wrong by an order of magnitude in both halves:
+    /// rendering and JPEG-encoding a 1920×1440 YCbCr buffer costs roughly
+    /// 30–80 ms, it runs SYNCHRONOUSLY ON THE MAIN ACTOR inside a tap
+    /// handler, and it is not once per burst — it is once for a DBH burst
+    /// plus twice for a height tree. The height top sighting is the instant
+    /// the measurement lands and the photo shutter fires, so this stacks
+    /// onto exactly the moment the cruiser describes as a freeze.
+    ///
+    /// THE ENCODE STAYS ON THE MAIN ACTOR, DELIBERATELY — this is a judged
+    /// trade, not an oversight. Moving it off means keeping these pixels
+    /// past this frame, and ARKit vends `capturedImage` from a recycled
+    /// pool: the buffer is good only for the frame it arrived on, so a
+    /// background encode needs its own `CVPixelBufferCreate` and a ~4 MB
+    /// plane copy first. The copy is cheap in time (single-digit ms) but it
+    /// is NOT neutral for this particular data. `CIImage(cvPixelBuffer:)`
+    /// reads the buffer's attached YCbCr matrix, colour primaries and
+    /// transfer function to do the YUV→RGB conversion, and a freshly
+    /// created buffer carries none of them unless they are propagated
+    /// explicitly. Get that one call wrong and every JPEG from that build
+    /// shifts colour — silently, with nothing in the schema-locked manifest
+    /// to mark it — and the study's image corpus splits into a before and
+    /// an after that nobody can tell apart later. The 30–80 ms is worth
+    /// having, but it is not worth spending the primary data on a change
+    /// that can only be verified on a device, by hashing an encode of the
+    /// live buffer against an encode of the propagated copy. Run that
+    /// comparison and this is the one function to change.
     public func currentCameraImageJPEG(quality: Double = 0.8) -> Data? {
         // Same rule as the anchor reads: a pre-run frame's captured image is
         // a photograph of wherever the cruiser was standing before the
@@ -623,13 +693,11 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
         guard hasLiveFrame,
               let pixelBuffer = session.currentFrame?.capturedImage else { return nil }
         let ci = CIImage(cvPixelBuffer: pixelBuffer)
-        let ctx = CIContext(options: nil)
-        let space = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
         let qualityKey = CIImageRepresentationOption(
             rawValue: kCGImageDestinationLossyCompressionQuality as String)
-        return ctx.jpegRepresentation(
+        return Self.jpegContext.jpegRepresentation(
             of: ci,
-            colorSpace: space,
+            colorSpace: Self.jpegColorSpace,
             options: [qualityKey: quality])
     }
 
@@ -655,19 +723,25 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
         // is never told to refuse a frame we already have.
         liveFrameSincePause.withLock { $0 = true }
         // Per-screen stream gate: the depth-map conversion below copies
-        // ~50 k floats per frame — screens that never read depth
-        // (sampling plot, distance) skip it entirely, and the VIO
-        // feature-point array copy is skipped unless the DBH AR-motion
-        // method is on screen. Screens that DO read depth get it at
-        // `depthMinIntervalSec`, not at ARKit's 60 Hz.
-        let gate = streamGate.withLock { g -> (depth: Bool, features: Bool) in
+        // ~50 k floats plus ~50 k confidence bytes and allocates two arrays
+        // for them — screens that never read depth (sampling plot,
+        // distance) skip it entirely. Screens that DO read depth get it at
+        // `depthMinIntervalSec` (30 Hz), not at ARKit's 60 Hz delivery.
+        //
+        // There used to be a second gated stream here, a per-frame copy of
+        // ARKit's sparse VIO cloud into `latestRawFeaturePoints`, described
+        // in this comment as feeding "the DBH AR-motion method". That method
+        // was removed and the property had no readers at all, so the copy and
+        // the main-actor publish behind it ran on every frame of every DBH
+        // scan for nothing. Both are gone.
+        let convertDepth = streamGate.withLock { g -> Bool in
             let convert = g.depth
                 && frame.timestamp - g.lastDepthConversion >= Self.depthMinIntervalSec
             if convert { g.lastDepthConversion = frame.timestamp }
-            return (convert, g.features)
+            return convert
         }
         let vp = viewport.withLock { $0 }
-        let converted = gate.depth
+        let converted = convertDepth
             ? Self.convert(frame: frame,
                            viewportSize: vp.size,
                            orientation: vp.orientation)
@@ -676,7 +750,6 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
         let relocalizing = Self.isRelocalizingState(frame.camera.trackingState)
         let t = frame.camera.transform
         let camPos = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
-        let features = gate.features ? frame.rawFeaturePoints?.points : nil
         Task { @MainActor [weak self] in
             guard let self else { return }
             if status != .normal {
@@ -686,7 +759,6 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
             self.trackingStatus = status
             if self.isRelocalizing != relocalizing { self.isRelocalizing = relocalizing }
             self.currentCameraWorldPosition = status == .notAvailable ? nil : camPos
-            if let features { self.latestRawFeaturePoints = features }
             if let converted { self.latestDepthFrame = converted }
         }
     }
@@ -870,7 +942,6 @@ public final class ARKitSessionManager: ObservableObject {
     @Published public private(set) var isRunning = false
     @Published public private(set) var currentCameraWorldPosition: SIMD3<Float>?
     @Published public private(set) var isRelocalizing = false
-    @Published public private(set) var latestRawFeaturePoints: [SIMD3<Float>]?
 
     public static var supportsLiDAR: Bool { false }
 

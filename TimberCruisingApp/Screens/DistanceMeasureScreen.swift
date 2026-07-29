@@ -49,8 +49,11 @@ public struct DistanceMeasureScreen: View {
     @State private var mode: Mode = .live
 
     /// Live continuous distance from device to whatever the crosshair
-    /// hits. Updated by a timer at ~20 Hz.
+    /// hits. The timer ticks at 20 Hz; the LiDAR path is resampled at
+    /// 10 Hz — see `lidarLivePollIntervalSec`.
     @State private var liveDistanceM: Double?
+    /// Uptime of the last LiDAR-path resample, for that throttle.
+    @State private var lastLidarPollAt: TimeInterval = 0
 
     /// Two-point screen positions (in the AR view's screen space) +
     /// world positions. Screen positions drive the overlay drawing; the
@@ -526,21 +529,48 @@ public struct DistanceMeasureScreen: View {
 
     // MARK: - Live distance polling
 
+    /// How often the LIDAR live readout is actually resampled. The 0.05 s
+    /// timer below is left alone on purpose, and the throttle sits inside the
+    /// LiDAR branch only.
+    ///
+    /// WHY NOT JUST RE-RATE THE TIMER. The AR branch feeds `DistanceSmoother`,
+    /// whose window is "every sample inside the last 1.2 s, capped at 12". At
+    /// 20 Hz that cap binds and the window spans 0.6 s; at 10 Hz it does not
+    /// and the window spans the full 1.2 s. Re-rating the timer would silently
+    /// re-tune the published AR distance — and `saveLiveReading` stores that
+    /// number. The estimator is frozen, so the AR path keeps its 20 Hz.
+    ///
+    /// The LiDAR branch has no such coupling: it resets the smoother and
+    /// publishes the single raycast sample. Sampling it half as often changes
+    /// WHICH instant is on screen, never how the number is computed — the same
+    /// difference as tapping Save 50 ms later. What it does buy is halving the
+    /// app's highest-rate caller of the LiDAR scene-mesh walk, which on this
+    /// screen is the whole main-thread cost of the readout. See the caller
+    /// inventory in `ARCenterRaycaster.meshRaycastHit`.
+    private static let lidarLivePollIntervalSec: TimeInterval = 0.1
+
     private func startLiveTimer() {
+        lastLidarPollAt = 0
         liveTimer?.invalidate()
         liveTimer = Timer.scheduledTimer(withTimeInterval: 0.05,
                                           repeats: true) { _ in
             Task { @MainActor in
-                let raw = currentDeviceToCenterDistance()
                 if settings.measurementSource == .ar {
                     // AR estimated-plane distances flicker — publish the
                     // spike-rejecting moving average instead of the raw
                     // sample (real movement still tracks via the median).
-                    if let raw { arSmoother.add(raw) }
+                    // Every tick, at the rate the smoother was tuned on.
+                    if let raw = currentDeviceToCenterDistance() {
+                        arSmoother.add(raw)
+                    }
                     liveDistanceM = arSmoother.value()
                 } else {
                     arSmoother.reset()
-                    liveDistanceM = raw
+                    let now = ProcessInfo.processInfo.systemUptime
+                    guard now - lastLidarPollAt >= Self.lidarLivePollIntervalSec
+                    else { return }
+                    lastLidarPollAt = now
+                    liveDistanceM = currentDeviceToCenterDistance()
                 }
             }
         }

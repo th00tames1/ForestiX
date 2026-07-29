@@ -212,6 +212,9 @@ enum MeasurePhotoChrome {
     static let inkDim = Color(red: 0.647, green: 0.682, blue: 0.659)   // #A5AEA8
     /// Meta-cell labels — dark-appearance textSecondary.
     static let labelDim = Color(red: 0.718, green: 0.753, blue: 0.729) // #B7C0BA
+    /// The "Photo unavailable" line — the Android viewer's own grey, so the
+    /// two platforms say the same thing in the same colour.
+    static let missing = Color(red: 0x79 / 255.0, green: 0x83 / 255.0, blue: 0x7D / 255.0) // #79837D
     /// Dark-glass chrome base (mock `rgba(6,9,10,…)`).
     static let glass = Color(red: 6 / 255, green: 9 / 255, blue: 10 / 255) // #06090A
     static let backdrop = Color(red: 0.039, green: 0.051, blue: 0.043)  // #0A0D0B
@@ -219,9 +222,10 @@ enum MeasurePhotoChrome {
 
 // MARK: - The viewer
 
-/// Full-screen AR-snapshot viewer: the photo (feed + overlay, captured at
-/// Accept) with the reading's identity along the bottom, and a horizontal
-/// swipe to the tree's next photo when it has one.
+/// Full-screen AR-snapshot viewer: the photo (feed + overlay, captured the
+/// instant the measurement landed — not at Accept, see MeasurePhotoStore)
+/// with the reading's identity along the bottom, and a horizontal swipe to
+/// the tree's next photo when it has one.
 struct MeasurePhotoDetailView: View {
     let context: PhotoViewerContext
 
@@ -322,6 +326,9 @@ private struct MeasurePhotoPageView: View {
 
     #if canImport(UIKit)
     @State private var image: UIImage?
+    /// Set once the load has actually come back empty. Until then the page
+    /// shows the spinner — "unloaded" and "not there" must not look alike.
+    @State private var loadFailed = false
     #endif
 
     var body: some View {
@@ -332,6 +339,18 @@ private struct MeasurePhotoPageView: View {
                     .resizable()
                     .scaledToFit()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if loadFailed {
+                // THE READING CLAIMED A PHOTO AND THE FILE IS NOT THERE. It
+                // can happen for real: the container moves between installs,
+                // and — since the JPEG is now written after the filename is
+                // handed to the reading — a write can fail on a full device
+                // after Accept already took the name. Say so. A spinner that
+                // never resolves reads as "still loading" forever, which is
+                // the app quietly claiming evidence it does not have. Same
+                // words as the Android viewer.
+                Text("Photo unavailable")
+                    .font(.system(size: 15))
+                    .foregroundStyle(MeasurePhotoChrome.missing)
             } else {
                 ProgressView().tint(MeasurePhotoChrome.ink)
             }
@@ -344,9 +363,13 @@ private struct MeasurePhotoPageView: View {
         }
         #if canImport(UIKit)
         .task(id: page.photoPath) {
+            image = nil
+            loadFailed = false
             let url = MeasurePhotoStore.url(for: page.photoPath)
             let data = await Task.detached { try? Data(contentsOf: url) }.value
-            if let data { image = UIImage(data: data) }
+            let decoded = data.flatMap { UIImage(data: $0) }
+            image = decoded
+            loadFailed = decoded == nil
         }
         #endif
     }

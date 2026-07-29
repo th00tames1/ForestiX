@@ -41,6 +41,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -50,6 +51,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.FolderZip
@@ -113,6 +115,7 @@ import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.UUID
 import kotlin.math.PI
 import kotlin.math.abs
 
@@ -137,12 +140,41 @@ fun FieldLogScreen(nav: NavController) {
     /// The row a swipe asked to delete, held until the cruiser confirms.
     /// Only multi-reading rows go through here (see onDelete below).
     var pendingDelete by remember { mutableStateOf<FieldLogRowModel?>(null) }
+    /// The "add a tree" the toolbar or the empty state raised. Null = closed.
+    var newTree by remember { mutableStateOf<FieldLogNewTree?>(null) }
 
     val rows = remember(entries) { fieldLogRows(entries) }
+
+    // The plot this screen is reporting on — the one whose summary card sits
+    // at the top of the log — resolved through the default plot the same way
+    // every entry's plotID is read. A hand-entered stem joins the plot the
+    // cruiser is LOOKING at, and it is captured when the sheet opens rather
+    // than read again on Create, so a plot switched elsewhere in the app
+    // mid-typing cannot claim the tree.
+    val shownPlotID = activePlotID ?: plots.firstOrNull { it.isDefault }?.id
+    val startNewTree = {
+        newTree = FieldLogNewTree(
+            // The measure chooser's own rule — max(existing) + 1 across the
+            // log — so a hand-entered stem cannot land on a number a scan has
+            // already used, in this plot or any other.
+            treeNumber = env.history.suggestedNextTreeNumber,
+            plotID = shownPlotID,
+            plotName = shownPlotID?.let { id -> plots.firstOrNull { it.id == id }?.name },
+            // Same suggestion the chooser offers: the successor of the highest
+            // name in the series the cruiser is using, or blank if they have
+            // never named a tree.
+            suggestedName = env.history.suggestedNextTreeName.orEmpty(),
+        )
+    }
 
     ForestixScaffold(
         nav, title = "Field log",
         actions = {
+            // Ungated, unlike Export: the case this exists for is a log with
+            // nothing in it yet and a stem the scan would not lock.
+            IconButton(onClick = startNewTree) {
+                Icon(Icons.Filled.Add, contentDescription = "New tree", tint = colors.primary)
+            }
             if (entries.isNotEmpty()) {
                 IconButton(onClick = { menuOpen = true }) {
                     Icon(Icons.Filled.IosShare, contentDescription = "Export", tint = colors.primary)
@@ -171,7 +203,7 @@ fun FieldLogScreen(nav: NavController) {
         },
     ) { padding ->
         if (entries.isEmpty()) {
-            EmptyState(Modifier.padding(padding))
+            EmptyState(Modifier.padding(padding), onNewTree = startNewTree)
         } else {
             LazyColumn(
                 Modifier.padding(padding).fillMaxSize(),
@@ -263,6 +295,35 @@ fun FieldLogScreen(nav: NavController) {
                 }
             }
         }
+    }
+
+    newTree?.let { request ->
+        FieldLogNewTreeSheet(
+            request = request,
+            unitSystem = settings.unitSystem,
+            onDismiss = { newTree = null },
+            onCreate = { name, species, dbhCm, heightM ->
+                // Both readings go through QuickMeasureEntry.typed — the SAME
+                // factory the row editor's "this kind has no reading yet"
+                // branch calls — so sigma is null, capture_mode is "typed" and
+                // the method is the manual arm. A stem entered here is stamped
+                // exactly like a number typed into an existing row, and
+                // neither can be read back as a scan.
+                listOf(MeasureKind.DBH to dbhCm, MeasureKind.HEIGHT to heightM)
+                    .forEach { (kind, value) ->
+                        if (value != null) {
+                            env.history.append(
+                                QuickMeasureEntry.typed(
+                                    kind = kind, value = value,
+                                    treeNumber = request.treeNumber,
+                                    treeName = name,
+                                    plotID = request.plotID,
+                                    speciesCode = species))
+                        }
+                    }
+                newTree = null
+            },
+        )
     }
 
     inspectingId?.let { id ->
@@ -471,7 +532,7 @@ private fun CapacityBanner() {
 }
 
 @Composable
-private fun EmptyState(modifier: Modifier) {
+private fun EmptyState(modifier: Modifier, onNewTree: () -> Unit) {
     val colors = Forestix.colors
     val type = Forestix.type
     // iOS: uniform 16 gaps, content ABOVE centre — one flexible spacer on
@@ -488,6 +549,14 @@ private fun EmptyState(modifier: Modifier) {
             "Accept a scan in a measurement tool and it'll land here.",
             style = type.caption, color = colors.textSecondary, textAlign = TextAlign.Center,
             modifier = Modifier.padding(horizontal = ForestixSpace.xl),
+        )
+        // A scan is not the only way in. The stem the sensors refused is still
+        // a stem, and this is the door for it — repeated here because an empty
+        // log is exactly where a cruiser looks for one.
+        ForestixProminentButton(
+            "Add a tree by hand",
+            modifier = Modifier.padding(horizontal = ForestixSpace.xl),
+            onClick = onNewTree,
         )
         Spacer(Modifier.weight(2f))
     }
@@ -860,6 +929,79 @@ private fun truthChanged(typed: Double?, stored: Double?): Boolean = when {
     else -> true
 }
 
+/// What a hand-typed diameter or height has to be, in ONE place.
+///
+/// Two screens now read a number the cruiser typed into a field in the unit
+/// system they are working in: the row editor completing a half-measured
+/// tree, and the new-tree sheet creating one from nothing. They must accept
+/// the same numbers, refuse the same numbers and warn in the same words — a
+/// second copy of these sentences would drift the day one of them changed.
+private object FieldLogTypedInput {
+
+    fun quantity(kind: MeasureKind): TruthInput.Quantity =
+        if (kind == MeasureKind.DBH) TruthInput.Quantity.DIAMETER
+        else TruthInput.Quantity.HEIGHT
+
+    /// The unit the field is typed in — the cruiser's active system,
+    /// converted to the metric base on the way in.
+    fun unit(kind: MeasureKind, imperial: Boolean): TruthInput.Unit =
+        TruthInput.defaultUnit(quantity(kind), imperial)
+
+    /// Placeholder copy is the scan screens' own, so the same field means the
+    /// same thing wherever a measurement is typed.
+    fun placeholder(kind: MeasureKind, imperial: Boolean): String =
+        if (kind == MeasureKind.DBH) {
+            if (imperial) "Diameter in inches" else "Diameter in cm"
+        } else {
+            if (imperial) "Height in feet" else "Height in metres"
+        }
+
+    /// The typed number in metric base units, or null when the field holds
+    /// nothing usable. Never falls back to a stored value — a blank field
+    /// means "nothing typed".
+    fun parse(text: String, kind: MeasureKind, imperial: Boolean): Double? =
+        TruthInput.parsePositiveBase(text, unit(kind, imperial))
+
+    /// A height under the estimator's floor is not a standing tree, so it is
+    /// REFUSED rather than warned about. Diameter has no such floor: any
+    /// positive number is a stem somebody could have taped.
+    fun isBelowHeightFloor(value: Double, kind: MeasureKind): Boolean =
+        kind == MeasureKind.HEIGHT && value < HeightEstimator.MIN_H_M
+
+    /// The number this text will actually be STORED as — null when the field
+    /// is blank, unparseable, or holds something the app refuses. Null never
+    /// means "use something else"; it means nothing is written.
+    fun accepted(text: String, kind: MeasureKind, imperial: Boolean): Double? {
+        val value = parse(text, kind, imperial) ?: return null
+        return if (isBelowHeightFloor(value, kind)) null else value
+    }
+
+    /// What to say about what is in the field, or null when there is nothing
+    /// to say. A blank field is silent — the cruiser has not typed yet.
+    fun warning(text: String, kind: MeasureKind, imperial: Boolean): String? {
+        if (TruthInput.normalized(text).isEmpty()) return null
+        val u = unit(kind, imperial)
+        val value = parse(text, kind, imperial)
+            ?: return if (kind == MeasureKind.DBH) {
+                "A typed diameter must be a number greater than zero."
+            } else {
+                "A typed height must be a number greater than zero."
+            }
+        if (isBelowHeightFloor(value, kind)) {
+            // The floor is one physical height; the sentence is written in the
+            // unit the field is in, so an imperial cruiser is not handed a
+            // metre figure to compare against the feet they just typed.
+            return String.format(
+                Locale.US, "A typed height must be at least %.1f %s.",
+                TruthInput.fromBase(HeightEstimator.MIN_H_M.toDouble(), u), u.raw)
+        }
+        // Outside the cruising window is a WARNING, not a refusal: the number
+        // is the cruiser's own observation. Same wording as every other truth
+        // field in the app.
+        return TruthInput.warning(value, quantity(kind), u)
+    }
+}
+
 /// One kind's editor: the number, its ground truth, and the two ways to
 /// change either — type it, or go and measure it again. A tree the sensors
 /// never read gets the same section, empty, so it can be completed from here
@@ -878,13 +1020,12 @@ private fun FieldLogEditSection(
     val colors = Forestix.colors
     val type = Forestix.type
     val existing = if (kind == MeasureKind.DBH) row.dbh else row.height
-    val quantity =
-        if (kind == MeasureKind.DBH) TruthInput.Quantity.DIAMETER
-        else TruthInput.Quantity.HEIGHT
+    val imperial = unitSystem == UnitSystem.IMPERIAL
+    val quantity = FieldLogTypedInput.quantity(kind)
     // The MEASURED-value field is typed in the cruiser's active system and
     // converted to the metric base on the way in — the one place that
     // conversion is allowed to happen.
-    val unit = TruthInput.defaultUnit(quantity, unitSystem == UnitSystem.IMPERIAL)
+    val unit = FieldLogTypedInput.unit(kind, imperial)
     // The TRUTH field opens in the same unit but carries a per-entry
     // override: a tape in centimetres read against an imperial project is the
     // case that lost a day of analysis. Keyed on the unit system so changing
@@ -901,28 +1042,9 @@ private fun FieldLogEditSection(
         mutableStateOf(existing?.truth?.let { TruthInput.text(it, unit) } ?: "")
     }
 
-    val typed = TruthInput.parsePositiveBase(valueText, unit)
-    val tooShort = kind == MeasureKind.HEIGHT &&
-        typed != null && typed < HeightEstimator.MIN_H_M
-    val valueWarning: String? =
-        if (TruthInput.normalized(valueText).isEmpty()) {
-            null
-        } else if (typed == null) {
-            if (kind == MeasureKind.DBH) "A typed diameter must be a number greater than zero."
-            else "A typed height must be a number greater than zero."
-        } else if (tooShort) {
-            // The floor is one physical height; the sentence is written in the
-            // unit the field is in, so an imperial cruiser is not handed a
-            // metre figure to compare against the feet they just typed.
-            String.format(
-                Locale.US, "A typed height must be at least %.1f %s.",
-                TruthInput.fromBase(HeightEstimator.MIN_H_M.toDouble(), unit), unit.raw)
-        } else {
-            // Outside the cruising window is a WARNING, not a refusal: the
-            // number is the cruiser's own observation. Same wording as every
-            // other truth field in the app.
-            TruthInput.warning(typed, quantity, unit)
-        }
+    val typed = FieldLogTypedInput.parse(valueText, kind, imperial)
+    val tooShort = typed != null && FieldLogTypedInput.isBelowHeightFloor(typed, kind)
+    val valueWarning = FieldLogTypedInput.warning(valueText, kind, imperial)
     val truthTyped = TruthInput.parsePositiveBase(truthText, truthUnit)
     val canSave = typed != null && !tooShort &&
         // Text that doesn't parse must never overwrite a stored truth.
@@ -939,16 +1061,7 @@ private fun FieldLogEditSection(
         OutlinedTextField(
             value = valueText,
             onValueChange = { valueText = TruthInput.sanitize(it) },
-            placeholder = {
-                Text(
-                    if (kind == MeasureKind.DBH) {
-                        if (unitSystem == UnitSystem.METRIC) "Diameter in cm"
-                        else "Diameter in inches"
-                    } else {
-                        if (unitSystem == UnitSystem.METRIC) "Height in metres"
-                        else "Height in feet"
-                    })
-            },
+            placeholder = { Text(FieldLogTypedInput.placeholder(kind, imperial)) },
             singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
             modifier = Modifier.fillMaxWidth(),
@@ -1049,6 +1162,159 @@ private fun FieldLogEditSection(
                     it.speciesCode?.takeIf(String::isNotEmpty)
                 },
                 existing?.truth)
+        }
+    }
+}
+
+// MARK: - New tree --------------------------------------------------------
+
+/// A tree the cruiser is entering by hand, raised from the log's toolbar or
+/// its empty state.
+///
+/// Every join key is resolved HERE, once, when the sheet opens — not read
+/// again when Create is tapped. The number on screen is the number that gets
+/// written, and the plot cannot move under the cruiser while they type.
+private data class FieldLogNewTree(
+    val treeNumber: Int,
+    val plotID: UUID?,
+    /// Shown so the cruiser can see which plot the stem joins. Null when the
+    /// log has no plot to name — the readings are then stored with no plot,
+    /// exactly as the pre-plot readings are, rather than claiming one.
+    val plotName: String?,
+    val suggestedName: String,
+    /// Identity for the field state below, so a second "add a tree" opens on
+    /// empty fields rather than the last one's leftovers.
+    val id: UUID = UUID.randomUUID(),
+)
+
+/// Enter a tree the sensors never read.
+///
+/// THE FIELD CASE: the scan will not lock — bad light, too close, the depth
+/// map refuses — so the cruiser tapes the stem by hand and walks on. The log
+/// builds its rows by grouping READINGS, so without this sheet that tree has
+/// no row to tap and no way into the app at all. It is also the worst row an
+/// accuracy study can lose, because it is precisely the stem the sensors
+/// found hard.
+///
+/// Everything here is the existing typed path with no row to start from: the
+/// same tree-number rule as the measure chooser, the same name and species
+/// controls, the same field rules as the row editor, and the same
+/// [QuickMeasureEntry.typed] factory doing the writing.
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun FieldLogNewTreeSheet(
+    request: FieldLogNewTree,
+    unitSystem: UnitSystem,
+    onDismiss: () -> Unit,
+    /// (tree name, species code, diameter in cm, height in m) — null for
+    /// anything the cruiser left blank. The host does the writing.
+    onCreate: (String?, String?, Double?, Double?) -> Unit,
+) {
+    val colors = Forestix.colors
+    val type = Forestix.type
+    val imperial = unitSystem == UnitSystem.IMPERIAL
+
+    var treeName by remember(request.id) { mutableStateOf(request.suggestedName) }
+    var speciesCode by remember(request.id) { mutableStateOf<String?>(null) }
+    var dbhText by remember(request.id) { mutableStateOf("") }
+    var heightText by remember(request.id) { mutableStateOf("") }
+
+    val dbh = FieldLogTypedInput.accepted(dbhText, MeasureKind.DBH, imperial)
+    val height = FieldLogTypedInput.accepted(heightText, MeasureKind.HEIGHT, imperial)
+    // Create needs at least one number, and refuses while a field holds
+    // something that cannot be stored — a typo in the height must not be
+    // quietly dropped on the floor while the diameter is saved.
+    val dbhOK = TruthInput.normalized(dbhText).isEmpty() || dbh != null
+    val heightOK = TruthInput.normalized(heightText).isEmpty() || height != null
+    val canCreate = dbhOK && heightOK && (dbh != null || height != null)
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = colors.canvas,
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = ForestixSpace.md)
+                .padding(bottom = ForestixSpace.xl)
+                .imePadding(),
+            verticalArrangement = Arrangement.spacedBy(ForestixSpace.md),
+        ) {
+            Text("New tree", style = type.title, color = colors.textPrimary)
+
+            SheetSection("TREE") {
+                // Not typed, and not editable: it is the next free number, the
+                // same rule the measure chooser follows, so a stem entered
+                // here cannot collide with a scanned one.
+                SheetRow("Tree number", "#${request.treeNumber}")
+                OutlinedTextField(
+                    value = treeName,
+                    onValueChange = { treeName = it },
+                    placeholder = { Text("Tree name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                // The same control the chooser and the details sheet use — one
+                // species list, one typed-code escape, no second copy to drift.
+                SpeciesPickerField(
+                    speciesCode = speciesCode,
+                    onSpeciesCode = { speciesCode = it },
+                    unspecifiedLabel = "Species",
+                    bordered = true,
+                )
+                // Named on screen rather than assumed: the cruiser can see
+                // which plot is about to own this stem.
+                request.plotName?.let { SheetRow("Plot", it) }
+            }
+
+            NewTreeMeasurementField(
+                MeasureKind.DBH, dbhText, { dbhText = it }, imperial)
+            NewTreeMeasurementField(
+                MeasureKind.HEIGHT, heightText, { heightText = it }, imperial)
+
+            Text(
+                "Type what you taped. A tree is recorded by its readings, so it needs a diameter or a height — and both are saved as typed, not measured.",
+                style = type.caption, color = colors.textTertiary,
+            )
+            ForestixProminentButton(
+                "Create tree", modifier = Modifier.fillMaxWidth(), enabled = canCreate,
+            ) {
+                onCreate(
+                    // trim(), matching iOS's `.whitespacesAndNewlines`: the
+                    // same pasted "Plot3-T07\n" has to persist the same bytes
+                    // on both phones, because the two halves of a split cruise
+                    // join on it.
+                    treeName.trim().ifEmpty { null },
+                    speciesCode, dbh, height)
+            }
+        }
+    }
+}
+
+/// One typed measurement on the new-tree sheet — the same field, unit and
+/// refusals as the row editor's, because both go through [FieldLogTypedInput].
+@Composable
+private fun NewTreeMeasurementField(
+    kind: MeasureKind,
+    text: String,
+    onText: (String) -> Unit,
+    imperial: Boolean,
+) {
+    val colors = Forestix.colors
+    val type = Forestix.type
+    SheetSection(if (kind == MeasureKind.DBH) "DIAMETER" else "HEIGHT") {
+        OutlinedTextField(
+            value = text,
+            onValueChange = { onText(TruthInput.sanitize(it)) },
+            placeholder = { Text(FieldLogTypedInput.placeholder(kind, imperial)) },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        FieldLogTypedInput.warning(text, kind, imperial)?.let {
+            Text(it, style = type.caption, color = colors.confidenceBad)
         }
     }
 }

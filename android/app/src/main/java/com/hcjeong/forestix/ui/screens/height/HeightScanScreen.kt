@@ -7,6 +7,7 @@
 
 package com.hcjeong.forestix.ui.screens.height
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -38,8 +39,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -52,6 +56,7 @@ import com.hcjeong.forestix.ar.ArCameraView
 import com.hcjeong.forestix.ar.ArSceneMarker
 import com.hcjeong.forestix.ar.ArSessionHub
 import com.hcjeong.forestix.ar.MarkerShape
+import com.hcjeong.forestix.ar.OpticalAxisProbe
 import com.hcjeong.forestix.ar.Vec3
 import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.TruthInput
@@ -521,6 +526,24 @@ fun HeightScanScreen(
         while (settings.developerMode && stage != Stage.ANCHOR) {
             controller.screenCenterHit()
             devHitInfo = controller.lastCenterHitInfo
+            delay(250)
+        }
+    }
+
+    // AIM-OFFSET INSTRUMENT (developer mode only) — where the camera optical
+    // axis actually projects onto the view, against the view centre the aim
+    // ring is drawn at. See ArController.opticalAxisProbe for the geometry
+    // and for why this measures rather than corrects. The value only moves
+    // when the display geometry does, so a quarter-second poll is ample; when
+    // developer mode is off the loop never starts and nothing is computed.
+    var axisProbe by remember { mutableStateOf<OpticalAxisProbe?>(null) }
+    LaunchedEffect(settings.developerMode) {
+        if (!settings.developerMode) {
+            axisProbe = null
+            return@LaunchedEffect
+        }
+        while (true) {
+            axisProbe = controller.opticalAxisProbe()
             delay(250)
         }
     }
@@ -1272,6 +1295,13 @@ fun HeightScanScreen(
             plotOverlay = ArSessionHub.PlotOverlay.SUBDUED,
         )
         crosshairLabel?.let { label -> HeightAimCrosshair(label) }
+        // Developer instrument, drawn ON TOP of the ring so one screenshot
+        // carries the ring, the projected optical axis and the numbers
+        // together. Hidden with the rest of the 2D chrome for the Accept
+        // snapshot, so the stored photo is identical to a non-developer run's.
+        if (settings.developerMode && !hidingChromeForCapture) {
+            OpticalAxisInstrument(axisProbe)
+        }
         if (!hidingChromeForCapture) MeasureBackButton { nav.popBackStack() }
 
         // Plot mini-map — top-right, same row as the GPS badge: the active
@@ -1829,5 +1859,104 @@ private fun BoxScope.HeightAimCrosshair(label: String) {
             .background(Color.Black.copy(alpha = 0.65f))
             .padding(horizontal = 8.dp, vertical = 4.dp),
     )
+}
+
+/// Cyan — deliberately NOT the amber the aim ring is drawn in, so a
+/// screenshot can never be read with the two marks confused.
+private val OPTICAL_AXIS_TINT = Color(0.20f, 0.85f, 1f, 0.85f)
+
+/// Optical-axis marker box (an X + open circle, drawn inside it).
+private val OPTICAL_AXIS_MARKER_DP = 22.dp
+
+/// Readout block CENTRE, measured down from the view centre: clear of the aim
+/// label pill (centre at 40 dp, ≈ 11 dp half-height), a gap, then half of a
+/// four-line block.
+private val OPTICAL_AXIS_READOUT_OFFSET_DP = 96.dp
+
+/// AIM-OFFSET INSTRUMENT (developer mode only) — draws where the camera
+/// optical axis projects onto the view, and reports its offset from the view
+/// centre in view pixels and in degrees. See ArController.opticalAxisProbe:
+/// the elevation the height tangent uses and the base/top spheres both live
+/// on the optical axis, while the aim ring and the anchor hit test use the
+/// view centre, and this says how far apart those two references actually
+/// are. It measures only — the ring is not moved, the hit test is not moved,
+/// and no stored value can reach this code.
+///
+/// A null probe prints WHY there is no reading rather than a zero offset,
+/// which would read as "the two references coincide".
+@Composable
+private fun BoxScope.OpticalAxisInstrument(probe: OpticalAxisProbe?) {
+    val density = LocalDensity.current
+    if (probe != null) {
+        val x = with(density) { probe.viewX.toDp() }
+        val y = with(density) { probe.viewY.toDp() }
+        Canvas(
+            Modifier
+                .align(Alignment.TopStart)
+                .offset(
+                    x = x - OPTICAL_AXIS_MARKER_DP / 2,
+                    y = y - OPTICAL_AXIS_MARKER_DP / 2,
+                )
+                .size(OPTICAL_AXIS_MARKER_DP),
+        ) {
+            // Dark halo under a thin tint, the same sun-glare treatment the
+            // aim ring gets — a bare cyan line vanishes against sky.
+            val halo = Color.Black.copy(alpha = 0.55f)
+            val haloW = 3.dp.toPx()
+            val lineW = 1.5.dp.toPx()
+            val r = size.minDimension * 0.30f
+            val c = Offset(size.width / 2f, size.height / 2f)
+            val a = Offset(0f, 0f)
+            val b = Offset(size.width, size.height)
+            val d = Offset(0f, size.height)
+            val e = Offset(size.width, 0f)
+            drawLine(halo, a, b, haloW)
+            drawLine(halo, d, e, haloW)
+            drawCircle(halo, r, c, style = Stroke(haloW))
+            drawLine(OPTICAL_AXIS_TINT, a, b, lineW)
+            drawLine(OPTICAL_AXIS_TINT, d, e, lineW)
+            drawCircle(OPTICAL_AXIS_TINT, r, c, style = Stroke(lineW))
+        }
+    }
+    Column(
+        Modifier
+            .align(Alignment.Center)
+            .offset(y = OPTICAL_AXIS_READOUT_OFFSET_DP)
+            .clip(RoundedCornerShape(4.dp))
+            .background(Color.Black.copy(alpha = 0.65f))
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            "Optical axis vs view centre",
+            style = Forestix.type.dataSmall,
+            color = Color.White,
+            textAlign = TextAlign.Center,
+        )
+        if (probe == null) {
+            Text(
+                "not available — no camera frame or display mapping yet",
+                style = Forestix.type.dataSmall,
+                color = Color.White,
+                textAlign = TextAlign.Center,
+            )
+        } else {
+            Text(
+                String.format(Locale.US, "dx %+.1f px  %+.2f°", probe.dxPx, probe.dxDeg),
+                style = Forestix.type.dataSmall,
+                color = OPTICAL_AXIS_TINT,
+            )
+            Text(
+                String.format(Locale.US, "dy %+.1f px  %+.2f°", probe.dyPx, probe.dyDeg),
+                style = Forestix.type.dataSmall,
+                color = OPTICAL_AXIS_TINT,
+            )
+            Text(
+                String.format(Locale.US, "r %.1f px  %.2f°", probe.rPx, probe.rDeg),
+                style = Forestix.type.dataSmall,
+                color = OPTICAL_AXIS_TINT,
+            )
+        }
+    }
 }
 

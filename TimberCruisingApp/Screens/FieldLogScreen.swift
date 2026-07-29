@@ -65,6 +65,8 @@ public struct FieldLogScreen: View {
     /// the destination themselves and fall back to the quick sampling
     /// screen, which is exactly where this one points.
     @State private var rescanPlotSetup = false
+    /// The "add a tree" the toolbar or the empty state raised. nil = closed.
+    @State private var newTree: FieldLogNewTree?
 
     public init() {}
 
@@ -86,6 +88,17 @@ public struct FieldLogScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .toolbar {
+            // Ungated, unlike Export: the case this exists for is a log with
+            // nothing in it yet and a stem the scan would not lock.
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    startNewTree()
+                } label: {
+                    Label("New tree", systemImage: "plus")
+                        .foregroundStyle(ForestixPalette.primary)
+                }
+                .accessibilityIdentifier("fieldLog.newTree")
+            }
             if !history.entries.isEmpty {
                 ToolbarItem(placement: .primaryAction) {
                     Menu {
@@ -107,6 +120,17 @@ public struct FieldLogScreen: View {
                     .accessibilityIdentifier("fieldLog.exportMenu")
                 }
             }
+        }
+        .sheet(item: $newTree) { request in
+            FieldLogNewTreeSheet(
+                request: request,
+                unitSystem: settings.unitSystem,
+                onCreate: { name, species, dbhCm, heightM in
+                    createTree(request, treeName: name, speciesCode: species,
+                               dbhCm: dbhCm, heightM: heightM)
+                })
+                .environmentObject(history)
+                .environmentObject(settings)
         }
         .sheet(item: $inspecting, onDismiss: {
             rescan = pendingRescan
@@ -362,6 +386,59 @@ public struct FieldLogScreen: View {
     }
     #endif
 
+    // MARK: - A tree the sensors never read
+
+    /// The plot this screen is reporting on — the one whose summary card sits
+    /// at the top of the log — resolved through the default plot the same way
+    /// every entry's `plotID` is read.
+    ///
+    /// A hand-entered stem joins the plot the cruiser is LOOKING at. It is
+    /// captured when the sheet opens rather than read again on Create, so a
+    /// plot switched elsewhere in the app mid-typing cannot claim the tree.
+    private var shownPlotID: UUID? {
+        history.activePlotID ?? history.defaultPlotID()
+    }
+
+    private func startNewTree() {
+        let plotID = shownPlotID
+        newTree = FieldLogNewTree(
+            // The measure chooser's own rule — max(existing) + 1 across the
+            // log — so a hand-entered stem cannot land on a number a scan has
+            // already used, in this plot or any other.
+            treeNumber: history.suggestedNextTreeNumber,
+            plotID: plotID,
+            plotName: plotID.flatMap { history.plot(id: $0)?.name },
+            // Same suggestion the chooser offers: the successor of the highest
+            // name in the series the cruiser is using, or blank if they have
+            // never named a tree.
+            suggestedName: history.suggestedNextTreeName ?? "")
+    }
+
+    /// Writes the tree.
+    ///
+    /// Both readings go through `QuickMeasureEntry.typed` — the SAME factory
+    /// the row editor's "this kind has no reading yet" branch calls — so σ is
+    /// nil, capture_mode is "typed" and the method is the manual arm. A stem
+    /// entered here is stamped exactly like a number typed into an existing
+    /// row, and neither can be read back as a scan.
+    private func createTree(_ request: FieldLogNewTree,
+                            treeName: String?,
+                            speciesCode: String?,
+                            dbhCm: Double?,
+                            heightM: Double?) {
+        let readings: [(QuickMeasureEntry.Kind, Double?)] = [(.dbh, dbhCm),
+                                                             (.height, heightM)]
+        for (kind, value) in readings {
+            guard let value else { continue }
+            history.append(.typed(kind: kind,
+                                  value: value,
+                                  treeNumber: request.treeNumber,
+                                  treeName: treeName,
+                                  plotID: request.plotID,
+                                  speciesCode: speciesCode))
+        }
+    }
+
     /// One reading goes immediately; a tree carrying several asks first.
     private func requestDelete(_ row: FieldLogRowModel) {
         if row.entries.count == 1 {
@@ -448,6 +525,13 @@ public struct FieldLogScreen: View {
                 .foregroundStyle(ForestixPalette.textSecondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, ForestixSpace.xl)
+            // A scan is not the only way in. The stem the sensors refused is
+            // still a stem, and this is the door for it — repeated here
+            // because an empty log is exactly where a cruiser looks for one.
+            Button("Add a tree by hand") { startNewTree() }
+                .buttonStyle(.borderedProminent)
+                .tint(ForestixPalette.primary)
+                .accessibilityIdentifier("fieldLog.emptyNewTree")
             Spacer()
             Spacer()
         }
@@ -575,6 +659,113 @@ public struct FieldLogRescan: Identifiable, Equatable {
     public let plotID: UUID?
     public let speciesCode: String?
     public let truth: Double?
+}
+
+// MARK: - New tree
+
+/// A tree the cruiser is entering by hand, raised from the log's toolbar or
+/// its empty state.
+///
+/// Every join key is resolved HERE, once, when the sheet opens — not read
+/// again when Create is tapped. The number on screen is the number that gets
+/// written, and the plot cannot move under the cruiser while they type.
+private struct FieldLogNewTree: Identifiable {
+    let id = UUID()
+    let treeNumber: Int
+    let plotID: UUID?
+    /// Shown so the cruiser can see which plot the stem joins. nil when the
+    /// log has no plot to name — the readings are then stored with no plot,
+    /// exactly as the pre-plot readings are, rather than claiming one.
+    let plotName: String?
+    let suggestedName: String
+}
+
+// MARK: - Typed-measurement rules
+
+/// What a hand-typed diameter or height has to be, in ONE place.
+///
+/// Two screens now read a number the cruiser typed into a field in the unit
+/// system they are working in: the row editor completing a half-measured
+/// tree, and the new-tree sheet creating one from nothing. They must accept
+/// the same numbers, refuse the same numbers, and warn in the same words —
+/// a second copy of these sentences would drift the day one of them changed.
+private enum FieldLogTypedInput {
+
+    static func quantity(_ kind: QuickMeasureEntry.Kind) -> TruthInput.Quantity {
+        kind == .dbh ? .diameter : .height
+    }
+
+    /// The unit the field is typed in — the cruiser's active system,
+    /// converted to the metric base on the way in.
+    static func unit(_ kind: QuickMeasureEntry.Kind,
+                     imperial: Bool) -> TruthInput.Unit {
+        TruthInput.defaultUnit(quantity(kind), imperial: imperial)
+    }
+
+    /// Placeholder copy is the scan screens' own, so the same field means the
+    /// same thing wherever a measurement is typed.
+    static func placeholder(_ kind: QuickMeasureEntry.Kind,
+                            imperial: Bool) -> String {
+        if kind == .dbh {
+            return imperial ? "Diameter in inches" : "Diameter in cm"
+        }
+        return imperial ? "Height in feet" : "Height in metres"
+    }
+
+    /// The typed number in metric base units, or nil when the field holds
+    /// nothing usable. Never falls back to a stored value — a blank field
+    /// means "nothing typed".
+    static func parse(_ text: String,
+                      kind: QuickMeasureEntry.Kind,
+                      imperial: Bool) -> Double? {
+        TruthInput.parsePositiveBase(text, unit: unit(kind, imperial: imperial))
+    }
+
+    /// A height under the estimator's floor is not a standing tree, so it is
+    /// REFUSED rather than warned about. Diameter has no such floor: any
+    /// positive number is a stem somebody could have taped.
+    static func isBelowHeightFloor(_ value: Double,
+                                   kind: QuickMeasureEntry.Kind) -> Bool {
+        kind == .height && value < Double(HeightEstimator.minHMeters)
+    }
+
+    /// The number this text will actually be STORED as — nil when the field
+    /// is blank, unparseable, or holds something the app refuses. nil never
+    /// means "use something else"; it means nothing is written.
+    static func accepted(_ text: String,
+                         kind: QuickMeasureEntry.Kind,
+                         imperial: Bool) -> Double? {
+        guard let value = parse(text, kind: kind, imperial: imperial),
+              !isBelowHeightFloor(value, kind: kind) else { return nil }
+        return value
+    }
+
+    /// What to say about what is in the field, or nil when there is nothing
+    /// to say. A blank field is silent — the cruiser has not typed yet.
+    static func warning(_ text: String,
+                        kind: QuickMeasureEntry.Kind,
+                        imperial: Bool) -> String? {
+        guard !TruthInput.normalized(text).isEmpty else { return nil }
+        let u = unit(kind, imperial: imperial)
+        guard let value = parse(text, kind: kind, imperial: imperial) else {
+            return kind == .dbh
+                ? "A typed diameter must be a number greater than zero."
+                : "A typed height must be a number greater than zero."
+        }
+        if isBelowHeightFloor(value, kind: kind) {
+            // The floor is one physical height; the sentence is written in the
+            // unit the field is in, so an imperial cruiser is not handed a
+            // metre figure to compare against the feet they just typed.
+            let floor = TruthInput.fromBase(Double(HeightEstimator.minHMeters),
+                                            unit: u)
+            return String(format: "A typed height must be at least %.1f %@.",
+                          floor, u.rawValue)
+        }
+        // Outside the cruising window is a WARNING, not a refusal: the number
+        // is the cruiser's own observation. Same wording as every other truth
+        // field in the app.
+        return TruthInput.warning(base: value, quantity: quantity(kind), unit: u)
+    }
 }
 
 // MARK: - Table geometry
@@ -851,6 +1042,167 @@ private struct FieldLogRow: View {
     }
 }
 
+// MARK: - New-tree sheet
+
+/// Enter a tree the sensors never read.
+///
+/// THE FIELD CASE: the scan will not lock — bad light, too close, the depth
+/// map refuses — so the cruiser tapes the stem by hand and walks on. The log
+/// builds its rows by grouping READINGS, so without this sheet that tree has
+/// no row to tap and no way into the app at all. It is also the worst row an
+/// accuracy study can lose, because it is precisely the stem the sensors
+/// found hard.
+///
+/// Everything here is the existing typed path with no row to start from: the
+/// same tree-number rule as the measure chooser, the same name and species
+/// controls, the same field rules as the row editor, and the same
+/// `QuickMeasureEntry.typed` factory doing the writing.
+private struct FieldLogNewTreeSheet: View {
+
+    let request: FieldLogNewTree
+    let unitSystem: UnitSystem
+    /// (tree name, species code, diameter in cm, height in m) — nil for
+    /// anything the cruiser left blank. The host does the writing.
+    let onCreate: (String?, String?, Double?, Double?) -> Void
+
+    @EnvironmentObject private var settings: AppSettings
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var treeName: String
+    @State private var speciesCode: String?
+    @State private var dbhText = ""
+    @State private var heightText = ""
+
+    init(request: FieldLogNewTree,
+         unitSystem: UnitSystem,
+         onCreate: @escaping (String?, String?, Double?, Double?) -> Void) {
+        self.request = request
+        self.unitSystem = unitSystem
+        self.onCreate = onCreate
+        _treeName = State(initialValue: request.suggestedName)
+    }
+
+    private var imperial: Bool { unitSystem == .imperial }
+
+    private func text(_ kind: QuickMeasureEntry.Kind) -> String {
+        kind == .dbh ? dbhText : heightText
+    }
+
+    private func binding(_ kind: QuickMeasureEntry.Kind) -> Binding<String> {
+        kind == .dbh ? $dbhText : $heightText
+    }
+
+    private func accepted(_ kind: QuickMeasureEntry.Kind) -> Double? {
+        FieldLogTypedInput.accepted(text(kind), kind: kind, imperial: imperial)
+    }
+
+    private func isBlank(_ kind: QuickMeasureEntry.Kind) -> Bool {
+        TruthInput.normalized(text(kind)).isEmpty
+    }
+
+    /// `.whitespacesAndNewlines`, matching the measure chooser and Kotlin's
+    /// `trim()`: the same pasted "Plot3-T07\n" has to persist the same bytes
+    /// on both phones, because the two halves of a split cruise join on it.
+    private var trimmedName: String? {
+        let trimmed = treeName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Create needs at least one number, and refuses while a field holds
+    /// something that cannot be stored — a typo in the height must not be
+    /// quietly dropped on the floor while the diameter is saved.
+    private var canCreate: Bool {
+        let dbhOK = isBlank(.dbh) || accepted(.dbh) != nil
+        let heightOK = isBlank(.height) || accepted(.height) != nil
+        let haveOne = accepted(.dbh) != nil || accepted(.height) != nil
+        return dbhOK && heightOK && haveOne
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Tree") {
+                    // Not typed, and not editable: it is the next free number,
+                    // the same rule the measure chooser follows, so a stem
+                    // entered here cannot collide with a scanned one.
+                    labelled("Tree number", "#\(request.treeNumber)")
+                    TextField("Tree name", text: $treeName)
+                        .autocorrectionDisabled()
+                        .foregroundStyle(ForestixPalette.textPrimary)
+                        .accessibilityIdentifier("fieldLog.newTree.treeName")
+                    // The same control the chooser and the details sheet use —
+                    // one species list, one typed-code escape, no second copy
+                    // to drift.
+                    SpeciesPickerField(speciesCode: $speciesCode,
+                                       unspecifiedLabel: "Species")
+                        .environmentObject(settings)
+                    if let plotName = request.plotName {
+                        // Named on screen rather than assumed: the cruiser can
+                        // see which plot is about to own this stem.
+                        labelled("Plot", plotName)
+                    }
+                }
+                measurementSection(.dbh)
+                measurementSection(.height)
+                Section {
+                    Text("Type what you taped. A tree is recorded by its readings, so it needs a diameter or a height — and both are saved as typed, not measured.")
+                        .font(ForestixType.caption)
+                        .foregroundStyle(ForestixPalette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Create tree") {
+                        onCreate(trimmedName, speciesCode,
+                                 accepted(.dbh), accepted(.height))
+                        dismiss()
+                    }
+                    .disabled(!canCreate)
+                    .accessibilityIdentifier("fieldLog.newTree.create")
+                }
+            }
+            .navigationTitle("New tree")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+        }
+    }
+
+    /// One typed measurement — the same field, unit and refusals as the row
+    /// editor's, because both go through `FieldLogTypedInput`.
+    @ViewBuilder
+    private func measurementSection(_ kind: QuickMeasureEntry.Kind) -> some View {
+        Section(kind == .dbh ? "Diameter" : "Height") {
+            TextField(FieldLogTypedInput.placeholder(kind, imperial: imperial),
+                      text: binding(kind))
+                #if os(iOS)
+                .keyboardType(.decimalPad)
+                #endif
+                .foregroundStyle(ForestixPalette.textPrimary)
+            if let warning = FieldLogTypedInput.warning(text(kind), kind: kind,
+                                                        imperial: imperial) {
+                Text(warning)
+                    .font(ForestixType.caption)
+                    .foregroundStyle(ForestixPalette.confidenceBad)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func labelled(_ label: String, _ value: String) -> some View {
+        HStack {
+            Text(label)
+                .foregroundStyle(ForestixPalette.textSecondary)
+            Spacer(minLength: 8)
+            Text(value)
+                .foregroundStyle(ForestixPalette.textPrimary)
+                .multilineTextAlignment(.trailing)
+        }
+    }
+}
+
 // MARK: - Detail sheet
 
 /// The whole record behind one row.
@@ -965,13 +1317,13 @@ private struct FieldLogDetailForm: View {
     private var imperial: Bool { unitSystem == .imperial }
 
     private func quantity(_ kind: QuickMeasureEntry.Kind) -> TruthInput.Quantity {
-        kind == .dbh ? .diameter : .height
+        FieldLogTypedInput.quantity(kind)
     }
 
     /// The unit the MEASURED-value field of a section is typed in — the
     /// cruiser's active system, converted to the metric base on the way in.
     private func unit(_ kind: QuickMeasureEntry.Kind) -> TruthInput.Unit {
-        TruthInput.defaultUnit(quantity(kind), imperial: imperial)
+        FieldLogTypedInput.unit(kind, imperial: imperial)
     }
 
     /// The unit the TRUTH field of a section is typed in. It opens in the
@@ -1033,48 +1385,23 @@ private struct FieldLogDetailForm: View {
     /// Placeholder copy is the scan screens' own, so the same field means
     /// the same thing wherever a measurement is typed.
     private func valuePlaceholder(_ kind: QuickMeasureEntry.Kind) -> String {
-        if kind == .dbh {
-            return imperial ? "Diameter in inches" : "Diameter in cm"
-        }
-        return imperial ? "Height in feet" : "Height in metres"
+        FieldLogTypedInput.placeholder(kind, imperial: imperial)
     }
 
     /// The typed number in metric base units, or nil when the field holds
     /// nothing usable. Never falls back to the stored value — a blank field
     /// means "nothing typed", and Save stays off.
     private func parsedValue(_ kind: QuickMeasureEntry.Kind) -> Double? {
-        TruthInput.parsePositiveBase(valueText(kind), unit: unit(kind))
+        FieldLogTypedInput.parse(valueText(kind), kind: kind, imperial: imperial)
     }
 
     private func valueWarning(_ kind: QuickMeasureEntry.Kind) -> String? {
-        let text = valueText(kind)
-        guard !TruthInput.normalized(text).isEmpty else { return nil }
-        if parsedValue(kind) == nil {
-            return kind == .dbh
-                ? "A typed diameter must be a number greater than zero."
-                : "A typed height must be a number greater than zero."
-        }
-        if kind == .height, let m = parsedValue(kind),
-           m < Double(HeightEstimator.minHMeters) {
-            // The floor is one physical height; the sentence is written in the
-            // unit the field is in, so an imperial cruiser is not handed a
-            // metre figure to compare against the feet they just typed.
-            let floor = TruthInput.fromBase(Double(HeightEstimator.minHMeters),
-                                            unit: unit(kind))
-            return String(format: "A typed height must be at least %.1f %@.",
-                          floor, unit(kind).rawValue)
-        }
-        // Outside the cruising window is a WARNING, not a refusal: the
-        // number is the cruiser's own observation. Same wording as every
-        // other truth field in the app.
-        return parsedValue(kind).flatMap {
-            TruthInput.warning(base: $0, quantity: quantity(kind), unit: unit(kind))
-        }
+        FieldLogTypedInput.warning(valueText(kind), kind: kind, imperial: imperial)
     }
 
     private func canSave(_ kind: QuickMeasureEntry.Kind) -> Bool {
         guard let value = parsedValue(kind) else { return false }
-        if kind == .height, value < Double(HeightEstimator.minHMeters) {
+        if FieldLogTypedInput.isBelowHeightFloor(value, kind: kind) {
             return false
         }
         // Text that doesn't parse must never overwrite a stored truth.

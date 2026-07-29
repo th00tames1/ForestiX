@@ -390,11 +390,18 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
     /// A brand-new reading the cruiser typed for a tree the sensors never
     /// measured. No σ, no GPS fix, no photo — none of those exist for a
     /// number that came off a tape.
+    ///
+    /// `speciesCode` rides along because a tree entered by hand is named and
+    /// identified in the same breath as it is measured; it is an observation
+    /// about the stem, not about the number, so carrying it changes nothing
+    /// about how the reading is stamped. It defaults to nil so the row
+    /// editor's "complete this half-measured tree" path is untouched.
     public static func typed(kind: Kind,
                              value: Double,
                              treeNumber: Int?,
                              treeName: String? = nil,
                              plotID: UUID?,
+                             speciesCode: String? = nil,
                              truth: Double? = nil) -> QuickMeasureEntry {
         QuickMeasureEntry(
             kind: kind, value: value,
@@ -404,6 +411,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             confidenceRaw: "yellow",
             method: typedMethodRaw(for: kind) ?? "manualVisual",
             treeNumber: treeNumber, treeName: treeName, plotID: plotID,
+            speciesCode: speciesCode,
             position: kind == Kind.dbh ? StemPosition.dbh : nil,
             captureMode: "typed", truth: truth)
     }

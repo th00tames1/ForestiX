@@ -144,12 +144,20 @@ data class QuickMeasureEntry(
         /// never measured. No sigma, no GPS fix, no photo — none of those
         /// exist for a number that came off a tape. "yellow" is the tier the
         /// scan screens' own manual-entry path stamps: usable, unverified.
+        ///
+        /// [speciesCode] rides along because a tree entered by hand is named
+        /// and identified in the same breath as it is measured; it is an
+        /// observation about the stem, not about the number, so carrying it
+        /// changes nothing about how the reading is stamped. It defaults to
+        /// null so the row editor's "complete this half-measured tree" path
+        /// is untouched.
         fun typed(
             kind: MeasureKind,
             value: Double,
             treeNumber: Int?,
             treeName: String? = null,
             plotID: java.util.UUID?,
+            speciesCode: String? = null,
             truth: Double? = null,
         ) = QuickMeasureEntry(
             kind = kind,
@@ -160,6 +168,7 @@ data class QuickMeasureEntry(
             treeNumber = treeNumber,
             treeName = treeName,
             plotID = plotID,
+            speciesCode = speciesCode,
             position = if (kind == MeasureKind.DBH) StemPosition.DBH else null,
             captureMode = "typed",
             truth = truth,

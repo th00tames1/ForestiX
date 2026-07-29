@@ -3,7 +3,7 @@
 // ④ tree peek, ⑤ project sheet, ⑥ cruise setup, ⑦ planned plot + guide,
 // ⑧ inline centre record; ③ tally loop rides the shared DBH screen as a
 // DIAMETER LOOP via CruiseCapture — heights on demand from the tree peek
-// / plot heights sheet) absorbed into MapHomeScreen as a TOGGLED MODE (v3.1):
+// / plot sample heights sheet) absorbed into MapHomeScreen as a TOGGLED MODE (v3.1):
 // one map, two modes, no navigation between them. MapHomeScreen owns the
 // single MapView/camera and, while `tc.mapMode == "cruise"`, feeds it this
 // file's markers/overlays and hosts this file's chrome, peeks and sheets.
@@ -114,6 +114,7 @@ import com.hcjeong.forestix.common.RegionalSpecies
 import com.hcjeong.forestix.data.SettingsSnapshot
 import com.hcjeong.forestix.data.cruise.BreastHeightConvention
 import com.hcjeong.forestix.data.cruise.CruiseDesign
+import com.hcjeong.forestix.data.cruise.HeightSubsampleRule
 import com.hcjeong.forestix.data.cruise.PlannedPlot
 import com.hcjeong.forestix.data.cruise.Plot
 import com.hcjeong.forestix.data.cruise.PlotType
@@ -126,6 +127,7 @@ import com.hcjeong.forestix.data.cruise.hasCentre
 import com.hcjeong.forestix.export.FullCruiseExporter
 import com.hcjeong.forestix.geo.CoordinateConversions
 import com.hcjeong.forestix.inventory.HDModel
+import com.hcjeong.forestix.inventory.HeightSubsample
 import com.hcjeong.forestix.inventory.PlotStats
 import com.hcjeong.forestix.inventory.PlotStatsCalculator
 import com.hcjeong.forestix.inventory.PooledHeights
@@ -198,7 +200,7 @@ internal class CruiseModeState {
     var recordCentreFor by mutableStateOf<PlannedPlot?>(null)
     /// Planned plot the dashed guide line + distance chip point at (mock ⑦).
     var navTargetId by mutableStateOf<UUID?>(null)
-    /// Plot whose heights sheet is open ("Heights · N measured", B).
+    /// Plot whose sample heights sheet is open ("Sample heights · N of M", B).
     var heightsSheetFor by mutableStateOf<UUID?>(null)
     /// Plot whose map-overlay menu (Edit / Remove) is open — raised by
     /// tapping the drawn plot's boundary on the map (M2).
@@ -236,7 +238,7 @@ internal class CruiseModeState {
     /// the plot's recorded CENTRE only — the plot row, its radius and every
     /// tree measured in it survive.
     var removePlot: (Plot) -> Unit = {}
-    /// Height on demand (tree peek "Measure height" / heights sheet).
+    /// Height on demand (tree peek "Measure height" / sample heights sheet).
     var measureHeight: (Tree) -> Unit = {}
 
     val project: Project? get() = data.project
@@ -594,7 +596,7 @@ internal fun CruiseModeEffects(
     }
 
     /// Per-tree height on demand (tree peek "Measure height" / the plot
-    /// heights sheet): arm a HEIGHT-ONLY cruise session on the EXISTING
+    /// sample heights sheet): arm a HEIGHT-ONLY cruise session on the EXISTING
     /// tree row and enter the shared Height screen scoped to it — the
     /// accepted reading folds into that row, the screen pops back here,
     /// and the map's re-entry runs CruiseCapture.end() as always.
@@ -888,7 +890,7 @@ internal fun CruiseModeSheets(
         )
     }
 
-    // MARK: - Plot heights sheet (B — "Heights · N measured")
+    // MARK: - Plot sample heights sheet (B — "Sample heights · N of M")
 
     val heightsPlot = state.heightsSheetFor
         ?.let { id -> state.data.plots.firstOrNull { it.id == id } }
@@ -1552,20 +1554,55 @@ private fun PlotPeekCard(
     // "Tree #<next>". Read straight off the peek's own tree list rather than
     // the repository, so the label tracks the tally without a round trip.
     val nextTreeTitle = TreeLabel.title(CruiseCapture.nextTreeName(trees), nextTree)
-    // B. Pooled sample heights — "N measured" counts the live trees
-    // carrying a height (iOS measuredHeightCount parity; the pooled FIT
-    // additionally applies the engine's > 1.3 m cleaning).
+    // B. PLOT SAMPLE HEIGHTS — named as a SUBSAMPLE. The row read "Heights"
+    // and a cruiser who had just tapped a PLOT asked why heights were being
+    // offered here and where diameter was — a fair question of a word that
+    // looks like a heading. Which trees get a measured height is a
+    // plot-level decision (the rest are imputed from the H–D curve), which
+    // is why the row is here and why there is correctly no diameter row
+    // beside it: every tree gets a diameter through the tally.
     //
-    // THE COUNT IS ONLY SHOWN WHEN THERE IS A COUNT. Heights are a
-    // subsample — most plots carry none, so the row spent almost all of its
-    // life saying "· 0 measured", which is the word "none" dressed up as a
-    // statistic and read as clutter in the stand. The row itself stays: it
-    // is the only door to the heights sheet, and hiding it at zero would
-    // take away the way to measure the first one. iOS `plotHeightsLabel`
-    // returns the same two strings.
-    val heightsCount = trees.count { it.deletedAt == null && it.heightM != null }
-    val heightsLabel =
-        if (heightsCount > 0) "Heights · $heightsCount measured" else "Heights"
+    // The rule the Add-Tree flow measures against, read from the project's
+    // CruiseDesign. Cruise setup is optional, so a design-less project falls
+    // back to the model default (every 5th tree) exactly as Mappers does —
+    // one fallback, so the peek and the flow agree about such a project.
+    //
+    // Null until the read lands. The repository is suspend here (iOS reads
+    // it synchronously), and a count derived from a rule not yet read would
+    // be a number stated before it is known: the row shows its bare name for
+    // that frame instead.
+    var subsampleRule by remember(plot.projectId) {
+        mutableStateOf<HeightSubsampleRule?>(null)
+    }
+    LaunchedEffect(plot.projectId) {
+        subsampleRule = try {
+            env.cruiseDesignRepository.forProject(plot.projectId)
+                .firstOrNull()?.heightSubsampleRule
+        } catch (_: Exception) {
+            null
+        } ?: HeightSubsampleRule.EveryKth(k = 5)
+    }
+    // LOCKED strings "Sample heights" / "Sample heights · N of M" /
+    // "Sample heights · N measured"; iOS `plotHeightsLabel` returns the same
+    // three. The target comes from HeightSubsample, the one owner of the
+    // rule, so the row can never ask for a different number than the flow
+    // that fills it. Where the rule sets no target (None) or asks nothing of
+    // this plot (an empty plot asks nothing) there is no denominator to
+    // show: the row falls back to the plain count, and to the bare name at
+    // zero. A fraction is never invented to fill the gap, and a plot with no
+    // trees never reads as work due.
+    val heightsProgress = remember(subsampleRule, trees) {
+        subsampleRule?.let { HeightSubsample.progress(it, trees) }
+    }
+    val heightsTarget = heightsProgress?.target
+    val heightsLabel = when {
+        heightsProgress == null -> "Sample heights"
+        heightsTarget != null && heightsTarget > 0 ->
+            "Sample heights · ${heightsProgress.measured} of $heightsTarget"
+        heightsProgress.measured > 0 ->
+            "Sample heights · ${heightsProgress.measured} measured"
+        else -> "Sample heights"
+    }
 
     Column(
         modifier
@@ -1638,9 +1675,9 @@ private fun PlotPeekCard(
                 "MEAN DBH", String.format(Locale.US, "%.1f", stats.qmdCm),
                 "cm", Modifier.weight(1f))
         }
-        // B. PLOT SAMPLE HEIGHTS — LOCKED strings "Heights" /
-        // "Heights · N measured"; list-row into the heights sheet (iOS
-        // plotPeek row 1:1), shown for open AND closed plots.
+        // B. PLOT SAMPLE HEIGHTS — list-row into the sample heights sheet
+        // (iOS plotPeek row 1:1), shown for open AND closed plots. The
+        // LOCKED label is built above.
         Row(
             Modifier
                 .fillMaxWidth()
@@ -1734,7 +1771,7 @@ private fun PlotPeekCard(
     }
 }
 
-// MARK: - Plot heights sheet (B) -----------------------------------------------
+// MARK: - Plot sample heights sheet (B) ----------------------------------------
 
 /// Pooled sample heights for one plot (no species dimension): the measured
 /// (tree #, DBH, height) pairs, the LOCKED "Height curve active — other
@@ -1778,7 +1815,9 @@ private fun PlotHeightsSheet(
                 .verticalScroll(rememberScrollState()),
         ) {
             Text(
-                "HEIGHTS · PLOT ${plot.plotNumber}",
+                // LOCKED "SAMPLE HEIGHTS · PLOT n" — one vocabulary with
+                // the plot peek row that opens this sheet.
+                "SAMPLE HEIGHTS · PLOT ${plot.plotNumber}",
                 style = type.sectionHead.copy(
                     fontWeight = FontWeight.ExtraBold, letterSpacing = 1.0.sp),
                 color = colors.textTertiary,
@@ -1905,7 +1944,7 @@ private fun PlotHeightsSheet(
     }
 }
 
-/// The heights sheet's 54 dp primary — LOCKED "Measure height" on both
+/// The sample heights sheet's 54 dp primary — LOCKED "Measure height" on both
 /// stages (iOS measureButton parity: filled primary, 0.45 alpha when
 /// there is nothing to measure).
 ///

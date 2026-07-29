@@ -311,7 +311,8 @@ public struct MapHomeScreen: View {
     /// other opens from the map), so one flag serves both.
     @State var heightPlotSetup = false
 
-    // Heights sheet (plot peek → "Heights · N measured") + the scoped
+    // Sample heights sheet (plot peek → "Sample heights · N of M") +
+    // the scoped
     // Height request staged across its dismissal.
     @State var heightsSheetTarget: HeightsSheetTarget?
     @State var pendingScopedHeight: ScopedHeightRequest?

@@ -48,8 +48,8 @@
 //     GPS + auto-photo), auto-increments the tree number, and resets
 //     the scan for the next trunk (Undo toast, 3 s). The floating back
 //     exits the loop. Heights are on demand: tree peek "Measure height"
-//     or the plot peek's HEIGHTS SHEET (pooled H–D curve estimates the
-//     rest once ≥3 pairs exist). Zero typing per record.
+//     or the plot peek's SAMPLE HEIGHTS SHEET (pooled H–D curve
+//     estimates the rest once ≥3 pairs exist). Zero typing per record.
 //
 // Tapping a plot ring peeks the tally card (live TREES/BA/TPA/QMD via
 // the InventoryEngine, Add tree, Close plot, Details); tapping a tree
@@ -124,14 +124,15 @@ struct ExportShareURL: Identifiable {
     var id: URL { url }
 }
 
-/// Plot whose HEIGHTS SHEET is presented (plot peek → "Heights · N
-/// measured"). Internal because MapHomeScreen.swift owns the state.
+/// Plot whose SAMPLE HEIGHTS SHEET is presented (plot peek →
+/// "Sample heights · N of M"). Internal because MapHomeScreen.swift owns
+/// the state.
 struct HeightsSheetTarget: Identifiable {
     let plotID: UUID
     var id: UUID { plotID }
 }
 
-/// Height screen scoped to one existing tree (tree peek / heights sheet
+/// Height screen scoped to one existing tree (tree peek / sample heights sheet
 /// "Measure height") — staged across the sheet dismissal, same two-step
 /// pattern as `pendingDestination`.
 struct ScopedHeightRequest {
@@ -577,9 +578,9 @@ extension MapHomeScreen {
                 MeasurePhotoDetailView(context: context)
             }
         #endif
-            // HEIGHTS SHEET (plot peek → "Heights · N measured") — the
-            // scoped Height cover launches from onDismiss so the two
-            // presentations never fight.
+            // SAMPLE HEIGHTS SHEET (plot peek → "Sample heights · N of
+            // M") — the scoped Height cover launches from onDismiss so the
+            // two presentations never fight.
             .sheet(item: $heightsSheetTarget, onDismiss: {
                 if let request = pendingScopedHeight {
                     pendingScopedHeight = nil
@@ -1035,7 +1036,7 @@ extension MapHomeScreen {
     /// on every Accept, auto-increments the target number, and resets
     /// itself for the next trunk — no Height chain, no return to the
     /// map until the floating back. Per-tree height on demand lives on
-    /// the tree peek / heights sheet instead.
+    /// the tree peek / sample heights sheet instead.
     func startAddTree(in plot: Plot) {
         // The tally is switching to THIS plot, so a ring belonging to any
         // other one stops being the boundary being measured — and the DBH /
@@ -1600,18 +1601,24 @@ extension MapHomeScreen {
                     .accessibilityIdentifier("cruiseMap.plotPeek.addTree")
                 }
 
-                // PLOT SAMPLE HEIGHTS — full-width secondary into the
+                // PLOT SAMPLE HEIGHTS — full-width secondary into the sample
                 // heights sheet: the plot's measured (tree, DBH, height)
                 // pairs + on-demand height measurement + the pooled-curve
-                // status. LOCKED strings "Heights" / "Heights · N measured".
+                // status. LOCKED strings, see `plotHeightsLabel(in:)`.
                 //
-                // THE COUNT IS ONLY SHOWN WHEN THERE IS A COUNT. Heights are
-                // a subsample — most plots carry none, so the row spent
-                // almost all of its life saying "· 0 measured", which is the
-                // word "none" dressed up as a statistic and read as clutter
-                // in the stand. The row itself stays: it is the only door to
-                // the heights sheet, and hiding it at zero would take away
-                // the way to measure the first one.
+                // NAMED AS A SUBSAMPLE. It read "Heights" and a cruiser who
+                // had just tapped a PLOT asked why heights were being offered
+                // here and where diameter was — a fair question of a word
+                // that looks like a heading. Which trees get a measured
+                // height is a plot-level decision (the rest are imputed from
+                // the H–D curve), which is why the row is here and why there
+                // is correctly no diameter row beside it: every tree gets a
+                // diameter through the tally.
+                //
+                // The count carries the target now, so "0 of 5" is worth
+                // saying where "· 0 measured" was the word "none" dressed up
+                // as a statistic. Where there is no target the row goes quiet
+                // rather than inventing one.
                 Button {
                     heightsSheetTarget = HeightsSheetTarget(plotID: plot.id)
                 } label: {
@@ -1766,22 +1773,34 @@ extension MapHomeScreen {
             hdFits: pooledHDFits(plotTrees: trees))
     }
 
-    // MARK: Pooled H–D relation (heights sheet + volume imputation)
+    // MARK: Pooled H–D relation (sample heights sheet + volume imputation)
 
-    /// Fit-eligible (DBH, height) pairs of a plot — the heights sheet's
-    /// list and the "Heights · N measured" count (matches Android's
-    /// PooledHeights.pairs gate).
-    func plotHeightsPairCount(in plotID: UUID) -> Int {
-        Self.hdPairs(liveTrees(in: plotID)).count
-    }
-
-    /// The plot peek's heights row. A zero count is not information — heights
-    /// are a subsample and most plots have none — so it is simply not said;
-    /// from the first measured height on, the number is worth reading.
-    /// Android's `plotHeightsLabel` returns the same two strings.
+    /// The plot peek's sample-heights row. Height is a SUBSAMPLE — every tree
+    /// gets a diameter through the tally, only some get a measured height,
+    /// and the rest are imputed from the fitted H–D curve — so the row is
+    /// named as one, and it says how much of this plot's subsample is left.
+    ///
+    /// LOCKED strings "Sample heights" / "Sample heights · N of M" /
+    /// "Sample heights · N measured". Android's `plotHeightsLabel` returns
+    /// the same three.
+    ///
+    /// The target comes from `HeightSubsample`, the one owner of the rule, so
+    /// the row can never ask for a different number than the flow that fills
+    /// it. When the rule sets no target (`.none`) or asks nothing of this
+    /// plot (an empty plot asks nothing), there is no denominator to show:
+    /// the row falls back to the plain count, and to the bare name at zero.
+    /// A fraction is never invented to fill the gap, and a plot with no trees
+    /// never reads as work due.
     func plotHeightsLabel(in plotID: UUID) -> String {
-        let n = plotHeightsPairCount(in: plotID)
-        return n > 0 ? "Heights · \(n) measured" : "Heights"
+        let progress = HeightSubsample.progress(
+            rule: effectiveDesign().heightSubsampleRule,
+            treesOnPlot: liveTrees(in: plotID))
+        if let target = progress.target, target > 0 {
+            return "Sample heights · \(progress.measured) of \(target)"
+        }
+        return progress.measured > 0
+            ? "Sample heights · \(progress.measured) measured"
+            : "Sample heights"
     }
 
     /// Fit-eligible (DBH, height) pairs — the same cleaning the engine
@@ -3015,10 +3034,11 @@ private struct CruisePressableStyle: ButtonStyle {
     }
 }
 
-// MARK: - Heights sheet (plot sample heights, pooled)
+// MARK: - Sample heights sheet (plot height subsample, pooled)
 
-/// The plot's measured (tree #, DBH, height) pairs + on-demand height
-/// measurement. Stage 1 lists the fit-eligible pairs with the primary
+/// The plot's SAMPLE HEIGHTS: the measured (tree #, DBH, height) pairs +
+/// on-demand height measurement. Stage 1 lists the fit-eligible pairs
+/// (the rows the pooled curve can use) with the primary
 /// "Measure height"; tapping it swaps in a compact horizontal tree-
 /// number picker (default = the last tallied tree) whose confirm hands
 /// the chosen tree to the host, which opens the scoped Height screen.
@@ -3058,7 +3078,9 @@ struct PlotHeightsSheet: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                Text("HEIGHTS · PLOT \(plot.plotNumber)")
+                // LOCKED "SAMPLE HEIGHTS · PLOT n" — one vocabulary with the
+                // plot peek row that opens this sheet.
+                Text("SAMPLE HEIGHTS · PLOT \(plot.plotNumber)")
                     .font(.system(size: 13, weight: .heavy))
                     .tracking(1.0)
                     .foregroundStyle(ForestixPalette.textTertiary)

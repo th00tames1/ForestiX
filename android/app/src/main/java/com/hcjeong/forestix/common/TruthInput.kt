@@ -10,7 +10,8 @@
 //     "clear the stored truth". Clearing a stored truth is always explicit.
 //   • Plausibility windows: DBH 1–300 cm, height 1–120 m. A value outside
 //     the window is still accepted (it is the operator's measurement) but
-//     the caller shows `fieldWarning(...)` next to the field.
+//     the caller shows `fieldWarning(...)` next to the field. The window is
+//     judged on the metric base and WORDED in the unit the field is typed in.
 //   • The UNIT a truth was typed in belongs to the entry, not to the reader.
 //     See the [Unit] section below.
 
@@ -161,20 +162,42 @@ object TruthInput {
     const val HEIGHT_MIN_M = 1.0
     const val HEIGHT_MAX_M = 120.0
 
-    /// Warning for a typed DBH truth, or null when it is inside 1–300 cm.
-    fun dbhWarning(cm: Double): String? =
-        if (cm < DBH_MIN_CM || cm > DBH_MAX_CM) "Outside 1–300 cm — check the value" else null
+    /// A window bound written in the unit the FIELD is in: converted from the
+    /// metric base, rounded to one decimal and trailing zeros trimmed. The
+    /// metric bounds therefore still render exactly "1", "300" and "120".
+    private fun boundText(base: Double, unit: Unit): String {
+        val v = fromBase(base, unit)
+        return text(Math.round(v * 10.0) / 10.0)
+    }
 
-    /// Warning for a typed height truth, or null when inside 1–120 m.
-    fun heightWarning(m: Double): String? =
-        if (m < HEIGHT_MIN_M || m > HEIGHT_MAX_M) "Outside 1–120 m — check the value" else null
+    /// Warning for a typed DBH truth, or null when it is inside 1–300 cm.
+    ///
+    /// [unit] is the unit the FIELD is in. The window is ONE physical range
+    /// and the judgement is made on the converted base either way, but the
+    /// sentence has to be denominated in what the cruiser typed: reading
+    /// "Outside 1–300 cm" under a field labelled "True Ø (in)" is the exact
+    /// cm/in confusion this screen exists to prevent.
+    fun dbhWarning(cm: Double, unit: Unit): String? {
+        if (cm >= DBH_MIN_CM && cm <= DBH_MAX_CM) return null
+        return "Outside ${boundText(DBH_MIN_CM, unit)}–${boundText(DBH_MAX_CM, unit)} " +
+            "${unit.raw} — check the value"
+    }
+
+    /// Warning for a typed height truth, or null when inside 1–120 m. Same
+    /// rule as [dbhWarning]: judged in the base, worded in the field's unit.
+    fun heightWarning(m: Double, unit: Unit): String? {
+        if (m >= HEIGHT_MIN_M && m <= HEIGHT_MAX_M) return null
+        return "Outside ${boundText(HEIGHT_MIN_M, unit)}–${boundText(HEIGHT_MAX_M, unit)} " +
+            "${unit.raw} — check the value"
+    }
 
     /// Quantity-dispatched window check. The value is the METRIC BASE, so the
     /// window is stated once and an imperial entry is judged by the same
-    /// numbers as a metric one. A distance has no cruising window.
-    fun warning(base: Double, quantity: Quantity): String? = when (quantity) {
-        Quantity.DIAMETER -> dbhWarning(base)
-        Quantity.HEIGHT -> heightWarning(base)
+    /// numbers as a metric one; [unit] only decides how the bounds are
+    /// WRITTEN. A distance has no cruising window.
+    fun warning(base: Double, quantity: Quantity, unit: Unit): String? = when (quantity) {
+        Quantity.DIAMETER -> dbhWarning(base, unit)
+        Quantity.HEIGHT -> heightWarning(base, unit)
         Quantity.DISTANCE -> null
     }
 
@@ -184,6 +207,6 @@ object TruthInput {
     fun fieldWarning(raw: String, quantity: Quantity, unit: Unit): String? {
         if (isUnparseable(raw)) return "Not a number"
         val base = parsePositiveBase(raw, unit) ?: return null
-        return warning(base, quantity)
+        return warning(base, quantity, unit)
     }
 }

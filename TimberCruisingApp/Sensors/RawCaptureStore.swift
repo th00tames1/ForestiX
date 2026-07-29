@@ -220,6 +220,22 @@ public struct RawCaptureManifest: Codable, Sendable {
             self.value = value; self.enteredAt = enteredAt
             self.truthUnit = truthUnit
         }
+
+        /// Explicit encoder. The SYNTHESIZED one emits `encodeIfPresent`, so a
+        /// nil field disappears from manifest.json entirely, while the Android
+        /// writer always writes `"truth_unit": null` (sensors/RawCaptureStore
+        /// .kt `truthJson`). A corpus reader keyed on the presence of the key
+        /// then sees a missing key on iOS bundles and a present-but-null key
+        /// on Android bundles for the IDENTICAL "no truth typed" state.
+        /// Writing all three keys unconditionally makes one document out of
+        /// the two platforms' manifests. Decoding stays synthesized, which
+        /// reads both shapes.
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(value, forKey: .value)
+            try c.encode(enteredAt, forKey: .enteredAt)
+            try c.encode(truthUnit, forKey: .truthUnit)
+        }
     }
 
     public struct GPS: Codable, Sendable {
@@ -312,14 +328,25 @@ public struct RawCaptureManifest: Codable, Sendable {
         public var top: Aim
         public var dHM: Double
         public var poseSamples: [PoseSample]
+        /// VIO tracking dropped somewhere between anchoring the trunk and the
+        /// aims. A dropout moves the world frame the anchor sits in, so it
+        /// moves `d_h_m` — the entire scale of H — and the pose trail above
+        /// has a hole where it happened. Optional so bundles written before
+        /// this key still decode; nil there means UNRECORDED, not "clean".
+        /// Byte-identical key on Android (`tracking_dropped` in the height
+        /// block), and the same fact the research CSV column carries.
+        public var trackingDropped: Bool?
         enum CodingKeys: String, CodingKey {
             case anchor, base, top
             case dHM = "d_h_m"
             case poseSamples = "pose_samples"
+            case trackingDropped = "tracking_dropped"
         }
-        public init(anchor: Anchor, base: Aim, top: Aim, dHM: Double, poseSamples: [PoseSample]) {
+        public init(anchor: Anchor, base: Aim, top: Aim, dHM: Double,
+                    poseSamples: [PoseSample], trackingDropped: Bool? = nil) {
             self.anchor = anchor; self.base = base; self.top = top
             self.dHM = dHM; self.poseSamples = poseSamples
+            self.trackingDropped = trackingDropped
         }
 
         public struct Anchor: Codable, Sendable {

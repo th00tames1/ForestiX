@@ -515,7 +515,12 @@ struct RawCaptureDetailView: View {
     /// Save guard: an empty or unparseable field NEVER overwrites a stored
     /// truth, and the input is left alone so nothing typed is lost.
     private func saveTruth() {
-        guard let value = TruthInput.parsePositive(truthText) else {
+        // parsePositiveBASE, not parsePositive: the value stored is the metric
+        // base and `consoleUnit` is what the field says it is being typed in.
+        // They agree today only because this console is hardcoded metric — the
+        // shared helper exists so that adding a toggle here cannot leave a
+        // number unconverted under a truth_unit that says it was converted.
+        guard let value = TruthInput.parsePositiveBase(truthText, unit: consoleUnit) else {
             truthStatus = TruthInput.normalized(truthText).isEmpty
                 ? "Nothing entered — stored truth left as it was."
                 : "Not a number — stored truth left as it was."

@@ -1572,6 +1572,18 @@ public enum DBHEstimator {
     ///
     /// Nothing about the geometry changes — same identity, same span, same
     /// focal. Only which pixels the depth is read from.
+    ///
+    /// The measured VALUE does move, though, and whoever pools this study's
+    /// corpora needs to know it: a stem's centre is up to one radius nearer
+    /// than its edges, so a median over the middle half reads a smaller z
+    /// and every bracketed diameter comes out slightly lower than before.
+    /// That is the geometrically right input for the identity — but it is
+    /// not backwards-compatible. A project whose `dbhCorrectionAlpha` /
+    /// `dbhCorrectionBeta` were fitted on ADJUST captures from before this
+    /// change now carries that bias into the correction applied on top, and
+    /// a raw-capture bundle recorded before it will not replay to the live
+    /// value in its manifest. The manifest's `app_commit` is what separates
+    /// the two corpora.
     static func bracketCoreRange(iLo: Int, iHi: Int) -> (Int, Int) {
         let span = iHi - iLo
         // Too few pixels to trim and still make a median of: a bracket this
@@ -1648,6 +1660,15 @@ public enum DBHEstimator {
         // measured correctly in the stand, and every change to it made from
         // reasoning alone has been wrong. Revisit with a device and a tape,
         // not from a reading of the geometry.
+        //
+        // KNOWN CROSS-PLATFORM DIVERGENCE, recorded so the accuracy study
+        // does not discover it in the pooled data: Android's bracket path
+        // (DbhEstimator.bracketChordFit / constrainedEstimate) divides by
+        // the axis-matched focal — fy for a column walk — and its live
+        // ADJUST readout is calibrated, where this one publishes the raw
+        // bracket diameter. Two phones on the same tree therefore show
+        // different live numbers. Settling which is right is a device-and-
+        // tape job on both platforms at once, not a keyboard edit to one.
         let fx = Double(frame.intrinsics[0, 0])
         guard fx - widthPx / 2.0 > 1.0 else { return nil }
         let diameterM = widthPx * z / (fx - widthPx / 2.0)

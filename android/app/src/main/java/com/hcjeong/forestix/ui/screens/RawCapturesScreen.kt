@@ -571,7 +571,16 @@ private fun RawCaptureDetail(
                             // Save guard: an empty or unparseable field NEVER
                             // overwrites a stored truth, and the input is left
                             // alone so nothing typed is lost.
-                            val v = TruthInput.parsePositive(truthText)
+                            //
+                            // parsePositiveBASE, not parsePositive: the value
+                            // stored is the metric base and `consoleUnit` is
+                            // what the field says it is being typed in. They
+                            // agree today only because this console is
+                            // hardcoded metric — the shared helper exists so
+                            // that adding a toggle here cannot leave a number
+                            // unconverted under a truth_unit that says it was
+                            // converted.
+                            val v = TruthInput.parsePositiveBase(truthText, consoleUnit)
                             if (v == null) {
                                 truthStatus = if (TruthInput.normalized(truthText).isEmpty()) {
                                     "Nothing entered — stored truth left as it was."

@@ -347,6 +347,9 @@ object RawCaptureStore {
         live: HeightResult,
         cal: ProjectCalibration,
         poseSamples: List<PoseSample>,
+        // Whether VIO tracking dropped between the anchor and the aims — the
+        // on-screen warning, recorded so the bundle can be filtered on it.
+        trackingDropped: Boolean,
         unitSystem: String,
         ctx: CaptureContext,
         baseAim: HeightAim? = null,
@@ -417,6 +420,13 @@ object RawCaptureStore {
             if (attachAimFrame(dir, topAim, "depth_top.bin", "rgb_top.jpg", topJson)) aimFrames++
             heightBlock.put("top", topJson)
             heightBlock.put("d_h_m", dHm.toDouble())
+            // A dropout moves the world frame the trunk anchor sits in, so it
+            // moves d_h — the entire scale of H — and the pose trail below has
+            // a hole where it happened. Written on every height bundle, so
+            // `false` states the walk-off was continuous rather than leaving
+            // the question unanswered. Byte-identical key on iOS
+            // (`HeightBundle.trackingDropped`).
+            heightBlock.put("tracking_dropped", trackingDropped)
             val samplesArr = JSONArray()
             for (s in poseSamples) {
                 val so = JSONObject()

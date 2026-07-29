@@ -14,9 +14,10 @@
 //    comes from the rotation-vector sensor with a geomagnetic
 //    declination correction (prefer true, fall back to magnetic —
 //    same rule as the CLHeading handler on iOS).
-//  * A synchronous `tier(forHorizontalAccuracyM:)` helper that
-//    classifies the most recent fix for the header badge without
-//    running the 60 s averager (REQ-NAV-003).
+//  * `FixFreshness` — the one rule for whether a stored fix still
+//    describes where the phone is. (The old REQ-NAV-003
+//    `tier(forHorizontalAccuracyM:)` badge helper is gone; the tier of a
+//    single fix is `GPSAveraging.classifySingleFix` and nothing else.)
 
 package com.hcjeong.forestix.positioning
 
@@ -32,7 +33,6 @@ import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Looper
-import com.hcjeong.forestix.data.cruise.PositionTier
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -306,19 +306,15 @@ class LocationService(
             context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) ==
                 PackageManager.PERMISSION_GRANTED
 
-        // MARK: - Live tier classification (REQ-NAV-003)
-
-        /// Quick "what tier would one sample be?" for the nav header
-        /// badge. Uses a conservative single-sample rule: horizontal
-        /// accuracy alone drives the tier (we don't have scatter for a
-        /// 1-sample window). Matches the UX: "GPS-C" while walking,
-        /// "GPS-A" when it tightens up.
-        fun tier(forHorizontalAccuracyM: Double): PositionTier {
-            if (forHorizontalAccuracyM <= 0) return PositionTier.D
-            if (forHorizontalAccuracyM < 5) return PositionTier.A
-            if (forHorizontalAccuracyM < 10) return PositionTier.B
-            if (forHorizontalAccuracyM < 20) return PositionTier.C
-            return PositionTier.D
-        }
+        // (`tier(forHorizontalAccuracyM:)` — the old REQ-NAV-003
+        // header-badge helper — is DELETED. It graded a SINGLE fix A below
+        // 5 m and B below 10 m, which is the averaged-centre scale applied
+        // to a one-shot reading: those two rows require a sample spread
+        // under a bound and one fix has no spread to measure.
+        // `GPSAveraging.classifySingleFix` is the rule for one fix, and it
+        // is the only one. The badge that called this went with field
+        // report F9, so nothing was left using it — and a dead second
+        // answer to "what tier is this fix?" is exactly what the next
+        // person finds first.)
     }
 }

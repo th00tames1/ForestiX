@@ -71,18 +71,28 @@ public struct HeightScanScreen: View {
         public var photoPath: String?
         public var latitude: Double?
         public var longitude: Double?
+        /// The pole / clinometer height typed on THIS screen for THIS capture,
+        /// already converted to the metric base (m). It goes onto the reading,
+        /// not only into the raw-capture manifest: the manifest is developer
+        /// plumbing that can be pruned, while the truth column the accuracy
+        /// study reads is exported from the reading. nil when nothing usable
+        /// was typed — never a zero, which would read as a pole that measured
+        /// nothing.
+        public var truth: Double?
         public init(speciesCode: String? = nil,
                     damageCodes: [String] = [],
                     note: String = "",
                     photoPath: String? = nil,
                     latitude: Double? = nil,
-                    longitude: Double? = nil) {
+                    longitude: Double? = nil,
+                    truth: Double? = nil) {
             self.speciesCode = speciesCode
             self.damageCodes = damageCodes
             self.note = note
             self.photoPath = photoPath
             self.latitude = latitude
             self.longitude = longitude
+            self.truth = truth
         }
     }
 
@@ -443,7 +453,11 @@ public struct HeightScanScreen: View {
                         note: metaNote,
                         photoPath: photo,
                         latitude: fix?.latitude,
-                        longitude: fix?.longitude)
+                        longitude: fix?.longitude,
+                        // The pole value rides WITH the reading. Read before
+                        // `applyTypedTruth` runs, because that call clears the
+                        // field once the value is durable on the bundle.
+                        truth: typedTruthForThisMeasurement)
                     // The host reports whether the reading actually reached
                     // storage. A dropped height used to be indistinguishable
                     // from a saved one (the cover closed either way), which is
@@ -497,8 +511,36 @@ public struct HeightScanScreen: View {
     @ViewBuilder
     private var overlayChrome: some View {
         if let label = crosshairLabel {
-            crosshair(label: label)
-                .accessibilityIdentifier(crosshairIdentifier)
+            // FIELD REPORT 16, SECOND PASS — the ring has to sit on the pixel
+            // the raycast samples. `ARCenterRaycaster` shoots through the AR
+            // view's bounds centre, and the AR view is FULL-BLEED
+            // (`.ignoresSafeArea()` on the camera layer above), so the aiming
+            // rect is the SCREEN rect. The body ZStack is not: it is laid out
+            // inside the safe area, so centring in it puts the ring on the
+            // SAFE-AREA centre — on a notched phone (top inset ≈ 59, bottom
+            // ≈ 34) that is ~12 pt below true screen centre, and the sphere
+            // lands that far off the ring on every tap. Centring the ring
+            // alone (the previous fix) removed the label's ~16 pt offset,
+            // which had been masking this one.
+            //
+            // It is not only a vertical error. In LANDSCAPE the safe-area
+            // insets are horizontally asymmetric (sensor housing on one side,
+            // home indicator on the other), so the safe-area centre sits to one
+            // side of the screen centre too — which is the only mechanism found
+            // for the sideways half of the field report, and it disappears with
+            // the same fix. Android was never exposed to either: its root Box
+            // is `fillMaxSize()` with no inset padding and the AR view fills
+            // the same Box, so `Alignment.Center` IS the view centre there.
+            //
+            // Positioned from a full-bleed GeometryReader, exactly as
+            // `DBHScanScreen.crosshairRing` is — same defect, same remedy,
+            // and the Diameter screen documents it at its own reader.
+            GeometryReader { geo in
+                crosshair(label: label)
+                    .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                    .accessibilityIdentifier(crosshairIdentifier)
+            }
+            .ignoresSafeArea()
         }
     }
 
@@ -734,7 +776,10 @@ public struct HeightScanScreen: View {
         // anchor being gone ends the measurement outright. Same precedence
         // and the same strings as the Android sibling.
         switch viewModel.state {
-        case .walking, .aimBaseArmed, .aimTopArmed:
+        // `.aimTopCaptured` is in the list because `observeWalkIntegrity`
+        // watches it too — without it a dropout during the top capture updated
+        // state that nothing on screen displayed.
+        case .walking, .aimBaseArmed, .aimTopArmed, .aimTopCaptured:
             if viewModel.anchorLost { return HeightScanViewModel.anchorLostText }
             if !viewModel.trackingLive { return HeightScanViewModel.trackingLostNow }
         default: break
@@ -812,6 +857,30 @@ public struct HeightScanScreen: View {
     /// validated against ground truth.
     private func recordResearchRow(_ r: HeightResult) {
         guard settings.developerMode else { return }
+        // Did VIO drop between anchoring and the aims? The warning the cruiser
+        // saw travels WITH the row — an accepted reading taken across a dropout
+        // used to export identically to a clean one. On a WALK-OFF row "false"
+        // is a positive statement that the walk was continuous, not a missing
+        // observation.
+        //
+        // EMPTY on a typed manual height, which is what the column's own
+        // definition says ("Empty on rows with no walk-off (DBH, typed manual
+        // heights)" — ResearchLog) and what this row did not do.
+        // `submitManualEntry` does not reset the latch, so a cruiser who
+        // anchored, walked, hit a dropout, gave up and typed the number
+        // exported tracking_dropped=true for a row where nothing was tracked;
+        // and an ordinary typed row exported "false", positively claiming that
+        // a walk-off which never happened was continuous. Both are assertions
+        // about a measurement the row did not make. Android makes the same test.
+        //
+        // Bound out of the literal below deliberately: that dictionary is
+        // already long enough to be worth keeping cheap for the type-checker.
+        let trackingDroppedCell: String
+        if r.method == .manualEntry {
+            trackingDroppedCell = ""
+        } else {
+            trackingDroppedCell = viewModel.trackingDroppedDuringWalk ? "true" : "false"
+        }
         var f: [String: String] = [
             "measure_type": "height",
             "method": r.method.rawValue,
@@ -831,6 +900,8 @@ public struct HeightScanScreen: View {
             // unmeasured drift and a zero drift are different facts.
             "aim_drift_m": viewModel.aimDriftM
                 .map { String(format: "%.3f", $0) } ?? "",
+            // Walk-off continuity — see `trackingDroppedCell` above.
+            "tracking_dropped": trackingDroppedCell,
             "species": metaSpecies ?? "",
             "note": metaNote,
         ]
@@ -838,17 +909,7 @@ public struct HeightScanScreen: View {
         // had to retype. Same value the raw-capture bundle and the saved
         // reading carry, so the three join.
         f["tree_id"] = treeNumber.map(String.init) ?? ""
-        // ',' is a legitimate decimal separator on the cruiser's keypad.
-        //
-        // OWNER GATE: the field is deliberately kept across trees when a truth
-        // could not be attached (queued, no bundle, or a failed save), so the
-        // text on screen may belong to an EARLIER measurement. Both owner marks
-        // are nil only while the value was typed for THIS compute — anything
-        // else would stamp the previous tree's clinometer reading onto this row.
-        let truthIsForThisMeasurement =
-            truthOwnerBundleID == nil && truthQueuedForBundleID == nil
-        if truthIsForThisMeasurement,
-           let t = TruthInput.parsePositiveBase(researchTrueText, unit: activeTruthUnit) {
+        if let t = typedTruthForThisMeasurement {
             // `true_value` and `error` are in the row's `unit` (m) — the same
             // scale as `measured_value`, so the error column stays
             // subtractable. `truth_unit` records what was actually typed.
@@ -859,6 +920,27 @@ public struct HeightScanScreen: View {
         ResearchLog.shared.record(f)
         // NOTE: the field is deliberately NOT cleared here — `applyTypedTruth`
         // clears it only once the value is durably on the bundle.
+    }
+
+    /// The typed pole / clinometer height in the metric base (m) when it
+    /// belongs to the measurement being accepted right now, else nil. Read by
+    /// BOTH consumers of the field — the reading and the research row — so they
+    /// can never disagree about which capture a number was typed for.
+    ///
+    /// ',' is a legitimate decimal separator on the cruiser's keypad.
+    ///
+    /// OWNER GATE: the field is deliberately kept across trees when a truth
+    /// could not be attached (queued, no bundle, or a failed save), so the text
+    /// on screen may belong to an EARLIER measurement. Both owner marks are nil
+    /// only while the value was typed for THIS compute — anything else would
+    /// stamp the previous tree's clinometer reading onto this one.
+    private var typedTruthForThisMeasurement: Double? {
+        guard settings.developerMode,
+              truthOwnerBundleID == nil,
+              truthQueuedForBundleID == nil
+        else { return nil }
+        return TruthInput.parsePositiveBase(researchTrueText,
+                                            unit: activeTruthUnit)
     }
 
     /// Attach the typed ground truth to the bundle this Accept confirms.

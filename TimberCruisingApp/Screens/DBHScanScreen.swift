@@ -56,6 +56,14 @@ public struct DBHScanScreen: View {
         /// "manual" when the reading was captured in ADJUST (edge-
         /// bracket) mode, "auto" otherwise. Recorded with the entry.
         public var captureMode: String?
+        /// The tape diameter typed on THIS screen for THIS capture, already
+        /// converted to the metric base (cm). It goes onto the reading, not
+        /// only into the raw-capture manifest: the manifest is developer
+        /// plumbing that can be pruned, while the truth column the accuracy
+        /// study reads is exported from the reading. nil when nothing usable
+        /// was typed — never a zero, which would read as a tape that
+        /// measured nothing.
+        public var truth: Double?
         public init(speciesCode: String? = nil,
                     position: QuickMeasureEntry.StemPosition? = nil,
                     damageCodes: [String] = [],
@@ -63,7 +71,8 @@ public struct DBHScanScreen: View {
                     photoPath: String? = nil,
                     latitude: Double? = nil,
                     longitude: Double? = nil,
-                    captureMode: String? = nil) {
+                    captureMode: String? = nil,
+                    truth: Double? = nil) {
             self.speciesCode = speciesCode
             self.position = position
             self.damageCodes = damageCodes
@@ -72,6 +81,7 @@ public struct DBHScanScreen: View {
             self.latitude = latitude
             self.longitude = longitude
             self.captureMode = captureMode
+            self.truth = truth
         }
     }
 
@@ -88,6 +98,9 @@ public struct DBHScanScreen: View {
     /// this appearance. Stops the arming from fighting a cruiser who taps
     /// Auto — one arm per visit, then the pill decides.
     @State private var adjustArmedThisAppearance = false
+    /// True once this screen has produced a fit — the switch that turns the
+    /// scene-reconstruction wireframe off. See `showsScanMesh`.
+    @State private var hasProducedFit = false
 
     /// Bridge that turns SwiftUI screen taps into world-space rays / hits
     /// against the live ARView; also the source of the camera pitch logged
@@ -287,6 +300,27 @@ public struct DBHScanScreen: View {
         .accessibilityIdentifier("dbhScan.lidarRequired")
     }
 
+    /// Whether the LiDAR scene-reconstruction wireframe is drawn over the
+    /// camera feed right now.
+    ///
+    /// FIELD REPORT 9. `.showSceneUnderstanding` re-renders the WHOLE
+    /// accumulated reconstruction every display frame, and ARKit keeps
+    /// accumulating it for as long as the session lives — which here is the
+    /// whole plot, because the scan screens attach to a shared session with
+    /// no reset options so world anchors survive. That is the one cost on
+    /// this screen whose shape matches the report exactly: fine on the first
+    /// tree, heavy by the tenth, worst on the trees that take longest.
+    ///
+    /// It is not decoration and it is not being deleted — the cruiser asked
+    /// for it as the "it's actually scanning" feedback. But that question is
+    /// answered, permanently, by the first diameter this screen puts on the
+    /// glass. So the wireframe runs until the first fit and then gets out of
+    /// the way; a stall keeps it up, which is exactly when the cruiser is
+    /// asking whether the sensor sees anything at all. Reopening the screen
+    /// brings it back (in the cruise tally the screen is reused across
+    /// trees, and by then the answer is in hand).
+    private var showsScanMesh: Bool { !hasProducedFit }
+
     private var scanBody: some View {
         ZStack {
             // Live AR camera feed wired to the same ARSession the
@@ -296,12 +330,13 @@ public struct DBHScanScreen: View {
             // the live single-frame fit as a translucent blue cylinder
             // at the trunk's world position — world-anchored, so it
             // stays locked to the tree as the phone moves.
-            // Mesh overlay ON for DBH (field fix): the scene-reconstruction
-            // wireframe is the "it's actually scanning" feedback cruisers
-            // asked for. Height keeps it off. The subdued sampling-plot
-            // overlay (if a plot is active) renders under the cylinder.
+            // Mesh overlay: see `showsScanMesh` — the "it's actually
+            // scanning" feedback the cruiser asked for, until the first
+            // diameter answers the question for good. Height keeps it off
+            // entirely. The subdued sampling-plot overlay (if a plot is
+            // active) renders under the cylinder.
             ARCameraView(manager: viewModel.session,
-                         debugMeshOverlay: true,
+                         debugMeshOverlay: showsScanMesh,
                          sceneMarkers: plotOverlayMarkers + cylinderMarkers,
                          raycaster: raycaster)
                 .ignoresSafeArea()
@@ -592,6 +627,11 @@ public struct DBHScanScreen: View {
             adjustArmedThisAppearance = true
             enterAdjustMode()
         }
+        // The wireframe's off-switch — see `showsScanMesh`. Latched, never
+        // released: it answers a question that only gets asked once.
+        .onChange(of: viewModel.previewFit != nil) { _, has in
+            if has, !hasProducedFit { hasProducedFit = true }
+        }
         .onDisappear {
             adjustArmedThisAppearance = false
             viewModel.onDisappear()
@@ -686,7 +726,11 @@ public struct DBHScanScreen: View {
                         // bucket the algorithm comparison draws from.
                         captureMode: r.method == .manualVisual
                             ? "typed"
-                            : (viewModel.resultCapturedManually ? "manual" : "auto"))
+                            : (viewModel.resultCapturedManually ? "manual" : "auto"),
+                        // The tape value rides WITH the reading. Read before
+                        // `applyTypedTruth` runs, because that call clears the
+                        // field once the value is durable on the bundle.
+                        truth: typedTruthForThisMeasurement)
                     // The host reports whether the reading actually reached
                     // storage. A dropped diameter used to be indistinguishable
                     // from a saved one — the loop reset for the next tree
@@ -1459,12 +1503,29 @@ public struct DBHScanScreen: View {
 
     /// Whether the banner should carry the acquisition hint right now.
     ///
-    /// Suppressed while `previewStatusText` is up: that line is a SPECIFIC
-    /// reason (the bracket's "narrow it onto the trunk", a fit's own
-    /// rejection) already on screen in the value strip, and two sentences
-    /// giving different advice about the same failure is worse than one.
+    /// Suppressed while an ADVICE line is up: that line is a SPECIFIC reason
+    /// (the bracket's "narrow it onto the trunk", a fit's own rejection)
+    /// already on screen in the value strip, and two sentences giving
+    /// different advice about the same failure is worse than one.
+    ///
+    /// NOT suppressed by the developer-mode diagnostic. That line is numbers,
+    /// not a remedy, so it competes with nothing — and developer mode is worn
+    /// in the stand here, not just on the bench: the tape-truth field, the
+    /// research CSV row and the typed-truth capture below are all gated on
+    /// `settings.developerMode`, so the accuracy-study cruiser runs with it
+    /// on all day. Treating the diagnostic as advice therefore withheld field
+    /// report 15's hint from exactly the operator the study depends on, while
+    /// Android (which has no developer gate on its banner at all) showed it.
+    ///
+    /// The other half of the bargain lives in the view model: the ADJUST
+    /// branch — the default path — stops writing its bracket line once the
+    /// stall interval has elapsed, and the stall ticker takes down whatever
+    /// the last frame left behind when depth delivery itself stops, precisely
+    /// so this hint can come through.
     private var showsAcquisitionHint: Bool {
-        viewModel.acquisitionStalled && viewModel.previewStatusText == nil
+        viewModel.acquisitionStalled
+            && (viewModel.previewStatusText == nil
+                || viewModel.previewStatusIsDiagnostic)
     }
 
     private var statusText: String {
@@ -1527,17 +1588,7 @@ public struct DBHScanScreen: View {
             f["depth_w"] = "\(frame.width)"
             f["depth_h"] = "\(frame.height)"
         }
-        // ',' is a legitimate decimal separator on the cruiser's keypad.
-        //
-        // OWNER GATE: the field is deliberately kept across trees when a truth
-        // could not be attached (queued, no bundle, or a failed save), so the
-        // text on screen may belong to an EARLIER measurement. Both owner marks
-        // are nil only while the value was typed for THIS burst — anything else
-        // would stamp the previous tree's tape reading onto this row.
-        let truthIsForThisMeasurement =
-            truthOwnerBundleID == nil && truthQueuedForBundleID == nil
-        if truthIsForThisMeasurement,
-           let t = TruthInput.parsePositiveBase(researchTrueText, unit: activeTruthUnit) {
+        if let t = typedTruthForThisMeasurement {
             // `true_value` and `error` are in the row's `unit` (cm) — the same
             // scale as `measured_value`, so the error column stays
             // subtractable. `truth_unit` records what was actually typed.
@@ -1548,6 +1599,27 @@ public struct DBHScanScreen: View {
         ResearchLog.shared.record(f)
         // NOTE: the field is deliberately NOT cleared here — `applyTypedTruth`
         // clears it only once the value is durably on the bundle.
+    }
+
+    /// The typed tape diameter in the metric base (cm) when it belongs to the
+    /// measurement being accepted right now, else nil. Read by BOTH consumers
+    /// of the field — the reading and the research row — so they can never
+    /// disagree about which capture a number was typed for.
+    ///
+    /// ',' is a legitimate decimal separator on the cruiser's keypad.
+    ///
+    /// OWNER GATE: the field is deliberately kept across trees when a truth
+    /// could not be attached (queued, no bundle, or a failed save), so the text
+    /// on screen may belong to an EARLIER measurement. Both owner marks are nil
+    /// only while the value was typed for THIS burst — anything else would
+    /// stamp the previous tree's tape reading onto this one.
+    private var typedTruthForThisMeasurement: Double? {
+        guard settings.developerMode,
+              truthOwnerBundleID == nil,
+              truthQueuedForBundleID == nil
+        else { return nil }
+        return TruthInput.parsePositiveBase(researchTrueText,
+                                            unit: activeTruthUnit)
     }
 
     /// Attach the typed ground truth to the bundle this Accept confirms.

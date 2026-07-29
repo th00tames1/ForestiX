@@ -56,6 +56,15 @@ public struct FieldLogScreen: View {
     /// dismissal animation.
     @State private var pendingRescan: FieldLogRescan?
     @State private var rescan: FieldLogRescan?
+    /// "Edit plot", tapped in the plot mini-map's enlarged view from a
+    /// re-measure launched here (FIELD REPORT 12). The scan screens only
+    /// OFFER Edit when a host hands them somewhere to go, and this host used
+    /// to hand them nothing — so the same enlarged view that offered Edit
+    /// everywhere else offered only Close when the cruiser reached it from
+    /// the field log. Android has never had the hole: its scan screens build
+    /// the destination themselves and fall back to the quick sampling
+    /// screen, which is exactly where this one points.
+    @State private var rescanPlotSetup = false
 
     public init() {}
 
@@ -115,7 +124,15 @@ public struct FieldLogScreen: View {
         }
         #if os(iOS)
         .fullScreenCover(item: $rescan) { request in
-            NavigationStack { rescanCover(request) }
+            NavigationStack {
+                rescanCover(request)
+                    // Presented from INSIDE the rescan cover, the way the map
+                    // home presents its own: a cover raised on the field log
+                    // itself would be behind the scan screen it was asked for.
+                    .fullScreenCover(isPresented: $rescanPlotSetup) {
+                        rescanPlotSetupCover
+                    }
+            }
         }
         #endif
         // A tree row can carry more than one reading, and a swipe is a
@@ -244,7 +261,12 @@ public struct FieldLogScreen: View {
                         treeNumber: request.treeNumber,
                         treeName: request.treeName,
                         plotID: request.plotID,
-                        speciesCode: meta.speciesCode ?? request.speciesCode,
+                        // The chip is SEEDED with the row's code now, so this
+                        // is the row's species until the cruiser changes it —
+                        // and a cruiser who CLEARS it means it, which the old
+                        // `?? request.speciesCode` fallback silently undid.
+                        // Android has always written the chip verbatim.
+                        speciesCode: meta.speciesCode,
                         position: meta.position ?? .dbh,
                         damageCodes: meta.damageCodes,
                         note: meta.note.isEmpty ? nil : meta.note,
@@ -252,15 +274,22 @@ public struct FieldLogScreen: View {
                         longitude: meta.longitude,
                         photoPath: meta.photoPath,
                         captureMode: meta.captureMode,
-                        // The tape reading did not change because the scan
-                        // did — a re-measure that dropped the truth would
-                        // quietly cost the validation study its comparison.
-                        truth: request.truth))
+                        // A truth typed on the scan screen is the cruiser's
+                        // newest word on this tree and wins; otherwise the
+                        // tape reading did not change because the scan did,
+                        // and a re-measure that dropped it would quietly cost
+                        // the validation study its comparison.
+                        truth: meta.truth ?? request.truth))
                     rescan = nil
                     return true
                 },
                 projectID: nil,
-                quickTreeNumber: request.treeNumber)
+                quickTreeNumber: request.treeNumber,
+                // Seed the species chip from the row being re-measured, as
+                // Android does — otherwise the cruiser retypes a code the
+                // accept handler would have restored behind their back.
+                initialSpeciesCode: request.speciesCode,
+                onEditPlot: { rescanPlotSetup = true })
         case .height:
             HeightScanScreen(
                 viewModel: HeightScanViewModel(calibration: .identity),
@@ -274,13 +303,18 @@ public struct FieldLogScreen: View {
                         treeNumber: request.treeNumber,
                         treeName: request.treeName,
                         plotID: request.plotID,
-                        speciesCode: meta.speciesCode ?? request.speciesCode,
+                        // Seeded chip, written verbatim — see the diameter
+                        // cover.
+                        speciesCode: meta.speciesCode,
                         damageCodes: meta.damageCodes,
                         note: meta.note.isEmpty ? nil : meta.note,
                         latitude: meta.latitude,
                         longitude: meta.longitude,
                         photoPath: meta.photoPath,
-                        truth: request.truth))
+                        // See the diameter cover: a truth typed on the scan
+                        // screen wins, else the row's own tape value rides
+                        // across the re-measure.
+                        truth: meta.truth ?? request.truth))
                     rescan = nil
                     return true
                 },
@@ -296,10 +330,32 @@ public struct FieldLogScreen: View {
                         confidenceRaw: "green",
                         method: "ar.crown.dh",
                         treeNumber: request.treeNumber,
+                        // NAMED, like every other crown this app writes
+                        // (map home, Android height screen). A nameless crown
+                        // row exports a blank tree_name for a tree whose other
+                        // readings carry one.
+                        treeName: request.treeName,
                         plotID: request.plotID))
                 },
                 projectID: nil,
-                treeNumber: request.treeNumber)
+                treeNumber: request.treeNumber,
+                // Seed the species chip from the row being re-measured, as
+                // Android does.
+                initialSpeciesCode: request.speciesCode,
+                onEditPlot: { rescanPlotSetup = true })
+                .environmentObject(history)
+                .environmentObject(settings)
+        }
+    }
+
+    /// Plot setup re-opened from a re-measure's mini-map (FIELD REPORT 12).
+    /// The quick sampling screen, exactly as the measure chooser opens it —
+    /// a re-measure launched from the field log is a QUICK reading, so the
+    /// ring it is measuring into is the quick sampling ring. Same destination
+    /// Android's scan screens fall back to (`Routes.SAMPLING`).
+    private var rescanPlotSetupCover: some View {
+        NavigationStack {
+            SamplingPlotScreen()
                 .environmentObject(history)
                 .environmentObject(settings)
         }
@@ -868,6 +924,11 @@ private struct FieldLogDetailForm: View {
     /// The fields are filled from the store ONCE. Re-filling them on every
     /// store change would overwrite what the cruiser is typing.
     @State private var seeded = false
+    /// Per-entry unit override for the two TRUTH fields, remembered with the
+    /// unit system it was chosen under so changing the system drops it.
+    /// Same shape as the scan screens' `truthUnitChoice`.
+    @State private var dbhTruthUnitChoice: (unit: TruthInput.Unit, imperial: Bool)?
+    @State private var heightTruthUnitChoice: (unit: TruthInput.Unit, imperial: Bool)?
 
     /// A prefilled field re-parses a hair off the number it was filled
     /// from — it is rendered to four decimals, and under imperial it makes
@@ -907,10 +968,50 @@ private struct FieldLogDetailForm: View {
         kind == .dbh ? .diameter : .height
     }
 
-    /// The unit BOTH fields of a section are typed in — the cruiser's
-    /// active system, converted to the metric base on the way in.
+    /// The unit the MEASURED-value field of a section is typed in — the
+    /// cruiser's active system, converted to the metric base on the way in.
     private func unit(_ kind: QuickMeasureEntry.Kind) -> TruthInput.Unit {
         TruthInput.defaultUnit(quantity(kind), imperial: imperial)
+    }
+
+    /// The unit the TRUTH field of a section is typed in. It opens in the
+    /// cruiser's active system like every other field, and the toggle
+    /// overrides it for THIS entry — a tape in centimetres read against an
+    /// imperial project is the case that lost a day of analysis. The override
+    /// is remembered with the system it was chosen under, so changing the
+    /// system drops it; identical rule to the three scan screens.
+    private func truthUnit(_ kind: QuickMeasureEntry.Kind) -> TruthInput.Unit {
+        let choice = kind == .dbh ? dbhTruthUnitChoice : heightTruthUnitChoice
+        if let choice, choice.imperial == imperial { return choice.unit }
+        return TruthInput.defaultUnit(quantity(kind), imperial: imperial)
+    }
+
+    /// Switching the unit CONVERTS the digits, and this is deliberately NOT
+    /// what the three scan screens do.
+    ///
+    /// There the field starts empty and the toggle means "the number I am
+    /// about to type is in this unit", so reinterpreting the digits is the
+    /// whole point. Here the field is seeded from a truth already on the
+    /// record. Reinterpreting it would take a stored 30 cm, call it 30 in and
+    /// write back 76.2 cm — a silent tenfold-ish corruption of the tape value
+    /// the entire study is measured against, reached by one tap on a square
+    /// button. Converting cannot change the quantity, only how it is spelled.
+    private func toggleTruthUnit(_ kind: QuickMeasureEntry.Kind) {
+        let from = truthUnit(kind)
+        let next: (unit: TruthInput.Unit, imperial: Bool) =
+            (TruthInput.toggled(from), imperial)
+        // Re-spell whatever is in the field, if it is a number at all. Text
+        // that does not parse is left alone rather than blanked; the cruiser
+        // is mid-edit and their keystrokes are not ours to discard.
+        let respelled = TruthInput.parsePositiveBase(truthText(kind), unit: from)
+            .map { TruthInput.text(base: $0, unit: next.unit) }
+        if kind == .dbh {
+            dbhTruthUnitChoice = next
+            if let respelled { dbhTruthText = respelled }
+        } else {
+            heightTruthUnitChoice = next
+            if let respelled { heightTruthText = respelled }
+        }
     }
 
     private func valueBinding(_ kind: QuickMeasureEntry.Kind) -> Binding<String> {
@@ -955,14 +1056,19 @@ private struct FieldLogDetailForm: View {
         }
         if kind == .height, let m = parsedValue(kind),
            m < Double(HeightEstimator.minHMeters) {
-            return String(format: "A typed height must be at least %.1f m.",
-                          HeightEstimator.minHMeters)
+            // The floor is one physical height; the sentence is written in the
+            // unit the field is in, so an imperial cruiser is not handed a
+            // metre figure to compare against the feet they just typed.
+            let floor = TruthInput.fromBase(Double(HeightEstimator.minHMeters),
+                                            unit: unit(kind))
+            return String(format: "A typed height must be at least %.1f %@.",
+                          floor, unit(kind).rawValue)
         }
         // Outside the cruising window is a WARNING, not a refusal: the
         // number is the cruiser's own observation. Same wording as every
         // other truth field in the app.
         return parsedValue(kind).flatMap {
-            TruthInput.warning(base: $0, quantity: quantity(kind))
+            TruthInput.warning(base: $0, quantity: quantity(kind), unit: unit(kind))
         }
     }
 
@@ -982,7 +1088,7 @@ private struct FieldLogDetailForm: View {
         guard let existing = existing(kind) else { return true }
         if abs(value - existing.value) > Self.valueEpsilon { return true }
         guard settings.developerMode else { return false }
-        let typed = TruthInput.parsePositiveBase(truthText(kind), unit: unit(kind))
+        let typed = TruthInput.parsePositiveBase(truthText(kind), unit: truthUnit(kind))
         switch (typed, existing.truth) {
         case (nil, nil):          return false
         case let (new?, old?):    return abs(new - old) > Self.valueEpsilon
@@ -996,7 +1102,7 @@ private struct FieldLogDetailForm: View {
         // Developer mode owns the truth field. With it off the stored truth
         // is not on screen, so a save must leave it exactly as it was.
         let truth = settings.developerMode
-            ? TruthInput.parsePositiveBase(truthText(kind), unit: unit(kind))
+            ? TruthInput.parsePositiveBase(truthText(kind), unit: truthUnit(kind))
             : current?.truth
         if let current {
             var next = current
@@ -1020,13 +1126,13 @@ private struct FieldLogDetailForm: View {
             TruthInput.text(base: $0.value, unit: unit(.dbh))
         } ?? ""
         dbhTruthText = row.dbh?.truth.map {
-            TruthInput.text(base: $0, unit: unit(.dbh))
+            TruthInput.text(base: $0, unit: truthUnit(.dbh))
         } ?? ""
         heightText = row.height.map {
             TruthInput.text(base: $0.value, unit: unit(.height))
         } ?? ""
         heightTruthText = row.height?.truth.map {
-            TruthInput.text(base: $0, unit: unit(.height))
+            TruthInput.text(base: $0, unit: truthUnit(.height))
         } ?? ""
     }
 
@@ -1052,16 +1158,30 @@ private struct FieldLogDetailForm: View {
                 warningRow(warning)
             }
             if settings.developerMode {
-                TextField(TruthInput.fieldLabel(quantity(kind), unit: unit(kind)),
-                          text: truthBinding(kind))
-                    #if os(iOS)
-                    .keyboardType(.decimalPad)
-                    #endif
-                    .foregroundStyle(ForestixPalette.textPrimary)
+                HStack(spacing: 6) {
+                    // Label and toggle read the SAME unit, so the field can
+                    // never say cm while the value is taken as inches.
+                    TextField(TruthInput.fieldLabel(quantity(kind), unit: truthUnit(kind)),
+                              text: truthBinding(kind))
+                        #if os(iOS)
+                        .keyboardType(.decimalPad)
+                        #endif
+                        .foregroundStyle(ForestixPalette.textPrimary)
+                    TruthUnitToggle(
+                        unit: truthUnit(kind),
+                        onToggle: { toggleTruthUnit(kind) },
+                        identifier: kind == .dbh
+                            ? "fieldLog.dbhTruthUnit"
+                            : "fieldLog.heightTruthUnit",
+                        chrome: .form)
+                }
                 if let warning = TruthInput.fieldWarning(truthText(kind),
                                                          quantity: quantity(kind),
-                                                         unit: unit(kind)) {
+                                                         unit: truthUnit(kind)) {
                     warningRow(warning)
+                }
+                if let hint = truthNeedsReadingHint(kind) {
+                    warningRow(hint)
                 }
             }
             Button("Save changes") { save(kind, tree: tree) }
@@ -1077,6 +1197,24 @@ private struct FieldLogDetailForm: View {
                     truth: current?.truth))
             }
         }
+    }
+
+    /// Why Save stays off when the cruiser types a tape value for a kind that
+    /// has no reading and no number beside it.
+    ///
+    /// A truth is an observation ABOUT a reading, so it needs one to sit on:
+    /// storing it alone would mean inventing a measurement to hang it from,
+    /// which is the one thing this app must never do. But the cruiser who
+    /// failed to get a scan and DID tape the tree still has a number to
+    /// record — it is a typed measurement, stamped as typed, and the sentence
+    /// says exactly that instead of leaving a dead button with no reason.
+    private func truthNeedsReadingHint(_ kind: QuickMeasureEntry.Kind) -> String? {
+        guard existing(kind) == nil,
+              parsedValue(kind) == nil,
+              TruthInput.parsePositiveBase(truthText(kind),
+                                           unit: truthUnit(kind)) != nil
+        else { return nil }
+        return "A ground truth attaches to a reading. Type the tape number as the measurement above — it is saved as typed, not measured."
     }
 
     private func remeasureTitle(_ kind: QuickMeasureEntry.Kind,
@@ -1243,16 +1381,24 @@ private struct FieldLogDetailForm: View {
 
     // MARK: Ground truth (developer mode)
 
-    /// Hand-measured values typed against this tree number, read back from
-    /// the raw-capture bundles — which is where the truth is actually
-    /// stored. Developer-mode only, because that is the only mode in which
-    /// the field exists to type into.
+    /// Hand-measured values in this tree's RAW-CAPTURE bundles that are on no
+    /// reading — typed before the truth lived on the reading, or typed for a
+    /// capture whose reading has since been deleted.
+    ///
+    /// ORPHANS ONLY. The truth that IS on a reading is shown, and edited, in
+    /// that reading's section above, and that is the one the CSV carries.
+    /// Listing the manifest copy beside it gave the cruiser two ground truths
+    /// for one tree that could disagree, with nothing saying which exports.
     private var groundTruths: [(kind: String, value: Double)] {
         guard case .tree(let number) = row.subject else { return [] }
         return RawCaptureStore.list().compactMap { summary in
             guard summary.manifest.context.treeNumber == number,
                   let truth = summary.manifest.truth.value else { return nil }
-            return (summary.manifest.kind, truth)
+            let kind = summary.manifest.kind
+            // Already answered — and exported — by the reading itself.
+            if kind == "dbh", row.dbh?.truth != nil { return nil }
+            if kind == "height", row.height?.truth != nil { return nil }
+            return (kind, truth)
         }
     }
 
@@ -1265,6 +1411,12 @@ private struct FieldLogDetailForm: View {
                         ? String(format: "%.1f cm", item.value)
                         : String(format: "%.2f m", item.value))
             }
+            // Says out loud what this section now is: a leftover, not the
+            // number the export reads.
+            Text("Kept with a raw capture, not on a reading — it is not exported. Type it in above to keep it.")
+                .font(ForestixType.caption)
+                .foregroundStyle(ForestixPalette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

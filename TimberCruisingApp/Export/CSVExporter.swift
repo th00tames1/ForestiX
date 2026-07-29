@@ -169,7 +169,23 @@ public enum CSVExporter {
             cells.append(quote(String(describing: p.positionTier)))
             cells.append("\(p.gpsNSamples)")
             cells.append(format(Double(p.gpsMedianHAccuracyM), places: 3))
-            cells.append(format(Double(p.gpsSampleStdXyM), places: 3))
+            // A SPREAD NEEDS TWO SAMPLES. Below that there is nothing to
+            // measure, and "0.000" in a spread column is the strongest claim
+            // the column can make — the fixes agreed perfectly — for a row
+            // where no spread was ever taken. Unmeasured is not zero. The
+            // empty cell is the same convention this file already gives
+            // `offset_walk_m` and the centre columns, so the file describes
+            // itself instead of requiring the reader to know that
+            // `position_source == gpsSingle` means "ignore this column".
+            //
+            // Keyed on the SAMPLE COUNT rather than on the source, because
+            // the count is the thing the statistic needs: it also blanks the
+            // day-1/day-2 rows that carry `gpsAveraged` with one sample (a
+            // storage mislabel, identified for a separate migration — this
+            // changes the export only, never the stored row).
+            cells.append(p.gpsNSamples >= 2
+                         ? format(Double(p.gpsSampleStdXyM), places: 3)
+                         : "")
             cells.append(optional(p.offsetWalkM, places: 2))
             cells.append(format(Double(p.slopeDeg), places: 2))
             cells.append(format(Double(p.aspectDeg), places: 2))

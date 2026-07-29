@@ -85,6 +85,7 @@ package com.hcjeong.forestix.ar
 
 import android.content.Context
 import android.content.ContextWrapper
+import android.os.SystemClock
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.compose.runtime.getValue
@@ -180,6 +181,27 @@ object ArSessionHub {
     fun linkPlot(cruisePlotId: java.util.UUID) {
         if (activePlot == null) return
         linkedCruisePlotId = cruisePlotId
+    }
+
+    /// Quick-measure history row this ring was saved as, null until the
+    /// sampling screen's Save writes one and again on the next placement.
+    ///
+    /// FIELD REPORT 12 — "Edit plot" re-opens the sampling screen on the ring
+    /// already placed, and its Save appended unconditionally. Three radius
+    /// tweaks during one plot wrote three SAMPLING_PLOT rows for one physical
+    /// ring, and those rows reach the field log and the CSV the validation
+    /// study reads. One ring is one row: Save updates the row it already has.
+    /// Mirror of iOS ActiveSamplingPlot.linkedQuickEntryID.
+    @Volatile
+    var linkedQuickEntryId: java.util.UUID? = null
+        private set
+
+    /// Associate the placed ring with the quick-measure row Save just wrote,
+    /// so a later Save on the SAME ring updates that row instead of adding a
+    /// second one. No-op while nothing is placed.
+    fun linkQuickEntry(entryId: java.util.UUID) {
+        if (activePlot == null) return
+        linkedQuickEntryId = entryId
     }
 
     // MARK: - Height trunk anchor (walk-off d_h reference)
@@ -335,9 +357,19 @@ object ArSessionHub {
     private var plotPoseY = Float.NaN
     private var plotPoseZ = Float.NaN
 
-    // Wall clock (ms) at which the plot's pose stopped being corrected, or 0
-    // while it is being corrected. The grace window between the two is what
-    // keeps a routine sub-second tracking dip from blinking the plot.
+    // MONOTONIC clock (SystemClock.elapsedRealtime, ms) at which the plot's
+    // pose stopped being corrected, or 0 while it is being corrected. The
+    // grace window between the two is what keeps a routine sub-second
+    // tracking dip from blinking the plot.
+    //
+    // NOT System.currentTimeMillis(): this is an elapsed interval, and the
+    // wall clock can be stepped mid-session by an NTP correction or by the
+    // cruiser changing the clock / timezone. A backwards step pushes the
+    // deadline arbitrarily far out and leaves the plot drawn at an
+    // uncorrected pose well past half a second; a forwards step expires the
+    // window instantly and blinks the ring off while tracking is fine.
+    // elapsedRealtime() counts since boot, including deep sleep, and cannot
+    // be set. iOS uses ProcessInfo.systemUptime for the same reason.
     private var plotPoseStaleSinceMs = 0L
 
     // RGBA -> MaterialInstance cache. Node.destroy() does NOT free material
@@ -496,6 +528,7 @@ object ArSessionHub {
         activePlot?.anchor?.let { runCatching { it.detach() } }
         activePlot = null
         linkedCruisePlotId = null
+        linkedQuickEntryId = null
         clearHeightAnchor()
         lifecycleOwner?.registry?.let { registry ->
             if (registry.currentState != Lifecycle.State.INITIALIZED) {
@@ -691,6 +724,7 @@ object ArSessionHub {
         activePlot?.anchor?.let { runCatching { it.detach() } }
         activePlot = ActivePlot(anchor, System.currentTimeMillis())
         linkedCruisePlotId = null   // fresh ring — not yet saved as a cruise plot
+        linkedQuickEntryId = null   // ...and not yet saved as a quick-measure row
         rebuildPlotNodes()
         return true
     }
@@ -764,6 +798,7 @@ object ArSessionHub {
         activePlot?.anchor?.let { runCatching { it.detach() } }
         activePlot = null
         linkedCruisePlotId = null
+        linkedQuickEntryId = null
         applyPlotTrackingLost(false)   // nothing left to have lost track OF
         destroyPlotNodes()
     }
@@ -911,7 +946,7 @@ object ArSessionHub {
             applyPlotTrackingLost(false)
             return
         }
-        val now = System.currentTimeMillis()
+        val now = SystemClock.elapsedRealtime()
         if (plotPoseStaleSinceMs == 0L) plotPoseStaleSinceMs = now
         if (now - plotPoseStaleSinceMs >= PLOT_POSE_GRACE_MS) applyPlotTrackingLost(true)
     }

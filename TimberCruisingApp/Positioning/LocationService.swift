@@ -143,20 +143,15 @@ public final class LocationService: NSObject, ObservableObject {
         buffer.removeAll(keepingCapacity: true)
     }
 
-    // MARK: - Live tier classification (REQ-NAV-003)
-
-    /// Quick "what tier would one sample be?" for the nav header
-    /// badge. Uses a conservative single-sample rule: horizontal
-    /// accuracy alone drives the tier (we don't have scatter for a
-    /// 1-sample window). Matches the UX: "GPS-C" while walking,
-    /// "GPS-A" when it tightens up.
-    public static func tier(forHorizontalAccuracyM mAcc: Double) -> PositionTier {
-        if mAcc <= 0 { return .D }
-        if mAcc < 5  { return .A }
-        if mAcc < 10 { return .B }
-        if mAcc < 20 { return .C }
-        return .D
-    }
+    // (`tier(forHorizontalAccuracyM:)` — the old REQ-NAV-003 header-badge
+    // helper — is DELETED. It graded a SINGLE fix A below 5 m and B below
+    // 10 m, which is the averaged-centre scale applied to a one-shot
+    // reading: those two rows require a sample spread under a bound and one
+    // fix has no spread to measure. `GPSAveraging.classifySingleFix` is the
+    // rule for one fix, and it is the only one. The badge that called this
+    // went with field report F9, so nothing was left using it — and a dead
+    // second answer to "what tier is this fix?" is exactly what the next
+    // person finds first.)
 
     // MARK: - Internal
 

@@ -132,26 +132,54 @@ struct TruthFieldWarning: View {
 ///
 /// CROSS-PLATFORM: same square, same unit text, same accessibility wording as the
 /// Android `TruthUnitToggle`.
+///
+/// The 32 pt square is what is DRAWN; the tappable area around it is 44 pt,
+/// Apple's minimum touch target (Android's twin uses 48 dp, that platform's
+/// own minimum). The visual size is a matter of fitting the row; the touch
+/// target is a matter of hitting it with a glove on.
 struct TruthUnitToggle: View {
+
+    /// Which surface the toggle is sitting on. The scan panels are a dark
+    /// camera overlay and the field log is a standard light Form — the same
+    /// white-on-white that once made the scan-screen truth fields invisible
+    /// would happen here if one styling served both.
+    enum Chrome {
+        case darkPanel
+        case form
+    }
+
     let unit: TruthInput.Unit
     let onToggle: () -> Void
     /// Identifier suffixed per screen so a UI test can name the one it means.
     let identifier: String
+    var chrome: Chrome = .darkPanel
+
+    private var ink: Color {
+        chrome == .darkPanel ? .white : ForestixPalette.textPrimary
+    }
+    private var fill: Color {
+        chrome == .darkPanel ? .white.opacity(0.12) : ForestixPalette.surfaceRaised
+    }
+    private var stroke: Color {
+        chrome == .darkPanel ? .white.opacity(0.4) : ForestixPalette.divider
+    }
 
     var body: some View {
         Button(action: onToggle) {
             Text(unit.rawValue)
                 .font(ForestixType.caption)
-                .foregroundStyle(.white)
+                .foregroundStyle(ink)
                 .frame(width: 32, height: 32)
                 .background(
                     RoundedRectangle(cornerRadius: 5)
-                        .fill(.white.opacity(0.12))
+                        .fill(fill)
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 5)
-                        .stroke(.white.opacity(0.4), lineWidth: 0.5)
+                        .stroke(stroke, lineWidth: 0.5)
                 )
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         // One string, not a label + a hint: the Android sibling exposes a

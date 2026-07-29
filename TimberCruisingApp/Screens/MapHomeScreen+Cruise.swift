@@ -584,11 +584,16 @@ extension MapHomeScreen {
                 // from this test falls through to createCruisePlot and mints
                 // a duplicate Plot N+1 out from under the cruiser —
                 // `heightPlotSetup` (FIELD REPORT 12) is the newest one.
+                //
+                // The result is the REFUSAL the plot screen must show, or nil
+                // when the save landed and it may close. See `editCruisePlot`
+                // for why the refusal travels back here instead of raising the
+                // map's `plotSaveRefusal` alert.
                 if chainingPlotSetup || heightPlotSetup || editingMapPlotID != nil,
                    editableCruisePlot != nil {
-                    editCruisePlot(radiusM: radiusM)
+                    return editCruisePlot(radiusM: radiusM)
                 } else {
-                    createCruisePlot(radiusM: radiusM)
+                    return createCruisePlot(radiusM: radiusM)
                 }
             })
             .environmentObject(history)
@@ -621,17 +626,42 @@ extension MapHomeScreen {
     /// loss — invisible. `ActiveSamplingPlot.place(...)` clears
     /// `linkedCruisePlotID`, so "still linked to this plot" is exactly the
     /// test for "the centre was not re-placed".
-    func editCruisePlot(radiusM: Double) {
+    ///
+    /// RETURNS the refusal to show ON THE PLOT SCREEN, or nil when the save
+    /// landed and that screen may close. It deliberately does NOT raise
+    /// `plotSaveRefusal`: that alert is attached to the MAP body, and the plot
+    /// setup screen is a cover over the map — reached from the cruise scan
+    /// screens it is a cover over ANOTHER cover. A host that is still
+    /// presenting a modal cannot show an alert, so from the two scan doors
+    /// (`chainingPlotSetup`, `heightPlotSetup`) the refusal was raised and
+    /// never seen: the radius was written, the centre was correctly refused,
+    /// and the cruiser was told nothing. Android's `CruiseStartPlotScreen`
+    /// has always kept this message on the plot screen itself and stayed up
+    /// so it can be read and retried; this is the same shape, same words.
+    /// `plotSaveRefusal` remains for `startPlannedPlotNow`, which is raised
+    /// from the map with no cover in the way.
+    func editCruisePlot(radiusM: Double) -> String? {
         guard var plot = editableCruisePlot else {
-            createCruisePlot(radiusM: radiusM)
-            return
+            return createCruisePlot(radiusM: radiusM)
         }
         plot.plotAreaAcres = Float(.pi * radiusM * radiusM / Units.squareMetersPerAcre)
 
         let store = ActiveSamplingPlot.shared
         let recentred = store.plot != nil && store.linkedCruisePlotID != plot.id
-        if recentred,
-           let fix = location.latestSnapshot ?? LocationService.lastGlobalFix {
+        // FRESHNESS-GATED, exactly as `createCruisePlot` below. A re-centre
+        // writes a plot centre, so it is the same act and it answers to the
+        // same rule: `latestSnapshot` is never cleared and
+        // `LocationService.lastGlobalFix` is a static that outlives the
+        // screen, so ungated they hand back the last fix that ever got
+        // through — an hour old, a valley away — and this path would stamp
+        // it as a real single fix. Moving a plot centre to yesterday's
+        // position is the same invisible data loss the `recentred` test
+        // exists to prevent, just arrived at from the other side.
+        let fix = recentred
+            ? FixFreshness.usable(
+                location.latestSnapshot ?? LocationService.lastGlobalFix)
+            : nil
+        if let fix {
             plot.centerLat = fix.latitude
             plot.centerLon = fix.longitude
             // ONE fix, named as one. This path never opened an averaging
@@ -646,13 +676,43 @@ extension MapHomeScreen {
             plot.positionTier = GPSAveraging.classifySingleFix(
                 horizontalAccuracyM: Float(fix.horizontalAccuracyM))
         }
+        let refusedRecentre = recentred && fix == nil
 
-        if (try? environment.plotRepository.update(plot)) != nil {
+        // The write is the whole point of the button, so a failed one is
+        // reported in the cruiser's own words rather than swallowed by a
+        // `try?` — same sentence as Android's `save()` catch.
+        var storeError: String?
+        do {
+            _ = try environment.plotRepository.update(plot)
+        } catch {
+            storeError = "Couldn't save the plot: \(error.localizedDescription)"
+        }
+        let stored = storeError == nil
+        if stored, !refusedRecentre {
             // Re-link so the mini-map trusts the AR-anchor path for YOU
-            // against the ring the cruiser is actually looking at.
+            // against the ring the cruiser is actually looking at — but ONLY
+            // when that ring is genuinely this plot's centre. On a refused
+            // re-centre the stored centre stayed where it was, so linking
+            // would draw YOU against a ring the plot was never moved to.
+            // Left unlinked, the mini-map falls through to the GPS path
+            // measured from the centre the plot actually has.
             ActiveSamplingPlot.shared.link(cruisePlotID: plot.id)
         }
         reloadCruise()
+        // Nothing was written at all — say that, and say nothing about a
+        // radius that did not land.
+        if let storeError { return storeError }
+        // A button that did not do what it looked like it did has to say so.
+        // The radius edit landed; the re-placed ring did not become the new
+        // centre, and without this the cruiser walks away believing it did.
+        // Only reached when `stored`, so the sentence about the radius is only
+        // said when the radius really was written.
+        if refusedRecentre {
+            return "No GPS fix — the plot keeps its recorded "
+                + "centre. The radius was saved. Step out for sky and "
+                + "try again."
+        }
+        return nil
     }
 
     /// Persist the placed ring as a cruise `Plot` in the current
@@ -662,9 +722,15 @@ extension MapHomeScreen {
     /// morphs to "Add tree · Plot N". `ActiveSamplingPlot` stays placed
     /// (the sampling screen anchored it), so DBH/Height overlay the
     /// ring while measuring inside it.
-    func createCruisePlot(radiusM: Double) {
+    ///
+    /// RETURNS the refusal to show ON THE PLOT SCREEN, or nil when the plot
+    /// was created and that screen may close — see `editCruisePlot` for why
+    /// the map's alert is not the place for it.
+    func createCruisePlot(radiusM: Double) -> String? {
         let project = currentProject ?? autoCreateProject()
-        guard let project else { return }
+        guard let project else {
+            return "Couldn't save the plot: there is no project to put it in."
+        }
         // FRESHNESS-GATED, and REFUSED when there is nothing usable.
         //
         // This used to fall through to the MAP CAMERA position, which is
@@ -677,9 +743,8 @@ extension MapHomeScreen {
         guard let fix = FixFreshness.usable(
             location.latestSnapshot ?? LocationService.lastGlobalFix)
         else {
-            plotSaveRefusal = "No GPS fix — the plot centre would be saved "
+            return "No GPS fix — the plot centre would be saved "
                 + "in the wrong place. Step out for sky and try again."
-            return
         }
         let number = ((try? environment.plotRepository
             .listByProject(project.id))?.map(\.plotNumber).max() ?? 0) + 1
@@ -711,13 +776,23 @@ extension MapHomeScreen {
             notes: "",
             coverPhotoPath: nil,
             panoramaPath: nil)
-        if (try? environment.plotRepository.create(plot)) != nil {
+        // The write is the whole point of the button, so a failed one is
+        // reported rather than swallowed by a `try?` — same sentence as
+        // Android's `save()` catch. Without this a storage error looked
+        // exactly like a saved plot: the screen closed and the cruiser
+        // started tallying into a plot that does not exist.
+        var storeError: String?
+        do {
+            _ = try environment.plotRepository.create(plot)
             // Stamp the placed AR ring as THIS cruise plot's centre so
             // the scan screens' mini-map may use the anchor path (the
             // accurate one) for YOU while measuring into this plot.
             ActiveSamplingPlot.shared.link(cruisePlotID: plot.id)
+        } catch {
+            storeError = "Couldn't save the plot: \(error.localizedDescription)"
         }
         reloadCruise()
+        return storeError
     }
 
     /// FIELD REPORT 17 — open a PLANNED plot on the fix that is live right

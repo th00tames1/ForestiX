@@ -202,6 +202,14 @@ internal class CruiseModeState {
     /// refusal the cruiser has to see, because the alternative was writing a
     /// plot centre the app had guessed (iOS `plotSaveRefusal`).
     var plotSaveRefusal by mutableStateOf<String?>(null)
+    /// A "Start plot now" write is in flight. The storage write is a
+    /// coroutine and the peek stays on screen until it lands, so without
+    /// this a second tap inside that window runs the conversion twice: two
+    /// Plot rows with the SAME plotNumber and the same plannedPlotId, and
+    /// the planned pin marked visited twice. The averaging sheet's own save
+    /// has carried this guard since it was written (`if (saving) return`,
+    /// RecordCentreSheet.kt); the peek path is the one that lost it.
+    var startingPlanned by mutableStateOf(false)
 
     /// Actions — wired by CruiseModeEffects (they need nav/scope/settings).
     var startPlot: () -> Unit = {}
@@ -210,8 +218,9 @@ internal class CruiseModeState {
     /// Planned-peek "Start plot now": open the planned plot on the fix that
     /// is live right now, with no averaging window in the way (field 17).
     var startPlannedNow: (PlannedPlot) -> Unit = {}
-    /// Toggle a planned plot's `skipped` flag (planned-peek "Skip plot" /
-    /// "Un-skip"). A skipped plot is inaccessible (cliff/water/private land)
+    /// Toggle a planned plot's `skipped` flag (planned-peek "Mark
+    /// unreachable" / "Restore plot"). A skipped plot is inaccessible
+    /// (cliff/water/private land)
     /// so it drops out of nearest-unvisited nav while still rendering.
     var skipPlanned: (PlannedPlot) -> Unit = {}
     /// Hard delete a plot + cascade its trees (plot peek "Delete plot").
@@ -402,6 +411,11 @@ internal fun CruiseModeEffects(
     /// worse than none. Same refusal, word for word, as the AR "Start plot"
     /// path.
     state.startPlannedNow = startNow@{ planned ->
+        // ONE write per tap. The conversion below creates a Plot row and
+        // marks the planned pin visited, and it runs in a coroutine while
+        // the peek is still on screen and still tappable — so the guard has
+        // to be here, at the only door into the write, not on the button.
+        if (state.startingPlanned) return@startNow
         val p = state.project ?: return@startNow
         val result = singleFixCentre(fix, System.currentTimeMillis())
         if (result == null) {
@@ -409,6 +423,7 @@ internal fun CruiseModeEffects(
                 "in the wrong place. Step out for sky and try again."
             return@startNow
         }
+        state.startingPlanned = true
         scope.launch {
             try {
                 val plot = convertPlannedToActivePlot(env, p, planned, result)
@@ -418,11 +433,12 @@ internal fun CruiseModeEffects(
                 state.plotSaveRefusal = "Storage error: ${e.message ?: e}. " +
                     "The centre was not saved — try again."
             }
+            state.startingPlanned = false
             state.refresh++
         }
     }
 
-    /// Planned peek "Skip plot (can't reach)" / "Un-skip": flip the planned
+    /// Planned peek "Mark unreachable" / "Restore plot": flip the planned
     /// plot's `skipped` flag and persist through the SAME
     /// plannedPlotRepository.update path RecordCentreSheet uses to set
     /// visited=true. A newly-skipped plot drops out of nearest-unvisited nav,
@@ -439,7 +455,11 @@ internal fun CruiseModeEffects(
             } catch (_: Exception) {
                 planned.skipped = !planned.skipped
             }
-            state.selectedId = null
+            // Dismiss on MARK UNREACHABLE (the plot is done with for now),
+            // stay up on RESTORE — the cruiser who just un-skipped a plot is
+            // about to start it, and the peek they need is the one already
+            // open. Same rule as iOS `setPlannedSkipped`.
+            if (planned.skipped) state.selectedId = null
             state.refresh++
         }
     }
@@ -665,6 +685,7 @@ internal fun CruiseModeBottomContent(
                 modifier = Modifier
                     .padding(horizontal = 12.dp)
                     .padding(bottom = 20.dp),
+                starting = state.startingPlanned,
                 onStartNow = { state.startPlannedNow(peekPlanned) },
                 onRecordCentre = {
                     state.selectedId = null
@@ -1043,6 +1064,7 @@ private fun PlannedPeekCard(
     planned: PlannedPlot,
     fix: CLLocationSnapshot?,
     navigating: Boolean,
+    starting: Boolean,
     modifier: Modifier = Modifier,
     onStartNow: () -> Unit,
     onRecordCentre: () -> Unit,
@@ -1053,7 +1075,14 @@ private fun PlannedPeekCard(
     val type = Forestix.type
     val shape = RoundedCornerShape(14.dp)
     // A skipped plot is documented inaccessible: the peek swaps the PLANNED
-    // chip for SKIPPED and offers only "Un-skip" (no centre-set / navigate).
+    // chip for SKIPPED. Every ACTION stays available, because "can't reach"
+    // is a judgement the cruiser is allowed to revise — a plot marked
+    // unreachable in the morning and walked into after lunch must be
+    // startable from the peek that is already open. iOS has always kept the
+    // three actions up on a skipped plot (MapHomeScreen+Cruise.swift); this
+    // used to hide them behind `if (!skipped)` and leave Android-only
+    // cruisers with an un-skip round trip. The skip toggle itself is the
+    // last row either way.
     val skipped = planned.skipped
 
     Column(
@@ -1127,114 +1156,103 @@ private fun PlannedPeekCard(
             )
         }
         Spacer(Modifier.size(ForestixSpace.sm))
-        if (!skipped) {
-            // 54 dp primary — FIELD REPORT 17. The plot opens on the fix
-            // that is live right now, with no window to sit out. The FROM
-            // YOU row directly above is the check that makes this safe: it
-            // is the cruiser's own reading of whether they are standing at
-            // the plot or looking at it from the far side of a draw.
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 54.dp)
-                    .pressableNoRipple(onClick = onStartNow)
-                    .clip(ForestixRadius.card)
-                    .background(colors.primary),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    "Start plot now",
-                    style = type.bodyBold.copy(fontSize = 15.sp),
-                    color = MaterialTheme.colorScheme.onPrimary,
-                )
-            }
-            Spacer(Modifier.size(8.dp))
+        // 54 dp primary — FIELD REPORT 17. The plot opens on the fix
+        // that is live right now, with no window to sit out. The FROM
+        // YOU row directly above is the check that makes this safe: it
+        // is the cruiser's own reading of whether they are standing at
+        // the plot or looking at it from the far side of a draw.
+        //
+        // Dimmed and deaf while a start is in flight, so the button LOOKS
+        // like what it is. The write itself is guarded at the action
+        // (`CruiseModeState.startingPlanned`) — this is the visible half.
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(min = 54.dp)
+                .alpha(if (starting) 0.45f else 1f)
+                .pressableNoRipple(enabled = !starting, onClick = onStartNow)
+                .clip(ForestixRadius.card)
+                .background(colors.primary),
+            contentAlignment = Alignment.Center,
+        ) {
             Text(
-                "Records one GPS fix, not an average.",
-                style = type.caption.copy(fontSize = 11.sp),
-                color = colors.textTertiary,
-                modifier = Modifier.fillMaxWidth(),
-                textAlign = TextAlign.Center,
+                "Start plot now",
+                style = type.bodyBold.copy(fontSize = 15.sp),
+                color = MaterialTheme.colorScheme.onPrimary,
             )
-            Spacer(Modifier.size(8.dp))
-            // 54 dp outline — LOCKED "Set plot centre (GPS)". The averaged
-            // centre is kept, one tap away, and is no longer a gate.
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 54.dp)
-                    .pressableNoRipple(onClick = onRecordCentre)
-                    .clip(ForestixRadius.card)
-                    .border(1.5.dp, colors.primary, ForestixRadius.card),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    "Set plot centre (GPS)",
-                    style = type.bodyBold.copy(fontSize = 15.sp),
-                    color = colors.primary,
-                )
-            }
-            Spacer(Modifier.size(8.dp))
-            // LOCKED secondary "Navigate" — toggles the dashed guide line;
-            // the active state reads in the accent outline.
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 44.dp)
-                    .pressableNoRipple(onClick = onToggleNavigate)
-                    .clip(ForestixRadius.control)
-                    .border(
-                        if (navigating) 1.5.dp else 1.dp,
-                        if (navigating) colors.accent else colors.divider,
-                        ForestixRadius.control,
-                    ),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    "Navigate",
-                    style = type.bodyBold.copy(fontSize = 14.sp),
-                    color = if (navigating) colors.accent else colors.textPrimary,
-                )
-            }
-            Spacer(Modifier.size(8.dp))
-            // 44 dp outline "Skip plot (can't reach)" — marks the plot
-            // inaccessible so nearest-unvisited nav passes over it. Modeled on
-            // the Navigate outline button above.
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 44.dp)
-                    .pressableNoRipple(onClick = onToggleSkip)
-                    .clip(ForestixRadius.control)
-                    .border(1.dp, colors.divider, ForestixRadius.control),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    "Skip plot (can't reach)",
-                    style = type.bodyBold.copy(fontSize = 14.sp),
-                    color = colors.textSecondary,
-                )
-            }
-        } else {
-            // Documented inaccessible: no centre-set / navigate. A single
-            // "Un-skip" outline reverses the decision (mirrors the
-            // reopen-closed-plot affordance) and returns the plot to the
-            // nearest-unvisited nav set.
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 44.dp)
-                    .pressableNoRipple(onClick = onToggleSkip)
-                    .clip(ForestixRadius.control)
-                    .border(1.dp, colors.divider, ForestixRadius.control),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    "Un-skip",
-                    style = type.bodyBold.copy(fontSize = 14.sp),
-                    color = colors.textPrimary,
-                )
-            }
+        }
+        Spacer(Modifier.size(8.dp))
+        Text(
+            "Records one GPS fix, not an average.",
+            style = type.caption.copy(fontSize = 11.sp),
+            color = colors.textTertiary,
+            modifier = Modifier.fillMaxWidth(),
+            textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.size(8.dp))
+        // 54 dp outline — LOCKED "Set plot centre (GPS)". The averaged
+        // centre is kept, one tap away, and is no longer a gate.
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(min = 54.dp)
+                .pressableNoRipple(onClick = onRecordCentre)
+                .clip(ForestixRadius.card)
+                .border(1.5.dp, colors.primary, ForestixRadius.card),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                "Set plot centre (GPS)",
+                style = type.bodyBold.copy(fontSize = 15.sp),
+                color = colors.primary,
+            )
+        }
+        Spacer(Modifier.size(8.dp))
+        // LOCKED secondary "Navigate" — toggles the dashed guide line;
+        // the active state reads in the accent outline.
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(min = 44.dp)
+                .pressableNoRipple(onClick = onToggleNavigate)
+                .clip(ForestixRadius.control)
+                .border(
+                    if (navigating) 1.5.dp else 1.dp,
+                    if (navigating) colors.accent else colors.divider,
+                    ForestixRadius.control,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                "Navigate",
+                style = type.bodyBold.copy(fontSize = 14.sp),
+                color = if (navigating) colors.accent else colors.textPrimary,
+            )
+        }
+        Spacer(Modifier.size(8.dp))
+        // 44 dp outline skip toggle — an EXPLICIT cruiser action (unlike
+        // `visited`, which flips implicitly on recording a centre).
+        // "Mark unreachable" documents a cliff/water/private-land plot so
+        // navigation passes over it; "Restore plot" undoes it. Same two
+        // words and same warn/neutral treatment as iOS.
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(min = 44.dp)
+                .pressableNoRipple(onClick = onToggleSkip)
+                .clip(ForestixRadius.control)
+                .border(
+                    1.dp,
+                    if (skipped) colors.divider else colors.confidenceWarn.copy(alpha = 0.5f),
+                    ForestixRadius.control,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                if (skipped) "Restore plot" else "Mark unreachable",
+                style = type.bodyBold.copy(fontSize = 14.sp),
+                color = if (skipped) colors.textPrimary else colors.confidenceWarn,
+            )
         }
     }
 }

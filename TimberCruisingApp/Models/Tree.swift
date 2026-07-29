@@ -152,6 +152,7 @@ public struct Tree: Identifiable, Codable, Sendable {
         self.id = id
         self.plotId = plotId
         self.treeNumber = treeNumber
+        self.treeName = treeName
         self.speciesCode = speciesCode
         self.status = status
         self.dbhCm = dbhCm

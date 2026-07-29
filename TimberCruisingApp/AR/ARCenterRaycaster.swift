@@ -216,10 +216,9 @@ public final class ARCenterRaycaster: ObservableObject {
         var bestHit: SIMD3<Float>?
 
         // FIELD REPORT 9 — this used to walk every triangle of every mesh
-        // anchor, so its cost grew without bound as the cruiser accumulated
-        // reconstruction across a plot: by the tenth tree a screen-centre
-        // raycast was tens of thousands of ray/triangle tests, fired at
-        // 10 Hz by the height anchor-aim sampler and the sampling-plot poll.
+        // anchor, fired at 10 Hz by the height anchor-aim sampler and the
+        // sampling-plot preview poll, so by the tenth tree of a plot a
+        // screen-centre raycast was tens of thousands of ray/triangle tests.
         //
         // Two rejections, no change to which surface is reported:
         //   1. Per-anchor slab test against a local-space AABB, rebuilt on
@@ -231,6 +230,27 @@ public final class ARCenterRaycaster: ObservableObject {
         //      BEYOND the closest hit found so far is skipped outright —
         //      it cannot produce a nearer hit, which is the only thing
         //      this function returns.
+        //
+        // BE PRECISE ABOUT WHAT THAT BOUGHT, because an earlier version of
+        // this note claimed the growth was gone and it is not. Per call the
+        // work is still Θ(all accumulated vertices): every anchor pays one
+        // linear vertex pass to get its box, before anything is pruned.
+        // What the pruning removes is the FACE walk — roughly two triangle
+        // intersections per vertex, each far dearer than a simd_min/max —
+        // for every anchor the ray misses, which in a forest is nearly all
+        // of them. A large constant factor, not a change of order.
+        //
+        // Making it O(changed anchors) means caching the box per
+        // `anchor.identifier` and invalidating it when ARKit refines that
+        // anchor's geometry. That is the right fix and it is deliberately
+        // NOT done here: this class holds a weak ARView and is not the
+        // session delegate, so it has no update signal to invalidate on,
+        // and ARKit's mesh buffers are documented as valid only for the
+        // frame they were vended in. A box that silently goes stale rejects
+        // an anchor the ray does hit, and this function then returns a
+        // farther surface — or nil — with no way for the caller to know.
+        // That is the exact anchor bias the class was written to remove, so
+        // it does not get reintroduced without a device to verify it on.
         var candidates: [(anchor: ARMeshAnchor, tNear: Float)] = []
         candidates.reserveCapacity(meshAnchors.count)
         for anchor in meshAnchors {
@@ -319,8 +339,11 @@ public final class ARCenterRaycaster: ObservableObject {
 
     /// Axis-aligned bounds of an anchor's vertices, in the anchor's own
     /// local frame. One linear pass over the vertex buffer — cheap next to
-    /// the face walk it guards, and recomputed every call so a refined mesh
-    /// can never be tested against a stale box.
+    /// the face walk it guards, but NOT free: this pass is what keeps the
+    /// raycast's cost proportional to the accumulated reconstruction. It is
+    /// recomputed every call on purpose, so a refined mesh can never be
+    /// tested against a stale box; see the note at the call site for why
+    /// the cache that would remove the growth is not taken from here.
     private func localBounds(
         of anchor: ARMeshAnchor
     ) -> (min: SIMD3<Float>, max: SIMD3<Float>)? {

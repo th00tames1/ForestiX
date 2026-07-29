@@ -91,6 +91,15 @@ public enum GeoJSONExporter {
     }
 
     static func measuredPlotFeature(_ p: Plot) -> [String: Any] {
+        // NULL, not 0, below two samples: a spread needs two fixes to exist,
+        // and zero here would read as "the fixes agreed perfectly" on a row
+        // where none was ever measured. Same rule and same reasoning as
+        // `gps_sample_std_xy_m` in plots.csv, and the same null this file
+        // already uses for `offsetWalkM`. Spelled into a local because the
+        // dictionary literal below is already at the size where the Swift
+        // type-checker starts to labour.
+        var stdXY: Any = NSNull()
+        if p.gpsNSamples >= 2 { stdXY = Double(p.gpsSampleStdXyM) }
         var props: [String: Any] = [
             "kind": "measuredPlot",
             "id": p.id.uuidString,
@@ -100,7 +109,7 @@ public enum GeoJSONExporter {
             "positionTier": String(describing: p.positionTier),
             "gpsNSamples": p.gpsNSamples,
             "gpsMedianHAccuracyM": Double(p.gpsMedianHAccuracyM),
-            "gpsSampleStdXyM": Double(p.gpsSampleStdXyM),
+            "gpsSampleStdXyM": stdXY,
             "offsetWalkM": p.offsetWalkM.map { Double($0) } ?? NSNull(),
             "slopeDeg": Double(p.slopeDeg),
             "aspectDeg": Double(p.aspectDeg),

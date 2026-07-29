@@ -732,11 +732,20 @@ public final class QuickMeasureHistory: ObservableObject {
         }?.treeName
     }
 
-    /// The name to offer for the next tree — the most recent name in the log,
-    /// stepped on by `TreeNameSequence`. nil on a log that has never been
-    /// named, and then the chooser's field simply starts empty.
+    /// The name to offer for the next tree — the HIGHEST name in the series
+    /// the cruiser is currently using, stepped on by `TreeNameSequence`. nil
+    /// on a log that has never been named, and then the chooser's field simply
+    /// starts empty.
+    ///
+    /// This used to step on the most recent name, which is not the same thing:
+    /// a re-measurement is appended carrying the name it already had, so
+    /// re-measuring T01 after T03 made the log's newest name "T01" and the
+    /// chooser proposed "T02" — a name a different stem already wears. The
+    /// number suggestion beside it is `max + 1` and cannot collide; the name
+    /// now matches that rule. `entries` is newest-first, which is the order
+    /// `nextInSeries` expects.
     public var suggestedNextTreeName: String? {
-        TreeNameSequence.next(entries.first(where: { $0.treeName != nil })?.treeName)
+        TreeNameSequence.nextInSeries(entries.compactMap(\.treeName))
     }
 
     /// Returns a brief description of an existing tree's measurements

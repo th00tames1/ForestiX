@@ -745,6 +745,18 @@ object DBHEstimator {
     /// Nothing about the geometry changes — same identity, same span, same
     /// focal. Only which samples the depth is read from. iOS
     /// DBHEstimator.bracketCoreRange parity.
+    ///
+    /// The measured VALUE does move, though, and whoever pools this study's
+    /// corpora needs to know it: a stem's centre is up to one radius nearer
+    /// than its edges, so a median over the middle half reads a smaller z
+    /// and every bracketed diameter comes out slightly lower than before.
+    /// That is the geometrically right input for the identity — but it is
+    /// not backwards-compatible. A project whose dbhCorrectionAlpha /
+    /// dbhCorrectionBeta were fitted on ADJUST captures from before this
+    /// change now carries that bias into the correction applied on top, and
+    /// a raw-capture bundle recorded before it will not replay to the live
+    /// value in its manifest. The manifest's app_commit is what separates
+    /// the two corpora.
     fun bracketCoreRange(iLo: Int, iHi: Int): Pair<Int, Int> {
         val span = iHi - iLo
         // Too few samples to trim and still make a median of: a bracket this

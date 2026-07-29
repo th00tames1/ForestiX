@@ -230,9 +230,10 @@ fun RecordCentreSheet(
             String.format(Locale.US, "±%.1f m", snap.horizontalAccuracyM)
         else -> "±— m"
     }
-    // (`liveTier` went with the chip — field report F9. `LocationService.tier`
-    // and `GPSAveraging.classify` are untouched; the grade is still computed
-    // and stored on the Plot, it just isn't shown to a cruiser.)
+    // (`liveTier` went with the chip — field report F9. `GPSAveraging.classify`
+    // and `classifySingleFix` are untouched; the grade is still computed and
+    // stored on the Plot, it just isn't shown to a cruiser. The badge's own
+    // `LocationService.tier` helper is gone with the badge.)
     val failed = windowDone && final == null
     val sampleCount = readout?.nSamples ?: location.buffer.value.size
     val metaTitle = when {

@@ -55,7 +55,15 @@ import simd
 public final class ActiveSamplingPlot: ObservableObject {
 
     /// App-scoped singleton — the one ACTIVE plot for this app run.
-    public static let shared = ActiveSamplingPlot()
+    ///
+    /// Built through a closure so the shared instance — and only it — hooks
+    /// the shared AR session's pause. See `observeSessionPause`. Privately
+    /// owned instances (tests, previews) stay inert.
+    public static let shared: ActiveSamplingPlot = {
+        let store = ActiveSamplingPlot()
+        store.observeSessionPause()
+        return store
+    }()
 
     public struct Plot: Equatable {
         /// Identifier of the ARAnchor pinned at the plot centre in the
@@ -97,8 +105,19 @@ public final class ActiveSamplingPlot: ObservableObject {
     /// Android's `POSE_EPSILON_M`.
     private static let poseEpsilonM: Float = 0.001
 
-    /// When the centre stopped being corrected; nil while it is.
-    private var poseStaleSince: Date?
+    /// When the centre stopped being corrected, on a MONOTONIC clock; nil
+    /// while it is being corrected.
+    ///
+    /// `ProcessInfo.systemUptime`, not `Date()`: this is an elapsed interval,
+    /// and `Date()` is an absolute wall clock that an NTP correction or a
+    /// manual clock/timezone change can step forwards or backwards mid
+    /// session. A backwards step would push the deadline arbitrarily far out
+    /// and leave the plot drawn at an uncorrected pose long past half a
+    /// second; a forwards step would expire the window instantly and blink
+    /// the ring off while tracking was fine. `systemUptime` is derived from
+    /// the mach timebase and cannot be set. Android's sibling uses
+    /// `SystemClock.elapsedRealtime()` for the same reason.
+    private var poseStaleSince: TimeInterval?
 
     /// Persisted cruise `Plot` whose centre the current anchor marks —
     /// stamped by the cruise Start-plot save, nil for quick-measure
@@ -108,6 +127,18 @@ public final class ActiveSamplingPlot: ObservableObject {
     /// ring).
     @Published public private(set) var linkedCruisePlotID: UUID?
 
+    /// Quick-measure history row this ring was saved as, nil until the
+    /// sampling screen's Save writes one and again on the next placement.
+    ///
+    /// FIELD REPORT 12 — "Edit plot" re-opens the sampling screen on the ring
+    /// already placed, and its Save used to append unconditionally. Three
+    /// radius tweaks during one plot wrote three `.samplingPlot` rows for one
+    /// physical ring, and those rows reach the field log and the CSV the
+    /// validation study reads. One ring is one row: Save updates the row it
+    /// already has. The cruise path was given the same guard at
+    /// `MapHomeScreen+Cruise.plotSetupCover`; this is the quick half of it.
+    @Published public private(set) var linkedQuickEntryID: UUID?
+
     public init() {}
 
     /// Record a freshly placed plot (replaces any previous one — the
@@ -115,6 +146,9 @@ public final class ActiveSamplingPlot: ObservableObject {
     public func place(anchorID: UUID, radiusM: Double) {
         plot = Plot(anchorID: anchorID, radiusM: radiusM, placedAt: Date())
         linkedCruisePlotID = nil
+        // A NEW ring is a new record — the next Save writes its own row
+        // rather than overwriting the one the previous ring left behind.
+        linkedQuickEntryID = nil
         // The centre this anchor marks is unknown until a poll reads it off
         // a tracked frame. Nothing is drawn in the meantime — which is one
         // poll tick, since the tap that got here needed tracking anyway.
@@ -130,6 +164,14 @@ public final class ActiveSamplingPlot: ObservableObject {
         linkedCruisePlotID = cruisePlotID
     }
 
+    /// Associate the placed ring with the quick-measure row Save just wrote,
+    /// so a later Save on the SAME ring updates that row instead of adding a
+    /// second one. No-op while nothing is placed.
+    public func link(quickEntryID: UUID) {
+        guard plot != nil else { return }
+        linkedQuickEntryID = quickEntryID
+    }
+
     /// Keep the stored radius in sync with the sampling screen's slider.
     /// No-op while no plot is placed.
     public func updateRadius(_ radiusM: Double) {
@@ -142,9 +184,56 @@ public final class ActiveSamplingPlot: ObservableObject {
     public func clear() {
         plot = nil
         linkedCruisePlotID = nil
+        linkedQuickEntryID = nil
         centreWorld = nil
         trackingLost = false   // nothing left to have lost track OF
         poseStaleSince = nil
+    }
+
+    // MARK: - Session pause
+
+    /// Drop the tracked centre the instant the shared AR session pauses.
+    ///
+    /// `centreWorld` and `trackingLost` are otherwise only ever written by
+    /// `refreshTrackedCentre`, which runs from an AR screen's poll — so when
+    /// the last AR screen leaves or the app backgrounds, the last centre
+    /// survived the gap untouched. On re-entry the ring, the pillar, the DBH
+    /// border chip and the mini-map YOU dot were all drawn from that
+    /// pre-pause pose for up to a poll interval plus the whole grace window,
+    /// while ARKit was still relocalizing. That is a plot drawn at a stale
+    /// pose, which is the one thing this class exists to prevent.
+    ///
+    /// Android does the same thing in `ArSessionHub.detach`, which owns the
+    /// session and the plot together; here the session lives in Sensors, so
+    /// it calls back.
+    private func observeSessionPause() {
+        ARKitSessionManager.shared.onSessionPaused = { [weak self] in
+            self?.invalidateTrackedCentre()
+        }
+    }
+
+    /// Forget where the centre is, WITHOUT forgetting that a plot is placed:
+    /// the anchor is still in the session's world map and a healthy frame
+    /// after the next attach brings the plot straight back. Until then the
+    /// geometry is hidden and the screens say tracking is lost — same words
+    /// they use for a tracking dip, because it is the same fact.
+    ///
+    /// This nils the centre; what keeps it nil is at the session manager.
+    /// `refreshTrackedCentre` runs on each screen's own poll and would
+    /// happily re-fill it from the next `trackedWorldAnchorPosition` read —
+    /// which, in the tens of milliseconds between the next attach's
+    /// `session.run` and ARKit's first new frame, could still be answering
+    /// out of the last PRE-PAUSE frame. That frame's camera read `.normal`
+    /// and its anchor transform is stale, so the poll would take the success
+    /// branch, clear `trackingLost`, and redraw the ring at the pose the
+    /// cruiser walked away from — undoing this invalidation in one tick.
+    /// `ARKitSessionManager.liveFrameSincePause` closes that window: a frame
+    /// captured before the current run is not read at all. Android gets the
+    /// same property from `ArSessionHub.detach` nil-ing `controller.frame`.
+    private func invalidateTrackedCentre() {
+        poseStaleSince = nil
+        centreWorld = nil
+        trackingLost = plot != nil
     }
 
     // MARK: - Tracked centre
@@ -178,10 +267,10 @@ public final class ActiveSamplingPlot: ObservableObject {
             if moved { centreWorld = live }
             return centreWorld
         }
-        let now = Date()
+        let now = ProcessInfo.processInfo.systemUptime
         let staleSince = poseStaleSince ?? now
         poseStaleSince = staleSince
-        if now.timeIntervalSince(staleSince) >= Self.trackingGraceSeconds {
+        if now - staleSince >= Self.trackingGraceSeconds {
             if !trackingLost { trackingLost = true }
             centreWorld = nil
         }

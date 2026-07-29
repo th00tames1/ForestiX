@@ -252,14 +252,39 @@ fun SamplingPlotScreen(nav: NavController) {
                     modifier = Modifier.weight(1f),
                 ) {
                     val r = ArSessionHub.plotRadiusM
-                    env.history.append(
-                        QuickMeasureEntry(
+                    // FIELD REPORT 12 — "Edit plot" re-opens this screen on
+                    // the ring that is already placed, so Save is BOTH
+                    // "record this ring" and "change the ring I recorded".
+                    // Appending on the second one wrote a second
+                    // SAMPLING_PLOT row for one physical ring, and those rows
+                    // go to the field log and the CSV the validation study
+                    // reads: three radius tweaks read as three plots. One
+                    // ring, one row.
+                    val savedId = ArSessionHub.linkedQuickEntryId
+                    val existing = savedId?.let { id ->
+                        env.history.entries.value.firstOrNull { it.id == id }
+                    }
+                    if (existing != null) {
+                        // createdAt and plotID ride across untouched — the
+                        // ring was recorded when it was PLACED, and an edit
+                        // changes its radius, not when the cruiser stood at
+                        // its centre.
+                        env.history.update(
+                            existing.copy(
+                                value = r,
+                                secondaryValue = Units.circleAreaM2(r),
+                            )
+                        )
+                    } else {
+                        val entry = QuickMeasureEntry(
                             kind = MeasureKind.SAMPLING_PLOT, value = r,
                             secondaryValue = Units.circleAreaM2(r),
                             sigma = null, confidenceRaw = "green", method = "ar.tap",
                             plotID = env.history.activePlotID.value,
                         )
-                    )
+                        env.history.append(entry)
+                        ArSessionHub.linkQuickEntry(entry.id)
+                    }
                     nav.popBackStack()
                 }
             }

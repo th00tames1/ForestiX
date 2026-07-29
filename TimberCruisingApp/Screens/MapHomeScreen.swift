@@ -1367,7 +1367,12 @@ public struct MapHomeScreen: View {
     /// belong to no tree and never call this.
     private func lockChooserTree() {
         pendingTreeNumber = chooserTargetTree
-        let trimmed = chooserTreeName.trimmingCharacters(in: .whitespaces)
+        // `.whitespacesAndNewlines`, not `.whitespaces`: Kotlin's `trim()` in
+        // the Android sibling (ui/PendingTreeNumber.set) strips newlines too,
+        // and a pasted "Plot3-T07\n" must persist the same bytes on both
+        // phones — the two halves of a split cruise join on this name.
+        let trimmed = chooserTreeName
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         pendingTreeName = trimmed.isEmpty ? nil : trimmed
         pendingSpeciesCode = chooserSpeciesCode
     }
@@ -1583,7 +1588,12 @@ public struct MapHomeScreen: View {
                         latitude: meta.latitude,
                         longitude: meta.longitude,
                         photoPath: meta.photoPath,
-                        captureMode: meta.captureMode))
+                        captureMode: meta.captureMode,
+                        // The tape diameter typed on the scan screen belongs
+                        // to THIS reading. Leaving it in the raw-capture
+                        // manifest alone exported a blank truth column for
+                        // every tree measured the normal way.
+                        truth: meta.truth))
                     // Full-measurement chain: an accepted DBH arms the
                     // Height cover; onDismiss presents it for the same
                     // tree number.
@@ -1638,7 +1648,10 @@ public struct MapHomeScreen: View {
                         note: meta.note.isEmpty ? nil : meta.note,
                         latitude: meta.latitude,
                         longitude: meta.longitude,
-                        photoPath: meta.photoPath))
+                        photoPath: meta.photoPath,
+                        // The pole height typed on the scan screen belongs to
+                        // THIS reading — see the note on the diameter cover.
+                        truth: meta.truth))
                     presentingHeightScan = false
                     // Quick measure is an in-memory/JSON append that cannot
                     // report a row-level failure — the reading is on the

@@ -52,7 +52,9 @@ import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -470,7 +472,7 @@ fun ResearchFieldsRow(
     ) {
         Text(trueLabel, style = Forestix.type.caption, color = Color.White.copy(alpha = 0.8f))
         ResearchField(trueValue, onTrueChange, truePlaceholder, width = 90.dp, decimal = true)
-        TruthUnitToggle(truthUnit, onToggleTruthUnit)
+        TruthUnitToggle(truthUnit, onToggle = onToggleTruthUnit)
     }
 }
 
@@ -483,21 +485,47 @@ fun ResearchFieldsRow(
 ///
 /// CROSS-PLATFORM: same square, same unit text, same accessibility wording as the
 /// iOS `TruthUnitToggle`.
+///
+/// `onDarkPanel` picks the chrome: the scan screens are a dark camera overlay,
+/// the field log is a standard light sheet, and the white-on-white that once
+/// made the scan-screen truth fields invisible would happen here if one
+/// styling served both.
+///
+/// The 32 dp square is what is DRAWN; the tappable box around it is 48 dp,
+/// Android's minimum touch target — the visual size is a matter of fitting the
+/// row, the touch target is a matter of hitting it with a glove on. It also
+/// carries `Role.Button`, without which TalkBack announces the control as
+/// plain text while VoiceOver announces the iOS twin as a button.
 @Composable
-fun TruthUnitToggle(unit: TruthInput.Unit, onToggle: () -> Unit) {
+fun TruthUnitToggle(
+    unit: TruthInput.Unit,
+    onDarkPanel: Boolean = true,
+    onToggle: () -> Unit,
+) {
+    val colors = Forestix.colors
+    val ink = if (onDarkPanel) Color.White else colors.textPrimary
+    val fill = if (onDarkPanel) Color.White.copy(alpha = 0.12f) else colors.surfaceRaised
+    val stroke = if (onDarkPanel) Color.White.copy(alpha = 0.4f) else colors.divider
     Box(
         Modifier
-            .size(32.dp)
-            .clip(RoundedCornerShape(5.dp))
-            .background(Color.White.copy(alpha = 0.12f))
-            .border(0.5.dp, Color.White.copy(alpha = 0.4f), RoundedCornerShape(5.dp))
+            .size(48.dp)
             .clickableNoRipple(onToggle)
             .semantics {
+                role = Role.Button
                 contentDescription = "Unit for this entry: ${unit.raw}. Tap to switch."
             },
         contentAlignment = Alignment.Center,
     ) {
-        Text(unit.raw, style = Forestix.type.caption, color = Color.White)
+        Box(
+            Modifier
+                .size(32.dp)
+                .clip(RoundedCornerShape(5.dp))
+                .background(fill)
+                .border(0.5.dp, stroke, RoundedCornerShape(5.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(unit.raw, style = Forestix.type.caption, color = ink)
+        }
     }
 }
 

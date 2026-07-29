@@ -341,25 +341,45 @@ public struct DistanceMeasureScreen: View {
     /// Developer-mode research capture field: the typed true value and the
     /// unit it is being typed in.
     private var researchFieldsRow: some View {
-        HStack(spacing: 6) {
-            // Label and unit come from the SAME value, so the field can never
-            // say m while the app reads feet.
-            Text(TruthInput.fieldLabel(.distance, unit: activeTruthUnit))
-                .font(ForestixType.caption)
-                .foregroundStyle(.white.opacity(0.8))
-            TextField("tape", text: $researchTrueText)
-                .keyboardType(.decimalPad)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 90)
-                .accessibilityIdentifier("distance.researchTrue")
-            TruthUnitToggle(
-                unit: activeTruthUnit,
-                onToggle: {
-                    truthUnitChoice = (TruthInput.toggled(activeTruthUnit),
-                                       settings.unitSystem == .imperial)
-                },
-                identifier: "distance.researchTrueUnit")
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                // Label and unit come from the SAME value, so the field can never
+                // say m while the app reads feet.
+                Text(TruthInput.fieldLabel(.distance, unit: activeTruthUnit))
+                    .font(ForestixType.caption)
+                    .foregroundStyle(.white.opacity(0.8))
+                TextField("tape", text: $researchTrueText)
+                    .keyboardType(.decimalPad)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 90)
+                    .accessibilityIdentifier("distance.researchTrue")
+                TruthUnitToggle(
+                    unit: activeTruthUnit,
+                    onToggle: {
+                        truthUnitChoice = (TruthInput.toggled(activeTruthUnit),
+                                           settings.unitSystem == .imperial)
+                    },
+                    identifier: "distance.researchTrueUnit")
+            }
+            // Same live warning as the DBH and height screens. Without it,
+            // "12.5.3" parsed to nil and Save wrote the row with no
+            // true_value, no error and no truth_unit while the screen said
+            // nothing — the hand measurement was gone and the cruiser had no
+            // way to know. A distance has no plausibility window, so this
+            // says only whether the text is a number.
+            if let warning = truthFieldWarning {
+                TruthFieldWarning(text: warning)
+            }
         }
+    }
+
+    /// Live warning under the truth field: unparseable text. The window check
+    /// is quantity-dispatched and `.distance` has none, so nothing else can
+    /// come back from here.
+    private var truthFieldWarning: String? {
+        TruthInput.fieldWarning(researchTrueText,
+                                quantity: .distance,
+                                unit: activeTruthUnit)
     }
 
     /// RESULT panel — a completed A→B pair: label + value + dev fields +

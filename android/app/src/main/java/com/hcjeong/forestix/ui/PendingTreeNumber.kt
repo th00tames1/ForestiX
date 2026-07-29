@@ -47,7 +47,13 @@ object PendingTreeNumber {
         truth: Double? = null,
         plotID: java.util.UUID? = null,
     ) {
-        lock = Lock(number, name?.takeIf { it.isNotBlank() }, speciesCode,
+        // TRIMMED before it is stored, exactly as iOS does in
+        // MapHomeScreen.lockChooserTree(). The name is a join key: a split
+        // cruise pairs an iPhone's rows with an Android phone's on tree_name,
+        // and the field log and the tree_name CSV column print it verbatim.
+        // A gloved thumb or a paste that leaves a leading space must not
+        // create " Plot3-T07" here and "Plot3-T07" there.
+        lock = Lock(number, name?.trim()?.takeIf { it.isNotEmpty() }, speciesCode,
                     replaceExisting, truth, plotID)
     }
 

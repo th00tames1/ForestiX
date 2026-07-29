@@ -144,6 +144,12 @@ private const val AIM_MARKER_RADIUS_M = 0.06f
 /// sent back to the start by an arm's-length wobble.
 private const val AIM_DRIFT_WARN_M = 0.25f
 
+/// Owner sentinel for a truth kept on screen for a measurement that produced
+/// NO usable bundle (the capture itself failed, so its id was dropped). Never
+/// a real bundle id, so the cross-tree guard in `acceptResult` still fires.
+/// iOS calls the same sentinel `noBundleOwner`.
+private const val TRUTH_NO_BUNDLE_OWNER = "no-bundle"
+
 /// Walk-off integrity copy (field round 9 — the vanishing anchor). Byte
 /// identical to the iOS HeightScanScreen constants of the same names.
 ///
@@ -160,8 +166,25 @@ private const val TRACKING_DROPPED_DURING_WALK =
     "Tracking dropped during the walk-off, so the distance to the trunk may have shifted. Retake for a firm number."
 private const val ANCHOR_LOST =
     "The trunk anchor is gone — the camera couldn't hold it. Tap Retake and anchor the trunk again."
+/// ANDROID-ONLY, deliberately — the three constants above are byte-identical
+/// to their iOS siblings and this one has none, which is worth saying out loud
+/// rather than leaving to be discovered as drift. ARCore's
+/// `session.createAnchor` can fail (session not running, resource exhaustion),
+/// so the refusal is reachable here; the iOS `addWorldAnchor` always returns an
+/// identifier on a real device, and on the non-ARKit stub it returns nil with
+/// the raw hit point still standing in, so there is no branch to write the
+/// sentence into. If iOS ever gains one, this exact string is the one to use.
 private const val ANCHOR_NOT_PLACED =
     "Couldn't pin the trunk — hold still for a second, then tap + again."
+
+/// The refusal for "the tap was legitimate, but ARCore has no world pose to
+/// serve it from" — every pose reader here returns null off a non-TRACKING
+/// frame. It was repeated verbatim at four call sites, which is how a string
+/// that has to stay byte-identical across two platforms drifts; iOS now holds
+/// it once as `HeightScanViewModel.cameraNotReadyText` and uses it at the
+/// matching taps (anchor, aim base, aim top).
+private const val CAMERA_NOT_READY =
+    "The camera hasn't got its bearings yet — hold still for a second, then tap + again."
 
 /// `chainedFromDiameter` = this session was opened AUTOMATICALLY by the
 /// cruise tally right after a diameter was accepted (field report F10). It is
@@ -221,6 +244,18 @@ fun HeightScanScreen(
     // (starts at 0.00 — the old single readout confusingly opened at the
     // full anchor distance). Total distance = dhLive (the d_h the math uses).
     var anchorInitialDistM by remember { mutableStateOf<Float?>(null) }
+    // DELIBERATELY A RAW Vec3, not an ARCore `Anchor`, unlike the trunk. The
+    // argument for anchoring the trunk is that its position enters d_h and d_h
+    // is the whole scale of H, so every world-frame correction the walk
+    // collects lands in the measurement. This point enters NOTHING: it feeds
+    // the "Walked back" readout and only that. A relocalization will still
+    // shift it, and the readout will still be off by the correction — so it is
+    // a DISPLAY number, and it is labelled as one here rather than being made
+    // to look like a measurement. Anchoring it would mean a second anchor with
+    // its own detach path on every exit, retake and re-anchor, i.e. another
+    // thing that can leak, bought for a line of chrome. The distance the
+    // cruiser actually acts on is "Total distance", measured to the anchored
+    // trunk. Same call, same wording, on iOS (`cameraPositionAtAnchor`).
     var standingAtAnchor by remember { mutableStateOf<Vec3?>(null) }
     var walkedLive by remember { mutableStateOf(0f) }
     // Live anchor-aim validity (gated hit available?) — drives the locked
@@ -334,6 +369,15 @@ fun HeightScanScreen(
     var truthPending by remember { mutableStateOf<String?>(null) }
     var truthPendingId by remember { mutableStateOf<String?>(null) }
     var truthPendingText by remember { mutableStateOf("") }
+    // The bundle a kept-on-screen truth was typed FOR (iOS truthOwnerBundleID).
+    // Every path above deliberately KEEPS the text when the value could not be
+    // attached, so what is in the field may belong to an EARLIER capture. In
+    // the diameter → height chain this screen is re-entered tree after tree,
+    // and without this mark the next tree's Accept re-parsed that text and
+    // exported it as ITS true_value: one tree's pole reading, with an error
+    // computed against another tree's height. Cleared the moment the cruiser
+    // edits the field.
+    var truthOwnerBundleId by remember { mutableStateOf<String?>(null) }
     // The unit THIS typed truth is in. It opens in the cruiser's active system
     // — an imperial operator gets feet, not a metre field they type feet into
     // — and the square button beside the field switches it for this entry.
@@ -388,16 +432,39 @@ fun HeightScanScreen(
             // anchor; latch it so the next tap refuses instead of the sphere
             // quietly disappearing and the math carrying on to a ghost.
             val anchorNow = ArSessionHub.heightAnchorWorld()
-            if (anchorNow == null) anchorLost = true else anchorPt = anchorNow
+            if (anchorNow == null) {
+                anchorLost = true
+                // THE HONEST VANISH. Dropping the point takes the red sphere
+                // out of markers() with it. Keeping the last `anchorPt` — as
+                // this did — left a marker drawn on the bark at a pose nothing
+                // is correcting any more, while the status line one line of
+                // chrome away said the anchor was gone: the screen
+                // contradicting itself at the moment it most needs not to. A
+                // marker that disappears beats one that stays put and lies,
+                // which is the entire argument for anchoring the trunk.
+                //
+                // The readouts below are not recomputed once it is null, so
+                // "Total distance" freezes at its last real value rather than
+                // restarting — the same hold a tracking dropout gets.
+                anchorPt = null
+            } else {
+                anchorPt = anchorNow
+            }
             // With no camera pose both readouts below return null and HOLD
             // their last good value rather than recomputing from a pose that
             // isn't real. Say it while it happens, and remember it after.
+            //
+            // NO BANNER HERE. `MeasureTopChrome.instruction` is already showing
+            // TRACKING_LOST_NOW for exactly this state, and posting
+            // TRACKING_DROPPED_DURING_WALK into the dismissible failure slot
+            // put two different instructions on screen at once — one saying
+            // hold still, the other saying retake. The dropout is remembered
+            // and stated where it can be acted on: on the RESULT panel, when
+            // the cruiser decides whether to keep the number, which is what
+            // iOS does and the only place the string appears there.
             val tracking = controller.trackingOk()
             trackingLive = tracking
-            if (!tracking && !trackingDropped) {
-                trackingDropped = true
-                failure = TRACKING_DROPPED_DURING_WALK
-            }
+            if (!tracking && !trackingDropped) trackingDropped = true
             if (stage == Stage.WALKING) {
                 anchorPt?.let { a -> controller.horizontalDistanceTo(a)?.let { dhLive = it } }
                 standingAtAnchor?.let { s0 -> controller.horizontalDistanceTo(s0)?.let { walkedLive = it } }
@@ -485,7 +552,7 @@ fun HeightScanScreen(
         // distance. NO fresh hitTest — at 10–30 m those fall back to
         // planes/garbage and put the sphere visibly off the crosshair.
         val hit = controller.forwardPointAtHorizontalDistance(crownProjDistance())
-        if (hit == null) { failure = "The camera hasn't got its bearings yet — hold still for a second, then tap + again."; return }
+        if (hit == null) { failure = CAMERA_NOT_READY; return }
         failure = null
         when (crownStep) {
             CrownStep.LEFT -> { cL = hit; crownStep = CrownStep.RIGHT }
@@ -541,7 +608,14 @@ fun HeightScanScreen(
         )
         val samples = poseSamples.toList()
         val hitType = anchorHitType
+        // Non-null for the whole of WALKING onward — the anchor stage refuses
+        // when no camera pose is available, so there is no reading whose start
+        // distance was never measured (see the ANCHOR branch of captureHeight).
         val dist = anchorInitialDistM ?: 0f
+        // Snapshot the walk-off integrity latch with the rest of the payload,
+        // so a dropout that arrives while the writer runs cannot retro-flag a
+        // bundle whose walk was clean.
+        val dropped = trackingDropped
         // Schema-2 aim captures (base/top depth + RGB). Snapshot the temp files
         // now and hand them off; recordHeight copies them into the bundle.
         val baseAim = RawCaptureStore.HeightAim(baseAimFrame, baseAimRgb)
@@ -565,6 +639,9 @@ fun HeightScanScreen(
                 topPitchDeg = (aTop * 180f / Math.PI.toFloat()), topPose = tPose,
                 dHm = r.dHm, live = r, cal = calibration,
                 poseSamples = samples,
+                // Latched for the whole walk-off — the same fact the result
+                // panel warns about and the research CSV row carries.
+                trackingDropped = dropped,
                 unitSystem = if (settings.unitSystem == UnitSystem.METRIC) "metric" else "imperial",
                 ctx = ctx,
                 baseAim = baseAim,
@@ -589,6 +666,8 @@ fun HeightScanScreen(
                     if (researchTrueText == truthPendingText) researchTrueText = ""
                     truthPending = null
                     truthPendingId = null
+                    // Durable and off the screen: it owns nothing now.
+                    truthOwnerBundleId = null
                 }
             } else {
                 if (lastRawCaptureId == id) lastRawCaptureId = null
@@ -609,10 +688,18 @@ fun HeightScanScreen(
                     }
                     // Only retire the pending marker if it is THIS capture's —
                     // a later capture may already own it.
-                    if (truthPendingId == id) {
+                    val stillOurs = truthPendingId == id
+                    if (stillOurs) {
                         truthPending = null
                         truthPendingId = null
                     }
+                    // The text now on screen belongs to THIS dead capture —
+                    // either we just put it back, or the cruiser never touched
+                    // it while the write ran. Mark it, or the next tree's Accept
+                    // exports a pole number never taken on that stem. When the
+                    // cruiser HAS typed something newer, that text is their
+                    // intent for the capture in front of them and stays unowned.
+                    if (restore || stillOurs) truthOwnerBundleId = id
                     // The number is named WITH its unit — a bare "12.5" in a
                     // failure message is the same ambiguity this item exists
                     // to remove.
@@ -630,6 +717,30 @@ fun HeightScanScreen(
                 // within 4 m only. No valid hit → the "+" is INERT — the
                 // status line already shows the locked "Move closer" copy.
                 val hit = controller.screenCenterAnchorHit(ANCHOR_MAX_M) ?: return
+                // BOTH walk-panel reference values come from the camera pose,
+                // and they are read BEFORE the anchor is placed so a refusal
+                // leaves nothing behind to clean up.
+                //
+                // `?: 0f` used to stand here and invented a start distance of
+                // zero — the one fallback pattern this round exists to remove.
+                // It is nearly unreachable (`screenCenterAnchorHit` has just
+                // succeeded, which needs a frame), but `frame` is @Volatile and
+                // replaced by the render thread, and a measurement that is
+                // WRONG is worse than one that refuses. iOS refuses at the same
+                // point for the same reason (`anchorHereNow` requires
+                // `currentCameraTranslation()`), with this same sentence — held
+                // there as `HeightScanViewModel.cameraNotReadyText`. That claim
+                // used to be aspirational: iOS folded the missing pose in with
+                // the INERT cases above and returned in silence, so the cruiser
+                // tapped "+" over and over with the eye-level prompt still on
+                // screen. Same order on both platforms now: missing hit is
+                // inert, missing pose speaks.
+                val standing = controller.currentCameraPosition()
+                val d0 = controller.horizontalDistanceTo(hit)
+                if (standing == null || d0 == null) {
+                    failure = CAMERA_NOT_READY
+                    return
+                }
                 // Pin the trunk with a REAL ARCore anchor rather than keeping
                 // the hit's raw world point (see ArSessionHub.heightAnchor for
                 // the full argument): ARCore re-fits the world frame all the
@@ -643,8 +754,7 @@ fun HeightScanScreen(
                 anchorLost = false
                 trackingDropped = false
                 trackingLive = true
-                standingAtAnchor = controller.currentCameraPosition()
-                val d0 = controller.horizontalDistanceTo(hit) ?: 0f
+                standingAtAnchor = standing
                 anchorInitialDistM = d0
                 dhLive = d0
                 walkedLive = 0f
@@ -670,7 +780,7 @@ fun HeightScanScreen(
                 val anchor = ArSessionHub.heightAnchorWorld()
                 if (anchor == null) { anchorLost = true; failure = ANCHOR_LOST; return }
                 anchorPt = anchor
-                if (a == null || s == null) { failure = "The camera hasn't got its bearings yet — hold still for a second, then tap + again."; return }
+                if (a == null || s == null) { failure = CAMERA_NOT_READY; return }
                 // Lock the standing pose on the first aim; both angles must
                 // come from the same spot (the §7.2 formula assumes it).
                 failure = null; alphaBase = a; standingLocked = s
@@ -706,7 +816,7 @@ fun HeightScanScreen(
                 anchorPt = anchor
                 val standing = standingLocked; val aBase = alphaBase
                 if (aTop == null || standing == null || aBase == null) {
-                    failure = "The camera hasn't got its bearings yet — hold still for a second, then tap + again."; return
+                    failure = CAMERA_NOT_READY; return
                 }
                 failure = null; alphaTop = aTop
                 // Sampled HERE, immediately after the angle and BEFORE the
@@ -815,6 +925,30 @@ fun HeightScanScreen(
         val truthUnitAtAccept = truthUnit
         // Always the metric base (m) — the conversion lives in TruthInput.
         val rawTrue = TruthInput.parsePositiveBase(truthTextAtAccept, truthUnitAtAccept)
+        // OWNER GATE (iOS `typedTruthForThisMeasurement`). The typed value may
+        // only be RECORDED against this measurement while both marks are clear,
+        // i.e. the text was typed for THIS capture: an owned truth belongs to an
+        // earlier capture that could not take it, and a pending one is queued
+        // against a bundle still being written. Read HERE, synchronously, before
+        // the attach block below can claim the pending slot — and read by BOTH
+        // consumers (the saved reading and the research row) so the two can
+        // never disagree about which capture a number was typed for.
+        val ownedTrue =
+            if (truthOwnerBundleId == null && truthPendingId == null) rawTrue else null
+        // The plot this reading must land in. A field-log RE-MEASURE names the
+        // plot explicitly — including "no plot", which is a real state for rows
+        // recorded before plots existed — and `replaceReading` matches the
+        // superseded reading on it. Resolving that null to the active plot sent
+        // the replacement somewhere else, where it found nothing to supersede
+        // and appended a SECOND reading on the tree: exactly the duplicate the
+        // re-measure was built to prevent. Only a lock that is not a re-measure
+        // (the map home's tree lock) means "wherever I am now". The crown below
+        // rides the same decision, so a tree's readings cannot split across two
+        // plots and become two rows in the log.
+        val lockedPlotID = pendingLock?.plotID
+        val targetPlotID =
+            if (pendingLock?.replaceExisting == true) lockedPlotID
+            else lockedPlotID ?: env.history.activePlotID.value
         truthSaveFailure = null
         scope.launch {
             // Stamp operator_accepted on the bundle this Accept confirms
@@ -827,12 +961,34 @@ fun HeightScanScreen(
             if (settings.developerMode && TruthInput.normalized(truthTextAtAccept).isNotEmpty()) {
                 when {
                     rawTrue == null -> truthSaveFailure = RawCaptureStrings.TRUTH_NOT_A_NUMBER
-                    // Not recording: the value still went to the research CSV.
-                    !rawCaptureArmed -> if (researchTrueText == truthTextAtAccept) researchTrueText = ""
+                    // Not recording: the value still went to the research CSV,
+                    // so the field may clear — and with it every owner mark,
+                    // since nothing is left on screen to belong to anyone.
+                    !rawCaptureArmed -> {
+                        if (researchTrueText == truthTextAtAccept) researchTrueText = ""
+                        truthOwnerBundleId = null
+                        truthPendingId = null
+                        truthPending = null
+                    }
+                    // Left over from an EARLIER capture that couldn't take it:
+                    // attaching it here would put one tree's pole measurement on
+                    // another tree's bundle. Make the cruiser re-enter (or clear)
+                    // it instead — the owner mark stays set, so the gate above
+                    // keeps it out of this tree's reading and research row too.
+                    truthOwnerBundleId != null && truthOwnerBundleId != rid ->
+                        truthSaveFailure = RawCaptureStrings.TRUTH_STALE_OWNER
                     // The capture itself failed — keep the typed value on
                     // screen rather than attach it to a bundle that isn't there.
-                    lastCaptureFailure != null -> truthSaveFailure =
-                        RawCaptureStrings.truthCaptureFailed(lastCaptureFailure)
+                    // It is marked as owned by no bundle (the failed capture's
+                    // id was already dropped) so the NEXT tree's Accept refuses
+                    // it instead of exporting it as that tree's pole number.
+                    lastCaptureFailure != null -> {
+                        truthSaveFailure =
+                            RawCaptureStrings.truthCaptureFailed(lastCaptureFailure)
+                        truthOwnerBundleId = rid ?: TRUTH_NO_BUNDLE_OWNER
+                        truthPendingId = null
+                        truthPending = null
+                    }
                     rid == null -> if (researchTrueText == truthTextAtAccept) researchTrueText = ""
                     else -> {
                         // Claim the pending slot BEFORE the store call: the
@@ -846,20 +1002,27 @@ fun HeightScanScreen(
                             RawCaptureStore.TruthWrite.SAVED -> {
                                 truthPending = null
                                 truthPendingId = null
+                                // In the manifest and off the screen — the only
+                                // state that owns nothing.
+                                truthOwnerBundleId = null
                                 if (researchTrueText == truthTextAtAccept) researchTrueText = ""
                             }
                             // QUEUED is NOT durable: the value lives only in
                             // the store's pending queue until the in-flight
-                            // write folds it in, so the text stays put.
+                            // write folds it in, so the text stays put — and
+                            // text left on screen belongs to THIS bundle until
+                            // the cruiser retypes it.
                             // (If the writer already resolved it, truthPendingId
                             // is null again and there is nothing to announce.)
                             RawCaptureStore.TruthWrite.QUEUED ->
                                 if (truthPendingId == rid) {
                                     truthPending = RawCaptureStrings.TRUTH_PENDING
+                                    truthOwnerBundleId = rid
                                 }
                             RawCaptureStore.TruthWrite.FAILED -> {
                                 truthPending = null
                                 truthPendingId = null
+                                truthOwnerBundleId = rid
                                 truthSaveFailure = RawCaptureStrings.TRUTH_WRITE_FAILED
                             }
                         }
@@ -926,18 +1089,31 @@ fun HeightScanScreen(
                         // one, else the name the tree already carries — a
                         // chained or repeat height must not arrive nameless
                         // and split the tree in two in the export.
+                        // The name is looked up in the plot this reading lands
+                        // in, not the active one — on a re-measure they can be
+                        // different plots, and the wrong plot's tree 7 is a
+                        // different tree.
                         treeName = pendingLock?.name
-                            ?: env.history.treeName(pendingTree, env.history.activePlotID.value),
-                        plotID = pendingLock?.plotID ?: env.history.activePlotID.value,
+                            ?: env.history.treeName(pendingTree, targetPlotID),
+                        plotID = targetPlotID,
                         speciesCode = metaSpecies,
                         damageCodes = metaDamage,
                         note = metaNote.ifBlank { null },
                         latitude = fix?.latitude,
                         longitude = fix?.longitude,
                         photoPath = photo,
-                        // A re-measure keeps the hand-measured value already
-                        // typed for this tree; a fresh reading has none.
-                        truth = pendingLock?.truth,
+                        // The pole / clinometer height belongs ON the reading:
+                        // the raw-capture manifest is developer plumbing that
+                        // can be pruned, while the truth column the accuracy
+                        // study reads is exported from here. A value typed on
+                        // this screen is the newest word on this tree and wins;
+                        // a re-measure otherwise keeps the hand-measured value
+                        // already typed for it, and a fresh reading has none.
+                        // `ownedTrue`, never the bare re-parse: text kept on
+                        // screen from an earlier capture is not this tree's
+                        // pole measurement.
+                        truth = (if (settings.developerMode) ownedTrue else null)
+                            ?: pendingLock?.truth,
                     )
                 // A re-measure launched from the field log TAKES THE PLACE of
                 // the reading it was launched from — appending would leave the
@@ -961,8 +1137,10 @@ fun HeightScanScreen(
                         sigma = null, confidenceRaw = "green", method = "ar.crown.dh",
                         treeNumber = pendingTree,
                         treeName = pendingLock?.name
-                            ?: env.history.treeName(pendingTree, env.history.activePlotID.value),
-                        plotID = pendingLock?.plotID ?: env.history.activePlotID.value,
+                            ?: env.history.treeName(pendingTree, targetPlotID),
+                        // Same plot as the height this crown was measured
+                        // inside — see `targetPlotID`.
+                        plotID = targetPlotID,
                     )
                 )
             }
@@ -984,6 +1162,27 @@ fun HeightScanScreen(
                 // Blank, not 0, when there was no pose to compare — an
                 // unmeasured drift and a zero drift are different facts.
                 "aim_drift_m" to (aimDriftM?.let { String.format(Locale.US, "%.3f", it) } ?: ""),
+                // Did VIO drop between anchoring and the aims? The warning the
+                // cruiser saw travels WITH the row — an accepted reading taken
+                // across a dropout used to export identically to a clean one.
+                // On a WALK-OFF row "false" is a positive statement that the
+                // walk was continuous, not a missing observation.
+                //
+                // EMPTY on a typed manual height, which is what the column's
+                // own definition says ("Empty on rows with no walk-off (DBH,
+                // typed manual heights)" — ResearchLog) and what this line did
+                // not do. The manual Save does not reset the latch, so a
+                // cruiser who anchored, walked, hit a dropout, gave up and
+                // typed the number exported tracking_dropped=true for a row
+                // where nothing was tracked; and an ordinary typed row exported
+                // "false", positively claiming that a walk-off which never
+                // happened was continuous. Both are assertions about a
+                // measurement the row did not make. iOS makes the same test.
+                "tracking_dropped" to when {
+                    r.method == HeightMethod.MANUAL_ENTRY -> ""
+                    trackingDropped -> "true"
+                    else -> "false"
+                },
                 "species" to (metaSpecies ?: ""),
                 "note" to metaNote,
             )
@@ -991,7 +1190,11 @@ fun HeightScanScreen(
             // cruiser had to retype. Same value the raw-capture bundle and the
             // saved reading carry, so the three join.
             fields["tree_id"] = "${CruiseCapture.target?.treeNumber ?: pendingTree}"
-            rawTrue?.let { t ->
+            // `ownedTrue`, never the bare re-parse — see the owner gate. A
+            // stale number here is the worst of the two: the CSV is what the
+            // accuracy study reads, and this tree's row would carry an earlier
+            // tree's pole value with an error computed against this height.
+            ownedTrue?.let { t ->
                 // `true_value` and `error` are in the row's `unit` (m) — the
                 // same scale as `measured_value`, so the error column stays
                 // subtractable. `truth_unit` records what was actually typed.
@@ -1172,8 +1375,18 @@ fun HeightScanScreen(
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         MeasureValuePill(
-                            "Start distance " + MeasurementFormatter.distance(
-                                (anchorInitialDistM ?: 0f).toDouble(), settings.unitSystem),
+                            // Unmeasured reads as "—", never as 0.00: a start
+                            // distance of zero is a claim (the cruiser was
+                            // standing ON the trunk) and it would be a false
+                            // one. Unreachable in practice — the anchor stage
+                            // refuses without a camera pose, which is what
+                            // makes iOS's non-optional `initialDistanceM`
+                            // equivalent — so the two platforms print the same
+                            // sentence for every state that can occur.
+                            "Start distance " + (anchorInitialDistM?.let {
+                                MeasurementFormatter.distance(
+                                    it.toDouble(), settings.unitSystem)
+                            } ?: "—"),
                             dimmed = true,
                         )
                         MeasureValuePill(
@@ -1365,8 +1578,8 @@ fun HeightScanScreen(
                     // THE CAMERA LOST THE SCENE somewhere between anchoring
                     // and this reading. d_h is the whole scale of the height
                     // — H = d_h(tan α_top − tan α_base) — and it rests on a
-                    // walk ARCore did not see all of. The top banner said so
-                    // at the time, but a banner is transient and this is the
+                    // walk ARCore did not see all of. The status line said so
+                    // at the time, but that is transient and this is the
                     // moment the cruiser decides whether to keep the number,
                     // so it is repeated here for the same reason the drift
                     // warning is. Not a refusal: ARCore usually relocalizes
@@ -1407,7 +1620,20 @@ fun HeightScanScreen(
                                 trueValue = researchTrueText,
                                 // ',' is NORMALISED to '.', never deleted — the
                                 // old digit filter turned "12,5" into "125".
-                                onTrueChange = { researchTrueText = TruthInput.sanitize(it) },
+                                onTrueChange = {
+                                    researchTrueText = TruthInput.sanitize(it)
+                                    // Editing retires every "couldn't save"
+                                    // state: the text is now the cruiser's
+                                    // current intent for the capture ON SCREEN,
+                                    // so it belongs to no earlier bundle and is
+                                    // no longer the value that was queued. This
+                                    // is also the ONLY way out of the stale-owner
+                                    // refusal — re-type it, or clear the field.
+                                    truthOwnerBundleId = null
+                                    truthSaveFailure = null
+                                    truthPendingId = null
+                                    truthPending = null
+                                },
                                 truePlaceholder = "clinometer",
                                 truthUnit = truthUnit,
                                 onToggleTruthUnit = { truthUnit = TruthInput.toggled(truthUnit) },

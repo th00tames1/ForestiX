@@ -53,6 +53,9 @@ public struct RecordCentreSheet: View {
     @StateObject private var offsetSession = ARKitSessionManager()
     @State private var pushingOffset = false
     @State private var saveErrorMessage: String?
+    /// A save is in flight (see `save(_:)`) — the sheet's buttons are deaf
+    /// and dimmed until it lands or fails.
+    @State private var saving = false
     /// Wall clock the FRESHNESS test reads. Freshness changes with TIME, not
     /// with the arrival of a fix: the view model's own tick stops at the 60 s
     /// bell, and a cruiser under canopy gets no new snapshot to redraw from,
@@ -191,8 +194,8 @@ public struct RecordCentreSheet: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .disabled(instantCentre == nil)
-                .opacity(instantCentre == nil ? 0.45 : 1)
+                .disabled(instantCentre == nil || saving)
+                .opacity(instantCentre == nil || saving ? 0.45 : 1)
                 .accessibilityIdentifier("recordCentre.startNow")
 
                 // Says what the button above actually records, because the
@@ -225,8 +228,8 @@ public struct RecordCentreSheet: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .disabled(readyResult == nil)
-                .opacity(readyResult == nil ? 0.45 : 1)
+                .disabled(readyResult == nil || saving)
+                .opacity(readyResult == nil || saving ? 0.45 : 1)
                 .accessibilityIdentifier("recordCentre.save")
 
                 Button {
@@ -343,9 +346,10 @@ public struct RecordCentreSheet: View {
         return "±— m"
     }
 
-    // (`liveTier` went with the chip — field report F9. `LocationService.tier`
-    // and `GPSAveraging.classify` are untouched; the grade is still computed
-    // and stored on the Plot, it just isn't shown to a cruiser.)
+    // (`liveTier` went with the chip — field report F9. `GPSAveraging.classify`
+    // and `classifySingleFix` are untouched; the grade is still computed and
+    // stored on the Plot, it just isn't shown to a cruiser. The badge's own
+    // `LocationService.tier` helper is gone with the badge.)
 
     private var metaTitle: String {
         switch viewModel.phase {
@@ -411,7 +415,18 @@ public struct RecordCentreSheet: View {
 
     // MARK: Save (planned → real Plot, the old conversion)
 
+    /// ONE write per sheet. `convertPlannedToActivePlot` creates a Plot row
+    /// and marks the planned pin visited, and `dismiss()` does not take the
+    /// buttons away synchronously — a second tap landing before the sheet
+    /// goes would write a SECOND Plot row carrying the same plotNumber and
+    /// the same plannedPlotId, which nothing downstream can tell from a
+    /// genuine duplicate. Three buttons reach this (instant, averaged, and
+    /// the offset flow's onDone), so the guard belongs here rather than on
+    /// any one of them. Android carries the same guard
+    /// (`RecordCentreSheet.kt` `if (saving) return`).
     private func save(_ result: PlotCenterResult) {
+        guard !saving else { return }
+        saving = true
         do {
             let created = try convertPlannedToActivePlot(
                 environment: environment,
@@ -422,6 +437,10 @@ public struct RecordCentreSheet: View {
             onSaved(created)
             dismiss()
         } catch {
+            // The row was not written, so the sheet re-arms: the cruiser can
+            // retry from the same screen rather than backing out and losing
+            // the averaging window they just sat out.
+            saving = false
             saveErrorMessage =
                 "Storage error: \(error.localizedDescription). The centre was not saved — try again."
         }

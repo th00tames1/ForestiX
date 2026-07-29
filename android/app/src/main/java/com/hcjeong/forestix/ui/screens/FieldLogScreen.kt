@@ -801,15 +801,28 @@ private fun FieldLogDetailSheet(
             }
         }
 
-        // Hand-measured values typed against this tree number, read back
-        // from the raw-capture bundles — which is where the truth is
-        // actually stored. Developer-mode only, because that is the only
-        // mode in which the field exists to type into.
+        // Hand-measured values in this tree's RAW-CAPTURE bundles that are on
+        // no reading — typed before the truth lived on the reading, or typed
+        // for a capture whose reading has since been deleted.
+        //
+        // ORPHANS ONLY. The truth that IS on a reading is shown, and edited, in
+        // that reading's section above, and that is the one the CSV carries.
+        // Listing the manifest copy beside it gave the cruiser two ground
+        // truths for one tree that could disagree, with nothing on screen
+        // saying which one exports.
         if (developerMode && row.treeNumber != null) {
-            val truths = remember(row.id) {
+            val bundleTruths = remember(row.id) {
                 RawCaptureStore.list(context)
                     .filter { it.treeNumber == row.treeNumber && it.truthValue != null }
                     .map { it.kind to it.truthValue!! }
+            }
+            val truths = bundleTruths.filter { (kind, _) ->
+                when (kind) {
+                    // Already answered — and exported — by the reading itself.
+                    "dbh" -> row.dbh?.truth == null
+                    "height" -> row.height?.truth == null
+                    else -> true
+                }
             }
             if (truths.isNotEmpty()) {
                 SheetSection("GROUND TRUTH") {
@@ -819,6 +832,11 @@ private fun FieldLogDetailSheet(
                             if (kind == "dbh") String.format(Locale.US, "%.1f cm", value)
                             else String.format(Locale.US, "%.2f m", value))
                     }
+                    // Says out loud what this section now is: a leftover, not
+                    // the number the export reads.
+                    Text(
+                        "Kept with a raw capture, not on a reading — it is not exported. Type it in above to keep it.",
+                        style = type.caption, color = colors.textTertiary)
                 }
             }
         }
@@ -863,10 +881,16 @@ private fun FieldLogEditSection(
     val quantity =
         if (kind == MeasureKind.DBH) TruthInput.Quantity.DIAMETER
         else TruthInput.Quantity.HEIGHT
-    // BOTH fields of a section are typed in the cruiser's active system and
+    // The MEASURED-value field is typed in the cruiser's active system and
     // converted to the metric base on the way in — the one place that
     // conversion is allowed to happen.
     val unit = TruthInput.defaultUnit(quantity, unitSystem == UnitSystem.IMPERIAL)
+    // The TRUTH field opens in the same unit but carries a per-entry
+    // override: a tape in centimetres read against an imperial project is the
+    // case that lost a day of analysis. Keyed on the unit system so changing
+    // the system drops the override — identical rule to the three scan
+    // screens, whose toggle this is.
+    var truthUnit by remember(row.id, kind, unitSystem) { mutableStateOf(unit) }
 
     // Filled from the store ONCE. Re-filling on every store change would
     // overwrite what the cruiser is typing.
@@ -887,15 +911,19 @@ private fun FieldLogEditSection(
             if (kind == MeasureKind.DBH) "A typed diameter must be a number greater than zero."
             else "A typed height must be a number greater than zero."
         } else if (tooShort) {
+            // The floor is one physical height; the sentence is written in the
+            // unit the field is in, so an imperial cruiser is not handed a
+            // metre figure to compare against the feet they just typed.
             String.format(
-                Locale.US, "A typed height must be at least %.1f m.", HeightEstimator.MIN_H_M)
+                Locale.US, "A typed height must be at least %.1f %s.",
+                TruthInput.fromBase(HeightEstimator.MIN_H_M.toDouble(), unit), unit.raw)
         } else {
             // Outside the cruising window is a WARNING, not a refusal: the
             // number is the cruiser's own observation. Same wording as every
             // other truth field in the app.
-            TruthInput.warning(typed, quantity)
+            TruthInput.warning(typed, quantity, unit)
         }
-    val truthTyped = TruthInput.parsePositiveBase(truthText, unit)
+    val truthTyped = TruthInput.parsePositiveBase(truthText, truthUnit)
     val canSave = typed != null && !tooShort &&
         // Text that doesn't parse must never overwrite a stored truth.
         !(developerMode && TruthInput.isUnparseable(truthText)) &&
@@ -929,16 +957,57 @@ private fun FieldLogEditSection(
             Text(it, style = type.caption, color = colors.confidenceBad)
         }
         if (developerMode) {
-            OutlinedTextField(
-                value = truthText,
-                onValueChange = { truthText = TruthInput.sanitize(it) },
-                label = { Text(TruthInput.fieldLabel(quantity, unit)) },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth(),
-            )
-            TruthInput.fieldWarning(truthText, quantity, unit)?.let {
+            ) {
+                // Label and toggle read the SAME unit, so the field can never
+                // say cm while the value is taken as inches.
+                OutlinedTextField(
+                    value = truthText,
+                    onValueChange = { truthText = TruthInput.sanitize(it) },
+                    label = { Text(TruthInput.fieldLabel(quantity, truthUnit)) },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.weight(1f),
+                )
+                // Switching the unit CONVERTS the digits, and this is
+                // deliberately NOT what the three scan screens do.
+                //
+                // There the field starts empty and the toggle means "the
+                // number I am about to type is in this unit", so
+                // reinterpreting is the whole point. Here the field is seeded
+                // from a truth already on the record. Reinterpreting it would
+                // take a stored 30 cm, call it 30 in and write back 76.2 cm —
+                // a silent corruption of the tape value the entire study is
+                // measured against, reached by one tap on a square button.
+                // Converting cannot change the quantity, only how it is
+                // spelled. Text that does not parse is left alone rather than
+                // blanked; the cruiser is mid-edit and their keystrokes are
+                // not ours to discard.
+                TruthUnitToggle(truthUnit, onDarkPanel = false) {
+                    val next = TruthInput.toggled(truthUnit)
+                    TruthInput.parsePositiveBase(truthText, truthUnit)?.let {
+                        truthText = TruthInput.text(it, next)
+                    }
+                    truthUnit = next
+                }
+            }
+            TruthInput.fieldWarning(truthText, quantity, truthUnit)?.let {
                 Text(it, style = type.caption, color = colors.confidenceBad)
+            }
+            // WHY SAVE IS OFF. A truth is an observation ABOUT a reading, so it
+            // needs one to sit on: storing it alone would mean inventing a
+            // measurement to hang it from, which is the one thing this app must
+            // never do. But the cruiser who failed to get a scan and DID tape
+            // the tree still has a number to record — it is a typed
+            // measurement, stamped as typed — and a Save that just stays grey
+            // never said so.
+            if (existing == null && typed == null && truthTyped != null) {
+                Text(
+                    "A ground truth attaches to a reading. Type the tape number as the measurement above — it is saved as typed, not measured.",
+                    style = type.caption, color = colors.confidenceBad)
             }
         }
         ForestixProminentButton(

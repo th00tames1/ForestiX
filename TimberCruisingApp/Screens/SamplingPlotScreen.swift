@@ -88,9 +88,17 @@ public struct SamplingPlotScreen: View {
     /// path passes nothing and keeps today's behaviour byte-identical.
     /// The AR anchor + `ActiveSamplingPlot` are placed the same way on
     /// both paths, so the scan screens' ring overlay comes for free.
-    private let onSaveCruisePlot: ((Double) -> Void)?
+    ///
+    /// It RETURNS the host's refusal, or nil when the plot was saved. The
+    /// refusal has to come back here because this screen is presented as a
+    /// full-screen cover — over the map, and from the cruise scan screens
+    /// over ANOTHER cover — and an alert bound to the map body cannot appear
+    /// while a cover is up. So the message goes in this screen's own banner
+    /// and the screen stays open, exactly as the Android sibling
+    /// (`CruiseStartPlotScreen.save()`) has always done.
+    private let onSaveCruisePlot: ((Double) -> String?)?
 
-    public init(onSaveCruisePlot: ((Double) -> Void)? = nil) {
+    public init(onSaveCruisePlot: ((Double) -> String?)? = nil) {
         self.onSaveCruisePlot = onSaveCruisePlot
     }
 
@@ -360,19 +368,54 @@ public struct SamplingPlotScreen: View {
         // Cruise mode: the host persists the ring as a cruise Plot;
         // nothing is written to the quick-measure history.
         if let onSaveCruisePlot {
-            onSaveCruisePlot(radiusM)
+            // A refusal keeps the screen UP: it is shown in the top banner
+            // (the same place a failed centre-placement is reported) so the
+            // cruiser reads why the ring they just placed is not the plot's
+            // centre, and can retry from here the moment a fix arrives.
+            // Dismissing first put the message on a host that was still
+            // covered, and it was never seen at all.
+            if let refusal = onSaveCruisePlot(radiusM) {
+                captureFailureReason = refusal
+                return
+            }
+            captureFailureReason = nil
             dismiss()
             return
         }
         let area = .pi * radiusM * radiusM
-        history.append(QuickMeasureEntry(
-            kind: .samplingPlot,
-            value: radiusM,
-            secondaryValue: area,
-            sigma: nil,
-            confidenceRaw: "green",
-            method: "ar.tap",
-            plotID: history.activePlotID))
+        // FIELD REPORT 12 — "Edit plot" re-opens this screen on the ring that
+        // is already placed, so Save is now BOTH "record this ring" and
+        // "change the ring I recorded". Appending on the second one wrote a
+        // second `.samplingPlot` row for one physical ring, and those rows go
+        // to the field log and the CSV the validation study reads: three
+        // radius tweaks read as three plots. One ring, one row. Same
+        // update-not-create rule the cruise path got.
+        if let id = activePlot.linkedQuickEntryID,
+           let existing = history.entries.first(where: { $0.id == id }) {
+            history.update(QuickMeasureEntry(
+                id: existing.id,
+                kind: .samplingPlot,
+                value: radiusM,
+                secondaryValue: area,
+                sigma: nil,
+                confidenceRaw: "green",
+                method: "ar.tap",
+                // The ring was recorded when it was PLACED — an edit changes
+                // its radius, not when the cruiser stood at its centre.
+                createdAt: existing.createdAt,
+                plotID: existing.plotID))
+        } else {
+            let entry = QuickMeasureEntry(
+                kind: .samplingPlot,
+                value: radiusM,
+                secondaryValue: area,
+                sigma: nil,
+                confidenceRaw: "green",
+                method: "ar.tap",
+                plotID: history.activePlotID)
+            history.append(entry)
+            activePlot.link(quickEntryID: entry.id)
+        }
         // Saving is the end of the flow — exit the screen (both
         // platforms); staying here only invited a duplicate save.
         dismiss()

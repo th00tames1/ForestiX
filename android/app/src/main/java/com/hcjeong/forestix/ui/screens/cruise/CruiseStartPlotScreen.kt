@@ -196,27 +196,55 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String, editPlotId: Str
         existing.plotAreaAcres = Units.squareMetersToAcres(Units.circleAreaM2(r)).toFloat()
         val recentred = ArSessionHub.activePlot != null &&
             ArSessionHub.linkedCruisePlotId != id
-        if (recentred) {
-            val snap = fix ?: LocationService.lastGlobalFix
-            if (snap != null) {
-                val acc = snap.horizontalAccuracyM.toFloat()
-                existing.centerLat = snap.latitude
-                existing.centerLon = snap.longitude
-                // ONE fix, named as one. This path never opened an averaging
-                // window, so it may not wear GPS_AVERAGED, and the tier comes
-                // from the single-fix rule rather than from `classify` with a
-                // spread of zero it never measured.
-                existing.positionSource = PositionSource.GPS_SINGLE
-                existing.gpsNSamples = 1
-                existing.gpsMedianHAccuracyM = acc
-                existing.gpsSampleStdXyM = 0f
-                // Still stored, still exported — just never shown (F9).
-                existing.positionTier = GPSAveraging.classifySingleFix(acc)
-            }
+        // FRESHNESS-GATED, exactly as `save()` below. A re-centre writes a
+        // plot centre, so it is the same act and it answers to the same
+        // rule: `latestSnapshot` is never cleared and
+        // `LocationService.lastGlobalFix` outlives the screen, so ungated
+        // they hand back the last fix that ever got through — an hour old, a
+        // valley away — and this path would stamp it as a real single fix.
+        // Moving a plot centre to yesterday's position is the same invisible
+        // data loss the `recentred` test exists to prevent, arrived at from
+        // the other side.
+        val snap = if (recentred) {
+            freshFixOrNull(fix ?: LocationService.lastGlobalFix, System.currentTimeMillis())
+        } else {
+            null
         }
+        if (snap != null) {
+            val acc = snap.horizontalAccuracyM.toFloat()
+            existing.centerLat = snap.latitude
+            existing.centerLon = snap.longitude
+            // ONE fix, named as one. This path never opened an averaging
+            // window, so it may not wear GPS_AVERAGED, and the tier comes
+            // from the single-fix rule rather than from `classify` with a
+            // spread of zero it never measured.
+            existing.positionSource = PositionSource.GPS_SINGLE
+            existing.gpsNSamples = 1
+            existing.gpsMedianHAccuracyM = acc
+            existing.gpsSampleStdXyM = 0f
+            // Still stored, still exported — just never shown (F9).
+            existing.positionTier = GPSAveraging.classifySingleFix(acc)
+        }
+        val refusedRecentre = recentred && snap == null
         env.plotRepository.update(existing)
-        // Re-link so the mini-map trusts the AR-anchor path for YOU again.
-        if (ArSessionHub.activePlot != null) ArSessionHub.linkPlot(id)
+        // Re-link so the mini-map trusts the AR-anchor path for YOU again —
+        // but ONLY when that ring is genuinely this plot's centre. On a
+        // refused re-centre the stored centre stayed where it was, so linking
+        // would draw YOU against a ring the plot was never moved to. Left
+        // unlinked, the mini-map falls through to the GPS path measured from
+        // the centre the plot actually has.
+        if (!refusedRecentre && ArSessionHub.activePlot != null) ArSessionHub.linkPlot(id)
+        // A button that did not do what it looked like it did has to say so.
+        // The radius edit landed; the re-placed ring did not become the new
+        // centre, and without this the cruiser walks away believing it did.
+        // The screen stays up (see `save()`) so the message is read and the
+        // re-centre can be retried once there is sky.
+        failure = if (refusedRecentre) {
+            "No GPS fix — the plot keeps its recorded centre. " +
+                "The radius was saved. Step out for sky and try again."
+        } else {
+            null
+        }
         return true
     }
 
@@ -230,7 +258,11 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String, editPlotId: Str
         scope.launch {
             try {
                 if (applyEdit()) {
-                    nav.popBackStack()
+                    // A refused re-centre leaves `failure` set: stay on the
+                    // screen so the cruiser reads why the ring they just
+                    // placed is not the new centre, and can try again from
+                    // here the moment a fix arrives.
+                    if (failure == null) nav.popBackStack() else saving = false
                     return@launch
                 }
                 val pid = UUID.fromString(projectId)

@@ -241,14 +241,25 @@ fun DistanceMeasureScreen(nav: NavController) {
                 )
                 CenteredText(twoPointDistance?.let { formatDistance(it) } ?: "—", large = true)
                 if (settings.developerMode) {
-                    ResearchFieldsRow(
-                        trueLabel = TruthInput.fieldLabel(TruthInput.Quantity.DISTANCE, truthUnit),
-                        trueValue = researchTrueText,
-                        onTrueChange = { researchTrueText = TruthInput.sanitize(it) },
-                        truePlaceholder = "tape",
-                        truthUnit = truthUnit,
-                        onToggleTruthUnit = { truthUnit = TruthInput.toggled(truthUnit) },
-                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        ResearchFieldsRow(
+                            trueLabel = TruthInput.fieldLabel(TruthInput.Quantity.DISTANCE, truthUnit),
+                            trueValue = researchTrueText,
+                            onTrueChange = { researchTrueText = TruthInput.sanitize(it) },
+                            truePlaceholder = "tape",
+                            truthUnit = truthUnit,
+                            onToggleTruthUnit = { truthUnit = TruthInput.toggled(truthUnit) },
+                        )
+                        // Same live warning as the DBH and height screens: a
+                        // field that parses to nothing writes a row with no
+                        // true_value and no truth_unit, and must say so rather
+                        // than swallow the hand measurement. A distance has no
+                        // plausibility window, so this only says whether the
+                        // text is a number.
+                        TruthInput.fieldWarning(
+                            researchTrueText, TruthInput.Quantity.DISTANCE, truthUnit,
+                        )?.let { TruthFieldWarning(it) }
+                    }
                 }
                 Row(
                     Modifier.fillMaxWidth().padding(top = 2.dp),
@@ -291,14 +302,22 @@ fun DistanceMeasureScreen(nav: NavController) {
                                     .background(Color.Black.copy(alpha = 0.55f))
                                     .padding(horizontal = 12.dp, vertical = 8.dp),
                             ) {
-                                ResearchFieldsRow(
-                                    trueLabel = TruthInput.fieldLabel(TruthInput.Quantity.DISTANCE, truthUnit),
-                                    trueValue = researchTrueText,
-                                    onTrueChange = { researchTrueText = TruthInput.sanitize(it) },
-                                    truePlaceholder = "tape",
-                                    truthUnit = truthUnit,
-                                    onToggleTruthUnit = { truthUnit = TruthInput.toggled(truthUnit) },
-                                )
+                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    ResearchFieldsRow(
+                                        trueLabel = TruthInput.fieldLabel(TruthInput.Quantity.DISTANCE, truthUnit),
+                                        trueValue = researchTrueText,
+                                        onTrueChange = { researchTrueText = TruthInput.sanitize(it) },
+                                        truePlaceholder = "tape",
+                                        truthUnit = truthUnit,
+                                        onToggleTruthUnit = { truthUnit = TruthInput.toggled(truthUnit) },
+                                    )
+                                    // See the two-point panel above: a field
+                                    // that parses to nothing must say so
+                                    // rather than swallow the measurement.
+                                    TruthInput.fieldWarning(
+                                        researchTrueText, TruthInput.Quantity.DISTANCE, truthUnit,
+                                    )?.let { TruthFieldWarning(it) }
+                                }
                             }
                         }
                         MeasureValuePill(

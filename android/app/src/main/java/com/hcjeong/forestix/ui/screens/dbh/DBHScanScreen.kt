@@ -241,10 +241,25 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // Manual DBH entry (typed cm) — mirror of the iOS .manualEntry state.
     var manualOpen by remember { mutableStateOf(false) }
     var manualText by remember { mutableStateOf("") }
-    // Accept-snapshot chrome blackout: while true, every 2D panel/button is
-    // hidden so the captured JPEG shows only the AR feed + measurement
+    // Measurement-snapshot chrome blackout: while true, every 2D panel/button
+    // is hidden so the captured JPEG shows only the AR feed + measurement
     // overlays (captured buttons read as real buttons in the photo viewer).
     var hidingChromeForCapture by remember { mutableStateOf(false) }
+    // The JPEG taken THE INSTANT THE 5-FRAME BURST FINISHED, held here until
+    // Accept attaches it to the reading.
+    //
+    // FIELD REPORT: the shutter used to sit in the Accept handler, and by the
+    // time the cruiser has read the result panel and decided, the phone is
+    // down at their side — every stored photo was leaf litter and boots. The
+    // frame worth keeping is the one taken with the bracket still on the stem.
+    // Nothing about the stored measurement changes: this is still the value
+    // that goes into QuickMeasureEntry.photoPath at Accept.
+    //
+    // It is a FILE, so every path that abandons it has to delete it (retake, a
+    // superseding burst, leaving the screen). It is released without deleting
+    // only once a reading has taken ownership of it. Same shape and the same
+    // lifetime rules as iOS `DBHScanScreen.heldPhoto`.
+    var heldPhoto by remember { mutableStateOf<String?>(null) }
     // Scan metadata (species / position / damage / note) attached on Accept.
     // Seeded from the chooser's species control when it was used, so the
     // details chip already reads the species the cruiser picked at the tree.
@@ -362,6 +377,50 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     DisposableEffect(rawCaptureArmed) {
         val token = if (rawCaptureArmed) ArSessionHub.armRawDepth() else null
         onDispose { token?.let { ArSessionHub.releaseRawDepth(it) } }
+    }
+    // Drop the held frame AND delete the file. Called on retake, on a
+    // superseding burst, and on the way off the screen — the store keeps one
+    // file per reading (QuickMeasureHistory deletes a reading's photo with
+    // it), so a frame no reading will ever claim has to go here.
+    fun discardHeldPhoto() {
+        val name = heldPhoto ?: return
+        heldPhoto = null
+        (context as? android.app.Activity)?.let { act ->
+            runCatching { MeasurePhotoStore.delete(act, name) }
+        }
+    }
+    // Take the measurement-moment JPEG and park it in `heldPhoto`.
+    //
+    // ORDER MATTERS. The chrome blackout is raised BEFORE the delay, so
+    // Compose has committed a chrome-less frame by the time the copy runs —
+    // and the callers run this BEFORE flipping to Stage.RESULT, so the result
+    // panel is not even composed yet. What deliberately stays is the AR
+    // scene: the trunk cylinder IS the measurement, and it is the whole
+    // evidentiary value of the photo. (The copy targets the AR surface, so
+    // Compose chrome could not reach the JPEG anyway — the blackout is belt
+    // and braces, and keeps the screen honest about what is photographed.)
+    suspend fun captureHeldPhoto() {
+        val activity = context as? android.app.Activity ?: return
+        // A fresh burst supersedes whatever was held — never leave the
+        // previous capture's file behind on disk.
+        discardHeldPhoto()
+        hidingChromeForCapture = true
+        // LEAVING THE SCREEN INSIDE THIS SETTLE writes nothing: the caller
+        // runs in `rememberCoroutineScope`, whose job is cancelled when the
+        // composition goes, and both suspension points below (this delay and
+        // the PixelCopy await) are cancellation points ahead of the file
+        // write. So there is no window where a photo lands on disk with no
+        // live screen left to hold or delete it. (iOS needs an explicit
+        // has-left check there — its capture task is unstructured.)
+        delay(80)
+        heldPhoto = MeasurePhotoStore.captureScene(activity)
+        hidingChromeForCapture = false
+    }
+    // Leaving without accepting: the held frame belongs to a measurement that
+    // was never stored, so the file goes with it. Anything already handed to a
+    // reading was released at Accept, so this can only ever delete an orphan.
+    DisposableEffect(Unit) {
+        onDispose { discardHeldPhoto() }
     }
     // The most-recent burst's stored bundle id — minted SYNCHRONOUSLY at
     // burst end (not when the async write finishes), so an Accept tapped
@@ -1001,6 +1060,12 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     RawCaptureStrings.notSaved(lastCaptureFailure), false))
             }
             val agg = DBHEstimator.aggregateSamples(samples)
+            // THE SHUTTER — here, at the instant the burst finished and the
+            // diameter is computed, with the cruiser still holding the phone
+            // on the stem, and BEFORE Stage.RESULT puts the panel up. NOT at
+            // Accept (see `heldPhoto`). A red fit cannot be accepted, so it
+            // gets no file — only a diameter a reading can carry does.
+            if (agg != null) captureHeldPhoto() else discardHeldPhoto()
             if (agg == null) {
                 // Surface the red sub-sample's reason when we have one — it
                 // says WHY the trunk couldn't be read.
@@ -1119,6 +1184,10 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     RawCaptureStrings.notSaved(lastCaptureFailure), false))
             }
             val agg = DBHEstimator.aggregateSamples(subs)
+            // THE SHUTTER — same moment and same rule as the auto burst
+            // above: the frame with the bracket still on the stem, taken
+            // before the result panel is composed.
+            if (agg != null) captureHeldPhoto() else discardHeldPhoto()
             if (agg == null) {
                 result = firstRed
                 failure = if (firstRed == null)
@@ -1137,10 +1206,10 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // Shared by the result row's Accept and the manual-entry Save (iOS
     // submitManualEntry goes straight to .accepted).
     fun acceptResult(r: DBHResult) {
-        // Auto-capture (map home): window snapshot as evidence of what was
-        // measured + the latest GPS fix from the badge's running location
-        // service.
-        val activity = context as? android.app.Activity
+        // Auto-capture (map home): the photo was taken at the end of the
+        // burst, by `captureHeldPhoto` — Accept attaches `heldPhoto` and the
+        // latest GPS fix from the badge's running location service, and needs
+        // no Activity of its own to do it.
         // Cruise tally session (v3): captured once so the whole accept
         // rides ONE consistent routing decision.
         val cruise = CruiseCapture.target
@@ -1259,17 +1328,14 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 }
             }
             lastRawCaptureId = null
-            // Chrome-less snapshot of the AR surface (camera feed + the
-            // rendered measurement geometry): hide the 2D chrome, give
-            // Compose one committed frame, capture, then restore. Null when
-            // the capture failed — the reading still saves, without a photo.
-            val photo = activity?.let {
-                hidingChromeForCapture = true
-                delay(80)
-                val name = MeasurePhotoStore.captureScene(it)
-                hidingChromeForCapture = false
-                name
-            }
+            // The chrome-less snapshot of the AR surface (camera feed + the
+            // rendered measurement geometry) was already taken, at the moment
+            // the burst finished (see `heldPhoto`) — Accept only attaches it.
+            // Null when that capture failed, or when there was no measurement
+            // moment at all: a TYPED diameter carries no photo, because the
+            // frame at Save is the keyboard panel and whatever the phone
+            // happened to be pointing at.
+            val photo = heldPhoto
             // FRESHNESS-GATED. lastGlobalFix is the newest fix ANY screen
             // ever saw, with no age check, so a red GPS chip and a green one
             // used to produce byte-identical records: a cruiser under heavy
@@ -1301,6 +1367,13 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         },
                     )
                 }.getOrNull()
+                // The tree row owns the file now — release it WITHOUT
+                // deleting, so the tally reset below (and this screen's own
+                // disposal) can't take the photo off a saved tree. If the row
+                // never reached the database there is nothing holding the
+                // file and the tally moves on regardless, so delete it here
+                // rather than leave an orphan in the photo store.
+                if (savedTreeId != null) heldPhoto = null else discardHeldPhoto()
                 // A. QUICK-TALLY LOOP: no pop, no continuation — bump the
                 // session to the plot's next tree number and reset this
                 // screen to aiming, with the Undo toast (F) offering a 3 s
@@ -1388,6 +1461,10 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 } else {
                     env.history.append(reading)
                 }
+                // The reading owns the file now — release it WITHOUT deleting,
+                // so the disposal the navigation below triggers can't take the
+                // photo off a saved reading.
+                heldPhoto = null
                 // Full-measurement chain (quick-measure world): skip the
                 // continuation dialog, go straight to Height on this tree.
                 // Navigate AFTER the append (this scope dies with the
@@ -1472,9 +1549,19 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     val locked = stage == Stage.AIMING && preview?.locked == true
 
     Box(Modifier.fillMaxSize()) {
-        // Live trunk-cylinder marker only while aiming (mirrors the iOS DBH
-        // cylinder overlay).
-        val dbhMarkers = if (stage == Stage.AIMING) {
+        // Live trunk-cylinder marker while aiming, and FROZEN THROUGH THE
+        // BURST — the preview loop stops at Stage.CAPTURING, so what stays on
+        // screen is the last locked fit, which is exactly the fit the burst is
+        // measuring. iOS renders it in the same window (`cylinderMarkers` is
+        // not stage-gated at all, and `adjustOverlayVisible` explicitly keeps
+        // the bracket up through `.capturing`).
+        //
+        // It also has to be there because the measurement photo is taken at
+        // the END of the burst, while the stage is still CAPTURING: the
+        // cylinder is what makes that photo evidence of WHERE the cruiser
+        // aimed rather than a bare camera frame. Result stages drop it, as
+        // before.
+        val dbhMarkers = if (stage == Stage.AIMING || stage == Stage.CAPTURING) {
             listOfNotNull(cylinderMarker)
         } else {
             emptyList()
@@ -2129,6 +2216,10 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     ForestixWhiteButton("Retake", modifier = Modifier.weight(1f)) {
                         result = null; failure = null; stage = Stage.AIMING
+                        // The held frame captions the measurement being thrown
+                        // away — keeping it would put the OLD aim on the NEW
+                        // diameter.
+                        discardHeldPhoto()
                         // A discarded burst must not collect the NEXT
                         // reading's accept flag or ground truth.
                         lastRawCaptureId = null

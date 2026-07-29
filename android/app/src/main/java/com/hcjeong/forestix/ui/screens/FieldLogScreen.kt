@@ -79,10 +79,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -103,6 +105,7 @@ import com.hcjeong.forestix.sensors.RawCaptureStore
 import com.hcjeong.forestix.ui.MeasurePhotoStore
 import com.hcjeong.forestix.ui.PendingTreeNumber
 import com.hcjeong.forestix.ui.Routes
+import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.screens.plot.PlotSummaryCard
 import com.hcjeong.forestix.ui.shareFile
 import com.hcjeong.forestix.ui.theme.Forestix
@@ -776,6 +779,11 @@ private fun FieldLogDetailSheet(
     val colors = Forestix.colors
     val type = Forestix.type
     val context = LocalContext.current
+    // Every photo on this tree, in capture order — a Full measurement leaves
+    // a diameter frame and a height frame, and this sheet used to show one
+    // of them with no way to the other.
+    val photoPages = measurePhotoPages(row.entries, unitSystem)
+    var showPhotos by remember(row.id) { mutableStateOf(false) }
 
     Column(
         Modifier
@@ -865,8 +873,12 @@ private fun FieldLogDetailSheet(
                         else -> "Automatic"
                     })
             }
-            row.entries.firstNotNullOfOrNull { it.photoPath }?.let { name ->
-                FieldLogPhoto(name)
+            // The row's photos in the order they were shot. The sheet still
+            // shows the first one in place, exactly as it always has; the
+            // rest are one tap away in the shared viewer, which is the only
+            // thing on this screen that pages.
+            photoPages.firstOrNull()?.let { first ->
+                FieldLogPhoto(first.photoPath, photoPages.size) { showPhotos = true }
             }
         }
 
@@ -909,6 +921,14 @@ private fun FieldLogDetailSheet(
                 }
             }
         }
+    }
+
+    if (showPhotos) {
+        PhotoViewerDialog(
+            pages = photoPages,
+            activity = context as? Activity,
+            onDismiss = { showPhotos = false },
+        )
     }
 }
 
@@ -1351,8 +1371,12 @@ private fun SheetRow(label: String, value: String) {
 /// The capture photo, if the file is still there. A missing file says so
 /// rather than leaving an empty box — a blank row would read as "no photo
 /// was taken".
+///
+/// Tapping it opens the shared full-screen viewer, the same one the map peek
+/// and the cruise tree peek open, which is where a tree's second frame is
+/// reachable.
 @Composable
-private fun FieldLogPhoto(name: String) {
+private fun FieldLogPhoto(name: String, count: Int, onOpen: () -> Unit) {
     val colors = Forestix.colors
     val type = Forestix.type
     val context = LocalContext.current
@@ -1364,15 +1388,34 @@ private fun FieldLogPhoto(name: String) {
         }
     }
     if (bitmap != null) {
-        Image(
-            bitmap.asImageBitmap(),
-            contentDescription = "Capture photo",
-            contentScale = ContentScale.Fit,
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(max = 220.dp)
-                .clip(ForestixRadius.control),
-        )
+        Box(Modifier.fillMaxWidth().clickableNoRipple(onOpen)) {
+            Image(
+                bitmap.asImageBitmap(),
+                contentDescription = "Capture photo",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 220.dp)
+                    .clip(ForestixRadius.control),
+            )
+            // Same badge, same wording as the map peek's thumbnail ("×2").
+            // Drawn only from two photos up — with one photo nothing sits
+            // over the image and the sheet is what it always was.
+            if (count > 1) {
+                Text(
+                    "×$count",
+                    style = type.dataSmall.copy(
+                        fontSize = 9.sp, fontWeight = FontWeight.Bold),
+                    color = Color(0xFFF2F5F3),
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(4.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Color(0xB306090A))
+                        .padding(horizontal = 5.dp, vertical = 2.dp),
+                )
+            }
+        }
     } else {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text("Photo", style = type.body, color = colors.textSecondary)

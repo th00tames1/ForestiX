@@ -1281,6 +1281,10 @@ private struct FieldLogDetailForm: View {
     /// Same shape as the scan screens' `truthUnitChoice`.
     @State private var dbhTruthUnitChoice: (unit: TruthInput.Unit, imperial: Bool)?
     @State private var heightTruthUnitChoice: (unit: TruthInput.Unit, imperial: Bool)?
+    /// The photo the sheet is showing full-screen, if any — the SAME viewer
+    /// the map peek and the cruise tree peek open, so a tree with a diameter
+    /// frame and a height frame pages the same way from every surface.
+    @State private var photoViewer: PhotoViewerContext?
 
     /// A prefilled field re-parses a hair off the number it was filled
     /// from — it is rendered to four decimals, and under imperial it makes
@@ -1306,6 +1310,11 @@ private struct FieldLogDetailForm: View {
             }
         }
         .onAppear(perform: seedFields)
+        #if os(iOS)
+        .fullScreenCover(item: $photoViewer) { context in
+            MeasurePhotoDetailView(context: context)
+        }
+        #endif
     }
 
     // MARK: Editing
@@ -1685,8 +1694,16 @@ private struct FieldLogDetailForm: View {
                 // ever pointed a camera at.
                 self.row(label: "Capture", value: captureModeText(mode))
             }
-            if let photo = row.entries.compactMap(\.photoPath).first {
-                FieldLogPhotoRow(name: photo)
+            // The row's photos in the order they were shot. The sheet still
+            // shows the first one in place, exactly as it always has; the
+            // rest are one tap away in the shared viewer, which is the only
+            // thing on this screen that pages.
+            let photoPages = MeasurePhotoPage.pages(for: row.entries,
+                                                    unitSystem: unitSystem)
+            if let first = photoPages.first {
+                FieldLogPhotoRow(name: first.photoPath, count: photoPages.count) {
+                    photoViewer = PhotoViewerContext(pages: photoPages)
+                }
             }
         }
     }
@@ -1764,20 +1781,34 @@ private struct FieldLogDetailForm: View {
 /// The capture photo, if the file is still there. A missing file says so
 /// rather than leaving an empty box — the container can move between
 /// installs, and a blank row would read as "no photo was taken".
+///
+/// Tapping it opens the shared full-screen viewer. With one photo on the
+/// tree nothing is drawn over the image and the sheet looks exactly as it
+/// did; from two up it carries the same "×N" badge the map peek's thumbnail
+/// uses, because that is where the second frame is reachable.
 private struct FieldLogPhotoRow: View {
     let name: String
+    let count: Int
+    let onOpen: () -> Void
 
     var body: some View {
         #if canImport(UIKit)
         if let image = UIImage(contentsOfFile:
                                 MeasurePhotoStore.url(for: name).path) {
-            Image(uiImage: image)
-                .resizable()
-                .scaledToFit()
-                .frame(maxHeight: 220)
-                .clipShape(RoundedRectangle(cornerRadius: ForestixRadius.control,
-                                            style: .continuous))
-                .accessibilityLabel("Capture photo")
+            Button(action: onOpen) {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxHeight: 220)
+                    .clipShape(RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                                style: .continuous))
+                    .overlay(alignment: .topTrailing) {
+                        if count > 1 { countBadge }
+                    }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Capture photo")
+            .accessibilityIdentifier("fieldLog.detail.photo")
         } else {
             HStack {
                 Text("Photo")
@@ -1790,6 +1821,19 @@ private struct FieldLogPhotoRow: View {
         #else
         EmptyView()
         #endif
+    }
+
+    /// Same badge, same wording as the map peek's thumbnail ("×2").
+    private var countBadge: some View {
+        Text("×\(count)")
+            .font(.system(size: 9, weight: .bold, design: .monospaced))
+            .foregroundStyle(MeasurePhotoChrome.ink)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(MeasurePhotoChrome.glass.opacity(0.70)))
+            .padding(4)
     }
 }
 

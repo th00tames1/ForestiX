@@ -100,10 +100,33 @@ public struct HeightScanScreen: View {
     @State private var metaDamage: [String] = []
     @State private var metaNote: String = ""
     @State private var presentingMetadata = false
-    /// True while the Accept-time window snapshot is being taken — hides
-    /// every piece of 2D chrome so the captured JPEG shows only the AR
+    /// True while the measurement-moment window snapshot is being taken —
+    /// hides every piece of 2D chrome so the captured JPEG shows only the AR
     /// feed and the measurement overlays (crosshair + scene markers).
     @State private var hidingChromeForCapture = false
+    /// The JPEG taken THE INSTANT THE TOP SIGHTING LANDED, held here until
+    /// Accept attaches it to the reading.
+    ///
+    /// FIELD REPORT: the shutter used to sit in the Accept handler, and by
+    /// the time the cruiser has read the H ± σ panel and decided, the phone is
+    /// down at their side — every stored photo was leaf litter and boots. The
+    /// frame worth keeping is the one taken with the phone still pointed at
+    /// the crown, because "was the top actually visible, and was it THIS
+    /// tree's top?" is the one thing about a height that cannot be checked
+    /// afterwards from the numbers. Nothing about the stored measurement
+    /// changes: this is still the value that goes into
+    /// `ScanMetadata.photoPath` at Accept.
+    ///
+    /// It is a FILE, so every path that abandons it has to delete it:
+    /// `discardHeldPhoto()` on retake / a superseding compute / leaving the
+    /// screen. It is released (not deleted) only once a reading has taken
+    /// ownership of it.
+    @State private var heldPhoto: String?
+    /// True between `onDisappear` and the next `onAppear`. Read by
+    /// `captureHeldPhoto` only: its 80 ms settle is an unstructured task that
+    /// outlives the screen, and a shot taken after the screen is gone is both
+    /// the wrong picture and an undeletable file.
+    @State private var hasLeftScreen = false
 
     /// "Pin centre" offer, waved off for this visit — see the DBH twin for
     /// why it is not persisted.
@@ -446,6 +469,7 @@ public struct HeightScanScreen: View {
             }
         }
         .onAppear {
+            hasLeftScreen = false
             configureRawCapture()
             viewModel.onAppear()
         }
@@ -453,6 +477,12 @@ public struct HeightScanScreen: View {
         // `onDisappear` too) — so the trunk anchor is released here and only
         // here, and survives a phone call taken mid-walk.
         .onDisappear {
+            // Leaving without accepting: the held frame belongs to a
+            // measurement that was never stored, so the file goes with it.
+            // Anything already handed to a reading was released at Accept, so
+            // this can only ever delete an orphan.
+            hasLeftScreen = true
+            discardHeldPhoto()
             viewModel.onDisappear()
             viewModel.releaseTrunkAnchor()
         }
@@ -477,19 +507,43 @@ public struct HeightScanScreen: View {
                 onResult(r)
             }
         }
+        // THE SHUTTER — fires the instant the treetop sighting is taken and
+        // the height is computed, while the phone is still up on the crown.
+        // NOT at Accept: see `heldPhoto`.
+        //
+        // `resultGeneration` is bumped once per `compute()`, so this fires
+        // exactly once per measurement. A failed save (`acceptFailed()`)
+        // moves the STATE back to `.computed` / `.rejected` without producing
+        // a new result, so the retry keeps this frame instead of
+        // photographing the ground.
+        .onChange(of: viewModel.resultGeneration) { _, _ in
+            // A height that is not a measurement at all (inverted aims,
+            // out-of-range H, degenerate geometry) can never be accepted, so
+            // no reading will carry the photo — don't write a file whose only
+            // future is deletion. A RED height is acceptable and does get one.
+            guard viewModel.canAcceptResult else {
+                discardHeldPhoto()
+                return
+            }
+            // Raised HERE, in the same synchronous turn as the state change
+            // that puts the H ± σ panel on screen, so the panel is never
+            // composed un-blacked-out: the first frame SwiftUI commits after
+            // the sighting is already chrome-less, and that is the frame the
+            // shot is taken from. `captureHeldPhoto` lowers it again.
+            hidingChromeForCapture = true
+            Task { @MainActor in await captureHeldPhoto() }
+        }
         .onChange(of: viewModel.state) { _, newState in
             if newState == .accepted, let r = viewModel.result {
-                // Auto-capture at Accept — the 2D chrome is hidden first
-                // (a short sleep lets SwiftUI commit the chrome-less
-                // frame) so the JPEG shows only the AR feed + overlays,
-                // not buttons/panels that read as live controls in the
-                // photo viewer. The entry must get its photoPath before
-                // it is appended, hence the await before onAccept.
+                // Auto-capture (map home): the snapshot of the AR feed + the
+                // measurement overlays was already taken, at the moment the
+                // top sighting produced the height (see `heldPhoto`) — Accept
+                // only attaches it. A TYPED height has no such moment and
+                // carries no photo: the frame at Save is the keyboard panel
+                // and whatever the phone happened to be pointing at, which is
+                // evidence of nothing.
                 Task { @MainActor in
-                    hidingChromeForCapture = true
-                    try? await Task.sleep(for: .milliseconds(80))
-                    let photo = MeasurePhotoStore.captureWindow()
-                    hidingChromeForCapture = false
+                    let photo = heldPhoto
                     // Freshness-gated — see the note on the diameter
                     // scan's accept path. A stale fix stores no position
                     // rather than a confident wrong one.
@@ -513,6 +567,12 @@ public struct HeightScanScreen: View {
                     // peek with nothing on screen to say so.
                     if onAccept(r, meta) {
                         heightSaveFailure = nil
+                        // The reading owns the file now — release it WITHOUT
+                        // deleting, so the screen's own exit can't take the
+                        // photo off a saved tree. A failed store keeps it
+                        // held: Accept can be tapped again and the same
+                        // crown-moment frame goes with it.
+                        heldPhoto = nil
                     } else {
                         heightSaveFailure = treeNumber.map {
                             "Height NOT saved to Tree \($0) — the tree row couldn't be updated. Tap Accept again."
@@ -549,6 +609,48 @@ public struct HeightScanScreen: View {
             @unknown default: break
             }
         }
+    }
+
+    // MARK: - Measurement photo
+
+    /// Take the measurement-moment JPEG and park it in `heldPhoto`.
+    ///
+    /// ORDER MATTERS. The chrome blackout is up before the settle sleep — the
+    /// caller raises it in the same turn the height lands, and this re-raise
+    /// is idempotent — so the frame SwiftUI has committed by the time the
+    /// renderer runs carries no panels and no buttons, the H ± σ result panel
+    /// included. What deliberately stays is the AR scene: the anchor, base and
+    /// top spheres are the measurement, and they are the whole evidentiary
+    /// value of the photo.
+    @MainActor
+    private func captureHeldPhoto() async {
+        // A fresh compute supersedes whatever was held — never leave the
+        // previous measurement's file behind on disk.
+        discardHeldPhoto()
+        hidingChromeForCapture = true
+        try? await Task.sleep(for: .milliseconds(80))
+        // THE SCREEN CAN BE LEFT INSIDE THAT SLEEP (the cruiser backs out,
+        // the host dismisses the cover). This task is unstructured, so it
+        // would still run: it would photograph whatever replaced this screen
+        // and write a file that no reading and no `onDisappear` would ever
+        // delete — an orphan in the photo store. Nothing is captured instead.
+        guard !hasLeftScreen else {
+            hidingChromeForCapture = false
+            return
+        }
+        heldPhoto = MeasurePhotoStore.captureWindow()
+        hidingChromeForCapture = false
+    }
+
+    /// Drop the held frame AND delete the file. Called on retake, on a
+    /// superseding compute, and on the way off the screen — the store keeps
+    /// one file per reading (`QuickMeasureHistory` deletes a reading's photo
+    /// with it), so a frame no reading will ever claim has to go here.
+    @MainActor
+    private func discardHeldPhoto() {
+        guard let name = heldPhoto else { return }
+        heldPhoto = nil
+        MeasurePhotoStore.delete(name)
     }
 
     // MARK: - Overlay chrome per stage
@@ -604,7 +706,17 @@ public struct HeightScanScreen: View {
         }
         switch viewModel.state {
         case .idle, .anchorSet: return "Aim at trunk (eye level)"
-        case .walking:          return "Walk back — aim stays on tree"
+        // WHAT THE WALK ACTUALLY NEEDS is live VIO, not a particular aim.
+        // The trunk anchor is a bare world anchor (`addWorldAnchor`), not
+        // attached to a trackable, and the walk reads only tracking state
+        // and the horizontal distance to it — camera direction is not an
+        // input. Position comes from visual-inertial odometry, so what
+        // breaks it is a covered or smeared lens and featureless scenery;
+        // the IMU alone cannot hold a position (double-integrated bias is
+        // metres out within seconds). Telling the cruiser to keep the aim
+        // on the tree was stricter than the code and made them walk
+        // backwards for nothing.
+        case .walking:          return "Walk back — keep the phone up and the lens clear"
         case .aimTopArmed:      return "Aim at treetop"
         case .aimBaseArmed:     return "Aim at trunk + ground"
         case .aimTopCaptured,
@@ -852,6 +964,9 @@ public struct HeightScanScreen: View {
         if showsRetakeFlank {
             return .init(systemImage: "arrow.counterclockwise",
                          caption: "Retake") {
+                // The held frame captions the measurement being thrown away —
+                // keeping it would put the OLD aim on the NEW height.
+                discardHeldPhoto()
                 viewModel.retake()
                 resetCrown()
             }
@@ -1226,18 +1341,14 @@ public struct HeightScanScreen: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("heightScan.resultReason")
             }
-            // The instrument moved between the two sightings, so the tangent
-            // pair no longer shares an origin and the height is soft by
-            // roughly this much. Said plainly and with the number, at the
-            // moment the cruiser decides whether to keep the reading.
-            if let drift = viewModel.aimDriftM,
-               drift > HeightScanViewModel.aimDriftWarnM {
-                Text("You moved \(MeasurementFormatter.distance(m: Double(drift), in: settings.unitSystem)) between the base and top sightings. Both have to be taken from one spot — retake for a firm number.")
-                    .font(ForestixType.caption)
-                    .foregroundStyle(ForestixPalette.confidenceWarn)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("heightScan.aimDrift")
-            }
+            // NO BASE-TO-TOP DRIFT WARNING HERE. It used to sit between the
+            // rejection reason and the tracking-dropped line; the cruiser
+            // asked for it off the field panel, and it never refused a
+            // reading, so removing it changes nothing about what is stored.
+            // `viewModel.aimDriftM` is still computed on every top sighting
+            // and still written to `aim_drift_m` in the research CSV and the
+            // raw-capture manifest (see `recordResearchRow`) — the study
+            // carries the drift in the height error budget.
             // THE CAMERA LOST THE SCENE somewhere between anchoring and this
             // reading. d_h is the whole scale of H — H = d_h(tan α_top −
             // tan α_base) — and it rests on a walk ARKit did not see all of.
@@ -1577,7 +1688,7 @@ public struct HeightScanScreen: View {
                     }
                 }
                 HStack(spacing: 12) {
-                    Button("Retake") { viewModel.retake(); resetCrown() }
+                    Button("Retake") { discardHeldPhoto(); viewModel.retake(); resetCrown() }
                         .buttonStyle(.forestixARSecondary)
                         .frame(maxWidth: .infinity)
                     Button("Accept") {
@@ -1628,10 +1739,18 @@ public struct HeightScanScreen: View {
                     }
                 }
                 HStack(spacing: 12) {
-                    Button("Retake") { viewModel.retake(); resetCrown() }
+                    Button("Retake") { discardHeldPhoto(); viewModel.retake(); resetCrown() }
                         .buttonStyle(.forestixARSecondary)
                         .frame(maxWidth: .infinity)
-                    Button("Manual") { viewModel.enterManualEntry() }
+                    // The AR frame held for the red fit must NOT ride along on
+                    // a typed height: it would caption a hand-entered number
+                    // with a sighting the cruiser has just decided against.
+                    // (Android's Manual button goes through `resetAll()`,
+                    // which discards for the same reason.)
+                    Button("Manual") {
+                        discardHeldPhoto()
+                        viewModel.enterManualEntry()
+                    }
                         .buttonStyle(.forestixARSecondary)
                         .frame(maxWidth: .infinity)
                     Button("Accept") {
@@ -1651,7 +1770,7 @@ public struct HeightScanScreen: View {
                 }
             }
         case .manualEntry:
-            Button("Cancel") { viewModel.retake() }
+            Button("Cancel") { discardHeldPhoto(); viewModel.retake() }
                 .buttonStyle(.forestixARSecondary)
         case .idle, .anchorSet, .walking,
              .aimTopArmed, .aimTopCaptured, .aimBaseArmed, .accepted:

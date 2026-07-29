@@ -1,7 +1,15 @@
-// Measure-photo store — JPEG snapshots auto-captured at the moment a DBH
-// or Height reading is Accepted (map-home feature). Mirror of the iOS
+// Measure-photo store — JPEG snapshots auto-captured at the moment a DBH or
+// Height measurement COMPLETES (map-home feature). Mirror of the iOS
 // MeasurePhotoStore: one file per entry under filesDir/measure-photos/,
 // QuickMeasureEntry.photoPath holds just the filename.
+//
+// WHEN THE SHUTTER FIRES: the instant the 5-frame burst finishes (Diameter)
+// or the treetop sighting produces a height (Height) — NOT at Accept. By
+// Accept the cruiser has lowered the phone to read the result panel and
+// decide, so every photo in the field log was leaf litter and boots. The scan
+// screens hold the file in Compose state and attach it to the reading at
+// Accept; they own its lifetime until then (see `heldPhoto` on either
+// screen). iOS moved the same shutter to the same two moments.
 //
 // WHAT IS IN THE PHOTO: the AR SURFACE — the camera feed with the rendered
 // measurement geometry drawn into it (the markers, the cylinder, the plot

@@ -1,12 +1,20 @@
 // Measure-photo store — JPEG snapshots auto-captured at the moment a DBH
-// or Height reading is Accepted (map-home feature). One file per entry in
+// or Height measurement COMPLETES (map-home feature). One file per entry in
 // Documents/measure-photos/; QuickMeasureEntry.photoPath holds just the
 // filename. Deleting an entry deletes its photo (QuickMeasureHistory).
 //
-// The snapshot is the WHOLE window (AR feed + aiming overlay + value
-// panel) on purpose: it is evidence of what was aimed at and what the
-// instrument showed — richer than a bare camera frame, and identical in
-// spirit to the Android PixelCopy capture.
+// WHEN THE SHUTTER FIRES: the instant the 5-frame burst finalises (Diameter)
+// or the treetop sighting produces a height (Height) — NOT at Accept. By
+// Accept the cruiser has lowered the phone to read the result panel and
+// decide, so every photo in the field log was leaf litter and boots. The scan
+// screens hold the file in view state and attach it to the reading at Accept;
+// they own its lifetime until then (see `heldPhoto` on either screen).
+//
+// The snapshot is the WHOLE window (AR feed + aiming overlay + scene
+// markers) on purpose: it is evidence of what was aimed at — richer than a
+// bare camera frame, and identical in spirit to the Android PixelCopy
+// capture. The scan screens black their 2D chrome out for the shot, so no
+// buttons or panels are baked in.
 
 import Foundation
 import SwiftUI

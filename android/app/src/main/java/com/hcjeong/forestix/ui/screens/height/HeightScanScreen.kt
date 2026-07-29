@@ -140,15 +140,23 @@ private const val MAX_POSE_SAMPLES = 600
 private const val AIM_MARKER_RADIUS_M = 0.06f
 
 /// How far the phone may move between the base sighting and the top
-/// sighting before the reading is worth a warning.
+/// sighting before the drift is large enough to matter.
 ///
 /// The §7.2 formula takes both angles from ONE point. 0.25 m clears
 /// ordinary hand and wrist movement while tilting up — measured against a
 /// held phone, that is a few centimetres — and catches the two cases that
 /// actually bias the number: raising the phone overhead to clear a crown,
-/// and taking a step. It WARNS rather than refuses: a cruiser who has
-/// already walked the off-distance should be told the reading is soft, not
-/// sent back to the start by an arm's-length wobble.
+/// and taking a step. It never refused a reading.
+///
+/// NOTHING READS THIS TODAY — the result-panel warning it gated was removed
+/// at the cruiser's request. It is kept, not deleted, because it is the cut
+/// point of the base-to-top drift analysis that sits in the height error
+/// budget (the analysis that measured a median drift of 0.31 m, ≈2.8 % of
+/// H); `aim_drift_m` is still recorded on every reading and scored against
+/// this number off-device. A deleted 0.25 would have to be rediscovered to
+/// read the study's own CSVs. iOS keeps the identical value in
+/// `HeightScanViewModel.aimDriftWarnM` for the same reason.
+@Suppress("unused")
 private const val AIM_DRIFT_WARN_M = 0.25f
 
 /// Owner sentinel for a truth kept on screen for a measurement that produced
@@ -283,10 +291,27 @@ fun HeightScanScreen(
     // Manual height entry (typed metres) — iOS .manualEntry state.
     var manualOpen by remember { mutableStateOf(false) }
     var manualText by remember { mutableStateOf("") }
-    // Accept-snapshot chrome blackout: while true, every 2D panel/button is
-    // hidden so the captured JPEG shows only the AR feed + measurement
+    // Measurement-snapshot chrome blackout: while true, every 2D panel/button
+    // is hidden so the captured JPEG shows only the AR feed + measurement
     // overlays (captured buttons read as real buttons in the photo viewer).
     var hidingChromeForCapture by remember { mutableStateOf(false) }
+    // The JPEG taken THE INSTANT THE TOP SIGHTING LANDED, held here until
+    // Accept attaches it to the reading.
+    //
+    // FIELD REPORT: the shutter used to sit in the Accept handler, and by the
+    // time the cruiser has read the H ± σ panel and decided, the phone is down
+    // at their side — every stored photo was leaf litter and boots. The frame
+    // worth keeping is the one taken with the phone still on the crown,
+    // because "was the top actually visible, and was it THIS tree's top?" is
+    // the one thing about a height that cannot be checked afterwards from the
+    // numbers. Nothing about the stored measurement changes: this is still the
+    // value that goes into QuickMeasureEntry.photoPath at Accept.
+    //
+    // It is a FILE, so every path that abandons it has to delete it (retake,
+    // a superseding compute, leaving the screen). It is released without
+    // deleting only once a reading has taken ownership of it. Same shape and
+    // the same lifetime rules as iOS `HeightScanScreen.heldPhoto`.
+    var heldPhoto by remember { mutableStateOf<String?>(null) }
     // FIELD REPORT 14 × 17 — a cruise plot is being tallied but no AR anchor
     // marks its centre, so `PlotOverlay.SUBDUED` has nothing to draw and the
     // cruiser is looking at a bare camera feed with a plot open. Non-null
@@ -339,6 +364,51 @@ fun HeightScanScreen(
     // abandoned walk-off can't hand its anchor to the next tree's session.
     DisposableEffect(Unit) {
         onDispose { ArSessionHub.clearHeightAnchor() }
+    }
+    // Drop the held frame AND delete the file. Called on retake, on a
+    // superseding compute, and on the way off the screen — the store keeps one
+    // file per reading (QuickMeasureHistory deletes a reading's photo with
+    // it), so a frame no reading will ever claim has to go here.
+    fun discardHeldPhoto() {
+        val name = heldPhoto ?: return
+        heldPhoto = null
+        (context as? android.app.Activity)?.let { act ->
+            runCatching { MeasurePhotoStore.delete(act, name) }
+        }
+    }
+    // Take the measurement-moment JPEG and park it in `heldPhoto`.
+    //
+    // ORDER MATTERS. The chrome blackout is up before the settle delay — the
+    // caller raises it in the same turn the height lands, and this re-raise is
+    // idempotent — so Compose has committed a chrome-less frame by the time
+    // the copy runs, the result panel included. What
+    // deliberately stays is the AR scene: the anchor, base and top spheres
+    // ARE the measurement, and they are the whole evidentiary value of the
+    // photo. (The copy targets the AR surface, so Compose chrome could not
+    // reach the JPEG anyway — the blackout is belt and braces, and keeps the
+    // screen honest about what is being photographed.)
+    suspend fun captureHeldPhoto() {
+        val activity = context as? android.app.Activity ?: return
+        // A fresh compute supersedes whatever was held — never leave the
+        // previous measurement's file behind on disk.
+        discardHeldPhoto()
+        hidingChromeForCapture = true
+        // LEAVING THE SCREEN INSIDE THIS SETTLE writes nothing: the caller
+        // runs in `rememberCoroutineScope`, whose job is cancelled when the
+        // composition goes, and both suspension points below (this delay and
+        // the PixelCopy await) are cancellation points ahead of the file
+        // write. So there is no window where a photo lands on disk with no
+        // live screen left to hold or delete it. (iOS needs an explicit
+        // has-left check there — its capture task is unstructured.)
+        delay(80)
+        heldPhoto = MeasurePhotoStore.captureScene(activity)
+        hidingChromeForCapture = false
+    }
+    // Leaving without accepting: the held frame belongs to a measurement that
+    // was never stored, so the file goes with it. Anything already handed to a
+    // reading was released at Accept, so this can only ever delete an orphan.
+    DisposableEffect(Unit) {
+        onDispose { discardHeldPhoto() }
     }
     // Grab the current AR depth frame + reference RGB JPEG bytes at an aim
     // moment. Returns (frame, jpegBytes) — either may be null; recordHeight
@@ -878,8 +948,12 @@ fun HeightScanScreen(
                 // movement one-for-one, plus the horizontal movement scaled
                 // by (tree height / d_h) — at 10 m from a 20 m tree, a 20 cm
                 // step is a 40 cm error, which is inside nothing this app
-                // claims. It is reported, not swallowed: the cruiser can
-                // retake, and a recorded run carries the number.
+                // claims. It is RECORDED, not swallowed — `aim_drift_m` in
+                // the research CSV and the raw-capture manifest — even
+                // though the field panel no longer says anything about it:
+                // the cruiser asked for that warning off, and the accuracy
+                // study still needs the drift in the height error budget
+                // (median 0.31 m, ≈2.8 % of H).
                 val drift = topPosNow?.let { now ->
                     val dx = now.x - standing.x
                     val dy = now.y - standing.y
@@ -897,6 +971,21 @@ fun HeightScanScreen(
                     unitSystem = settings.unitSystem,
                 )
                 result = r
+                // THE SHUTTER — here, at the instant the treetop sighting
+                // produced a height and while the phone is still up on the
+                // crown, NOT at Accept (see `heldPhoto`). A height that is not
+                // a measurement at all can never be accepted, so it gets no
+                // file; a RED height is acceptable and does.
+                if (HeightEstimator.canAccept(r)) {
+                    // Raised HERE, synchronously with the stage flip below,
+                    // so the result panel is never composed un-blacked-out:
+                    // the first frame Compose commits after the sighting is
+                    // already chrome-less. captureHeldPhoto lowers it again.
+                    hidingChromeForCapture = true
+                    scope.launch { captureHeldPhoto() }
+                } else {
+                    discardHeldPhoto()
+                }
                 // Raw-capture: serialize this compute for offline replay
                 // (every compute, accepted or rejected). Off the main thread.
                 recordRawHeight(r, anchor, aBase, aTop)
@@ -908,6 +997,9 @@ fun HeightScanScreen(
 
     fun resetCrown() { crownStep = CrownStep.NONE; cL = null; cR = null; cT = null; cB = null; crownW = null; crownH = null }
     fun resetAll() {
+        // The held frame captions the measurement being thrown away — keeping
+        // it would put the OLD aim on the NEW height.
+        discardHeldPhoto()
         stage = Stage.ANCHOR; anchorPt = null; standingLocked = null
         alphaBase = null; alphaTop = null; topMarker = null; baseMarker = null
         aimDriftM = null
@@ -938,7 +1030,8 @@ fun HeightScanScreen(
         // not part of this — a red fit is committable, with its reason shown
         // inline, and stays red everywhere it is recorded.
         if (!HeightEstimator.canAccept(r)) return
-        val activity = context as? android.app.Activity
+        // (No Activity cast here any more — the photo is taken at the top
+        // sighting, by `captureHeldPhoto`, and Accept only reads `heldPhoto`.)
         // Cruise tally session (v3): the height leg folds into the Tree row
         // the DBH leg created, then the chain returns to the cruise map —
         // no quick-history entry, no continuation sheet.
@@ -1060,17 +1153,14 @@ fun HeightScanScreen(
                 }
             }
             lastRawCaptureId = null
-            // Chrome-less snapshot of the AR surface (camera feed + the
-            // rendered measurement geometry): hide the 2D chrome, give
-            // Compose one committed frame, capture, then restore. Null when
-            // the capture failed — the reading still saves, without a photo.
-            val photo = activity?.let {
-                hidingChromeForCapture = true
-                delay(80)
-                val name = MeasurePhotoStore.captureScene(it)
-                hidingChromeForCapture = false
-                name
-            }
+            // The chrome-less snapshot of the AR surface (camera feed + the
+            // rendered measurement geometry) was already taken, at the moment
+            // the top sighting produced the height (see `heldPhoto`) — Accept
+            // only attaches it. Null when that capture failed, or when there
+            // was no measurement moment at all: a TYPED height carries no
+            // photo, because the frame at Save is the keyboard panel and
+            // whatever the phone happened to be pointing at.
+            val photo = heldPhoto
             // FRESHNESS-GATED. lastGlobalFix is the newest fix ANY screen
             // ever saw, with no age check, so a red GPS chip and a green one
             // used to produce byte-identical records: a cruiser under heavy
@@ -1091,6 +1181,12 @@ fun HeightScanScreen(
                     CruiseCapture.recordHeight(env, r, photoPath = photo, fix = fix)
                 }.getOrDefault(false)
                 if (folded) {
+                    // The tree row owns the file now — release it WITHOUT
+                    // deleting, so this screen's own disposal (the pop below)
+                    // can't take the photo off a saved tree. A failed fold
+                    // keeps it held: Accept can be tapped again and the same
+                    // crown-moment frame goes with it.
+                    heldPhoto = null
                     // One pop, two destinations by construction: in the
                     // diameter → height chain (F10) the tally is directly
                     // underneath, so this drops back onto it already aiming
@@ -1153,6 +1249,10 @@ fun HeightScanScreen(
                 } else {
                     env.history.append(reading)
                 }
+                // The reading owns the file now — release it WITHOUT deleting,
+                // so the disposal the pop below triggers can't take the photo
+                // off a saved reading.
+                heldPhoto = null
                 // Quick measure saved — no continuation prompt (iOS parity);
                 // return to the map once the save completes.
                 nav.popBackStack()
@@ -1253,7 +1353,18 @@ fun HeightScanScreen(
         crownStep == CrownStep.BOTTOM -> "Aim at LOWEST branch"
         crownStep == CrownStep.DONE -> null
         stage == Stage.ANCHOR -> "Aim at trunk (eye level)"
-        stage == Stage.WALKING -> "Walk back — aim stays on tree"
+        // WHAT THE WALK ACTUALLY NEEDS is live VIO, not a particular aim.
+        // The trunk anchor is a bare world anchor
+        // (`session.createAnchor(Pose.makeTranslation(...))`), not attached
+        // to a trackable, and the walk reads only `trackingOk()` and the
+        // horizontal distance to it — camera direction is not an input.
+        // Position comes from visual-inertial odometry, so what breaks it is
+        // a covered or smeared lens and featureless scenery; the IMU alone
+        // cannot hold a position (double-integrated bias is metres out
+        // within seconds). Telling the cruiser to keep the aim on the tree
+        // was stricter than the code and made them walk backwards for
+        // nothing. Byte-identical to iOS.
+        stage == Stage.WALKING -> "Walk back — keep the phone up and the lens clear"
         stage == Stage.AIM_TOP -> "Aim at treetop"
         stage == Stage.AIM_BASE -> "Aim at trunk + ground"
         else -> null
@@ -1608,27 +1719,15 @@ fun HeightScanScreen(
                             color = Forestix.colors.confidenceBad,
                         )
                     }
-                    // THE INSTRUMENT MOVED between the two sightings, so the
-                    // tangent pair no longer shares an origin and the height
-                    // is soft by roughly this much.
-                    //
-                    // This lives in the SHARED panel, not in the COMPUTED
-                    // action row where it started, because a RED fit is
-                    // Accept-able here: a cruiser who stepped half a metre
-                    // and got a red result would have read the rejection
-                    // reason, decided the tree was just awkward, and accepted
-                    // a badly drifted height with no warning at all. iOS has
-                    // always rendered it for both stages, because its
-                    // resultPanel is shared; this is the same placement.
-                    aimDriftM?.takeIf { it > AIM_DRIFT_WARN_M }?.let { d ->
-                        Text(
-                            "You moved " + MeasurementFormatter.distance(
-                                d.toDouble(), settings.unitSystem) +
-                                " between the base and top sightings. Both have to be taken from one spot — retake for a firm number.",
-                            style = type.caption,
-                            color = Forestix.colors.confidenceWarn,
-                        )
-                    }
+                    // NO BASE-TO-TOP DRIFT WARNING HERE. It used to sit
+                    // between the rejection reason and the tracking-dropped
+                    // line; the cruiser asked for it off the field panel, and
+                    // it never refused a reading, so removing it changes
+                    // nothing about what is stored. `aimDriftM` is still
+                    // computed on every top sighting and still written to
+                    // `aim_drift_m` in the research CSV and the raw-capture
+                    // manifest — the study carries the drift in the height
+                    // error budget. iOS dropped the same block.
                     // THE CAMERA LOST THE SCENE somewhere between anchoring
                     // and this reading. d_h is the whole scale of the height
                     // — H = d_h(tan α_top − tan α_base) — and it rests on a

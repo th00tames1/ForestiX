@@ -245,7 +245,7 @@ public struct MapHomeScreen: View {
     // cruise tree photo viewer opened from the tree-peek thumbnail.
     @State var deletePlotCandidateID: UUID?
     @State var deleteTreeCandidateID: UUID?
-    @State var cruisePhotoContext: CruisePhotoContext?
+    @State var cruisePhotoContext: PhotoViewerContext?
 
     // Planned-plot navigation + centre recording + setup.
     @State var navTargetPlannedID: UUID?
@@ -434,8 +434,7 @@ public struct MapHomeScreen: View {
                 }
             }
             .fullScreenCover(item: $photoViewer) { context in
-                MeasurePhotoDetailView(context: context,
-                                       unitSystem: settings.unitSystem)
+                MeasurePhotoDetailView(context: context)
             }
             #endif
             .sheet(isPresented: $presentingChooser,
@@ -1025,7 +1024,11 @@ public struct MapHomeScreen: View {
     // MARK: Peek card (mock ②)
 
     private func peekCard(for pin: MapPin) -> some View {
-        let photos = pin.entries.compactMap(\.photoPath)
+        // Capture order, so the thumbnail is the viewer's first page rather
+        // than whichever frame happens to be newest.
+        let photos = pin.entries
+            .sorted { $0.createdAt < $1.createdAt }
+            .compactMap(\.photoPath)
         return VStack(spacing: 0) {
             RoundedRectangle(cornerRadius: 2)
                 .fill(ForestixPalette.divider)
@@ -1288,10 +1291,13 @@ public struct MapHomeScreen: View {
         }
     }
 
+    /// Opens EVERY photo on the pin, not just the first one found. A Full
+    /// measurement leaves the tree with a diameter frame and a height
+    /// frame; the viewer pages between them in the order they were shot.
     private func openPhotoViewer(_ pin: MapPin) {
-        guard let entry = pin.entries.first(where: { $0.photoPath != nil })
-        else { return }
-        photoViewer = PhotoViewerContext(entry: entry, title: peekTitle(pin))
+        let pages = MeasurePhotoPage.pages(for: pin.entries,
+                                           unitSystem: settings.unitSystem)
+        photoViewer = PhotoViewerContext(pages: pages)
     }
 
     /// The pin's representative reading for "Edit this tree" — DBH first,
@@ -1994,206 +2000,6 @@ private struct QuickEntryEditSheet: View {
         case .crown, .distance, .samplingPlot:
             return "A typed reading must be a number greater than zero."
         }
-    }
-}
-
-// MARK: - Photo detail (mock ⑤)
-
-private struct PhotoViewerContext: Identifiable {
-    let entry: QuickMeasureEntry
-    let title: String
-    var id: UUID { entry.id }
-}
-
-/// Full-screen AR-snapshot viewer: the photo (feed + overlay, captured
-/// at Accept) with the reading's identity along the bottom. The chrome
-/// is fixed dark regardless of appearance — it sits on a photograph.
-private struct MeasurePhotoDetailView: View {
-    let context: PhotoViewerContext
-    let unitSystem: UnitSystem
-
-    @Environment(\.dismiss) private var dismiss
-    #if canImport(UIKit)
-    @State private var image: UIImage?
-    #endif
-
-    private let ink = Color(red: 0.949, green: 0.961, blue: 0.953)      // #F2F5F3
-    private let inkDim = Color(red: 0.647, green: 0.682, blue: 0.659)   // #A5AEA8
-    /// Meta-cell labels — dark-appearance textSecondary, fixed because
-    /// the chrome sits on a photograph regardless of the app theme.
-    private let labelDim = Color(red: 0.718, green: 0.753, blue: 0.729) // #B7C0BA
-    /// Dark-glass chrome base (mock `rgba(6,9,10,…)`).
-    private let glass = Color(red: 6 / 255, green: 9 / 255, blue: 10 / 255) // #06090A
-
-    var body: some View {
-        ZStack {
-            Color(red: 0.039, green: 0.051, blue: 0.043).ignoresSafeArea() // #0A0D0B
-
-            #if canImport(UIKit)
-            if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ProgressView().tint(ink)
-            }
-            #endif
-
-            VStack {
-                HStack {
-                    Spacer()
-                    Button {
-                        dismiss()
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(ink)
-                            .frame(width: 44, height: 44)
-                            .background(Circle().fill(glass.opacity(0.70)))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Close photo")
-                    .accessibilityIdentifier("mapHome.photo.close")
-                }
-                .padding(.horizontal, 14)
-                Spacer()
-            }
-
-            VStack {
-                Spacer()
-                meta
-            }
-        }
-        #if canImport(UIKit)
-        .task {
-            let url = MeasurePhotoStore.url(for: context.entry.photoPath ?? "")
-            let data = await Task.detached { try? Data(contentsOf: url) }.value
-            if let data { image = UIImage(data: data) }
-        }
-        #endif
-    }
-
-    private var meta: some View {
-        let entry = context.entry
-        let descriptor = ConfidenceStyle.descriptor(for: entry.confidenceRaw)
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text(bigValue)
-                    .font(.system(size: 30, weight: .heavy, design: .monospaced))
-                    .foregroundStyle(ink)
-                Text([sigmaText, descriptor.label]
-                    .compactMap { $0 }.joined(separator: " · "))
-                    .font(.system(size: 13, design: .monospaced))
-                    .foregroundStyle(inkDim)
-            }
-            HStack(alignment: .top, spacing: 18) {
-                metaCell("TREE", treeText)
-                metaCell("METHOD", methodText)
-                metaCell("GPS", gpsText)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 20)
-        .padding(.top, 40)
-        .padding(.bottom, 30)
-        .background(
-            LinearGradient(colors: [glass.opacity(0),
-                                    glass.opacity(0.92)],
-                           startPoint: .top, endPoint: .bottom))
-    }
-
-    private func metaCell(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(label)
-                .font(.system(size: 11.5, design: .monospaced))
-                .foregroundStyle(labelDim)
-            Text(value)
-                .font(.system(size: 13, weight: .bold, design: .monospaced))
-                .foregroundStyle(ink)
-                .lineLimit(1)
-        }
-    }
-
-    private var bigValue: String {
-        let entry = context.entry
-        switch entry.kind {
-        case .dbh:
-            // The peek card this viewer opens from labels these two
-            // values "DBH" and "HEIGHT"; Ø and H were the only place
-            // they appeared as symbols.
-            return "DBH " + MeasurementFormatter.diameter(cm: entry.value, in: unitSystem)
-        case .height:
-            return "Height " + MeasurementFormatter.height(m: entry.value, in: unitSystem)
-        case .crown:
-            return String(format: "%.1f × %.1f m",
-                          entry.value, entry.secondaryValue ?? 0)
-        case .distance:
-            return MeasurementFormatter.distance(m: entry.value, in: unitSystem)
-        case .samplingPlot:
-            return String(format: "%.1f m radius", entry.value)
-        }
-    }
-
-    /// Plain-language name for the stored capture method. `entry.method`
-    /// holds the raw enum/tag string that goes into the CSV export
-    /// ("lidarChordSilhouette", "vioWalkoffTangent", "two-point.lidar",
-    /// …); printing it verbatim put camelCase identifiers on a cruiser's
-    /// screen. The raw value is unchanged in storage and export — only
-    /// this readout is translated, and an unknown tag degrades to a
-    /// generic phrase rather than leaking the identifier.
-    private var methodText: String {
-        let raw = context.entry.method
-        switch raw {
-        case "lidarChordSilhouette", "lidarPartialArcSingleView",
-             "lidarPartialArcDualView", "lidarIrregular":
-            return "Trunk scan"
-        case "arCaliper", "arVioCircleFit":
-            return "Trunk scan (earlier app version)"
-        case "manualCaliper":       return "Measured by hand"
-        case "manualVisual":        return "Estimated by eye"
-        case "vioWalkoffTangent":   return "Walked back and sighted"
-        case "tapeTangent":         return "Tape and angle"
-        case "manualEntry":         return "Typed in"
-        case "imputedHD":           return "Estimated from the height curve"
-        case "ar.crown.dh":         return "Crown edges tapped"
-        case "ar.tap":              return "Centre dropped on the ground"
-        default:
-            if raw.hasPrefix("live.")      { return "Pointed at a target" }
-            if raw.hasPrefix("two-point.") { return "Two points on screen" }
-            return "Measured in Forestix"
-        }
-    }
-
-    private var sigmaText: String? {
-        let entry = context.entry
-        guard let sigma = entry.sigma, sigma > 0 else { return nil }
-        switch entry.kind {
-        case .dbh:
-            return MeasurementFormatter.diameterSigma(mm: sigma, in: unitSystem)
-        case .height:
-            return MeasurementFormatter.heightSigma(m: sigma, in: unitSystem)
-        case .crown, .distance, .samplingPlot:
-            return String(format: "±%.2f m", sigma)
-        }
-    }
-
-    private var treeText: String {
-        let entry = context.entry
-        var parts: [String] = []
-        if let n = entry.treeNumber { parts.append("T\(n)") }
-        if let species = entry.speciesCode, !species.isEmpty {
-            parts.append(RegionalSpecies.name(forCode: species))
-        }
-        return parts.isEmpty ? "—" : parts.joined(separator: " · ")
-    }
-
-    /// The entry stores the fix itself (not its accuracy), so the GPS
-    /// cell shows the coordinates the reading was anchored to.
-    private var gpsText: String {
-        guard let lat = context.entry.latitude,
-              let lon = context.entry.longitude else { return "—" }
-        return String(format: "%.5f, %.5f", lat, lon)
     }
 }
 

@@ -90,10 +90,31 @@ public struct DBHScanScreen: View {
     @State private var metaDamage: [String] = []
     @State private var metaNote: String = ""
     @State private var presentingMetadata = false
-    /// True while the Accept-time window snapshot is being taken — hides
-    /// every piece of 2D chrome so the captured JPEG shows only the AR
+    /// True while the measurement-moment window snapshot is being taken —
+    /// hides every piece of 2D chrome so the captured JPEG shows only the AR
     /// feed and the measurement overlays (crosshair, chord, markers).
     @State private var hidingChromeForCapture = false
+    /// The JPEG taken THE INSTANT THE BURST FINISHED, held here until Accept
+    /// attaches it to the reading.
+    ///
+    /// FIELD REPORT: the shutter used to sit in the Accept handler, and by
+    /// the time the cruiser has read the panel and decided, the phone is down
+    /// at their side — every stored photo was leaf litter and boots. The
+    /// frame worth keeping is the one where the bracket is still on the stem,
+    /// so it is taken at `resultGeneration` (see `captureHeldPhoto`) and
+    /// parked here. Nothing about the stored measurement changes: this is
+    /// still the value that goes into `ScanMetadata.photoPath` at Accept.
+    ///
+    /// It is a FILE, so every path that abandons it has to delete it:
+    /// `discardHeldPhoto()` on retake / a superseding capture / leaving the
+    /// screen. It is released (not deleted) only once a reading has taken
+    /// ownership of it.
+    @State private var heldPhoto: String?
+    /// True between `onDisappear` and the next `onAppear`. Read by
+    /// `captureHeldPhoto` only: its 80 ms settle is an unstructured task that
+    /// outlives the screen, and a shot taken after the screen is gone is both
+    /// the wrong picture and an undeletable file.
+    @State private var hasLeftScreen = false
     /// Whether the bracket has already been armed from an auto fit during
     /// this appearance. Stops the arming from fighting a cruiser who taps
     /// Auto — one arm per visit, then the pill decides.
@@ -612,6 +633,7 @@ public struct DBHScanScreen: View {
             }
         }
         .onAppear {
+            hasLeftScreen = false
             // Phase 19 — pull the cruiser's chosen DBH method off
             // AppSettings every time the screen comes back into view
             // so flipping the picker in Settings takes effect on the
@@ -668,6 +690,12 @@ public struct DBHScanScreen: View {
         }
         .onDisappear {
             adjustArmedThisAppearance = false
+            hasLeftScreen = true
+            // Leaving without accepting: the held frame belongs to a
+            // measurement that was never stored, so the file goes with it.
+            // Anything already handed to a reading was released at Accept, so
+            // this can only ever delete an orphan.
+            discardHeldPhoto()
             viewModel.onDisappear()
         }
         // CRUISE TALLY — the loop reuses this one screen and advances its
@@ -708,6 +736,31 @@ public struct DBHScanScreen: View {
                 onResult(r)
             }
         }
+        // THE SHUTTER — fires the instant the 5-frame burst finalises and the
+        // diameter is computed, while the cruiser is still holding the bracket
+        // on the stem. NOT at Accept: see `heldPhoto`.
+        //
+        // `resultGeneration` is bumped once per `finalizeCapture()`, so this
+        // fires exactly once per burst. A failed save (`acceptFailed()`) drops
+        // back to `.fitted` WITHOUT producing a new result, so the retry keeps
+        // the frame this burst produced instead of photographing the ground.
+        .onChange(of: viewModel.resultGeneration) { _, _ in
+            // A red fit cannot be accepted (`accept()` refuses it), so no
+            // reading will ever carry this photo — don't write a file whose
+            // only future is deletion. Any frame held for the superseded
+            // measurement goes with it.
+            guard let tier = viewModel.result?.confidence, tier != .red else {
+                discardHeldPhoto()
+                return
+            }
+            // Raised HERE, in the same synchronous turn as the state change
+            // that puts the result panel on screen, so the panel is never
+            // composed un-blacked-out: the first frame SwiftUI commits after
+            // the burst is already chrome-less, and that is the frame the shot
+            // is taken from. `captureHeldPhoto` lowers it again.
+            hidingChromeForCapture = true
+            Task { @MainActor in await captureHeldPhoto() }
+        }
         .onChange(of: viewModel.state) { _, newState in
             switch newState {
             case .idle, .aligning, .armed, .capturing, .manualEntry:
@@ -723,20 +776,16 @@ public struct DBHScanScreen: View {
             // only on an explicit user confirmation (Quick Measure) can
             // distinguish a fitted preview from a committed reading.
             if newState == .accepted, let r = viewModel.result {
-                // Auto-capture (map home): snapshot the AR view + the
-                // measurement overlays as evidence of what was measured,
-                // plus the latest GPS fix from the badge's running
-                // location service. The 2D chrome is hidden first — a
-                // short sleep lets SwiftUI commit the chrome-less frame —
-                // so the JPEG doesn't show buttons/panels that read as
-                // live controls in the photo viewer. The entry must get
-                // its photoPath before it is appended, hence the await
-                // before onAccept.
+                // Auto-capture (map home): the snapshot of the AR view + the
+                // measurement overlays was already taken, at the moment the
+                // burst landed (see `heldPhoto`) — Accept only attaches it,
+                // together with the latest GPS fix from the badge's running
+                // location service. A TYPED diameter has no such moment and
+                // carries no photo: the frame at Save is the keyboard panel
+                // and whatever the phone happened to be pointing at, which is
+                // evidence of nothing.
                 Task { @MainActor in
-                    hidingChromeForCapture = true
-                    try? await Task.sleep(for: .milliseconds(80))
-                    let photo = MeasurePhotoStore.captureWindow()
-                    hidingChromeForCapture = false
+                    let photo = heldPhoto
                     // FRESHNESS-GATED. `lastGlobalFix` is the newest fix ANY screen ever saw,
                     // with no age check, so a red GPS chip and a green one used to produce
                     // byte-identical records: a cruiser under heavy canopy stamped every tree in
@@ -771,6 +820,12 @@ public struct DBHScanScreen: View {
                     // either way, and in cruise the chain then opened Height
                     // against whatever tree `chainTreeID` still pointed at.
                     let stored = onAccept(r, meta)
+                    // The reading owns the file now — release it WITHOUT
+                    // deleting, so the cruise tally's `retake()` below and the
+                    // screen's own exit can't take the photo off a saved tree.
+                    // A failed store keeps it held: Accept can be tapped again
+                    // and the same measurement-moment frame goes with it.
+                    if stored { heldPhoto = nil }
                     // Raw-capture (developer mode): attach the tape-measured
                     // truth to the just-recorded bundle. The bundle id is
                     // minted synchronously at burst finalize, so this works
@@ -1968,6 +2023,48 @@ public struct DBHScanScreen: View {
         }
     }
 
+    // MARK: - Measurement photo
+
+    /// Take the measurement-moment JPEG and park it in `heldPhoto`.
+    ///
+    /// ORDER MATTERS. The chrome blackout is up before the settle sleep — the
+    /// caller raises it in the same turn the burst lands, and this re-raise is
+    /// idempotent — so the frame SwiftUI has committed by the time the
+    /// renderer runs carries no panels and no buttons, the result panel
+    /// included. What deliberately stays is the guide line, the fit chord, the
+    /// crosshair and the AR cylinder: those are the measurement, and they are
+    /// the whole evidentiary value of the photo.
+    @MainActor
+    private func captureHeldPhoto() async {
+        // A fresh capture supersedes whatever was held — never leave the
+        // previous burst's file behind on disk.
+        discardHeldPhoto()
+        hidingChromeForCapture = true
+        try? await Task.sleep(for: .milliseconds(80))
+        // THE SCREEN CAN BE LEFT INSIDE THAT SLEEP (the cruiser backs out,
+        // the host dismisses the cover). This task is unstructured, so it
+        // would still run: it would photograph whatever replaced this screen
+        // and write a file that no reading and no `onDisappear` would ever
+        // delete — an orphan in the photo store. Nothing is captured instead.
+        guard !hasLeftScreen else {
+            hidingChromeForCapture = false
+            return
+        }
+        heldPhoto = MeasurePhotoStore.captureWindow()
+        hidingChromeForCapture = false
+    }
+
+    /// Drop the held frame AND delete the file. Called on retake, on a
+    /// superseding capture, and on the way off the screen — the store keeps
+    /// one file per reading (`QuickMeasureHistory` deletes a reading's photo
+    /// with it), so a frame no reading will ever claim has to go here.
+    @MainActor
+    private func discardHeldPhoto() {
+        guard let name = heldPhoto else { return }
+        heldPhoto = nil
+        MeasurePhotoStore.delete(name)
+    }
+
     // MARK: - Actions
 
     @ViewBuilder
@@ -1980,7 +2077,9 @@ public struct DBHScanScreen: View {
             // aiming-phase Type rail button. Secondary buttons are solid
             // white (sun-glare legibility) — the green Accept stays.
             HStack(spacing: 12) {
-                Button("Retake") { viewModel.retake() }
+                // The held frame captions the measurement being thrown away —
+                // keeping it would put the OLD aim on the NEW diameter.
+                Button("Retake") { discardHeldPhoto(); viewModel.retake() }
                     .buttonStyle(.forestixARSecondary)
                     .frame(maxWidth: .infinity)
                 Button("Details") { presentingMetadata = true }
@@ -1995,7 +2094,7 @@ public struct DBHScanScreen: View {
             }
         case .manualEntry:
             HStack(spacing: 12) {
-                Button("Cancel") { viewModel.retake() }
+                Button("Cancel") { discardHeldPhoto(); viewModel.retake() }
                     .buttonStyle(.forestixARSecondary)
                     .frame(maxWidth: .infinity)
             }

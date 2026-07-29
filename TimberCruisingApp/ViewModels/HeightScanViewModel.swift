@@ -39,8 +39,11 @@ public final class HeightScanViewModel: ObservableObject {
 
     @Published public private(set) var state: State = .idle
     @Published public private(set) var result: HeightResult?
-    /// Bumped once per height computation so the screen can fire research
-    /// logging exactly when a new measurement is committed.
+    /// Bumped once per height computation, at the end of `compute()`, so the
+    /// screen can act exactly when a new measurement lands. The scan screen
+    /// takes the measurement photo off this edge — the frame with the phone
+    /// still on the crown — rather than at Accept, by which time it is
+    /// pointing at the ground.
     @Published public private(set) var resultGeneration: Int = 0
 
     /// Live horizontal distance from the anchor to the current standing
@@ -196,12 +199,20 @@ public final class HeightScanViewModel: ObservableObject {
     @Published public private(set) var aimDriftM: Float?
 
     /// How far the phone may move between the two sightings before the
-    /// reading is worth a warning.
+    /// drift is large enough to matter.
     ///
     /// 0.25 m clears ordinary hand and wrist movement while tilting up —
     /// a few centimetres on a held phone — and catches the two cases that
     /// actually bias the number: raising the phone overhead to clear a
     /// crown, and taking a step. Android uses the identical value.
+    ///
+    /// NOTHING READS THIS TODAY — the field warning it gated was removed at
+    /// the cruiser's request. It is kept, not deleted, because it is the
+    /// cut point of the base-to-top drift analysis that sits in the height
+    /// error budget (the analysis that measured a median drift of 0.31 m,
+    /// ≈2.8 % of H); `aim_drift_m` is still recorded on every reading and is
+    /// scored against this number off-device. A deleted 0.25 would have to
+    /// be rediscovered to read the study's own CSVs.
     public static let aimDriftWarnM: Float = 0.25
 
     /// World hit point for the Aim Top / Aim Base taps, if the host
@@ -797,10 +808,12 @@ public final class HeightScanViewModel: ObservableObject {
         // is roughly the vertical movement one-for-one, plus the horizontal
         // movement scaled by (tree height / d_h) — at 10 m from a 20 m tree
         // a 20 cm step is a 40 cm error, which is inside nothing this app
-        // claims. Measured here and reported on the result panel; the
-        // reading is not refused, because a cruiser who has already walked
-        // the off-distance should be told it is soft rather than sent back
-        // by an arm's-length wobble.
+        // claims. Measured here and RECORDED — on the reading, in the
+        // research CSV (`aim_drift_m`) and in the raw-capture manifest. It
+        // is no longer shown in the field: the cruiser asked for the panel
+        // warning to go, and the reading was never refused on it anyway.
+        // The number still has to exist, because the accuracy study carries
+        // it in the height error budget (median 0.31 m on iOS, ≈2.8 % of H).
         //
         // THE LIVE POSE IS REQUIRED, not merely nice to have — it used to be
         // optional here, and only here, which is what let a relocalization
@@ -1021,6 +1034,13 @@ public final class HeightScanViewModel: ObservableObject {
         // developer truth field) and its action row offers Accept
         // alongside Retake and Manual. The tier itself is untouched.
         state = (r.confidence == .red) ? .rejected : .computed
+        // Bumped LAST, once the result and the stage are both settled, so a
+        // screen watching it sees a finished measurement. It is the "a new
+        // height just landed" edge — distinct from the state, which
+        // `acceptFailed()` also moves without producing a new measurement.
+        // The Diameter twin does exactly this at the end of
+        // `finalizeCapture()`.
+        resultGeneration &+= 1
         recordRawHeightIfNeeded(result: r, anchor: anchor, standing: standing,
                                 alphaTop: at, alphaBase: ab)
     }

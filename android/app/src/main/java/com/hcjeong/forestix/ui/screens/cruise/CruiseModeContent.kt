@@ -138,12 +138,13 @@ import com.hcjeong.forestix.ui.pressableNoRipple
 import com.hcjeong.forestix.ui.screens.CaptureColumn
 import com.hcjeong.forestix.ui.screens.ClusterSlots
 import com.hcjeong.forestix.ui.screens.ExportViewModel
-import com.hcjeong.forestix.ui.screens.FullScreenImageViewer
 import com.hcjeong.forestix.ui.screens.Haptics
 import com.hcjeong.forestix.ui.screens.PeekActionButton
 import com.hcjeong.forestix.ui.screens.PhotoThumb
+import com.hcjeong.forestix.ui.screens.PhotoViewerDialog
 import com.hcjeong.forestix.ui.screens.SideCircleButton
 import com.hcjeong.forestix.ui.screens.TierChipSoft
+import com.hcjeong.forestix.ui.screens.cruiseTreePhotoPages
 import com.hcjeong.forestix.ui.screens.exportMimeFor
 import com.hcjeong.forestix.ui.screens.plot.PlotFlowRoutes
 import com.hcjeong.forestix.ui.screens.project.ProjectFlowRoutes
@@ -2025,6 +2026,18 @@ private fun TreePeekCard(
     var showPhoto by remember(tree.id) { mutableStateOf(false) }
     var confirmDelete by remember(tree.id) { mutableStateOf(false) }
 
+    // One title and one subtitle for the card AND for the photo viewer the
+    // thumbnail opens — the caption under the photo must name the same tree
+    // the card above it does. Declared out here because the viewer is raised
+    // beside the Column, not inside it.
+    val treeTitle = "Tree ${tree.treeNumber}" +
+        (tree.speciesCode.takeIf { it.isNotBlank() }
+            ?.let { " · ${RegionalSpecies.nameForCode(it)}" } ?: "")
+    val treeSubtitle = listOfNotNull(
+        plotNumber?.let { "Plot $it" },
+        SimpleDateFormat("d MMM · HH:mm", Locale.US).format(Date(tree.createdAt)),
+    ).joinToString(" · ")
+
     Column(
         modifier
             .fillMaxWidth()
@@ -2044,9 +2057,7 @@ private fun TreePeekCard(
         )
         Row {
             Text(
-                "Tree ${tree.treeNumber}" +
-                    (tree.speciesCode.takeIf { it.isNotBlank() }
-                        ?.let { " · ${RegionalSpecies.nameForCode(it)}" } ?: ""),
+                treeTitle,
                 style = type.bodyBold.copy(fontSize = 16.sp, fontWeight = FontWeight.Bold),
                 color = colors.textPrimary,
                 modifier = Modifier.weight(1f).alignByBaseline(),
@@ -2054,10 +2065,7 @@ private fun TreePeekCard(
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                listOfNotNull(
-                    plotNumber?.let { "Plot $it" },
-                    SimpleDateFormat("d MMM · HH:mm", Locale.US).format(Date(tree.createdAt)),
-                ).joinToString(" · "),
+                treeSubtitle,
                 style = type.dataSmall.copy(fontSize = 11.sp),
                 color = colors.textTertiary,
                 modifier = Modifier.alignByBaseline(),
@@ -2066,8 +2074,10 @@ private fun TreePeekCard(
         }
         Spacer(Modifier.size(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            // Tapping the thumbnail opens the full-screen viewer (map-peek
-            // spec item 3). The cruise tree photo lives in the same store.
+            // Tapping the thumbnail opens the app's one full-screen viewer
+            // (map-peek spec item 3). The cruise tree photo lives in the
+            // same store. A Tree row carries a SINGLE photo path, so this
+            // opens one page and shows no counter.
             PhotoThumb(
                 tree.photoPath, if (tree.photoPath != null) 1 else 0, activity,
                 onClick = tree.photoPath?.let { { showPhoto = true } },
@@ -2152,9 +2162,11 @@ private fun TreePeekCard(
     }
 
     if (showPhoto) {
-        tree.photoPath?.let { name ->
-            FullScreenImageViewer(name, activity, onDismiss = { showPhoto = false })
-        }
+        PhotoViewerDialog(
+            pages = cruiseTreePhotoPages(tree.photoPath, treeTitle, treeSubtitle),
+            activity = activity,
+            onDismiss = { showPhoto = false },
+        )
     }
 
     if (confirmDelete) {

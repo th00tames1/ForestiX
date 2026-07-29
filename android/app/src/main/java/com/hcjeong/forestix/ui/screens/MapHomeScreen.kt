@@ -54,6 +54,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentWidth
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -102,6 +104,8 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
@@ -269,7 +273,9 @@ fun MapHomeScreen(nav: NavController) {
     // when the current fix sits > 30 m from the tapped tree's pin.
     var farTreeConfirm by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var mapSettingsOpen by remember { mutableStateOf(false) }
-    var photoEntry by remember { mutableStateOf<QuickMeasureEntry?>(null) }
+    // The photos the viewer is open on — every frame the tapped tree has,
+    // in capture order. Empty = closed.
+    var photoPages by remember { mutableStateOf<List<PhotoPage>>(emptyList()) }
     // Quick peek "Edit this tree" → compact edit sheet for one reading.
     var editEntry by remember { mutableStateOf<QuickMeasureEntry?>(null) }
 
@@ -567,7 +573,7 @@ fun MapHomeScreen(nav: NavController) {
                         onToggleMode = { setMode("cruise") },
                         onMeasure = { chooserOpen = true },
                         onLog = { nav.navigate(Routes.FIELD_LOG) },
-                        onViewPhoto = { photoEntry = it },
+                        onViewPhoto = { pages -> photoPages = pages },
                         onEditEntry = { editEntry = it },
                         onMeasureAgain = { pin ->
                             val tree = pin.treeNumber
@@ -663,12 +669,11 @@ fun MapHomeScreen(nav: NavController) {
             onDismiss = { mapSettingsOpen = false },
         )
     }
-    photoEntry?.let { entry ->
+    if (photoPages.isNotEmpty()) {
         PhotoViewerDialog(
-            entry = entry,
-            unitSystem = settings.unitSystem,
+            pages = photoPages,
             activity = activity,
-            onDismiss = { photoEntry = null },
+            onDismiss = { photoPages = emptyList() },
         )
     }
     // Quick-edit sheet (map-peek spec item 2): value / species / note +
@@ -800,7 +805,7 @@ private fun MeasureBottomContent(
     onToggleMode: () -> Unit,
     onMeasure: () -> Unit,
     onLog: () -> Unit,
-    onViewPhoto: (QuickMeasureEntry) -> Unit,
+    onViewPhoto: (List<PhotoPage>) -> Unit,
     onEditEntry: (QuickMeasureEntry) -> Unit,
     onMeasureAgain: (TreePin) -> Unit,
 ) {
@@ -1123,7 +1128,7 @@ private fun PeekCard(
     activity: Activity?,
     plotName: String?,
     modifier: Modifier = Modifier,
-    onViewPhoto: (QuickMeasureEntry) -> Unit,
+    onViewPhoto: (List<PhotoPage>) -> Unit,
     onEditEntry: (QuickMeasureEntry) -> Unit,
     onMeasureAgain: () -> Unit,
 ) {
@@ -1141,8 +1146,10 @@ private fun PeekCard(
     // Date, plus the plot name when the reading isn't on the default plot
     // (iOS peekSubtitle: "7 Jul · 09:41 · Plot 2").
     val subtitle = listOfNotNull(dateLine(newest.createdAt), plotName).joinToString(" · ")
-    val photoOwner = pin.entries.firstOrNull { it.photoPath != null }
-    val photoCount = pin.entries.count { it.photoPath != null }
+    // EVERY photo on this tree, in the order the readings were taken — a
+    // Full measurement leaves a diameter frame and a height frame, and the
+    // thumbnail used to be a dead end at whichever one was newest.
+    val photoPages = measurePhotoPages(pin.entries, unitSystem)
 
     Column(
         modifier
@@ -1184,8 +1191,9 @@ private fun PeekCard(
             // Tapping the thumbnail opens the existing full-screen viewer
             // (map-peek spec item 2 — the retired "View photo" button's job).
             PhotoThumb(
-                photoOwner?.photoPath, photoCount, activity,
-                onClick = photoOwner?.let { owner -> { onViewPhoto(owner) } },
+                photoPages.firstOrNull()?.photoPath, photoPages.size, activity,
+                onClick = photoPages.takeIf { it.isNotEmpty() }
+                    ?.let { pages -> { onViewPhoto(pages) } },
             )
             Column(Modifier.weight(1f)) {
                 val rows = latestPerKind(pin.entries)
@@ -1522,55 +1530,153 @@ private fun ChoiceRow(
 
 // MARK: - Photo detail (mock ⑤) ------------------------------------------------
 
-/// Full-screen accept-snapshot viewer. Deliberately dark in both app
-/// appearances, matching the mock's photo screens (iOS
-/// MeasurePhotoDetailView).
+/// One page of the photo viewer: the frame, and the caption saying what it
+/// belongs to. A photo with no caption is half a record — with two frames on
+/// one tree the cruiser cannot otherwise tell the diameter frame from the
+/// height frame.
+internal data class PhotoPage(
+    /// Filename inside the MeasurePhotoStore directory.
+    val photoPath: String,
+    val headline: String,
+    val detail: String?,
+    /// TREE / METHOD / GPS cells. Empty draws no meta row at all.
+    val meta: List<Pair<String, String>>,
+    val caption: PhotoCaption,
+)
+
+/// How a page's caption reads.
+internal enum class PhotoCaption {
+    /// A quick-measure reading's own frame: the kind and the value in
+    /// figures ("DBH 32.4 cm"), then σ and the confidence word.
+    READING,
+
+    /// A cruise tree's photo. The Tree row keeps ONE photo path and does not
+    /// record which leg of the measurement it came off, so the page is
+    /// labelled with the tree rather than with a reading it cannot honestly
+    /// claim.
+    TREE,
+}
+
+/// Every photo attached to a group of readings, IN THE ORDER THEY WERE
+/// TAKEN. The history hands entries back newest-first, which would have
+/// paged a Full measurement height-then-diameter — backwards from the way
+/// the cruiser shot them.
 @Composable
-private fun PhotoViewerDialog(
+internal fun measurePhotoPages(
+    entries: List<QuickMeasureEntry>,
+    system: UnitSystem,
+): List<PhotoPage> = entries
+    .sortedBy { it.createdAt }
+    .mapNotNull { entry ->
+        // A reading that was never photographed has no page; an empty path
+        // would open a black screen.
+        entry.photoPath?.let { path -> readingPhotoPage(entry, path, system) }
+    }
+
+@Composable
+private fun readingPhotoPage(
     entry: QuickMeasureEntry,
-    unitSystem: UnitSystem,
+    photoPath: String,
+    system: UnitSystem,
+): PhotoPage {
+    val tier = confidenceDescriptor(entry.confidenceRaw)
+    val tree = listOfNotNull(
+        entry.treeNumber?.let { "T$it" },
+        entry.speciesCode?.takeIf { it.isNotEmpty() }
+            ?.let { RegionalSpecies.nameForCode(it) },
+    ).joinToString(" · ").ifEmpty { "—" }
+    // The entry stores the fix itself (not its accuracy), so the GPS cell
+    // shows the coordinates the reading was anchored to.
+    val gps = if (entry.latitude != null && entry.longitude != null) {
+        String.format(Locale.US, "%.5f, %.5f", entry.latitude, entry.longitude)
+    } else {
+        "—"
+    }
+    return PhotoPage(
+        photoPath = photoPath,
+        headline = bigValueText(entry, system),
+        detail = listOfNotNull(sigmaText(entry, system), tier.label).joinToString(" · "),
+        meta = listOf("TREE" to tree, "METHOD" to methodLabel(entry.method), "GPS" to gps),
+        caption = PhotoCaption.READING,
+    )
+}
+
+/// A cruise tree's single Accept snapshot — see [PhotoCaption.TREE] for why
+/// it is not labelled with a diameter or a height.
+internal fun cruiseTreePhotoPages(
+    photoPath: String?,
+    title: String,
+    subtitle: String,
+): List<PhotoPage> = if (photoPath == null) {
+    emptyList()
+} else {
+    listOf(PhotoPage(photoPath, title, subtitle, emptyList(), PhotoCaption.TREE))
+}
+
+/// THE full-screen photo viewer — one dialog, every surface.
+///
+/// The map peek, the field-log detail sheet and the cruise tree peek all
+/// open THIS. They had a viewer each before, and none of them could reach
+/// past the first frame: a Full measurement records a diameter AND a height,
+/// each with its own Accept snapshot, so the second photo sat on the tree
+/// with no way in. One viewer is what stops the gesture, the caption and the
+/// chrome drifting apart between the three again.
+///
+/// PAGING STAYS INVISIBLE UNTIL THERE IS SOMEWHERE TO PAGE TO. A tree with
+/// one photo renders exactly as it did before — no counter, nothing new.
+///
+/// Deliberately dark in both app appearances, matching the mock's photo
+/// screens (iOS MeasurePhotoDetailView).
+@Composable
+internal fun PhotoViewerDialog(
+    pages: List<PhotoPage>,
     activity: Activity?,
     onDismiss: () -> Unit,
+    startIndex: Int = 0,
 ) {
+    if (pages.isEmpty()) return
     val type = Forestix.type
-    val tier = confidenceDescriptor(entry.confidenceRaw)
     val ink = Color(0xFFF2F5F3)
-    val inkDim = Color(0xFFA5AEA8)
-    // Spinner while the JPEG decodes; "Photo unavailable" only once the
-    // decode has actually failed (iOS ProgressView behaviour).
-    var loadFailed by remember(entry.photoPath) { mutableStateOf(false) }
-    val bitmap by produceState<Bitmap?>(initialValue = null, entry.photoPath, activity) {
-        val decoded = withContext(Dispatchers.IO) {
-            val name = entry.photoPath
-            if (name == null || activity == null) null
-            else decodeSampled(MeasurePhotoStore.file(activity, name), targetPx = 1600)
-        }
-        value = decoded
-        if (decoded == null) loadFailed = true
-    }
+    val pagerState = rememberPagerState(
+        initialPage = startIndex.coerceIn(0, pages.lastIndex),
+        pageCount = { pages.size },
+    )
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         Box(Modifier.fillMaxSize().background(Color(0xFF0A0D0B))) {
-            val image = bitmap
-            when {
-                image != null -> Image(
-                    image.asImageBitmap(),
-                    contentDescription = "Measurement photo",
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize(),
-                )
-                !loadFailed -> CircularProgressIndicator(
-                    color = ink,
-                    modifier = Modifier.align(Alignment.Center),
-                )
-                else -> Text(
-                    "Photo unavailable",
-                    style = type.body,
-                    color = Color(0xFF79837D),
-                    modifier = Modifier.align(Alignment.Center),
-                )
+            HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { index ->
+                PhotoViewerPage(pages[index], activity)
+            }
+            // "1 / 2" — says there IS a second photo and which one is on
+            // screen. Drawn only from two photos up; one photo gets no
+            // counter, and the screen is what it always was.
+            if (pages.size > 1) {
+                val position = "${pagerState.currentPage + 1} / ${pages.size}"
+                Box(
+                    Modifier
+                        .align(Alignment.TopStart)
+                        .statusBarsPadding()
+                        .padding(start = 14.dp)
+                        .height(44.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        position,
+                        style = type.dataSmall.copy(
+                            fontSize = 13.sp, fontWeight = FontWeight.SemiBold),
+                        color = ink,
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .background(Color(0xB306090A))
+                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                            .semantics {
+                                contentDescription =
+                                    "Photo ${pagerState.currentPage + 1} of ${pages.size}"
+                            },
+                    )
+                }
             }
             // Close — 44 dp dark-glass circle flush to the status-bar
             // inset, trailing 14 (iOS xmark button).
@@ -1592,58 +1698,103 @@ private fun PhotoViewerDialog(
                     modifier = Modifier.size(16.dp),
                 )
             }
-            // Bottom meta strip (mock `.photofull .meta`) over a vertical
-            // fade into near-black.
-            Column(
-                Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .background(
-                        Brush.verticalGradient(
-                            colors = listOf(Color.Transparent, Color(0xEB06090A)),
-                        ),
-                    )
-                    .navigationBarsPadding()
-                    .padding(start = 20.dp, end = 20.dp, top = 40.dp, bottom = 30.dp),
-            ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        }
+    }
+}
+
+/// One page: the photo itself plus its caption strip. Each page decodes its
+/// own file, so paging never shows the previous photo under the next one's
+/// caption.
+@Composable
+private fun PhotoViewerPage(page: PhotoPage, activity: Activity?) {
+    val type = Forestix.type
+    val ink = Color(0xFFF2F5F3)
+    val inkDim = Color(0xFFA5AEA8)
+    // Spinner while the JPEG decodes; "Photo unavailable" only once the
+    // decode has actually failed (iOS ProgressView behaviour).
+    var loadFailed by remember(page.photoPath) { mutableStateOf(false) }
+    val bitmap by produceState<Bitmap?>(initialValue = null, page.photoPath, activity) {
+        val decoded = withContext(Dispatchers.IO) {
+            if (activity == null) null
+            else decodeSampled(MeasurePhotoStore.file(activity, page.photoPath), targetPx = 1600)
+        }
+        value = decoded
+        if (decoded == null) loadFailed = true
+    }
+    Box(Modifier.fillMaxSize()) {
+        val image = bitmap
+        when {
+            image != null -> Image(
+                image.asImageBitmap(),
+                contentDescription = "Measurement photo",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize(),
+            )
+            !loadFailed -> CircularProgressIndicator(
+                color = ink,
+                modifier = Modifier.align(Alignment.Center),
+            )
+            else -> Text(
+                "Photo unavailable",
+                style = type.body,
+                color = Color(0xFF79837D),
+                modifier = Modifier.align(Alignment.Center),
+            )
+        }
+        // Bottom meta strip (mock `.photofull .meta`) over a vertical fade
+        // into near-black.
+        Column(
+            Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(Color.Transparent, Color(0xEB06090A)),
+                    ),
+                )
+                .navigationBarsPadding()
+                .padding(start = 20.dp, end = 20.dp, top = 40.dp, bottom = 30.dp),
+        ) {
+            // A reading leads with its number, so the value and its σ sit on
+            // one baseline in figures. A cruise tree leads with the tree's
+            // name, which is prose and stacks above its date line.
+            when (page.caption) {
+                PhotoCaption.READING -> Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
-                        bigValueText(entry, unitSystem),
+                        page.headline,
                         style = type.dataLarge.copy(
                             fontSize = 30.sp, fontWeight = FontWeight.ExtraBold),
                         color = ink,
                         modifier = Modifier.alignByBaseline(),
                     )
                     Text(
-                        listOfNotNull(sigmaText(entry, unitSystem), tier.label)
-                            .joinToString(" · "),
+                        page.detail ?: "",
                         style = type.dataSmall,
                         color = inkDim,
                         modifier = Modifier.alignByBaseline(),
                     )
                 }
+                PhotoCaption.TREE -> {
+                    Text(
+                        page.headline,
+                        style = type.bodyBold.copy(
+                            fontSize = 17.sp, fontWeight = FontWeight.ExtraBold),
+                        color = ink,
+                    )
+                    Spacer(Modifier.size(4.dp))
+                    Text(
+                        page.detail ?: "",
+                        style = type.dataSmall.copy(fontSize = 12.sp),
+                        color = inkDim,
+                    )
+                }
+            }
+            if (page.meta.isNotEmpty()) {
                 Row(
                     Modifier.padding(top = 10.dp),
                     horizontalArrangement = Arrangement.spacedBy(18.dp),
                 ) {
-                    MetaCell(
-                        "TREE",
-                        listOfNotNull(
-                            entry.treeNumber?.let { "T$it" },
-                            entry.speciesCode?.takeIf { it.isNotEmpty() }
-                                ?.let { RegionalSpecies.nameForCode(it) },
-                        ).joinToString(" · ").ifEmpty { "—" },
-                    )
-                    MetaCell("METHOD", methodLabel(entry.method))
-                    MetaCell(
-                        "GPS",
-                        if (entry.latitude != null && entry.longitude != null) {
-                            String.format(
-                                Locale.US, "%.5f, %.5f", entry.latitude, entry.longitude)
-                        } else {
-                            "—"
-                        },
-                    )
+                    page.meta.forEach { (label, value) -> MetaCell(label, value) }
                 }
             }
         }
@@ -1873,74 +2024,6 @@ private fun QuickEntryEditSheet(
                 TextButton(onClick = { confirmDelete = false }) { Text("Cancel") }
             },
         )
-    }
-}
-
-// MARK: - Full-screen image viewer --------------------------------------------
-
-/// Bare full-screen photo viewer (image + close, no measurement meta) — the
-/// cruise tree peek's tappable thumbnail opens this. Reuses the quick-measure
-/// photo store + decoder; deliberately dark in both app appearances.
-@Composable
-internal fun FullScreenImageViewer(
-    photoName: String,
-    activity: Activity?,
-    onDismiss: () -> Unit,
-) {
-    val type = Forestix.type
-    val ink = Color(0xFFF2F5F3)
-    var loadFailed by remember(photoName) { mutableStateOf(false) }
-    val bitmap by produceState<Bitmap?>(initialValue = null, photoName, activity) {
-        val decoded = withContext(Dispatchers.IO) {
-            if (activity == null) null
-            else decodeSampled(MeasurePhotoStore.file(activity, photoName), targetPx = 1600)
-        }
-        value = decoded
-        if (decoded == null) loadFailed = true
-    }
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false),
-    ) {
-        Box(Modifier.fillMaxSize().background(Color(0xFF0A0D0B))) {
-            val image = bitmap
-            when {
-                image != null -> Image(
-                    image.asImageBitmap(),
-                    contentDescription = "Measurement photo",
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize(),
-                )
-                !loadFailed -> CircularProgressIndicator(
-                    color = ink,
-                    modifier = Modifier.align(Alignment.Center),
-                )
-                else -> Text(
-                    "Photo unavailable",
-                    style = type.body,
-                    color = Color(0xFF79837D),
-                    modifier = Modifier.align(Alignment.Center),
-                )
-            }
-            Box(
-                Modifier
-                    .align(Alignment.TopEnd)
-                    .statusBarsPadding()
-                    .padding(end = 14.dp)
-                    .size(44.dp)
-                    .clip(CircleShape)
-                    .background(Color(0xB306090A))
-                    .clickableNoRipple(onDismiss),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    Icons.Filled.Close,
-                    contentDescription = "Close photo",
-                    tint = ink,
-                    modifier = Modifier.size(16.dp),
-                )
-            }
-        }
     }
 }
 

@@ -108,15 +108,6 @@ struct ScopedHeightRequest {
     let treeID: UUID
 }
 
-/// A cruise tree's auto-photo presented full-screen from the tree-peek
-/// thumbnail. Internal because MapHomeScreen.swift owns the `@State`.
-struct CruisePhotoContext: Identifiable {
-    let photoPath: String
-    let title: String
-    let subtitle: String
-    var id: String { photoPath }
-}
-
 // MARK: - Cruise mode
 
 extension MapHomeScreen {
@@ -503,9 +494,9 @@ extension MapHomeScreen {
                              onDismiss: { reloadCruise() }) { cruiseDBHCover }
             .fullScreenCover(isPresented: $presentingCruiseHeight,
                              onDismiss: { reloadCruise() }) { cruiseHeightCover }
-            // Tree-peek thumbnail → full-screen photo viewer.
+            // Tree-peek thumbnail → the app's one full-screen photo viewer.
             .fullScreenCover(item: $cruisePhotoContext) { context in
-                CruiseTreePhotoView(context: context)
+                MeasurePhotoDetailView(context: context)
             }
         #endif
             // HEIGHTS SHEET (plot peek → "Heights · N measured") — the
@@ -1760,17 +1751,18 @@ extension MapHomeScreen {
             .padding(.bottom, 10)
 
             HStack(alignment: .top, spacing: ForestixSpace.sm) {
-                // Tappable thumbnail → full-screen viewer (reuses the
-                // MeasurePhotoStore path); disabled with no photo.
+                // Tappable thumbnail → the app's one full-screen viewer
+                // (reuses the MeasurePhotoStore path); disabled with no
+                // photo. A cruise Tree row carries a SINGLE photo path, so
+                // this opens one page and shows no counter.
                 Button {
-                    if let path = tree.photoPath {
-                        cruisePhotoContext = CruisePhotoContext(
-                            photoPath: path,
-                            title: tree.speciesCode.isEmpty
-                                ? "Tree \(tree.treeNumber)"
-                                : "Tree \(tree.treeNumber) · \(RegionalSpecies.name(forCode: tree.speciesCode))",
-                            subtitle: peekTreeSubtitle(tree, plot: plot))
-                    }
+                    let pages = MeasurePhotoPage.pages(
+                        forCruiseTree: tree.photoPath,
+                        title: tree.speciesCode.isEmpty
+                            ? "Tree \(tree.treeNumber)"
+                            : "Tree \(tree.treeNumber) · \(RegionalSpecies.name(forCode: tree.speciesCode))",
+                        subtitle: peekTreeSubtitle(tree, plot: plot))
+                    cruisePhotoContext = PhotoViewerContext(pages: pages)
                 } label: {
                     cruisePhotoThumb(tree.photoPath)
                 }
@@ -3023,83 +3015,6 @@ struct PlotHeightsSheet: View {
         .disabled(!enabled)
     }
 }
-
-// MARK: - Cruise tree photo viewer (tree peek thumbnail → full screen)
-
-#if os(iOS)
-/// Full-screen viewer for a cruise tree's auto-photo, reached by tapping
-/// the tree-peek thumbnail. Reuses the MeasurePhotoStore path; the chrome
-/// is fixed dark (it sits on a photograph), matching the measure-mode
-/// photo detail's language.
-private struct CruiseTreePhotoView: View {
-    let context: CruisePhotoContext
-    @Environment(\.dismiss) private var dismiss
-    @State private var image: UIImage?
-
-    private let ink = Color(red: 0.949, green: 0.961, blue: 0.953)      // #F2F5F3
-    private let inkDim = Color(red: 0.647, green: 0.682, blue: 0.659)   // #A5AEA8
-    private let glass = Color(red: 6 / 255, green: 9 / 255, blue: 10 / 255) // #06090A
-
-    var body: some View {
-        ZStack {
-            Color(red: 0.039, green: 0.051, blue: 0.043).ignoresSafeArea() // #0A0D0B
-
-            if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ProgressView().tint(ink)
-            }
-
-            VStack {
-                HStack {
-                    Spacer()
-                    Button {
-                        dismiss()
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(ink)
-                            .frame(width: 44, height: 44)
-                            .background(Circle().fill(glass.opacity(0.70)))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Close photo")
-                    .accessibilityIdentifier("cruiseMap.photo.close")
-                }
-                .padding(.horizontal, 14)
-                Spacer()
-            }
-
-            VStack {
-                Spacer()
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(context.title)
-                        .font(.system(size: 17, weight: .heavy))
-                        .foregroundStyle(ink)
-                    Text(context.subtitle)
-                        .font(.system(size: 12, design: .monospaced))
-                        .foregroundStyle(inkDim)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 20)
-                .padding(.top, 40)
-                .padding(.bottom, 30)
-                .background(
-                    LinearGradient(colors: [glass.opacity(0), glass.opacity(0.92)],
-                                   startPoint: .top, endPoint: .bottom))
-            }
-        }
-        .task {
-            let url = MeasurePhotoStore.url(for: context.photoPath)
-            let data = await Task.detached { try? Data(contentsOf: url) }.value
-            if let data { image = UIImage(data: data) }
-        }
-    }
-}
-#endif
 
 // MARK: - Photo thumbnail loader
 

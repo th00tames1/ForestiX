@@ -254,6 +254,7 @@ public enum TreeMapper {
         e.dbhCoverageDeg = s.dbhCoverageDeg.map(NSNumber.init(value:))
         e.dbhNInliers = s.dbhNInliers.map { NSNumber(value: Int32($0)) }
         e.dbhConfidence = s.dbhConfidence.rawValue
+        e.dbhCaptureMode = s.dbhCaptureMode
         e.dbhIsIrregular = s.dbhIsIrregular
 
         e.heightM = s.heightM.map(NSNumber.init(value:))
@@ -323,6 +324,7 @@ public enum TreeMapper {
             dbhNInliers: e.dbhNInliers?.intValue,
             dbhConfidence: dbhConf,
             dbhIsIrregular: e.dbhIsIrregular,
+            dbhCaptureMode: e.dbhCaptureMode,
             heightM: e.heightM?.floatValue,
             heightMethod: heightMethod,
             heightSource: e.heightSource,

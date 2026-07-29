@@ -260,7 +260,12 @@ object BackupArchive {
 
         val srcDb = try {
             Room.databaseBuilder(context.applicationContext, CruiseDatabase::class.java, tempName)
-                .addMigrations(CruiseDatabase.MIGRATION_1_2, CruiseDatabase.MIGRATION_2_3)
+                .addMigrations(
+                    CruiseDatabase.MIGRATION_1_2,
+                    CruiseDatabase.MIGRATION_2_3,
+                    CruiseDatabase.MIGRATION_3_4,
+                    CruiseDatabase.MIGRATION_4_5,
+                )
                 .build()
         } catch (e: Exception) {
             tempFile.delete()

@@ -42,7 +42,7 @@ sealed class CruiseDataError(override val message: String) : Exception(message) 
         VolumeEquationEntity::class,
         HeightDiameterFitEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = false,
 )
 @TypeConverters(CruiseConverters::class)
@@ -86,6 +86,17 @@ abstract class CruiseDatabase : RoomDatabase() {
         val MIGRATION_3_4 = object : Migration(3, 4) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE TreeEntity ADD COLUMN treeName TEXT")
+            }
+        }
+
+        /// v4 → v5: Tree gains `dbhCaptureMode` — which estimator found the
+        /// diameter's edges ("auto", "manual", "typed"). Nullable TEXT, no
+        /// backfill: rows written before the column existed genuinely have
+        /// no provenance, and guessing one would corrupt the algorithm
+        /// comparison this field is recorded for.
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE TreeEntity ADD COLUMN dbhCaptureMode TEXT")
             }
         }
     }

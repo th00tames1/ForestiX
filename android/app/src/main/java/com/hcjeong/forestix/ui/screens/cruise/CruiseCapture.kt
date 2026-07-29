@@ -36,9 +36,11 @@
 package com.hcjeong.forestix.ui.screens.cruise
 
 import com.hcjeong.forestix.AppEnvironment
+import com.hcjeong.forestix.data.TreeNameSequence
 import com.hcjeong.forestix.data.cruise.Plot
 import com.hcjeong.forestix.data.cruise.Project
 import com.hcjeong.forestix.data.cruise.Tree
+import com.hcjeong.forestix.data.cruise.TreeLabel
 import com.hcjeong.forestix.data.cruise.TreeStatus
 import com.hcjeong.forestix.positioning.CLLocationSnapshot
 import com.hcjeong.forestix.positioning.GeoMath
@@ -59,9 +61,19 @@ object CruiseCapture {
         val plotId: UUID,
         val plotNumber: Int,
         val treeNumber: Int,
+        /// The name the NEXT tallied tree will be saved under, stepped on by
+        /// [TreeNameSequence] after every save exactly as the number is. Null
+        /// on a plot nobody has named — the loop then stays zero-typing and
+        /// the trees are labelled by number, which is what cruise mode has
+        /// always done. The tally pill is where the cruiser sets or clears it.
+        val treeName: String? = null,
         val plotCenterLat: Double,
         val plotCenterLon: Double,
-    )
+    ) {
+        /// What the tally chrome calls the tree it is ABOUT to write. One
+        /// rule, shared with every saved tree's `displayTitle`.
+        val treeTitle: String get() = TreeLabel.title(treeName, treeNumber)
+    }
 
     @Volatile
     var target: Target? = null
@@ -71,23 +83,44 @@ object CruiseCapture {
     @Volatile
     private var savedTreeId: UUID? = null
 
+    /// What that row is CALLED. Tracked beside the id rather than read back
+    /// off `target`, because in the diameter → height chain (F10) the tally
+    /// has already advanced its target to the next tree: `target.treeName` is
+    /// the name of the tree not yet measured, and labelling the height leg
+    /// with it would name the wrong stem. Null when the row was never named,
+    /// or when there is no row. iOS reads the same thing off the scoped row
+    /// (`chainHeightTreeName`).
+    @Volatile
+    var savedTreeName: String? = null
+        private set
+
     val isActive: Boolean get() = target != null
 
     /// Arm the session and publish the project's REAL calibration into the
     /// shared scan screens (quick measure keeps identity — iOS parity).
-    fun begin(env: AppEnvironment, project: Project, plot: Plot, treeNumber: Int) {
+    fun begin(
+        env: AppEnvironment,
+        project: Project,
+        plot: Plot,
+        treeNumber: Int,
+        treeName: String? = null,
+    ) {
         target = Target(
             projectId = project.id,
             plotId = plot.id,
             plotNumber = plot.plotNumber,
             treeNumber = treeNumber,
+            treeName = treeName,
             plotCenterLat = plot.centerLat,
             plotCenterLon = plot.centerLon,
         )
         savedTreeId = null
-        // Number only. Cruise names its trees by plot and tally position, not
-        // by the free-text name the quick-measure chooser offers, and a cruise
-        // reading is always a new tally line rather than a replacement.
+        savedTreeName = null
+        // Number only, still: the cruise tree's name is written straight onto
+        // the Tree row by [recordDbh] below, and the PendingTreeNumber lock is
+        // the QUICK-MEASURE handoff — a cruise reading never becomes a
+        // QuickMeasureEntry, so a name left in that lock would only be there
+        // to leak into an unrelated quick-measure capture later.
         PendingTreeNumber.set(number = treeNumber)
         env.activeScanCalibration.value = ProjectCalibration(
             depthNoiseMm = project.depthNoiseMm,
@@ -108,10 +141,15 @@ object CruiseCapture {
             plotId = plot.id,
             plotNumber = plot.plotNumber,
             treeNumber = tree.treeNumber,
+            // The EXISTING row's name — this session measures a tree that is
+            // already on the books, so the height screen has to call it what
+            // the map and the tree peek call it.
+            treeName = tree.treeName,
             plotCenterLat = plot.centerLat,
             plotCenterLon = plot.centerLon,
         )
         savedTreeId = tree.id
+        savedTreeName = tree.treeName
         PendingTreeNumber.set(number = tree.treeNumber)
         env.activeScanCalibration.value = ProjectCalibration(
             depthNoiseMm = project.depthNoiseMm,
@@ -125,11 +163,62 @@ object CruiseCapture {
     /// for the plot's next tree — bump the target number in place (the
     /// just-saved row stays remembered for `undoLastTally`). Returns the
     /// new target number, or null when no session is active.
-    fun advanceTally(): Int? {
+    ///
+    /// [saved] is whether the Accept actually wrote a row. The NUMBER advances
+    /// either way (it always has), but the NAME advances only on a save that
+    /// landed: re-deriving it from a plot the row never reached would resolve
+    /// the series WITHOUT the name the cruiser typed and quietly throw it
+    /// away. Left alone, the next Accept reuses it — which is what the pill is
+    /// still promising on screen. iOS gates it the same way.
+    suspend fun advanceTally(env: AppEnvironment, saved: Boolean): Int? {
         val t = target ?: return null
         val next = t.treeNumber + 1
-        target = t.copy(treeNumber = next)
+        target = t.copy(
+            treeNumber = next,
+            treeName = if (saved) nextTreeName(env, t.plotId) else t.treeName,
+        )
         return next
+    }
+
+    /// The name to offer for the next tree in this plot — the HIGHEST name in
+    /// the series the cruiser is using here, stepped on by [TreeNameSequence].
+    /// Null on a plot whose trees have never been named, and the tally then
+    /// stays zero-typing and labels by number, exactly as cruise always has.
+    ///
+    /// The SAME rule the quick-measure chooser offers
+    /// (`QuickMeasureHistory.suggestedNextTreeName`), through the same helper
+    /// rather than a second copy of it: the two worlds have to agree on what
+    /// follows "Plot3-T07", because a split cruise joins on the name.
+    /// [TreeNameSequence.nextInSeries] wants the names newest-first, so the
+    /// plot's trees are ordered by creation before their names are read —
+    /// repository order is not a promise. Soft-deleted rows are excluded, so
+    /// a deleted tree never holds a name hostage.
+    suspend fun nextTreeName(env: AppEnvironment, plotId: UUID): String? =
+        nextTreeName(
+            runCatching { env.treeRepository.listByPlot(plotId) }
+                .getOrDefault(emptyList()))
+
+    /// The same rule against a plot's trees already in hand — the plot peek
+    /// labels its "Add tree" button from its own list rather than going back
+    /// to the repository for one string.
+    fun nextTreeName(trees: List<Tree>): String? {
+        val live = trees.filter { it.deletedAt == null }
+            .sortedByDescending { it.createdAt }
+        val proposed =
+            TreeNameSequence.nextInSeries(live.mapNotNull { it.treeName })
+                ?: return null
+        // NEVER propose a name a stem in this plot already wears.
+        //
+        // [TreeNameSequence.next] deliberately hands a name with no trailing
+        // number back UNCHANGED rather than inventing "Big oak2" — the app
+        // cannot tell whether "Big oak" starts a series, so the quick-measure
+        // chooser shows it again and the cruiser retypes it. The tally loop
+        // never stops to ask: it would accept "Big oak", "Big oak", "Big oak"
+        // down the whole plot, and tree_name is the column a cruise split
+        // across two phones joins on. Dropping back to null labels the next
+        // stem "Tree #<n>" instead, and the pill is one tap away.
+        if (live.any { it.treeName == proposed }) return null
+        return proposed
     }
 
     /// Undo toast action: HARD-delete the just-saved tally row and step the
@@ -142,8 +231,29 @@ object CruiseCapture {
         val tree = runCatching { env.treeRepository.read(id) }.getOrNull() ?: return null
         runCatching { env.treeRepository.hardDelete(id) }.getOrElse { return null }
         savedTreeId = null
-        target = t.copy(treeNumber = tree.treeNumber)
+        savedTreeName = null
+        target = t.copy(
+            treeNumber = tree.treeNumber,
+            // Stepped back with the number, and re-derived from the plot for
+            // the same reason: the undone row is gone, so the series resolves
+            // to the name that row had. Reusing the name the loop had already
+            // advanced to would leave a gap nothing ever fills.
+            treeName = nextTreeName(env, t.plotId),
+        )
         return tree
+    }
+
+    /// Tally pill → rename, committed. An emptied field CLEARS the name rather
+    /// than storing "": the tree then falls back to "Tree #<n>", which is the
+    /// only way back to an unnamed tally once a series has been started.
+    ///
+    /// Trimmed before it is stored, exactly as `PendingTreeNumber.set` and
+    /// iOS's `lockChooserTree()` do — the name is a join key for a split
+    /// cruise, and a gloved thumb must not create " Plot3-T07" here and
+    /// "Plot3-T07" there.
+    fun renameTarget(name: String?) {
+        val t = target ?: return
+        target = t.copy(treeName = name?.trim()?.takeIf { it.isNotEmpty() })
     }
 
     /// Disarm (chain finished OR abandoned) and restore the identity
@@ -152,6 +262,7 @@ object CruiseCapture {
         if (target == null && savedTreeId == null) return
         target = null
         savedTreeId = null
+        savedTreeName = null
         env.activeScanCalibration.value = ProjectCalibration.identity
     }
 
@@ -180,6 +291,7 @@ object CruiseCapture {
     ): UUID? {
         val t = target ?: return null
         savedTreeId = null
+        savedTreeName = null
         val now = System.currentTimeMillis()
         val species = speciesCode
             ?: env.treeRepository.listByPlot(t.plotId)
@@ -197,6 +309,10 @@ object CruiseCapture {
             id = UUID.randomUUID(),
             plotId = t.plotId,
             treeNumber = t.treeNumber,
+            // The name the pill was showing when the cruiser accepted. Null is
+            // the norm and stays the norm — an unnamed cruise tree is labelled
+            // by number and exports an empty tree_name, as it always has.
+            treeName = t.treeName,
             speciesCode = species,
             status = TreeStatus.LIVE,
             dbhCm = r.diameterCm,
@@ -241,6 +357,7 @@ object CruiseCapture {
         )
         env.treeRepository.create(tree)
         savedTreeId = tree.id
+        savedTreeName = tree.treeName
         return tree.id
     }
 

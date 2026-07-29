@@ -95,7 +95,7 @@ val MeasureMiniMapSlot = 132.dp
 
 /// The AR screens' top strip, laid out as ONE row instead of a pile of
 /// independently-aligned overlays. The leading slot (GPS pill) and the
-/// centre slot (the cruise "Tree N" title) are siblings in the same Row,
+/// centre slot (the cruise "Tree #N" title) are siblings in the same Row,
 /// so they cannot overlap at any screen width: the centre is centred in
 /// whatever is left between the GPS pill and the reserved trailing slot,
 /// and gives way rather than colliding when the width runs out.

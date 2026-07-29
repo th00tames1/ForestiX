@@ -48,8 +48,8 @@ public struct Tree: Identifiable, Codable, Sendable {
     public let plotId: UUID
     public var treeNumber: Int
     /// The cruiser's own name for this tree ("Plot3-T07"). nil for a tree
-    /// that was never named, and every display falls back to "#treeNumber"
-    /// — the label the cruise surfaces have always shown.
+    /// that was never named, and every display falls back to
+    /// "Tree #treeNumber" through `displayTitle`.
     public var treeName: String?
     public var speciesCode: String
     public var status: TreeStatus
@@ -187,5 +187,37 @@ public struct Tree: Identifiable, Codable, Sendable {
         self.deletedAt = deletedAt
         self.latitude = latitude
         self.longitude = longitude
+    }
+}
+
+// MARK: - What the cruise surfaces call a tree
+
+/// The one rule for turning a tree's identity into the words on screen.
+///
+/// It lives apart from `Tree` because the tally loop has to label the tree it
+/// is ABOUT to write — a target number and a pending name, with no row behind
+/// them yet. Both callers must produce the same string, so both come through
+/// here rather than one of them re-typing the format.
+///
+/// Ported 1:1 from / to Android `data/cruise/TreeLabel.kt`: a cruise split
+/// across an iPhone and an Android phone must not print one stem two ways.
+public enum TreeLabel {
+
+    /// The cruiser's own name when they gave the tree one, else
+    /// "Tree #<number>" — the same shape as the field log's
+    /// `FieldLogRowModel.title`, so the two worlds call a tree one thing.
+    ///
+    /// The name is used VERBATIM. It was trimmed on the way in (the chooser
+    /// and the tally both trim before storing) precisely so nothing downstream
+    /// has to guess whether " Plot3-T07" and "Plot3-T07" are the same stem.
+    public static func title(name: String?, number: Int) -> String {
+        name ?? "Tree #\(number)"
+    }
+}
+
+extension Tree {
+    /// What every cruise surface calls this tree — see `TreeLabel.title`.
+    public var displayTitle: String {
+        TreeLabel.title(name: treeName, number: treeNumber)
     }
 }

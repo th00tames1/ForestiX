@@ -84,7 +84,7 @@ public struct TreeDetailScreen: View {
             }
             actionSection
         }
-        .navigationTitle("Tree #\(viewModel.tree.treeNumber)")
+        .navigationTitle(viewModel.tree.displayTitle)
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif

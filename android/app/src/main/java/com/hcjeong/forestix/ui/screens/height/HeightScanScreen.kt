@@ -65,6 +65,7 @@ import com.hcjeong.forestix.common.Units
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
 import com.hcjeong.forestix.data.ResearchLog
+import com.hcjeong.forestix.data.cruise.TreeLabel
 import com.hcjeong.forestix.sensors.ArDepthFrame
 import com.hcjeong.forestix.sensors.ConfidenceTier
 import com.hcjeong.forestix.sensors.HeightEstimator
@@ -1204,9 +1205,12 @@ fun HeightScanScreen(
                 } else {
                     // Name the tree this SESSION is measuring, not
                     // `CruiseCapture.target` — in the chain the tally has
-                    // already advanced its target to the next number.
-                    failure = "Height NOT saved to Tree $pendingTree — " +
-                        "the tree row couldn't be updated. Tap Accept again."
+                    // already advanced its target to the next number, and
+                    // `savedTreeName` is tracked beside the row id for exactly
+                    // that reason.
+                    failure = "Height NOT saved to " +
+                        TreeLabel.title(CruiseCapture.savedTreeName, pendingTree) +
+                        " — the tree row couldn't be updated. Tap Accept again."
                 }
             } else {
                 val reading =

@@ -205,6 +205,18 @@ public struct HeightScanScreen: View {
     private let projectID: String?
     private let treeNumber: Int?
 
+    /// The scoped tree's own name, when the cruiser gave it one. DISPLAY
+    /// ONLY — the raw-capture join key stays `treeNumber`, which is the
+    /// column the bundles and the tree rows actually pair on. nil falls back
+    /// to "Tree #<number>", so an unnamed tree reads exactly as before.
+    private let treeName: String?
+
+    /// What this screen calls the tree it is measuring — nil when the host
+    /// scoped it to no tree at all (every quick-measure call site).
+    private var treeTitle: String? {
+        treeNumber.map { TreeLabel.title(name: treeName, number: $0) }
+    }
+
     /// Re-open plot setup, to change radius / centre after the first
     /// placement. Reached from the ENLARGED plot view that the top-right
     /// mini-map now opens — the tap itself no longer jumps into re-setup.
@@ -219,6 +231,7 @@ public struct HeightScanScreen: View {
                 cruisePlotInfo: PlotMiniMapInfo? = nil,
                 projectID: String? = nil,
                 treeNumber: Int? = nil,
+                treeName: String? = nil,
                 initialSpeciesCode: String? = nil,
                 onEditPlot: (() -> Void)? = nil) {
         _viewModel = StateObject(wrappedValue: viewModel())
@@ -233,6 +246,7 @@ public struct HeightScanScreen: View {
         self.cruisePlotInfo = cruisePlotInfo
         self.projectID = projectID
         self.treeNumber = treeNumber
+        self.treeName = treeName
         self.onEditPlot = onEditPlot
     }
 
@@ -574,8 +588,8 @@ public struct HeightScanScreen: View {
                         // crown-moment frame goes with it.
                         heldPhoto = nil
                     } else {
-                        heightSaveFailure = treeNumber.map {
-                            "Height NOT saved to Tree \($0) — the tree row couldn't be updated. Tap Accept again."
+                        heightSaveFailure = treeTitle.map {
+                            "Height NOT saved to \($0) — the tree row couldn't be updated. Tap Accept again."
                         } ?? "Height NOT saved — the tree row couldn't be updated. Tap Accept again."
                         // Back to the result panel so the value is still on
                         // screen and Accept is tappable again.

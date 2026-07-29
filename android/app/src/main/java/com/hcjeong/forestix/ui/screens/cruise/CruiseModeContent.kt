@@ -119,6 +119,8 @@ import com.hcjeong.forestix.data.cruise.PlotType
 import com.hcjeong.forestix.data.cruise.Project
 import com.hcjeong.forestix.data.cruise.SamplingScheme
 import com.hcjeong.forestix.data.cruise.Tree
+import com.hcjeong.forestix.data.cruise.TreeLabel
+import com.hcjeong.forestix.data.cruise.displayTitle
 import com.hcjeong.forestix.data.cruise.hasCentre
 import com.hcjeong.forestix.export.FullCruiseExporter
 import com.hcjeong.forestix.geo.CoordinateConversions
@@ -419,7 +421,13 @@ internal fun CruiseModeEffects(
             }
             val next = (state.data.treesByPlot[plot.id].orEmpty()
                 .maxOfOrNull { it.treeNumber } ?: 0) + 1
-            CruiseCapture.begin(env, p, plot, next)
+            // Picked up from the plot the loop is entering, not carried over
+            // from whatever was tallied last: re-entering Plot 2 after naming
+            // trees in Plot 1 must continue PLOT 2's series. Null when this
+            // plot has never been named, and the loop stays nameless until
+            // the tally pill is tapped.
+            CruiseCapture.begin(
+                env, p, plot, next, CruiseCapture.nextTreeName(env, plot.id))
             nav.navigate("${Routes.DBH}?chain=true")
         }
     }
@@ -1533,6 +1541,11 @@ private fun PlotPeekCard(
         stats = computePlotStats(env, project, plot, trees, allProjectTrees)
     }
     val nextTree = (trees.maxOfOrNull { it.treeNumber } ?: 0) + 1
+    // What the tree this button is about to open the tally on will be called:
+    // the auto-incremented name when this plot has a series running, else
+    // "Tree #<next>". Read straight off the peek's own tree list rather than
+    // the repository, so the label tracks the tally without a round trip.
+    val nextTreeTitle = TreeLabel.title(CruiseCapture.nextTreeName(trees), nextTree)
     // B. Pooled sample heights — "N measured" counts the live trees
     // carrying a height (iOS measuredHeightCount parity; the pooled FIT
     // additionally applies the engine's > 1.3 m cleaning).
@@ -1640,9 +1653,11 @@ private fun PlotPeekCard(
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
-                    "Add tree · Tree $nextTree",
+                    "Add tree · $nextTreeTitle",
                     style = type.bodyBold.copy(fontSize = 15.sp),
                     color = MaterialTheme.colorScheme.onPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
             Spacer(Modifier.size(8.dp))
@@ -1771,11 +1786,17 @@ private fun PlotHeightsSheet(
                         .padding(vertical = 9.dp, horizontal = 2.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    // A cruiser's name is longer than "Tree #7" and this column
+                    // was sized for the number alone; it gets room to grow, and
+                    // truncates rather than shoving the diameter and height out
+                    // of the row.
                     Text(
-                        "Tree ${t.treeNumber}",
+                        t.displayTitle,
                         style = type.bodyBold.copy(fontSize = 13.sp, fontWeight = FontWeight.Bold),
                         color = colors.textPrimary,
-                        modifier = Modifier.width(76.dp),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.widthIn(min = 76.dp),
                     )
                     Text(
                         MeasurementFormatter.diameter(t.dbhCm.toDouble(), unitSystem),
@@ -1817,7 +1838,7 @@ private fun PlotHeightsSheet(
                 }
             } else {
                 // Compact tree-number picker (default = last tallied
-                // tree) — selectable "Tree N · DBH (✓)" rows, the
+                // tree) — selectable "Tree #N · DBH (✓)" rows, the
                 // Android analogue of the iOS wheel.
                 Column(
                     Modifier
@@ -1839,7 +1860,7 @@ private fun PlotHeightsSheet(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Text(
-                                "Tree ${t.treeNumber} · " +
+                                t.displayTitle + " · " +
                                     MeasurementFormatter.diameter(
                                         t.dbhCm.toDouble(), unitSystem) +
                                     (if (t.heightM != null) " ✓" else ""),
@@ -1854,8 +1875,13 @@ private fun PlotHeightsSheet(
                     }
                 }
                 Spacer(Modifier.size(ForestixSpace.xs))
-                // Stage 2 confirm — same LOCKED "Measure height" label.
-                HeightsSheetPrimary(enabled = selected != null) {
+                // Stage 2 confirm — names the picked tree, "Measure height"
+                // until there is one (iOS pickerStage 1:1).
+                HeightsSheetPrimary(
+                    enabled = selected != null,
+                    label = selected?.let { "Measure ${it.displayTitle}" }
+                        ?: "Measure height",
+                ) {
                     selected?.let { onMeasure(it) }
                 }
             }
@@ -1866,8 +1892,17 @@ private fun PlotHeightsSheet(
 /// The heights sheet's 54 dp primary — LOCKED "Measure height" on both
 /// stages (iOS measureButton parity: filled primary, 0.45 alpha when
 /// there is nothing to measure).
+///
+/// Stage 2 names the tree once one is picked — "Measure Tree #7", or the
+/// cruiser's name for it. iOS has always done this and Android always said
+/// "Measure height"; the label is a tree-identity surface like the rows above
+/// it, so the two now say the same words.
 @Composable
-private fun HeightsSheetPrimary(enabled: Boolean, onClick: () -> Unit) {
+private fun HeightsSheetPrimary(
+    enabled: Boolean,
+    label: String = "Measure height",
+    onClick: () -> Unit,
+) {
     val colors = Forestix.colors
     Box(
         Modifier
@@ -1880,9 +1915,11 @@ private fun HeightsSheetPrimary(enabled: Boolean, onClick: () -> Unit) {
         contentAlignment = Alignment.Center,
     ) {
         Text(
-            "Measure height",
+            label,
             style = Forestix.type.bodyBold.copy(fontSize = 15.sp),
             color = MaterialTheme.colorScheme.onPrimary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }
@@ -2030,7 +2067,7 @@ private fun TreePeekCard(
     // thumbnail opens — the caption under the photo must name the same tree
     // the card above it does. Declared out here because the viewer is raised
     // beside the Column, not inside it.
-    val treeTitle = "Tree ${tree.treeNumber}" +
+    val treeTitle = tree.displayTitle +
         (tree.speciesCode.takeIf { it.isNotBlank() }
             ?.let { " · ${RegionalSpecies.nameForCode(it)}" } ?: "")
     val treeSubtitle = listOfNotNull(
@@ -2172,7 +2209,7 @@ private fun TreePeekCard(
     if (confirmDelete) {
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
-            title = { Text("Delete Tree ${tree.treeNumber}?") },
+            title = { Text("Delete ${tree.displayTitle}?") },
             text = { Text("This permanently removes the tree and its photo. This cannot be undone.") },
             confirmButton = {
                 TextButton(onClick = { confirmDelete = false; onDelete() }) { Text("Delete") }

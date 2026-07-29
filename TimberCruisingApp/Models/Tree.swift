@@ -47,6 +47,10 @@ public struct Tree: Identifiable, Codable, Sendable {
     public let id: UUID
     public let plotId: UUID
     public var treeNumber: Int
+    /// The cruiser's own name for this tree ("Plot3-T07"). nil for a tree
+    /// that was never named, and every display falls back to "#treeNumber"
+    /// — the label the cruise surfaces have always shown.
+    public var treeName: String?
     public var speciesCode: String
     public var status: TreeStatus
 
@@ -109,6 +113,7 @@ public struct Tree: Identifiable, Codable, Sendable {
         id: UUID,
         plotId: UUID,
         treeNumber: Int,
+        treeName: String? = nil,
         speciesCode: String,
         status: TreeStatus,
         dbhCm: Float,
@@ -147,6 +152,7 @@ public struct Tree: Identifiable, Codable, Sendable {
         self.id = id
         self.plotId = plotId
         self.treeNumber = treeNumber
+        self.treeName = treeName
         self.speciesCode = speciesCode
         self.status = status
         self.dbhCm = dbhCm

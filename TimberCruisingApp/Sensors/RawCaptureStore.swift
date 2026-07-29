@@ -201,14 +201,40 @@ public struct RawCaptureManifest: Codable, Sendable {
     }
 
     public struct Truth: Codable, Sendable {
+        /// ALWAYS the app's metric base — cm for a diameter, m for a height.
         public var value: Double?
         public var enteredAt: String?
+        /// The unit the operator actually TYPED ("cm" | "in" | "m" | "ft").
+        /// Recorded rather than inferred at read time: `value` is normalised
+        /// on the way in, so without this the export cannot tell an imperial
+        /// entry from a metric one and has to guess. Nil on bundles written
+        /// before the unit was recorded and on bundles with no truth — a
+        /// reader must treat that as "not stated", not as metric.
+        public var truthUnit: String?
         enum CodingKeys: String, CodingKey {
             case value
             case enteredAt = "entered_at"
+            case truthUnit = "truth_unit"
         }
-        public init(value: Double?, enteredAt: String?) {
+        public init(value: Double?, enteredAt: String?, truthUnit: String? = nil) {
             self.value = value; self.enteredAt = enteredAt
+            self.truthUnit = truthUnit
+        }
+
+        /// Explicit encoder. The SYNTHESIZED one emits `encodeIfPresent`, so a
+        /// nil field disappears from manifest.json entirely, while the Android
+        /// writer always writes `"truth_unit": null` (sensors/RawCaptureStore
+        /// .kt `truthJson`). A corpus reader keyed on the presence of the key
+        /// then sees a missing key on iOS bundles and a present-but-null key
+        /// on Android bundles for the IDENTICAL "no truth typed" state.
+        /// Writing all three keys unconditionally makes one document out of
+        /// the two platforms' manifests. Decoding stays synthesized, which
+        /// reads both shapes.
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(value, forKey: .value)
+            try c.encode(enteredAt, forKey: .enteredAt)
+            try c.encode(truthUnit, forKey: .truthUnit)
         }
     }
 
@@ -302,14 +328,25 @@ public struct RawCaptureManifest: Codable, Sendable {
         public var top: Aim
         public var dHM: Double
         public var poseSamples: [PoseSample]
+        /// VIO tracking dropped somewhere between anchoring the trunk and the
+        /// aims. A dropout moves the world frame the anchor sits in, so it
+        /// moves `d_h_m` — the entire scale of H — and the pose trail above
+        /// has a hole where it happened. Optional so bundles written before
+        /// this key still decode; nil there means UNRECORDED, not "clean".
+        /// Byte-identical key on Android (`tracking_dropped` in the height
+        /// block), and the same fact the research CSV column carries.
+        public var trackingDropped: Bool?
         enum CodingKeys: String, CodingKey {
             case anchor, base, top
             case dHM = "d_h_m"
             case poseSamples = "pose_samples"
+            case trackingDropped = "tracking_dropped"
         }
-        public init(anchor: Anchor, base: Aim, top: Aim, dHM: Double, poseSamples: [PoseSample]) {
+        public init(anchor: Anchor, base: Aim, top: Aim, dHM: Double,
+                    poseSamples: [PoseSample], trackingDropped: Bool? = nil) {
             self.anchor = anchor; self.base = base; self.top = top
             self.dHM = dHM; self.poseSamples = poseSamples
+            self.trackingDropped = trackingDropped
         }
 
         public struct Anchor: Codable, Sendable {
@@ -770,10 +807,17 @@ public enum RawCaptureStore {
     /// the async bundle write: an existing manifest is patched, otherwise the
     /// value is parked in a sidecar the recorder picks up. Callers MUST NOT
     /// clear their input field unless the returned outcome `isDurable`.
-    public static func applyTruth(id: String, value: Double) -> TruthOutcome {
+    ///
+    /// `value` is the metric base (cm / m); `unit` is what the operator typed,
+    /// and is stored beside it so the export never has to infer the scale.
+    public static func applyTruth(id: String,
+                                  value: Double,
+                                  unit: TruthInput.Unit) -> TruthOutcome {
         patchLock.lock()
         defer { patchLock.unlock() }
-        let truth = RawCaptureManifest.Truth(value: value, enteredAt: Self.isoNow())
+        let truth = RawCaptureManifest.Truth(value: value,
+                                             enteredAt: Self.isoNow(),
+                                             truthUnit: unit.rawValue)
         if var m = loadManifest(id: id) {
             // Carry over anything already parked (e.g. an Accept that beat the
             // recorder) so writing the manifest can't drop it.
@@ -809,7 +853,7 @@ public enum RawCaptureStore {
             try? savePendingPatch(patch, id: id)
         }
         guard var m = loadManifest(id: id) else { return .failed("bundle not found") }
-        m.truth = RawCaptureManifest.Truth(value: nil, enteredAt: nil)
+        m.truth = RawCaptureManifest.Truth(value: nil, enteredAt: nil, truthUnit: nil)
         do {
             try writeManifest(m, id: id)
             return .applied

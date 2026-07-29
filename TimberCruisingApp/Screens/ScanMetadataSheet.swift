@@ -102,38 +102,8 @@ public struct ScanMetadataSheet: View {
 
     private var speciesSection: some View {
         Section(header: Text("SPECIES").font(ForestixType.sectionHead)) {
-            Picker("Species",
-                   selection: Binding(
-                    get: { speciesCode ?? "" },
-                    set: { speciesCode = $0.isEmpty ? nil : $0 })
-            ) {
-                Text("— Unspecified —").tag("")
-                ForEach(speciesOptions, id: \.0) { code, name in
-                    Text(Self.pickerLabel(name: name, code: code)).tag(code)
-                }
-            }
+            SpeciesPickerField(speciesCode: $speciesCode)
         }
-    }
-
-    private var speciesOptions: [(String, String)] {
-        // Country-scoped: the US resolves its per-region FIA presets; metric
-        // countries carry a flat national list.
-        let preset = settings.country.speciesPresets(region: settings.region)
-        // Always allow "Other" rather than locking to the preset
-        // list — cruisers occasionally measure non-preset trees.
-        return preset + [("OT", "Other")]
-    }
-
-    /// Name-first option label: the common name reads prominently, the
-    /// FIA code trails as a dim secondary suffix (" · DF"). Selecting the
-    /// row still stores the code — this only reshapes what's shown.
-    private static func pickerLabel(name: String, code: String) -> AttributedString {
-        var label = AttributedString(name)
-        var suffix = AttributedString(" · \(code)")
-        suffix.foregroundColor = ForestixPalette.textSecondary
-        suffix.font = .caption
-        label.append(suffix)
-        return label
     }
 
     // MARK: - Position
@@ -221,6 +191,120 @@ public struct ScanMetadataSheet: View {
                       text: $note, axis: .vertical)
                 .lineLimit(2...4)
         }
+    }
+}
+
+// MARK: - Species picker
+
+/// THE species control. Both places a cruiser picks a species go through this
+/// one view — the reading-details sheet and the measure chooser — so the list,
+/// the ordering and the typed-code escape cannot drift apart.
+///
+/// The regional presets are a convenience, not a boundary: a cruiser standing
+/// in front of a tree the preset does not carry can type its code rather than
+/// filing it under "Other" and losing which species it actually was.
+///
+/// `compact` is the pill the measure chooser wants, where the control sits
+/// beside a text field with no section header to name it; the sheet's row
+/// spans its section and says "— Unspecified —" when empty.
+public struct SpeciesPickerField: View {
+
+    @EnvironmentObject private var settings: AppSettings
+    @Binding public var speciesCode: String?
+    public var unspecifiedLabel: String = "— Unspecified —"
+    public var compact: Bool = false
+
+    @State private var promptingForCode = false
+    @State private var typedCode = ""
+
+    public init(speciesCode: Binding<String?>,
+                unspecifiedLabel: String = "— Unspecified —",
+                compact: Bool = false) {
+        self._speciesCode = speciesCode
+        self.unspecifiedLabel = unspecifiedLabel
+        self.compact = compact
+    }
+
+    public var body: some View {
+        Menu {
+            Button("— Unspecified —") { speciesCode = nil }
+            ForEach(speciesOptions, id: \.0) { code, name in
+                Button {
+                    speciesCode = code
+                } label: {
+                    Text(Self.pickerLabel(name: name, code: code))
+                }
+            }
+            Button("Type a code…") {
+                typedCode = speciesCode ?? ""
+                promptingForCode = true
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(selectedLabel)
+                    .foregroundStyle(speciesCode == nil
+                                     ? ForestixPalette.textTertiary
+                                     : ForestixPalette.textPrimary)
+                    .lineLimit(1)
+                if !compact { Spacer(minLength: 0) }
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(ForestixPalette.textSecondary)
+            }
+            .padding(.horizontal, compact ? ForestixSpace.sm : 0)
+            .padding(.vertical, compact ? 10 : 0)
+            .background {
+                if compact {
+                    RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                     style: .continuous)
+                        .stroke(ForestixPalette.divider, lineWidth: 1)
+                }
+            }
+        }
+        .accessibilityIdentifier("speciesPicker")
+        .alert("Species code", isPresented: $promptingForCode) {
+            TextField("Code not in the list", text: $typedCode)
+            Button("Cancel", role: .cancel) {}
+            Button("Use") {
+                // An empty box means "no species", not a species whose code
+                // is the empty string.
+                let trimmed = typedCode
+                    .trimmingCharacters(in: .whitespaces).uppercased()
+                speciesCode = trimmed.isEmpty ? nil : trimmed
+            }
+        }
+    }
+
+    private var selectedLabel: AttributedString {
+        guard let code = speciesCode else {
+            return AttributedString(unspecifiedLabel)
+        }
+        guard let match = speciesOptions.first(where: { $0.0 == code }) else {
+            // A code the list does not carry is shown as typed, not silently
+            // relabelled to something the cruiser did not choose.
+            return AttributedString(code)
+        }
+        return Self.pickerLabel(name: match.1, code: match.0)
+    }
+
+    /// The active region's curated list plus the permanent "OT · Other"
+    /// escape — cruisers occasionally measure non-regional trees. The US
+    /// resolves its per-region FIA presets; metric countries carry a flat
+    /// national list.
+    private var speciesOptions: [(String, String)] {
+        settings.country.speciesPresets(region: settings.region) + [("OT", "Other")]
+    }
+
+    /// Name-first option label: the common name reads prominently, the
+    /// FIA code trails as a dim secondary suffix (" · DF"). Selecting the
+    /// row still stores the code — this only reshapes what's shown.
+    private static func pickerLabel(name: String, code: String) -> AttributedString {
+        var label = AttributedString(name)
+        var suffix = AttributedString(" · \(code)")
+        suffix.foregroundColor = ForestixPalette.textSecondary
+        suffix.font = .caption
+        label.append(suffix)
+        return label
     }
 }
 

@@ -257,6 +257,7 @@ object TreeMapper {
         id = s.id,
         plotId = s.plotId,
         treeNumber = s.treeNumber,
+        treeName = s.treeName,
         speciesCode = s.speciesCode,
         status = s.status.raw,
 
@@ -319,6 +320,7 @@ object TreeMapper {
             id = e.id,
             plotId = e.plotId,
             treeNumber = e.treeNumber,
+            treeName = e.treeName,
             speciesCode = e.speciesCode,
             status = status,
             dbhCm = e.dbhCm,

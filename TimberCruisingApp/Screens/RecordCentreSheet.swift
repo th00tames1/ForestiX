@@ -12,8 +12,19 @@
 // the kept OffsetFlowScreen (its own AR session, run while pushed);
 // its computed PlotCenterResult lands the centre through the same
 // save path.
+//
+// FIELD REPORT 17 — averaging is no longer a GATE. The 60 s window was
+// the only way out of this sheet, and a cruiser who has already walked to
+// the plot spends that minute standing still under a canopy that is not
+// going to give them a better fix anyway. "Start plot now" takes whatever
+// fix is live at that instant and opens the plot immediately; "Save
+// centre" still arms at the bell for anyone who wants the median. The two
+// produce DIFFERENT DATA and are recorded as such — `gpsSingle` /
+// nSamples 1 for the instant one, `gpsAveraged` / nSamples ≥ 30 for the
+// window — so nothing downstream has to guess which it was reading.
 
 import SwiftUI
+import Combine
 import Common
 import Models
 import Persistence
@@ -42,6 +53,15 @@ public struct RecordCentreSheet: View {
     @StateObject private var offsetSession = ARKitSessionManager()
     @State private var pushingOffset = false
     @State private var saveErrorMessage: String?
+    /// A save is in flight (see `save(_:)`) — the sheet's buttons are deaf
+    /// and dimmed until it lands or fails.
+    @State private var saving = false
+    /// Wall clock the FRESHNESS test reads. Freshness changes with TIME, not
+    /// with the arrival of a fix: the view model's own tick stops at the 60 s
+    /// bell, and a cruiser under canopy gets no new snapshot to redraw from,
+    /// so without this "Start plot now" would stay armed on a fix that aged
+    /// out while they were reading the sheet.
+    @State private var now = Date()
 
     public init(plannedPlot: PlannedPlot,
                 project: Project,
@@ -72,6 +92,9 @@ public struct RecordCentreSheet: View {
         .presentationBackground(ForestixPalette.surface)
         .onAppear { viewModel.start() }
         .onDisappear { viewModel.cancel() }
+        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) {
+            now = $0
+        }
         // The offset flow runs its own 30 s averaging over the SAME
         // location buffer — stop the 60 s window while it's up and
         // restart fresh if the cruiser backs out without landing it.
@@ -132,11 +155,35 @@ public struct RecordCentreSheet: View {
             }
             .padding(.vertical, ForestixSpace.xs)
 
+            // How far the cruiser is from where this plot was PLANNED.
+            // "Start plot now" binds Plot N to wherever they are standing,
+            // so the one number that says whether that is the right place
+            // has to be on the same screen as the button. Same wording,
+            // same freshness gate as the planned pin's peek.
+            HStack(spacing: ForestixSpace.xs) {
+                Text("FROM YOU")
+                    .font(.system(size: 10, weight: .bold))
+                    .tracking(0.7)
+                    .foregroundStyle(ForestixPalette.textTertiary)
+                    .frame(width: 72, alignment: .leading)
+                Text(rangeText)
+                    .font(.system(size: 14.5, weight: .semibold,
+                                  design: .monospaced))
+                    .foregroundStyle(ForestixPalette.textPrimary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                Spacer(minLength: 4)
+            }
+            .padding(.vertical, 6)
+
             VStack(spacing: ForestixSpace.xs) {
+                // The instant path (field report 17): armed the moment
+                // there is a fix the app still believes, so the cruiser
+                // never waits out the window to start measuring.
                 Button {
-                    if let result = readyResult { save(result) }
+                    if let result = instantCentre { save(result) }
                 } label: {
-                    Text("Save centre")
+                    Text("Start plot now")
                         .font(.system(size: 15, weight: .bold))
                         .foregroundStyle(ForestixPalette.primaryInk)
                         .frame(maxWidth: .infinity, minHeight: 54)
@@ -147,8 +194,42 @@ public struct RecordCentreSheet: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .disabled(readyResult == nil)
-                .opacity(readyResult == nil ? 0.45 : 1)
+                .disabled(instantCentre == nil || saving)
+                .opacity(instantCentre == nil || saving ? 0.45 : 1)
+                .accessibilityIdentifier("recordCentre.startNow")
+
+                // Says what the button above actually records, because the
+                // difference between one fix and a 60 s median is the whole
+                // reason the other button exists — and it is invisible once
+                // the plot is on the map.
+                Text("Records one GPS fix, not an average.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(ForestixPalette.textTertiary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+
+                // The averaged path — still here, still the better centre,
+                // now something the cruiser chooses rather than sits out.
+                Button {
+                    if let result = readyResult { save(result) }
+                } label: {
+                    Text("Save centre")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(readyResult == nil
+                                         ? ForestixPalette.textPrimary
+                                         : ForestixPalette.primary)
+                        .frame(maxWidth: .infinity, minHeight: 54)
+                        .background(
+                            RoundedRectangle(cornerRadius: ForestixRadius.card,
+                                             style: .continuous)
+                                .stroke(readyResult == nil
+                                        ? ForestixPalette.divider
+                                        : ForestixPalette.primary,
+                                        lineWidth: readyResult == nil ? 1 : 1.5))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(readyResult == nil || saving)
+                .opacity(readyResult == nil || saving ? 0.45 : 1)
                 .accessibilityIdentifier("recordCentre.save")
 
                 Button {
@@ -230,6 +311,31 @@ public struct RecordCentreSheet: View {
         }
     }
 
+    /// The centre "Start plot now" would write — nil while there is no fix
+    /// the app still believes, which is exactly when the button greys out.
+    /// Independent of `viewModel.phase`: the window has nothing to do with
+    /// whether a single fix is available.
+    private var instantCentre: PlotCenterResult? {
+        singleFixCentre(viewModel.latestSample, asOf: now)
+    }
+
+    /// Range + bearing from the cruiser to where this plot was PLANNED, or
+    /// "no GPS fix". Same strings and same freshness gate as the planned
+    /// pin's peek — a walking instruction measured from a position the
+    /// cruiser has left is worse than none.
+    private var rangeText: String {
+        guard let fix = FixFreshness.usable(viewModel.latestSample, asOf: now)
+        else { return "no GPS fix" }
+        let d = GeoMath.distanceM(
+            fromLat: fix.latitude, fromLon: fix.longitude,
+            toLat: plannedPlot.plannedLat, toLon: plannedPlot.plannedLon)
+        let b = GeoMath.bearingDeg(
+            fromLat: fix.latitude, fromLon: fix.longitude,
+            toLat: plannedPlot.plannedLat, toLon: plannedPlot.plannedLon)
+        return String(format: "%.0f m · bearing %.0f°", d,
+                      (b + 360).truncatingRemainder(dividingBy: 360))
+    }
+
     private var accuracyText: String {
         if let r = liveResult {
             return String(format: "±%.1f m", r.medianHAccuracyM)
@@ -240,9 +346,10 @@ public struct RecordCentreSheet: View {
         return "±— m"
     }
 
-    // (`liveTier` went with the chip — field report F9. `LocationService.tier`
-    // and `GPSAveraging.classify` are untouched; the grade is still computed
-    // and stored on the Plot, it just isn't shown to a cruiser.)
+    // (`liveTier` went with the chip — field report F9. `GPSAveraging.classify`
+    // and `classifySingleFix` are untouched; the grade is still computed and
+    // stored on the Plot, it just isn't shown to a cruiser. The badge's own
+    // `LocationService.tier` helper is gone with the badge.)
 
     private var metaTitle: String {
         switch viewModel.phase {
@@ -308,45 +415,105 @@ public struct RecordCentreSheet: View {
 
     // MARK: Save (planned → real Plot, the old conversion)
 
+    /// ONE write per sheet. `convertPlannedToActivePlot` creates a Plot row
+    /// and marks the planned pin visited, and `dismiss()` does not take the
+    /// buttons away synchronously — a second tap landing before the sheet
+    /// goes would write a SECOND Plot row carrying the same plotNumber and
+    /// the same plannedPlotId, which nothing downstream can tell from a
+    /// genuine duplicate. Three buttons reach this (instant, averaged, and
+    /// the offset flow's onDone), so the guard belongs here rather than on
+    /// any one of them. Android carries the same guard
+    /// (`RecordCentreSheet.kt` `if (saving) return`).
     private func save(_ result: PlotCenterResult) {
-        let design = (try? environment.cruiseDesignRepository
-            .forProject(project.id))?.first
-        let areaAcres = design?.plotAreaAcres ?? 0.1
-        let plot = Plot(
-            id: UUID(),
-            projectId: project.id,
-            plannedPlotId: plannedPlot.id,
-            plotNumber: plannedPlot.plotNumber,
-            centerLat: result.lat,
-            centerLon: result.lon,
-            positionSource: result.source,
-            positionTier: result.tier,
-            gpsNSamples: result.nSamples,
-            gpsMedianHAccuracyM: result.medianHAccuracyM,
-            gpsSampleStdXyM: result.sampleStdXyM,
-            offsetWalkM: result.offsetWalkM,
-            slopeDeg: 0,
-            aspectDeg: 0,
-            plotAreaAcres: areaAcres,
-            startedAt: Date(),
-            closedAt: nil,
-            closedBy: nil,
-            notes: "",
-            coverPhotoPath: nil,
-            panoramaPath: nil)
+        guard !saving else { return }
+        saving = true
         do {
-            let created = try environment.plotRepository.create(plot)
-            var planned = plannedPlot
-            planned.visited = true
-            _ = try environment.plannedPlotRepository.update(planned)
-            ForestixLogger.log(.plotOpened(plotId: created.id,
-                                           projectId: project.id))
+            let created = try convertPlannedToActivePlot(
+                environment: environment,
+                project: project,
+                planned: plannedPlot,
+                result: result)
             HapticFeedback.play(.success)
             onSaved(created)
             dismiss()
         } catch {
+            // The row was not written, so the sheet re-arms: the cruiser can
+            // retry from the same screen rather than backing out and losing
+            // the averaging window they just sat out.
+            saving = false
             saveErrorMessage =
                 "Storage error: \(error.localizedDescription). The centre was not saved — try again."
         }
     }
+}
+
+// MARK: - Shared conversion + single-fix centre
+
+/// Persist a Plot row at the recorded centre, mark the PlannedPlot visited,
+/// and hand back the created plot (iOS derives the ACTIVE plot as the newest
+/// open one, so a just-started plot wins with nothing else to write).
+///
+/// Free function rather than a method on the sheet because the planned pin's
+/// peek now starts a plot WITHOUT opening the sheet — and a second copy of
+/// this is how a plot ends up recorded but never marked visited, so its
+/// dashed planned pin goes on standing next to the real ring it became.
+func convertPlannedToActivePlot(
+    environment: AppEnvironment,
+    project: Project,
+    planned: PlannedPlot,
+    result: PlotCenterResult
+) throws -> Plot {
+    let design = (try? environment.cruiseDesignRepository
+        .forProject(project.id))?.first
+    let plot = Plot(
+        id: UUID(),
+        projectId: project.id,
+        plannedPlotId: planned.id,
+        plotNumber: planned.plotNumber,
+        centerLat: result.lat,
+        centerLon: result.lon,
+        positionSource: result.source,
+        positionTier: result.tier,
+        gpsNSamples: result.nSamples,
+        gpsMedianHAccuracyM: result.medianHAccuracyM,
+        gpsSampleStdXyM: result.sampleStdXyM,
+        offsetWalkM: result.offsetWalkM,
+        slopeDeg: 0,
+        aspectDeg: 0,
+        plotAreaAcres: design?.plotAreaAcres ?? 0.1,
+        startedAt: Date(),
+        closedAt: nil,
+        closedBy: nil,
+        notes: "",
+        coverPhotoPath: nil,
+        panoramaPath: nil)
+    let created = try environment.plotRepository.create(plot)
+    var visited = planned
+    visited.visited = true
+    _ = try environment.plannedPlotRepository.update(visited)
+    ForestixLogger.log(.plotOpened(plotId: created.id, projectId: project.id))
+    return created
+}
+
+/// The centre a SINGLE instantaneous fix stands for, or nil when there is no
+/// fix worth standing on (field report 17's "Start plot now").
+///
+/// `sampleStdXyM` is 0 because the field is not optional, NOT because the
+/// fixes agreed: there is one sample and no spread to measure. The pair that
+/// says so is `source == .gpsSingle` and `nSamples == 1`, and the tier comes
+/// from `classifySingleFix`, which refuses the tiers that a spread bound
+/// would have to earn.
+func singleFixCentre(_ snapshot: CLLocationSnapshot?,
+                     asOf now: Date = Date()) -> PlotCenterResult? {
+    guard let fix = FixFreshness.usable(snapshot, asOf: now) else { return nil }
+    let acc = Float(fix.horizontalAccuracyM)
+    return PlotCenterResult(
+        lat: fix.latitude,
+        lon: fix.longitude,
+        source: .gpsSingle,
+        tier: GPSAveraging.classifySingleFix(horizontalAccuracyM: acc),
+        nSamples: 1,
+        medianHAccuracyM: acc,
+        sampleStdXyM: 0,
+        offsetWalkM: nil)
 }

@@ -67,6 +67,8 @@ import com.hcjeong.forestix.ui.screens.MeasureBackButton
 import com.hcjeong.forestix.ui.screens.MeasureShutterBar
 import com.hcjeong.forestix.ui.screens.MeasureStatusPanel
 import com.hcjeong.forestix.ui.screens.MeasureTopChrome
+import com.hcjeong.forestix.ui.screens.PLOT_TRACKING_LOST_HINT
+import com.hcjeong.forestix.ui.screens.PLOT_TRACKING_LOST_STATUS
 import com.hcjeong.forestix.ui.screens.SamplingPlotMiniMap
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixProminentButton
@@ -122,6 +124,10 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String, editPlotId: Str
     val plot = ArSessionHub.activePlot
     val radiusM = ArSessionHub.plotRadiusM
     val placed = plot != null
+    // ARCore stopped correcting the plot's anchor pose, so the hub hid the
+    // ring — everything this screen says about the plot comes from that same
+    // pose and goes unknown with it (sampling-tool parity).
+    val trackingLost = placed && ArSessionHub.plotTrackingLost
 
     var isOutside by remember { mutableStateOf(false) }
     var distanceFromCenter by remember { mutableStateOf<Double?>(null) }
@@ -190,23 +196,55 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String, editPlotId: Str
         existing.plotAreaAcres = Units.squareMetersToAcres(Units.circleAreaM2(r)).toFloat()
         val recentred = ArSessionHub.activePlot != null &&
             ArSessionHub.linkedCruisePlotId != id
-        if (recentred) {
-            val snap = fix ?: LocationService.lastGlobalFix
-            if (snap != null) {
-                val acc = snap.horizontalAccuracyM.toFloat()
-                existing.centerLat = snap.latitude
-                existing.centerLon = snap.longitude
-                existing.positionSource = PositionSource.GPS_AVERAGED
-                existing.gpsNSamples = 1
-                existing.gpsMedianHAccuracyM = acc
-                existing.gpsSampleStdXyM = 0f
-                // Still stored, still exported — just never shown (F9).
-                existing.positionTier = GPSAveraging.classify(acc, 0f)
-            }
+        // FRESHNESS-GATED, exactly as `save()` below. A re-centre writes a
+        // plot centre, so it is the same act and it answers to the same
+        // rule: `latestSnapshot` is never cleared and
+        // `LocationService.lastGlobalFix` outlives the screen, so ungated
+        // they hand back the last fix that ever got through — an hour old, a
+        // valley away — and this path would stamp it as a real single fix.
+        // Moving a plot centre to yesterday's position is the same invisible
+        // data loss the `recentred` test exists to prevent, arrived at from
+        // the other side.
+        val snap = if (recentred) {
+            freshFixOrNull(fix ?: LocationService.lastGlobalFix, System.currentTimeMillis())
+        } else {
+            null
         }
+        if (snap != null) {
+            val acc = snap.horizontalAccuracyM.toFloat()
+            existing.centerLat = snap.latitude
+            existing.centerLon = snap.longitude
+            // ONE fix, named as one. This path never opened an averaging
+            // window, so it may not wear GPS_AVERAGED, and the tier comes
+            // from the single-fix rule rather than from `classify` with a
+            // spread of zero it never measured.
+            existing.positionSource = PositionSource.GPS_SINGLE
+            existing.gpsNSamples = 1
+            existing.gpsMedianHAccuracyM = acc
+            existing.gpsSampleStdXyM = 0f
+            // Still stored, still exported — just never shown (F9).
+            existing.positionTier = GPSAveraging.classifySingleFix(acc)
+        }
+        val refusedRecentre = recentred && snap == null
         env.plotRepository.update(existing)
-        // Re-link so the mini-map trusts the AR-anchor path for YOU again.
-        if (ArSessionHub.activePlot != null) ArSessionHub.linkPlot(id)
+        // Re-link so the mini-map trusts the AR-anchor path for YOU again —
+        // but ONLY when that ring is genuinely this plot's centre. On a
+        // refused re-centre the stored centre stayed where it was, so linking
+        // would draw YOU against a ring the plot was never moved to. Left
+        // unlinked, the mini-map falls through to the GPS path measured from
+        // the centre the plot actually has.
+        if (!refusedRecentre && ArSessionHub.activePlot != null) ArSessionHub.linkPlot(id)
+        // A button that did not do what it looked like it did has to say so.
+        // The radius edit landed; the re-placed ring did not become the new
+        // centre, and without this the cruiser walks away believing it did.
+        // The screen stays up (see `save()`) so the message is read and the
+        // re-centre can be retried once there is sky.
+        failure = if (refusedRecentre) {
+            "No GPS fix — the plot keeps its recorded centre. " +
+                "The radius was saved. Step out for sky and try again."
+        } else {
+            null
+        }
         return true
     }
 
@@ -220,7 +258,11 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String, editPlotId: Str
         scope.launch {
             try {
                 if (applyEdit()) {
-                    nav.popBackStack()
+                    // A refused re-centre leaves `failure` set: stay on the
+                    // screen so the cruiser reads why the ring they just
+                    // placed is not the new centre, and can try again from
+                    // here the moment a fix arrives.
+                    if (failure == null) nav.popBackStack() else saving = false
                     return@launch
                 }
                 val pid = UUID.fromString(projectId)
@@ -255,10 +297,12 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String, editPlotId: Str
                     plotNumber = number,
                     centerLat = snap.latitude,
                     centerLon = snap.longitude,
-                    positionSource = PositionSource.GPS_AVERAGED,
-                    // Honest single-fix stamp: spec tier table on the
-                    // accuracy axis, nSamples = 1 records the shortcut.
-                    positionTier = GPSAveraging.classify(acc, 0f),
+                    // ONE fix, named as one — see PositionSource.GPS_SINGLE.
+                    // Nothing on this path opens an averaging window, so
+                    // neither the source nor the tier may be borrowed from
+                    // the one that does; nSamples = 1 records the shortcut.
+                    positionSource = PositionSource.GPS_SINGLE,
+                    positionTier = GPSAveraging.classifySingleFix(acc),
                     gpsNSamples = 1,
                     gpsMedianHAccuracyM = acc,
                     gpsSampleStdXyM = 0f,
@@ -352,7 +396,8 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String, editPlotId: Str
         // is a value and stays in the bottom panel).
         MeasureTopChrome(
             instruction = failure
-                ?: if (!placed) "Set the radius, aim at the plot centre, tap +" else null,
+                ?: if (trackingLost) PLOT_TRACKING_LOST_HINT
+                else if (!placed) "Set the radius, aim at the plot centre, tap +" else null,
         )
 
         // U2 — bottom-centre shutter while aiming for the centre.
@@ -362,9 +407,14 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String, editPlotId: Str
         // distance line + Reset/Save plot, as before.
         if (placed) MeasureStatusPanel {
             CenteredText(
-                if (isOutside) "OUTSIDE — walk back inside" else "INSIDE plot boundary",
+                if (trackingLost) PLOT_TRACKING_LOST_STATUS
+                else if (isOutside) "OUTSIDE — walk back inside" else "INSIDE plot boundary",
                 large = true,
-                color = if (isOutside) colors.confidenceBad else colors.confidenceOk,
+                color = when {
+                    trackingLost -> colors.confidenceWarn
+                    isOutside -> colors.confidenceBad
+                    else -> colors.confidenceOk
+                },
             )
             Text(
                 distanceFromCenter?.let {

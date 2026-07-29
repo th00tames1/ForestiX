@@ -165,9 +165,12 @@ fun scanPlotMiniMapVisible(): Boolean =
 ///
 /// The card is TAPPABLE wherever it appears — the tap opens the enlarged
 /// plot view, which is what somebody tapping a small picture of their plot
-/// is asking for. `onEditPlot` is a separate question: hosts pass it only in
-/// cruise, where there is a saved plot to re-open, and it decides only
-/// whether the enlarged view offers an Edit control.
+/// is asking for. `onEditPlot` decides whether that view also offers Edit,
+/// and the host answers it: a cruise session re-opens the saved plot, a
+/// quick session re-opens the sampling screen. FIELD REPORT 12 — this used
+/// to be re-gated HERE on `cruise != null`, so a cruiser measuring into a
+/// quick sampling ring could look at their plot but never change its radius
+/// without walking the whole flow back to the map.
 @Composable
 fun BoxScope.ScanPlotMiniMap(onEditPlot: (() -> Unit)? = null) {
     // The cruise target is armed before navigation and cleared after the
@@ -209,10 +212,7 @@ fun BoxScope.ScanPlotMiniMap(onEditPlot: (() -> Unit)? = null) {
             // and the strip share one baseline.
             .statusBarsPadding()
             .padding(top = MeasureTopStripTop, end = 16.dp),
-        // Only a CRUISE session has a persisted plot whose radius/centre a
-        // setup session can rewrite; the quick sampling ring has nothing to
-        // re-open, so its card stays inert.
-        onEditPlot = onEditPlot?.takeIf { cruise != null },
+        onEditPlot = onEditPlot,
     )
 }
 

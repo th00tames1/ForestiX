@@ -108,6 +108,47 @@ class QuickMeasureHistory private constructor(
         }
     }
 
+    /// Saves [entry] as THE reading of its kind for its (plot, tree) — any
+    /// earlier reading of the same kind on the same tree is removed rather
+    /// than left behind as a second one.
+    ///
+    /// This is what "measure it again" means from the field log: the log
+    /// shows one row per (plot, tree) and picks the newest reading of each
+    /// kind, so an appended re-measure left the superseded number invisible
+    /// on screen but still in the CSV, where it read as a second tree visit.
+    /// Readings with no tree number are never merged (the field log gives
+    /// each its own row), so those just append.
+    fun replaceReading(entry: QuickMeasureEntry) {
+        val tree = entry.treeNumber
+        if (tree == null) {
+            append(entry)
+            return
+        }
+        scope.launch {
+            val default = defaultPlotID()
+            val plot = entry.plotID ?: default
+            val superseded = dao.allEntries().map { it.toDomain() }.filter {
+                it.id != entry.id && it.kind == entry.kind &&
+                    it.treeNumber == tree && (it.plotID ?: default) == plot
+            }
+            superseded.forEach { old ->
+                old.photoPath?.let { name ->
+                    File(File(appContext.filesDir, "measure-photos"), name).delete()
+                }
+                dao.deleteEntry(old.id.toString())
+            }
+            dao.upsertEntry(EntryRow.from(entry))
+            // Same cap as `append` — a replacement that adds a row (the tree
+            // had no reading of this kind yet) can still push past it.
+            val all = dao.allEntries()
+            if (all.size > capacity) {
+                all.drop(capacity).forEach { dao.deleteEntry(it.id) }
+            }
+            _entries.value = dao.allEntries().map { it.toDomain() }
+            recomputeCapacity()
+        }
+    }
+
     fun clearAll() {
         scope.launch {
             dao.clearEntries()
@@ -188,6 +229,36 @@ class QuickMeasureHistory private constructor(
 
     val suggestedNextTreeNumber: Int
         get() = (distinctTreeNumbers.maxOrNull() ?: 0) + 1
+
+    /// The name already recorded against a tree, if it has one. Entries are
+    /// newest-first, so a re-measurement or a chained height picks up the
+    /// name the first reading on that tree was given instead of arriving
+    /// nameless and splitting the tree in two in the export.
+    fun treeName(forTreeNumber: Int?, plotID: UUID?): String? {
+        if (forTreeNumber == null) return null
+        val def = defaultPlotID()
+        return _entries.value.lastOrNull {
+            it.treeNumber == forTreeNumber &&
+                (it.plotID ?: def) == (plotID ?: def) &&
+                it.treeName != null
+        }?.treeName
+    }
+
+    /// The name to offer for the next tree — the HIGHEST name in the series
+    /// the cruiser is currently using, stepped on by [TreeNameSequence]. Null
+    /// on a log that has never been named, and then the chooser's field simply
+    /// starts empty.
+    ///
+    /// This used to step on the most recent name, which is not the same thing:
+    /// a re-measurement is appended carrying the name it already had, so
+    /// re-measuring T01 after T03 made the log's newest name "T01" and the
+    /// chooser proposed "T02" — a name a different stem already wears. The
+    /// number suggestion beside it is `max + 1` and cannot collide; the name
+    /// now matches that rule. Entries are newest-first, which is the order
+    /// [TreeNameSequence.nextInSeries] expects.
+    val suggestedNextTreeName: String?
+        get() = TreeNameSequence.nextInSeries(
+            _entries.value.mapNotNull { it.treeName })
 
     fun summary(forTreeNumber: Int): String? {
         val n = forTreeNumber

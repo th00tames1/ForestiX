@@ -38,8 +38,8 @@ object MeasurementFormatter {
     /// The ± band beside it ([heightSigma]) is what says how much of the
     /// second decimal to believe. iOS prints the identical string.
     fun height(m: Double, system: UnitSystem): String = when (system) {
-        UnitSystem.METRIC -> String.format(Locale.US, "%.2f m", m)
-        UnitSystem.IMPERIAL -> String.format(Locale.US, "%.2f ft", m * 3.28084)
+        UnitSystem.METRIC -> String.format(Locale.US, "%.1f m", m)
+        UnitSystem.IMPERIAL -> String.format(Locale.US, "%.1f ft", m * 3.28084)
     }
 
     /// Renders a height precision sigma (stored in metres).

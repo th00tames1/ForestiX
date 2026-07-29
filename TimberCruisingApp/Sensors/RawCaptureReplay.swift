@@ -785,6 +785,9 @@ public enum RawCaptureRecorder {
         topPose: simd_float4x4,
         dHM: Float,
         poseSamples: [(tMs: Int, pose: simd_float4x4)],
+        // Whether VIO tracking dropped between the anchor and the aims — the
+        // on-screen warning, recorded so the bundle can be filtered on it.
+        trackingDropped: Bool,
         calibration: ProjectCalibration,
         context: RawCaptureContext,
         gps: RawCaptureGPS?,
@@ -882,7 +885,8 @@ public enum RawCaptureRecorder {
             dHM: Double(dHM),
             poseSamples: poseSamples.map {
                 .init(tMs: $0.tMs, pose: RawCaptureMatrix.flat($0.pose))
-            })
+            },
+            trackingDropped: trackingDropped)
         manifest.replaySelfcheck = .init(status: "fail", rerunValue: nil, delta: nil)
         do {
             try RawCaptureStore.writeManifest(manifest, id: id)

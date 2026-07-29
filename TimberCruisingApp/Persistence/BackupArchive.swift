@@ -430,16 +430,29 @@ public enum BackupArchive {
 
     /// Tree's `id` and `plotId` are `let` properties, so a straight copy
     /// can't reassign them — we rebuild the value through the public init.
+    ///
+    /// EVERY field of `Tree` must be listed below. The init gives several
+    /// parameters a default (`treeName`, `dbhCaptureMode`, `latitude`,
+    /// `longitude`), so omitting one does NOT fail to compile — it silently
+    /// substitutes nil and the restored tree comes back missing data the
+    /// archive was carrying. Restore had already lost all four this way:
+    /// the cruiser's tree names, the estimator provenance, and the GPS fix
+    /// that puts the tree on the map. The Android sibling
+    /// (backup/BackupArchive.kt) uses `t.copy(...)`, which cannot drop a
+    /// field, so a divergence here is also a cross-platform divergence.
+    /// When a field is added to `Tree`, add it here in the same commit.
     private static func rebuildTree(_ t: Tree,
                                     newId: UUID, newPlotId: UUID) -> Tree {
         Tree(
             id: newId, plotId: newPlotId,
-            treeNumber: t.treeNumber, speciesCode: t.speciesCode,
+            treeNumber: t.treeNumber, treeName: t.treeName,
+            speciesCode: t.speciesCode,
             status: t.status,
             dbhCm: t.dbhCm, dbhMethod: t.dbhMethod,
             dbhSigmaMm: t.dbhSigmaMm, dbhRmseMm: t.dbhRmseMm,
             dbhCoverageDeg: t.dbhCoverageDeg, dbhNInliers: t.dbhNInliers,
             dbhConfidence: t.dbhConfidence, dbhIsIrregular: t.dbhIsIrregular,
+            dbhCaptureMode: t.dbhCaptureMode,
             heightM: t.heightM, heightMethod: t.heightMethod,
             heightSource: t.heightSource,
             heightSigmaM: t.heightSigmaM, heightDHM: t.heightDHM,
@@ -454,7 +467,8 @@ public enum BackupArchive {
             notes: t.notes,
             photoPath: t.photoPath, rawScanPath: t.rawScanPath,
             createdAt: t.createdAt, updatedAt: t.updatedAt,
-            deletedAt: t.deletedAt)
+            deletedAt: t.deletedAt,
+            latitude: t.latitude, longitude: t.longitude)
     }
 
     /// Copy the live sqlite store into a temp file (Core Data checkpoints

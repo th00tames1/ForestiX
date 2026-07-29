@@ -33,8 +33,10 @@ object QuickMeasureExport {
 
     fun buildCsv(entries: List<QuickMeasureEntry>, plots: List<QuickMeasurePlot>): ByteArray {
         val headers = listOf(
-            "id", "timestamp", "plot", "tree", "kind",
-            "value", "value_unit",
+            "id", "timestamp", "plot", "tree", "tree_name", "kind",
+            // "truth" sits beside the value it is the truth OF, in the same
+            // unit ("value_unit"); blank means none was ever entered.
+            "value", "value_unit", "truth",
             "secondary_value", "secondary_unit",
             "sigma", "sigma_unit",
             "species", "position", "damage", "note",
@@ -54,9 +56,11 @@ object QuickMeasureExport {
                 isoStamp(e.createdAt),
                 plotName,
                 e.treeNumber?.toString() ?: "",
+                e.treeName ?: "",
                 e.kind.raw,
                 fmt(e.value),
                 e.valueUnit,
+                e.truth?.let { fmt(it) } ?: "",
                 secVal,
                 if (e.secondaryValue == null) "" else e.secondaryValueUnit,
                 sigma,
@@ -100,7 +104,7 @@ object QuickMeasureExport {
         }
 
         // -- Trees.csv (plot x treeNumber) --
-        val trees = StringBuilder("plot_id,plot,tree_number,species,damage,note\r\n")
+        val trees = StringBuilder("plot_id,plot,tree_number,tree_name,species,damage,note\r\n")
         val byPlotTree = entries.groupBy { "${it.plotID ?: ""}|${it.treeNumber ?: -1}" }
         for ((_, group) in byPlotTree.toSortedMap()) {
             val any = group.first()
@@ -108,22 +112,27 @@ object QuickMeasureExport {
             val species = group.mapNotNull { it.speciesCode }.firstOrNull() ?: ""
             val dmg = group.flatMap { it.damageCodes }.toSet().joinToString("|")
             val note = group.mapNotNull { it.note }.firstOrNull() ?: ""
+            // Any one reading on the tree carries the name; take the first
+            // that has one rather than `any`'s, which may be a later
+            // re-measurement recorded before the name existed.
+            val name = group.mapNotNull { it.treeName }.firstOrNull() ?: ""
             trees.append(
                 listOf(
                     any.plotID?.toString() ?: "", plotName,
-                    any.treeNumber?.toString() ?: "", species, dmg, note,
+                    any.treeNumber?.toString() ?: "", name, species, dmg, note,
                 ).joinToString(",") { csv(it) }
             ).append("\r\n")
         }
 
         // -- Stems.csv (per DBH) --
-        val stems = StringBuilder("id,plot_id,tree_number,timestamp,dbh_cm,sigma_mm,position,confidence,method,capture_mode\r\n")
+        val stems = StringBuilder("id,plot_id,tree_number,timestamp,dbh_cm,truth_cm,sigma_mm,position,confidence,method,capture_mode\r\n")
         for (e in entries.filter { it.kind == MeasureKind.DBH }) {
             stems.append(
                 listOf(
                     e.id.toString(), e.plotID?.toString() ?: "",
                     e.treeNumber?.toString() ?: "", isoStamp(e.createdAt),
-                    fmt(e.value), e.sigma?.let { fmt(it) } ?: "",
+                    fmt(e.value), e.truth?.let { fmt(it) } ?: "",
+                    e.sigma?.let { fmt(it) } ?: "",
                     e.position?.raw ?: "", e.confidenceRaw, e.method,
                     e.captureMode ?: "",
                 ).joinToString(",") { csv(it) }
@@ -131,13 +140,14 @@ object QuickMeasureExport {
         }
 
         // -- Heights.csv (per Height) --
-        val heights = StringBuilder("id,plot_id,tree_number,timestamp,height_m,sigma_m,confidence,method\r\n")
+        val heights = StringBuilder("id,plot_id,tree_number,timestamp,height_m,truth_m,sigma_m,confidence,method\r\n")
         for (e in entries.filter { it.kind == MeasureKind.HEIGHT }) {
             heights.append(
                 listOf(
                     e.id.toString(), e.plotID?.toString() ?: "",
                     e.treeNumber?.toString() ?: "", isoStamp(e.createdAt),
-                    fmt(e.value), e.sigma?.let { fmt(it) } ?: "",
+                    fmt(e.value), e.truth?.let { fmt(it) } ?: "",
+                    e.sigma?.let { fmt(it) } ?: "",
                     e.confidenceRaw, e.method,
                 ).joinToString(",") { csv(it) }
             ).append("\r\n")

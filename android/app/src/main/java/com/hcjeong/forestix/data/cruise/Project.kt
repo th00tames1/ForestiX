@@ -109,8 +109,21 @@ sealed class HeightSubsampleRule {
     }
 }
 
+/// How a plot centre was obtained.
+///
+/// `GPS_SINGLE` is the ONE-SHOT fix: the coordinate the receiver happened to
+/// be reporting at the instant the cruiser dropped the plot, with no window
+/// and no median behind it. It exists because the app has always been able
+/// to record such a centre (the AR "Start plot" path, and now the planned
+/// plot's "Start plot now") and used to file it under `GPS_AVERAGED` with
+/// `gpsNSamples = 1` — a label that says a 60 s median was computed when
+/// nothing of the sort happened. Anyone reading the corpus later has to be
+/// able to separate the two populations, and `gpsNSamples` is not where a
+/// reader looks first. One fix and thirty are different data; they get
+/// different names.
 enum class PositionSource(val raw: String) {
     GPS_AVERAGED("gpsAveraged"),
+    GPS_SINGLE("gpsSingle"),
     VIO_OFFSET("vioOffset"),
     VIO_CHAIN("vioChain"),
     EXTERNAL_RTK("externalRTK"),

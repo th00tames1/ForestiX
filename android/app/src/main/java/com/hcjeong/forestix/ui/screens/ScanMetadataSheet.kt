@@ -8,6 +8,7 @@
 package com.hcjeong.forestix.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,6 +24,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -49,6 +51,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -85,23 +88,6 @@ fun ScanMetadataSheet(
 ) {
     val type = Forestix.type
     val colors = Forestix.colors
-    val env = LocalAppEnvironment.current
-    val settings by env.settings.state.collectAsStateWithLifecycle()
-    // iOS ScanMetadataSheet.speciesOptions: the curated regional list for
-    // settings.region (nil → .all) plus a permanent "OT · Other" escape
-    // hatch — cruisers occasionally measure non-regional trees.
-    val speciesOptions = remember(settings.country, settings.region) {
-        val country = settings.country
-        val base = if (country.hasRegions) {
-            // US: scoped by the selected timber region.
-            val region = Region.fromRaw(settings.region) ?: Region.ALL
-            RegionalSpecies.defaultSpecies(region)
-        } else {
-            // Metric countries (incl. Korea scaffold): single national preset.
-            CountrySpecies.defaultSpecies(country)
-        }
-        base + ("OT" to "Other")
-    }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -133,52 +119,11 @@ fun ScanMetadataSheet(
 
             // SPECIES ------------------------------------------------------
             MetadataSection(header = "SPECIES") {
-                var speciesMenuOpen by remember { mutableStateOf(false) }
-                val selectedLabel: AnnotatedString = speciesCode?.let { code ->
-                    speciesOptions.firstOrNull { it.first == code }
-                        ?.let { speciesPickerLabel(it.second, it.first, colors.textSecondary) }
-                        ?: AnnotatedString(code)
-                } ?: AnnotatedString("— Unspecified —")
-                Box(Modifier.fillMaxWidth()) {
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickableNoRipple { speciesMenuOpen = true }
-                            .padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        // Default label colour (no primary tint) — iOS Form
-                        // Picker row parity.
-                        Text(selectedLabel, style = type.body, color = colors.textPrimary)
-                        Spacer(Modifier.weight(1f))
-                        Icon(
-                            Icons.Filled.ArrowDropDown,
-                            contentDescription = null,
-                            tint = colors.textSecondary,
-                        )
-                    }
-                    DropdownMenu(
-                        expanded = speciesMenuOpen,
-                        onDismissRequest = { speciesMenuOpen = false },
-                    ) {
-                        DropdownMenuItem(
-                            text = { Text("— Unspecified —") },
-                            onClick = {
-                                speciesMenuOpen = false
-                                onSpeciesCode(null)
-                            })
-                        speciesOptions.forEach { (code, name) ->
-                            DropdownMenuItem(
-                                text = {
-                                    Text(speciesPickerLabel(name, code, colors.textSecondary))
-                                },
-                                onClick = {
-                                    speciesMenuOpen = false
-                                    onSpeciesCode(code)
-                                })
-                        }
-                    }
-                }
+                SpeciesPickerField(
+                    speciesCode = speciesCode,
+                    onSpeciesCode = onSpeciesCode,
+                    modifier = Modifier.padding(vertical = 8.dp),
+                )
             }
 
             // POSITION -----------------------------------------------------
@@ -240,6 +185,148 @@ fun ScanMetadataSheet(
                 )
             }
         }
+    }
+}
+
+// MARK: - Species picker ------------------------------------------------------
+
+/// The active region's curated species list plus the permanent "OT · Other"
+/// escape — cruisers occasionally measure non-regional trees. iOS
+/// ScanMetadataSheet.speciesOptions.
+@Composable
+internal fun rememberSpeciesOptions(): List<Pair<String, String>> {
+    val settings by LocalAppEnvironment.current.settings.state.collectAsStateWithLifecycle()
+    return remember(settings.country, settings.region) {
+        val country = settings.country
+        val base = if (country.hasRegions) {
+            // US: scoped by the selected timber region.
+            val region = Region.fromRaw(settings.region) ?: Region.ALL
+            RegionalSpecies.defaultSpecies(region)
+        } else {
+            // Metric countries (incl. Korea scaffold): single national preset.
+            CountrySpecies.defaultSpecies(country)
+        }
+        base + ("OT" to "Other")
+    }
+}
+
+/// THE species control. Both places a cruiser picks a species go through this
+/// one composable — the reading-details sheet and the measure chooser — so the
+/// list, the ordering and the typed-code escape cannot drift apart.
+///
+/// The regional presets are a convenience, not a boundary: a cruiser standing
+/// in front of a tree the preset does not carry can type its code rather than
+/// filing it under "Other" and losing which species it actually was.
+///
+/// [bordered] is the compact pill the measure chooser wants; the sheet's row
+/// sits bare inside its section card.
+@Composable
+internal fun SpeciesPickerField(
+    speciesCode: String?,
+    onSpeciesCode: (String?) -> Unit,
+    modifier: Modifier = Modifier,
+    unspecifiedLabel: String = "— Unspecified —",
+    bordered: Boolean = false,
+) {
+    val type = Forestix.type
+    val colors = Forestix.colors
+    val options = rememberSpeciesOptions()
+    var menuOpen by remember { mutableStateOf(false) }
+    var typedCodeOpen by remember { mutableStateOf(false) }
+
+    val selectedLabel: AnnotatedString = speciesCode?.let { code ->
+        options.firstOrNull { it.first == code }
+            ?.let { speciesPickerLabel(it.second, it.first, colors.textSecondary) }
+            // A code the list does not carry is shown as typed, not silently
+            // relabelled to something the cruiser did not choose.
+            ?: AnnotatedString(code)
+    } ?: AnnotatedString(unspecifiedLabel)
+
+    Box(modifier) {
+        Row(
+            Modifier
+                .then(
+                    if (bordered) {
+                        Modifier
+                            .clip(ForestixRadius.control)
+                            .border(1.dp, colors.divider, ForestixRadius.control)
+                            .padding(horizontal = ForestixSpace.sm, vertical = 10.dp)
+                    } else {
+                        Modifier.fillMaxWidth()
+                    },
+                )
+                .clickableNoRipple { menuOpen = true },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            // Default label colour (no primary tint) — iOS Form Picker row
+            // parity.
+            Text(
+                selectedLabel,
+                style = type.body,
+                color = if (speciesCode == null) colors.textTertiary else colors.textPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = if (bordered) Modifier else Modifier.weight(1f, fill = false),
+            )
+            if (!bordered) Spacer(Modifier.weight(1f))
+            Icon(
+                Icons.Filled.ArrowDropDown,
+                contentDescription = null,
+                tint = colors.textSecondary,
+            )
+        }
+        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+            DropdownMenuItem(
+                text = { Text("— Unspecified —") },
+                onClick = {
+                    menuOpen = false
+                    onSpeciesCode(null)
+                })
+            options.forEach { (code, name) ->
+                DropdownMenuItem(
+                    text = { Text(speciesPickerLabel(name, code, colors.textSecondary)) },
+                    onClick = {
+                        menuOpen = false
+                        onSpeciesCode(code)
+                    })
+            }
+            DropdownMenuItem(
+                text = { Text("Type a code…") },
+                onClick = {
+                    menuOpen = false
+                    typedCodeOpen = true
+                })
+        }
+    }
+
+    if (typedCodeOpen) {
+        var typed by remember { mutableStateOf(speciesCode.orEmpty()) }
+        AlertDialog(
+            onDismissRequest = { typedCodeOpen = false },
+            title = { Text("Species code") },
+            text = {
+                OutlinedTextField(
+                    value = typed,
+                    onValueChange = { typed = it },
+                    placeholder = { Text("Code not in the list") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    // An empty box means "no species", not a species whose
+                    // code is the empty string.
+                    onClick = {
+                        typedCodeOpen = false
+                        onSpeciesCode(typed.trim().uppercase(Locale.US).ifEmpty { null })
+                    },
+                ) { Text("Use") }
+            },
+            dismissButton = {
+                TextButton(onClick = { typedCodeOpen = false }) { Text("Cancel") }
+            },
+        )
     }
 }
 

@@ -996,9 +996,14 @@ final class PlotMiniMapLiveModel: ObservableObject {
         let session = ARKitSessionManager.shared
         let anchorMatchesPlot = info.plotID == nil
             || store.linkedCruisePlotID == info.plotID
+        // `centreWorld`, not the raw anchor pose: while tracking is lost the
+        // plot's own geometry is hidden, and a YOU dot placed against the
+        // pose behind it would be the wrong answer drawn confidently. It
+        // falls through to the GPS path below instead, which is the honest
+        // one when AR does not know where the plot is.
         if anchorMatchesPlot,
-           let active = store.plot,
-           let centre = session.worldAnchorPosition(id: active.anchorID),
+           store.plot != nil,
+           let centre = store.centreWorld,
            let cam = session.currentCameraWorldPosition {
             next = You(eastM: Double(cam.x - centre.x),
                        northM: Double(-(cam.z - centre.z)),

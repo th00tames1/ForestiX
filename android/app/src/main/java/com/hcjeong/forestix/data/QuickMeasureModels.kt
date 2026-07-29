@@ -59,6 +59,12 @@ data class QuickMeasureEntry(
     val method: String,
     val createdAt: Long = System.currentTimeMillis(),
     val treeNumber: Int? = null,
+    /// Cruiser-typed name for the tree ("Plot3-T07"), chosen in the measure
+    /// chooser before the scan. Null for every reading taken before naming
+    /// existed and for any tree left unnamed — read it through
+    /// [displayTreeName], never raw, so those readings keep looking the way
+    /// they always have.
+    val treeName: String? = null,
     val plotID: UUID? = null,
     val speciesCode: String? = null,
     val position: StemPosition? = null,
@@ -70,11 +76,29 @@ data class QuickMeasureEntry(
     val longitude: Double? = null,
     /// Filename inside MeasurePhotoStore's directory (not a full path).
     val photoPath: String? = null,
-    /// How the DBH edges were found: "auto" (automatic edge-finding) or
-    /// "manual" (ADJUST edge-bracket). Null for non-DBH kinds and for
-    /// entries recorded before the column existed. Same vocabulary as iOS.
+    /// How the DBH edges were found: "auto" (automatic edge-finding),
+    /// "manual" (ADJUST edge-bracket) or "typed" (a number the cruiser
+    /// entered by hand). Null for non-DBH kinds and for entries recorded
+    /// before the column existed. Same vocabulary as iOS.
     val captureMode: String? = null,
+    /// Hand-measured GROUND TRUTH for this reading — the tape diameter or
+    /// the pole/clinometer height the accuracy study compares against.
+    /// Same unit as [value] (cm for diameter, m otherwise).
+    ///
+    /// It lives ON the reading, not in the raw-capture manifest keyed on
+    /// tree number: a truth typed against a tree number alone could not say
+    /// WHICH of that tree's readings it was measured for, and it vanished
+    /// with the raw-capture bundle. Null = no truth was ever entered —
+    /// never zero, which would read as a measured 0 cm.
+    val truth: Double? = null,
 ) {
+    /// How this reading's tree is labelled anywhere a tree is named — the
+    /// cruiser's name when there is one, else the bare "#12" the log and the
+    /// map pins have always shown. Null only for a reading that belongs to no
+    /// tree at all (a sampling plot, a loose distance).
+    val displayTreeName: String?
+        get() = treeName ?: treeNumber?.let { "#$it" }
+
     /// cm for diameter, m elsewhere.
     val valueUnit: String
         get() = if (kind == MeasureKind.DBH) "cm" else "m"
@@ -90,6 +114,57 @@ data class QuickMeasureEntry(
             MeasureKind.SAMPLING_PLOT -> "m\u00B2"
             else -> ""
         }
+
+    // MARK: Hand-typed readings
+
+    /// The `method` raw a hand-typed reading of this kind carries — the same
+    /// manual-entry arms the scan screens stamp on a typed diameter/height.
+    /// The compound kinds have no typed arm, so they keep what produced them.
+    val typedMethodRaw: String
+        get() = when (kind) {
+            MeasureKind.DBH -> "manualVisual"
+            MeasureKind.HEIGHT -> "manualEntry"
+            else -> method
+        }
+
+    /// This reading re-stated with a value the cruiser TYPED.
+    ///
+    /// A typed number has no geometry behind it, so it cannot keep the
+    /// sensor's sigma or its edge provenance: sigma is dropped (never
+    /// zeroed — a 0 band claims a perfect measurement and poisons the sigma
+    /// column the accuracy work reads) and captureMode becomes "typed", the
+    /// vocabulary the scan screens already stamp. createdAt is kept:
+    /// correcting a number is not a second visit to the tree.
+    fun typedValue(newValue: Double): QuickMeasureEntry =
+        copy(value = newValue, sigma = null,
+             method = typedMethodRaw, captureMode = "typed")
+
+    companion object {
+        /// A brand-new reading the cruiser typed for a tree the sensors
+        /// never measured. No sigma, no GPS fix, no photo — none of those
+        /// exist for a number that came off a tape. "yellow" is the tier the
+        /// scan screens' own manual-entry path stamps: usable, unverified.
+        fun typed(
+            kind: MeasureKind,
+            value: Double,
+            treeNumber: Int?,
+            treeName: String? = null,
+            plotID: java.util.UUID?,
+            truth: Double? = null,
+        ) = QuickMeasureEntry(
+            kind = kind,
+            value = value,
+            sigma = null,
+            confidenceRaw = "yellow",
+            method = if (kind == MeasureKind.HEIGHT) "manualEntry" else "manualVisual",
+            treeNumber = treeNumber,
+            treeName = treeName,
+            plotID = plotID,
+            position = if (kind == MeasureKind.DBH) StemPosition.DBH else null,
+            captureMode = "typed",
+            truth = truth,
+        )
+    }
 }
 
 data class QuickMeasurePlot(

@@ -47,6 +47,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -122,6 +123,7 @@ import com.hcjeong.forestix.basemap.rememberMapCameraState
 import com.hcjeong.forestix.common.ForestixLogger
 import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.RegionalSpecies
+import com.hcjeong.forestix.common.TruthInput
 import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
@@ -604,18 +606,27 @@ fun MapHomeScreen(nav: NavController) {
         MeasureChooserSheet(
             nextTree = env.history.suggestedNextTreeNumber,
             treeOverride = chooserTreeOverride,
+            // A tree the peek card scoped to already has its name; only a NEW
+            // tree gets the incremented suggestion.
+            suggestedName = chooserTreeOverride
+                ?.let { env.history.treeName(it, env.history.activePlotID.value) }
+                ?: env.history.suggestedNextTreeName,
             onDismiss = {
                 chooserOpen = false
                 chooserTreeOverride = null
             },
-            onChoose = { route, lockTree ->
+            onChoose = { route, lockTree, name, speciesCode ->
                 chooserOpen = false
                 // Full / DBH / Height lock the reading to the tree number
                 // the sheet header promised (iOS chooserRow actions) — the
-                // peek card's override tree when set, else the next free.
+                // peek card's override tree when set, else the next free —
+                // and to the name and species typed above them.
                 if (lockTree) {
-                    PendingTreeNumber.value =
-                        chooserTreeOverride ?: env.history.suggestedNextTreeNumber
+                    PendingTreeNumber.set(
+                        number = chooserTreeOverride ?: env.history.suggestedNextTreeNumber,
+                        name = name,
+                        speciesCode = speciesCode,
+                    )
                 }
                 chooserTreeOverride = null
                 nav.navigate(route)
@@ -1121,7 +1132,10 @@ private fun PeekCard(
     val shape = RoundedCornerShape(14.dp)
     val newest = pin.entries.first()
     val species = pin.entries.firstNotNullOfOrNull { it.speciesCode }
-    val title = (pin.treeNumber?.let { "Tree $it" } ?: rowLabel(newest)) +
+    // The cruiser's name if this tree has one — same rule as the field log's
+    // TREE column, so the two surfaces call the tree one thing.
+    val title = (pin.entries.firstNotNullOfOrNull { it.treeName }
+        ?: pin.treeNumber?.let { "Tree $it" } ?: rowLabel(newest)) +
         (species?.takeIf { it.isNotBlank() }
             ?.let { " · ${RegionalSpecies.nameForCode(it)}" } ?: "")
     // Date, plus the plot name when the reading isn't on the default plot
@@ -1366,19 +1380,31 @@ private fun MeasureChooserSheet(
     /// Non-null when the peek card scoped the sheet to an existing tree —
     /// the header drops "(NEXT)" and the tree-bound rows lock to it.
     treeOverride: Int? = null,
+    /// Name the tree-name field opens on: the tree's existing name when the
+    /// peek card scoped this sheet, else the auto-incremented successor of the
+    /// last name in the log. Null / blank starts the field empty.
+    suggestedName: String? = null,
     onDismiss: () -> Unit,
-    /// (route, lockTree) — lockTree is true for the tree-bound rows
-    /// (Full / DBH / Height), which pin the reading to `treeOverride`
-    /// when set, else `nextTree`.
-    onChoose: (String, Boolean) -> Unit,
+    /// (route, lockTree, name, speciesCode) — lockTree is true for the
+    /// tree-bound rows (Full / DBH / Height), which pin the reading to
+    /// `treeOverride` when set, else `nextTree`. Name and species ride along
+    /// only for those rows; a distance or a plot belongs to no tree.
+    onChoose: (String, Boolean, String?, String?) -> Unit,
 ) {
     val colors = Forestix.colors
     val type = Forestix.type
+    // Named BEFORE the scan, not after: the cruiser is standing at the tree
+    // when they open this sheet, and typing its tag then is one action rather
+    // than a second trip through the details sheet once the number is already
+    // recorded.
+    var treeName by remember(suggestedName) { mutableStateOf(suggestedName.orEmpty()) }
+    var speciesCode by remember { mutableStateOf<String?>(null) }
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = colors.surface) {
         Column(
             Modifier
                 .padding(horizontal = ForestixSpace.md)
-                .padding(bottom = ForestixSpace.xl),
+                .padding(bottom = ForestixSpace.xl)
+                .imePadding(),
         ) {
             Text(
                 treeOverride?.let { "MEASURE · TREE $it" }
@@ -1388,6 +1414,28 @@ private fun MeasureChooserSheet(
                 color = colors.textTertiary,
                 modifier = Modifier.padding(bottom = ForestixSpace.xs),
             )
+            Row(
+                Modifier.fillMaxWidth().padding(bottom = ForestixSpace.sm),
+                horizontalArrangement = Arrangement.spacedBy(ForestixSpace.sm),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                OutlinedTextField(
+                    value = treeName,
+                    onValueChange = { treeName = it },
+                    placeholder = { Text("Tree name") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+                // The same control the reading-details sheet uses — one
+                // species list, one typed-code escape, no second copy to
+                // drift.
+                SpeciesPickerField(
+                    speciesCode = speciesCode,
+                    onSpeciesCode = { speciesCode = it },
+                    unspecifiedLabel = "Species",
+                    bordered = true,
+                )
+            }
             // Field fix: the chained DBH → Height capture is the common
             // whole-tree workflow, so it leads the sheet (emphasised icon
             // tile). "dbh?chain=true" tells DBH Accept to jump straight to
@@ -1397,22 +1445,22 @@ private fun MeasureChooserSheet(
                 "Full measurement",
                 "DBH → Height, one tree",
                 emphasized = true,
-            ) { onChoose("${Routes.DBH}?chain=true", true) }
+            ) { onChoose("${Routes.DBH}?chain=true", true, treeName, speciesCode) }
             HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
             ChoiceRow(Icons.Filled.Straighten, "Diameter (DBH)", "Scan the trunk with the camera") {
-                onChoose(Routes.DBH, true)
+                onChoose(Routes.DBH, true, treeName, speciesCode)
             }
             HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
             ChoiceRow(Icons.Filled.Height, "Height", "Walk back, aim at the base and the top") {
-                onChoose(Routes.HEIGHT, true)
+                onChoose(Routes.HEIGHT, true, treeName, speciesCode)
             }
             HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
             ChoiceRow(Icons.Filled.SwapHoriz, "Distance", "Point at a target, or tap two points") {
-                onChoose(Routes.DISTANCE, false)
+                onChoose(Routes.DISTANCE, false, null, null)
             }
             HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
             ChoiceRow(Icons.Filled.CenterFocusWeak, "Sampling plot", "Centre stake · boundary ring") {
-                onChoose(Routes.SAMPLING, false)
+                onChoose(Routes.SAMPLING, false, null, null)
             }
         }
     }
@@ -1734,9 +1782,18 @@ private fun QuickEntryEditSheet(
                 modifier = Modifier.fillMaxWidth(),
             )
             PeekActionButton("Save changes", primary = true, modifier = Modifier.fillMaxWidth()) {
+                val newValue = TruthInput.parse(valueField) ?: entry.value
+                // A value the cruiser retyped is a TYPED reading from here on:
+                // it keeps neither the sensor's sigma nor its edge provenance.
+                // Carrying those across left a hand-entered number wearing the
+                // precision of a measurement it has nothing to do with. The
+                // tolerance absorbs the field's own four-decimal rendering.
+                val base =
+                    if (kotlin.math.abs(newValue - entry.value) > 0.001)
+                        entry.typedValue(newValue)
+                    else entry
                 onSave(
-                    entry.copy(
-                        value = valueField.toDoubleOrNull() ?: entry.value,
+                    base.copy(
                         speciesCode = species.trim().ifEmpty { null },
                         note = note.trim().ifEmpty { null },
                     ),

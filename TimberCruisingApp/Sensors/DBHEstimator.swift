@@ -118,6 +118,24 @@ public struct DBHScanInput: Sendable {
 
 public enum DBHEstimator {
 
+    /// Plausible-diameter window for any single-frame fit, in centimetres.
+    ///
+    /// THE CEILING USED TO BE 100 cm, WHICH IS 39.4 INCHES. The stand at McDunn
+    /// has Douglas-fir over 40 in, so the gate refused them outright: the bracket
+    /// would be placed correctly on a 42 in stem, the arithmetic would return
+    /// ~107 cm, and the fit would come back nil with nothing on screen. It also
+    /// explains why a deliberately wide bracket "stopped working" past about half
+    /// the screen, and why the automatic path could not hold a big tree from a
+    /// distance — all three were the same number.
+    ///
+    /// 300 cm is chosen to clear any stem this app will meet (the largest known
+    /// Douglas-fir is ~440 cm, and a hand-held phone is not measuring that) while
+    /// still refusing the degenerate cases the gate exists for: a bracket dragged
+    /// across the whole depth axis at arm's length computes tens of metres and is
+    /// still rejected. The floor stays at 2.5 cm.
+    public static let plausibleDiameterCm: ClosedRange<Double> = 2.5...300.0
+
+
     /// Full §7.1 pipeline. Returns nil only if the input cannot be
     /// attempted at all (e.g. burst too small). Quality failures return
     /// a `.red` `DBHResult` carrying `rejectionReason`.
@@ -1231,7 +1249,7 @@ public enum DBHEstimator {
         guard fx - halfWidth > 1.0 else { return nil }
         let diameterM = Double(medianWidth) * Double(dTap) / (fx - halfWidth)
         let diameterCm = diameterM * 100.0
-        guard (2.5...100.0).contains(diameterCm) else { return nil }
+        guard plausibleDiameterCm.contains(diameterCm) else { return nil }
 
         // Confidence: width consistency. Tight CoV ⇒ green; otherwise
         // yellow (renders as a silent / "gray" chip in the HUD per
@@ -1406,7 +1424,7 @@ public enum DBHEstimator {
             let chordM = chordDiameterFromCloud(pts)
             guard chordM > 0 else { continue }
             let diameterCm = chordM * 100.0
-            guard (2.5...100.0).contains(diameterCm) else { continue }
+            guard plausibleDiameterCm.contains(diameterCm) else { continue }
             diameters.append(diameterCm)
             var minX = Double.infinity, maxX = -Double.infinity
             var minZ = Double.infinity, maxZ = -Double.infinity
@@ -1529,6 +1547,53 @@ public enum DBHEstimator {
         return (axis, left, right)
     }
 
+    /// The middle half of a bracket, as an index range on the walk axis.
+    ///
+    /// FIELD REPORT 13 — with the bracket held perfectly still on a trunk,
+    /// the diameter jumped by several inches at random. The bracket's z is a
+    /// median, the chord identity d = w·z/(f − w/2) is LINEAR in z, and the
+    /// median was taken over the WHOLE span. The cruiser puts the handles ON
+    /// the silhouette edges, so the span's end pixels sit on the boundary and
+    /// routinely return the background instead of the stem — several metres
+    /// further away in a stand. Whenever the valid samples split near evenly
+    /// between stem and background, one pixel dropping in or out of validity
+    /// moves the median from one cluster to the other, and the diameter moves
+    /// with it in exact proportion: a 2 m stem behind a 6 m gap triples.
+    ///
+    /// The middle half cannot be background if the bracket is on a trunk at
+    /// all — that is what placing the handles on the edges MEANS — so the
+    /// median is taken from stem pixels only and the bimodal hop is gone.
+    ///
+    /// A short temporal median over consecutive frames was the alternative
+    /// and is the wrong tool twice over: it slows a hop it can't remove (the
+    /// distribution is bimodal in SPACE, and the wrong mode persists for as
+    /// long as the cruiser holds still), and ADJUST deliberately publishes
+    /// the raw per-frame fit so the number tracks a handle drag immediately.
+    ///
+    /// Nothing about the geometry changes — same identity, same span, same
+    /// focal. Only which pixels the depth is read from.
+    ///
+    /// The measured VALUE does move, though, and whoever pools this study's
+    /// corpora needs to know it: a stem's centre is up to one radius nearer
+    /// than its edges, so a median over the middle half reads a smaller z
+    /// and every bracketed diameter comes out slightly lower than before.
+    /// That is the geometrically right input for the identity — but it is
+    /// not backwards-compatible. A project whose `dbhCorrectionAlpha` /
+    /// `dbhCorrectionBeta` were fitted on ADJUST captures from before this
+    /// change now carries that bias into the correction applied on top, and
+    /// a raw-capture bundle recorded before it will not replay to the live
+    /// value in its manifest. The manifest's `app_commit` is what separates
+    /// the two corpora.
+    static func bracketCoreRange(iLo: Int, iHi: Int) -> (Int, Int) {
+        let span = iHi - iLo
+        // Too few pixels to trim and still make a median of: a bracket this
+        // narrow is a handful of samples either way, and dropping to one or
+        // two would fail the ≥ 3 gate on a fit that is otherwise fine.
+        guard span >= 8 else { return (iLo, iHi) }
+        let quarter = span / 4
+        return (iLo + quarter, iHi - quarter)
+    }
+
     /// Single-frame DBH estimate constrained by two user-placed edge
     /// handles instead of the automatic silhouette walk — the DBH
     /// ADJUST mode's estimator. `leftFraction` / `rightFraction` are
@@ -1539,7 +1604,9 @@ public enum DBHEstimator {
     /// extent, exactly like the fit-chord overlay in reverse).
     ///
     ///     w = handle span in walk-axis pixels
-    ///     z = median valid depth INSIDE the bracket at the guide row
+    ///     z = median valid depth over the bracket's MIDDLE HALF at the
+    ///         guide row (see `bracketCoreRange` — the ends sit on the
+    ///         silhouette edge and read the background)
     ///     d = w·z / (f_axis − w/2)
     ///
     /// — the same axis-matched pinhole identity the auto chord path
@@ -1567,15 +1634,16 @@ public enum DBHEstimator {
         let widthPx = rightPx - leftPx
         guard widthPx >= 2 else { return nil }
 
-        // Median depth INSIDE the bracket at the guide row. Zero-depth /
-        // low-confidence pixels are skipped; a handful of valid returns
-        // is required before the median is trusted.
+        // Median depth inside the bracket's CENTRAL PORTION at the guide row.
+        // Zero-depth / low-confidence pixels are skipped; a handful of valid
+        // returns is required before the median is trusted.
         let iLo = max(0, Int(leftPx.rounded(.up)))
         let iHi = min(extent - 1, Int(rightPx.rounded(.down)))
         guard iHi >= iLo else { return nil }
         var depths: [Float] = []
         depths.reserveCapacity(iHi - iLo + 1)
-        for idx in iLo...iHi {
+        let (cLo, cHi) = bracketCoreRange(iLo: iLo, iHi: iHi)
+        for idx in cLo...cHi {
             let (px, py) = pixelCoords(axis: guideAxis, idx: idx)
             guard frame.confidence(atX: px, y: py) >= 1 else { continue }
             let d = frame.depth(atX: px, y: py)
@@ -1592,11 +1660,20 @@ public enum DBHEstimator {
         // measured correctly in the stand, and every change to it made from
         // reasoning alone has been wrong. Revisit with a device and a tape,
         // not from a reading of the geometry.
+        //
+        // KNOWN CROSS-PLATFORM DIVERGENCE, recorded so the accuracy study
+        // does not discover it in the pooled data: Android's bracket path
+        // (DbhEstimator.bracketChordFit / constrainedEstimate) divides by
+        // the axis-matched focal — fy for a column walk — and its live
+        // ADJUST readout is calibrated, where this one publishes the raw
+        // bracket diameter. Two phones on the same tree therefore show
+        // different live numbers. Settling which is right is a device-and-
+        // tape job on both platforms at once, not a keyboard edit to one.
         let fx = Double(frame.intrinsics[0, 0])
         guard fx - widthPx / 2.0 > 1.0 else { return nil }
         let diameterM = widthPx * z / (fx - widthPx / 2.0)
         let diameterCm = diameterM * 100.0
-        guard (2.5...100.0).contains(diameterCm) else { return nil }
+        guard plausibleDiameterCm.contains(diameterCm) else { return nil }
 
         // Centre for the cylinder overlay + distance HUD — bracket
         // midpoint back-projected at its depth, pushed one radius behind

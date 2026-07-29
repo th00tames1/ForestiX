@@ -84,6 +84,42 @@ public final class HeightScanViewModel: ObservableObject {
     /// move closer. Same value on Android.
     public static let anchorMaxRangeM: Float = 4.0
 
+    // MARK: - Walk-off integrity (field round 9 — the vanishing anchor)
+
+    /// Whether ARKit has a usable camera pose right now. False freezes the
+    /// walk readouts and puts `trackingLostNow` on the status line.
+    @Published public private(set) var trackingLive: Bool = true
+
+    /// Latched for the whole measurement once tracking has dropped at any
+    /// point after anchoring. A dropout that has since recovered still means
+    /// the camera did not see part of the walk that set d_h, and d_h is the
+    /// entire scale of H — so the reading carries the warning even though the
+    /// numbers look ordinary again.
+    @Published public private(set) var trackingDroppedDuringWalk: Bool = false
+
+    /// ARKit dropped the trunk anchor. Fatal for the measurement: there is no
+    /// reference left to compute d_h against, so the aim taps refuse.
+    @Published public private(set) var anchorLost: Bool = false
+
+    /// Walk-off integrity copy. Byte identical to the Android
+    /// HeightScanScreen.kt constants of the same names.
+    public static let trackingLostNow =
+        "Tracking lost — hold still until the camera picks the scene back up. The distance is frozen, not restarted."
+    public static let trackingDroppedDuringWalkText =
+        "Tracking dropped during the walk-off, so the distance to the trunk may have shifted. Retake for a firm number."
+    public static let anchorLostText =
+        "The trunk anchor is gone — the camera couldn't hold it. Tap Retake and anchor the trunk again."
+    /// The refusal for "the tap was legitimate, but ARKit has no world pose to
+    /// serve it from". Every "+" on this screen that needs a camera position
+    /// says THIS, and says it out loud — a tap that quietly does nothing is
+    /// indistinguishable from a broken button, and `currentCameraTranslation()`
+    /// returns nil right through `.relocalizing`, which is a routine field
+    /// state and not a rare one. Hoisted out of the three call sites that used
+    /// to repeat it verbatim; byte identical to the Android sibling's
+    /// `CAMERA_NOT_READY`, which is used at the matching taps there.
+    public static let cameraNotReadyText =
+        "The camera hasn't got its bearings yet — hold still for a second, then tap + again."
+
     /// Fallback for REQ-HGT-006. Non-empty only in `.manualEntry`.
     @Published public var manualHeightM: String = ""
 
@@ -100,8 +136,53 @@ public final class HeightScanViewModel: ObservableObject {
     private var alphaTopRad: Float?
     private var alphaBaseRad: Float?
 
+    /// The trunk pinned as a REAL `ARAnchor`, so `anchorPointWorld` can be
+    /// re-read from ARKit's drift-corrected transform for the whole walk-off.
+    ///
+    /// WHY AN ANCHOR (field round 9). The raw hit point is frozen in the world
+    /// frame as it stood at the instant of the raycast, and ARKit keeps
+    /// re-fitting that frame underneath it — every loop closure and
+    /// relocalization moves world coordinates. The walk-off is the longest
+    /// continuous motion the app performs (10–30 m backwards through a stand),
+    /// so it collects the most correction, and the correction lands squarely
+    /// in d_h, which multiplies straight into H. An anchor gets the correction
+    /// applied to it; a frozen point silently keeps the error. And when ARKit
+    /// genuinely loses the anchor, `worldAnchorPosition` returns nil and the
+    /// screen says so — a marker that disappears honestly beats one that stays
+    /// put and lies.
+    ///
+    /// nil on the non-ARKit stub (`addWorldAnchor` has no anchors to add), and
+    /// only there: the ARKit implementation always returns an identifier. The
+    /// raw hit point stays the anchor position in that case, which is exactly
+    /// the previous behaviour and affects previews and tests only.
+    private var trunkAnchorID: UUID?
+
+    /// Monotonic time the trunk anchor first read back as missing, or nil while
+    /// it is being served normally. See `observeWalkIntegrity` for why a single
+    /// missing frame is not a lost trunk.
+    private var anchorPoseStaleSince: TimeInterval?
+
+    /// How long the trunk anchor may read as missing before the measurement
+    /// gives up on it. Same 0.5 s as `ActiveSamplingPlot.trackingGraceSeconds`
+    /// and Android's `PLOT_POSE_GRACE_MS` — one value for "ARKit has not
+    /// answered yet" across the app.
+    private static let anchorGraceSeconds: TimeInterval = 0.5
+
     /// Camera world position frozen at the moment the anchor was
     /// captured — reference point for the "Walked back" displacement.
+    ///
+    /// DELIBERATELY A RAW POINT, not an `ARAnchor`, unlike `trunkAnchorID`.
+    /// The argument for anchoring the trunk is that its position enters d_h and
+    /// d_h is the whole scale of H, so every world-frame correction the walk
+    /// collects lands in the measurement. This point enters NOTHING: it feeds
+    /// the "Walked back" readout and only that. A relocalization will still
+    /// shift it, and the readout will still be off by the correction — so it is
+    /// a DISPLAY number, and it is labelled as one here rather than being made
+    /// to look like a measurement. Anchoring it would mean a second anchor with
+    /// its own release path on every exit, retake and re-anchor, i.e. another
+    /// thing that can leak, bought for a line of chrome. The distance the
+    /// cruiser actually acts on is "Total distance", which is measured to the
+    /// anchored trunk.
     private var cameraPositionAtAnchor: SIMD3<Float>?
 
     /// Standing pose at aim-top tap — §7.2 uses the same standing point
@@ -228,25 +309,196 @@ public final class HeightScanViewModel: ObservableObject {
         depthCancellable = nil
     }
 
+    /// Release the trunk anchor. Called ONLY when the screen actually goes
+    /// away — deliberately NOT from `onDisappear`, which the scan screens also
+    /// call on `.background`/`.inactive`. Dropping the anchor when the cruiser
+    /// takes a phone call mid-walk would resurrect the exact failure this
+    /// round is fixing: the sphere gone and the measurement quietly untethered.
+    /// The anchor lives in the app-shared session, so it survives that pause.
+    public func releaseTrunkAnchor() {
+        if let id = trunkAnchorID { session.removeWorldAnchor(id: id) }
+        trunkAnchorID = nil
+    }
+
     private func subscribeToDepth() {
         depthCancellable = session.$latestDepthFrame
             .compactMap { $0 }
             .sink { [weak self] frame in
                 guard let self else { return }
+                // Integrity FIRST: it publishes `trackingLive` for this frame,
+                // and both the pose trail and the walk readout below gate on
+                // it. Called the other way round the gate was a frame stale.
+                self.observeWalkIntegrity()
                 self.collectPoseSampleIfNeeded(frame)
                 guard self.state == .walking else { return }
+                // No usable camera pose (ARKit reports `.notAvailable`): HOLD
+                // the walk readouts rather than recomputing them from a
+                // transform ARKit itself does not stand behind.
+                // `observeWalkIntegrity` has already put that on screen —
+                // silently restarting the walked distance is the one outcome
+                // this screen must never produce (field round 9).
+                guard self.trackingLive else { return }
                 let pose = frame.cameraPoseWorld
                 let standing = SIMD3<Float>(pose.columns.3.x,
                                             pose.columns.3.y,
                                             pose.columns.3.z)
+                // Always remember where the cruiser is; publish the walk
+                // panel at `liveHintMinIntervalSec`. `updateLiveHint` writes
+                // three `@Published` distances, and doing that on every depth
+                // frame re-evaluated the whole height screen — AR view
+                // included — at the frame rate. Field report 9.
+                //
+                // The RETAINED point is what makes the throttle safe:
+                // `continueToAimTop()` flushes it before freezing d_h, so the
+                // baseline the tangent method divides by is the distance at
+                // the moment of the tap, not one up to 100 ms stale.
+                self.pendingStandingPointWorld = standing
+                let now = ProcessInfo.processInfo.systemUptime
+                guard now - self.lastLiveHintUpdate >= self.liveHintMinIntervalSec
+                else { return }
+                self.lastLiveHintUpdate = now
                 self.updateLiveHint(standingPointWorld: standing)
             }
+    }
+
+    /// Newest camera standing point seen on the depth stream, whether or not
+    /// the throttled walk panel has caught up with it yet.
+    private var pendingStandingPointWorld: SIMD3<Float>?
+    private var lastLiveHintUpdate: TimeInterval = 0
+    /// Same 10 Hz cadence the DBH preview and the anchor-aim sampler use.
+    private let liveHintMinIntervalSec: TimeInterval = 0.1
+
+    /// Per-frame walk-off integrity, from anchoring through the aim taps.
+    ///
+    /// Two jobs. It re-reads the trunk anchor's DRIFT-CORRECTED transform so
+    /// `anchorPointWorld` — which both aim taps compute d_h from, and which
+    /// places the anchor sphere — follows the tree instead of the world frame
+    /// as it stood at the raycast. And it latches tracking loss, both live
+    /// (`trackingLive`, for the "hold still" status line) and for the whole
+    /// measurement (`trackingDroppedDuringWalk`, which the result panel
+    /// repeats at the moment the cruiser decides whether to keep the number).
+    private func observeWalkIntegrity() {
+        switch state {
+        case .walking, .aimBaseArmed, .aimTopArmed, .aimTopCaptured: break
+        default: return
+        }
+        if let id = trunkAnchorID, !anchorLost {
+            // TWO DIFFERENT QUESTIONS, and this block used to ask only the
+            // first one with the accessor that answers only the first one.
+            //
+            //   IS THE ANCHOR STILL THERE? — `worldAnchorPosition`, the
+            //   UNGATED accessor. Presence in `currentFrame.anchors` is the
+            //   whole of what a plain `ARAnchor` can be asked (it is not
+            //   `ARTrackable`), and it is the question the `anchorLost` latch
+            //   below is about. Degraded tracking does not mean the trunk is
+            //   gone, so the latch must NOT key on tracking.
+            //
+            //   MAY I MEASURE THROUGH IT? — `trackedWorldAnchorPosition`,
+            //   which additionally requires `.normal`. `anchorPointWorld` is
+            //   one half of d_h and d_h is the entire scale of H, so it is
+            //   world geometry in exactly the sense `ARKitSessionManager`
+            //   documents: an anchor transform is a coordinate in whatever
+            //   world frame ARKit held when it was read, and relocalization
+            //   re-fits that frame underneath it. That is the SAME event for
+            //   which `currentCameraTranslation()` refuses the camera pose —
+            //   taking the camera's refusal and the anchor's correction from
+            //   one relocalization moved d_h by the re-fit with nothing on
+            //   screen saying so. `ActiveSamplingPlot.refreshTrackedCentre`
+            //   makes the same split for the same reason.
+            //
+            // When the gate refuses we HOLD the last `.normal` position rather
+            // than substituting an untracked one: the frozen point is at least
+            // in the same world frame as `standingPointWorldAtAimTop`, which
+            // was locked at the base tap and is never re-fitted. The dropout
+            // itself is still latched below, warned about on the result panel
+            // and carried into the research row.
+            if session.worldAnchorExists(id: id) {
+                anchorPoseStaleSince = nil
+                if let corrected = session.trackedWorldAnchorPosition(id: id) {
+                    // Republish the markers only when the correction is big
+                    // enough to see (1 cm). This runs at the depth frame rate
+                    // and every rebuild replaces the whole `sceneMarkers` array.
+                    let moved = anchorPointWorld.map {
+                        simd_distance($0, corrected) > 0.01
+                    } ?? true
+                    anchorPointWorld = corrected
+                    if moved { rebuildSceneMarkers() }
+                }
+            } else {
+                // NOT fatal on the first miss. `session.add(anchor:)` is
+                // ASYNCHRONOUS — the anchor is not in `currentFrame.anchors`
+                // until ARKit has processed the add — while `anchorHere` moves
+                // to `.walking` synchronously, so the very next depth frame
+                // reads nil for an anchor that is perfectly healthy. Latching
+                // there bricked the measurement outright: both aim taps refuse
+                // on `anchorLost`, and Retake re-ran the same race.
+                // `currentFrame` is also nil across a pause, which is the other
+                // way a live anchor reads as missing for a moment.
+                //
+                // Same grace, same duration, as the plot centre
+                // (`ActiveSamplingPlot.trackingGraceSeconds`) and the Android
+                // sibling (`PLOT_POSE_GRACE_MS`) — one reason to be missing is
+                // a frame, several in a row is a lost trunk.
+                let now = ProcessInfo.processInfo.systemUptime
+                let staleSince = anchorPoseStaleSince ?? now
+                anchorPoseStaleSince = staleSince
+                if now - staleSince >= Self.anchorGraceSeconds {
+                    // ARKit dropped the anchor: there is no trunk to measure
+                    // d_h to any more, and the aim taps refuse from here.
+                    anchorLost = true
+                    // THE HONEST VANISH. Clearing the point takes the red
+                    // sphere off the scene with it — leaving it drawn would put
+                    // a marker on the bark at a pose nothing is correcting any
+                    // more, contradicting the status line that has just said
+                    // the anchor is gone. A marker that disappears beats one
+                    // that stays put and lies; that is the whole argument for
+                    // anchoring the trunk in the first place.
+                    anchorPointWorld = nil
+                    rebuildSceneMarkers()
+                }
+            }
+        }
+        // WHAT COUNTS AS A DROPOUT ON iOS.
+        //
+        // `.notAvailable` alone does not: it is a session-start / post-pause
+        // state, and a walk-off through a stand almost never produces one, so
+        // gating only on it left `trackingLostNow` and `trackingDroppedDuringWalk`
+        // effectively unreachable in the field — while the byte-identical
+        // Android strings fired on every routine ARCore PAUSED. Identical
+        // warning text with different trigger conditions is a data-comparability
+        // defect for a cross-platform accuracy study, not a cosmetic one.
+        //
+        // `.limited(.relocalizing)` is the ARKit analogue of the failure the
+        // cruiser reported: it is precisely when ARKit re-fits the world frame
+        // and the camera pose jumps discontinuously, which is what moves d_h
+        // under a walk-off. The other `.limited` reasons
+        // (`.insufficientFeatures`, `.excessiveMotion`) are degraded but
+        // CONTINUOUS — they cover most of a real walk under canopy and stay
+        // non-dropouts, exactly as `currentCameraWorldPosition` documents.
+        //
+        // ONLY ON CHANGE, all three. `@Published` fires `objectWillChange`
+        // on every assignment, equal value or not, and this runs on every
+        // depth frame — writing an unchanged `true` back re-evaluated the
+        // whole height screen, AR view included, at the frame rate for the
+        // entire walk-off. Field report 9.
+        let live = session.trackingStatus != .notAvailable
+            && !session.isRelocalizing
+        if trackingLive != live { trackingLive = live }
+        if !live, !trackingDroppedDuringWalk { trackingDroppedDuringWalk = true }
     }
 
     /// Accumulate 5 Hz camera poses from anchor to compute (developer mode
     /// only), so a future d_h derivation can be replayed from the walk track.
     private func collectPoseSampleIfNeeded(_ frame: ARDepthFrame) {
         guard rawCaptureEnabled, anchorPointWorld != nil else { return }
+        // SAME GATE AS THE MEASUREMENT PATH. `frame.cameraPoseWorld` is a
+        // transform in a world frame ARKit does not stand behind while
+        // tracking is down, and the replay re-derives d_h from this trail —
+        // an untracked pose entering it unmarked is the measurement bug one
+        // more time, in the research artifact instead of on screen. A gap in
+        // `t_ms` says "nothing was seen here", which is true; a sample says
+        // "the camera was here", which is not.
+        guard trackingLive else { return }
         switch state {
         case .walking, .aimBaseArmed, .aimTopArmed, .aimTopCaptured: break
         default: return
@@ -281,8 +533,16 @@ public final class HeightScanViewModel: ObservableObject {
     ///      works on non-LiDAR devices too.
     ///   2. `session.latestDepthFrame?.cameraPoseWorld` — secondary path
     ///      kept for preview / test sessions that only exercise depth.
-    /// Returns nil only before any frame has arrived.
+    /// Returns nil before any frame has arrived, while ARKit reports
+    /// `.notAvailable` — there is no pose then, only a transform collapsing
+    /// toward the identity, and BOTH sources above carry it — and while it is
+    /// RELOCALIZING, where the transform is real but expressed in a world
+    /// frame that is being re-fitted and will jump. `.limited` for the other
+    /// two reasons still returns a position: it is degraded, not absent, and
+    /// it covers most of a real walk-off under canopy.
     private func currentCameraTranslation() -> SIMD3<Float>? {
+        guard session.trackingStatus != .notAvailable,
+              !session.isRelocalizing else { return nil }
         if let p = session.currentCameraWorldPosition { return p }
         if let frame = session.latestDepthFrame {
             let c = frame.cameraPoseWorld.columns.3
@@ -309,6 +569,13 @@ public final class HeightScanViewModel: ObservableObject {
     public func anchorHere(anchorPointWorld: SIMD3<Float>,
                            standingPointWorld: SIMD3<Float>) {
         self.anchorPointWorld = anchorPointWorld
+        // Pin the trunk with a REAL ARKit anchor so its position is re-read
+        // from ARKit's drift-corrected transform for the rest of the walk-off
+        // (see `trunkAnchorID`). The raw point above stays as the seed and as
+        // the non-ARKit fallback.
+        if let previous = trunkAnchorID { session.removeWorldAnchor(id: previous) }
+        trunkAnchorID = session.addWorldAnchor(at: anchorPointWorld,
+                                               name: "forestix.heightAnchor")
         alphaTopRad = nil
         alphaBaseRad = nil
         standingPointWorldAtAimTop = nil
@@ -316,6 +583,12 @@ public final class HeightScanViewModel: ObservableObject {
         topAimedWorld = nil
         baseAimedWorld = nil
         anchorFailureReason = nil
+        // A fresh trunk starts a fresh integrity record — the previous tree's
+        // dropout says nothing about this one.
+        trackingLive = true
+        trackingDroppedDuringWalk = false
+        anchorLost = false
+        anchorPoseStaleSince = nil
         // Freeze the walk-panel reference values: "Initial dist" is the
         // camera→anchor horizontal distance at this instant, and the
         // camera position becomes the origin the "Walked back"
@@ -334,12 +607,18 @@ public final class HeightScanViewModel: ObservableObject {
         recordAnchorTime = session.latestDepthFrame?.timestamp ?? 0
         state = .anchorSet
         state = .walking
+        // Seed the throttled walk panel AND the point it flushes from, so a
+        // Continue tapped before the first depth frame of the walk still
+        // freezes a d_h that belongs to this tree.
+        pendingStandingPointWorld = standingPointWorld
+        lastLiveHintUpdate = ProcessInfo.processInfo.systemUptime
         updateLiveHint(standingPointWorld: standingPointWorld)
         rebuildSceneMarkers()
     }
 
-    /// Step (b) — called on every ARKit frame while the user walks back
-    /// to refresh `dhMeters` and `walkHintMeters`.
+    /// Step (b) — refreshes `dhMeters` and `walkHintMeters` as the user
+    /// walks back. Driven off the depth stream at 10 Hz, and flushed once
+    /// more from the newest pose when Continue freezes d_h.
     public func updateLiveHint(standingPointWorld: SIMD3<Float>) {
         guard let anchor = anchorPointWorld else { return }
         let dx = standingPointWorld.x - anchor.x
@@ -362,6 +641,12 @@ public final class HeightScanViewModel: ObservableObject {
     /// top-then-base, so we arm the BASE aim first.
     public func continueToAimTop() {
         guard state == .walking, anchorPointWorld != nil else { return }
+        // d_h freezes here, so it has to be the distance AT THE TAP. The walk
+        // panel is published at 10 Hz; the standing point behind it is
+        // current to the last depth frame.
+        if let standing = pendingStandingPointWorld {
+            updateLiveHint(standingPointWorld: standing)
+        }
         state = .aimBaseArmed
     }
 
@@ -443,19 +728,32 @@ public final class HeightScanViewModel: ObservableObject {
     ///
     /// Anchor range gate: the tap is an inert no-op — matching the other
     /// pre-armed inert "+" states — whenever the raycast missed (no LiDAR
-    /// mesh / plane in that direction yet, sky, tracking not ready) or
-    /// the hit is beyond `anchorMaxRangeM`, where depth is unreliable.
-    /// The anchor-stage status line continuously shows "Move closer —
-    /// anchor within 4 m of the trunk." in exactly those conditions, so
-    /// no banner fires here. Refusing the anchor is much better than
-    /// silently substituting the camera position, which would leave the
-    /// trunk-to-cruiser offset baked into d_h as a systematic bias.
+    /// mesh / plane in that direction yet, sky) or the hit is beyond
+    /// `anchorMaxRangeM`, where depth is unreliable. The anchor-stage status
+    /// line continuously shows "Move closer — stand within 4 m of the trunk,
+    /// then tap +." in exactly those conditions, so no banner fires for them.
+    /// Refusing the anchor is much better than silently substituting the
+    /// camera position, which would leave the trunk-to-cruiser offset baked
+    /// into d_h as a systematic bias.
+    ///
+    /// A MISSING CAMERA POSE IS NOT ONE OF THE INERT CASES, and it used to be
+    /// folded in with them. `currentCameraTranslation()` returns nil right
+    /// through `.limited(.relocalizing)` — the common field state, not the
+    /// rare one — and nothing on the anchor stage mentions tracking: the
+    /// integrity block in `statusText` covers the walk states only (so does
+    /// Android's), so the screen went on reading "Aim at the trunk at eye
+    /// level, then tap +." while the "+" did nothing, tap after tap, with no
+    /// reason given. It now says so, in the same order and the same sentence
+    /// Android uses at the matching point (`HeightScanScreen.kt`, Stage.ANCHOR:
+    /// missing hit → inert, missing pose → this banner).
     public func anchorHereNow(screenCenterHit: SIMD3<Float>? = nil,
                               hitType: String = "unknown") {
-        guard let cam = currentCameraTranslation(),
-              let anchor = screenCenterHit,
-              simd_distance(cam, anchor) <= Self.anchorMaxRangeM
-        else { return }
+        guard let anchor = screenCenterHit else { return }
+        guard let cam = currentCameraTranslation() else {
+            anchorFailureReason = Self.cameraNotReadyText
+            return
+        }
+        guard simd_distance(cam, anchor) <= Self.anchorMaxRangeM else { return }
         recordAnchorHitType = hitType
         anchorHere(anchorPointWorld: anchor,
                    standingPointWorld: cam)
@@ -482,6 +780,13 @@ public final class HeightScanViewModel: ObservableObject {
     /// 10–100× and produced absurd heights (e.g. a desk at 2 m showing
     /// up as 100 m+) instead of an honest "tracking not ready" message.
     public func captureTopNow(screenCenterHit: SIMD3<Float>? = nil) {
+        // No trunk anchor left = no d_h, and d_h is the whole scale of H.
+        // Refusing here is the only honest branch; the stale anchor point
+        // would still produce a confident-looking number.
+        guard !anchorLost else {
+            anchorFailureReason = Self.anchorLostText
+            return
+        }
         // HOW FAR THE INSTRUMENT MOVED between the two sightings.
         //
         // The §7.2 tangent formula assumes both angles were taken from ONE
@@ -496,8 +801,22 @@ public final class HeightScanViewModel: ObservableObject {
         // reading is not refused, because a cruiser who has already walked
         // the off-distance should be told it is soft rather than sent back
         // by an arm's-length wobble.
-        if let locked = standingPointWorldAtAimTop,
-           let now = currentCameraTranslation() {
+        //
+        // THE LIVE POSE IS REQUIRED, not merely nice to have — it used to be
+        // optional here, and only here, which is what let a relocalization
+        // between the two sightings through. α_top comes from the IMU and is
+        // gravity-referenced, so unlike Android (whose `cameraForwardElevationRad()`
+        // reads a TRACKING frame or nothing) this tap had nothing that noticed
+        // the world frame being re-fitted — while the base tap next door
+        // refuses for exactly that. And d_h lives in that frame: the standing
+        // point was locked at the base tap and is never re-fitted, so a re-fit
+        // in between rescales H by whatever it moved. Same sentence as the base
+        // tap and the anchor tap, and the same one Android shows.
+        guard let now = currentCameraTranslation() else {
+            anchorFailureReason = Self.cameraNotReadyText
+            return
+        }
+        if let locked = standingPointWorldAtAimTop {
             aimDriftM = simd_distance(locked, now)
         } else {
             aimDriftM = nil
@@ -510,9 +829,13 @@ public final class HeightScanViewModel: ObservableObject {
     /// standing pose used for both angles. Same clock convention as
     /// `captureTopNow()`.
     public func captureBaseNow(screenCenterHit: SIMD3<Float>? = nil) {
+        // Same refusal as the top aim — see `captureTopNow`.
+        guard !anchorLost else {
+            anchorFailureReason = Self.anchorLostText
+            return
+        }
         guard let p = currentCameraTranslation() else {
-            anchorFailureReason =
-                "The camera hasn't got its bearings yet — hold still for a second, then tap + again."
+            anchorFailureReason = Self.cameraNotReadyText
             return
         }
         captureBase(at: nowForPitchBuffer(),
@@ -552,6 +875,14 @@ public final class HeightScanViewModel: ObservableObject {
 
     public func retake() {
         anchorPointWorld = nil
+        // Release the ARKit trunk anchor with the rest of the geometry — a
+        // new measurement must pin its own trunk, never inherit the last one.
+        if let id = trunkAnchorID { session.removeWorldAnchor(id: id) }
+        trunkAnchorID = nil
+        trackingLive = true
+        trackingDroppedDuringWalk = false
+        anchorLost = false
+        anchorPoseStaleSince = nil
         alphaTopRad = nil
         alphaBaseRad = nil
         standingPointWorldAtAimTop = nil
@@ -714,6 +1045,9 @@ public final class HeightScanViewModel: ObservableObject {
         let topPose = recordTopPose
         let dh = r.dHm
         let samples = recordPoseSamples
+        // Latched for the whole walk-off — the same fact the result panel warns
+        // about and the research CSV row carries.
+        let dropped = trackingDroppedDuringWalk
         let cal = calibration
         let ctx = rawCaptureContext
         let gps = rawCaptureGPS
@@ -733,6 +1067,7 @@ public final class HeightScanViewModel: ObservableObject {
                 baseRotationPose: basePose,
                 topPitchRad: alphaTop, topPose: topPose,
                 dHM: dh, poseSamples: samples,
+                trackingDropped: dropped,
                 calibration: cal, context: ctx, gps: gps,
                 baseFrame: baseFrame, baseJPEG: baseJPEG,
                 topFrame: topFrame, topJPEG: topJPEG)

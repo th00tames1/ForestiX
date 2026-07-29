@@ -57,7 +57,6 @@ public final class AppSettings: ObservableObject {
         // so the DBH scan is depth-only. The key is no longer read, which
         // migrates any stored "arMotion"/"arCaliper" value to the depth
         // method.
-        public static let researchTreeId          = "tc.researchTreeId"
         public static let researchTrueValue       = "tc.researchTrueValue"
         public static let researchSpecies         = "tc.researchSpecies"
         public static let currentCruiseProjectID  = "tc.currentCruiseProjectID"
@@ -254,15 +253,11 @@ public final class AppSettings: ObservableObject {
         set { defaults.set(newValue, forKey: Keys.appearance); objectWillChange.send() }
     }
 
-    /// Operator-set tags written into every research-log row while
-    /// Developer mode is on. `researchTreeId` labels the physical tree (so
-    /// repeats group + join to ground truth); `researchTrueValue` is the
-    /// reference measurement for the controlled cylinder / known-distance
-    /// experiments (blank for real-tree runs, joined later by tree id).
-    public var researchTreeId: String {
-        get { defaults.string(forKey: Keys.researchTreeId) ?? "" }
-        set { defaults.set(newValue, forKey: Keys.researchTreeId); objectWillChange.send() }
-    }
+    /// Operator-set tag written into every research-log row while Developer
+    /// mode is on: the reference measurement for the controlled cylinder /
+    /// known-distance experiments (blank for real-tree runs, joined later by
+    /// tree id — which now comes from the tree the capture is locked to, not
+    /// from a box the operator retyped).
     public var researchTrueValue: String {
         get { defaults.string(forKey: Keys.researchTrueValue) ?? "" }
         set { defaults.set(newValue, forKey: Keys.researchTrueValue); objectWillChange.send() }

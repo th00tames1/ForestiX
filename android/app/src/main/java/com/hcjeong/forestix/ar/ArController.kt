@@ -91,6 +91,25 @@ class ArController {
         return f.camera.trackingState == TrackingState.TRACKING && viewWidthPx > 1 && viewHeightPx > 1
     }
 
+    /// The live frame ONLY while ARCore is actually tracking — the gate every
+    /// pose reader below goes through.
+    ///
+    /// `Frame.camera.pose` is undefined once the camera's tracking state
+    /// drops to PAUSED, and in practice it collapses toward the identity
+    /// pose. The readers turn that into a world position, an aim angle or a
+    /// distance with nothing in the return value to say the pose was never
+    /// real. That is the height walk-off's vanishing anchor (field round 9):
+    /// the anchoring pose sits near the session origin, so a distance
+    /// measured from an identity pose to it is ~0 and "Walked back" drops to
+    /// 0.00 while the cruiser is still walking — and the same untracked pose
+    /// is what the base/top aim taps would have read for d_h.
+    ///
+    /// Null is the honest answer and the contract the hit tests have always
+    /// had: it means "no pose", never "a pose that happens to be wrong".
+    /// Every caller in the app already treats it that way (`?.let` / `?:`).
+    private fun trackingFrame(): Frame? =
+        frame?.takeIf { it.camera.trackingState == TrackingState.TRACKING }
+
     /// Last screenCenterHit's trackable type + distance — dev-HUD readout so
     /// a field run can see WHAT the anchor landed on ("depth 1.62m").
     @Volatile var lastCenterHitInfo: String? = null
@@ -195,7 +214,7 @@ class ArController {
     /// metres of horizontal distance — fallback when no surface is hit
     /// (sky / canopy). Direct port of forwardPointAtHorizontalDistance.
     fun forwardPointAtHorizontalDistance(d: Float): Vec3? {
-        val f = frame ?: return null
+        val f = trackingFrame() ?: return null
         val pose = f.camera.pose
         // ARCore camera looks down -Z of its pose, like ARKit.
         val zAxis = pose.zAxis            // forward = -zAxis
@@ -219,7 +238,7 @@ class ArController {
     }
 
     fun currentCameraPosition(): Vec3? {
-        val f = frame ?: return null
+        val f = trackingFrame() ?: return null
         val t = f.camera.pose.translation
         return Vec3(t[0], t[1], t[2])
     }
@@ -228,7 +247,7 @@ class ArController {
     /// horizon — the Android analogue of the iOS IMU pitch α used by the
     /// height walk-off tangent. Positive = aiming up. Forward = -zAxis.
     fun cameraForwardElevationRad(): Float? {
-        val f = frame ?: return null
+        val f = trackingFrame() ?: return null
         val z = f.camera.pose.zAxis
         val fwd = Vec3(-z[0], -z[1], -z[2])
         val horiz = sqrt(fwd.x * fwd.x + fwd.z * fwd.z)
@@ -243,8 +262,7 @@ class ArController {
     /// no `.gravityAndHeading` world alignment like ARKit. Null while not
     /// tracking or when the forward ray is near-vertical (no stable yaw).
     fun cameraWorldYawDeg(): Double? {
-        val f = frame ?: return null
-        if (f.camera.trackingState != TrackingState.TRACKING) return null
+        val f = trackingFrame() ?: return null
         val z = f.camera.pose.zAxis
         val fwd = Vec3(-z[0], -z[1], -z[2])
         val horiz = sqrt(fwd.x * fwd.x + fwd.z * fwd.z)
@@ -265,8 +283,11 @@ class ArController {
     /// Full-resolution camera focal length (x) + image width, used to
     /// project a real-world width (m) to on-screen pixels for the live HUD.
 
-    /// True when the latest frame is tracking — for the dev HUD.
-    fun trackingOk(): Boolean = frame?.camera?.trackingState == TrackingState.TRACKING
+    /// True when the latest frame is tracking, i.e. when every pose reader
+    /// above will actually return something. Read live by the height
+    /// walk-off so a dropout is announced while it is happening, not
+    /// inferred afterwards from a frozen number.
+    fun trackingOk(): Boolean = trackingFrame() != null
 
     /// Camera-forward elevation in degrees (the dev-HUD readout of the
     /// pitch the height tangent uses).
@@ -397,8 +418,7 @@ class ArController {
     /// raw-capture recorder stores this for the height anchor/base/top +
     /// the 5 Hz pose-sample trail. Null while not tracking.
     fun currentCameraPose(): FloatArray? {
-        val f = frame ?: return null
-        if (f.camera.trackingState != TrackingState.TRACKING) return null
+        val f = trackingFrame() ?: return null
         val m = FloatArray(16)
         f.camera.pose.toMatrix(m, 0)
         return m

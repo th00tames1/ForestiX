@@ -77,6 +77,14 @@ object RawCaptureStrings {
 
     const val TRUTH_NOT_A_NUMBER = "Not a number — truth not saved"
 
+    /// The text on screen was typed for an EARLIER capture that could not
+    /// take it, and the field is deliberately kept across trees so the number
+    /// is not thrown away. Attaching it to the capture in front of us would
+    /// put one tree's tape measurement on another tree's bundle — and export
+    /// it as that tree's `true_value`. Word for word the iOS sentence.
+    const val TRUTH_STALE_OWNER =
+        "Unsaved truth from an earlier capture — re-type it for this tree, or clear the field"
+
     fun saved(frames: Int?): String =
         if (frames != null && frames > 0) "$SAVED · $frames frames" else SAVED
 

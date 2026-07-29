@@ -217,7 +217,36 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
     /// Live camera position in ARKit world space (column 3 of the
     /// camera transform). Used by Offset-from-Opening / VIOChain to
     /// snapshot where the user is standing at each confirmation.
+    ///
+    /// nil WHILE TRACKING IS `.notAvailable`. ARKit still hands out a camera
+    /// transform then, but it is not a position in the session's world frame
+    /// — it collapses toward the identity — and publishing it made every
+    /// reader compute a confident distance from a place the device never was.
+    /// That is the height walk-off's "walked distance goes back to zero"
+    /// (field round 9): the anchoring pose sits near the world origin, so the
+    /// displacement from an identity transform to it is ~0. `.limited` is
+    /// deliberately NOT gated: ARKit keeps a continuous, usable pose through
+    /// `.limited(.excessiveMotion)` and `.limited(.insufficientFeatures)`,
+    /// which is most of a real walk-off under canopy, and treating that as
+    /// "no position" would refuse nearly every honest measurement (it is the
+    /// same mistake the estimator's old `.limited` latch made).
     @Published public private(set) var currentCameraWorldPosition: SIMD3<Float>?
+
+    /// ARKit is `.limited(.relocalizing)` — it is RE-FITTING the world frame
+    /// onto a scene it has recognised again, so world coordinates move
+    /// underneath everything holding one, and the camera pose jumps when the
+    /// fit lands.
+    ///
+    /// Published separately instead of folded into `TrackingStatus` because the
+    /// other two `.limited` reasons are the opposite case: `.insufficientFeatures`
+    /// and `.excessiveMotion` are degraded but CONTINUOUS, they cover most of a
+    /// real walk-off under canopy, and callers that must keep working through
+    /// them (see `currentCameraWorldPosition`) would break if the enum stopped
+    /// distinguishing. `TrackingStatus` collapses every `.limited` into one
+    /// case, so without this the reason never reached the view models at all —
+    /// and relocalization is the iOS analogue of the ARCore PAUSED that the
+    /// height walk-off's dropout warning was written for.
+    @Published public private(set) var isRelocalizing = false
     /// Latest ARKit sparse VIO feature points in world space (metric).
     /// Published every frame; the AR-motion DBH method accumulates these
     /// over a short capture window and circle-fits them. Available on every
@@ -250,9 +279,76 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
     private let legacyClientID = UUID()
     /// Per-frame stream gate read by the (nonisolated) session delegate:
     /// which conversions/publishes the current screen actually wants.
-    private struct StreamGate { var depth: Bool; var features: Bool }
+    ///
+    /// `lastDepthConversion` is the ARFrame timestamp of the last frame we
+    /// actually converted — see `depthMinIntervalSec`.
+    private struct StreamGate {
+        var depth: Bool
+        var features: Bool
+        var lastDepthConversion: TimeInterval = 0
+    }
     private let streamGate = OSAllocatedUnfairLock(
         initialState: StreamGate(depth: true, features: true))
+
+    /// False from the moment the session pauses until the delegate delivers
+    /// the first frame of the NEXT run. Every read of `session.currentFrame`
+    /// that yields a pose or an image goes through it.
+    ///
+    /// ARKit documents nothing about `currentFrame` across `pause()` and the
+    /// next `run()`, in either direction. The note on `addedAnchors` below
+    /// records having found it nil during a pause; that is one observation on
+    /// one OS version, not a contract, and it says nothing at all about the
+    /// tens of milliseconds AFTER `run(config)` and before the first new
+    /// frame lands. If `currentFrame` is the last PRE-PAUSE frame in that
+    /// window, every gate here passes on it: its `camera.trackingState` was
+    /// `.normal` and its anchor transforms belong to the world frame ARKit
+    /// held before the pause, so `trackedWorldAnchorPosition` takes its
+    /// success branch and hands back a pose from wherever the cruiser was
+    /// standing when they left. `ActiveSamplingPlot`'s pause invalidation
+    /// would then be undone by the very next 0.2 s poll — the ring, pillar,
+    /// DBH border chip and mini-map dot all back at the old pose, with no
+    /// tracking-lost wording, which is the whole window that invalidation
+    /// exists to close.
+    ///
+    /// So this does not rest on which way ARKit actually behaves: it makes
+    /// the answer ours. The honest rule is that a frame captured before the
+    /// current run is not a frame, and one bool enforces it.
+    ///
+    /// This is the Android property made explicit: `ArSessionHub.detach`
+    /// sets `controller.frame = null`, so nothing there can be read until a
+    /// real new frame lands.
+    ///
+    /// It is tied to PAUSE, not to `run()`. A configuration switch between
+    /// two AR screens re-runs the session without reset options; the world
+    /// frame is continuous across that and the last frame is still this
+    /// run's, so gating on every `run` would blank the plot for a poll on
+    /// every screen change for no reason.
+    ///
+    /// Written from the (nonisolated) delegate, so it lives behind a lock
+    /// like the other delegate-visible state. The delegate and the screens'
+    /// polls are both main-queue work, so the worst case is one poll landing
+    /// between ARKit publishing a frame and the delegate callback running —
+    /// one tick of refusing, which is the safe side.
+    private let liveFrameSincePause = OSAllocatedUnfairLock(initialState: false)
+
+    /// True once the current run has delivered at least one frame.
+    private var hasLiveFrame: Bool { liveFrameSincePause.withLock { $0 } }
+
+    /// Floor on the interval between depth conversions, in ARFrame time.
+    ///
+    /// FIELD REPORT 9 — heavy lag and freezes on the scan screens. ARKit
+    /// delivers 60 frames a second and `convert` was running on every one of
+    /// them, but NOTHING consumes depth at 60 Hz: the DBH live preview is
+    /// throttled to 10 Hz, the height walk hint to 10 Hz, and a capture
+    /// sub-sample closes on 0.5 s of frames with a floor of 5. At 30 Hz the
+    /// burst still sees ~15 frames per sub-sample window — three times its
+    /// floor — while the per-frame buffer copy, the two array allocations
+    /// and the main-actor publish all halve.
+    ///
+    /// This is a RATE floor, never a value substitution: a frame that is
+    /// skipped is not published at all, so no consumer ever reads an
+    /// invented or interpolated depth.
+    private static let depthMinIntervalSec: TimeInterval = 1.0 / 30.0
 
     /// The AR view's size and interface orientation, reported by
     /// `ARCameraView` whenever its bounds change. Read by the (nonisolated)
@@ -292,6 +388,31 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
         applyConfiguration(configuration)
     }
 
+    /// Called synchronously, on the main actor, the moment the LAST attached
+    /// screen leaves and the session pauses.
+    ///
+    /// This exists for exactly one caller: `ActiveSamplingPlot`, which has to
+    /// drop the plot centre at that instant. A world anchor's transform is a
+    /// coordinate in the world frame ARKit was maintaining when it was read,
+    /// and a paused session maintains nothing — so once the session stops,
+    /// the last centre is a claim about a frame nobody is tracking. Waiting
+    /// for the next screen's first poll instead would redraw the ring, the
+    /// pillar, the DBH border chip and the mini-map YOU dot from that
+    /// pre-pause pose while ARKit is still relocalizing. Android does this
+    /// inline in `ArSessionHub.detach`, which owns both halves; here the
+    /// session lives in Sensors and the plot in the app layer, so the app
+    /// layer registers.
+    ///
+    /// A survivor screen (overlapping transition) is NOT a pause: the world
+    /// frame carries on and nothing is invalidated.
+    ///
+    /// This callback alone is not enough, and was not: the next screen's
+    /// first poll could re-fill the centre from a pre-pause `currentFrame`
+    /// before ARKit had delivered anything for the resumed session. The gap
+    /// is held shut by `liveFrameSincePause`, which is dropped in the same
+    /// branch below.
+    public var onSessionPaused: (() -> Void)?
+
     /// Detach an AR screen. If another screen is still attached (screen-
     /// transition overlap) its configuration is re-applied; otherwise the
     /// session pauses until the next attach. Detaching an unknown client
@@ -304,6 +425,24 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
         } else {
             session.pause()
             isRunning = false
+            // Nothing may be read out of `currentFrame` again until the next
+            // run delivers a real frame — see `liveFrameSincePause`.
+            liveFrameSincePause.withLock { $0 = false }
+            // The same rule for the values the delegate PUSHES. These are
+            // only ever written per frame, so without this they survive the
+            // pause and the next screen reads them before ARKit has said
+            // anything: a DBH bracket mapped against a depth frame captured
+            // 15 m away, a walk-off displacement measured from a camera
+            // position in the previous world frame, a `.normal` tracking
+            // status for a session that is not tracking at all. The screens
+            // all handle these being absent (it is the same nil they get on
+            // a config switch, twenty lines below), and absent is the truth
+            // here: the session is paused, so nobody knows.
+            latestDepthFrame = nil
+            latestRawFeaturePoints = nil
+            currentCameraWorldPosition = nil
+            trackingStatus = .notAvailable
+            onSessionPaused?()
         }
     }
 
@@ -365,12 +504,37 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
                                            worldPosition.z, 1)
         let anchor = ARAnchor(name: name, transform: transform)
         session.add(anchor: anchor)
+        // Held so removal never depends on a live frame — see
+        // `removeWorldAnchor`.
+        addedAnchors[anchor.identifier] = anchor
         return anchor.identifier
     }
 
+    /// Anchors this manager created, by identifier. `session.remove(anchor:)`
+    /// needs the `ARAnchor` OBJECT, and the only other way to get one back was
+    /// `currentFrame.anchors` — which was found nil while the session was
+    /// paused, i.e. exactly when a screen is going away and releasing its
+    /// anchor (ARKit documents no behaviour either way here — see
+    /// `liveFrameSincePause` — so the table is what makes it certain). The
+    /// removal then silently no-opped and the anchor leaked into the
+    /// app-shared session for the rest of the process, with no one holding its
+    /// id to reclaim it. Cleared on removal; at most a handful of entries (the
+    /// plot centre and the trunk).
+    private var addedAnchors: [UUID: ARAnchor] = [:]
+
     /// Remove a previously added world anchor. No-op when the anchor no
     /// longer exists (session recreated, already removed).
+    ///
+    /// Deliberately NOT gated on `liveFrameSincePause`, unlike every other
+    /// `currentFrame` reader here: this asks for an anchor's IDENTITY, not
+    /// its pose, and identity does not go stale. Refusing a removal because
+    /// the session just paused would leak the anchor — which is the exact
+    /// bug the `addedAnchors` table above was added to fix.
     public func removeWorldAnchor(id: UUID) {
+        if let anchor = addedAnchors.removeValue(forKey: id) {
+            session.remove(anchor: anchor)
+            return
+        }
         guard let anchor = session.currentFrame?.anchors
             .first(where: { $0.identifier == id }) else { return }
         session.remove(anchor: anchor)
@@ -380,6 +544,7 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
     /// world-map correction, not the position it was placed at. nil when
     /// the anchor is gone or no frame is available yet.
     public func worldAnchorPosition(id: UUID) -> SIMD3<Float>? {
+        guard hasLiveFrame else { return nil }
         guard let anchor = session.currentFrame?.anchors
             .first(where: { $0.identifier == id }) else { return nil }
         let c = anchor.transform.columns.3
@@ -392,6 +557,59 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
         worldAnchorPosition(id: id) != nil
     }
 
+    /// Live world position of an anchor, but ONLY while ARKit's camera
+    /// tracking is `.normal` — otherwise nil.
+    ///
+    /// An anchor transform is a coordinate in the world frame ARKit held
+    /// when it was read, and `.limited` (relocalizing, excessive motion,
+    /// insufficient features) is precisely when that frame is being
+    /// re-jigged underneath it. Reading through it produces a point that
+    /// looks fine and is metres from the physical spot, which is how the
+    /// sampling plot ended up drawn beside a cruiser standing outside it.
+    /// Callers that draw world geometry — the plot ring and pillar — use
+    /// this one and show nothing when it refuses. `worldAnchorPosition`
+    /// stays for callers that only need "is this anchor still here?".
+    ///
+    /// THIS IS THE ANDROID RULE, NOT A STRICTER ONE. `ArSessionHub`
+    /// requires `frame.camera.trackingState == TRACKING`, and ARCore reports
+    /// PAUSED — never TRACKING — for insufficient features, excessive
+    /// motion, insufficient light, initialization and relocalization. Those
+    /// are exactly the cases ARKit spells `.limited(.insufficientFeatures)`,
+    /// `.limited(.excessiveMotion)`, `.limited(.initializing)` and
+    /// `.limited(.relocalizing)`. So `.normal` ↔ TRACKING is the mapping,
+    /// and both platforms then give the pose the same half-second grace
+    /// (`ActiveSamplingPlot.trackingGraceSeconds` / `PLOT_POSE_GRACE_MS`)
+    /// before the geometry goes. Widening this to accept `.limited` would
+    /// not "match Android" — it would make iOS the loose one and hand back
+    /// the drift field report 7 was about.
+    ///
+    /// Nor does it contradict `currentCameraWorldPosition`, which IS
+    /// published through `.limited`. That one is read as a DISPLACEMENT
+    /// between two samples seconds apart in one walk-off, and ARKit's pose
+    /// stays continuous through excessive motion / thin features. This is a
+    /// LONG-LIVED absolute coordinate placed minutes ago, compared against
+    /// where the cruiser is standing now; its whole risk is the world frame
+    /// being re-fitted underneath it in between. Different question, and the
+    /// screen never shows one without the other — when this refuses, the
+    /// sampling screen blanks the distance readout with the ring.
+    ///
+    /// The anchor half of Android's test has no counterpart to write: a
+    /// plain ARKit `ARAnchor` is not `ARTrackable` and carries no tracking
+    /// state, so presence in `frame.anchors` is the whole of what iOS can
+    /// ask, and it is asked below.
+    public func trackedWorldAnchorPosition(id: UUID) -> SIMD3<Float>? {
+        // A frame from before the current run is not a frame — its
+        // `.normal` tracking state and its anchor transforms describe a
+        // world ARKit is no longer maintaining. See `liveFrameSincePause`.
+        guard hasLiveFrame,
+              let frame = session.currentFrame,
+              case .normal = frame.camera.trackingState,
+              let anchor = frame.anchors.first(where: { $0.identifier == id })
+        else { return nil }
+        let c = anchor.transform.columns.3
+        return SIMD3<Float>(c.x, c.y, c.z)
+    }
+
     /// Reference RGB of the current camera image as JPEG, for the
     /// raw-capture recorder (developer mode only). Reads the live
     /// `ARFrame.capturedImage` (YCbCr CVPixelBuffer) and encodes it via
@@ -399,7 +617,11 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
     /// matching the depth buffers). Returns nil when no frame is available
     /// or encoding fails. Cheap enough to call once per burst.
     public func currentCameraImageJPEG(quality: Double = 0.8) -> Data? {
-        guard let pixelBuffer = session.currentFrame?.capturedImage else { return nil }
+        // Same rule as the anchor reads: a pre-run frame's captured image is
+        // a photograph of wherever the cruiser was standing before the
+        // pause, and it would be filed as this capture's reference RGB.
+        guard hasLiveFrame,
+              let pixelBuffer = session.currentFrame?.capturedImage else { return nil }
         let ci = CIImage(cvPixelBuffer: pixelBuffer)
         let ctx = CIContext(options: nil)
         let space = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
@@ -427,12 +649,23 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
     // MARK: ARSessionDelegate
 
     public nonisolated func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        // ARKit has delivered a frame for the CURRENT run, so `currentFrame`
+        // is this run's from here on and the anchor/image readers may use it
+        // again. Set before any of the work below so a poll that interleaves
+        // is never told to refuse a frame we already have.
+        liveFrameSincePause.withLock { $0 = true }
         // Per-screen stream gate: the depth-map conversion below copies
         // ~50 k floats per frame — screens that never read depth
         // (sampling plot, distance) skip it entirely, and the VIO
         // feature-point array copy is skipped unless the DBH AR-motion
-        // method is on screen.
-        let gate = streamGate.withLock { $0 }
+        // method is on screen. Screens that DO read depth get it at
+        // `depthMinIntervalSec`, not at ARKit's 60 Hz.
+        let gate = streamGate.withLock { g -> (depth: Bool, features: Bool) in
+            let convert = g.depth
+                && frame.timestamp - g.lastDepthConversion >= Self.depthMinIntervalSec
+            if convert { g.lastDepthConversion = frame.timestamp }
+            return (convert, g.features)
+        }
         let vp = viewport.withLock { $0 }
         let converted = gate.depth
             ? Self.convert(frame: frame,
@@ -440,6 +673,7 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
                            orientation: vp.orientation)
             : nil
         let status = Self.mapTrackingState(frame.camera.trackingState)
+        let relocalizing = Self.isRelocalizingState(frame.camera.trackingState)
         let t = frame.camera.transform
         let camPos = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
         let features = gate.features ? frame.rawFeaturePoints?.points : nil
@@ -450,7 +684,8 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
                 self.trackedNormalSinceWatch = false
             }
             self.trackingStatus = status
-            self.currentCameraWorldPosition = camPos
+            if self.isRelocalizing != relocalizing { self.isRelocalizing = relocalizing }
+            self.currentCameraWorldPosition = status == .notAvailable ? nil : camPos
             if let features { self.latestRawFeaturePoints = features }
             if let converted { self.latestDepthFrame = converted }
         }
@@ -464,6 +699,15 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
         case .notAvailable: return .notAvailable
         case .limited: return .limited
         }
+    }
+
+    /// The one `.limited` reason that means WORLD COORDINATES ARE MOVING —
+    /// see `isRelocalizing`.
+    private nonisolated static func isRelocalizingState(
+        _ state: ARCamera.TrackingState
+    ) -> Bool {
+        if case .limited(.relocalizing) = state { return true }
+        return false
     }
 
     /// VIEW px → DEPTH px for this frame, or nil when it cannot be built
@@ -535,12 +779,23 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
         else { return nil }
         let depthStride = CVPixelBufferGetBytesPerRow(depthMap)
 
+        // Row-wise memcpy, not element-wise assignment (field report 9).
+        // Both buffers are tightly packed within a row, so the only reason
+        // to walk pixels was the row stride — and the strided rows can be
+        // bulk-copied one at a time. The old scalar loops ran ~98 k bounds-
+        // checked subscript writes per frame on the main sensor path.
         var depth = [Float](repeating: 0, count: width * height)
-        for row in 0..<height {
-            let rowPtr = depthBase.advanced(by: row * depthStride)
-                .assumingMemoryBound(to: Float.self)
-            for col in 0..<width {
-                depth[row * width + col] = rowPtr[col]
+        let depthRowBytes = width * MemoryLayout<Float>.size
+        depth.withUnsafeMutableBytes { dst in
+            guard let dstBase = dst.baseAddress else { return }
+            if depthStride == depthRowBytes {
+                memcpy(dstBase, depthBase, depthRowBytes * height)
+            } else {
+                for row in 0..<height {
+                    memcpy(dstBase.advanced(by: row * depthRowBytes),
+                           depthBase.advanced(by: row * depthStride),
+                           depthRowBytes)
+                }
             }
         }
 
@@ -550,11 +805,16 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
             defer { CVPixelBufferUnlockBaseAddress(cm, .readOnly) }
             if let cBase = CVPixelBufferGetBaseAddress(cm) {
                 let cStride = CVPixelBufferGetBytesPerRow(cm)
-                for row in 0..<height {
-                    let rowPtr = cBase.advanced(by: row * cStride)
-                        .assumingMemoryBound(to: UInt8.self)
-                    for col in 0..<width {
-                        confidence[row * width + col] = rowPtr[col]
+                confidence.withUnsafeMutableBytes { dst in
+                    guard let dstBase = dst.baseAddress else { return }
+                    if cStride == width {
+                        memcpy(dstBase, cBase, width * height)
+                    } else {
+                        for row in 0..<height {
+                            memcpy(dstBase.advanced(by: row * width),
+                                   cBase.advanced(by: row * cStride),
+                                   width)
+                        }
                     }
                 }
             }
@@ -609,9 +869,12 @@ public final class ARKitSessionManager: ObservableObject {
     @Published public private(set) var latestDepthFrame: ARDepthFrame?
     @Published public private(set) var isRunning = false
     @Published public private(set) var currentCameraWorldPosition: SIMD3<Float>?
+    @Published public private(set) var isRelocalizing = false
     @Published public private(set) var latestRawFeaturePoints: [SIMD3<Float>]?
 
     public static var supportsLiDAR: Bool { false }
+
+    public var onSessionPaused: (() -> Void)?
 
     public init() {}
     public func run() {}
@@ -624,6 +887,7 @@ public final class ARKitSessionManager: ObservableObject {
     public func removeWorldAnchor(id: UUID) {}
     public func worldAnchorPosition(id: UUID) -> SIMD3<Float>? { nil }
     public func worldAnchorExists(id: UUID) -> Bool { false }
+    public func trackedWorldAnchorPosition(id: UUID) -> SIMD3<Float>? { nil }
     public func currentCameraImageJPEG(quality: Double = 0.8) -> Data? { nil }
     public var trackingStayedNormal: Bool { false }
     public func beginTrackingWatch() {}

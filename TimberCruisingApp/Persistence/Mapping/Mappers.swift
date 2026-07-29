@@ -243,6 +243,7 @@ public enum TreeMapper {
         e.id = s.id
         e.plotId = s.plotId
         e.treeNumber = Int32(s.treeNumber)
+        e.treeName = s.treeName
         e.speciesCode = s.speciesCode
         e.status = s.status.rawValue
 
@@ -311,6 +312,7 @@ public enum TreeMapper {
             id: e.id,
             plotId: e.plotId,
             treeNumber: Int(e.treeNumber),
+            treeName: e.treeName,
             speciesCode: e.speciesCode,
             status: status,
             dbhCm: e.dbhCm,

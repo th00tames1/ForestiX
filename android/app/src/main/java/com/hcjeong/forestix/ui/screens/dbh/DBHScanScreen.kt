@@ -6,6 +6,7 @@
 
 package com.hcjeong.forestix.ui.screens.dbh
 
+import android.os.SystemClock
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -140,6 +141,31 @@ private const val SAMPLE_COUNT = 5
 /// detector in the preview loop.
 private const val PREVIEW_MISS_RESET = 7
 
+/// FIELD REPORT 15 — how long the screen aims without producing a single
+/// fit before it stops repeating "align and hold steady" and says what to
+/// do instead. ARCore's depth wants parallax, and whether it gets any is
+/// dominated by how far the cruiser is standing from the stem; the cruiser
+/// found that a gentle sway or a step in/out clears it, but nothing on
+/// screen said so. Two seconds is long enough that a normal acquisition
+/// never trips it and short enough to answer someone who is already
+/// wondering why the number won't come up.
+private const val ACQUISITION_STALL_MS = 2_000L
+
+/// The hint itself. Byte-identical to the iOS sibling
+/// (`DBHScanScreen.acquisitionStallHint`).
+private const val ACQUISITION_STALL_HINT =
+    "No depth lock yet — move the phone gently side to side, or change your distance."
+
+/// How long without a single depth frame before everything the banner could
+/// say about `preview` / `adjustPreview` is treated as describing a frame that
+/// no longer exists. Both preview loops write those only inside the frame
+/// block, so an ARCore stall (interruption, thermal throttle, tracking loss)
+/// freezes the last one — and a frozen locked preview would otherwise keep
+/// telling the cruiser to "hold steady, then tap +" over a dead screen, and
+/// keep the stall clock from ever running. Three missed 150 ms ticks, so one
+/// dropped frame is not an outage; matches the iOS `depthSilentSec`.
+private const val DEPTH_SILENT_MS = 500L
+
 /// Fresh-vs-held tap-depth divergence treated as a possible re-aim: one
 /// such tick is bridged with the EMA seed (could be an ML-depth hole /
 /// outlier); two consecutive divergent ticks reset the lock immediately.
@@ -152,6 +178,12 @@ private const val TAP_JUMP_M = 0.5f
 /// the bar. Below it, the EMA (α=0.3) irons out hand tremor as before.
 private const val CYL_ANCHOR_SNAP_M = 0.05f
 
+/// Owner sentinel for a truth kept on screen for a measurement that produced
+/// NO usable bundle (the capture itself failed, so its id was dropped). Never
+/// a real bundle id, so the cross-tree guard in `acceptResult` still fires.
+/// iOS calls the same sentinel `noBundleOwner`.
+private const val TRUTH_NO_BUNDLE_OWNER = "no-bundle"
+
 /// `chainToHeight` = launched from the map-home "Full measurement" row
 /// ("dbh?chain=true"): Accept saves the diameter, skips the continuation
 /// dialog, and goes straight to Height on the same tree.
@@ -163,12 +195,14 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // and the sampling plot's anchor renders here as a subdued overlay).
     val controller = ArSessionHub.controller
     val scope = rememberCoroutineScope()
-    // Map-home tree lock ("Measure this tree again" / chooser rows) hands
-    // the tree number over via PendingTreeNumber — consume it once so the
-    // accepted reading lands on the promised tree; otherwise pick the next
-    // free number (iOS pendingTreeNumber parity).
+    // Map-home tree lock ("Measure this tree again" / chooser rows) hands the
+    // tree number — and the name and species the cruiser typed in the chooser
+    // — over via PendingTreeNumber. Consume it once so the accepted reading
+    // lands on the promised tree; otherwise pick the next free number (iOS
+    // pendingTreeNumber parity).
+    val pendingLock = remember { PendingTreeNumber.consume() }
     var pendingTree by remember {
-        mutableStateOf(PendingTreeNumber.consume() ?: env.history.suggestedNextTreeNumber)
+        mutableStateOf(pendingLock?.number ?: env.history.suggestedNextTreeNumber)
     }
     // Manual DBH entry (typed cm) — mirror of the iOS .manualEntry state.
     var manualOpen by remember { mutableStateOf(false) }
@@ -178,13 +212,17 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // overlays (captured buttons read as real buttons in the photo viewer).
     var hidingChromeForCapture by remember { mutableStateOf(false) }
     // Scan metadata (species / position / damage / note) attached on Accept.
-    var metaSpecies by remember { mutableStateOf<String?>(null) }
+    // Seeded from the chooser's species control when it was used, so the
+    // details chip already reads the species the cruiser picked at the tree.
+    var metaSpecies by remember { mutableStateOf(pendingLock?.speciesCode) }
     var metaPosition by remember { mutableStateOf<StemPosition?>(StemPosition.DBH) }
     var metaDamage by remember { mutableStateOf<List<String>>(emptyList()) }
     var metaNote by remember { mutableStateOf("") }
     var showMetadata by remember { mutableStateOf(false) }
-    // Developer-mode research capture: tape-measured true diameter (cm).
-    var researchTrueCm by remember { mutableStateOf("") }
+    // Developer-mode research capture: the tape-measured true diameter, AS
+    // TYPED. The unit is `truthUnit` below, never assumed — the field used to
+    // be named (and read) as centimetres whatever the cruiser was working in.
+    var researchTrueText by remember { mutableStateOf("") }
     // Cruise quick-tally loop (field-benchmark batch): the target tree number
     // shown in the top pill, mirrored into Compose state so advance/undo
     // recompose (CruiseCapture.target is a plain @Volatile holder).
@@ -304,6 +342,25 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     var truthPending by remember { mutableStateOf<String?>(null) }
     var truthPendingId by remember { mutableStateOf<String?>(null) }
     var truthPendingText by remember { mutableStateOf("") }
+    // The bundle a kept-on-screen truth was typed FOR (iOS truthOwnerBundleID).
+    // Every path above deliberately KEEPS the text when the value could not be
+    // attached, so what is in the field may belong to an EARLIER capture — and
+    // the cruise tally reset does not clear it either. Without this mark the
+    // next tree's Accept re-parsed that text and exported it as ITS true_value:
+    // tree 7's tape number, and an error computed against tree 8's diameter.
+    // Cleared the moment the cruiser edits the field.
+    var truthOwnerBundleId by remember { mutableStateOf<String?>(null) }
+    // The unit THIS typed truth is in. It opens in the cruiser's active system
+    // — an imperial operator gets inches, not a centimetre field they type
+    // inches into — and the square button beside the field switches it for
+    // this entry. Keyed on the active system so changing the project's units
+    // re-defaults it; a per-entry toggle survives ordinary recomposition.
+    var truthUnit by remember(settings.unitSystem) {
+        mutableStateOf(TruthInput.defaultUnit(
+            TruthInput.Quantity.DIAMETER,
+            imperial = settings.unitSystem != UnitSystem.METRIC,
+        ))
+    }
     // Storage headroom, re-read on entry and after every capture: below the
     // guard the recorder refuses to write, and the capture's outcome pill
     // says so before a whole plot is lost.
@@ -372,9 +429,11 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 // manifest carries it — this is the only place the field may
                 // be cleared for a queued value.
                 if (outcome.queuedTruthSaved != null && truthPendingId == id) {
-                    if (researchTrueCm == truthPendingText) researchTrueCm = ""
+                    if (researchTrueText == truthPendingText) researchTrueText = ""
                     truthPending = null
                     truthPendingId = null
+                    // Durable and off the screen: it owns nothing now.
+                    truthOwnerBundleId = null
                 }
             } else {
                 // Nothing on disk under this id — drop it so a later Accept
@@ -386,16 +445,34 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 // pairing is acceptable; losing it INVISIBLY is not — put the
                 // number back on screen (or at least name it) and say so.
                 outcome.queuedTruthLost?.let { lost ->
-                    val text = TruthInput.text(lost)
-                    val restore = TruthInput.normalized(researchTrueCm).isEmpty()
-                    if (restore) researchTrueCm = text
+                    // Rendered in the unit it was TYPED in, not the metric base
+                    // it was stored as — handing an imperial cruiser back a
+                    // silently converted number is the same defect in reverse.
+                    val text = TruthInput.text(lost.value, lost.unit)
+                    val restore = TruthInput.normalized(researchTrueText).isEmpty()
+                    if (restore) {
+                        researchTrueText = text
+                        truthUnit = lost.unit
+                    }
                     // Only retire the pending marker if it is THIS capture's —
                     // a later capture may already own it.
-                    if (truthPendingId == id) {
+                    val stillOurs = truthPendingId == id
+                    if (stillOurs) {
                         truthPending = null
                         truthPendingId = null
                     }
-                    truthSaveFailure = RawCaptureStrings.truthLost(text, restore)
+                    // The text now on screen belongs to THIS dead capture —
+                    // either we just put it back, or the cruiser never touched
+                    // it while the write ran. Mark it, or the next tree's Accept
+                    // exports a tape number never taken on that stem. When the
+                    // cruiser HAS typed something newer, that text is their
+                    // intent for the capture in front of them and stays unowned.
+                    if (restore || stillOurs) truthOwnerBundleId = id
+                    // The number is named WITH its unit — a bare "12.5" in a
+                    // failure message is the same ambiguity this item exists
+                    // to remove.
+                    truthSaveFailure = RawCaptureStrings.truthLost(
+                        "$text ${lost.unit.raw}", restore)
                 }
             }
         }
@@ -435,6 +512,17 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // through one-frame fit dropouts (iOS tolerates transient reds the
     // same way).
     var missStreak by remember { mutableStateOf(0) }
+    // True once ACQUISITION_STALL_MS of aiming has gone by without a single
+    // lock — the acquisition hint's only trigger. Both preview loops
+    // maintain it, and it is a Boolean rather than a timestamp so a screen
+    // that is quietly failing to acquire recomposes exactly twice (in, and
+    // back out again) instead of on every 150 ms tick.
+    var acquisitionStalled by remember { mutableStateOf(false) }
+    // True once DEPTH_SILENT_MS has gone by with no depth frame at all. The
+    // banner uses it to stop quoting a preview that stopped being updated —
+    // see DEPTH_SILENT_MS. Maintained by both preview loops alongside the
+    // stall flag.
+    var depthSilent by remember { mutableStateOf(false) }
     // Consecutive ticks whose FRESH centre median diverged > TAP_JUMP_M from
     // the held smoothed distance while shown-locked. 1 = bridge with the EMA
     // seed (hole/outlier); 2 = real re-aim → reset immediately (cuts the
@@ -460,8 +548,15 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // Live single-frame preview loop while aiming (paused while the ADJUST
     // bracket owns the edges).
     LaunchedEffect(stage, depthBlocked, adjustMode) {
+        // The stall clock belongs to THIS aiming run — a stage change or a
+        // mode flip restarts the effect and so restarts the clock.
+        acquisitionStalled = false
+        depthSilent = false
+        var lastLockAt = SystemClock.elapsedRealtime()
+        var lastFrameAt = SystemClock.elapsedRealtime()
         while (stage == Stage.AIMING && !depthBlocked && !adjustMode) {
             controller.acquireDepthFrame()?.let { f ->
+                lastFrameAt = SystemClock.elapsedRealtime()
                 // Crosshair → depth pixel through ARCore's own view↔texture
                 // mapping (display rotation + aspect crop). Falls back to the
                 // grid centre while the mapping isn't available — same point
@@ -668,6 +763,20 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     )
                 }
             }
+            // OUTSIDE the frame block on purpose: "no depth frame at all" is
+            // one of the states the cruiser is stuck in, and it has to count
+            // towards the stall the same as a frame that produced no lock.
+            //
+            // Which is why the lock test is gated on a FRESH frame. `preview`
+            // is only ever written inside the block above, so with no frames
+            // arriving it holds its last value — and a held `locked == true`
+            // pushed `lastLockAt` forward on every tick, so the clock never
+            // ran and the hint could never come up in precisely the state
+            // this line was written for.
+            val nowMs = SystemClock.elapsedRealtime()
+            depthSilent = nowMs - lastFrameAt >= DEPTH_SILENT_MS
+            if (!depthSilent && preview?.locked == true) lastLockAt = nowMs
+            acquisitionStalled = nowMs - lastLockAt >= ACQUISITION_STALL_MS
             delay(150)
         }
     }
@@ -676,8 +785,13 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // frame's own view↔depth affine) + the median depth inside the bracket
     // at the guide row, refreshed on the same cadence as the auto preview.
     LaunchedEffect(stage, adjustMode, depthBlocked) {
+        acquisitionStalled = false
+        depthSilent = false
+        var lastLockAt = SystemClock.elapsedRealtime()
+        var lastFrameAt = SystemClock.elapsedRealtime()
         while (stage == Stage.AIMING && adjustMode && !depthBlocked) {
             controller.acquireDepthFrame()?.let { f ->
+                lastFrameAt = SystemClock.elapsedRealtime()
                 val w = controller.viewWidthPx.toFloat()
                 val cy = controller.viewHeightPx / 2f
                 adjustPreview = if (w > 1f) {
@@ -686,6 +800,13 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     )
                 } else null
             }
+            // Same gate as the auto loop: `adjustPreview` survives a frame
+            // outage untouched, so a held lock would refresh the clock for
+            // ever. ADJUST is the default path, so this is the common case.
+            val nowMs = SystemClock.elapsedRealtime()
+            depthSilent = nowMs - lastFrameAt >= DEPTH_SILENT_MS
+            if (!depthSilent && adjustPreview?.locked == true) lastLockAt = nowMs
+            acquisitionStalled = nowMs - lastLockAt >= ACQUISITION_STALL_MS
             delay(150)
         }
     }
@@ -941,8 +1062,35 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         // store queues edits against the synchronously-minted id) — the old
         // code wrote truth only when the write had already completed, so a
         // fast Accept dropped it and the field was cleared anyway.
-        val truthTextAtAccept = researchTrueCm
-        val rawTrue = TruthInput.parsePositive(truthTextAtAccept)
+        // The UNIT is snapshotted with the text for the same reason: the
+        // cruiser can retype and re-toggle while the write runs, and the value
+        // must be converted and recorded with the unit it was typed under.
+        val truthTextAtAccept = researchTrueText
+        val truthUnitAtAccept = truthUnit
+        // Always the metric base (cm) — the conversion lives in TruthInput.
+        val rawTrue = TruthInput.parsePositiveBase(truthTextAtAccept, truthUnitAtAccept)
+        // OWNER GATE (iOS `typedTruthForThisMeasurement`). The typed value may
+        // only be RECORDED against this measurement while both marks are clear,
+        // i.e. the text was typed for THIS capture: an owned truth belongs to an
+        // earlier capture that could not take it, and a pending one is queued
+        // against a bundle still being written. Read HERE, synchronously, before
+        // the attach block below can claim the pending slot — and read by BOTH
+        // consumers (the saved reading and the research row) so the two can
+        // never disagree about which capture a number was typed for.
+        val ownedTrue =
+            if (truthOwnerBundleId == null && truthPendingId == null) rawTrue else null
+        // The plot this reading must land in. A field-log RE-MEASURE names the
+        // plot explicitly — including "no plot", which is a real state for rows
+        // recorded before plots existed — and `replaceReading` matches the
+        // superseded reading on it. Resolving that null to the active plot sent
+        // the replacement somewhere else, where it found nothing to supersede
+        // and appended a SECOND reading on the tree: exactly the duplicate the
+        // re-measure was built to prevent. Only a lock that is not a re-measure
+        // (the map home's tree lock) means "wherever I am now".
+        val lockedPlotID = pendingLock?.plotID
+        val targetPlotID =
+            if (pendingLock?.replaceExisting == true) lockedPlotID
+            else lockedPlotID ?: env.history.activePlotID.value
         truthSaveFailure = null
         scope.launch {
             // Stamp operator_accepted on the bundle this Accept confirms
@@ -955,38 +1103,68 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             if (settings.developerMode && TruthInput.normalized(truthTextAtAccept).isNotEmpty()) {
                 when {
                     rawTrue == null -> truthSaveFailure = RawCaptureStrings.TRUTH_NOT_A_NUMBER
-                    // Not recording: the value still went to the research CSV.
-                    !rawCaptureArmed -> if (researchTrueCm == truthTextAtAccept) researchTrueCm = ""
+                    // Not recording: the value still went to the research CSV,
+                    // so the field may clear — and with it every owner mark,
+                    // since nothing is left on screen to belong to anyone.
+                    !rawCaptureArmed -> {
+                        if (researchTrueText == truthTextAtAccept) researchTrueText = ""
+                        truthOwnerBundleId = null
+                        truthPendingId = null
+                        truthPending = null
+                    }
+                    // Left over from an EARLIER capture that couldn't take it:
+                    // attaching it here would put one tree's tape measurement on
+                    // another tree's bundle. Make the cruiser re-enter (or clear)
+                    // it instead — the owner mark stays set, so the gate above
+                    // keeps it out of this tree's reading and research row too.
+                    truthOwnerBundleId != null && truthOwnerBundleId != rid ->
+                        truthSaveFailure = RawCaptureStrings.TRUTH_STALE_OWNER
                     // The capture itself failed — keep the typed value on
                     // screen rather than attach it to a bundle that isn't there.
-                    lastCaptureFailure != null -> truthSaveFailure =
-                        RawCaptureStrings.truthCaptureFailed(lastCaptureFailure)
-                    rid == null -> if (researchTrueCm == truthTextAtAccept) researchTrueCm = ""
+                    // It is marked as owned by no bundle (the failed capture's
+                    // id was already dropped) so the NEXT tree's Accept refuses
+                    // it instead of exporting it as that tree's tape number.
+                    lastCaptureFailure != null -> {
+                        truthSaveFailure =
+                            RawCaptureStrings.truthCaptureFailed(lastCaptureFailure)
+                        truthOwnerBundleId = rid ?: TRUTH_NO_BUNDLE_OWNER
+                        truthPendingId = null
+                        truthPending = null
+                    }
+                    rid == null -> if (researchTrueText == truthTextAtAccept) researchTrueText = ""
                     else -> {
                         // Claim the pending slot BEFORE the store call: the
                         // recorder's own completion handler reads it to decide
                         // whether the queued value landed.
                         truthPendingId = rid
                         truthPendingText = truthTextAtAccept
-                        when (RawCaptureStore.setTruth(context, rid, rawTrue)) {
+                        when (RawCaptureStore.setTruth(
+                            context, rid, rawTrue, truthUnitAtAccept)) {
                             // Durable — the manifest already exists.
                             RawCaptureStore.TruthWrite.SAVED -> {
                                 truthPending = null
                                 truthPendingId = null
-                                if (researchTrueCm == truthTextAtAccept) researchTrueCm = ""
+                                // In the manifest and off the screen — the only
+                                // state that owns nothing.
+                                truthOwnerBundleId = null
+                                if (researchTrueText == truthTextAtAccept) researchTrueText = ""
                             }
                             // QUEUED is NOT durable: the value lives only in
                             // the store's pending queue until the in-flight
-                            // write folds it in, so the text stays put.
+                            // write folds it in, so the text stays put — and
+                            // text left on screen belongs to THIS bundle until
+                            // the cruiser retypes it.
                             // (If the writer already resolved it, truthPendingId
                             // is null again and there is nothing to announce.)
                             RawCaptureStore.TruthWrite.QUEUED ->
                                 if (truthPendingId == rid) {
                                     truthPending = RawCaptureStrings.TRUTH_PENDING
+                                    truthOwnerBundleId = rid
                                 }
                             RawCaptureStore.TruthWrite.FAILED -> {
                                 truthPending = null
                                 truthPendingId = null
+                                truthOwnerBundleId = rid
                                 truthSaveFailure = RawCaptureStrings.TRUTH_WRITE_FAILED
                             }
                         }
@@ -1063,7 +1241,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     nav.navigate("height?tree=$measuredTreeNumber&chained=true")
                 }
             } else {
-                env.history.append(
+                val reading =
                     QuickMeasureEntry(
                         kind = MeasureKind.DBH, value = r.diameterCm.toDouble(),
                         // A TYPED diameter has no propagated uncertainty —
@@ -1074,7 +1252,17 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                                 else r.sigmaRmm.toDouble(),
                         confidenceRaw = r.confidence.raw,
                         method = r.method.raw, treeNumber = pendingTree,
-                        plotID = env.history.activePlotID.value,
+                        // The chooser's name when this flow was launched with
+                        // one, else the name the tree already carries — a
+                        // re-measurement must not arrive nameless and split
+                        // the tree in two in the export.
+                        // The name is looked up in the plot this reading lands
+                        // in, not the active one — on a re-measure they can be
+                        // different plots, and the wrong plot's tree 7 is a
+                        // different tree.
+                        treeName = pendingLock?.name
+                            ?: env.history.treeName(pendingTree, targetPlotID),
+                        plotID = targetPlotID,
                         speciesCode = metaSpecies,
                         position = metaPosition ?: StemPosition.DBH,
                         damageCodes = metaDamage,
@@ -1092,8 +1280,27 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                             resultFromAdjust -> "manual"
                             else -> "auto"
                         },
+                        // The tape diameter belongs ON the reading: the
+                        // raw-capture manifest is developer plumbing that can
+                        // be pruned, while the truth column the accuracy study
+                        // reads is exported from here. A value typed on this
+                        // screen is the newest word on this tree and wins; a
+                        // re-measure otherwise keeps the tape value already
+                        // typed for it, and a fresh reading has none.
+                        // `ownedTrue`, never the bare re-parse: text kept on
+                        // screen from an earlier capture is not this tree's
+                        // tape measurement.
+                        truth = (if (settings.developerMode) ownedTrue else null)
+                            ?: pendingLock?.truth,
                     )
-                )
+                // A re-measure launched from the field log TAKES THE PLACE of
+                // the reading it was launched from — appending would leave the
+                // superseded number invisible in the log but still in the CSV.
+                if (pendingLock?.replaceExisting == true) {
+                    env.history.replaceReading(reading)
+                } else {
+                    env.history.append(reading)
+                }
                 // Full-measurement chain (quick-measure world): skip the
                 // continuation dialog, go straight to Height on this tree.
                 // Navigate AFTER the append (this scope dies with the
@@ -1128,9 +1335,10 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 "species" to (metaSpecies ?: ""),
                 "note" to metaNote,
             )
-            if (settings.researchTreeId.isNotEmpty()) {
-                fields["tree_id"] = settings.researchTreeId  // repeat auto-filled by record()
-            }
+            // The tree this capture is ALREADY locked to, not a box the
+            // cruiser had to retype. Same value the raw-capture bundle and the
+            // saved reading carry, so the three join.
+            fields["tree_id"] = "${CruiseCapture.target?.treeNumber ?: pendingTree}"
             // Raw per-frame distance (pre-round-6 semantics) — never the
             // EMA-smoothed badge value; the display smoothing must not leak
             // into research/σ inputs.
@@ -1138,9 +1346,17 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             controller.cameraForwardElevationRad()?.let {
                 fields["pitch_deg"] = String.format(Locale.US, "%.1f", it * 180f / Math.PI.toFloat())
             }
-            rawTrue?.let { t ->
+            // `ownedTrue`, never the bare re-parse — see the owner gate. A
+            // stale number here is the worst of the three: the CSV is what the
+            // accuracy study reads, and tree 8's row would carry tree 7's tape
+            // value with an error computed against tree 8's diameter.
+            ownedTrue?.let { t ->
+                // `true_value` and `error` are in the row's `unit` (cm) — the
+                // same scale as `measured_value`, so the error column stays
+                // subtractable. `truth_unit` records what was actually typed.
                 fields["true_value"] = String.format(Locale.US, "%.2f", t)
                 fields["error"] = String.format(Locale.US, "%.2f", r.diameterCm - t)
+                fields["truth_unit"] = truthUnitAtAccept.raw
             }
             ResearchLog.record(context, fields)
             // The field is NOT cleared here any more — the accept coroutine
@@ -1271,20 +1487,24 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         // cruise plot (ring + YOU + measured trees) or the quick sampling
         // ring (ring + YOU). Hidden with the rest of the 2D chrome during
         // the Accept snapshot blackout.
-        // F11 — the card is TAPPABLE in cruise: it re-opens plot setup so
-        // the radius / centre stay editable after the first placement. The
-        // session's project/plot are fixed for this screen's lifetime
-        // (advanceTally only moves the tree NUMBER), so one remember is safe.
+        // F11 — the card is TAPPABLE: it re-opens plot setup so the radius /
+        // centre stay editable after the first placement. The session's
+        // project/plot are fixed for this screen's lifetime (advanceTally
+        // only moves the tree NUMBER), so one remember is safe.
+        //
+        // FIELD REPORT 12 — a QUICK sampling ring gets Edit too, pointed at
+        // the sampling screen that owns it. The ring the cruiser is measuring
+        // into is editable either way; which screen edits it is an internal
+        // detail, and hiding the control for one of them read as a bug.
         val miniMapUp = scanPlotMiniMapVisible()
         val editPlotTarget = remember { CruiseCapture.target }
-        if (!hidingChromeForCapture) ScanPlotMiniMap(
-            onEditPlot = editPlotTarget?.let { c ->
-                {
-                    nav.navigate(
-                        CruiseRoutes.editPlot(c.projectId.toString(), c.plotId.toString()))
-                }
-            },
-        )
+        val onEditPlot: () -> Unit = editPlotTarget?.let { c ->
+            {
+                nav.navigate(
+                    CruiseRoutes.editPlot(c.projectId.toString(), c.plotId.toString()))
+            }
+        } ?: { nav.navigate(Routes.SAMPLING) }
+        if (!hidingChromeForCapture) ScanPlotMiniMap(onEditPlot = onEditPlot)
 
         // Top strip: GPS pill leading, the cruise tally target ("Tree 8",
         // the auto number the next Accept saves to) centred in what is left.
@@ -1607,18 +1827,36 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             instruction = when {
                 manualOpen -> "Enter diameter manually in cm."
                 stage == Stage.AIMING -> when {
+                    // FIELD REPORT 15, the stuck case: depth delivery has
+                    // stopped outright and has been down long enough to
+                    // stall. Every line below reads `preview` /
+                    // `adjustPreview`, which the loops froze at whatever the
+                    // last frame said — a stale "hold steady, then tap +"
+                    // over a dead screen, or bracket advice for a bracket
+                    // that is no longer being evaluated. The hint is the only
+                    // sentence that is still true, so it goes first. (iOS
+                    // reaches the same place by clearing the stale strip line
+                    // from its stall ticker.)
+                    depthSilent && acquisitionStalled -> ACQUISITION_STALL_HINT
                     // ADJUST keeps the standard aligning/armed copy
                     // (iOS statusText parity): armed as soon as a
                     // bracket fit exists.
                     adjustMode ->
                         if (adjustPreview?.locked == true) "Hold steady, then tap + to capture."
+                        // Field report 15 — the bracket has been up for
+                        // seconds with no depth behind it. Say what clears
+                        // it instead of repeating "hold steady", which is
+                        // the one thing that does not.
+                        else if (acquisitionStalled) ACQUISITION_STALL_HINT
                         else "Align the guide to the trunk's uphill side; hold steady."
                     locked -> "Hold steady, then tap + to capture."
                     // Border-touch invalidity: the silhouette walk ran off
                     // the image — the trunk's edges aren't in frame, so no
-                    // fit can lock. Honest guidance instead of a lock.
+                    // fit can lock. Honest guidance instead of a lock. More
+                    // specific than the stall hint, so it wins.
                     preview?.edgesClipped == true ->
                         "Can't see both sides of the trunk — step back so the whole trunk is in view."
+                    acquisitionStalled -> ACQUISITION_STALL_HINT
                     else -> "Align the guide to the trunk's uphill side; hold steady."
                 }
                 // Depth burst: the under-crosshair capture pill carries the
@@ -1730,20 +1968,41 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     if (settings.developerMode) {
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             ResearchFieldsRow(
-                                targetValue = settings.researchTreeId,
-                                onTargetChange = { env.settings.setResearchTreeId(it.trim()) },
-                                targetPlaceholder = "T1",
-                                trueLabel = "True Ø (cm)",
-                                trueValue = researchTrueCm,
+                                // Label and unit come from the SAME value, so
+                                // the field can never say cm while the app
+                                // reads inches.
+                                trueLabel = TruthInput.fieldLabel(
+                                    TruthInput.Quantity.DIAMETER, truthUnit),
+                                trueValue = researchTrueText,
                                 // ',' is NORMALISED to '.', never deleted — the
                                 // old digit filter turned "12,5" into "125".
-                                onTrueChange = { researchTrueCm = TruthInput.sanitize(it) },
+                                onTrueChange = {
+                                    researchTrueText = TruthInput.sanitize(it)
+                                    // Editing retires every "couldn't save"
+                                    // state: the text is now the cruiser's
+                                    // current intent for the capture ON SCREEN,
+                                    // so it belongs to no earlier bundle and is
+                                    // no longer the value that was queued. This
+                                    // is also the ONLY way out of the stale-owner
+                                    // refusal — re-type it, or clear the field.
+                                    truthOwnerBundleId = null
+                                    truthSaveFailure = null
+                                    truthPendingId = null
+                                    truthPending = null
+                                },
                                 truePlaceholder = "tape",
+                                truthUnit = truthUnit,
+                                onToggleTruthUnit = { truthUnit = TruthInput.toggled(truthUnit) },
                             )
                             // Live warning under the truth field: a failed save,
-                            // unparseable text, or an implausible value.
+                            // unparseable text, or an implausible value. The
+                            // window is judged on the converted value, so an
+                            // imperial entry is checked against the same limits.
                             (truthSaveFailure
-                                ?: TruthInput.fieldWarning(researchTrueCm, isHeight = false))
+                                ?: TruthInput.fieldWarning(
+                                    researchTrueText,
+                                    TruthInput.Quantity.DIAMETER,
+                                    truthUnit))
                                 ?.let { w -> TruthFieldWarning(w) }
                             // Queued-but-not-yet-durable truth: the field was
                             // deliberately NOT cleared, so say why.

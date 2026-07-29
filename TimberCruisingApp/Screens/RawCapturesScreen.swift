@@ -395,6 +395,19 @@ struct RawCaptureDetailView: View {
 
     private var unit: String { manifest?.kind == "height" ? "m" : "cm" }
 
+    // This is the DESK console, not a field-entry surface: it types in the
+    // bundle's own metric base, stated in the section header and in the
+    // placeholder. There is no per-entry unit toggle here (that lives on the
+    // scan screens, where the cruiser's active system decides), but the unit is
+    // still RECORDED with the value, so every truth in the corpus carries a
+    // truth_unit and nothing has to be inferred later.
+    private var consoleQuantity: TruthInput.Quantity {
+        manifest?.kind == "height" ? .height : .diameter
+    }
+    private var consoleUnit: TruthInput.Unit {
+        TruthInput.defaultUnit(consoleQuantity, imperial: false)
+    }
+
     @ViewBuilder
     private func overviewSection(_ m: RawCaptureManifest) -> some View {
         Section {
@@ -459,18 +472,18 @@ struct RawCaptureDetailView: View {
         Section {
             HStack {
                 // ',' is accepted as the decimal separator and normalised.
-                TextField(m.kind == "height" ? "True height (m)" : "True Ø (cm)",
+                TextField(TruthInput.promptLabel(consoleQuantity, unit: consoleUnit),
                           text: $truthText)
                     #if os(iOS)
                     .keyboardType(.decimalPad)
                     #endif
                     .textFieldStyle(.roundedBorder)
                     .accessibilityIdentifier("rawCaptures.detail.truthField")
-                Button("Save") { saveTruth(kind: m.kind) }
+                Button("Save") { saveTruth() }
                 .buttonStyle(.forestixProminent)
                 .frame(width: 90)
             }
-            if let warning = truthWarning(kind: m.kind) {
+            if let warning = truthWarning() {
                 TruthFieldWarning(text: warning)
             }
             // Clearing a stored truth is EXPLICIT. Save used to write
@@ -501,14 +514,19 @@ struct RawCaptureDetailView: View {
 
     /// Save guard: an empty or unparseable field NEVER overwrites a stored
     /// truth, and the input is left alone so nothing typed is lost.
-    private func saveTruth(kind: String) {
-        guard let value = TruthInput.parsePositive(truthText) else {
+    private func saveTruth() {
+        // parsePositiveBASE, not parsePositive: the value stored is the metric
+        // base and `consoleUnit` is what the field says it is being typed in.
+        // They agree today only because this console is hardcoded metric — the
+        // shared helper exists so that adding a toggle here cannot leave a
+        // number unconverted under a truth_unit that says it was converted.
+        guard let value = TruthInput.parsePositiveBase(truthText, unit: consoleUnit) else {
             truthStatus = TruthInput.normalized(truthText).isEmpty
                 ? "Nothing entered — stored truth left as it was."
                 : "Not a number — stored truth left as it was."
             return
         }
-        switch RawCaptureStore.applyTruth(id: id, value: value) {
+        switch RawCaptureStore.applyTruth(id: id, value: value, unit: consoleUnit) {
         case .applied:
             truthStatus = "Truth saved."
             load()
@@ -523,10 +541,8 @@ struct RawCaptureDetailView: View {
         }
     }
 
-    private func truthWarning(kind: String) -> String? {
-        if TruthInput.isUnparseable(truthText) { return "Not a number" }
-        guard let v = TruthInput.parsePositive(truthText) else { return nil }
-        return TruthInput.warning(value: v, isHeight: kind == "height")
+    private func truthWarning() -> String? {
+        TruthInput.fieldWarning(truthText, quantity: consoleQuantity, unit: consoleUnit)
     }
 
     @ViewBuilder

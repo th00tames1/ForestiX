@@ -100,6 +100,11 @@ public final class TreeEntity: NSManagedObject {
     @NSManaged public var dbhCoverageDeg: NSNumber?
     @NSManaged public var dbhNInliers: NSNumber?
     @NSManaged public var dbhConfidence: String
+    // Model v4 — which estimator found the diameter's edges: "auto",
+    // "manual" (the ADJUST bracket), or "typed". Optional; nil on rows
+    // written before the field existed. `dbhMethod` cannot stand in for
+    // this — a bracket and an auto fit record the same method.
+    @NSManaged public var dbhCaptureMode: String?
     @NSManaged public var dbhIsIrregular: Bool
 
     @NSManaged public var heightM: NSNumber?

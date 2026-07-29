@@ -117,6 +117,12 @@ data class TreeEntity(
     val dbhCoverageDeg: Float?,
     val dbhNInliers: Int?,
     val dbhConfidence: String,
+    /// Which estimator found the diameter's edges: "auto", "manual" (the
+    /// ADJUST bracket), or "typed". Nullable; added in schema v5
+    /// (CruiseDatabase.MIGRATION_4_5). Null on rows written before the
+    /// column existed. `dbhMethod` cannot stand in for this — a bracket
+    /// and an auto fit record the same method.
+    val dbhCaptureMode: String? = null,
     val dbhIsIrregular: Boolean,
 
     val heightM: Float?,

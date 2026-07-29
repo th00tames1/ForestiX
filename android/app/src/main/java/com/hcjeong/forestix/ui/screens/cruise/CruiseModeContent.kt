@@ -14,8 +14,11 @@
 // no active plot → "Start plot" (AR sampling-ring component saving a cruise
 // Plot row); active plot → "Add tree · Plot N" straight into the shared
 // DBH→Height chain on the next auto tree number. A planned pin peeks into
-// "Set plot centre (GPS)" (inline GPS-averaging sheet) or "Navigate" (dashed
-// you-dot→plot guide line + live distance chip — the map is the nav).
+// "Start plot now" (one tap, the fix that is live at that instant, plot
+// open and measurable immediately — field report 17), "Set plot centre
+// (GPS)" (the inline GPS-averaging sheet, kept but no longer a gate) or
+// "Navigate" (dashed you-dot→plot guide line + live distance chip — the
+// map is the nav).
 // Quick-measure pins NEVER appear in cruise mode and cruise pins never
 // appear in measure mode — the two data worlds stay separate.
 
@@ -90,6 +93,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -194,11 +198,18 @@ internal class CruiseModeState {
     /// Plot whose map-overlay menu (Edit / Remove) is open — raised by
     /// tapping the drawn plot's boundary on the map (M2).
     var plotMenuFor by mutableStateOf<UUID?>(null)
+    /// Why a plot centre could not be saved. Non-null raises a dialog — a
+    /// refusal the cruiser has to see, because the alternative was writing a
+    /// plot centre the app had guessed (iOS `plotSaveRefusal`).
+    var plotSaveRefusal by mutableStateOf<String?>(null)
 
     /// Actions — wired by CruiseModeEffects (they need nav/scope/settings).
     var startPlot: () -> Unit = {}
     var addTree: (Plot) -> Unit = {}
     var closePlot: (Plot) -> Unit = {}
+    /// Planned-peek "Start plot now": open the planned plot on the fix that
+    /// is live right now, with no averaging window in the way (field 17).
+    var startPlannedNow: (PlannedPlot) -> Unit = {}
     /// Toggle a planned plot's `skipped` flag (planned-peek "Skip plot" /
     /// "Un-skip"). A skipped plot is inaccessible (cliff/water/private land)
     /// so it drops out of nearest-unvisited nav while still rendering.
@@ -373,6 +384,40 @@ internal fun CruiseModeEffects(
                 plot.closedBy = null
             }
             state.selectedId = null
+            state.refresh++
+        }
+    }
+
+    /// FIELD REPORT 17 — planned peek "Start plot now": open a PLANNED plot
+    /// on the fix that is live right now, with no averaging window in the
+    /// way. Same conversion the averaging sheet's "Save centre" runs (so the
+    /// planned pin is marked visited and the plot opens exactly as it always
+    /// did); the only difference is in the position stamp the result carries,
+    /// which says GPS_SINGLE / one sample rather than borrowing the averaged
+    /// label.
+    ///
+    /// REFUSES rather than guesses. With no fix the app still believes,
+    /// there is nothing to put in centerLat/centerLon — and a plot centre is
+    /// the anchor for every tree tallied into the plot, so the wrong one is
+    /// worse than none. Same refusal, word for word, as the AR "Start plot"
+    /// path.
+    state.startPlannedNow = startNow@{ planned ->
+        val p = state.project ?: return@startNow
+        val result = singleFixCentre(fix, System.currentTimeMillis())
+        if (result == null) {
+            state.plotSaveRefusal = "No GPS fix — the plot centre would be saved " +
+                "in the wrong place. Step out for sky and try again."
+            return@startNow
+        }
+        scope.launch {
+            try {
+                val plot = convertPlannedToActivePlot(env, p, planned, result)
+                if (state.navTargetId == planned.id) state.navTargetId = null
+                state.selectedId = "plot-${plot.id}"
+            } catch (e: Exception) {
+                state.plotSaveRefusal = "Storage error: ${e.message ?: e}. " +
+                    "The centre was not saved — try again."
+            }
             state.refresh++
         }
     }
@@ -620,6 +665,7 @@ internal fun CruiseModeBottomContent(
                 modifier = Modifier
                     .padding(horizontal = 12.dp)
                     .padding(bottom = 20.dp),
+                onStartNow = { state.startPlannedNow(peekPlanned) },
                 onRecordCentre = {
                     state.selectedId = null
                     state.recordCentreFor = peekPlanned
@@ -824,6 +870,20 @@ internal fun CruiseModeSheets(
             },
         )
     }
+
+    // MARK: - Plot-centre refusal (field 17 — "Start plot now" with no fix)
+
+    val refusal = state.plotSaveRefusal
+    if (refusal != null) {
+        AlertDialog(
+            onDismissRequest = { state.plotSaveRefusal = null },
+            title = { Text("Can't save the plot centre") },
+            text = { Text(refusal) },
+            confirmButton = {
+                TextButton(onClick = { state.plotSaveRefusal = null }) { Text("OK") }
+            },
+        )
+    }
 }
 
 // MARK: - Data helpers --------------------------------------------------------
@@ -984,6 +1044,7 @@ private fun PlannedPeekCard(
     fix: CLLocationSnapshot?,
     navigating: Boolean,
     modifier: Modifier = Modifier,
+    onStartNow: () -> Unit,
     onRecordCentre: () -> Unit,
     onToggleNavigate: () -> Unit,
     onToggleSkip: () -> Unit,
@@ -1067,20 +1128,50 @@ private fun PlannedPeekCard(
         }
         Spacer(Modifier.size(ForestixSpace.sm))
         if (!skipped) {
-            // 54 dp primary — LOCKED "Set plot centre (GPS)".
+            // 54 dp primary — FIELD REPORT 17. The plot opens on the fix
+            // that is live right now, with no window to sit out. The FROM
+            // YOU row directly above is the check that makes this safe: it
+            // is the cruiser's own reading of whether they are standing at
+            // the plot or looking at it from the far side of a draw.
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 54.dp)
+                    .pressableNoRipple(onClick = onStartNow)
+                    .clip(ForestixRadius.card)
+                    .background(colors.primary),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "Start plot now",
+                    style = type.bodyBold.copy(fontSize = 15.sp),
+                    color = MaterialTheme.colorScheme.onPrimary,
+                )
+            }
+            Spacer(Modifier.size(8.dp))
+            Text(
+                "Records one GPS fix, not an average.",
+                style = type.caption.copy(fontSize = 11.sp),
+                color = colors.textTertiary,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.size(8.dp))
+            // 54 dp outline — LOCKED "Set plot centre (GPS)". The averaged
+            // centre is kept, one tap away, and is no longer a gate.
             Box(
                 Modifier
                     .fillMaxWidth()
                     .heightIn(min = 54.dp)
                     .pressableNoRipple(onClick = onRecordCentre)
                     .clip(ForestixRadius.card)
-                    .background(colors.primary),
+                    .border(1.5.dp, colors.primary, ForestixRadius.card),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
                     "Set plot centre (GPS)",
                     style = type.bodyBold.copy(fontSize = 15.sp),
-                    color = MaterialTheme.colorScheme.onPrimary,
+                    color = colors.primary,
                 )
             }
             Spacer(Modifier.size(8.dp))

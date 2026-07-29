@@ -31,6 +31,13 @@
 // their marker lists. Per-screen style: OWNER (sampling, full alpha),
 // SUBDUED (DBH/Height overlay, 0.5 alpha, non-interactive), HIDDEN.
 //
+// AND THE PLOT IS ONLY DRAWN WHILE THAT POSE IS BEING CORRECTED. Half a
+// second without correction (see PLOT_POSE_GRACE_MS) hides the geometry and
+// makes plotCenterWorld() refuse, because an anchor translation only means
+// anything in the world frame it was read in, and losing tracking is exactly
+// when that frame moves. Drawing a boundary in the wrong place is worse than
+// drawing none — the ring's whole job is answering "am I inside?".
+//
 // PERF (sampling-lag fixes riding the same refactor):
 //  - Marker colour MaterialInstances are cached per RGBA. Node.destroy()
 //    frees geometry but NOT material instances, so the old rebuild path
@@ -151,6 +158,13 @@ object ArSessionHub {
     var plotRadiusM by mutableDoubleStateOf(8.0)
         private set
 
+    /// True while a plot exists but ARCore is no longer correcting its pose,
+    /// i.e. the geometry is HIDDEN and [plotCenterWorld] refuses. Screens
+    /// read this to say so in words instead of leaving the cruiser to guess
+    /// why the ring went away. See [updatePlotNodes] for the rule.
+    var plotTrackingLost by mutableStateOf(false)
+        private set
+
     /// Persisted cruise `Plot` whose centre the current anchor marks —
     /// stamped by the cruise Start-plot save, null for quick-measure
     /// rings. Lets the plot mini-map trust the anchor path only when the
@@ -166,6 +180,68 @@ object ArSessionHub {
     fun linkPlot(cruisePlotId: java.util.UUID) {
         if (activePlot == null) return
         linkedCruisePlotId = cruisePlotId
+    }
+
+    // MARK: - Height trunk anchor (walk-off d_h reference)
+
+    /// The trunk anchor the height walk-off measures d_h against, as a REAL
+    /// ARCore anchor rather than the world Vec3 the hit test returned.
+    ///
+    /// WHY AN ANCHOR (field round 9). A raw Vec3 is frozen in the world frame
+    /// as it stood at the instant of the hit test, and ARCore keeps re-fitting
+    /// that frame underneath it: every loop closure and relocalization moves
+    /// world coordinates by centimetres to tens of centimetres. The height
+    /// walk-off is the longest continuous motion this app performs — 10–30 m
+    /// backwards through a stand — so it collects the most correction, and the
+    /// correction lands squarely in d_h, which multiplies straight into H. A
+    /// raw Vec3 survives a tracking dropout and keeps returning a number; that
+    /// number is simply wrong, and nothing on screen can tell. An `Anchor`
+    /// gets ARCore's corrections applied to it, so the sphere stays on the
+    /// bark and d_h stays the distance to the tree. When ARCore genuinely
+    /// cannot place it any more the anchor STOPS, [heightAnchorWorld] returns
+    /// null, and the screen says so — a marker that disappears honestly beats
+    /// one that stays put and lies.
+    private var heightAnchor: Anchor? = null
+
+    /// Anchor the trunk at `p` (world) for a height walk-off. Replaces any
+    /// previous trunk anchor. False while the session isn't running — no hit
+    /// could have been produced then anyway, and the caller must refuse the
+    /// measurement rather than fall back to the raw point.
+    fun placeHeightAnchor(p: Vec3): Boolean {
+        val session = sceneView?.session ?: return false
+        val anchor = runCatching {
+            session.createAnchor(Pose.makeTranslation(p.x, p.y, p.z))
+        }.getOrNull() ?: return false
+        heightAnchor?.let { runCatching { it.detach() } }
+        heightAnchor = anchor
+        return true
+    }
+
+    /// Drift-corrected trunk position — the anchor's CURRENT pose. Null when
+    /// no trunk is anchored, or when ARCore has STOPPED the anchor: the
+    /// session was torn down or relocalization gave up, and there is no trunk
+    /// reference left. The height flow must say that instead of measuring to
+    /// the last place it saw one.
+    ///
+    /// PAUSED is deliberately NOT fatal here, and this is where the trunk
+    /// anchor parts company with [plotCenterWorld], which now refuses a pose
+    /// ARCore has stopped correcting. The difference is who else is watching:
+    /// the walk-off gates every stage on `controller.trackingOk()` and cannot
+    /// produce a height while tracking is down, so a frozen d_h reference is
+    /// never read through — whereas the plot ring is drawn continuously and
+    /// nothing else was checking it. Freezing the marker with the camera pose
+    /// also keeps it from jumping on every momentary dropout.
+    fun heightAnchorWorld(): Vec3? {
+        val anchor = heightAnchor ?: return null
+        if (anchor.trackingState == TrackingState.STOPPED) return null
+        val pose = anchor.pose
+        return Vec3(pose.tx(), pose.ty(), pose.tz())
+    }
+
+    /// Release the trunk anchor (Retake, or leaving the height screen).
+    fun clearHeightAnchor() {
+        heightAnchor?.let { runCatching { it.detach() } }
+        heightAnchor = null
     }
 
     // MARK: - Raw-depth recorder arm (REF-COUNTED)
@@ -258,6 +334,11 @@ object ArSessionHub {
     private var plotPoseX = Float.NaN
     private var plotPoseY = Float.NaN
     private var plotPoseZ = Float.NaN
+
+    // Wall clock (ms) at which the plot's pose stopped being corrected, or 0
+    // while it is being corrected. The grace window between the two is what
+    // keeps a routine sub-second tracking dip from blinking the plot.
+    private var plotPoseStaleSinceMs = 0L
 
     // RGBA -> MaterialInstance cache. Node.destroy() does NOT free material
     // instances (only the view-level MaterialLoader.destroy() does), so
@@ -385,6 +466,13 @@ object ArSessionHub {
         attachedToken = null
         clearMarkerNodes()
         controller.frame = null
+        // No AR screen is left to pump the plot pose, and the session itself
+        // is about to pause. Whatever the anchor last reported is a claim
+        // about a world frame nobody is tracking any more, so the plot goes
+        // back to "not known" until a frame proves otherwise — one frame
+        // after the next attach, if tracking is healthy.
+        plotPoseStaleSinceMs = 0L
+        applyPlotTrackingLost(activePlot != null)
         syncLifecycle()
     }
 
@@ -408,6 +496,7 @@ object ArSessionHub {
         activePlot?.anchor?.let { runCatching { it.detach() } }
         activePlot = null
         linkedCruisePlotId = null
+        clearHeightAnchor()
         lifecycleOwner?.registry?.let { registry ->
             if (registry.currentState != Lifecycle.State.INITIALIZED) {
                 registry.currentState = Lifecycle.State.DESTROYED
@@ -426,6 +515,10 @@ object ArSessionHub {
         // Only the view/session state dies here; the arm is re-derived from
         // whatever tokens are still registered.
         syncRawDepthArm()
+        // The trunk anchor belongs to the session that just died — holding the
+        // handle would let heightAnchorWorld() keep serving a pose from a world
+        // frame that no longer exists.
+        heightAnchor = null
         hostActivity?.lifecycle?.removeObserver(activityObserver)
         sceneView = null
         hostActivity = null
@@ -440,6 +533,8 @@ object ArSessionHub {
         plotRingHaloNode = null
         plotRingNode = null
         plotPoseX = Float.NaN; plotPoseY = Float.NaN; plotPoseZ = Float.NaN
+        plotPoseStaleSinceMs = 0L
+        applyPlotTrackingLost(false)
         materialCache.clear()
         controller.frame = null
         controller.session = null
@@ -510,7 +605,7 @@ object ArSessionHub {
                 node.scale = Float3(factor, factor, factor)
             }
         }
-        updatePlotNodes()
+        updatePlotNodes(frame)
     }
 
     // MARK: - Generic marker pipeline (per-screen markers)
@@ -669,13 +764,18 @@ object ArSessionHub {
         activePlot?.anchor?.let { runCatching { it.detach() } }
         activePlot = null
         linkedCruisePlotId = null
+        applyPlotTrackingLost(false)   // nothing left to have lost track OF
         destroyPlotNodes()
     }
 
     /// Drift-corrected plot centre — the anchor's CURRENT pose translation.
-    /// Null when no plot exists or its anchor has stopped for good.
+    /// Null when no plot exists, when its anchor has stopped for good, or
+    /// when [plotTrackingLost] — the pose behind a hidden ring is the same
+    /// pose a distance readout would be computed from, and one rule has to
+    /// govern both. Callers must show "unknown", not a number.
     fun plotCenterWorld(): Vec3? {
         val plot = activePlot ?: return null
+        if (plotTrackingLost) return null
         if (plot.anchor.trackingState == TrackingState.STOPPED) return null
         val pose = plot.anchor.pose
         return Vec3(pose.tx(), pose.ty(), pose.tz())
@@ -727,13 +827,15 @@ object ArSessionHub {
         plotTopNode = top
         plotRingHaloNode = halo
         plotRingNode = ring
-        // The anchor's pose is readable while merely PAUSED (it is the last
-        // known one), so the geometry is placed and shown straight away —
-        // waiting for TRACKING left the plot invisible on entry whenever the
-        // session was mid-relocalization.
+        // Seed from the anchor's last known pose so a screen entered during a
+        // brief tracking dip still has geometry ready to show the instant
+        // corrections resume. Whether it is VISIBLE is a separate question,
+        // and [plotTrackingLost] — maintained by the frame pump across screen
+        // switches — is the standing answer to it.
         val pose = plot.anchor.pose
         applyPlotPose(pose.tx(), pose.ty(), pose.tz(), force = true)
         listOf(centre, pole, top, halo, ring).forEach { node ->
+            node.isVisible = !plotTrackingLost
             plotNodes.add(node)
             view.addChildNode(node)
         }
@@ -770,30 +872,57 @@ object ArSessionHub {
         plotPoseX = Float.NaN; plotPoseY = Float.NaN; plotPoseZ = Float.NaN
     }
 
-    /// Per-frame: follow the anchor's corrected pose; self-clear when ARCore
+    /// Per-frame: follow the anchor's corrected pose while ARCore is
+    /// correcting it, hide the plot when it is not, self-clear when ARCore
     /// stops the anchor permanently.
     ///
-    /// A PAUSED anchor does NOT hide the plot any more. That single line was
-    /// the flicker: ARCore drops an anchor to PAUSED on every routine
-    /// tracking dip — a fast pan, a low-texture patch of litter, sun in the
-    /// lens, the camera swinging past a trunk — which is a continuous
-    /// occurrence while somebody walks a plot boundary. The pillar and ring
-    /// blinked on and off with it, and on a bad stretch never came back for
-    /// long enough to be seen. PAUSED means "the pose is not being corrected
-    /// right now", not "the plot is gone": the world coordinates from the
-    /// last update are still the best estimate, so the geometry simply stays
-    /// where it was until corrections resume. Only STOPPED — which ARCore
-    /// documents as permanent — clears the plot.
-    private fun updatePlotNodes() {
+    /// FIELD REPORT 7/8 — the boundary walked with the cruiser. Its cause was
+    /// the previous rule here, which held the last known pose through a
+    /// PAUSED anchor and kept drawing at it. That is not conservative, it is
+    /// wrong: an anchor's translation is only meaningful in the world frame
+    /// ARCore held when it was read, and a tracking dip is exactly when that
+    /// frame moves. Every dip therefore left the ring a little further from
+    /// the ground it was placed on, the errors accumulated over a plot's
+    /// worth of walking, and the cruiser ended up outside a boundary still
+    /// drawn beside them. A plot in the wrong place is worse than no plot:
+    /// the whole point of the ring is answering "am I inside?".
+    ///
+    /// The reason the hold was introduced still stands — ARCore drops an
+    /// anchor to PAUSED on every routine dip (a fast pan, low-texture litter,
+    /// sun in the lens), and hiding on the first PAUSED frame made the plot
+    /// blink continuously. So the pose gets [PLOT_POSE_GRACE_MS] to come
+    /// back: shorter than that and nothing on screen changes (the world frame
+    /// cannot have moved far in half a second either); longer and the plot
+    /// goes away and says why. The camera's own tracking state is part of the
+    /// same test — an anchor can read TRACKING for a frame or two after the
+    /// camera has lost the world.
+    private fun updatePlotNodes(frame: Frame) {
         val plot = activePlot ?: return
-        when (plot.anchor.trackingState) {
-            TrackingState.STOPPED -> clearPlot()
-            TrackingState.TRACKING -> {
-                val pose = plot.anchor.pose
-                applyPlotPose(pose.tx(), pose.ty(), pose.tz())
-            }
-            else -> Unit   // PAUSED: hold the last good pose, stay on screen
+        if (plot.anchor.trackingState == TrackingState.STOPPED) {
+            clearPlot()
+            return
         }
+        val corrected = plot.anchor.trackingState == TrackingState.TRACKING &&
+            frame.camera.trackingState == TrackingState.TRACKING
+        if (corrected) {
+            plotPoseStaleSinceMs = 0L
+            val pose = plot.anchor.pose
+            applyPlotPose(pose.tx(), pose.ty(), pose.tz())
+            applyPlotTrackingLost(false)
+            return
+        }
+        val now = System.currentTimeMillis()
+        if (plotPoseStaleSinceMs == 0L) plotPoseStaleSinceMs = now
+        if (now - plotPoseStaleSinceMs >= PLOT_POSE_GRACE_MS) applyPlotTrackingLost(true)
+    }
+
+    /// Single writer of the "the plot is not where we last drew it" verdict:
+    /// flips the state screens read AND the visibility of the geometry, so
+    /// the words and the drawing can never disagree.
+    private fun applyPlotTrackingLost(lost: Boolean) {
+        if (plotTrackingLost == lost) return
+        plotTrackingLost = lost
+        plotNodes.forEach { it.isVisible = !lost }
     }
 }
 
@@ -851,6 +980,13 @@ internal const val RING_Y_M = 0.03f
 
 /// Movement below this (1 mm) is not worth re-transforming five nodes for.
 internal const val POSE_EPSILON_M = 0.001f
+
+/// How long the plot's pose may go uncorrected before the plot is hidden.
+/// Long enough to ride out the routine sub-second tracking dips that made an
+/// immediate hide flicker; short enough that the world frame cannot have
+/// shifted far under a plot still on screen. Kept EQUAL to the iOS
+/// ActiveSamplingPlot.trackingGraceSeconds — it is one rule, in two places.
+internal const val PLOT_POSE_GRACE_MS = 500L
 
 /// Winding for a [RING_SEGMENTS] annulus. Constant — the radius changes the
 /// POSITIONS, never the topology — so it is computed once for the whole app

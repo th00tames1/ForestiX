@@ -717,6 +717,44 @@ object DBHEstimator {
 
     // MARK: - Manual edge-bracket (ADJUST) constrained estimate
 
+    /// The middle half of a bracket, as an inclusive index range along
+    /// whatever the caller is stepping (walk-axis pixels, or interpolation
+    /// steps between the two mapped handles).
+    ///
+    /// FIELD REPORT 13 — with the bracket held perfectly still on a trunk,
+    /// the diameter jumped by several inches at random. The bracket's z is a
+    /// median, the chord identity d = w·z/(f − w/2) is LINEAR in z, and the
+    /// median was taken over the WHOLE span. The cruiser puts the handles ON
+    /// the silhouette edges, so the span's end samples sit on the boundary
+    /// and routinely return the background instead of the stem — several
+    /// metres further away in a stand. Whenever the valid samples split near
+    /// evenly between stem and background, one sample dropping in or out of
+    /// validity moves the median from one cluster to the other, and the
+    /// diameter moves with it in exact proportion.
+    ///
+    /// The middle half cannot be background if the bracket is on a trunk at
+    /// all — that is what placing the handles on the edges MEANS — so the
+    /// median is taken from stem samples only and the bimodal hop is gone.
+    ///
+    /// A short temporal median over consecutive frames was the alternative
+    /// and is the wrong tool twice over: it slows a hop it can't remove (the
+    /// distribution is bimodal in SPACE, and the wrong mode persists for as
+    /// long as the cruiser holds still), and ADJUST deliberately publishes
+    /// the raw per-frame fit so the number tracks a handle drag immediately.
+    ///
+    /// Nothing about the geometry changes — same identity, same span, same
+    /// focal. Only which samples the depth is read from. iOS
+    /// DBHEstimator.bracketCoreRange parity.
+    fun bracketCoreRange(iLo: Int, iHi: Int): Pair<Int, Int> {
+        val span = iHi - iLo
+        // Too few samples to trim and still make a median of: a bracket this
+        // narrow is a handful of returns either way, and dropping to one or
+        // two would fail the >= 3 gate on a fit that is otherwise fine.
+        if (span < 8) return iLo to iHi
+        val quarter = span / 4
+        return (iLo + quarter) to (iHi - quarter)
+    }
+
     /// Constrained estimate for the manual edge-bracket (ADJUST) mode: the
     /// user places the trunk's two silhouette edges as VIEW-space x
     /// positions on the horizontal guide line, so the handle span IS the
@@ -747,10 +785,12 @@ object DBHEstimator {
         if (focal <= 1.0) return null
         val w = max(dxSpan, dySpan)
         if (w < 2.0) return null
-        // Median depth INSIDE the bracket along the guide row.
+        // Median depth over the bracket's MIDDLE HALF along the guide row —
+        // see bracketCoreRange.
         val steps = Math.round(w).toInt().coerceAtLeast(2)
         val depths = ArrayList<Float>(steps + 1)
-        for (i in 0..steps) {
+        val core = bracketCoreRange(0, steps)
+        for (i in core.first..core.second) {
             val t = i.toDouble() / steps
             val x = Math.round(pL.first + (pR.first - pL.first) * t).toInt()
             val y = Math.round(pL.second + (pR.second - pL.second) * t).toInt()
@@ -763,7 +803,8 @@ object DBHEstimator {
         depths.sort()
         val z = depths[depths.size / 2]
         // Same null gates as iOS bracketChordFit: bracket depth 0.3–5 m,
-        // RAW diameter 2.5–100 cm — outside them there is no fit at all.
+        // RAW diameter within PLAUSIBLE_DIAMETER_CM — outside them there is
+        // no fit at all.
         if (z !in 0.3f..5.0f) return null
         val halfW = w / 2.0
         if (focal - halfW <= 1.0) return null
@@ -785,7 +826,8 @@ object DBHEstimator {
     /// depth inside that span at the guide line. Same pinhole chord identity
     /// as the auto path, d = w·z/(f_axis − w/2), axis-matched focal. Returns
     /// the RAW (un-calibrated) diameter (cm) + span, or null on the same
-    /// gates iOS uses (bracket depth 0.3–5 m, raw diameter 2.5–100 cm).
+    /// gates iOS uses (bracket depth 0.3–5 m, raw diameter within
+    /// PLAUSIBLE_DIAMETER_CM).
     ///
     /// This lives in depth-fraction space (not view-px like constrainedEstimate)
     /// so the raw-capture manifest can store the two handles as view-independent
@@ -816,7 +858,8 @@ object DBHEstimator {
             is GuideAxis.Col -> if (guideAxis.x < 0 || guideAxis.x >= frame.width) return null
         }
         val depths = ArrayList<Float>(w + 1)
-        for (idx in a..b) {
+        val core = bracketCoreRange(a, b)
+        for (idx in core.first..core.second) {
             val (px, py) = pixelCoords(guideAxis, idx)
             if (px < 0 || px >= frame.width || py < 0 || py >= frame.height) continue
             if (frame.confidenceAt(px, py) < 1) continue

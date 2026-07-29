@@ -88,6 +88,10 @@ fun SamplingPlotScreen(nav: NavController) {
     val plot = ArSessionHub.activePlot
     val radiusM = ArSessionHub.plotRadiusM
     val placed = plot != null
+    // The plot is placed but ARCore is no longer correcting its pose, so the
+    // hub has hidden the ring. Everything this screen says about the plot is
+    // derived from that same pose and has to go unknown with it.
+    val trackingLost = placed && ArSessionHub.plotTrackingLost
 
     var isOutside by remember { mutableStateOf(false) }
     var distanceFromCenter by remember { mutableStateOf<Double?>(null) }
@@ -202,7 +206,8 @@ fun SamplingPlotScreen(nav: NavController) {
         // INSIDE/OUTSIDE status is a value and stays in the panel below).
         MeasureTopChrome(
             instruction = failure
-                ?: if (!placed) "Set the radius, aim at the plot centre, tap +" else null,
+                ?: if (trackingLost) PLOT_TRACKING_LOST_HINT
+                else if (!placed) "Set the radius, aim at the plot centre, tap +" else null,
         )
 
         // U2 — bottom-centre shutter while aiming for the centre (no
@@ -214,9 +219,14 @@ fun SamplingPlotScreen(nav: NavController) {
         // bottom as before.
         if (placed) MeasureStatusPanel {
             CenteredText(
-                if (isOutside) "OUTSIDE — walk back inside" else "INSIDE sampling area",
+                if (trackingLost) PLOT_TRACKING_LOST_STATUS
+                else if (isOutside) "OUTSIDE — walk back inside" else "INSIDE sampling area",
                 large = true,
-                color = if (isOutside) colors.confidenceBad else colors.confidenceOk,
+                color = when {
+                    trackingLost -> colors.confidenceWarn
+                    isOutside -> colors.confidenceBad
+                    else -> colors.confidenceOk
+                },
             )
             // Distance line — iOS distanceLine format + style.
             Text(

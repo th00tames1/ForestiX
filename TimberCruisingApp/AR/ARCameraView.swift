@@ -65,8 +65,23 @@ public struct ARSceneMarker: Identifiable, Equatable {
     /// tracks the anchor's live transform, so ARKit world-map
     /// corrections (drift compensation, relocalization) move the marker
     /// with the anchor. If the anchor doesn't exist the marker simply
-    /// doesn't render. Used by the sampling-plot ring/pole so the plot
-    /// centre stays pinned to the physical ground across screens.
+    /// doesn't render.
+    ///
+    /// NOTHING SETS THIS TODAY, and the sampling plot — which used to — is
+    /// the reason. Two traps, both bitten in the field:
+    ///
+    ///  • BINDING IS ORDER-DEPENDENT. A screen that builds its ARView over a
+    ///    session where the anchor ALREADY exists gets a scene that never
+    ///    saw the anchor arrive, and the marker never renders at all. That
+    ///    was field report 14: the plot overlay was invisible on the DBH and
+    ///    Height screens while working on the sampling screen, which places
+    ///    the anchor with its own view already up.
+    ///  • IT CANNOT BE HIDDEN ON TRACKING LOSS. RealityKit keeps drawing at
+    ///    the anchor's last transform, and a plot drawn where the plot is not
+    ///    is worse than no plot at all.
+    ///
+    /// Geometry that must follow an anchor reads the pose itself and passes
+    /// world coordinates — see `ActiveSamplingPlot.refreshTrackedCentre`.
     public var worldAnchorID: UUID?
 
     public init(id: UUID = UUID(),

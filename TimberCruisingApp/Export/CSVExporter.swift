@@ -63,7 +63,7 @@ public enum CSVExporter {
     /// rows (with `deleted_at` populated) so the CSV is a lossless dump.
     public static func treesCSV(trees: [Tree]) -> String {
         let header = [
-            "id", "plot_id", "tree_number", "species_code", "status",
+            "id", "plot_id", "tree_number", "tree_name", "species_code", "status",
             "dbh_cm", "dbh_method", "dbh_capture_mode",
             "dbh_sigma_mm", "dbh_rmse_mm", "dbh_coverage_deg",
             "dbh_n_inliers", "dbh_confidence", "dbh_is_irregular",
@@ -88,6 +88,7 @@ public enum CSVExporter {
             cells.append(quote(t.id.uuidString))
             cells.append(quote(t.plotId.uuidString))
             cells.append("\(t.treeNumber)")
+            cells.append(quote(t.treeName ?? ""))
             cells.append(quote(t.speciesCode))
             cells.append(quote(String(describing: t.status)))
             cells.append(format(Double(t.dbhCm), places: 2))

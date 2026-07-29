@@ -261,9 +261,7 @@ public struct SamplingPlotScreen: View {
             // instruction lives in the top banner.)
             Text(statusTitle)
                 .font(ForestixType.dataLarge)
-                .foregroundStyle(isOutside
-                                 ? ForestixPalette.confidenceBad
-                                 : ForestixPalette.confidenceOk)
+                .foregroundStyle(statusTint)
             Text(distanceLine)
                 .font(ForestixType.dataSmall)
                 .foregroundStyle(.white.opacity(0.85))
@@ -280,15 +278,29 @@ public struct SamplingPlotScreen: View {
         }
     }
 
-    /// Guidance for the top banner: capture failures first, else the
-    /// aim instruction while no centre is placed.
+    /// Guidance for the top banner: capture failures first, then the
+    /// tracking-loss explanation, else the aim instruction while no centre
+    /// is placed.
     private var topBannerText: String? {
         if let reason = captureFailureReason { return reason }
+        if trackingLost { return MeasurementCopy.plotTrackingLostHint }
         return hasPlot ? nil : "Set the radius, aim at the plot centre, tap +"
     }
 
+    /// A plot is placed but its centre is not being tracked, so the ring is
+    /// hidden and every readout derived from that centre is unknown.
+    private var trackingLost: Bool { hasPlot && activePlot.trackingLost }
+
     private var statusTitle: String {
-        isOutside ? "OUTSIDE — walk back inside" : "INSIDE sampling area"
+        if trackingLost { return MeasurementCopy.plotTrackingLostStatus }
+        return isOutside ? "OUTSIDE — walk back inside" : "INSIDE sampling area"
+    }
+
+    private var statusTint: Color {
+        if trackingLost { return ForestixPalette.confidenceWarn }
+        return isOutside
+            ? ForestixPalette.confidenceBad
+            : ForestixPalette.confidenceOk
     }
 
     private var distanceLine: String {
@@ -410,11 +422,14 @@ public struct SamplingPlotScreen: View {
 
     @MainActor
     private func tickOutsideCheck() {
-        // The centre is the plot anchor's LIVE transform — ARKit's
-        // world-map corrections move it with the physical ground, so the
-        // distance readout stays honest even after drift/relocalization.
-        guard let plot = activePlot.plot,
-              let center = session.worldAnchorPosition(id: plot.anchorID)
+        // The centre is the plot anchor's LIVE transform, re-read here and
+        // republished for the markers — ARKit's world-map corrections move
+        // it with the physical ground. It is nil once tracking has been lost
+        // past the grace window, and then the ring is gone and this readout
+        // has to go with it: an in/out call from an uncorrected pose is the
+        // one thing this screen must never print.
+        guard activePlot.plot != nil,
+              let center = activePlot.refreshTrackedCentre(using: session)
         else {
             isOutside = false
             distanceFromCenterM = nil
@@ -456,45 +471,40 @@ public struct SamplingPlotScreen: View {
     // MARK: - Scene markers
 
     private var markers: [ARSceneMarker] {
-        guard let plot = activePlot.plot else { return previewMarkers }
+        guard activePlot.plot != nil else { return previewMarkers }
+        // Nothing is drawn while the centre is not being tracked — see
+        // ActiveSamplingPlot.refreshTrackedCentre. The panel and the banner
+        // say so; a ring left on screen at an uncorrected pose would be
+        // telling the cruiser they are somewhere they are not.
+        guard let centre = activePlot.centreWorld else { return [] }
         // Stable ids → ARCameraView only rebuilds a marker when its shape
         // changes (e.g. radius), never on the flash timer. The ring colour
         // is kept constant (in/out is shown by the red border flash + the
         // panel) so an in/out flip doesn't churn the geometry either.
-        //
-        // Every marker is pinned to the plot's ARAnchor — positions are
-        // anchor-LOCAL offsets, and RealityKit tracks the anchor's live
-        // transform, so the whole assembly rides ARKit's world-map
-        // corrections without any per-frame work here.
-        let anchorID = plot.anchorID
         return [
             // Exact-centre red sphere so the tapped point is unmistakable.
             ARSceneMarker(id: Self.baseSphereId,
-                          worldPosition: SIMD3<Float>(0, 0, 0),
+                          worldPosition: centre,
                           shape: .sphere(radiusM: 0.07),
-                          colorRGBA: SIMD4<Float>(1, 0.25, 0.25, 1),
-                          worldAnchorID: anchorID),
+                          colorRGBA: SIMD4<Float>(1, 0.25, 0.25, 1)),
             // Tall white pole rising from the tapped point. FIELD REPORT:
             // 5 cm read as a fence post through the AR view and hid the
             // trunk behind it — 3 cm still reads at plot distance without
             // blocking anything. Kept identical to the Android sibling.
             ARSceneMarker(id: Self.poleId,
-                          worldPosition: SIMD3<Float>(0, 0.6, 0),
+                          worldPosition: centre + SIMD3<Float>(0, 0.6, 0),
                           shape: .cylinder(radiusM: 0.03, heightM: 1.2),
-                          colorRGBA: SIMD4<Float>(1, 1, 1, 1),
-                          worldAnchorID: anchorID),
+                          colorRGBA: SIMD4<Float>(1, 1, 1, 1)),
             // Bright top sphere — visible from across the plot.
             ARSceneMarker(id: Self.topSphereId,
-                          worldPosition: SIMD3<Float>(0, 1.2, 0),
+                          worldPosition: centre + SIMD3<Float>(0, 1.2, 0),
                           shape: .sphere(radiusM: 0.12),
-                          colorRGBA: SIMD4<Float>(1, 0.85, 0.15, 1),
-                          worldAnchorID: anchorID),
+                          colorRGBA: SIMD4<Float>(1, 0.85, 0.15, 1)),
             // Thick boundary ring (constant cyan).
             ARSceneMarker(id: Self.ringId,
-                          worldPosition: SIMD3<Float>(0, 0.02, 0),
+                          worldPosition: centre + SIMD3<Float>(0, 0.02, 0),
                           shape: .ring(radiusM: Float(radiusM), thicknessM: 0.4),
-                          colorRGBA: SIMD4<Float>(0.2, 0.85, 1, 1),
-                          worldAnchorID: anchorID),
+                          colorRGBA: SIMD4<Float>(0.2, 0.85, 1, 1)),
         ]
     }
 

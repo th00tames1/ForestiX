@@ -1547,6 +1547,41 @@ public enum DBHEstimator {
         return (axis, left, right)
     }
 
+    /// The middle half of a bracket, as an index range on the walk axis.
+    ///
+    /// FIELD REPORT 13 — with the bracket held perfectly still on a trunk,
+    /// the diameter jumped by several inches at random. The bracket's z is a
+    /// median, the chord identity d = w·z/(f − w/2) is LINEAR in z, and the
+    /// median was taken over the WHOLE span. The cruiser puts the handles ON
+    /// the silhouette edges, so the span's end pixels sit on the boundary and
+    /// routinely return the background instead of the stem — several metres
+    /// further away in a stand. Whenever the valid samples split near evenly
+    /// between stem and background, one pixel dropping in or out of validity
+    /// moves the median from one cluster to the other, and the diameter moves
+    /// with it in exact proportion: a 2 m stem behind a 6 m gap triples.
+    ///
+    /// The middle half cannot be background if the bracket is on a trunk at
+    /// all — that is what placing the handles on the edges MEANS — so the
+    /// median is taken from stem pixels only and the bimodal hop is gone.
+    ///
+    /// A short temporal median over consecutive frames was the alternative
+    /// and is the wrong tool twice over: it slows a hop it can't remove (the
+    /// distribution is bimodal in SPACE, and the wrong mode persists for as
+    /// long as the cruiser holds still), and ADJUST deliberately publishes
+    /// the raw per-frame fit so the number tracks a handle drag immediately.
+    ///
+    /// Nothing about the geometry changes — same identity, same span, same
+    /// focal. Only which pixels the depth is read from.
+    static func bracketCoreRange(iLo: Int, iHi: Int) -> (Int, Int) {
+        let span = iHi - iLo
+        // Too few pixels to trim and still make a median of: a bracket this
+        // narrow is a handful of samples either way, and dropping to one or
+        // two would fail the ≥ 3 gate on a fit that is otherwise fine.
+        guard span >= 8 else { return (iLo, iHi) }
+        let quarter = span / 4
+        return (iLo + quarter, iHi - quarter)
+    }
+
     /// Single-frame DBH estimate constrained by two user-placed edge
     /// handles instead of the automatic silhouette walk — the DBH
     /// ADJUST mode's estimator. `leftFraction` / `rightFraction` are
@@ -1557,7 +1592,9 @@ public enum DBHEstimator {
     /// extent, exactly like the fit-chord overlay in reverse).
     ///
     ///     w = handle span in walk-axis pixels
-    ///     z = median valid depth INSIDE the bracket at the guide row
+    ///     z = median valid depth over the bracket's MIDDLE HALF at the
+    ///         guide row (see `bracketCoreRange` — the ends sit on the
+    ///         silhouette edge and read the background)
     ///     d = w·z / (f_axis − w/2)
     ///
     /// — the same axis-matched pinhole identity the auto chord path
@@ -1585,15 +1622,16 @@ public enum DBHEstimator {
         let widthPx = rightPx - leftPx
         guard widthPx >= 2 else { return nil }
 
-        // Median depth INSIDE the bracket at the guide row. Zero-depth /
-        // low-confidence pixels are skipped; a handful of valid returns
-        // is required before the median is trusted.
+        // Median depth inside the bracket's CENTRAL PORTION at the guide row.
+        // Zero-depth / low-confidence pixels are skipped; a handful of valid
+        // returns is required before the median is trusted.
         let iLo = max(0, Int(leftPx.rounded(.up)))
         let iHi = min(extent - 1, Int(rightPx.rounded(.down)))
         guard iHi >= iLo else { return nil }
         var depths: [Float] = []
         depths.reserveCapacity(iHi - iLo + 1)
-        for idx in iLo...iHi {
+        let (cLo, cHi) = bracketCoreRange(iLo: iLo, iHi: iHi)
+        for idx in cLo...cHi {
             let (px, py) = pixelCoords(axis: guideAxis, idx: idx)
             guard frame.confidence(atX: px, y: py) >= 1 else { continue }
             let d = frame.depth(atX: px, y: py)

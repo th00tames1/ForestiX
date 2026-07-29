@@ -68,6 +68,18 @@ public final class DBHScanViewModel: ObservableObject {
     /// fit's rejection reason on red. nil while a green/yellow value
     /// is being shown.
     @Published public private(set) var previewStatusText: String?
+    /// True once `acquisitionStallSec` of aiming has gone by without a
+    /// single usable fit. Field report 15: when depth won't resolve, the
+    /// screen said nothing and the cruiser had no way to know that a small
+    /// movement — or standing at a different distance — is what unblocks
+    /// it. The screen turns this into one sentence of guidance; it never
+    /// affects what gets measured.
+    @Published public private(set) var acquisitionStalled: Bool = false
+    /// Uptime of the last preview tick that produced a fit. Seeded when
+    /// aiming begins so the hint waits out the full interval rather than
+    /// flashing up on the first frame.
+    private var lastFitTime: TimeInterval = 0
+    private let acquisitionStallSec: TimeInterval = 2.0
 
     // MARK: - Manual edge-bracket (ADJUST) mode
 
@@ -335,6 +347,11 @@ public final class DBHScanViewModel: ObservableObject {
         session.attach(client: arClientID, configuration: .dbhScan)
         subscribeToDepth()
 
+        // A fresh appearance gets a fresh acquisition clock, so the hint
+        // reflects THIS tree rather than however the last one ended.
+        acquisitionStalled = false
+        lastFitTime = ProcessInfo.processInfo.systemUptime
+
         let resettable = state == .idle || state == .accepted
             || state == .rejected || state == .manualEntry
         guard resettable else { return }
@@ -383,7 +400,12 @@ public final class DBHScanViewModel: ObservableObject {
         let d = frame.depth(atX: cx, y: cy)
         let c = frame.confidence(atX: cx, y: cy)
         let stable = d > 0.5 && d < 3.0 && c >= 1
-        crosshairIsStable = stable
+        // ONLY ON CHANGE. `@Published` fires `objectWillChange` on every
+        // assignment, equal value or not, and this one runs on every depth
+        // frame — so writing it unconditionally re-evaluated the whole scan
+        // screen (AR view included) at the depth frame rate whether or not
+        // anything the cruiser can see had moved. Field report 9.
+        if crosshairIsStable != stable { crosshairIsStable = stable }
         if state == .aligning, stable { state = .armed }
         if state == .armed, !stable    { state = .aligning }
         if state == .capturing {
@@ -420,10 +442,14 @@ public final class DBHScanViewModel: ObservableObject {
             smoothedCenterWorldXZ = nil
             lastTapDepthHint = nil
             recentRawDiameters.removeAll()
-            previewTier = nil
-            previewStatusText = nil
+            if previewTier != nil { previewTier = nil }
+            if previewStatusText != nil { previewStatusText = nil }
             isStable = false
             consecutiveRedFrames = 0
+            // Not aiming ⇒ no acquisition to stall. Re-seed the clock so
+            // the hint waits out a full interval when aiming resumes.
+            if acquisitionStalled { acquisitionStalled = false }
+            lastFitTime = ProcessInfo.processInfo.systemUptime
             return
         }
 
@@ -434,10 +460,18 @@ public final class DBHScanViewModel: ObservableObject {
         // Auto-pick the across-the-trunk axis (orientation-robust) instead of
         // a fixed orientation guess, which on some devices walked the strip
         // along the trunk and under-read the diameter to a few cm.
-        let axis = DBHEstimator.pickGuideAxis(
-            frame: frame,
-            tapPixel: SIMD2(Double(cx), Double(cy)),
-            calibration: calibration)
+        //
+        // LAZY, because it is not cheap — two strip extractions plus a
+        // back-projection each — and ADJUST, which is now the default path,
+        // needs it only on the tick that latches its axis. Voting it on every
+        // tick and discarding the answer was pure cost on the screen the
+        // cruiser spends the whole plot in. Field report 9.
+        func votedGuideAxis() -> GuideAxis {
+            DBHEstimator.pickGuideAxis(
+                frame: frame,
+                tapPixel: SIMD2(Double(cx), Double(cy)),
+                calibration: calibration)
+        }
 
         // ADJUST (edge-bracket) mode bypasses BOTH the automatic
         // edge-finding and the stability/EMA machinery: the live value
@@ -459,10 +493,11 @@ public final class DBHScanViewModel: ObservableObject {
             // derivation goes. The mapping is still computed and recorded in
             // the raw-capture manifest, where it costs nothing and can
             // settle the question later against a tape.
-            if adjustAxisLatch == nil { adjustAxisLatch = axis }
+            if adjustAxisLatch == nil { adjustAxisLatch = votedGuideAxis() }
+            let bracketAxis = adjustAxisLatch ?? votedGuideAxis()
             let fit = DBHEstimator.bracketChordFit(
                 frame: frame,
-                guideAxis: adjustAxisLatch ?? axis,
+                guideAxis: bracketAxis,
                 leftFraction: edgeBracketLeftFraction,
                 rightFraction: edgeBracketRightFraction)
             bracketMappingReady = true
@@ -483,7 +518,7 @@ public final class DBHScanViewModel: ObservableObject {
                 if fit != nil { return nil }
                 if developerMode {
                     let ax: String
-                    switch (adjustAxisLatch ?? axis) {
+                    switch bracketAxis {
                     case .row(let y): ax = "row \(y)"
                     case .col(let x): ax = "col \(x)"
                     }
@@ -494,8 +529,8 @@ public final class DBHScanViewModel: ObservableObject {
                 }
                 // NOT "widen it". A wider bracket raises the computed
                 // diameter, which pushes it further past the estimator's
-                // 100 cm ceiling — the advice guaranteed the failure it was
-                // trying to clear.
+                // plausibility ceiling — the advice guaranteed the failure it
+                // was trying to clear.
                 return "Can't read depth across the bracket — narrow it onto the trunk, or step closer."
             }()
             let pose = frame.cameraPoseWorld
@@ -508,6 +543,7 @@ public final class DBHScanViewModel: ObservableObject {
             } else {
                 distanceToStemCenterM = nil
             }
+            updateAcquisitionStall(hasFit: fit != nil, now: now)
             return
         }
 
@@ -517,6 +553,7 @@ public final class DBHScanViewModel: ObservableObject {
         // jitter and the multi-frame median in the burst handles the
         // rest). The legacy partial-arc path keeps its tap-depth hint.
         let fit: DBHEstimator.PreviewFit?
+        let axis = votedGuideAxis()
         switch dbhMeasurementMethod {
         case .chord:
             fit = DBHEstimator.chordPreviewFit(
@@ -673,6 +710,26 @@ public final class DBHScanViewModel: ObservableObject {
         } else {
             distanceToStemCenterM = nil
         }
+
+        updateAcquisitionStall(hasFit: fit != nil, now: now)
+    }
+
+    /// Field report 15 — say so when nothing is resolving.
+    ///
+    /// The stall is measured on the FIT, not on the depth frames: frames keep
+    /// arriving while the cruiser stands at a range the sensor can't read the
+    /// stem at, which is exactly the case that used to leave the screen
+    /// showing the ordinary "align and hold steady" line forever. Published
+    /// only on a change so it can't reintroduce per-tick invalidation.
+    private func updateAcquisitionStall(hasFit: Bool, now: TimeInterval) {
+        if hasFit {
+            lastFitTime = now
+            if acquisitionStalled { acquisitionStalled = false }
+            return
+        }
+        if lastFitTime == 0 { lastFitTime = now }
+        let stalled = now - lastFitTime >= acquisitionStallSec
+        if acquisitionStalled != stalled { acquisitionStalled = stalled }
     }
 
     // MARK: - User actions
@@ -750,6 +807,8 @@ public final class DBHScanViewModel: ObservableObject {
         captureSampleIndex = 0
         captureGeneration &+= 1
         result = nil
+        acquisitionStalled = false
+        lastFitTime = ProcessInfo.processInfo.systemUptime
         state = isLiDARSupported ? .aligning : .manualEntry
     }
 

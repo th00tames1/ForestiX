@@ -82,7 +82,10 @@ final class GoldenFileTests: XCTestCase {
 /// Populated by `xcrun swift test --filter GoldenFileTests` once on a
 /// clean branch; treat later changes as a deliberate review event.
 enum Golden {
-    static let treesCSV: String = "a03f1117f96a31a60c767938f06cb56151169d2e95d9e56bf19b71020db8db3f"
+    // Re-pinned when `tree_name` was added after `tree_number` — the cruiser
+    // names the tree in the measure chooser now, and the name travels with
+    // the row.
+    static let treesCSV: String = "3e3d4eae60a4cfbd36ffbde1b56c8d08f0da7edacb853674f088a876a1797c25"
     static let plotsCSV: String = "c2dd5e1ff6330ace9fb4b9ffe7ac605b1f51ce76368b4966ff06775bd712340c"
     static let standSummaryCSV: String = "5fbb5dbbeb1c36a7df3b12ec89c3c9741396d9b8514fc7b22b42f91774b2ff12"
     static let cruiseGeoJSON: String = "e275756156b3c9ed87d373e163398c9187d653ed26ae32ca1fb8028001f65ce4"

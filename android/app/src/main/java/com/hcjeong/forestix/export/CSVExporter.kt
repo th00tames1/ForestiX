@@ -90,7 +90,7 @@ object CSVExporter {
     /// rows (with `deleted_at` populated) so the CSV is a lossless dump.
     fun treesCSV(trees: List<Tree>): String {
         val header = listOf(
-            "id", "plot_id", "tree_number", "species_code", "status",
+            "id", "plot_id", "tree_number", "tree_name", "species_code", "status",
             "dbh_cm", "dbh_method", "dbh_capture_mode",
             "dbh_sigma_mm", "dbh_rmse_mm", "dbh_coverage_deg",
             "dbh_n_inliers", "dbh_confidence", "dbh_is_irregular",
@@ -112,6 +112,7 @@ object CSVExporter {
             cells.add(quote(t.id.uuidString))
             cells.add(quote(t.plotId.uuidString))
             cells.add("${t.treeNumber}")
+            cells.add(quote(t.treeName ?: ""))
             cells.add(quote(t.speciesCode))
             cells.add(quote(t.status.raw))
             cells.add(format(t.dbhCm.toDouble(), places = 2))

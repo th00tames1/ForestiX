@@ -201,14 +201,24 @@ public struct RawCaptureManifest: Codable, Sendable {
     }
 
     public struct Truth: Codable, Sendable {
+        /// ALWAYS the app's metric base — cm for a diameter, m for a height.
         public var value: Double?
         public var enteredAt: String?
+        /// The unit the operator actually TYPED ("cm" | "in" | "m" | "ft").
+        /// Recorded rather than inferred at read time: `value` is normalised
+        /// on the way in, so without this the export cannot tell an imperial
+        /// entry from a metric one and has to guess. Nil on bundles written
+        /// before the unit was recorded and on bundles with no truth — a
+        /// reader must treat that as "not stated", not as metric.
+        public var truthUnit: String?
         enum CodingKeys: String, CodingKey {
             case value
             case enteredAt = "entered_at"
+            case truthUnit = "truth_unit"
         }
-        public init(value: Double?, enteredAt: String?) {
+        public init(value: Double?, enteredAt: String?, truthUnit: String? = nil) {
             self.value = value; self.enteredAt = enteredAt
+            self.truthUnit = truthUnit
         }
     }
 
@@ -770,10 +780,17 @@ public enum RawCaptureStore {
     /// the async bundle write: an existing manifest is patched, otherwise the
     /// value is parked in a sidecar the recorder picks up. Callers MUST NOT
     /// clear their input field unless the returned outcome `isDurable`.
-    public static func applyTruth(id: String, value: Double) -> TruthOutcome {
+    ///
+    /// `value` is the metric base (cm / m); `unit` is what the operator typed,
+    /// and is stored beside it so the export never has to infer the scale.
+    public static func applyTruth(id: String,
+                                  value: Double,
+                                  unit: TruthInput.Unit) -> TruthOutcome {
         patchLock.lock()
         defer { patchLock.unlock() }
-        let truth = RawCaptureManifest.Truth(value: value, enteredAt: Self.isoNow())
+        let truth = RawCaptureManifest.Truth(value: value,
+                                             enteredAt: Self.isoNow(),
+                                             truthUnit: unit.rawValue)
         if var m = loadManifest(id: id) {
             // Carry over anything already parked (e.g. an Accept that beat the
             // recorder) so writing the manifest can't drop it.
@@ -809,7 +826,7 @@ public enum RawCaptureStore {
             try? savePendingPatch(patch, id: id)
         }
         guard var m = loadManifest(id: id) else { return .failed("bundle not found") }
-        m.truth = RawCaptureManifest.Truth(value: nil, enteredAt: nil)
+        m.truth = RawCaptureManifest.Truth(value: nil, enteredAt: nil, truthUnit: nil)
         do {
             try writeManifest(m, id: id)
             return .applied

@@ -44,6 +44,15 @@ public final class ResearchLog {
         // stayed under the warning threshold and so was never announced at
         // all. Empty for non-height rows and when no pose was available.
         "aim_drift_m",
+        // truth_unit — the unit the operator TYPED `true_value` in ("cm" |
+        // "in" | "m" | "ft"). `true_value` itself is always the metric base,
+        // normalised on the way in, so nothing else in the row says whether
+        // the cruiser was working in inches or centimetres. Recording it makes
+        // the reconciliation arithmetic instead of guesswork. Empty when no
+        // truth was typed. NEW COLUMNS GO AT THE END: an existing log keeps
+        // its old header, so inserting mid-row would shift every column of
+        // every subsequent row against it.
+        "truth_unit",
     ]
 
     private let queue = DispatchQueue(label: "forestix.researchlog")

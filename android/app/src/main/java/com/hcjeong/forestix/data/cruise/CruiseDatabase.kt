@@ -42,7 +42,7 @@ sealed class CruiseDataError(override val message: String) : Exception(message) 
         VolumeEquationEntity::class,
         HeightDiameterFitEntity::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = false,
 )
 @TypeConverters(CruiseConverters::class)
@@ -77,6 +77,15 @@ abstract class CruiseDatabase : RoomDatabase() {
         val MIGRATION_2_3 = object : Migration(2, 3) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE PlannedPlotEntity ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /// v3 → v4: Tree gains `treeName`, the cruiser's own label for the
+        /// tree. Nullable TEXT, no backfill — an unnamed tree reads as
+        /// "#<treeNumber>" exactly as before.
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE TreeEntity ADD COLUMN treeName TEXT")
             }
         }
     }

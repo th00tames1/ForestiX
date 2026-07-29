@@ -217,6 +217,19 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
     /// Live camera position in ARKit world space (column 3 of the
     /// camera transform). Used by Offset-from-Opening / VIOChain to
     /// snapshot where the user is standing at each confirmation.
+    ///
+    /// nil WHILE TRACKING IS `.notAvailable`. ARKit still hands out a camera
+    /// transform then, but it is not a position in the session's world frame
+    /// — it collapses toward the identity — and publishing it made every
+    /// reader compute a confident distance from a place the device never was.
+    /// That is the height walk-off's "walked distance goes back to zero"
+    /// (field round 9): the anchoring pose sits near the world origin, so the
+    /// displacement from an identity transform to it is ~0. `.limited` is
+    /// deliberately NOT gated: ARKit keeps a continuous, usable pose through
+    /// `.limited(.excessiveMotion)` and `.limited(.insufficientFeatures)`,
+    /// which is most of a real walk-off under canopy, and treating that as
+    /// "no position" would refuse nearly every honest measurement (it is the
+    /// same mistake the estimator's old `.limited` latch made).
     @Published public private(set) var currentCameraWorldPosition: SIMD3<Float>?
     /// Latest ARKit sparse VIO feature points in world space (metric).
     /// Published every frame; the AR-motion DBH method accumulates these
@@ -250,9 +263,32 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
     private let legacyClientID = UUID()
     /// Per-frame stream gate read by the (nonisolated) session delegate:
     /// which conversions/publishes the current screen actually wants.
-    private struct StreamGate { var depth: Bool; var features: Bool }
+    ///
+    /// `lastDepthConversion` is the ARFrame timestamp of the last frame we
+    /// actually converted — see `depthMinIntervalSec`.
+    private struct StreamGate {
+        var depth: Bool
+        var features: Bool
+        var lastDepthConversion: TimeInterval = 0
+    }
     private let streamGate = OSAllocatedUnfairLock(
         initialState: StreamGate(depth: true, features: true))
+
+    /// Floor on the interval between depth conversions, in ARFrame time.
+    ///
+    /// FIELD REPORT 9 — heavy lag and freezes on the scan screens. ARKit
+    /// delivers 60 frames a second and `convert` was running on every one of
+    /// them, but NOTHING consumes depth at 60 Hz: the DBH live preview is
+    /// throttled to 10 Hz, the height walk hint to 10 Hz, and a capture
+    /// sub-sample closes on 0.5 s of frames with a floor of 5. At 30 Hz the
+    /// burst still sees ~15 frames per sub-sample window — three times its
+    /// floor — while the per-frame buffer copy, the two array allocations
+    /// and the main-actor publish all halve.
+    ///
+    /// This is a RATE floor, never a value substitution: a frame that is
+    /// skipped is not published at all, so no consumer ever reads an
+    /// invented or interpolated depth.
+    private static let depthMinIntervalSec: TimeInterval = 1.0 / 30.0
 
     /// The AR view's size and interface orientation, reported by
     /// `ARCameraView` whenever its bounds change. Read by the (nonisolated)
@@ -392,6 +428,27 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
         worldAnchorPosition(id: id) != nil
     }
 
+    /// Live world position of an anchor, but ONLY while ARKit's camera
+    /// tracking is `.normal` — otherwise nil.
+    ///
+    /// An anchor transform is a coordinate in the world frame ARKit held
+    /// when it was read, and `.limited` (relocalizing, excessive motion,
+    /// insufficient features) is precisely when that frame is being
+    /// re-jigged underneath it. Reading through it produces a point that
+    /// looks fine and is metres from the physical spot, which is how the
+    /// sampling plot ended up drawn beside a cruiser standing outside it.
+    /// Callers that draw world geometry — the plot ring and pillar — use
+    /// this one and show nothing when it refuses. `worldAnchorPosition`
+    /// stays for callers that only need "is this anchor still here?".
+    public func trackedWorldAnchorPosition(id: UUID) -> SIMD3<Float>? {
+        guard let frame = session.currentFrame,
+              case .normal = frame.camera.trackingState,
+              let anchor = frame.anchors.first(where: { $0.identifier == id })
+        else { return nil }
+        let c = anchor.transform.columns.3
+        return SIMD3<Float>(c.x, c.y, c.z)
+    }
+
     /// Reference RGB of the current camera image as JPEG, for the
     /// raw-capture recorder (developer mode only). Reads the live
     /// `ARFrame.capturedImage` (YCbCr CVPixelBuffer) and encodes it via
@@ -431,8 +488,14 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
         // ~50 k floats per frame — screens that never read depth
         // (sampling plot, distance) skip it entirely, and the VIO
         // feature-point array copy is skipped unless the DBH AR-motion
-        // method is on screen.
-        let gate = streamGate.withLock { $0 }
+        // method is on screen. Screens that DO read depth get it at
+        // `depthMinIntervalSec`, not at ARKit's 60 Hz.
+        let gate = streamGate.withLock { g -> (depth: Bool, features: Bool) in
+            let convert = g.depth
+                && frame.timestamp - g.lastDepthConversion >= Self.depthMinIntervalSec
+            if convert { g.lastDepthConversion = frame.timestamp }
+            return (convert, g.features)
+        }
         let vp = viewport.withLock { $0 }
         let converted = gate.depth
             ? Self.convert(frame: frame,
@@ -450,7 +513,7 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
                 self.trackedNormalSinceWatch = false
             }
             self.trackingStatus = status
-            self.currentCameraWorldPosition = camPos
+            self.currentCameraWorldPosition = status == .notAvailable ? nil : camPos
             if let features { self.latestRawFeaturePoints = features }
             if let converted { self.latestDepthFrame = converted }
         }
@@ -535,12 +598,23 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
         else { return nil }
         let depthStride = CVPixelBufferGetBytesPerRow(depthMap)
 
+        // Row-wise memcpy, not element-wise assignment (field report 9).
+        // Both buffers are tightly packed within a row, so the only reason
+        // to walk pixels was the row stride — and the strided rows can be
+        // bulk-copied one at a time. The old scalar loops ran ~98 k bounds-
+        // checked subscript writes per frame on the main sensor path.
         var depth = [Float](repeating: 0, count: width * height)
-        for row in 0..<height {
-            let rowPtr = depthBase.advanced(by: row * depthStride)
-                .assumingMemoryBound(to: Float.self)
-            for col in 0..<width {
-                depth[row * width + col] = rowPtr[col]
+        let depthRowBytes = width * MemoryLayout<Float>.size
+        depth.withUnsafeMutableBytes { dst in
+            guard let dstBase = dst.baseAddress else { return }
+            if depthStride == depthRowBytes {
+                memcpy(dstBase, depthBase, depthRowBytes * height)
+            } else {
+                for row in 0..<height {
+                    memcpy(dstBase.advanced(by: row * depthRowBytes),
+                           depthBase.advanced(by: row * depthStride),
+                           depthRowBytes)
+                }
             }
         }
 
@@ -550,11 +624,16 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
             defer { CVPixelBufferUnlockBaseAddress(cm, .readOnly) }
             if let cBase = CVPixelBufferGetBaseAddress(cm) {
                 let cStride = CVPixelBufferGetBytesPerRow(cm)
-                for row in 0..<height {
-                    let rowPtr = cBase.advanced(by: row * cStride)
-                        .assumingMemoryBound(to: UInt8.self)
-                    for col in 0..<width {
-                        confidence[row * width + col] = rowPtr[col]
+                confidence.withUnsafeMutableBytes { dst in
+                    guard let dstBase = dst.baseAddress else { return }
+                    if cStride == width {
+                        memcpy(dstBase, cBase, width * height)
+                    } else {
+                        for row in 0..<height {
+                            memcpy(dstBase.advanced(by: row * width),
+                                   cBase.advanced(by: row * cStride),
+                                   width)
+                        }
                     }
                 }
             }
@@ -624,6 +703,7 @@ public final class ARKitSessionManager: ObservableObject {
     public func removeWorldAnchor(id: UUID) {}
     public func worldAnchorPosition(id: UUID) -> SIMD3<Float>? { nil }
     public func worldAnchorExists(id: UUID) -> Bool { false }
+    public func trackedWorldAnchorPosition(id: UUID) -> SIMD3<Float>? { nil }
     public func currentCameraImageJPEG(quality: Double = 0.8) -> Data? { nil }
     public var trackingStayedNormal: Bool { false }
     public func beginTrackingWatch() {}

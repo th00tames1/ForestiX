@@ -15,6 +15,16 @@
 // the kept OffsetFlowScreen (its own AR session, hosted full-screen by
 // CruiseOffsetHostScreen below); its computed PlotCenterResult lands
 // the centre through the same save path.
+//
+// FIELD REPORT 17 — averaging is no longer a GATE. The 60 s window was
+// the only way out of this sheet, and a cruiser who has already walked to
+// the plot spends that minute standing still under a canopy that is not
+// going to give them a better fix anyway. "Start plot now" takes whatever
+// fix is live at that instant and opens the plot immediately; "Save
+// centre" still arms at the bell for anyone who wants the median. The two
+// produce DIFFERENT DATA and are recorded as such — `gpsSingle` /
+// nSamples 1 for the instant one, `gpsAveraged` / nSamples >= 30 for the
+// window — so nothing downstream has to guess which it was reading.
 
 package com.hcjeong.forestix.ui.screens.cruise
 
@@ -33,6 +43,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -46,6 +57,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -61,6 +73,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -71,9 +84,12 @@ import com.hcjeong.forestix.common.ForestixLogger
 import com.hcjeong.forestix.data.cruise.PlannedPlot
 import com.hcjeong.forestix.data.cruise.Plot
 import com.hcjeong.forestix.data.cruise.PlotCenterResult
+import com.hcjeong.forestix.data.cruise.PositionSource
 import com.hcjeong.forestix.data.cruise.PositionTier
 import com.hcjeong.forestix.data.cruise.Project
+import com.hcjeong.forestix.positioning.CLLocationSnapshot
 import com.hcjeong.forestix.positioning.GPSAveraging
+import com.hcjeong.forestix.positioning.GeoMath
 import com.hcjeong.forestix.positioning.LocationService
 import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.pressableNoRipple
@@ -133,6 +149,11 @@ fun RecordCentreSheet(
     val latest by location.latestSnapshot.collectAsStateWithLifecycle()
 
     var elapsedS by remember { mutableIntStateOf(0) }
+    /// Wall clock the FRESHNESS test reads. Freshness changes with time, not
+    /// with the arrival of a fix, so without a clock that keeps ticking past
+    /// the 60 s bell "Start plot now" would stay armed on a fix that aged
+    /// out while the cruiser read the sheet.
+    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
     /// Engine run live over the rolling buffer while the window is open
     /// (nil until 30 accurate samples) — readouts only.
     var liveResult by remember { mutableStateOf<PlotCenterResult?>(null) }
@@ -144,11 +165,14 @@ fun RecordCentreSheet(
 
     // 1 s tick: advance the clock, re-run the engine over the buffer, and
     // ring the 60 s bell exactly once (retired PlotCenterViewModel.tick).
+    // The tick outlives the window because the freshness clock above does.
     LaunchedEffect(Unit) {
         val startedAt = System.currentTimeMillis()
-        while (!windowDone) {
+        while (true) {
             delay(1_000)
-            elapsedS = ((System.currentTimeMillis() - startedAt) / 1_000L)
+            nowMs = System.currentTimeMillis()
+            if (windowDone) continue
+            elapsedS = ((nowMs - startedAt) / 1_000L)
                 .toInt().coerceAtMost(AVERAGING_WINDOW_S)
             liveResult = GPSAveraging.compute(
                 GPSAveraging.Input(samples = location.buffer.value))
@@ -159,8 +183,10 @@ fun RecordCentreSheet(
         }
     }
 
-    fun save() {
-        val r = finalResult ?: return
+    /// One save path for both buttons — whichever result they hand over is
+    /// what gets stamped on the row, so the instant centre cannot pick up
+    /// the averaged one's labels by taking a different route to storage.
+    fun save(r: PlotCenterResult) {
         if (saving) return
         saving = true
         scope.launch {
@@ -179,6 +205,25 @@ fun RecordCentreSheet(
     val readout = liveResult
     val final = finalResult
     val snap = latest
+    /// The centre "Start plot now" would write — null while there is no fix
+    /// the app still believes, which is exactly when the button greys out.
+    /// Independent of the averaging window: it has nothing to say about
+    /// whether a single fix is available.
+    val instantCentre = singleFixCentre(latest, nowMs)
+    /// Range + bearing from the cruiser to where this plot was PLANNED.
+    /// "Start plot now" binds Plot N to wherever they are standing, so the
+    /// one number that says whether that is the right place has to be on the
+    /// same screen as the button. Same strings and same freshness gate as
+    /// the planned pin's peek.
+    val rangeText = freshFixOrNull(latest, nowMs)?.let { f ->
+        val d = GeoMath.distanceM(
+            fromLat = f.latitude, fromLon = f.longitude,
+            toLat = planned.plannedLat, toLon = planned.plannedLon)
+        val b = GeoMath.bearingDeg(
+            fromLat = f.latitude, fromLon = f.longitude,
+            toLat = planned.plannedLat, toLon = planned.plannedLon)
+        String.format(Locale.US, "%.0f m · bearing %.0f°", d, (b + 360.0).mod(360.0))
+    } ?: "no GPS fix"
     val accuracyText = when {
         readout != null -> String.format(Locale.US, "±%.1f m", readout.medianHAccuracyM)
         snap != null && snap.horizontalAccuracyM > 0 ->
@@ -272,15 +317,40 @@ fun RecordCentreSheet(
             }
             Spacer(Modifier.size(ForestixSpace.sm))
 
-            // 54 dp primary — LOCKED "Save centre"; arms when the window
-            // completes with an engine result.
-            val ready = finalResult != null && !saving
+            // FROM YOU — how far the cruiser is from the PLANNED position.
+            Row(
+                Modifier.padding(vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs),
+            ) {
+                Text(
+                    "FROM YOU",
+                    style = type.caption.copy(
+                        fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.7.sp),
+                    color = colors.textTertiary,
+                    modifier = Modifier.width(72.dp),
+                )
+                Text(
+                    rangeText,
+                    style = type.dataSmall.copy(fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold),
+                    color = colors.textPrimary,
+                    maxLines = 1,
+                )
+            }
+            Spacer(Modifier.size(ForestixSpace.xs))
+
+            // 54 dp primary — the instant path (field report 17): armed the
+            // moment there is a fix the app still believes, so the cruiser
+            // never waits out the window to start measuring.
+            val canStartNow = instantCentre != null && !saving
             Box(
                 Modifier
                     .fillMaxWidth()
                     .heightIn(min = 54.dp)
-                    .alpha(if (ready) 1f else 0.45f)
-                    .pressableNoRipple(enabled = ready, onClick = ::save)
+                    .alpha(if (canStartNow) 1f else 0.45f)
+                    .pressableNoRipple(enabled = canStartNow) {
+                        instantCentre?.let(::save)
+                    }
                     .clip(ForestixRadius.card)
                     .background(colors.primary),
                 contentAlignment = Alignment.Center,
@@ -293,11 +363,52 @@ fun RecordCentreSheet(
                     )
                 } else {
                     Text(
-                        "Save centre",
+                        "Start plot now",
                         style = type.bodyBold.copy(fontSize = 15.sp),
                         color = MaterialTheme.colorScheme.onPrimary,
                     )
                 }
+            }
+            Spacer(Modifier.size(ForestixSpace.xs))
+
+            // Says what the button above actually records, because the
+            // difference between one fix and a 60 s median is the whole
+            // reason the other button exists — and it is invisible once the
+            // plot is on the map.
+            Text(
+                "Records one GPS fix, not an average.",
+                style = type.caption.copy(fontSize = 11.sp),
+                color = colors.textTertiary,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.size(ForestixSpace.xs))
+
+            // 54 dp outline — LOCKED "Save centre"; arms when the window
+            // completes with an engine result. The averaged centre is still
+            // the better one; it is no longer the only way out of here.
+            val ready = finalResult != null && !saving
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 54.dp)
+                    .alpha(if (ready) 1f else 0.45f)
+                    .pressableNoRipple(enabled = ready) {
+                        finalResult?.let(::save)
+                    }
+                    .clip(ForestixRadius.card)
+                    .border(
+                        if (ready) 1.5.dp else 1.dp,
+                        if (ready) colors.primary else colors.divider,
+                        ForestixRadius.card,
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "Save centre",
+                    style = type.bodyBold.copy(fontSize = 15.sp),
+                    color = if (ready) colors.primary else colors.textPrimary,
+                )
             }
             Spacer(Modifier.size(ForestixSpace.xs))
 
@@ -400,6 +511,31 @@ private fun ProgressRing(progress: Float, centreTop: String, centreBottom: Strin
 // explains, and a cruiser could neither act on a "C" nor tell what would
 // make it a "B". The ±x.x m accuracy in the ring is the plain figure that
 // survives. Storage and exports are untouched.)
+
+// MARK: - Single instantaneous fix (field report 17)
+
+/// The centre a SINGLE instantaneous fix stands for, or null when there is
+/// no fix worth standing on ("Start plot now").
+///
+/// `sampleStdXyM` is 0 because the field is not nullable, NOT because the
+/// fixes agreed: there is one sample and no spread to measure. The pair that
+/// says so is `source == GPS_SINGLE` and `nSamples == 1`, and the tier comes
+/// from `classifySingleFix`, which refuses the tiers a spread bound would
+/// have to earn.
+internal fun singleFixCentre(fix: CLLocationSnapshot?, nowMs: Long): PlotCenterResult? {
+    val f = freshFixOrNull(fix, nowMs) ?: return null
+    val acc = f.horizontalAccuracyM.toFloat()
+    return PlotCenterResult(
+        lat = f.latitude,
+        lon = f.longitude,
+        source = PositionSource.GPS_SINGLE,
+        tier = GPSAveraging.classifySingleFix(acc),
+        nSamples = 1,
+        medianHAccuracyM = acc,
+        sampleStdXyM = 0f,
+        offsetWalkM = null,
+    )
+}
 
 // MARK: - Conversion (retired CruiseFlowCoordinator.acceptCenter semantics)
 

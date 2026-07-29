@@ -33,6 +33,7 @@
 // it — no changes to the durability / schema layer.
 
 import SwiftUI
+import Common
 import Models
 import Sensors
 
@@ -46,6 +47,15 @@ public struct FieldLogScreen: View {
     /// The row a swipe asked to delete, held until the cruiser confirms.
     /// Only multi-reading rows go through here (see `requestDelete`).
     @State private var pendingDelete: FieldLogRowModel?
+    /// A "measure again" the detail sheet asked for. Held here, not in the
+    /// sheet, because the scan is a full-screen cover: it has to present
+    /// AFTER the sheet has gone, from the screen the sheet was raised from.
+    /// `pending` is the handoff (set while the sheet is still closing), the
+    /// sheet's onDismiss moves it into `rescan` — same two-step the map
+    /// home's measure chooser uses so the cover doesn't fight the sheet's
+    /// dismissal animation.
+    @State private var pendingRescan: FieldLogRescan?
+    @State private var rescan: FieldLogRescan?
 
     public init() {}
 
@@ -89,10 +99,25 @@ public struct FieldLogScreen: View {
                 }
             }
         }
-        .sheet(item: $inspecting) { row in
-            FieldLogDetailSheet(row: row, unitSystem: settings.unitSystem)
+        .sheet(item: $inspecting, onDismiss: {
+            rescan = pendingRescan
+            pendingRescan = nil
+        }) { row in
+            FieldLogDetailSheet(
+                rowID: row.id,
+                unitSystem: settings.unitSystem,
+                onRemeasure: { request in
+                    pendingRescan = request
+                    inspecting = nil
+                })
+                .environmentObject(history)
                 .environmentObject(settings)
         }
+        #if os(iOS)
+        .fullScreenCover(item: $rescan) { request in
+            NavigationStack { rescanCover(request) }
+        }
+        #endif
         // A tree row can carry more than one reading, and a swipe is a
         // cheap gesture — so a swipe that would take BOTH the diameter and
         // the height says what it is about to take first. Single-reading
@@ -194,6 +219,92 @@ public struct FieldLogScreen: View {
         #endif
         .scrollContentBackground(.hidden)
     }
+
+    // MARK: - Measure again
+
+    #if os(iOS)
+    /// The scan the cruiser asked to re-run, wired so the reading lands on
+    /// the tree it was launched from. Accept goes through
+    /// `replaceReading`, so the tree ends up with ONE diameter and ONE
+    /// height rather than a second copy the log would never show.
+    @ViewBuilder
+    private func rescanCover(_ request: FieldLogRescan) -> some View {
+        switch request.kind {
+        case .dbh:
+            DBHScanScreen(
+                viewModel: DBHScanViewModel(calibration: .identity),
+                onAccept: { result, meta in
+                    history.replaceReading(QuickMeasureEntry(
+                        kind: .dbh,
+                        value: Double(result.diameterCm),
+                        sigma: result.method == .manualVisual
+                            ? nil : Double(result.sigmaRmm),
+                        confidenceRaw: result.confidence.rawValue,
+                        method: result.method.rawValue,
+                        treeNumber: request.treeNumber,
+                        treeName: request.treeName,
+                        plotID: request.plotID,
+                        speciesCode: meta.speciesCode ?? request.speciesCode,
+                        position: meta.position ?? .dbh,
+                        damageCodes: meta.damageCodes,
+                        note: meta.note.isEmpty ? nil : meta.note,
+                        latitude: meta.latitude,
+                        longitude: meta.longitude,
+                        photoPath: meta.photoPath,
+                        captureMode: meta.captureMode,
+                        // The tape reading did not change because the scan
+                        // did — a re-measure that dropped the truth would
+                        // quietly cost the validation study its comparison.
+                        truth: request.truth))
+                    rescan = nil
+                    return true
+                },
+                projectID: nil,
+                quickTreeNumber: request.treeNumber)
+        case .height:
+            HeightScanScreen(
+                viewModel: HeightScanViewModel(calibration: .identity),
+                onAccept: { result, meta in
+                    history.replaceReading(QuickMeasureEntry(
+                        kind: .height,
+                        value: Double(result.heightM),
+                        sigma: result.sigmaHm.map(Double.init),
+                        confidenceRaw: result.confidence.rawValue,
+                        method: result.method.rawValue,
+                        treeNumber: request.treeNumber,
+                        treeName: request.treeName,
+                        plotID: request.plotID,
+                        speciesCode: meta.speciesCode ?? request.speciesCode,
+                        damageCodes: meta.damageCodes,
+                        note: meta.note.isEmpty ? nil : meta.note,
+                        latitude: meta.latitude,
+                        longitude: meta.longitude,
+                        photoPath: meta.photoPath,
+                        truth: request.truth))
+                    rescan = nil
+                    return true
+                },
+                onCrown: { widthM, heightM in
+                    // Crown is measured inside the Height session; it is a
+                    // separate reading of the same tree, so it is appended
+                    // rather than replacing the height.
+                    history.append(QuickMeasureEntry(
+                        kind: .crown,
+                        value: widthM,
+                        secondaryValue: heightM,
+                        sigma: nil,
+                        confidenceRaw: "green",
+                        method: "ar.crown.dh",
+                        treeNumber: request.treeNumber,
+                        plotID: request.plotID))
+                },
+                projectID: nil,
+                treeNumber: request.treeNumber)
+                .environmentObject(history)
+                .environmentObject(settings)
+        }
+    }
+    #endif
 
     /// One reading goes immediately; a tree carrying several asks first.
     private func requestDelete(_ row: FieldLogRowModel) {
@@ -308,6 +419,9 @@ public struct FieldLogRowModel: Identifiable, Equatable {
 
     public let id: String
     public let subject: Subject
+    /// The cruiser's name for this tree, when they gave it one. nil falls
+    /// back to "#treeNumber" through `treeLabel`.
+    public let treeName: String?
     /// Newest diameter and height on this tree. Earlier re-measurements
     /// stay in `entries` and are listed in the detail sheet.
     public let dbh: QuickMeasureEntry?
@@ -317,7 +431,15 @@ public struct FieldLogRowModel: Identifiable, Equatable {
     /// Sort key — the most recent reading in the group.
     public let latest: Date
 
+    /// What the TREE column shows. nil for a row that belongs to no tree.
+    public var treeLabel: String? {
+        if let treeName { return treeName }
+        if case .tree(let n) = subject { return "#\(n)" }
+        return nil
+    }
+
     public var title: String {
+        if let treeName { return treeName }
         switch subject {
         case .tree(let n):     return "Tree #\(n)"
         case .loose(let kind): return FieldLogRowModel.kindWord(kind)
@@ -369,12 +491,34 @@ public struct FieldLogRowModel: Identifiable, Equatable {
             return FieldLogRowModel(
                 id: key,
                 subject: subject,
+                // Any reading on the tree carries the name; take the first
+                // that has one rather than `first`'s, which is the newest and
+                // may be a re-measurement recorded before the tree was named.
+                treeName: group.compactMap(\.treeName).first,
                 dbh: group.first { $0.kind == .dbh },
                 height: group.first { $0.kind == .height },
                 entries: group,
                 latest: group.map(\.createdAt).max() ?? first.createdAt)
         }
     }
+}
+
+// MARK: - Measure-again request
+
+/// A "measure again" raised from the detail sheet: which scan to open, and
+/// every join key the accepted reading needs to land back on the SAME tree
+/// instead of starting a new one — the plot, the tree number, the species
+/// already recorded against it, and the ground truth already typed for it.
+public struct FieldLogRescan: Identifiable, Equatable {
+    public enum Kind: Equatable { case dbh, height }
+
+    public let id = UUID()
+    public let kind: Kind
+    public let treeNumber: Int
+    public let treeName: String?
+    public let plotID: UUID?
+    public let speciesCode: String?
+    public let truth: Double?
 }
 
 // MARK: - Table geometry
@@ -439,14 +583,19 @@ private struct WeightedColumns: Layout {
 /// THREE columns now, not four. Dropping ± RANGE and QUALITY gave back
 /// roughly 110 pt on a 360 pt phone, which is why every cell here sits well
 /// inside its column instead of scaling to fit as the four-column table did:
-/// at 288 pt of content the shares are TREE 58.3 / DBH 106.9 / HEIGHT 106.9,
-/// against measured demands of "#128" 32, "150.0 cm" 82 and "150.00 ft" 88.
-/// The scale floors below are a backstop for an unusually long value, not
-/// the layout.
+/// at 288 pt of content the shares are TREE 73.8 / DBH 99.1 / HEIGHT 99.1,
+/// against measured demands of "Plot3-T08" 68, "150.0 cm" 82 and
+/// "150.00 ft" 88. The scale floors below are a backstop for an unusually
+/// long value, not the layout.
 private enum FieldLogTable {
     /// TREE · DBH · HEIGHT. The two measurement columns are equal — either
     /// can carry the longest string depending on the unit system.
-    static let weights: [CGFloat] = [3.0, 5.5, 5.5]
+    ///
+    /// TREE carries a NAME now, not just "#128", so it holds a quarter of the
+    /// row rather than a fifth. The width it took came off the two
+    /// measurement columns, which were still well clear of their widest
+    /// reading. Same proportions as the Android sibling's column weights.
+    static let weights: [CGFloat] = [3.8, 5.1, 5.1]
     /// 8 pt, not the 12 pt row default: gaps are width the numbers could
     /// have had.
     static let gap: CGFloat = ForestixSpace.xs
@@ -522,7 +671,8 @@ private struct FieldLogRow: View {
             // Same weights as the column header — the two are one table.
             WeightedColumns(weights: FieldLogTable.weights,
                             spacing: FieldLogTable.gap) {
-                FieldLogCell(text: row.title.replacingOccurrences(of: "Tree ", with: ""),
+                FieldLogCell(text: row.treeLabel
+                                ?? FieldLogRowModel.kindWord(row.entries[0].kind),
                              font: ForestixType.data,
                              color: ForestixPalette.textPrimary,
                              alignment: .leading)
@@ -656,23 +806,39 @@ private struct FieldLogRow: View {
 /// this tree — lives one tap away instead of being squeezed into columns.
 private struct FieldLogDetailSheet: View {
 
-    let row: FieldLogRowModel
+    /// The row is looked up by id rather than carried by value: an edit
+    /// made in this sheet changes the store, and a snapshot taken at
+    /// presentation time would keep showing the number the cruiser just
+    /// replaced.
+    let rowID: String
     let unitSystem: UnitSystem
+    let onRemeasure: (FieldLogRescan) -> Void
 
-    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var history: QuickMeasureHistory
     @Environment(\.dismiss) private var dismiss
+
+    private var liveRow: FieldLogRowModel? {
+        FieldLogRowModel.rows(from: history.entries).first { $0.id == rowID }
+    }
 
     var body: some View {
         NavigationStack {
-            Form {
-                measurementsSection
-                detailsSection
-                contextSection
-                if settings.developerMode, !groundTruths.isEmpty {
-                    groundTruthSection
+            Group {
+                if let row = liveRow {
+                    FieldLogDetailForm(row: row,
+                                       unitSystem: unitSystem,
+                                       onRemeasure: onRemeasure)
+                } else {
+                    // Every reading behind this row went away while the
+                    // sheet was open. An empty form would read as "this
+                    // tree has nothing on it" — say what happened instead.
+                    Text("Every reading on this row has been deleted.")
+                        .font(ForestixType.caption)
+                        .foregroundStyle(ForestixPalette.textTertiary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
-            .navigationTitle(row.title)
+            .navigationTitle(liveRow?.title ?? "Field log")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
@@ -682,6 +848,252 @@ private struct FieldLogDetailSheet: View {
                 }
             }
         }
+    }
+}
+
+/// The record itself, once the row is known to still exist.
+private struct FieldLogDetailForm: View {
+
+    let row: FieldLogRowModel
+    let unitSystem: UnitSystem
+    let onRemeasure: (FieldLogRescan) -> Void
+
+    @EnvironmentObject private var history: QuickMeasureHistory
+    @EnvironmentObject private var settings: AppSettings
+
+    @State private var dbhText = ""
+    @State private var dbhTruthText = ""
+    @State private var heightText = ""
+    @State private var heightTruthText = ""
+    /// The fields are filled from the store ONCE. Re-filling them on every
+    /// store change would overwrite what the cruiser is typing.
+    @State private var seeded = false
+
+    /// A prefilled field re-parses a hair off the number it was filled
+    /// from — it is rendered to four decimals, and under imperial it makes
+    /// a round trip through inches or feet. Anything smaller than this is
+    /// that rounding, not an edit, and treating it as an edit would restamp
+    /// a measured reading as typed and throw away its σ.
+    private static let valueEpsilon: Double = 0.001
+
+    var body: some View {
+        Form {
+            measurementsSection
+            // Editing is per TREE: the two named readings are what a tree
+            // has, and a loose crown / distance / plot record has no tree to
+            // re-measure or to complete.
+            if case .tree(let number) = row.subject {
+                editSection(.dbh, tree: number)
+                editSection(.height, tree: number)
+            }
+            detailsSection
+            contextSection
+            if settings.developerMode, !groundTruths.isEmpty {
+                groundTruthSection
+            }
+        }
+        .onAppear(perform: seedFields)
+    }
+
+    // MARK: Editing
+
+    private func existing(_ kind: QuickMeasureEntry.Kind) -> QuickMeasureEntry? {
+        kind == .dbh ? row.dbh : row.height
+    }
+
+    private var imperial: Bool { unitSystem == .imperial }
+
+    private func quantity(_ kind: QuickMeasureEntry.Kind) -> TruthInput.Quantity {
+        kind == .dbh ? .diameter : .height
+    }
+
+    /// The unit BOTH fields of a section are typed in — the cruiser's
+    /// active system, converted to the metric base on the way in.
+    private func unit(_ kind: QuickMeasureEntry.Kind) -> TruthInput.Unit {
+        TruthInput.defaultUnit(quantity(kind), imperial: imperial)
+    }
+
+    private func valueBinding(_ kind: QuickMeasureEntry.Kind) -> Binding<String> {
+        kind == .dbh ? $dbhText : $heightText
+    }
+
+    private func truthBinding(_ kind: QuickMeasureEntry.Kind) -> Binding<String> {
+        kind == .dbh ? $dbhTruthText : $heightTruthText
+    }
+
+    private func valueText(_ kind: QuickMeasureEntry.Kind) -> String {
+        kind == .dbh ? dbhText : heightText
+    }
+
+    private func truthText(_ kind: QuickMeasureEntry.Kind) -> String {
+        kind == .dbh ? dbhTruthText : heightTruthText
+    }
+
+    /// Placeholder copy is the scan screens' own, so the same field means
+    /// the same thing wherever a measurement is typed.
+    private func valuePlaceholder(_ kind: QuickMeasureEntry.Kind) -> String {
+        if kind == .dbh {
+            return imperial ? "Diameter in inches" : "Diameter in cm"
+        }
+        return imperial ? "Height in feet" : "Height in metres"
+    }
+
+    /// The typed number in metric base units, or nil when the field holds
+    /// nothing usable. Never falls back to the stored value — a blank field
+    /// means "nothing typed", and Save stays off.
+    private func parsedValue(_ kind: QuickMeasureEntry.Kind) -> Double? {
+        TruthInput.parsePositiveBase(valueText(kind), unit: unit(kind))
+    }
+
+    private func valueWarning(_ kind: QuickMeasureEntry.Kind) -> String? {
+        let text = valueText(kind)
+        guard !TruthInput.normalized(text).isEmpty else { return nil }
+        if parsedValue(kind) == nil {
+            return kind == .dbh
+                ? "A typed diameter must be a number greater than zero."
+                : "A typed height must be a number greater than zero."
+        }
+        if kind == .height, let m = parsedValue(kind),
+           m < Double(HeightEstimator.minHMeters) {
+            return String(format: "A typed height must be at least %.1f m.",
+                          HeightEstimator.minHMeters)
+        }
+        // Outside the cruising window is a WARNING, not a refusal: the
+        // number is the cruiser's own observation. Same wording as every
+        // other truth field in the app.
+        return parsedValue(kind).flatMap {
+            TruthInput.warning(base: $0, quantity: quantity(kind))
+        }
+    }
+
+    private func canSave(_ kind: QuickMeasureEntry.Kind) -> Bool {
+        guard let value = parsedValue(kind) else { return false }
+        if kind == .height, value < Double(HeightEstimator.minHMeters) {
+            return false
+        }
+        // Text that doesn't parse must never overwrite a stored truth.
+        if settings.developerMode, TruthInput.isUnparseable(truthText(kind)) {
+            return false
+        }
+        return isDirty(kind, value: value)
+    }
+
+    private func isDirty(_ kind: QuickMeasureEntry.Kind, value: Double) -> Bool {
+        guard let existing = existing(kind) else { return true }
+        if abs(value - existing.value) > Self.valueEpsilon { return true }
+        guard settings.developerMode else { return false }
+        let typed = TruthInput.parsePositiveBase(truthText(kind), unit: unit(kind))
+        switch (typed, existing.truth) {
+        case (nil, nil):          return false
+        case let (new?, old?):    return abs(new - old) > Self.valueEpsilon
+        default:                  return true
+        }
+    }
+
+    private func save(_ kind: QuickMeasureEntry.Kind, tree: Int) {
+        guard let value = parsedValue(kind) else { return }
+        let current = existing(kind)
+        // Developer mode owns the truth field. With it off the stored truth
+        // is not on screen, so a save must leave it exactly as it was.
+        let truth = settings.developerMode
+            ? TruthInput.parsePositiveBase(truthText(kind), unit: unit(kind))
+            : current?.truth
+        if let current {
+            var next = current
+            if abs(value - current.value) > Self.valueEpsilon {
+                next = next.typedValue(value)
+            }
+            history.update(next.settingTruth(truth))
+        } else {
+            history.append(.typed(kind: kind, value: value,
+                                  treeNumber: tree,
+                                  treeName: row.entries.compactMap(\.treeName).first,
+                                  plotID: row.entries.first?.plotID,
+                                  truth: truth))
+        }
+    }
+
+    private func seedFields() {
+        guard !seeded else { return }
+        seeded = true
+        dbhText = row.dbh.map {
+            TruthInput.text(base: $0.value, unit: unit(.dbh))
+        } ?? ""
+        dbhTruthText = row.dbh?.truth.map {
+            TruthInput.text(base: $0, unit: unit(.dbh))
+        } ?? ""
+        heightText = row.height.map {
+            TruthInput.text(base: $0.value, unit: unit(.height))
+        } ?? ""
+        heightTruthText = row.height?.truth.map {
+            TruthInput.text(base: $0, unit: unit(.height))
+        } ?? ""
+    }
+
+    /// One kind's editor: the number, its ground truth, and the two ways to
+    /// change either — type it, or go and measure it again. A tree the
+    /// sensors never read has the same section, empty, so it can be
+    /// completed from here instead of staying half-measured forever.
+    @ViewBuilder
+    private func editSection(_ kind: QuickMeasureEntry.Kind, tree: Int) -> some View {
+        let current = existing(kind)
+        Section(kind == .dbh ? "Diameter" : "Height") {
+            if current == nil {
+                Text("Not measured. Type the number, or measure it now.")
+                    .font(ForestixType.caption)
+                    .foregroundStyle(ForestixPalette.textTertiary)
+            }
+            TextField(valuePlaceholder(kind), text: valueBinding(kind))
+                #if os(iOS)
+                .keyboardType(.decimalPad)
+                #endif
+                .foregroundStyle(ForestixPalette.textPrimary)
+            if let warning = valueWarning(kind) {
+                warningRow(warning)
+            }
+            if settings.developerMode {
+                TextField(TruthInput.fieldLabel(quantity(kind), unit: unit(kind)),
+                          text: truthBinding(kind))
+                    #if os(iOS)
+                    .keyboardType(.decimalPad)
+                    #endif
+                    .foregroundStyle(ForestixPalette.textPrimary)
+                if let warning = TruthInput.fieldWarning(truthText(kind),
+                                                         quantity: quantity(kind),
+                                                         unit: unit(kind)) {
+                    warningRow(warning)
+                }
+            }
+            Button("Save changes") { save(kind, tree: tree) }
+                .disabled(!canSave(kind))
+            Button(remeasureTitle(kind, hasReading: current != nil)) {
+                onRemeasure(FieldLogRescan(
+                    kind: kind == .dbh ? .dbh : .height,
+                    treeNumber: tree,
+                    treeName: row.entries.compactMap(\.treeName).first,
+                    plotID: row.entries.first?.plotID,
+                    speciesCode: row.entries.compactMap(\.speciesCode)
+                        .first(where: { !$0.isEmpty }),
+                    truth: current?.truth))
+            }
+        }
+    }
+
+    private func remeasureTitle(_ kind: QuickMeasureEntry.Kind,
+                                hasReading: Bool) -> String {
+        switch (kind, hasReading) {
+        case (.dbh, true):  return "Measure the diameter again"
+        case (.dbh, false): return "Measure the diameter"
+        case (_, true):     return "Measure the height again"
+        case (_, false):    return "Measure the height"
+        }
+    }
+
+    private func warningRow(_ text: String) -> some View {
+        Text(text)
+            .font(ForestixType.caption)
+            .foregroundStyle(ForestixPalette.confidenceBad)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     // MARK: Measurements
@@ -803,8 +1215,10 @@ private struct FieldLogDetailSheet: View {
                 self.row(label: "Position", value: "not recorded")
             }
             if let mode = row.entries.compactMap(\.captureMode).first {
-                self.row(label: "Capture",
-                         value: mode == "manual" ? "Adjusted by hand" : "Automatic")
+                // "typed" is its own answer. Folding it into "Automatic"
+                // told the cruiser the sensors produced a number nobody
+                // ever pointed a camera at.
+                self.row(label: "Capture", value: captureModeText(mode))
             }
             if let photo = row.entries.compactMap(\.photoPath).first {
                 FieldLogPhotoRow(name: photo)
@@ -817,6 +1231,14 @@ private struct FieldLogDetailSheet: View {
         fmt.locale = Locale(identifier: "en_US")
         fmt.dateFormat = "MMM d, HH:mm"
         return fmt.string(from: row.latest)
+    }
+
+    private func captureModeText(_ mode: String) -> String {
+        switch mode {
+        case "manual": return "Adjusted by hand"
+        case "typed":  return "Typed by hand"
+        default:       return "Automatic"
+        }
     }
 
     // MARK: Ground truth (developer mode)

@@ -178,6 +178,21 @@ public struct MeasureCircleButton: View {
 
 // MARK: - Top instruction banner (U1)
 
+// MARK: - Sampling-plot tracking-loss wording
+
+/// What the plot screens say once the plot has been hidden because ARKit
+/// stopped correcting its centre. Two strings, one meaning, used by every
+/// plot-placement screen; byte-identical to the Android
+/// `PLOT_TRACKING_LOST_HINT` / `PLOT_TRACKING_LOST_STATUS` pair.
+/// The remedy clause is lifted verbatim from the height screen's
+/// `trackingLostNow` — one tracking dropout, one thing to do about it.
+public enum MeasurementCopy {
+    public static let plotTrackingLostHint =
+        "Tracking lost — the plot is hidden rather than drawn in the wrong place. Hold still until the camera picks the scene back up."
+    public static let plotTrackingLostStatus =
+        "TRACKING LOST — inside or outside is unknown"
+}
+
 /// Stage-guidance banner pinned top-centre on every AR measure screen —
 /// the instruction strings moved OUT of the bottom status panel so the
 /// bottom edge is free for the camera-app shutter row. Locked geometry

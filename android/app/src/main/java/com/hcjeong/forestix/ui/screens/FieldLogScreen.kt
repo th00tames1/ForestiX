@@ -47,6 +47,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
@@ -63,6 +64,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -79,6 +81,7 @@ import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -88,16 +91,22 @@ import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.RegionalSpecies
+import com.hcjeong.forestix.common.TruthInput
 import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.common.areaUnit
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
+import com.hcjeong.forestix.sensors.HeightEstimator
 import com.hcjeong.forestix.sensors.RawCaptureStore
 import com.hcjeong.forestix.ui.MeasurePhotoStore
+import com.hcjeong.forestix.ui.PendingTreeNumber
+import com.hcjeong.forestix.ui.Routes
 import com.hcjeong.forestix.ui.screens.plot.PlotSummaryCard
 import com.hcjeong.forestix.ui.shareFile
 import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixBorderedButton
 import com.hcjeong.forestix.ui.theme.ForestixDenseTextScale
+import com.hcjeong.forestix.ui.theme.ForestixProminentButton
 import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import kotlinx.coroutines.launch
@@ -105,6 +114,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.PI
+import kotlin.math.abs
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -119,8 +129,11 @@ fun FieldLogScreen(nav: NavController) {
     val nearCapacity by env.history.isNearCapacity.collectAsStateWithLifecycle()
     val settings by env.settings.state.collectAsStateWithLifecycle()
     var menuOpen by remember { mutableStateOf(false) }
-    /// The row whose detail sheet is open. Null = closed.
-    var inspecting by remember { mutableStateOf<FieldLogRowModel?>(null) }
+    /// The row whose detail sheet is open, held by ID rather than by value:
+    /// an edit made in the sheet changes the store, and a snapshot taken
+    /// when the sheet opened would keep showing the number just replaced.
+    /// Null = closed.
+    var inspectingId by remember { mutableStateOf<String?>(null) }
     /// The row a swipe asked to delete, held until the cruiser confirms.
     /// Only multi-reading rows go through here (see onDelete below).
     var pendingDelete by remember { mutableStateOf<FieldLogRowModel?>(null) }
@@ -232,7 +245,7 @@ fun FieldLogScreen(nav: NavController) {
                         ) {
                             FieldLogRow(
                                 row, settings.unitSystem,
-                                onClick = { inspecting = row })
+                                onClick = { inspectingId = row.id })
                         }
                         if (!last) {
                             HorizontalDivider(
@@ -252,16 +265,48 @@ fun FieldLogScreen(nav: NavController) {
         }
     }
 
-    inspecting?.let { row ->
+    inspectingId?.let { id ->
+        val live = rows.firstOrNull { it.id == id }
         ModalBottomSheet(
-            onDismissRequest = { inspecting = null },
+            onDismissRequest = { inspectingId = null },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = colors.canvas,
         ) {
-            FieldLogDetailSheet(
-                row = row,
-                unitSystem = settings.unitSystem,
-                developerMode = settings.developerMode)
+            if (live == null) {
+                // Every reading behind this row went away while the sheet was
+                // open. An empty sheet would read as "this tree has nothing
+                // on it" — say what happened instead.
+                Text(
+                    "Every reading on this row has been deleted.",
+                    style = Forestix.type.caption, color = colors.textTertiary,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(ForestixSpace.lg),
+                )
+            } else {
+                FieldLogDetailSheet(
+                    row = live,
+                    unitSystem = settings.unitSystem,
+                    developerMode = settings.developerMode,
+                    onSave = { env.history.update(it) },
+                    onAdd = { env.history.append(it) },
+                    onRemeasure = { kind, tree, name, species, truth ->
+                        // Close the sheet before leaving the screen, and hand
+                        // the scan the tree it must land on plus the truth it
+                        // must carry across (PendingTreeNumber is the same
+                        // slot the map home's tree lock uses). The plot is
+                        // named explicitly: this row can belong to a plot
+                        // that is not the active one.
+                        inspectingId = null
+                        PendingTreeNumber.set(
+                            number = tree, name = name, speciesCode = species,
+                            replaceExisting = true, truth = truth,
+                            plotID = live.entries.firstOrNull()?.plotID)
+                        nav.navigate(
+                            if (kind == MeasureKind.DBH) Routes.DBH else Routes.HEIGHT)
+                    },
+                )
+            }
         }
     }
 
@@ -301,6 +346,9 @@ data class FieldLogRowModel(
     /// Null for a reading with no tree number — a sampling-plot record, or
     /// a standalone crown / distance measurement.
     val treeNumber: Int?,
+    /// The cruiser's name for this tree, when they gave it one. Null falls
+    /// back to "#<treeNumber>" through [treeLabel].
+    val treeName: String?,
     /// Newest diameter and height on this tree. Earlier re-measurements stay
     /// in [entries] and are listed in the detail sheet.
     val dbh: QuickMeasureEntry?,
@@ -310,8 +358,12 @@ data class FieldLogRowModel(
     /// Sort key — the most recent reading in the group.
     val latest: Long,
 ) {
+    /// What the TREE column shows. Null for a row that belongs to no tree.
+    val treeLabel: String?
+        get() = treeName ?: treeNumber?.let { "#$it" }
+
     val title: String
-        get() = treeNumber?.let { "Tree #$it" } ?: kindWord(entries.first().kind)
+        get() = treeName ?: treeNumber?.let { "Tree #$it" } ?: kindWord(entries.first().kind)
 
     /// What a destructive swipe is actually about to remove.
     val deleteWarning: String
@@ -351,6 +403,10 @@ internal fun fieldLogRows(entries: List<QuickMeasureEntry>): List<FieldLogRowMod
         FieldLogRowModel(
             id = key,
             treeNumber = first.treeNumber,
+            // Any reading on the tree carries the name; take the first that
+            // has one rather than `first`'s, which is the newest and may be a
+            // re-measurement recorded before the tree was named.
+            treeName = group.firstNotNullOfOrNull { it.treeName },
             dbh = group.firstOrNull { it.kind == MeasureKind.DBH },
             height = group.firstOrNull { it.kind == MeasureKind.HEIGHT },
             entries = group,
@@ -446,18 +502,22 @@ private fun EmptyState(modifier: Modifier) {
 // to share:
 //
 //   column   widest content        needs    360 dp   411 dp   320 dp
-//   TREE     "#128"                 32 dp    61 dp    73 dp    52 dp
-//   DBH      "150.0 cm"             82 dp   111 dp   134 dp    96 dp
-//   HEIGHT   "150.00 ft"            88 dp   111 dp   134 dp    96 dp
+//   TREE     "Plot3-T08"            68 dp    77 dp    93 dp    66 dp
+//   DBH      "150.0 cm"             82 dp   103 dp   124 dp    89 dp
+//   HEIGHT   "150.00 ft"            88 dp   103 dp   124 dp    89 dp
+//
+// TREE carries a NAME now, not just "#128", so it holds a quarter of the row
+// rather than a fifth. The 8 dp it took came off the two measurement columns,
+// which were still 20 dp clear of their widest reading.
 //
 // Every heading is a single unwrappable word, so nothing can break
 // mid-word the way "PRECISI/ON" and "QUALI/TY" did. The two numeric cells
 // may take a second line instead — a sampling-plot reading is wider than
 // any phone column, and a taller row is better than a measurement the
 // cruiser cannot read in full.
-private const val ColTreeWeight = 1.0f
-private const val ColDbhWeight = 1.83f
-private const val ColHeightWeight = 1.83f
+private const val ColTreeWeight = 1.3f
+private const val ColDbhWeight = 1.75f
+private const val ColHeightWeight = 1.75f
 private val ColGap = 6.dp
 
 /// The ONE definition of the field-log grid. The header and every row go
@@ -532,7 +592,7 @@ private fun FieldLogRow(
         FieldLogColumns(
             treeSlot = {
                 Text(
-                    row.treeNumber?.let { "#$it" } ?: kindWord(row.entries.first().kind),
+                    row.treeLabel ?: kindWord(row.entries.first().kind),
                     style = type.data, color = colors.textPrimary,
                     maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
             },
@@ -639,6 +699,10 @@ private fun FieldLogDetailSheet(
     row: FieldLogRowModel,
     unitSystem: UnitSystem,
     developerMode: Boolean,
+    onSave: (QuickMeasureEntry) -> Unit,
+    onAdd: (QuickMeasureEntry) -> Unit,
+    /// (kind, tree number, tree name, species code, ground truth)
+    onRemeasure: (MeasureKind, Int, String?, String?, Double?) -> Unit,
 ) {
     val colors = Forestix.colors
     val type = Forestix.type
@@ -671,6 +735,20 @@ private fun FieldLogDetailSheet(
                     }
                 }
             }
+        }
+
+        // Editing is per TREE: the two named readings are what a tree has,
+        // and a loose crown / distance / plot record has no tree to
+        // re-measure or to complete.
+        row.treeNumber?.let { tree ->
+            FieldLogEditSection(
+                kind = MeasureKind.DBH, row = row, tree = tree,
+                unitSystem = unitSystem, developerMode = developerMode,
+                onSave = onSave, onAdd = onAdd, onRemeasure = onRemeasure)
+            FieldLogEditSection(
+                kind = MeasureKind.HEIGHT, row = row, tree = tree,
+                unitSystem = unitSystem, developerMode = developerMode,
+                onSave = onSave, onAdd = onAdd, onRemeasure = onRemeasure)
         }
 
         val species = row.entries.firstNotNullOfOrNull {
@@ -707,7 +785,16 @@ private fun FieldLogDetailSheet(
                 fix?.let { String.format(Locale.US, "%.5f, %.5f", it.latitude, it.longitude) }
                     ?: "not recorded")
             row.entries.firstNotNullOfOrNull { it.captureMode }?.let {
-                SheetRow("Capture", if (it == "manual") "Adjusted by hand" else "Automatic")
+                // "typed" is its own answer. Folding it into "Automatic" told
+                // the cruiser the sensors produced a number nobody ever
+                // pointed a camera at.
+                SheetRow(
+                    "Capture",
+                    when (it) {
+                        "manual" -> "Adjusted by hand"
+                        "typed" -> "Typed by hand"
+                        else -> "Automatic"
+                    })
             }
             row.entries.firstNotNullOfOrNull { it.photoPath }?.let { name ->
                 FieldLogPhoto(name)
@@ -734,6 +821,165 @@ private fun FieldLogDetailSheet(
                     }
                 }
             }
+        }
+    }
+}
+
+// MARK: - Editing one reading ---------------------------------------------
+
+/// A prefilled field re-parses a hair off the number it was filled from — it
+/// is rendered to four decimals, and under imperial it makes a round trip
+/// through inches or feet. Anything smaller than this is that rounding, not
+/// an edit, and treating it as an edit would restamp a measured reading as
+/// typed and throw away its sigma.
+private const val FIELD_LOG_VALUE_EPSILON = 0.001
+
+/// True when a typed truth differs from the stored one, treating "absent"
+/// and "present" as different states rather than comparing against a zero.
+private fun truthChanged(typed: Double?, stored: Double?): Boolean = when {
+    typed == null && stored == null -> false
+    typed != null && stored != null -> abs(typed - stored) > FIELD_LOG_VALUE_EPSILON
+    else -> true
+}
+
+/// One kind's editor: the number, its ground truth, and the two ways to
+/// change either — type it, or go and measure it again. A tree the sensors
+/// never read gets the same section, empty, so it can be completed from here
+/// instead of staying half-measured forever.
+@Composable
+private fun FieldLogEditSection(
+    kind: MeasureKind,
+    row: FieldLogRowModel,
+    tree: Int,
+    unitSystem: UnitSystem,
+    developerMode: Boolean,
+    onSave: (QuickMeasureEntry) -> Unit,
+    onAdd: (QuickMeasureEntry) -> Unit,
+    onRemeasure: (MeasureKind, Int, String?, String?, Double?) -> Unit,
+) {
+    val colors = Forestix.colors
+    val type = Forestix.type
+    val existing = if (kind == MeasureKind.DBH) row.dbh else row.height
+    val quantity =
+        if (kind == MeasureKind.DBH) TruthInput.Quantity.DIAMETER
+        else TruthInput.Quantity.HEIGHT
+    // BOTH fields of a section are typed in the cruiser's active system and
+    // converted to the metric base on the way in — the one place that
+    // conversion is allowed to happen.
+    val unit = TruthInput.defaultUnit(quantity, unitSystem == UnitSystem.IMPERIAL)
+
+    // Filled from the store ONCE. Re-filling on every store change would
+    // overwrite what the cruiser is typing.
+    var valueText by remember(row.id, kind) {
+        mutableStateOf(existing?.let { TruthInput.text(it.value, unit) } ?: "")
+    }
+    var truthText by remember(row.id, kind) {
+        mutableStateOf(existing?.truth?.let { TruthInput.text(it, unit) } ?: "")
+    }
+
+    val typed = TruthInput.parsePositiveBase(valueText, unit)
+    val tooShort = kind == MeasureKind.HEIGHT &&
+        typed != null && typed < HeightEstimator.MIN_H_M
+    val valueWarning: String? =
+        if (TruthInput.normalized(valueText).isEmpty()) {
+            null
+        } else if (typed == null) {
+            if (kind == MeasureKind.DBH) "A typed diameter must be a number greater than zero."
+            else "A typed height must be a number greater than zero."
+        } else if (tooShort) {
+            String.format(
+                Locale.US, "A typed height must be at least %.1f m.", HeightEstimator.MIN_H_M)
+        } else {
+            // Outside the cruising window is a WARNING, not a refusal: the
+            // number is the cruiser's own observation. Same wording as every
+            // other truth field in the app.
+            TruthInput.warning(typed, quantity)
+        }
+    val truthTyped = TruthInput.parsePositiveBase(truthText, unit)
+    val canSave = typed != null && !tooShort &&
+        // Text that doesn't parse must never overwrite a stored truth.
+        !(developerMode && TruthInput.isUnparseable(truthText)) &&
+        (existing == null ||
+            abs(typed - existing.value) > FIELD_LOG_VALUE_EPSILON ||
+            (developerMode && truthChanged(truthTyped, existing.truth)))
+
+    SheetSection(if (kind == MeasureKind.DBH) "DIAMETER" else "HEIGHT") {
+        if (existing == null) {
+            Text("Not measured. Type the number, or measure it now.",
+                style = type.caption, color = colors.textTertiary)
+        }
+        OutlinedTextField(
+            value = valueText,
+            onValueChange = { valueText = TruthInput.sanitize(it) },
+            placeholder = {
+                Text(
+                    if (kind == MeasureKind.DBH) {
+                        if (unitSystem == UnitSystem.METRIC) "Diameter in cm"
+                        else "Diameter in inches"
+                    } else {
+                        if (unitSystem == UnitSystem.METRIC) "Height in metres"
+                        else "Height in feet"
+                    })
+            },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        valueWarning?.let {
+            Text(it, style = type.caption, color = colors.confidenceBad)
+        }
+        if (developerMode) {
+            OutlinedTextField(
+                value = truthText,
+                onValueChange = { truthText = TruthInput.sanitize(it) },
+                label = { Text(TruthInput.fieldLabel(quantity, unit)) },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            TruthInput.fieldWarning(truthText, quantity, unit)?.let {
+                Text(it, style = type.caption, color = colors.confidenceBad)
+            }
+        }
+        ForestixProminentButton(
+            "Save changes", modifier = Modifier.fillMaxWidth(), enabled = canSave,
+        ) {
+            val value = typed
+            if (value != null) {
+                // Developer mode owns the truth field. With it off the stored
+                // truth is not on screen, so a save must leave it as it was.
+                val truth = if (developerMode) truthTyped else existing?.truth
+                if (existing != null) {
+                    val next =
+                        if (abs(value - existing.value) > FIELD_LOG_VALUE_EPSILON)
+                            existing.typedValue(value)
+                        else existing
+                    onSave(next.copy(truth = truth))
+                } else {
+                    onAdd(
+                        QuickMeasureEntry.typed(
+                            kind = kind, value = value, treeNumber = tree,
+                            treeName = row.treeName,
+                            plotID = row.entries.firstOrNull()?.plotID,
+                            truth = truth))
+                }
+            }
+        }
+        ForestixBorderedButton(
+            label = when {
+                kind == MeasureKind.DBH && existing != null -> "Measure the diameter again"
+                kind == MeasureKind.DBH -> "Measure the diameter"
+                existing != null -> "Measure the height again"
+                else -> "Measure the height"
+            },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            onRemeasure(
+                kind, tree, row.treeName,
+                row.entries.firstNotNullOfOrNull {
+                    it.speciesCode?.takeIf(String::isNotEmpty)
+                },
+                existing?.truth)
         }
     }
 }

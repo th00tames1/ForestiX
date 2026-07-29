@@ -52,6 +52,8 @@ import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -60,6 +62,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.hcjeong.forestix.common.TruthInput
 import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.theme.Forestix
 
@@ -140,6 +143,18 @@ fun BoxScope.MeasureBackButton(onClick: () -> Unit) {
         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(22.dp))
     }
 }
+
+// MARK: - Sampling-plot tracking-loss wording
+
+/// What the plot screens say once ArSessionHub has hidden the ring because
+/// its anchor pose stopped being corrected. Two strings, one meaning, used
+/// by both plot-placement screens; byte-identical to the iOS
+/// `MeasurementCopy.plotTrackingLost*` pair. The remedy clause is lifted
+/// verbatim from the height screen's TRACKING_LOST_NOW — one tracking
+/// dropout, one thing to do about it.
+const val PLOT_TRACKING_LOST_HINT =
+    "Tracking lost — the plot is hidden rather than drawn in the wrong place. Hold still until the camera picks the scene back up."
+const val PLOT_TRACKING_LOST_STATUS = "TRACKING LOST — inside or outside is unknown"
 
 // MARK: - Top instruction banner (U1 — all four AR screens)
 
@@ -422,29 +437,67 @@ fun MeasureFailureBanner(text: String, onDismiss: (() -> Unit)? = null) {
     )
 }
 
-// MARK: - Developer research fields (Target / True value)
+// MARK: - Developer research field (hand-measured true value)
 
-/// Compact fixed-width research capture row — iOS parity: caption labels at
-/// white 0.8, a 70 dp Target-id field and a 90 dp true-value field with a
-/// decimal keyboard, HStack spacing 6.
+/// Compact fixed-width research capture row — iOS parity: caption label at
+/// white 0.8 and a 90 dp true-value field with a decimal keyboard, spacing 6.
+///
+/// The "Target" id box that used to lead this row is gone. It meant nothing to
+/// a cruiser, and it was a free-text field they had to keep in step by hand
+/// with the tree they were actually standing at — when it drifted, the
+/// research CSV's `tree_id` pointed at the wrong tree. That column is now
+/// filled from the tree number the capture is already locked to, which cannot
+/// drift.
+///
+/// `trueLabel` MUST come from `TruthInput.fieldLabel(quantity, unit)` and
+/// `truthUnit` MUST be the same unit that label was built from — the two are
+/// separate parameters only because the label is a plain string here. The
+/// toggle changes the unit for THIS entry; the caller re-derives the label
+/// from it, so the field can never be labelled in one system while the value
+/// is read as another.
 @Composable
 fun ResearchFieldsRow(
-    targetValue: String,
-    onTargetChange: (String) -> Unit,
-    targetPlaceholder: String,
     trueLabel: String,
     trueValue: String,
     onTrueChange: (String) -> Unit,
     truePlaceholder: String,
+    truthUnit: TruthInput.Unit,
+    onToggleTruthUnit: () -> Unit,
 ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Text("Target", style = Forestix.type.caption, color = Color.White.copy(alpha = 0.8f))
-        ResearchField(targetValue, onTargetChange, targetPlaceholder, width = 70.dp, decimal = false)
         Text(trueLabel, style = Forestix.type.caption, color = Color.White.copy(alpha = 0.8f))
         ResearchField(trueValue, onTrueChange, truePlaceholder, width = 90.dp, decimal = true)
+        TruthUnitToggle(truthUnit, onToggleTruthUnit)
+    }
+}
+
+/// Per-entry unit switch that sits next to a typed ground-truth field.
+///
+/// The field opens in the cruiser's ACTIVE unit system; this changes it for
+/// THIS entry only, and the field's label is driven from the same value, so
+/// what is typed and what is read can never disagree. The button shows the
+/// unit currently in force — the cruiser reads the state, not the action.
+///
+/// CROSS-PLATFORM: same square, same unit text, same accessibility wording as the
+/// iOS `TruthUnitToggle`.
+@Composable
+fun TruthUnitToggle(unit: TruthInput.Unit, onToggle: () -> Unit) {
+    Box(
+        Modifier
+            .size(32.dp)
+            .clip(RoundedCornerShape(5.dp))
+            .background(Color.White.copy(alpha = 0.12f))
+            .border(0.5.dp, Color.White.copy(alpha = 0.4f), RoundedCornerShape(5.dp))
+            .clickableNoRipple(onToggle)
+            .semantics {
+                contentDescription = "Unit for this entry: ${unit.raw}. Tap to switch."
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(unit.raw, style = Forestix.type.caption, color = Color.White)
     }
 }
 

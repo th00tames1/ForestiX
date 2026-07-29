@@ -30,6 +30,7 @@ data class EntryRow(
     val method: String,
     val createdAt: Long,
     val treeNumber: Int?,
+    val treeName: String?,
     val plotID: String?,
     val speciesCode: String?,
     val position: String?,
@@ -39,6 +40,7 @@ data class EntryRow(
     val longitude: Double?,
     val photoPath: String?,
     val captureMode: String?,
+    val truth: Double?,
 ) {
     fun toDomain() = QuickMeasureEntry(
         id = UUID.fromString(id),
@@ -50,6 +52,7 @@ data class EntryRow(
         method = method,
         createdAt = createdAt,
         treeNumber = treeNumber,
+        treeName = treeName,
         plotID = plotID?.let { UUID.fromString(it) },
         speciesCode = speciesCode,
         position = StemPosition.fromRaw(position),
@@ -59,6 +62,7 @@ data class EntryRow(
         longitude = longitude,
         photoPath = photoPath,
         captureMode = captureMode,
+        truth = truth,
     )
 
     companion object {
@@ -72,6 +76,7 @@ data class EntryRow(
             method = e.method,
             createdAt = e.createdAt,
             treeNumber = e.treeNumber,
+            treeName = e.treeName,
             plotID = e.plotID?.toString(),
             speciesCode = e.speciesCode,
             position = e.position?.raw,
@@ -81,6 +86,7 @@ data class EntryRow(
             longitude = e.longitude,
             photoPath = e.photoPath,
             captureMode = e.captureMode,
+            truth = e.truth,
         )
     }
 }
@@ -186,7 +192,25 @@ val QUICK_MEASURE_MIGRATION_2_3 = object : androidx.room.migration.Migration(2, 
     }
 }
 
-@Database(entities = [EntryRow::class, PlotRow::class], version = 3, exportSchema = false)
+/// v4: the cruiser's name for the tree ("Plot3-T07") — additive and
+/// nullable; a null reads as the "#<treeNumber>" the log always showed, so
+/// nothing recorded before naming existed changes appearance.
+val QUICK_MEASURE_MIGRATION_3_4 = object : androidx.room.migration.Migration(3, 4) {
+    override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE entries ADD COLUMN treeName TEXT")
+    }
+}
+
+/// v5: the hand-measured ground truth typed against a reading — additive
+/// and nullable, so every row written before the field existed reads back
+/// as "no truth entered" rather than as a measured zero.
+val QUICK_MEASURE_MIGRATION_4_5 = object : androidx.room.migration.Migration(4, 5) {
+    override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE entries ADD COLUMN truth REAL")
+    }
+}
+
+@Database(entities = [EntryRow::class, PlotRow::class], version = 5, exportSchema = false)
 @TypeConverters(Converters::class)
 abstract class ForestixDatabase : RoomDatabase() {
     abstract fun dao(): QuickMeasureDao

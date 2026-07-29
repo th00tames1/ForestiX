@@ -87,6 +87,9 @@ public final class TreeEntity: NSManagedObject {
     @NSManaged public var id: UUID
     @NSManaged public var plotId: UUID
     @NSManaged public var treeNumber: Int32
+    // Model v3 — the cruiser's own name for the tree. Optional; nil reads as
+    // "#treeNumber", the label the cruise surfaces have always shown.
+    @NSManaged public var treeName: String?
     @NSManaged public var speciesCode: String
     @NSManaged public var status: String
 

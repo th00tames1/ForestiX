@@ -104,6 +104,9 @@ data class TreeEntity(
     @PrimaryKey val id: UUID,
     val plotId: UUID,
     val treeNumber: Int,
+    /// The cruiser's own name for the tree. Nullable; added in schema v4
+    /// (CruiseDatabase.MIGRATION_3_4). Null reads as "#$treeNumber".
+    val treeName: String? = null,
     val speciesCode: String,
     val status: String,
 

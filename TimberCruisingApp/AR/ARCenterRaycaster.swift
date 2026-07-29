@@ -215,7 +215,43 @@ public final class ARCenterRaycaster: ObservableObject {
         var bestT: Float = .greatestFiniteMagnitude
         var bestHit: SIMD3<Float>?
 
+        // FIELD REPORT 9 — this used to walk every triangle of every mesh
+        // anchor, so its cost grew without bound as the cruiser accumulated
+        // reconstruction across a plot: by the tenth tree a screen-centre
+        // raycast was tens of thousands of ray/triangle tests, fired at
+        // 10 Hz by the height anchor-aim sampler and the sampling-plot poll.
+        //
+        // Two rejections, no change to which surface is reported:
+        //   1. Per-anchor slab test against a local-space AABB, rebuilt on
+        //      every call from the SAME vertices the triangles are built
+        //      from — so a box miss is a triangle miss, and a mesh ARKit
+        //      has just refined can never be tested against a stale box.
+        //      One linear vertex pass replaces the anchor's whole face list.
+        //   2. Nearest box first, and any anchor whose box only starts
+        //      BEYOND the closest hit found so far is skipped outright —
+        //      it cannot produce a nearer hit, which is the only thing
+        //      this function returns.
+        var candidates: [(anchor: ARMeshAnchor, tNear: Float)] = []
+        candidates.reserveCapacity(meshAnchors.count)
         for anchor in meshAnchors {
+            guard let inv = invertibleInverse(anchor.transform) else { continue }
+            let localOrigin = transform(rayOrigin, by: inv)
+            let localDir = rotate(rayDirection, by: inv)
+            guard let box = localBounds(of: anchor) else { continue }
+            guard let tNear = slabIntersection(origin: localOrigin,
+                                               direction: localDir,
+                                               boxMin: box.min,
+                                               boxMax: box.max)
+            else { continue }
+            candidates.append((anchor, tNear))
+        }
+        candidates.sort { $0.tNear < $1.tNear }
+
+        for candidate in candidates {
+            // Everything left in the list starts further away than the hit
+            // we already have; nothing nearer can come out of it.
+            if candidate.tNear >= bestT { break }
+            let anchor = candidate.anchor
             let geometry = anchor.geometry
             let anchorTransform = anchor.transform
             // Vertices are in the anchor's local frame — transform once
@@ -279,6 +315,78 @@ public final class ARCenterRaycaster: ObservableObject {
         return bestHit
     }
 
+    // MARK: - Bounding-volume rejection
+
+    /// Axis-aligned bounds of an anchor's vertices, in the anchor's own
+    /// local frame. One linear pass over the vertex buffer — cheap next to
+    /// the face walk it guards, and recomputed every call so a refined mesh
+    /// can never be tested against a stale box.
+    private func localBounds(
+        of anchor: ARMeshAnchor
+    ) -> (min: SIMD3<Float>, max: SIMD3<Float>)? {
+        let vertices = anchor.geometry.vertices
+        guard vertices.count > 0 else { return nil }
+        let ptr = vertices.buffer.contents()
+            .advanced(by: vertices.offset)
+            .assumingMemoryBound(to: UInt8.self)
+        var lo = readVertex(ptr, index: 0, stride: vertices.stride)
+        var hi = lo
+        for i in 1..<vertices.count {
+            let v = readVertex(ptr, index: i, stride: vertices.stride)
+            lo = simd_min(lo, v)
+            hi = simd_max(hi, v)
+        }
+        return (lo, hi)
+    }
+
+    /// Ray/AABB slab test. Returns the ray parameter at which the ray
+    /// ENTERS the box (0 when the origin is already inside), or nil when it
+    /// misses. `direction` need not be normalised — `t` stays in the same
+    /// parameterisation as the direction it was built from, which is what
+    /// lets the caller compare it against triangle hits from the same ray.
+    private func slabIntersection(origin: SIMD3<Float>,
+                                  direction: SIMD3<Float>,
+                                  boxMin: SIMD3<Float>,
+                                  boxMax: SIMD3<Float>) -> Float? {
+        var tMin: Float = 0
+        var tMax: Float = .greatestFiniteMagnitude
+        for axis in 0..<3 {
+            let d = direction[axis]
+            let o = origin[axis]
+            if abs(d) < 1e-9 {
+                // Parallel to this pair of planes: a miss unless the origin
+                // already lies between them.
+                if o < boxMin[axis] || o > boxMax[axis] { return nil }
+                continue
+            }
+            let inv = 1 / d
+            var t0 = (boxMin[axis] - o) * inv
+            var t1 = (boxMax[axis] - o) * inv
+            if t0 > t1 { swap(&t0, &t1) }
+            tMin = max(tMin, t0)
+            tMax = min(tMax, t1)
+            if tMin > tMax { return nil }
+        }
+        return tMin
+    }
+
+    /// Inverse of an anchor transform, or nil when it is degenerate.
+    /// ARKit anchor transforms are rigid, so this is only ever nil for a
+    /// transform that has not resolved.
+    private func invertibleInverse(_ m: simd_float4x4) -> simd_float4x4? {
+        let det = m.determinant
+        guard det.isFinite, abs(det) > 1e-12 else { return nil }
+        return m.inverse
+    }
+
+    /// Rotate a DIRECTION by a transform — translation deliberately
+    /// dropped (w = 0), so the result is still a direction.
+    private func rotate(_ v: SIMD3<Float>,
+                        by m: simd_float4x4) -> SIMD3<Float> {
+        let r = m * SIMD4<Float>(v.x, v.y, v.z, 0)
+        return SIMD3<Float>(r.x, r.y, r.z)
+    }
+
     // MARK: - Mesh-buffer plumbing
 
     private func readUInt32(_ ptr: UnsafePointer<UInt8>, offset: Int) -> UInt32 {
@@ -291,14 +399,17 @@ public final class ARCenterRaycaster: ObservableObject {
     private func readVertex(_ ptr: UnsafePointer<UInt8>,
                             index: Int,
                             stride: Int) -> SIMD3<Float> {
-        var x: Float = 0, y: Float = 0, z: Float = 0
-        let base = index * stride
-        memcpy(&x, ptr.advanced(by: base), MemoryLayout<Float>.size)
-        memcpy(&y, ptr.advanced(by: base + MemoryLayout<Float>.size),
-               MemoryLayout<Float>.size)
-        memcpy(&z, ptr.advanced(by: base + 2 * MemoryLayout<Float>.size),
-               MemoryLayout<Float>.size)
-        return SIMD3<Float>(x, y, z)
+        // ONE unaligned 12-byte copy, not three 4-byte ones: this is the
+        // innermost read of both the bounds pass and the face walk.
+        // SIMD3<Float> is 16 bytes wide in memory, so it can't be the memcpy
+        // destination — the tuple is exactly the packed 3 × Float the mesh
+        // buffer stores.
+        var xyz: (Float, Float, Float) = (0, 0, 0)
+        withUnsafeMutableBytes(of: &xyz) { dst in
+            guard let base = dst.baseAddress else { return }
+            memcpy(base, ptr.advanced(by: index * stride), 3 * MemoryLayout<Float>.size)
+        }
+        return SIMD3<Float>(xyz.0, xyz.1, xyz.2)
     }
 
     private func transform(_ p: SIMD3<Float>,

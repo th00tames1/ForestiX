@@ -35,6 +35,10 @@ data class Tree(
     val id: UUID,
     val plotId: UUID,
     var treeNumber: Int,
+    /// The cruiser's own name for this tree ("Plot3-T07"). Null for a tree
+    /// that was never named, and every display falls back to "#$treeNumber"
+    /// — the label the cruise surfaces have always shown.
+    var treeName: String? = null,
     var speciesCode: String,
     var status: TreeStatus,
 

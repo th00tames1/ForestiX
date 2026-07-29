@@ -20,6 +20,7 @@ import android.net.Uri
 import android.os.Build
 import androidx.core.content.FileProvider
 import com.hcjeong.forestix.ar.Vec3
+import com.hcjeong.forestix.common.TruthInput
 import com.hcjeong.forestix.positioning.CLLocationSnapshot
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -83,11 +84,19 @@ object RawCaptureStore {
         val id: String?,
         val frameCount: Int,
         val error: String?,
-        val queuedTruthSaved: Double? = null,
-        val queuedTruthLost: Double? = null,
+        val queuedTruthSaved: TruthEntry? = null,
+        val queuedTruthLost: TruthEntry? = null,
     ) {
         val saved: Boolean get() = id != null && error == null
     }
+
+    /// A typed ground truth AND the unit it was typed in. `value` is always
+    /// the app's metric base (cm for a diameter, m for a height); `unit` is
+    /// the operator's tag ("cm" | "in" | "m" | "ft"). The two travel together
+    /// everywhere, so a value handed back to a scan screen after a failed
+    /// write is shown in the scale it was typed at rather than converted
+    /// behind the cruiser's back.
+    data class TruthEntry(val value: Double, val unit: TruthInput.Unit)
 
     /// Result of a truth write. QUEUED is NOT durable — the value sits in the
     /// pending queue until the in-flight bundle write folds it in, so a caller
@@ -100,6 +109,7 @@ object RawCaptureStore {
     /// wrote truth when lastRecordedBundleID already existed).
     private class PendingEdit {
         var truth: Double? = null
+        var truthUnit: TruthInput.Unit? = null
         var hasTruth: Boolean = false
         var accepted: Boolean = false
     }
@@ -271,7 +281,7 @@ object RawCaptureStore {
                 frameCount = raw.size,
                 perFrame = perFrame,
             ))
-            manifest.put("truth", truthJson(null, null))
+            manifest.put("truth", truthJson(null, null, null))
             manifest.put("gps", gpsJson(ctx.gps))
 
             // DBH block: per-frame raw descriptors. view_to_depth is ALWAYS
@@ -381,7 +391,7 @@ object RawCaptureStore {
                 frameCount = 0,            // patched below once the aims are attached
                 perFrame = emptyList(),
             ))
-            manifest.put("truth", truthJson(null, null))
+            manifest.put("truth", truthJson(null, null, null))
             manifest.put("gps", gpsJson(ctx.gps))
             manifest.put("dbh", JSONObject.NULL)
 
@@ -565,18 +575,32 @@ object RawCaptureStore {
     /// recorder's manifest drain holds — the two used to interleave, and a
     /// direct setTruth landing between the drain's read and its write was
     /// clobbered with no error.
-    suspend fun setTruth(context: Context, id: String, value: Double?): TruthWrite =
+    /// `value` is the metric base (cm / m); `unit` is what the operator typed,
+    /// recorded beside it so the export never has to infer the scale. A clear
+    /// (`value == null`) carries no unit.
+    suspend fun setTruth(
+        context: Context,
+        id: String,
+        value: Double?,
+        unit: TruthInput.Unit?,
+    ): TruthWrite =
         withContext(Dispatchers.IO) {
             synchronized(pendingLock) {
                 val file = manifestFile(context, id)
                 if (!file.exists()) {
                     pending.getOrPut(id) { PendingEdit() }.also {
-                        it.truth = value; it.hasTruth = true
+                        it.truth = value
+                        it.truthUnit = if (value != null) unit else null
+                        it.hasTruth = true
                     }
                     return@synchronized TruthWrite.QUEUED
                 }
                 val m = manifestOf(context, id) ?: return@synchronized TruthWrite.FAILED
-                m.put("truth", truthJson(value, if (value != null) iso8601() else null))
+                m.put("truth", truthJson(
+                    value,
+                    if (value != null) iso8601() else null,
+                    if (value != null) unit else null,
+                ))
                 if (writeQuietly(file, m)) TruthWrite.SAVED else TruthWrite.FAILED
             }
         }
@@ -630,7 +654,7 @@ object RawCaptureStore {
     /// recorder can tell the scan screen its typed value is now durable.
     /// A failed write puts the queued edit BACK on the queue and rethrows, so
     /// the caller's failure path reports it as lost instead of eating it.
-    private fun writeManifest(id: String, dir: File, manifest: JSONObject): Double? =
+    private fun writeManifest(id: String, dir: File, manifest: JSONObject): TruthEntry? =
         synchronized(pendingLock) {
             val edit = pending.remove(id)
             if (edit != null) applyPending(manifest, edit)
@@ -640,7 +664,7 @@ object RawCaptureStore {
                 if (edit != null) pending[id] = edit
                 throw t
             }
-            if (edit != null && edit.hasTruth) edit.truth else null
+            edit?.let { truthEntryOf(it) }
         }
 
     /// Temp file + rename. `writeText` truncates in place, so a crash (or a
@@ -684,10 +708,25 @@ object RawCaptureStore {
         if (edit.hasTruth) {
             manifest.put(
                 "truth",
-                truthJson(edit.truth, if (edit.truth != null) iso8601() else null),
+                truthJson(
+                    edit.truth,
+                    if (edit.truth != null) iso8601() else null,
+                    edit.truthUnit,
+                ),
             )
         }
         if (edit.accepted) applyAccepted(manifest)
+    }
+
+    /// The queued value + its typed unit, or null when the edit carried no
+    /// truth (or was an explicit clear). A truth with no unit tag cannot be
+    /// handed back to a field without guessing its scale, so it is reported as
+    /// "nothing to hand back" rather than assumed metric.
+    private fun truthEntryOf(edit: PendingEdit): TruthEntry? {
+        if (!edit.hasTruth) return null
+        val v = edit.truth ?: return null
+        val u = edit.truthUnit ?: return null
+        return TruthEntry(v, u)
     }
 
     private fun applyAccepted(manifest: JSONObject) {
@@ -701,9 +740,9 @@ object RawCaptureStore {
     /// queued edit was an explicit clear). The caller must surface it — a
     /// queued truth thrown away in silence is exactly the invisible loss this
     /// whole path exists to prevent.
-    private fun dropPending(id: String): Double? {
+    private fun dropPending(id: String): TruthEntry? {
         val edit = synchronized(pendingLock) { pending.remove(id) } ?: return null
-        return if (edit.hasTruth) edit.truth else null
+        return truthEntryOf(edit)
     }
 
     /// Human-readable reason for a failed write — a full disk is the one the
@@ -764,9 +803,20 @@ object RawCaptureStore {
         put("per_frame", JSONArray().apply { perFrame.forEach { put(it) } })
     }
 
-    private fun truthJson(value: Double?, enteredAt: String?): JSONObject = JSONObject().apply {
+    // truth — `value` is ALWAYS the app's metric base (cm for a diameter, m
+    // for a height); `truth_unit` is the unit the operator actually TYPED.
+    // Without the tag the export cannot tell an imperial entry from a metric
+    // one, because the conversion has already happened by the time the number
+    // is written. Null on a bundle with no truth and on bundles written before
+    // the tag existed — a reader must treat that as "not stated", not metric.
+    private fun truthJson(
+        value: Double?,
+        enteredAt: String?,
+        unit: TruthInput.Unit?,
+    ): JSONObject = JSONObject().apply {
         put("value", value ?: JSONObject.NULL)
         put("entered_at", enteredAt ?: JSONObject.NULL)
+        put("truth_unit", unit?.raw ?: JSONObject.NULL)
     }
 
     // GPS block — {lat, lon, acc_m}, byte-identical to the iOS schema.

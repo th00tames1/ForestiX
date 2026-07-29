@@ -85,7 +85,10 @@ object CruiseCapture {
             plotCenterLon = plot.centerLon,
         )
         savedTreeId = null
-        PendingTreeNumber.value = treeNumber
+        // Number only. Cruise names its trees by plot and tally position, not
+        // by the free-text name the quick-measure chooser offers, and a cruise
+        // reading is always a new tally line rather than a replacement.
+        PendingTreeNumber.set(number = treeNumber)
         env.activeScanCalibration.value = ProjectCalibration(
             depthNoiseMm = project.depthNoiseMm,
             dbhCorrectionAlpha = project.dbhCorrectionAlpha,
@@ -109,7 +112,7 @@ object CruiseCapture {
             plotCenterLon = plot.centerLon,
         )
         savedTreeId = tree.id
-        PendingTreeNumber.value = tree.treeNumber
+        PendingTreeNumber.set(number = tree.treeNumber)
         env.activeScanCalibration.value = ProjectCalibration(
             depthNoiseMm = project.depthNoiseMm,
             dbhCorrectionAlpha = project.dbhCorrectionAlpha,

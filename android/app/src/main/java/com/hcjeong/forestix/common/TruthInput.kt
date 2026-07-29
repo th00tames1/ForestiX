@@ -11,6 +11,8 @@
 //   • Plausibility windows: DBH 1–300 cm, height 1–120 m. A value outside
 //     the window is still accepted (it is the operator's measurement) but
 //     the caller shows `fieldWarning(...)` next to the field.
+//   • The UNIT a truth was typed in belongs to the entry, not to the reader.
+//     See the [Unit] section below.
 
 package com.hcjeong.forestix.common
 
@@ -53,20 +55,104 @@ object TruthInput {
     fun parsePositive(raw: String): Double? =
         parse(raw)?.takeIf { it.isFinite() && it > 0.0 }
 
-    /// A value put BACK into a truth field — used when a queued truth could
-    /// not be stored (its bundle write failed) and the operator must see the
-    /// number again instead of losing it. Trailing zeros are trimmed so
-    /// "12.5" round-trips as typed.
+    /// True when the field holds characters but doesn't parse — the state
+    /// that must NEVER overwrite (or silently discard) a stored truth.
+    fun isUnparseable(raw: String): Boolean =
+        normalized(raw).isNotEmpty() && parsePositive(raw) == null
+
+    // MARK: What is being typed
+
+    /// The quantity a truth field stands for. It picks the unit pair, the
+    /// label and the plausibility window in one place, so those three can
+    /// never disagree about what the field holds.
+    enum class Quantity {
+        DIAMETER,   // base cm
+        HEIGHT,     // base m
+        DISTANCE,   // base m
+    }
+
+    // MARK: The unit the operator typed in
+
+    /// The unit a typed truth is IN, recorded with the value (manifest
+    /// `truth_unit`, research CSV `truth_unit`).
+    ///
+    /// The stored number stays in the app's metric base, so after the fact
+    /// nothing in an export says whether a 12.5 was typed as centimetres or
+    /// converted from inches — and a field labelled in metric while the
+    /// cruiser worked in imperial is how a day of analysis was lost. Recording
+    /// what was typed makes the reconciliation arithmetic instead of guesswork.
+    enum class Unit(val raw: String) {
+        CM("cm"),
+        INCHES("in"),
+        METERS("m"),
+        FEET("ft"),
+    }
+
+    /// The unit a FRESH entry starts in: the cruiser's ACTIVE system, never a
+    /// fixed metric default.
+    fun defaultUnit(quantity: Quantity, imperial: Boolean): Unit = when (quantity) {
+        Quantity.DIAMETER -> if (imperial) Unit.INCHES else Unit.CM
+        Quantity.HEIGHT, Quantity.DISTANCE -> if (imperial) Unit.FEET else Unit.METERS
+    }
+
+    /// The other unit for the same quantity — what the per-entry toggle picks.
+    fun toggled(unit: Unit): Unit = when (unit) {
+        Unit.CM -> Unit.INCHES
+        Unit.INCHES -> Unit.CM
+        Unit.METERS -> Unit.FEET
+        Unit.FEET -> Unit.METERS
+    }
+
+    /// A typed value converted to the app's metric base (cm for a diameter,
+    /// m for a height or distance). The ONE place that conversion happens —
+    /// every truth field routes through here rather than converting at the
+    /// call site, because a call site that forgets is silently 2.54x wrong.
+    fun toBase(value: Double, unit: Unit): Double = when (unit) {
+        Unit.CM, Unit.METERS -> value
+        Unit.INCHES -> Units.inchesToCm(value)
+        Unit.FEET -> Units.feetToMeters(value)
+    }
+
+    /// A stored base value expressed back in [unit] — for putting a value the
+    /// app is handing back into the field it was typed in.
+    fun fromBase(base: Double, unit: Unit): Double = when (unit) {
+        Unit.CM, Unit.METERS -> base
+        Unit.INCHES -> Units.cmToInches(base)
+        Unit.FEET -> Units.metersToFeet(base)
+    }
+
+    /// Parse and convert in one step: the base value a typed field means, or
+    /// null when nothing usable was typed.
+    fun parsePositiveBase(raw: String, unit: Unit): Double? =
+        parsePositive(raw)?.let { toBase(it, unit) }
+
+    /// Compact label for the scan panels' inline field — carries the unit, so
+    /// what is typed and what is read can never disagree.
+    fun fieldLabel(quantity: Quantity, unit: Unit): String = when (quantity) {
+        Quantity.DIAMETER -> "True Ø (${unit.raw})"
+        Quantity.HEIGHT -> "True H (${unit.raw})"
+        Quantity.DISTANCE -> "True (${unit.raw})"
+    }
+
+    /// Longer label for the raw-capture console's field placeholder.
+    fun promptLabel(quantity: Quantity, unit: Unit): String = when (quantity) {
+        Quantity.DIAMETER -> "True Ø (${unit.raw})"
+        Quantity.HEIGHT -> "True height (${unit.raw})"
+        Quantity.DISTANCE -> "True distance (${unit.raw})"
+    }
+
+    /// A value put BACK into a truth field, rendered in the unit it was typed
+    /// in — used when a queued truth could not be stored (its bundle write
+    /// failed) and the operator must see the number again instead of losing
+    /// it. Trailing zeros are trimmed so "12.5" round-trips as typed.
+    fun text(base: Double, unit: Unit): String = text(fromBase(base, unit))
+
+    /// The same rendering for a value already in the unit it will be shown in.
     fun text(value: Double): String {
         val s = String.format(java.util.Locale.US, "%.4f", value)
             .trimEnd('0').trimEnd('.')
         return if (s.isEmpty() || s == "-") "0" else s
     }
-
-    /// True when the field holds characters but doesn't parse — the state
-    /// that must NEVER overwrite (or silently discard) a stored truth.
-    fun isUnparseable(raw: String): Boolean =
-        normalized(raw).isNotEmpty() && parsePositive(raw) == null
 
     // MARK: Plausibility windows
 
@@ -83,16 +169,21 @@ object TruthInput {
     fun heightWarning(m: Double): String? =
         if (m < HEIGHT_MIN_M || m > HEIGHT_MAX_M) "Outside 1–120 m — check the value" else null
 
-    /// Kind-dispatched convenience.
-    fun warning(value: Double, isHeight: Boolean): String? =
-        if (isHeight) heightWarning(value) else dbhWarning(value)
+    /// Quantity-dispatched window check. The value is the METRIC BASE, so the
+    /// window is stated once and an imperial entry is judged by the same
+    /// numbers as a metric one. A distance has no cruising window.
+    fun warning(base: Double, quantity: Quantity): String? = when (quantity) {
+        Quantity.DIAMETER -> dbhWarning(base)
+        Quantity.HEIGHT -> heightWarning(base)
+        Quantity.DISTANCE -> null
+    }
 
-    /// The inline warning a truth field shows for its CURRENT text: "Not a
-    /// number" for unparseable input, the plausibility warning for an
+    /// The inline warning a truth field shows for its CURRENT text and unit:
+    /// "Not a number" for unparseable input, the plausibility warning for an
     /// out-of-window value, null otherwise.
-    fun fieldWarning(raw: String, isHeight: Boolean): String? {
+    fun fieldWarning(raw: String, quantity: Quantity, unit: Unit): String? {
         if (isUnparseable(raw)) return "Not a number"
-        val v = parsePositive(raw) ?: return null
-        return warning(v, isHeight)
+        val base = parsePositiveBase(raw, unit) ?: return null
+        return warning(base, quantity)
     }
 }

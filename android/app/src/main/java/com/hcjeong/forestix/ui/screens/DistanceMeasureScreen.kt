@@ -54,6 +54,7 @@ import com.hcjeong.forestix.ar.Vec3
 import com.hcjeong.forestix.ar.distance
 import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.TruthInput
+import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
 import com.hcjeong.forestix.data.ResearchLog
@@ -91,8 +92,19 @@ fun DistanceMeasureScreen(nav: NavController) {
     // Hampel-style robust moving average for the non-depth (plane hit-test)
     // path — the raw AR distance flickers there. Depth-API values stay raw.
     val arSmoother = remember { DistanceSmoother() }
-    // Developer-mode research capture: tape-measured true distance (m).
-    var researchTrueM by remember { mutableStateOf("") }
+    // Developer-mode research capture: the tape-measured true distance, AS
+    // TYPED. The unit is `truthUnit` below, never assumed — the field used to
+    // be named (and read) as metres whatever the cruiser was working in.
+    var researchTrueText by remember { mutableStateOf("") }
+    // The unit THIS typed truth is in: opens in the cruiser's active system,
+    // switched per entry by the square button beside the field. Keyed on the
+    // active system so changing the project's units re-defaults it.
+    var truthUnit by remember(settings.unitSystem) {
+        mutableStateOf(TruthInput.defaultUnit(
+            TruthInput.Quantity.DISTANCE,
+            imperial = settings.unitSystem != UnitSystem.METRIC,
+        ))
+    }
     LaunchedEffect(Unit) {
         while (true) {
             kotlinx.coroutines.delay(50)
@@ -152,15 +164,18 @@ fun DistanceMeasureScreen(nav: NavController) {
                 "unit" to "m",
                 "distance_m" to String.format(Locale.US, "%.3f", d),
             )
-            if (settings.researchTreeId.isNotEmpty()) {
-                fields["tree_id"] = settings.researchTreeId  // repeat auto-filled by record()
-            }
+            // No tree_id: a distance reading is not taken against a tree, and
+            // the retyped "Target" box that used to fill this column was as
+            // likely to name the previous tree as this measurement's subject.
             controller.cameraForwardElevationRad()?.let {
                 fields["pitch_deg"] = String.format(Locale.US, "%.1f", it * 180f / Math.PI.toFloat())
             }
-            TruthInput.parse(researchTrueM)?.takeIf { it > 0 }?.let { t ->
+            // Converted to the row's `unit` (m) so `error` stays subtractable
+            // against `measured_value`; `truth_unit` records what was typed.
+            TruthInput.parsePositiveBase(researchTrueText, truthUnit)?.let { t ->
                 fields["true_value"] = String.format(Locale.US, "%.3f", t)
                 fields["error"] = String.format(Locale.US, "%.3f", d - t)
+                fields["truth_unit"] = truthUnit.raw
             }
             ResearchLog.record(context, fields)
         }
@@ -227,13 +242,12 @@ fun DistanceMeasureScreen(nav: NavController) {
                 CenteredText(twoPointDistance?.let { formatDistance(it) } ?: "—", large = true)
                 if (settings.developerMode) {
                     ResearchFieldsRow(
-                        targetValue = settings.researchTreeId,
-                        onTargetChange = { env.settings.setResearchTreeId(it.trim()) },
-                        targetPlaceholder = "D1",
-                        trueLabel = "True (m)",
-                        trueValue = researchTrueM,
-                        onTrueChange = { researchTrueM = TruthInput.sanitize(it) },
+                        trueLabel = TruthInput.fieldLabel(TruthInput.Quantity.DISTANCE, truthUnit),
+                        trueValue = researchTrueText,
+                        onTrueChange = { researchTrueText = TruthInput.sanitize(it) },
                         truePlaceholder = "tape",
+                        truthUnit = truthUnit,
+                        onToggleTruthUnit = { truthUnit = TruthInput.toggled(truthUnit) },
                     )
                 }
                 Row(
@@ -278,13 +292,12 @@ fun DistanceMeasureScreen(nav: NavController) {
                                     .padding(horizontal = 12.dp, vertical = 8.dp),
                             ) {
                                 ResearchFieldsRow(
-                                    targetValue = settings.researchTreeId,
-                                    onTargetChange = { env.settings.setResearchTreeId(it.trim()) },
-                                    targetPlaceholder = "D1",
-                                    trueLabel = "True (m)",
-                                    trueValue = researchTrueM,
-                                    onTrueChange = { researchTrueM = TruthInput.sanitize(it) },
+                                    trueLabel = TruthInput.fieldLabel(TruthInput.Quantity.DISTANCE, truthUnit),
+                                    trueValue = researchTrueText,
+                                    onTrueChange = { researchTrueText = TruthInput.sanitize(it) },
                                     truePlaceholder = "tape",
+                                    truthUnit = truthUnit,
+                                    onToggleTruthUnit = { truthUnit = TruthInput.toggled(truthUnit) },
                                 )
                             }
                         }

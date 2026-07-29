@@ -67,6 +67,8 @@ import com.hcjeong.forestix.ui.screens.MeasureBackButton
 import com.hcjeong.forestix.ui.screens.MeasureShutterBar
 import com.hcjeong.forestix.ui.screens.MeasureStatusPanel
 import com.hcjeong.forestix.ui.screens.MeasureTopChrome
+import com.hcjeong.forestix.ui.screens.PLOT_TRACKING_LOST_HINT
+import com.hcjeong.forestix.ui.screens.PLOT_TRACKING_LOST_STATUS
 import com.hcjeong.forestix.ui.screens.SamplingPlotMiniMap
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixProminentButton
@@ -122,6 +124,10 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String, editPlotId: Str
     val plot = ArSessionHub.activePlot
     val radiusM = ArSessionHub.plotRadiusM
     val placed = plot != null
+    // ARCore stopped correcting the plot's anchor pose, so the hub hid the
+    // ring — everything this screen says about the plot comes from that same
+    // pose and goes unknown with it (sampling-tool parity).
+    val trackingLost = placed && ArSessionHub.plotTrackingLost
 
     var isOutside by remember { mutableStateOf(false) }
     var distanceFromCenter by remember { mutableStateOf<Double?>(null) }
@@ -196,12 +202,16 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String, editPlotId: Str
                 val acc = snap.horizontalAccuracyM.toFloat()
                 existing.centerLat = snap.latitude
                 existing.centerLon = snap.longitude
-                existing.positionSource = PositionSource.GPS_AVERAGED
+                // ONE fix, named as one. This path never opened an averaging
+                // window, so it may not wear GPS_AVERAGED, and the tier comes
+                // from the single-fix rule rather than from `classify` with a
+                // spread of zero it never measured.
+                existing.positionSource = PositionSource.GPS_SINGLE
                 existing.gpsNSamples = 1
                 existing.gpsMedianHAccuracyM = acc
                 existing.gpsSampleStdXyM = 0f
                 // Still stored, still exported — just never shown (F9).
-                existing.positionTier = GPSAveraging.classify(acc, 0f)
+                existing.positionTier = GPSAveraging.classifySingleFix(acc)
             }
         }
         env.plotRepository.update(existing)
@@ -255,10 +265,12 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String, editPlotId: Str
                     plotNumber = number,
                     centerLat = snap.latitude,
                     centerLon = snap.longitude,
-                    positionSource = PositionSource.GPS_AVERAGED,
-                    // Honest single-fix stamp: spec tier table on the
-                    // accuracy axis, nSamples = 1 records the shortcut.
-                    positionTier = GPSAveraging.classify(acc, 0f),
+                    // ONE fix, named as one — see PositionSource.GPS_SINGLE.
+                    // Nothing on this path opens an averaging window, so
+                    // neither the source nor the tier may be borrowed from
+                    // the one that does; nSamples = 1 records the shortcut.
+                    positionSource = PositionSource.GPS_SINGLE,
+                    positionTier = GPSAveraging.classifySingleFix(acc),
                     gpsNSamples = 1,
                     gpsMedianHAccuracyM = acc,
                     gpsSampleStdXyM = 0f,
@@ -352,7 +364,8 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String, editPlotId: Str
         // is a value and stays in the bottom panel).
         MeasureTopChrome(
             instruction = failure
-                ?: if (!placed) "Set the radius, aim at the plot centre, tap +" else null,
+                ?: if (trackingLost) PLOT_TRACKING_LOST_HINT
+                else if (!placed) "Set the radius, aim at the plot centre, tap +" else null,
         )
 
         // U2 — bottom-centre shutter while aiming for the centre.
@@ -362,9 +375,14 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String, editPlotId: Str
         // distance line + Reset/Save plot, as before.
         if (placed) MeasureStatusPanel {
             CenteredText(
-                if (isOutside) "OUTSIDE — walk back inside" else "INSIDE plot boundary",
+                if (trackingLost) PLOT_TRACKING_LOST_STATUS
+                else if (isOutside) "OUTSIDE — walk back inside" else "INSIDE plot boundary",
                 large = true,
-                color = if (isOutside) colors.confidenceBad else colors.confidenceOk,
+                color = when {
+                    trackingLost -> colors.confidenceWarn
+                    isOutside -> colors.confidenceBad
+                    else -> colors.confidenceOk
+                },
             )
             Text(
                 distanceFromCenter?.let {

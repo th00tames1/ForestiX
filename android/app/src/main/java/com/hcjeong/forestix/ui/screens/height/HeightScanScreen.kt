@@ -11,10 +11,12 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -142,6 +144,25 @@ private const val AIM_MARKER_RADIUS_M = 0.06f
 /// sent back to the start by an arm's-length wobble.
 private const val AIM_DRIFT_WARN_M = 0.25f
 
+/// Walk-off integrity copy (field round 9 — the vanishing anchor). Byte
+/// identical to the iOS HeightScanScreen constants of the same names.
+///
+/// The cruiser's report was "the sphere disappears and the walked distance
+/// goes back to zero". Both were the SAME silence: ARCore's camera pose is
+/// undefined while tracking is PAUSED, the pose readers handed that out as a
+/// real position anyway (now fixed in ArController), and the walk panel
+/// recomputed both distances from it. A dropout must be announced while it
+/// is happening AND remembered afterwards — a distance that restarts without
+/// saying so is the one thing this screen must never do.
+private const val TRACKING_LOST_NOW =
+    "Tracking lost — hold still until the camera picks the scene back up. The distance is frozen, not restarted."
+private const val TRACKING_DROPPED_DURING_WALK =
+    "Tracking dropped during the walk-off, so the distance to the trunk may have shifted. Retake for a firm number."
+private const val ANCHOR_LOST =
+    "The trunk anchor is gone — the camera couldn't hold it. Tap Retake and anchor the trunk again."
+private const val ANCHOR_NOT_PLACED =
+    "Couldn't pin the trunk — hold still for a second, then tap + again."
+
 /// `chainedFromDiameter` = this session was opened AUTOMATICALLY by the
 /// cruise tally right after a diameter was accepted (field report F10). It is
 /// the one case where "I don't want a height for this tree" needs its own
@@ -166,15 +187,16 @@ fun HeightScanScreen(
     // PendingTreeNumber; otherwise the next free number is used. The slot
     // is consumed unconditionally so a stale lock can never leak into a
     // later capture session.
+    val pendingLock = remember { PendingTreeNumber.consume() }
     var pendingTree by remember {
         mutableStateOf(
-            PendingTreeNumber.consume().let { pending ->
-                treeOverride ?: pending ?: env.history.suggestedNextTreeNumber
-            },
+            treeOverride ?: pendingLock?.number ?: env.history.suggestedNextTreeNumber,
         )
     }
-    // Developer-mode research capture: true height (m) from a clinometer.
-    var researchTrueM by remember { mutableStateOf("") }
+    // Developer-mode research capture: the clinometer-measured true height, AS
+    // TYPED. The unit is `truthUnit` below, never assumed — the field used to
+    // be named (and read) as metres whatever the cruiser was working in.
+    var researchTrueText by remember { mutableStateOf("") }
     val settings by env.settings.state.collectAsStateWithLifecycle()
     // Project calibration — identity for plain quick-measure (iOS parity),
     // the active project's VIO drift fraction when launched from the
@@ -204,6 +226,15 @@ fun HeightScanScreen(
     // Live anchor-aim validity (gated hit available?) — drives the locked
     // "Move closer" status line and keeps the anchor "+" inert.
     var anchorAimOk by remember { mutableStateOf(false) }
+    // Walk-off integrity. `trackingLive` is the CURRENT camera state (drives
+    // the live "hold still" line); `trackingDropped` latches for the whole
+    // measurement, because a dropout that has since recovered still means the
+    // camera did not see part of the walk that set d_h. `anchorLost` is the
+    // fatal one: ARCore stopped the trunk anchor, so there is nothing left to
+    // measure d_h against and the capture refuses.
+    var trackingLive by remember { mutableStateOf(true) }
+    var trackingDropped by remember { mutableStateOf(false) }
+    var anchorLost by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<HeightResult?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
 
@@ -216,7 +247,9 @@ fun HeightScanScreen(
     var hidingChromeForCapture by remember { mutableStateOf(false) }
     // Scan metadata (species / damage / note) attached on Accept — iOS
     // ScanMetadataSheet(kind: .height); no stem position for heights.
-    var metaSpecies by remember { mutableStateOf<String?>(null) }
+    // Seeded from the chooser's species control when it was used, so the
+    // details chip already reads the species the cruiser picked at the tree.
+    var metaSpecies by remember { mutableStateOf(pendingLock?.speciesCode) }
     var metaDamage by remember { mutableStateOf<List<String>>(emptyList()) }
     var metaNote by remember { mutableStateOf("") }
     var showMetadata by remember { mutableStateOf(false) }
@@ -253,6 +286,12 @@ fun HeightScanScreen(
     DisposableEffect(rawCaptureArmed) {
         val token = if (rawCaptureArmed) ArSessionHub.armRawDepth() else null
         onDispose { token?.let { ArSessionHub.releaseRawDepth(it) } }
+    }
+    // The trunk anchor is this screen's, and it outlives the composition
+    // otherwise (the hub is app-scoped). Release it on the way out so an
+    // abandoned walk-off can't hand its anchor to the next tree's session.
+    DisposableEffect(Unit) {
+        onDispose { ArSessionHub.clearHeightAnchor() }
     }
     // Grab the current AR depth frame + reference RGB JPEG bytes at an aim
     // moment. Returns (frame, jpegBytes) — either may be null; recordHeight
@@ -295,6 +334,17 @@ fun HeightScanScreen(
     var truthPending by remember { mutableStateOf<String?>(null) }
     var truthPendingId by remember { mutableStateOf<String?>(null) }
     var truthPendingText by remember { mutableStateOf("") }
+    // The unit THIS typed truth is in. It opens in the cruiser's active system
+    // — an imperial operator gets feet, not a metre field they type feet into
+    // — and the square button beside the field switches it for this entry.
+    // Keyed on the active system so changing the project's units re-defaults
+    // it; a per-entry toggle survives ordinary recomposition.
+    var truthUnit by remember(settings.unitSystem) {
+        mutableStateOf(TruthInput.defaultUnit(
+            TruthInput.Quantity.HEIGHT,
+            imperial = settings.unitSystem != UnitSystem.METRIC,
+        ))
+    }
     // Storage headroom, re-read on entry and after every capture: below the
     // guard the recorder refuses to write, and the capture's outcome pill
     // says so before a whole plot is lost.
@@ -325,10 +375,33 @@ fun HeightScanScreen(
 
     // Live walk-off distances while walking back: Total (camera→anchor,
     // the d_h the math uses) + Walked (displacement since anchoring).
+    //
+    // It runs through the AIM stages too, not just WALKING. The trunk is
+    // pinned with a REAL ARCore anchor now (ArSessionHub.placeHeightAnchor),
+    // and ARCore keeps correcting that anchor's pose while the cruiser lines
+    // up the base and then the top — `anchorPt` is what BOTH aim taps compute
+    // d_h from, so it has to keep following the anchor, not stop at whatever
+    // the pose was when the walking stage ended.
     LaunchedEffect(stage) {
-        while (stage == Stage.WALKING) {
-            anchorPt?.let { a -> controller.horizontalDistanceTo(a)?.let { dhLive = it } }
-            standingAtAnchor?.let { s0 -> controller.horizontalDistanceTo(s0)?.let { walkedLive = it } }
+        while (stage == Stage.WALKING || stage == Stage.AIM_BASE || stage == Stage.AIM_TOP) {
+            // Drift-corrected trunk position. Null = ARCore STOPPED the
+            // anchor; latch it so the next tap refuses instead of the sphere
+            // quietly disappearing and the math carrying on to a ghost.
+            val anchorNow = ArSessionHub.heightAnchorWorld()
+            if (anchorNow == null) anchorLost = true else anchorPt = anchorNow
+            // With no camera pose both readouts below return null and HOLD
+            // their last good value rather than recomputing from a pose that
+            // isn't real. Say it while it happens, and remember it after.
+            val tracking = controller.trackingOk()
+            trackingLive = tracking
+            if (!tracking && !trackingDropped) {
+                trackingDropped = true
+                failure = TRACKING_DROPPED_DURING_WALK
+            }
+            if (stage == Stage.WALKING) {
+                anchorPt?.let { a -> controller.horizontalDistanceTo(a)?.let { dhLive = it } }
+                standingAtAnchor?.let { s0 -> controller.horizontalDistanceTo(s0)?.let { walkedLive = it } }
+            }
             delay(100)
         }
     }
@@ -513,7 +586,7 @@ fun HeightScanScreen(
                 // manifest carries it — this is the only place the field may
                 // be cleared for a queued value.
                 if (outcome.queuedTruthSaved != null && truthPendingId == id) {
-                    if (researchTrueM == truthPendingText) researchTrueM = ""
+                    if (researchTrueText == truthPendingText) researchTrueText = ""
                     truthPending = null
                     truthPendingId = null
                 }
@@ -525,16 +598,26 @@ fun HeightScanScreen(
                 // pairing is acceptable; losing it INVISIBLY is not — put the
                 // number back on screen (or at least name it) and say so.
                 outcome.queuedTruthLost?.let { lost ->
-                    val text = TruthInput.text(lost)
-                    val restore = TruthInput.normalized(researchTrueM).isEmpty()
-                    if (restore) researchTrueM = text
+                    // Rendered in the unit it was TYPED in, not the metric base
+                    // it was stored as — handing an imperial cruiser back a
+                    // silently converted number is the same defect in reverse.
+                    val text = TruthInput.text(lost.value, lost.unit)
+                    val restore = TruthInput.normalized(researchTrueText).isEmpty()
+                    if (restore) {
+                        researchTrueText = text
+                        truthUnit = lost.unit
+                    }
                     // Only retire the pending marker if it is THIS capture's —
                     // a later capture may already own it.
                     if (truthPendingId == id) {
                         truthPending = null
                         truthPendingId = null
                     }
-                    truthSaveFailure = RawCaptureStrings.truthLost(text, restore)
+                    // The number is named WITH its unit — a bare "12.5" in a
+                    // failure message is the same ambiguity this item exists
+                    // to remove.
+                    truthSaveFailure = RawCaptureStrings.truthLost(
+                        "$text ${lost.unit.raw}", restore)
                 }
             }
         }
@@ -547,8 +630,19 @@ fun HeightScanScreen(
                 // within 4 m only. No valid hit → the "+" is INERT — the
                 // status line already shows the locked "Move closer" copy.
                 val hit = controller.screenCenterAnchorHit(ANCHOR_MAX_M) ?: return
+                // Pin the trunk with a REAL ARCore anchor rather than keeping
+                // the hit's raw world point (see ArSessionHub.heightAnchor for
+                // the full argument): ARCore re-fits the world frame all the
+                // way through a 10–30 m walk-off, and a frozen Vec3 collects
+                // every one of those corrections straight into d_h. Refusing
+                // when the anchor can't be created is the honest branch — the
+                // fallback would be exactly the raw point we are replacing.
+                if (!ArSessionHub.placeHeightAnchor(hit)) { failure = ANCHOR_NOT_PLACED; return }
                 failure = null
                 anchorPt = hit
+                anchorLost = false
+                trackingDropped = false
+                trackingLive = true
                 standingAtAnchor = controller.currentCameraPosition()
                 val d0 = controller.horizontalDistanceTo(hit) ?: 0f
                 anchorInitialDistM = d0
@@ -568,8 +662,15 @@ fun HeightScanScreen(
             Stage.AIM_BASE -> {
                 val a = controller.cameraForwardElevationRad()
                 val s = controller.currentCameraPosition()
-                val anchor = anchorPt
-                if (a == null || s == null || anchor == null) { failure = "The camera hasn't got its bearings yet — hold still for a second, then tap + again."; return }
+                // The anchor's CURRENT pose, not the one remembered from the
+                // anchoring frame — it has been drift-corrected for the whole
+                // walk. Null means ARCore stopped it: there is no trunk to
+                // measure d_h to, so this refuses rather than reusing a stale
+                // point that would still produce a confident-looking number.
+                val anchor = ArSessionHub.heightAnchorWorld()
+                if (anchor == null) { anchorLost = true; failure = ANCHOR_LOST; return }
+                anchorPt = anchor
+                if (a == null || s == null) { failure = "The camera hasn't got its bearings yet — hold still for a second, then tap + again."; return }
                 // Lock the standing pose on the first aim; both angles must
                 // come from the same spot (the §7.2 formula assumes it).
                 failure = null; alphaBase = a; standingLocked = s
@@ -599,8 +700,12 @@ fun HeightScanScreen(
             }
             Stage.AIM_TOP -> {
                 val aTop = controller.cameraForwardElevationRad()
-                val anchor = anchorPt; val standing = standingLocked; val aBase = alphaBase
-                if (aTop == null || anchor == null || standing == null || aBase == null) {
+                // Same rule as the base aim: the live anchor pose or nothing.
+                val anchor = ArSessionHub.heightAnchorWorld()
+                if (anchor == null) { anchorLost = true; failure = ANCHOR_LOST; return }
+                anchorPt = anchor
+                val standing = standingLocked; val aBase = alphaBase
+                if (aTop == null || standing == null || aBase == null) {
                     failure = "The camera hasn't got its bearings yet — hold still for a second, then tap + again."; return
                 }
                 failure = null; alphaTop = aTop
@@ -668,6 +773,10 @@ fun HeightScanScreen(
         aimDriftM = null
         dhLive = 0f; anchorInitialDistM = null; standingAtAnchor = null
         walkedLive = 0f; anchorAimOk = false
+        // Release the ARCore trunk anchor with the rest of the geometry — a
+        // new measurement must pin its own trunk, never inherit the last one.
+        ArSessionHub.clearHeightAnchor()
+        trackingLive = true; trackingDropped = false; anchorLost = false
         result = null; failure = null; resetCrown()
         // Drop the raw-capture geometry so a fresh measurement starts clean.
         // Releasing the bundle id too: a discarded compute must not collect
@@ -699,8 +808,13 @@ fun HeightScanScreen(
         // store queues edits against the synchronously-minted id) — the old
         // code wrote truth only when the write had already completed, so a
         // fast Accept dropped it and the field was cleared anyway.
-        val truthTextAtAccept = researchTrueM
-        val rawTrue = TruthInput.parsePositive(truthTextAtAccept)
+        // The UNIT is snapshotted with the text for the same reason: the
+        // cruiser can retype and re-toggle while the write runs, and the value
+        // must be converted and recorded with the unit it was typed under.
+        val truthTextAtAccept = researchTrueText
+        val truthUnitAtAccept = truthUnit
+        // Always the metric base (m) — the conversion lives in TruthInput.
+        val rawTrue = TruthInput.parsePositiveBase(truthTextAtAccept, truthUnitAtAccept)
         truthSaveFailure = null
         scope.launch {
             // Stamp operator_accepted on the bundle this Accept confirms
@@ -714,24 +828,25 @@ fun HeightScanScreen(
                 when {
                     rawTrue == null -> truthSaveFailure = RawCaptureStrings.TRUTH_NOT_A_NUMBER
                     // Not recording: the value still went to the research CSV.
-                    !rawCaptureArmed -> if (researchTrueM == truthTextAtAccept) researchTrueM = ""
+                    !rawCaptureArmed -> if (researchTrueText == truthTextAtAccept) researchTrueText = ""
                     // The capture itself failed — keep the typed value on
                     // screen rather than attach it to a bundle that isn't there.
                     lastCaptureFailure != null -> truthSaveFailure =
                         RawCaptureStrings.truthCaptureFailed(lastCaptureFailure)
-                    rid == null -> if (researchTrueM == truthTextAtAccept) researchTrueM = ""
+                    rid == null -> if (researchTrueText == truthTextAtAccept) researchTrueText = ""
                     else -> {
                         // Claim the pending slot BEFORE the store call: the
                         // recorder's own completion handler reads it to decide
                         // whether the queued value landed.
                         truthPendingId = rid
                         truthPendingText = truthTextAtAccept
-                        when (RawCaptureStore.setTruth(context, rid, rawTrue)) {
+                        when (RawCaptureStore.setTruth(
+                            context, rid, rawTrue, truthUnitAtAccept)) {
                             // Durable — the manifest already exists.
                             RawCaptureStore.TruthWrite.SAVED -> {
                                 truthPending = null
                                 truthPendingId = null
-                                if (researchTrueM == truthTextAtAccept) researchTrueM = ""
+                                if (researchTrueText == truthTextAtAccept) researchTrueText = ""
                             }
                             // QUEUED is NOT durable: the value lives only in
                             // the store's pending queue until the in-flight
@@ -798,7 +913,7 @@ fun HeightScanScreen(
                         "the tree row couldn't be updated. Tap Accept again."
                 }
             } else {
-                env.history.append(
+                val reading =
                     QuickMeasureEntry(
                         kind = MeasureKind.HEIGHT, value = r.heightM.toDouble(),
                         // σ null = no uncertainty was derivable. It stays
@@ -807,15 +922,31 @@ fun HeightScanScreen(
                         // tangent fits with no σ — see HeightEstimator.canAccept.)
                         sigma = r.sigmaHm?.toDouble(), confidenceRaw = r.confidence.raw,
                         method = r.method.raw, treeNumber = pendingTree,
-                        plotID = env.history.activePlotID.value,
+                        // The chooser's name when this flow was launched with
+                        // one, else the name the tree already carries — a
+                        // chained or repeat height must not arrive nameless
+                        // and split the tree in two in the export.
+                        treeName = pendingLock?.name
+                            ?: env.history.treeName(pendingTree, env.history.activePlotID.value),
+                        plotID = pendingLock?.plotID ?: env.history.activePlotID.value,
                         speciesCode = metaSpecies,
                         damageCodes = metaDamage,
                         note = metaNote.ifBlank { null },
                         latitude = fix?.latitude,
                         longitude = fix?.longitude,
                         photoPath = photo,
+                        // A re-measure keeps the hand-measured value already
+                        // typed for this tree; a fresh reading has none.
+                        truth = pendingLock?.truth,
                     )
-                )
+                // A re-measure launched from the field log TAKES THE PLACE of
+                // the reading it was launched from — appending would leave the
+                // superseded number invisible in the log but still in the CSV.
+                if (pendingLock?.replaceExisting == true) {
+                    env.history.replaceReading(reading)
+                } else {
+                    env.history.append(reading)
+                }
                 // Quick measure saved — no continuation prompt (iOS parity);
                 // return to the map once the save completes.
                 nav.popBackStack()
@@ -828,7 +959,10 @@ fun HeightScanScreen(
                     QuickMeasureEntry(
                         kind = MeasureKind.CROWN, value = w, secondaryValue = ch,
                         sigma = null, confidenceRaw = "green", method = "ar.crown.dh",
-                        treeNumber = pendingTree, plotID = env.history.activePlotID.value,
+                        treeNumber = pendingTree,
+                        treeName = pendingLock?.name
+                            ?: env.history.treeName(pendingTree, env.history.activePlotID.value),
+                        plotID = pendingLock?.plotID ?: env.history.activePlotID.value,
                     )
                 )
             }
@@ -853,12 +987,17 @@ fun HeightScanScreen(
                 "species" to (metaSpecies ?: ""),
                 "note" to metaNote,
             )
-            if (settings.researchTreeId.isNotEmpty()) {
-                fields["tree_id"] = settings.researchTreeId  // repeat auto-filled by record()
-            }
+            // The tree this capture is ALREADY locked to, not a box the
+            // cruiser had to retype. Same value the raw-capture bundle and the
+            // saved reading carry, so the three join.
+            fields["tree_id"] = "${CruiseCapture.target?.treeNumber ?: pendingTree}"
             rawTrue?.let { t ->
+                // `true_value` and `error` are in the row's `unit` (m) — the
+                // same scale as `measured_value`, so the error column stays
+                // subtractable. `truth_unit` records what was actually typed.
                 fields["true_value"] = String.format(Locale.US, "%.2f", t)
                 fields["error"] = String.format(Locale.US, "%.2f", r.heightM - t)
+                fields["truth_unit"] = truthUnitAtAccept.raw
             }
             ResearchLog.record(context, fields)
             // The field is NOT cleared here any more — the accept coroutine
@@ -922,29 +1061,27 @@ fun HeightScanScreen(
             // overlay under the height markers.
             plotOverlay = ArSessionHub.PlotOverlay.SUBDUED,
         )
-        crosshairLabel?.let { label ->
-            HeightAimCrosshair(label, Modifier.align(Alignment.Center))
-        }
+        crosshairLabel?.let { label -> HeightAimCrosshair(label) }
         if (!hidingChromeForCapture) MeasureBackButton { nav.popBackStack() }
 
         // Plot mini-map — top-right, same row as the GPS badge: the active
         // cruise plot (ring + YOU + measured trees) or the quick sampling
         // ring (ring + YOU). Hidden with the rest of the 2D chrome during
         // the Accept snapshot blackout.
-        // F11 — the card is TAPPABLE in cruise: it re-opens plot setup so
-        // the radius / centre stay editable after the first placement. The
-        // session's project/plot are fixed for this screen's lifetime, so
-        // one remember is safe.
+        // F11 — the card is TAPPABLE: it re-opens plot setup so the radius /
+        // centre stay editable after the first placement. The session's
+        // project/plot are fixed for this screen's lifetime, so one remember
+        // is safe. FIELD REPORT 12 — a quick sampling ring gets Edit too,
+        // pointed at the sampling screen that owns it (Diameter parity).
         val miniMapUp = scanPlotMiniMapVisible()
         val editPlotTarget = remember { CruiseCapture.target }
-        if (!hidingChromeForCapture) ScanPlotMiniMap(
-            onEditPlot = editPlotTarget?.let { c ->
-                {
-                    nav.navigate(
-                        CruiseRoutes.editPlot(c.projectId.toString(), c.plotId.toString()))
-                }
-            },
-        )
+        val onEditPlot: () -> Unit = editPlotTarget?.let { c ->
+            {
+                nav.navigate(
+                    CruiseRoutes.editPlot(c.projectId.toString(), c.plotId.toString()))
+            }
+        } ?: { nav.navigate(Routes.SAMPLING) }
+        if (!hidingChromeForCapture) ScanPlotMiniMap(onEditPlot = onEditPlot)
 
         // Same top strip as the Diameter scan — one row, inset past the
         // system status bar, with the mini-map's width reserved on the
@@ -1070,6 +1207,13 @@ fun HeightScanScreen(
         if (!hidingChromeForCapture) MeasureTopChrome(
             instruction = when {
                 manualOpen -> "Enter height manually in metres."
+                // Walk-off integrity beats stage guidance: "walk back" is
+                // useless advice while the camera has no idea where it is,
+                // and the anchor being gone ends the measurement outright.
+                anchorLost -> ANCHOR_LOST
+                !trackingLive && stage in listOf(
+                    Stage.WALKING, Stage.AIM_BASE, Stage.AIM_TOP,
+                ) -> TRACKING_LOST_NOW
                 // Locked spec: while no gated hit exists the "+" is
                 // inert and this exact copy explains why.
                 stage == Stage.ANCHOR && !anchorAimOk ->
@@ -1218,6 +1362,23 @@ fun HeightScanScreen(
                             color = Forestix.colors.confidenceWarn,
                         )
                     }
+                    // THE CAMERA LOST THE SCENE somewhere between anchoring
+                    // and this reading. d_h is the whole scale of the height
+                    // — H = d_h(tan α_top − tan α_base) — and it rests on a
+                    // walk ARCore did not see all of. The top banner said so
+                    // at the time, but a banner is transient and this is the
+                    // moment the cruiser decides whether to keep the number,
+                    // so it is repeated here for the same reason the drift
+                    // warning is. Not a refusal: ARCore usually relocalizes
+                    // and the corrected anchor makes the reading sound again,
+                    // and the cruiser has already walked the distance.
+                    if (trackingDropped) {
+                        Text(
+                            TRACKING_DROPPED_DURING_WALK,
+                            style = type.caption,
+                            color = Forestix.colors.confidenceWarn,
+                        )
+                    }
                     if (settings.developerMode) {
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             // Bench diagnostic — the raw captured inputs that
@@ -1238,20 +1399,28 @@ fun HeightScanScreen(
                                 color = Color.White.copy(alpha = 0.55f),
                             )
                             ResearchFieldsRow(
-                                targetValue = settings.researchTreeId,
-                                onTargetChange = { env.settings.setResearchTreeId(it.trim()) },
-                                targetPlaceholder = "T1",
-                                trueLabel = "True H (m)",
-                                trueValue = researchTrueM,
+                                // Label and unit come from the SAME value, so
+                                // the field can never say m while the app
+                                // reads feet.
+                                trueLabel = TruthInput.fieldLabel(
+                                    TruthInput.Quantity.HEIGHT, truthUnit),
+                                trueValue = researchTrueText,
                                 // ',' is NORMALISED to '.', never deleted — the
                                 // old digit filter turned "12,5" into "125".
-                                onTrueChange = { researchTrueM = TruthInput.sanitize(it) },
+                                onTrueChange = { researchTrueText = TruthInput.sanitize(it) },
                                 truePlaceholder = "clinometer",
+                                truthUnit = truthUnit,
+                                onToggleTruthUnit = { truthUnit = TruthInput.toggled(truthUnit) },
                             )
                             // Live warning under the truth field: a failed save,
-                            // unparseable text, or an implausible value.
+                            // unparseable text, or an implausible value. The
+                            // window is judged on the converted value, so an
+                            // imperial entry is checked against the same limits.
                             (truthSaveFailure
-                                ?: TruthInput.fieldWarning(researchTrueM, isHeight = true))
+                                ?: TruthInput.fieldWarning(
+                                    researchTrueText,
+                                    TruthInput.Quantity.HEIGHT,
+                                    truthUnit))
                                 ?.let { w -> TruthFieldWarning(w) }
                             // Queued-but-not-yet-durable truth: the field was
                             // deliberately NOT cleared, so say why.
@@ -1363,34 +1532,52 @@ fun HeightScanScreen(
     }
 }
 
+/// Outer diameter of the aim ring (iOS 1:1).
+private val HEIGHT_AIM_RING_DP = 40.dp
+
+/// Label pill CENTRE, measured down from the crosshair centre: the ring's
+/// outer radius (20) + the original 8 dp gap + half the pill (13 sp line +
+/// 4 dp padding top and bottom ≈ 24 dp). Offsets the label only — the ring
+/// cannot move with it.
+private val HEIGHT_AIM_LABEL_OFFSET_DP = 40.dp
+
 /// Amber labelled aim crosshair — port of the iOS Height `crosshair(label:)`:
 /// dual-stroke 40/36 ring + cross with dark halos, and a state pill that
 /// explains what the next tap captures.
+///
+/// FIELD REPORT 16 — the ring and the label used to be a Column, and the
+/// COLUMN was what got centred. That put the ring's centre half the label
+/// block (label height + the 8 gap, ≈ 16 dp) ABOVE the true screen centre,
+/// while every hit test and every geometric marker placement uses the true
+/// centre — so the anchor sphere landed consistently below the ring, by a
+/// fixed amount, on every tap. The ring IS the aiming instrument, so it is
+/// centred on its own here and the label is pushed clear with an explicit
+/// offset. Same construction as the Diameter scan, where DbhRing is centred
+/// alone and the tilt badge / capture pill ride explicit offsets.
 @Composable
-private fun HeightAimCrosshair(label: String, modifier: Modifier = Modifier) {
+private fun BoxScope.HeightAimCrosshair(label: String) {
     val warn = Forestix.colors.confidenceWarn
-    Column(
-        modifier,
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+    Box(
+        Modifier.align(Alignment.Center).size(HEIGHT_AIM_RING_DP),
+        contentAlignment = Alignment.Center,
     ) {
-        Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-            Box(Modifier.size(40.dp).clip(CircleShape).border(4.dp, Color.Black.copy(alpha = 0.6f), CircleShape))
-            Box(Modifier.size(36.dp).clip(CircleShape).border(2.dp, warn, CircleShape))
-            Box(Modifier.size(width = 16.dp, height = 3.5.dp).background(Color.Black.copy(alpha = 0.6f)))
-            Box(Modifier.size(width = 3.5.dp, height = 16.dp).background(Color.Black.copy(alpha = 0.6f)))
-            Box(Modifier.size(width = 14.dp, height = 1.5.dp).background(warn))
-            Box(Modifier.size(width = 1.5.dp, height = 14.dp).background(warn))
-        }
-        Text(
-            label,
-            style = Forestix.type.dataSmall,
-            color = Color.White,
-            modifier = Modifier
-                .clip(RoundedCornerShape(4.dp))
-                .background(Color.Black.copy(alpha = 0.65f))
-                .padding(horizontal = 8.dp, vertical = 4.dp),
-        )
+        Box(Modifier.size(40.dp).clip(CircleShape).border(4.dp, Color.Black.copy(alpha = 0.6f), CircleShape))
+        Box(Modifier.size(36.dp).clip(CircleShape).border(2.dp, warn, CircleShape))
+        Box(Modifier.size(width = 16.dp, height = 3.5.dp).background(Color.Black.copy(alpha = 0.6f)))
+        Box(Modifier.size(width = 3.5.dp, height = 16.dp).background(Color.Black.copy(alpha = 0.6f)))
+        Box(Modifier.size(width = 14.dp, height = 1.5.dp).background(warn))
+        Box(Modifier.size(width = 1.5.dp, height = 14.dp).background(warn))
     }
+    Text(
+        label,
+        style = Forestix.type.dataSmall,
+        color = Color.White,
+        modifier = Modifier
+            .align(Alignment.Center)
+            .offset(y = HEIGHT_AIM_LABEL_OFFSET_DP)
+            .clip(RoundedCornerShape(4.dp))
+            .background(Color.Black.copy(alpha = 0.65f))
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+    )
 }
 

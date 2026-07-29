@@ -533,6 +533,17 @@ private fun RawCaptureDetail(
             // unparseable field can NEVER reach the store: Save leaves the
             // stored value (and the typed text) exactly as they were, so a
             // stored truth is only ever removed by the explicit Clear below.
+            //
+            // This is the DESK console, not a field-entry surface: it types in
+            // the bundle's own metric base, stated in the header and in the
+            // placeholder. There is no per-entry unit toggle here (that lives
+            // on the scan screens, where the cruiser's active system decides),
+            // but the unit is still RECORDED with the value, so every truth in
+            // the corpus carries a truth_unit and nothing has to be inferred.
+            val consoleQuantity =
+                if (data.kind == "height") TruthInput.Quantity.HEIGHT
+                else TruthInput.Quantity.DIAMETER
+            val consoleUnit = TruthInput.defaultUnit(consoleQuantity, imperial = false)
             FormSection(
                 header = "Ground truth (${data.unit})",
                 footer = "Persists into the bundle manifest; used as the reference in " +
@@ -549,9 +560,7 @@ private fun RawCaptureDetail(
                         // ',' is accepted as the decimal separator and normalised.
                         onValueChange = { truthText = TruthInput.sanitize(it) },
                         placeholder = {
-                            Text(
-                                if (data.kind == "height") "True height (m)" else "True Ø (cm)",
-                            )
+                            Text(TruthInput.promptLabel(consoleQuantity, consoleUnit))
                         },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -577,7 +586,7 @@ private fun RawCaptureDetail(
                                 // the value is not in any manifest yet — the
                                 // console reaches finished bundles, so this is
                                 // the belt-and-braces branch.
-                                when (RawCaptureStore.setTruth(context, id, v)) {
+                                when (RawCaptureStore.setTruth(context, id, v, consoleUnit)) {
                                     RawCaptureStore.TruthWrite.SAVED -> {
                                         truthStatus = "Truth saved."
                                         truthText = ""
@@ -593,7 +602,7 @@ private fun RawCaptureDetail(
                         },
                     ) { Text("Save") }
                 }
-                TruthInput.fieldWarning(truthText, isHeight = data.kind == "height")?.let { w ->
+                TruthInput.fieldWarning(truthText, consoleQuantity, consoleUnit)?.let { w ->
                     TruthFieldWarning(w)
                 }
                 // Clearing a stored truth is EXPLICIT.
@@ -628,7 +637,9 @@ private fun RawCaptureDetail(
                 TextButton(onClick = {
                     clearTruthConfirm = false
                     scope.launch {
-                        truthStatus = when (RawCaptureStore.setTruth(context, id, null)) {
+                        // A clear carries no unit — there is no longer a typed
+                        // value for one to describe.
+                        truthStatus = when (RawCaptureStore.setTruth(context, id, null, null)) {
                             RawCaptureStore.TruthWrite.SAVED -> "Truth cleared."
                             RawCaptureStore.TruthWrite.QUEUED ->
                                 "Clear pending — applied when the capture is written."

@@ -94,12 +94,31 @@ public struct DBHScanScreen: View {
     /// with every research row.
     @StateObject private var raycaster = ARCenterRaycaster()
 
-    /// Developer-mode research capture: tape-measured true diameter (cm)
-    /// typed before Accept; logged with the scan context to the research
-    /// CSV so error can be analysed against distance / aim angle.
+    /// Developer-mode research capture: the tape-measured true diameter AS
+    /// TYPED, logged with the scan context to the research CSV so error can be
+    /// analysed against distance / aim angle. The unit is `activeTruthUnit`
+    /// below, never assumed — the field used to be named (and read) as
+    /// centimetres whatever the cruiser was working in.
     /// NEVER cleared until the value is durably on the bundle (or there is
     /// no bundle to attach it to) — see `applyTypedTruth`.
-    @State private var researchTrueCm: String = ""
+    @State private var researchTrueText: String = ""
+    /// The cruiser's per-entry unit choice, remembered with the unit system it
+    /// was made under. Nil means "no choice yet", which falls back to the
+    /// ACTIVE system — an imperial operator gets inches, not a centimetre
+    /// field they type inches into. The choice sticks for the rest of this
+    /// screen session (a plot is not walked switching units tree by tree) and
+    /// is dropped if the project's unit system changes underneath it.
+    @State private var truthUnitChoice: (unit: TruthInput.Unit, imperial: Bool)?
+    /// The unit in force for the field right now: the per-entry choice, or the
+    /// active system's default until one is made.
+    private var activeTruthUnit: TruthInput.Unit {
+        let imperial = settings.unitSystem == .imperial
+        // A choice made under the OTHER system is discarded rather than
+        // carried across: switching the project to imperial must not leave
+        // the field sitting in centimetres.
+        if let choice = truthUnitChoice, choice.imperial == imperial { return choice.unit }
+        return TruthInput.defaultUnit(.diameter, imperial: imperial)
+    }
     /// Non-nil when the last Accept could NOT attach the typed truth. The
     /// text stays in the field so the value isn't lost.
     @State private var truthSaveFailure: String?
@@ -177,7 +196,7 @@ public struct DBHScanScreen: View {
     /// Signed metres from the camera to the active cruise plot BOUNDARY
     /// (|camera→centre| − radius; negative = inside). Polled from the
     /// plot's AR anchor at 0.2 s — the sampling screen's inside/outside
-    /// machinery. nil while no anchor for THIS plot is alive.
+    /// machinery. nil while this plot's centre is not being tracked.
     @State private var boundarySignedM: Double?
 
     public init(viewModel: @autoclosure @escaping () -> DBHScanViewModel,
@@ -188,8 +207,13 @@ public struct DBHScanScreen: View {
                 onUndoTally: (() -> Void)? = nil,
                 projectID: String? = nil,
                 quickTreeNumber: Int? = nil,
+                initialSpeciesCode: String? = nil,
                 onEditPlot: (() -> Void)? = nil) {
         _viewModel = StateObject(wrappedValue: viewModel())
+        // Seeded from the measure chooser's species control when it was used,
+        // so the details chip already reads the species the cruiser picked at
+        // the tree instead of asking for it a second time.
+        _metaSpecies = State(initialValue: initialSpeciesCode)
         self.onResult = onResult
         self.onAccept = onAccept
         self.cruisePlotInfo = cruisePlotInfo
@@ -490,6 +514,23 @@ public struct DBHScanScreen: View {
                 try? await Task.sleep(nanoseconds: 200_000_000)
             }
         }
+        // FIELD REPORT 14 — the plot's tracked centre, refreshed off the
+        // body at the sampling screen's cadence. This is what draws the
+        // overlay here: the ring and pillar used to be pinned to the plot's
+        // ARAnchor, and on THIS screen the ARView is built over a session
+        // where that anchor already exists, so RealityKit never saw it
+        // arrive and had nothing to bind them to — the overlay simply never
+        // appeared. Reading the pose ourselves removes the ordering
+        // dependency, and it is the same rule Android runs (see
+        // ActiveSamplingPlot.refreshTrackedCentre). It also replaces the old
+        // anchor-liveness poll: one gate, not two.
+        .task(id: activePlot.plot?.anchorID) {
+            guard activePlot.plot != nil else { return }
+            while !Task.isCancelled {
+                activePlot.refreshTrackedCentre(using: viewModel.session)
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+        }
         // Tally toast auto-hide — 3 s per show; the generation id
         // restarts the clock when a new save replaces the toast.
         .task(id: tallyToastGeneration) {
@@ -563,7 +604,7 @@ public struct DBHScanScreen: View {
         }
         // Editing the truth field retires any "couldn't save" state: the text
         // is now the cruiser's current intent for the capture on screen.
-        .onChange(of: researchTrueCm) { _, _ in
+        .onChange(of: researchTrueText) { _, _ in
             truthOwnerBundleID = nil
             truthSaveFailure = nil
             // The text is no longer the value that was queued.
@@ -1264,9 +1305,11 @@ public struct DBHScanScreen: View {
     private func liveBoundarySignedM() -> Double? {
         guard let info = cruisePlotInfo else { return nil }
         let store = ActiveSamplingPlot.shared
-        guard let plot = store.plot,
+        // The TRACKED centre, not the raw anchor pose: a border chip counted
+        // off an uncorrected pose is the same lie the ring itself would be.
+        guard store.plot != nil,
               store.linkedCruisePlotID == info.plotID,
-              let centre = viewModel.session.worldAnchorPosition(id: plot.anchorID),
+              let centre = store.centreWorld,
               let cam = viewModel.session.currentCameraWorldPosition
         else { return nil }
         let dx = Double(cam.x - centre.x)
@@ -1327,17 +1370,18 @@ public struct DBHScanScreen: View {
     private static let cylinderMarkerId: UUID =
         UUID(uuidString: "00DBC415-0000-0000-0000-000000000001") ?? UUID()
 
-    /// Subdued sampling-plot context (ring + centre pole at ~0.5 alpha,
-    /// pinned to the plot's ARAnchor). Shown only while a plot is active
-    /// AND its anchor is still alive in the shared session — after an
-    /// app restart or a session reset there is no anchor, so nothing is
-    /// drawn. Non-interactive by construction (scene markers take no
-    /// input) and listed before the measurement markers.
+    /// Subdued sampling-plot context (ring + centre pole at ~0.5 alpha, at
+    /// the plot's tracked centre). Shown only while a plot is active AND
+    /// ARKit is correcting its centre — after an app restart, a session
+    /// reset, or a lost-tracking stretch there is no tracked centre and
+    /// nothing is drawn. Non-interactive by construction (scene markers
+    /// take no input) and listed before the measurement markers.
     private var plotOverlayMarkers: [ARSceneMarker] {
         guard let plot = activePlot.plot,
-              viewModel.session.worldAnchorExists(id: plot.anchorID)
+              let centre = activePlot.centreWorld
         else { return [] }
-        return ActiveSamplingPlot.subduedOverlayMarkers(for: plot)
+        return ActiveSamplingPlot.subduedOverlayMarkers(for: plot,
+                                                        centre: centre)
     }
 
     // MARK: - Bottom panel
@@ -1407,11 +1451,37 @@ public struct DBHScanScreen: View {
         settings.dbhEdgeAdjustDefault = true
     }
 
+    /// Field report 15 — what to DO when depth won't resolve. Both remedies
+    /// are the cruiser's own: a small movement, or a different standing
+    /// distance. Byte-identical to the Android sibling.
+    static let acquisitionStallHint =
+        "No depth lock yet — move the phone gently side to side, or change your distance."
+
+    /// Whether the banner should carry the acquisition hint right now.
+    ///
+    /// Suppressed while `previewStatusText` is up: that line is a SPECIFIC
+    /// reason (the bracket's "narrow it onto the trunk", a fit's own
+    /// rejection) already on screen in the value strip, and two sentences
+    /// giving different advice about the same failure is worse than one.
+    private var showsAcquisitionHint: Bool {
+        viewModel.acquisitionStalled && viewModel.previewStatusText == nil
+    }
+
     private var statusText: String {
         switch viewModel.state {
         case .idle:         return "Starting camera…"
-        case .aligning:     return "Align the guide to the trunk's uphill side; hold steady."
-        case .armed:        return "Hold steady, then tap + to capture."
+        case .aligning:
+            // Only when there is genuinely no fit: the ADJUST bracket sits
+            // in `.aligning` even while it is producing a diameter, and the
+            // stall flag is what tells those two apart.
+            if showsAcquisitionHint { return Self.acquisitionStallHint }
+            return "Align the guide to the trunk's uphill side; hold steady."
+        case .armed:
+            // Centre-pixel depth can be stable while no fit comes out of it;
+            // "tap + to capture" would then be an instruction the tap gate
+            // refuses to honour.
+            if showsAcquisitionHint { return Self.acquisitionStallHint }
+            return "Hold steady, then tap + to capture."
         case .capturing:
             return "Capturing \(max(1, viewModel.captureSampleIndex))/\(viewModel.captureSampleTotal) — hold steady."
         case .fitted:       return "Scan complete. Accept, retake, or add a second view."
@@ -1442,9 +1512,10 @@ public struct DBHScanScreen: View {
             "species": metaSpecies ?? "",
             "note": metaNote,
         ]
-        if !settings.researchTreeId.isEmpty {
-            f["tree_id"] = settings.researchTreeId   // repeat auto-filled by record()
-        }
+        // The tree this capture is ALREADY locked to, not a box the cruiser
+        // had to retype. Same value the raw-capture bundle and the saved
+        // reading carry, so the three join.
+        f["tree_id"] = captureTreeNumber.map(String.init) ?? ""
         if let d = viewModel.distanceToStemCenterM {
             f["distance_m"] = String(format: "%.2f", d)
         }
@@ -1466,9 +1537,13 @@ public struct DBHScanScreen: View {
         let truthIsForThisMeasurement =
             truthOwnerBundleID == nil && truthQueuedForBundleID == nil
         if truthIsForThisMeasurement,
-           let t = TruthInput.parsePositive(researchTrueCm) {
+           let t = TruthInput.parsePositiveBase(researchTrueText, unit: activeTruthUnit) {
+            // `true_value` and `error` are in the row's `unit` (cm) — the same
+            // scale as `measured_value`, so the error column stays
+            // subtractable. `truth_unit` records what was actually typed.
             f["true_value"] = String(format: "%.2f", t)
             f["error"] = String(format: "%.2f", Double(r.diameterCm) - t)
+            f["truth_unit"] = activeTruthUnit.rawValue
         }
         ResearchLog.shared.record(f)
         // NOTE: the field is deliberately NOT cleared here — `applyTypedTruth`
@@ -1486,9 +1561,13 @@ public struct DBHScanScreen: View {
     private func applyTypedTruth() {
         guard settings.developerMode else { return }
         truthSaveFailure = nil
-        let raw = researchTrueCm
+        let raw = researchTrueText
+        // The unit is read once here and used for both the conversion and the
+        // record, so a toggle mid-save cannot split them.
+        let unit = activeTruthUnit
         guard !TruthInput.normalized(raw).isEmpty else { return }
-        guard let t = TruthInput.parsePositive(raw) else {
+        // Always the metric base (cm) — the conversion lives in TruthInput.
+        guard let t = TruthInput.parsePositiveBase(raw, unit: unit) else {
             truthSaveFailure = "Not a number — truth not saved"
             return
         }
@@ -1496,7 +1575,7 @@ public struct DBHScanScreen: View {
         // CSV row written just above, so the field can clear. The dev block
         // already carries the "Raw capture OFF" notice.
         guard viewModel.rawCaptureEnabled else {
-            researchTrueCm = ""
+            researchTrueText = ""
             truthOwnerBundleID = nil
             truthQueuedForBundleID = nil
             return
@@ -1527,10 +1606,10 @@ public struct DBHScanScreen: View {
             truthQueuedForBundleID = nil
             return
         }
-        switch RawCaptureStore.applyTruth(id: id, value: t) {
+        switch RawCaptureStore.applyTruth(id: id, value: t, unit: unit) {
         case .applied:
             // In the manifest — the only state that may clear the field.
-            researchTrueCm = ""
+            researchTrueText = ""
             truthOwnerBundleID = nil
             truthQueuedForBundleID = nil
         case .pending:
@@ -1558,7 +1637,7 @@ public struct DBHScanScreen: View {
             truthQueuedForBundleID = nil
             truthOwnerBundleID = nil
             truthSaveFailure = nil
-            researchTrueCm = ""
+            researchTrueText = ""
         case .failed(let reason):
             truthQueuedForBundleID = nil
             truthSaveFailure = "Capture NOT saved (\(reason)) — truth kept on screen"
@@ -1568,12 +1647,13 @@ public struct DBHScanScreen: View {
     }
 
     /// Live warning under the truth field: unparseable text, or a value
-    /// outside the plausible DBH window.
+    /// outside the plausible DBH window. The window is judged on the CONVERTED
+    /// value, so an imperial entry is checked against the same limits.
     private var truthFieldWarning: String? {
         if let failure = truthSaveFailure { return failure }
-        if TruthInput.isUnparseable(researchTrueCm) { return "Not a number" }
-        guard let v = TruthInput.parsePositive(researchTrueCm) else { return nil }
-        return TruthInput.dbhWarning(cm: v)
+        return TruthInput.fieldWarning(researchTrueText,
+                                       quantity: .diameter,
+                                       unit: activeTruthUnit)
     }
 
     @ViewBuilder
@@ -1622,24 +1702,24 @@ public struct DBHScanScreen: View {
             if settings.developerMode {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
-                        Text("Target")
-                            .font(ForestixType.caption)
-                            .foregroundStyle(.white.opacity(0.8))
-                        TextField("T1", text: Binding(
-                            get: { settings.researchTreeId },
-                            set: { settings.researchTreeId = $0 }))
-                            .scanPanelTextField()
-                            .frame(width: 70)
-                            .accessibilityIdentifier("dbhScan.researchTarget")
-                        Text("True Ø (cm)")
+                        // Label and unit come from the SAME value, so the field
+                        // can never say cm while the app reads inches.
+                        Text(TruthInput.fieldLabel(.diameter, unit: activeTruthUnit))
                             .font(ForestixType.caption)
                             .foregroundStyle(.white.opacity(0.8))
                         // ',' is accepted and normalised to '.' on submit.
-                        TextField("tape", text: $researchTrueCm)
+                        TextField("tape", text: $researchTrueText)
                             .keyboardType(.decimalPad)
                             .scanPanelTextField()
                             .frame(width: 90)
                             .accessibilityIdentifier("dbhScan.researchTrue")
+                        TruthUnitToggle(
+                            unit: activeTruthUnit,
+                            onToggle: {
+                                truthUnitChoice = (TruthInput.toggled(activeTruthUnit),
+                                                   settings.unitSystem == .imperial)
+                            },
+                            identifier: "dbhScan.researchTrueUnit")
                     }
                     if let warning = truthFieldWarning {
                         TruthFieldWarning(text: warning)

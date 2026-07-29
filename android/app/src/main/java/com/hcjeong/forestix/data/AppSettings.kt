@@ -118,11 +118,6 @@ data class SettingsSnapshot(
     /// (depth source, intrinsics, point counts, raw chord, pitch, σ) on the
     /// AR screens and unlocks the validation-experiment tooling.
     val developerMode: Boolean = false,
-    /// Operator-set target/tree id written into every research-log row while
-    /// developer mode is on — groups repeats + joins to ground truth. Shared
-    /// across the scan screens and persisted so a field session survives
-    /// app restarts (mirror of iOS tc.researchTreeId).
-    val researchTreeId: String = "",
     /// Raw-capture recording (developer mode only) — when ON, every DBH
     /// capture burst and Height compute serializes a replay bundle (raw
     /// depth u16 + intrinsics + poses + calibration) under
@@ -185,7 +180,6 @@ class AppSettings(private val context: Context) {
         val dbhBracketHalfWidth = floatPreferencesKey("tc.dbhBracketHalfWidth")
         val measureHeightAfterDBH = booleanPreferencesKey("tc.measureHeightAfterDiameter")
         val developerMode = booleanPreferencesKey("tc.developerMode")
-        val researchTreeId = stringPreferencesKey("tc.researchTreeId")
         val rawCaptureEnabled = booleanPreferencesKey("tc.rawCaptureEnabled")
         val appearance = stringPreferencesKey("tc.appearance")
         // Unified with the iOS sibling's key (was "tc.cruiseProjectId"); the
@@ -237,7 +231,6 @@ class AppSettings(private val context: Context) {
             // touched the toggle chains diameter → height.
             measureHeightAfterDiameter = p[Keys.measureHeightAfterDBH] ?: true,
             developerMode = p[Keys.developerMode] ?: false,
-            researchTreeId = p[Keys.researchTreeId] ?: "",
             rawCaptureEnabled = p[Keys.rawCaptureEnabled] ?: false,
             appearance = p[Keys.appearance] ?: "light",
             cruiseProjectId = p[Keys.cruiseProjectId],
@@ -270,11 +263,6 @@ class AppSettings(private val context: Context) {
     fun setAppearance(value: String) = update {
         _state.value = _state.value.copy(appearance = value)
         it[Keys.appearance] = value
-    }
-
-    fun setResearchTreeId(value: String) = update {
-        _state.value = _state.value.copy(researchTreeId = value)
-        it[Keys.researchTreeId] = value
     }
 
     fun setRawCaptureEnabled(value: Boolean) = update {

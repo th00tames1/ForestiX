@@ -20,10 +20,8 @@
 
 package com.hcjeong.forestix.ui.screens
 
-import android.app.Activity
 import android.graphics.Bitmap
 import android.text.format.DateUtils
-import android.graphics.BitmapFactory
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -83,6 +81,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -133,6 +132,7 @@ import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
 import com.hcjeong.forestix.data.SettingsSnapshot
 import com.hcjeong.forestix.data.cruise.CrashRecoveryService
+import com.hcjeong.forestix.data.cruise.TreeLabel
 import com.hcjeong.forestix.geo.BoundaryGeometryKind
 import com.hcjeong.forestix.geo.CoordinateConversions
 import com.hcjeong.forestix.geo.SurveyBoundaryStore
@@ -143,6 +143,8 @@ import com.hcjeong.forestix.ui.MeasurePhotoStore
 import com.hcjeong.forestix.ui.PendingTreeNumber
 import com.hcjeong.forestix.ui.Routes
 import com.hcjeong.forestix.ui.clickableNoRipple
+import com.hcjeong.forestix.ui.screens.tree.TierExplainerKind
+import com.hcjeong.forestix.ui.screens.tree.TierExplainerSheet
 import com.hcjeong.forestix.ui.pressableNoRipple
 import com.hcjeong.forestix.ui.screens.cruise.CruiseCapture
 import com.hcjeong.forestix.ui.screens.cruise.CruiseDistanceOverlay
@@ -163,7 +165,6 @@ import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import com.hcjeong.forestix.ui.theme.confidenceDescriptor
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -195,7 +196,6 @@ fun MapHomeScreen(nav: NavController) {
     val colors = Forestix.colors
     val env = LocalAppEnvironment.current
     val context = LocalContext.current
-    val activity = context as? Activity
     val settings by env.settings.state.collectAsStateWithLifecycle()
     val entries by env.history.entries.collectAsStateWithLifecycle()
 
@@ -325,6 +325,9 @@ fun MapHomeScreen(nav: NavController) {
     var photoPages by remember { mutableStateOf<List<PhotoPage>>(emptyList()) }
     // Quick peek "Edit this tree" → compact edit sheet for one reading.
     var editEntry by remember { mutableStateOf<QuickMeasureEntry?>(null) }
+    // Quick peek "Details" → the field log's own per-tree record sheet,
+    // opened on the row behind the tapped pin. Null = closed.
+    var inspectingRowId by remember { mutableStateOf<String?>(null) }
 
     // Crash-recovery resume prompt: open plots (closedAt == null) edited within
     // the last 24h, most-recent first. Non-null + non-empty shows the prompt.
@@ -611,7 +614,6 @@ fun MapHomeScreen(nav: NavController) {
                         selectedPin = selectedPin,
                         lastPin = lastPin,
                         settings = settings,
-                        activity = activity,
                         plotNameFor = { pin ->
                             pin.entries.firstOrNull()?.plotID
                                 ?.let { env.history.plot(it) }
@@ -622,6 +624,23 @@ fun MapHomeScreen(nav: NavController) {
                         onLog = { nav.navigate(Routes.FIELD_LOG) },
                         onViewPhoto = { pages -> photoPages = pages },
                         onEditEntry = { editEntry = it },
+                        // Which field-log row the peek's "Details" opens.
+                        //
+                        // The log groups by (plot, tree number) because tree
+                        // numbering restarts on each plot; the map groups by
+                        // tree number ALONE, so one pin can in principle span
+                        // two plots' trees. The row picked is the one the
+                        // pin's REPRESENTATIVE reading belongs to — the same
+                        // reading "Edit this tree" edits — so the two peek
+                        // buttons can never be about different trees. The key
+                        // is built by `fieldLogRows`, and this must stay in
+                        // step with it.
+                        onDetails = { pin ->
+                            val entry = pin.entries.first()
+                            inspectingRowId = entry.treeNumber
+                                ?.let { "t|${entry.plotID?.toString() ?: "-"}|$it" }
+                                ?: "e|${entry.id}"
+                        },
                         onMeasureAgain = { pin ->
                             val tree = pin.treeNumber
                             if (tree == null) {
@@ -689,9 +708,15 @@ fun MapHomeScreen(nav: NavController) {
     // Far-GPS confirmation — shown before the scoped chooser when the tree's
     // pin is > 30 m from the current fix (peek "Measure this tree" only).
     farTreeConfirm?.let { (tree, metres) ->
+        // The alert names the tree the way every other surface does — the
+        // cruiser's name when it has one, else "Tree #n".
+        val farTreeTitle = TreeLabel.title(
+            entries.firstOrNull { it.treeNumber == tree && it.treeName != null }?.treeName,
+            tree,
+        )
         AlertDialog(
             onDismissRequest = { farTreeConfirm = null },
-            title = { Text("Tree $tree is $metres m away") },
+            title = { Text("$farTreeTitle is $metres m away") },
             text = {
                 Text(
                     "Your current GPS position is about $metres m from this " +
@@ -719,7 +744,6 @@ fun MapHomeScreen(nav: NavController) {
     if (photoPages.isNotEmpty()) {
         PhotoViewerDialog(
             pages = photoPages,
-            activity = activity,
             onDismiss = { photoPages = emptyList() },
         )
     }
@@ -742,6 +766,50 @@ fun MapHomeScreen(nav: NavController) {
                 selectedPinId = null
             },
         )
+    }
+
+    // Quick-peek "Details" — the SAME sheet the field log opens, not a second
+    // copy of it. "Measure again" from inside it lands on the map's own
+    // route: close the sheet, hand the scan the tree it must land on (the
+    // slot the peek's own tree lock uses) and go.
+    inspectingRowId?.let { id ->
+        val live = fieldLogRows(entries).firstOrNull { it.id == id }
+        ModalBottomSheet(
+            onDismissRequest = { inspectingRowId = null },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            containerColor = colors.canvas,
+        ) {
+            if (live == null) {
+                // Every reading behind this pin went away while the sheet was
+                // open. An empty sheet would read as "this tree has nothing
+                // on it" — say what happened instead. Same sentence the field
+                // log uses for the same state.
+                Text(
+                    "Every reading on this row has been deleted.",
+                    style = Forestix.type.caption, color = colors.textTertiary,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(ForestixSpace.lg),
+                )
+            } else {
+                FieldLogDetailSheet(
+                    row = live,
+                    unitSystem = settings.unitSystem,
+                    developerMode = settings.developerMode,
+                    onSave = { env.history.update(it) },
+                    onAdd = { env.history.append(it) },
+                    onRemeasure = { kind, tree, name, species, truth ->
+                        inspectingRowId = null
+                        PendingTreeNumber.set(
+                            number = tree, name = name, speciesCode = species,
+                            replaceExisting = true, truth = truth,
+                            plotID = live.entries.firstOrNull()?.plotID)
+                        nav.navigate(
+                            if (kind == MeasureKind.DBH) Routes.DBH else Routes.HEIGHT)
+                    },
+                )
+            }
+        }
     }
 
     // First-launch UX: the map home hosts the region picker (it is the
@@ -847,13 +915,13 @@ private fun MeasureBottomContent(
     selectedPin: TreePin?,
     lastPin: TreePin?,
     settings: SettingsSnapshot,
-    activity: Activity?,
     plotNameFor: (TreePin) -> String?,
     onToggleMode: () -> Unit,
     onMeasure: () -> Unit,
     onLog: () -> Unit,
     onViewPhoto: (List<PhotoPage>) -> Unit,
     onEditEntry: (QuickMeasureEntry) -> Unit,
+    onDetails: (TreePin) -> Unit,
     onMeasureAgain: (TreePin) -> Unit,
 ) {
     AnimatedContent(
@@ -879,13 +947,13 @@ private fun MeasureBottomContent(
             PeekCard(
                 pin = pin,
                 unitSystem = settings.unitSystem,
-                activity = activity,
                 plotName = plotNameFor(pin),
                 modifier = Modifier
                     .padding(horizontal = 12.dp)
                     .padding(bottom = 20.dp),
                 onViewPhoto = onViewPhoto,
                 onEditEntry = onEditEntry,
+                onDetails = { onDetails(pin) },
                 onMeasureAgain = { onMeasureAgain(pin) },
             )
         }
@@ -936,7 +1004,13 @@ private fun buildTreePins(entries: List<QuickMeasureEntry>): List<TreePin> {
                 id = "tree-$number",
                 coordinate = CoordinateConversions.LatLon(
                     latitude = anchor.latitude!!, longitude = anchor.longitude!!),
-                title = "T$number",
+                // The pin says what the cruiser called this tree, shortened
+                // to what a 30 dp drop holds — one rule, shared with the
+                // cruise pins and both mini-maps.
+                title = TreeLabel.pinTitle(
+                    name = all.firstNotNullOfOrNull { it.treeName },
+                    number = number,
+                ),
                 warn = all.any { isWarnTier(it.confidenceRaw) },
                 badges = badgeKinds.filter { k -> all.any { it.kind == k } }.map(::kindLetter),
                 entries = all,
@@ -1172,11 +1246,11 @@ internal fun ClusterLabel(label: String, gap: Dp) {
 private fun PeekCard(
     pin: TreePin,
     unitSystem: UnitSystem,
-    activity: Activity?,
     plotName: String?,
     modifier: Modifier = Modifier,
     onViewPhoto: (List<PhotoPage>) -> Unit,
     onEditEntry: (QuickMeasureEntry) -> Unit,
+    onDetails: () -> Unit,
     onMeasureAgain: () -> Unit,
 ) {
     val colors = Forestix.colors
@@ -1238,7 +1312,7 @@ private fun PeekCard(
             // Tapping the thumbnail opens the existing full-screen viewer
             // (map-peek spec item 2 — the retired "View photo" button's job).
             PhotoThumb(
-                photoPages.firstOrNull()?.photoPath, photoPages.size, activity,
+                photoPages.firstOrNull()?.photoPath, photoPages.size,
                 onClick = photoPages.takeIf { it.isNotEmpty() }
                     ?.let { pages -> { onViewPhoto(pages) } },
             )
@@ -1251,6 +1325,20 @@ private fun PeekCard(
             }
         }
         Spacer(Modifier.size(12.dp))
+        // DETAILS — the whole record behind this pin, on the SAME surface the
+        // field log opens (`FieldLogDetailSheet`): species, stem position,
+        // damage, note, ±sigma, where and when it was recorded, every photo.
+        // The word is "Details" because that is what the map's plot peek
+        // already calls its equivalent step; a second word for one idea is
+        // how a map ends up with two.
+        //
+        // Full width above the pair rather than a third button in the row:
+        // three 44 dp controls across a phone leave no label room.
+        PeekActionButton(
+            "Details", primary = false, modifier = Modifier.fillMaxWidth(),
+            onClick = onDetails,
+        )
+        Spacer(Modifier.size(ForestixSpace.xs))
         Row(horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs)) {
             // "Edit this tree" replaces the redundant "View photo" (the thumb
             // now opens the viewer): a compact edit sheet on the newest
@@ -1303,21 +1391,53 @@ private fun MeasureRow(entry: QuickMeasureEntry, unitSystem: UnitSystem) {
                 color = colors.textPrimary,
             )
         }
-        TierChipSoft(entry.confidenceRaw)
+        TierChipSoft(entry.confidenceRaw, explains = tierExplainerKind(entry.kind))
     }
+}
+
+/// Which explainer a peek row's chip opens. Null where nothing in the
+/// confidence framework graded the reading.
+internal fun tierExplainerKind(kind: MeasureKind): TierExplainerKind? = when (kind) {
+    MeasureKind.DBH -> TierExplainerKind.DIAMETER
+    MeasureKind.HEIGHT -> TierExplainerKind.HEIGHT
+    else -> null
 }
 
 /// Mock `.chip` — soft tier-coloured background, dot + uppercase label.
 /// Internal: the cruise tree/plot peeks reuse it (v3).
+///
+/// Pass `explains` and the chip becomes tappable, opening the confidence
+/// explainer for that measurement. "Good" / "Fair" with no stated criteria
+/// reads as a mood; the sheet is what makes it a criterion. It is left null
+/// where the grade is not one an estimator computed (crown, distance, plot),
+/// because a sheet describing diameter checks over a plot radius would be a
+/// worse answer than no sheet.
+///
+/// The sheet's open state lives HERE rather than in each host screen: it is
+/// a ModalBottomSheet, it needs nothing from the host, and one state per
+/// chip is what keeps the two peeks from having to agree about it.
 @Composable
-internal fun TierChipSoft(rawTier: String) {
+internal fun TierChipSoft(rawTier: String, explains: TierExplainerKind? = null) {
     val d = confidenceDescriptor(rawTier)
+    var explaining by remember { mutableStateOf(false) }
+    if (explaining) {
+        TierExplainerSheet(explains ?: TierExplainerKind.DIAMETER) { explaining = false }
+    }
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         modifier = Modifier
             .clip(ForestixRadius.chip)
             .background(d.color.copy(alpha = 0.12f))
+            .then(
+                if (explains != null) {
+                    Modifier
+                        .clickableNoRipple { explaining = true }
+                        .semantics { contentDescription = "What this grade means" }
+                } else {
+                    Modifier
+                }
+            )
             .padding(horizontal = 7.dp, vertical = 2.dp),
     ) {
         Box(Modifier.size(6.dp).clip(CircleShape).background(d.color))
@@ -1337,15 +1457,15 @@ internal fun TierChipSoft(rawTier: String) {
 internal fun PhotoThumb(
     photoName: String?,
     photoCount: Int,
-    activity: Activity?,
     onClick: (() -> Unit)? = null,
 ) {
     val colors = Forestix.colors
-    val thumb by produceState<Bitmap?>(initialValue = null, photoName, activity) {
-        value = withContext(Dispatchers.IO) {
-            if (photoName == null || activity == null) null
-            else decodeSampled(MeasurePhotoStore.file(activity, photoName), targetPx = 256)
-        }
+    // LocalContext, not an Activity threaded down from the screen root. The
+    // store resolves against any Context, and this composable is reused
+    // inside sheets and dialogs where LocalContext is a ContextThemeWrapper.
+    val context = LocalContext.current
+    val thumb by produceState<Bitmap?>(initialValue = null, photoName, context) {
+        value = photoName?.let { MeasurePhotoStore.loadBitmap(context, it, targetPx = 256) }
     }
     Box(
         Modifier
@@ -1628,7 +1748,9 @@ private fun readingPhotoPage(
 ): PhotoPage {
     val tier = confidenceDescriptor(entry.confidenceRaw)
     val tree = listOfNotNull(
-        entry.treeNumber?.let { "T$it" },
+        // The caption strip has room for the whole name, so it prints the
+        // full title rather than the pin's shortened form.
+        entry.treeNumber?.let { TreeLabel.title(entry.treeName, it) },
         entry.speciesCode?.takeIf { it.isNotEmpty() }
             ?.let { RegionalSpecies.nameForCode(it) },
     ).joinToString(" · ").ifEmpty { "—" }
@@ -1677,7 +1799,6 @@ internal fun cruiseTreePhotoPages(
 @Composable
 internal fun PhotoViewerDialog(
     pages: List<PhotoPage>,
-    activity: Activity?,
     onDismiss: () -> Unit,
     startIndex: Int = 0,
 ) {
@@ -1694,7 +1815,7 @@ internal fun PhotoViewerDialog(
     ) {
         Box(Modifier.fillMaxSize().background(Color(0xFF0A0D0B))) {
             HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { index ->
-                PhotoViewerPage(pages[index], activity)
+                PhotoViewerPage(pages[index])
             }
             // "1 / 2" — says there IS a second photo and which one is on
             // screen. Drawn only from two photos up; one photo gets no
@@ -1753,18 +1874,19 @@ internal fun PhotoViewerDialog(
 /// own file, so paging never shows the previous photo under the next one's
 /// caption.
 @Composable
-private fun PhotoViewerPage(page: PhotoPage, activity: Activity?) {
+private fun PhotoViewerPage(page: PhotoPage) {
     val type = Forestix.type
     val ink = Color(0xFFF2F5F3)
     val inkDim = Color(0xFFA5AEA8)
     // Spinner while the JPEG decodes; "Photo unavailable" only once the
     // decode has actually failed (iOS ProgressView behaviour).
     var loadFailed by remember(page.photoPath) { mutableStateOf(false) }
-    val bitmap by produceState<Bitmap?>(initialValue = null, page.photoPath, activity) {
-        val decoded = withContext(Dispatchers.IO) {
-            if (activity == null) null
-            else decodeSampled(MeasurePhotoStore.file(activity, page.photoPath), targetPx = 1600)
-        }
+    // This page is composed inside a Dialog, so LocalContext here is the
+    // dialog's ContextThemeWrapper — fine, because the store resolves
+    // against a Context and no longer asks anyone for an Activity.
+    val context = LocalContext.current
+    val bitmap by produceState<Bitmap?>(initialValue = null, page.photoPath, context) {
+        val decoded = MeasurePhotoStore.loadBitmap(context, page.photoPath, targetPx = 1600)
         value = decoded
         if (decoded == null) loadFailed = true
     }
@@ -1944,7 +2066,13 @@ private fun QuickEntryEditSheet(
             verticalArrangement = Arrangement.spacedBy(ForestixSpace.sm),
         ) {
             Text(
-                entry.treeNumber?.let { "EDIT · TREE $it" }
+                // A named stem is headed by its name, not by the number the
+                // cruiser stopped using the moment they named it. The name
+                // is NOT uppercased — it is the cruiser's own word, and
+                // "STARKER32" is not what they typed. Unnamed rows keep the
+                // header they have always had.
+                entry.treeName?.takeIf { it.isNotEmpty() }?.let { "EDIT · $it" }
+                    ?: entry.treeNumber?.let { "EDIT · TREE $it" }
                     ?: "EDIT · ${rowLabel(entry).uppercase(Locale.US)}",
                 style = type.sectionHead.copy(
                     fontWeight = FontWeight.ExtraBold, letterSpacing = 1.0.sp),
@@ -2110,25 +2238,3 @@ private fun sigmaText(e: QuickMeasureEntry, system: UnitSystem): String? {
 private fun dateLine(epochMs: Long): String =
     SimpleDateFormat("d MMM · HH:mm", Locale.US).format(Date(epochMs))
 
-/// Decode a stored JPEG at roughly `targetPx` on the short side — thumbs
-/// shouldn't pay for a full window-size bitmap.
-private fun decodeSampled(file: File, targetPx: Int): Bitmap? {
-    if (!file.exists()) return null
-    return try {
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(file.absolutePath, bounds)
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
-        var sample = 1
-        while (bounds.outWidth / (sample * 2) >= targetPx &&
-            bounds.outHeight / (sample * 2) >= targetPx
-        ) {
-            sample *= 2
-        }
-        BitmapFactory.decodeFile(
-            file.absolutePath,
-            BitmapFactory.Options().apply { inSampleSize = sample },
-        )
-    } catch (_: Exception) {
-        null
-    }
-}

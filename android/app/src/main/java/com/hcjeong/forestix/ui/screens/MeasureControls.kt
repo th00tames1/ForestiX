@@ -385,16 +385,33 @@ private fun ShutterFlankSlot(content: (@Composable () -> Unit)?) {
 
 // MARK: - Live-value pill (U2 value strip)
 
+/// The three steps of the data type scale a value pill may render at, and
+/// nothing else — a pill never invents a size of its own.
+///
+/// MEDIUM exists because of the field report on the height walk strip: a line
+/// that carries a WORD as well as a number ("Total distance 21.40 m") at the
+/// 26 sp step is far wider than the bare numbers the step was drawn for, and
+/// read as oversized. It is still the emphasised line of its strip, one step
+/// up from the two dimmed lines above it. iOS `MeasureValuePill.Size`.
+enum class MeasurePillSize { LARGE, MEDIUM, SMALL }
+
 /// One line of the compact live-value strip directly above the shutter
 /// row — same dark-glass capsule language as the under-crosshair pills
-/// (iOS MeasureValuePill 1:1). Emphasised lines pass `large = true`
-/// (dataLarge); secondary lines default to dataSmall, `dimmed` on a
-/// lighter scrim.
+/// (iOS MeasureValuePill 1:1). `size` picks the step of the data scale;
+/// `dimmed` drops to 0.85 white on a lighter scrim.
 @Composable
-fun MeasureValuePill(text: String, large: Boolean = false, dimmed: Boolean = false) {
+fun MeasureValuePill(
+    text: String,
+    size: MeasurePillSize = MeasurePillSize.SMALL,
+    dimmed: Boolean = false,
+) {
     Text(
         text,
-        style = if (large) Forestix.type.dataLarge else Forestix.type.dataSmall,
+        style = when (size) {
+            MeasurePillSize.LARGE -> Forestix.type.dataLarge
+            MeasurePillSize.MEDIUM -> Forestix.type.data
+            MeasurePillSize.SMALL -> Forestix.type.dataSmall
+        },
         color = Color.White.copy(alpha = if (dimmed) 0.85f else 1f),
         modifier = Modifier
             .clip(CircleShape)

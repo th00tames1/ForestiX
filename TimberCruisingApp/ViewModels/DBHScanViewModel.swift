@@ -82,6 +82,53 @@ public final class DBHScanViewModel: ObservableObject {
     /// of guidance from the only operator the study depends on, and made iOS
     /// print something different from Android for the identical state.
     @Published public private(set) var previewStatusIsDiagnostic: Bool = false
+
+    // MARK: - ADJUST live-readout settling (field round 10)
+
+    /// True while the ADJUST bracket is spanning more than one surface, so the
+    /// number on screen is the last one taken off bark rather than this tick's.
+    ///
+    /// THE DEFECT THIS ANSWERS is the diameter that jumps by inches with the
+    /// phone held still — see `DBHEstimator.bracketCoreDepthSpreadM` for the
+    /// measurement and the cause. The correction is HERE and not in the
+    /// estimator because the estimator is frozen and does not need correcting:
+    /// the stored value is a median of five frames and the excursions do not
+    /// reach it. What they reach is the readout the cruiser is watching while
+    /// they place the handles, which publishes the raw per-frame fit.
+    ///
+    /// WHY HOLD RATHER THAN BLANK. A bad tick lands roughly one time in ten at
+    /// 10 Hz, so blanking on each one would strobe the number in and out —
+    /// harder to read than the jump it replaces. Holding shows the most recent
+    /// diameter actually measured across bark, which is a real reading and not
+    /// an invented one, and a good tick publishes immediately, so a handle drag
+    /// still tracks the handles exactly as the ADJUST design requires. Only a
+    /// SUSTAINED bad run (`bracketUnsettledGraceSec`) blanks the value, and
+    /// then it says why in a sentence.
+    @Published public private(set) var bracketDepthUnsettled: Bool = false
+
+    /// How long the bracket may keep reading two surfaces before the held
+    /// value stops being current enough to show.
+    ///
+    /// 1.0 s is long enough that the intermittent excursion never reaches it
+    /// (it is one or two ticks) and short enough that a cruiser who has walked
+    /// the bracket off the stem is told so while they are still holding it
+    /// there, rather than reading a stale number.
+    private static let bracketUnsettledGraceSec: TimeInterval = 1.0
+
+    /// Advice for a bracket that is spanning the stem AND what is behind it.
+    /// Byte identical to the Android `BRACKET_TWO_SURFACES` constant.
+    ///
+    /// NOT "widen it", for the same reason as the sibling line below: a wider
+    /// bracket takes in more background and more diameter at once.
+    public static let bracketTwoSurfacesText =
+        "The bracket is reading past the trunk — narrow it onto the bark, or step closer."
+
+    /// Monotonic time the ADJUST bracket last measured a single surface, or nil
+    /// before the first such tick of this aiming session.
+    private var lastSettledBracketAt: TimeInterval?
+    /// The most recent diameter measured across one surface — what the readout
+    /// holds while an excursion passes.
+    private var lastSettledBracketCm: Double?
     /// True once `acquisitionStallSec` of aiming has gone by without a
     /// single usable fit. Field report 15: when depth won't resolve, the
     /// screen said nothing and the cruiser had no way to know that a small
@@ -160,7 +207,14 @@ public final class DBHScanViewModel: ObservableObject {
     /// only — the screen never enables it for the AR caliper/motion
     /// developer modes.
     @Published public var edgeAdjustActive: Bool = false {
-        didSet { if !edgeAdjustActive { adjustAxisLatch = nil } }
+        // The held ADJUST value goes with the latch: it was measured through
+        // the bracket, and there is no bracket outside this mode.
+        didSet {
+            if !edgeAdjustActive {
+                adjustAxisLatch = nil
+                resetBracketSettling()
+            }
+        }
     }
     /// Handle positions as fractions (0…1) of the on-screen walk axis —
     /// the same normalisation `PreviewFit.stripLeftFraction` uses, so
@@ -553,6 +607,10 @@ public final class DBHScanViewModel: ObservableObject {
             if previewStatusIsDiagnostic { previewStatusIsDiagnostic = false }
             isStable = false
             consecutiveRedFrames = 0
+            // A held bracket value belongs to the aiming session that produced
+            // it. Carrying it across a capture or a committed result would put
+            // the previous tree's diameter under the next tree's handles.
+            resetBracketSettling()
             // Not aiming ⇒ no acquisition to stall. Re-seed the clock so
             // the hint waits out a full interval when aiming resumes.
             if acquisitionStalled { acquisitionStalled = false }
@@ -628,9 +686,16 @@ public final class DBHScanViewModel: ObservableObject {
             recentRawDiameters.removeAll()
             isStable = false
             consecutiveRedFrames = 0
+            // `previewFit` IS THE FIT, always and unconditionally — the
+            // settling logic below decides what NUMBER to show and nothing
+            // else. The capture gate, the chord bar and the cylinder overlay
+            // all read this, and gating the capture on a live display tick
+            // would refuse a burst whose stored median is demonstrably
+            // unaffected (rho = −0.11). See `bracketDepthUnsettled`.
             previewFit = fit
-            previewDbhCm = fit?.diameterCm
             previewTier = fit?.tier
+            previewDbhCm = settledBracketDiameterCm(
+                frame: frame, axis: bracketAxis, fit: fit, now: now)
             // BEFORE the status line, not after: the stall flag decides
             // which of the two sentences the screen is allowed to show, so
             // it has to describe THIS tick when the line is written.
@@ -648,7 +713,14 @@ public final class DBHScanViewModel: ObservableObject {
             let line: String?
             let isDiagnostic: Bool
             if fit != nil {
-                line = nil
+                // A fit that measured, but not across bark: the diameter has
+                // been withheld (`previewDbhCm` is nil above) because the
+                // bracket has been spanning two surfaces for longer than the
+                // grace, so the strip must say what happened. While the run is
+                // shorter than the grace the held value is on screen and this
+                // stays silent — a sentence for every one-tick excursion would
+                // flicker exactly as badly as the number used to.
+                line = previewDbhCm == nil ? Self.bracketTwoSurfacesText : nil
                 isDiagnostic = false
             } else if developerMode {
                 // The bench numbers stay on the strip even once the stall is
@@ -890,6 +962,67 @@ public final class DBHScanViewModel: ObservableObject {
         }
 
         updateAcquisitionStall(hasFit: fit != nil, now: now)
+    }
+
+    /// The diameter the ADJUST readout should show for this tick — see
+    /// `bracketDepthUnsettled` for why the raw fit is not always it.
+    ///
+    /// Three outcomes, in order:
+    ///   • no fit at all → nil, and the existing advice lines take over;
+    ///   • the bracket's middle half is ONE surface → publish this tick's raw
+    ///     diameter, immediately, and remember it. This is the ordinary case
+    ///     and it keeps ADJUST's contract that the number tracks the handles
+    ///     with no smoothing and no lag;
+    ///   • the middle half straddles two surfaces → hold the last one-surface
+    ///     diameter, up to `bracketUnsettledGraceSec`, then withhold it.
+    ///
+    /// The spread probe is READ-ONLY and the fit is untouched on every path —
+    /// what is decided here is only which number reaches the screen.
+    private func settledBracketDiameterCm(
+        frame: ARDepthFrame,
+        axis: GuideAxis,
+        fit: DBHEstimator.PreviewFit?,
+        now: TimeInterval
+    ) -> Double? {
+        guard let fit else {
+            // No fit is already a fully-explained state on this path, and it
+            // is not evidence about the bark either way — leave the held value
+            // and its clock alone so a one-frame depth outage mid-drag does
+            // not restart the grace.
+            if bracketDepthUnsettled { bracketDepthUnsettled = false }
+            return nil
+        }
+        let spread = DBHEstimator.bracketCoreDepthSpreadM(
+            frame: frame,
+            guideAxis: axis,
+            leftFraction: edgeBracketLeftFraction,
+            rightFraction: edgeBracketRightFraction)
+        // A fit exists but the probe declined to describe it (fewer than three
+        // valid depths cannot happen here — the fit needs them too — so this
+        // is the bounds refusal). Treat an unmeasurable spread as settled
+        // rather than inventing a verdict about it.
+        let settled = spread.map { $0 <= DBHEstimator.bracketCoreDepthSpreadLimitM } ?? true
+        if settled {
+            lastSettledBracketAt = now
+            lastSettledBracketCm = fit.diameterCm
+            if bracketDepthUnsettled { bracketDepthUnsettled = false }
+            return fit.diameterCm
+        }
+        if !bracketDepthUnsettled { bracketDepthUnsettled = true }
+        // Never held anything yet — the very first ticks of a session already
+        // straddling two surfaces. There is nothing honest to show.
+        guard let held = lastSettledBracketCm, let since = lastSettledBracketAt
+        else { return nil }
+        return now - since <= Self.bracketUnsettledGraceSec ? held : nil
+    }
+
+    /// Drop the held ADJUST value and its clock. Called wherever the aiming
+    /// session ends, so a held diameter can never outlive the tree it was
+    /// measured on.
+    private func resetBracketSettling() {
+        lastSettledBracketAt = nil
+        lastSettledBracketCm = nil
+        if bracketDepthUnsettled { bracketDepthUnsettled = false }
     }
 
     /// Field report 15 — say so when nothing is resolving.

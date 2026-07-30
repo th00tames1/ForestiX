@@ -24,7 +24,6 @@
 
 package com.hcjeong.forestix.ui.screens.cruise
 
-import android.app.Activity
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.EaseOut
 import androidx.compose.animation.core.tween
@@ -150,6 +149,7 @@ import com.hcjeong.forestix.ui.screens.PhotoThumb
 import com.hcjeong.forestix.ui.screens.PhotoViewerDialog
 import com.hcjeong.forestix.ui.screens.SideCircleButton
 import com.hcjeong.forestix.ui.screens.TierChipSoft
+import com.hcjeong.forestix.ui.screens.tree.TierExplainerKind
 import com.hcjeong.forestix.ui.screens.cruiseTreePhotoPages
 import com.hcjeong.forestix.ui.screens.exportMimeFor
 import com.hcjeong.forestix.ui.screens.plot.PlotFlowRoutes
@@ -583,9 +583,10 @@ internal fun CruiseModeEffects(
     state.deleteTree = { tree ->
         scope.launch {
             try {
-                tree.photoPath?.let { name ->
-                    (context as? Activity)?.let { MeasurePhotoStore.delete(it, name) }
-                }
+                // Plain Context: `as? Activity` yields null wherever this
+                // screen is hosted inside a dialog window, and a null there
+                // silently skipped the deletion and orphaned the file.
+                tree.photoPath?.let { name -> MeasurePhotoStore.delete(context, name) }
                 env.treeRepository.hardDelete(tree.id)
             } catch (_: Exception) {
                 // Storage error — leave the tree in place; the next tap retries.
@@ -709,8 +710,6 @@ internal fun CruiseModeBottomContent(
 ) {
     val env = LocalAppEnvironment.current
     val settings by env.settings.state.collectAsStateWithLifecycle()
-    val context = LocalContext.current
-    val activity = context as? Activity
     val activePlot = state.activePlot(settings)
 
     AnimatedContent(
@@ -777,7 +776,6 @@ internal fun CruiseModeBottomContent(
                 tree = peekTree,
                 plotNumber = state.data.plots.firstOrNull { it.id == peekTree.plotId }?.plotNumber,
                 unitSystemMetric = state.project?.units == com.hcjeong.forestix.data.cruise.UnitSystem.METRIC,
-                activity = activity,
                 modifier = Modifier
                     .padding(horizontal = 12.dp)
                     .padding(bottom = 20.dp),
@@ -1080,7 +1078,9 @@ private fun cruiseMarkers(
         // (every cruise tree has a DBH by construction).
         markers += MapMarker(
             coordinate = CoordinateConversions.LatLon(latitude = lat, longitude = lon),
-            title = "T${tree.treeNumber}",
+            // Named trees read by their name here too (shortened to what
+            // the drop holds) — the peek prints it in full.
+            title = TreeLabel.pinTitle(tree.treeName, tree.treeNumber),
             tint = if (isWarn(tree.dbhConfidence.raw) || isWarn(tree.heightConfidence?.raw)) {
                 warn
             } else {
@@ -2101,7 +2101,6 @@ private fun TreePeekCard(
     tree: Tree,
     plotNumber: Int?,
     unitSystemMetric: Boolean,
-    activity: Activity?,
     modifier: Modifier = Modifier,
     onMeasureHeight: () -> Unit,
     onEdit: () -> Unit,
@@ -2171,7 +2170,7 @@ private fun TreePeekCard(
             // same store. A Tree row carries a SINGLE photo path, so this
             // opens one page and shows no counter.
             PhotoThumb(
-                tree.photoPath, if (tree.photoPath != null) 1 else 0, activity,
+                tree.photoPath, if (tree.photoPath != null) 1 else 0,
                 onClick = tree.photoPath?.let { { showPhoto = true } },
             )
             Column(Modifier.weight(1f)) {
@@ -2179,6 +2178,7 @@ private fun TreePeekCard(
                     label = "DBH",
                     value = MeasurementFormatter.diameter(tree.dbhCm.toDouble(), unitSystem),
                     tierRaw = tree.dbhConfidence.raw,
+                    explains = TierExplainerKind.DIAMETER,
                 )
                 if (tree.heightM != null) {
                     HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
@@ -2186,6 +2186,7 @@ private fun TreePeekCard(
                         label = "HEIGHT",
                         value = MeasurementFormatter.height(tree.heightM!!.toDouble(), unitSystem),
                         tierRaw = tree.heightConfidence?.raw,
+                        explains = TierExplainerKind.HEIGHT,
                     )
                 }
             }
@@ -2256,7 +2257,6 @@ private fun TreePeekCard(
     if (showPhoto) {
         PhotoViewerDialog(
             pages = cruiseTreePhotoPages(tree.photoPath, treeTitle, treeSubtitle),
-            activity = activity,
             onDismiss = { showPhoto = false },
         )
     }
@@ -2277,7 +2277,12 @@ private fun TreePeekCard(
 }
 
 @Composable
-private fun TreeMetricRow(label: String, value: String, tierRaw: String?) {
+private fun TreeMetricRow(
+    label: String,
+    value: String,
+    tierRaw: String?,
+    explains: TierExplainerKind,
+) {
     val colors = Forestix.colors
     val type = Forestix.type
     Row(
@@ -2302,7 +2307,9 @@ private fun TreeMetricRow(label: String, value: String, tierRaw: String?) {
                 color = colors.textPrimary,
             )
         }
-        if (tierRaw != null) TierChipSoft(tierRaw)
+        // Tapping the grade opens the same explainer the tree report and
+        // the quick peek open, scoped to this row's measurement.
+        if (tierRaw != null) TierChipSoft(tierRaw, explains = explains)
     }
 }
 

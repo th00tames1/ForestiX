@@ -301,8 +301,8 @@ public struct FieldLogScreen: View {
                     .listRowBackground(ForestixPalette.surface)
             }
 
-            // Plot summary card — BA / TPA / QMD + stocking gauge + species
-            // mix for the active QUICK plot. It reads the quick-measure
+            // Plot summary card — BA / TPA / QMD + species mix for the
+            // active QUICK plot. It reads the quick-measure
             // store, so it is shown only while the quick world is on screen:
             // under a cruise scope it would be a card about a different plot
             // than every row beneath it.
@@ -703,11 +703,16 @@ public struct FieldLogScreen: View {
     }
 
     private func summaryCell(value: String, label: String) -> some View {
-        // Single-line throughout: "LAST" can carry a date ("Mar 14") at
-        // 26 pt, which is what would push this row into wrapping first.
+        // Single-line throughout: "LAST" can carry a date ("Mar 14"), which
+        // is what would push this row into wrapping first.
+        //
+        // FIELD REPORT — the values were `dataLarge` (26 pt) and read as
+        // oversized beside everything else on the screen. `data` (17 pt) is
+        // the next step of the same scale and the one the log's row values
+        // and the plot-summary card already use.
         VStack(alignment: .leading, spacing: 2) {
             Text(value)
-                .font(ForestixType.dataLarge)
+                .font(ForestixType.data)
                 .foregroundStyle(ForestixPalette.textPrimary)
                 .lineLimit(1)
                 .allowsTightening(true)
@@ -1587,7 +1592,10 @@ private struct FieldLogNewTreeSheet: View {
 /// the details sheet at capture time, the species, the ± band, where the
 /// reading was taken, and in developer mode the ground truth entered against
 /// this tree — lives one tap away instead of being squeezed into columns.
-private struct FieldLogDetailSheet: View {
+/// Internal, not private: the MAP peek opens THIS sheet for the row behind a
+/// tapped pin (map spec item 4). There is exactly one per-tree record surface
+/// in the quick-measure world and both entry points must land on it.
+struct FieldLogDetailSheet: View {
 
     /// The row is looked up by id rather than carried by value: an edit
     /// made in this sheet changes the store, and a snapshot taken at
@@ -1660,6 +1668,11 @@ private struct FieldLogDetailForm: View {
     /// the map peek and the cruise tree peek open, so a tree with a diameter
     /// frame and a height frame pages the same way from every surface.
     @State private var photoViewer: PhotoViewerContext?
+    /// The recorded-coordinate editor: whether it is up, what is in its
+    /// field, and why the field cannot be saved (nil = it can).
+    @State private var editingPosition = false
+    @State private var positionText = ""
+    @State private var positionRefusal: String?
 
     /// A prefilled field re-parses a hair off the number it was filled
     /// from — it is rendered to four decimals, and under imperial it makes
@@ -1680,11 +1693,13 @@ private struct FieldLogDetailForm: View {
             }
             detailsSection
             contextSection
-            if settings.developerMode, !groundTruths.isEmpty {
-                groundTruthSection
-            }
+            // There is no second ground-truth section here any more. The
+            // truth field inside the Diameter and Height sections above is
+            // the only place a truth is shown or edited — see the note at
+            // the foot of this file.
         }
         .onAppear(perform: seedFields)
+        .sheet(isPresented: $editingPosition) { positionEditor }
         #if os(iOS)
         .fullScreenCover(item: $photoViewer) { context in
             MeasurePhotoDetailView(context: context)
@@ -2052,16 +2067,39 @@ private struct FieldLogDetailForm: View {
     private var contextSection: some View {
         Section("Recorded") {
             row(label: "When", value: timestampText)
-            if let fix = row.entries.first(where: {
-                $0.latitude != nil && $0.longitude != nil
-            }) {
-                self.row(label: "Position",
-                         value: String(format: "%.5f, %.5f",
-                                       fix.latitude ?? 0, fix.longitude ?? 0))
-            } else {
-                // Said out loud rather than left blank: a reading with no
-                // fix is a different thing from one whose fix was not shown.
-                self.row(label: "Position", value: "not recorded")
+            // POSITION IS TAPPABLE. A fix that never arrived, or arrived on
+            // the wrong stem, used to be permanent — the reading carried it
+            // for the rest of the cruise and into every export. The row now
+            // opens an editor; what it shows is unchanged.
+            Button {
+                positionText = locatedEntry.map {
+                    CoordinateInput.text(latitude: $0.latitude ?? 0,
+                                         longitude: $0.longitude ?? 0)
+                } ?? ""
+                positionRefusal = nil
+                editingPosition = true
+            } label: {
+                HStack {
+                    Text("Position")
+                        .foregroundStyle(ForestixPalette.textSecondary)
+                    Spacer(minLength: 8)
+                    Text(positionValueText)
+                        .foregroundStyle(ForestixPalette.textPrimary)
+                        .multilineTextAlignment(.trailing)
+                    Image(systemName: "chevron.right")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("fieldLog.detail.position")
+            // WHERE THE COORDINATE CAME FROM. Without this a coordinate the
+            // cruiser typed reads on screen — and exports — exactly like one
+            // the satellites produced.
+            if let source = locatedEntry?.positionRecordedSource {
+                self.row(label: "Position source",
+                         value: FieldLogWords.positionSourceText(source))
             }
             if let mode = row.entries.compactMap(\.captureMode).first {
                 // "typed" is its own answer. Folding it into "Automatic"
@@ -2090,52 +2128,115 @@ private struct FieldLogDetailForm: View {
         return fmt.string(from: row.latest)
     }
 
+    // MARK: The recorded coordinate
+
+    /// The reading whose coordinate this row shows and edits — the newest
+    /// one that HAS a coordinate. nil when nothing on the tree was located.
+    private var locatedEntry: QuickMeasureEntry? {
+        row.entries.first { $0.latitude != nil && $0.longitude != nil }
+    }
+
+    /// Said out loud rather than left blank: a reading with no fix is a
+    /// different thing from one whose fix was not shown.
+    private var positionValueText: String {
+        guard let fix = locatedEntry else { return "not recorded" }
+        return CoordinateInput.text(latitude: fix.latitude ?? 0,
+                                    longitude: fix.longitude ?? 0)
+    }
+
+    /// Write a typed coordinate — or a clearance — onto EVERY reading on
+    /// this row.
+    ///
+    /// The cruiser is fixing where the TREE is, not where one of its two or
+    /// three readings is; setting only the newest would leave the diameter
+    /// and the height claiming different places, and clearing only the
+    /// newest would make an older fix pop back into the row as if nothing
+    /// had happened. `settingPosition` stamps the source `manual` so the
+    /// typed coordinate can never be read back as a device fix.
+    private func applyPosition(latitude: Double?, longitude: Double?) {
+        for entry in row.entries {
+            history.update(entry.settingPosition(latitude: latitude,
+                                                 longitude: longitude))
+        }
+    }
+
+    /// The editor. Save is off while the text cannot be read as a
+    /// coordinate — the stored one is never replaced by a guess.
+    private var positionEditor: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("44.56417, -123.28556", text: $positionText)
+                        .font(.body.monospacedDigit())
+                        .autocorrectionDisabled()
+                        #if os(iOS)
+                        .textInputAutocapitalization(.never)
+                        #endif
+                        .foregroundStyle(ForestixPalette.textPrimary)
+                        .accessibilityIdentifier("fieldLog.positionField")
+                    if let refusal = positionRefusal {
+                        Text(refusal)
+                            .font(ForestixType.caption)
+                            .foregroundStyle(ForestixPalette.confidenceBad)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } header: {
+                    Text("Latitude, longitude")
+                } footer: {
+                    Text("Decimal degrees, the way the app shows them. This is the position for every reading on this tree, and it is recorded as typed by hand.")
+                }
+
+                Section {
+                    Button("Save position") { savePosition() }
+                        .disabled(positionRefusal != nil)
+                    if locatedEntry != nil {
+                        Button("Clear position", role: .destructive) {
+                            applyPosition(latitude: nil, longitude: nil)
+                            editingPosition = false
+                        }
+                    }
+                }
+            }
+            .onChange(of: positionText) { _, new in
+                // Refuse as they type, so Save is never a surprise. A blank
+                // field is not a refusal: it means "clear", which Save then
+                // performs.
+                switch CoordinateInput.parse(new) {
+                case .refused(let message): positionRefusal = message
+                case .coordinate, .cleared: positionRefusal = nil
+                }
+            }
+            .navigationTitle("Position")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { editingPosition = false }
+                }
+            }
+        }
+    }
+
+    private func savePosition() {
+        switch CoordinateInput.parse(positionText) {
+        case .coordinate(let lat, let lon):
+            applyPosition(latitude: lat, longitude: lon)
+            editingPosition = false
+        case .cleared:
+            applyPosition(latitude: nil, longitude: nil)
+            editingPosition = false
+        case .refused(let message):
+            // Nothing is written. The sentence stays on screen.
+            positionRefusal = message
+        }
+    }
+
     private func captureModeText(_ mode: String) -> String {
         switch mode {
         case "manual": return "Adjusted by hand"
         case "typed":  return "Typed by hand"
         default:       return "Automatic"
-        }
-    }
-
-    // MARK: Ground truth (developer mode)
-
-    /// Hand-measured values in this tree's RAW-CAPTURE bundles that are on no
-    /// reading — typed before the truth lived on the reading, or typed for a
-    /// capture whose reading has since been deleted.
-    ///
-    /// ORPHANS ONLY. The truth that IS on a reading is shown, and edited, in
-    /// that reading's section above, and that is the one the CSV carries.
-    /// Listing the manifest copy beside it gave the cruiser two ground truths
-    /// for one tree that could disagree, with nothing saying which exports.
-    private var groundTruths: [(kind: String, value: Double)] {
-        guard case .tree(let number) = row.subject else { return [] }
-        return RawCaptureStore.list().compactMap { summary in
-            guard summary.manifest.context.treeNumber == number,
-                  let truth = summary.manifest.truth.value else { return nil }
-            let kind = summary.manifest.kind
-            // Already answered — and exported — by the reading itself.
-            if kind == "dbh", row.dbh?.truth != nil { return nil }
-            if kind == "height", row.height?.truth != nil { return nil }
-            return (kind, truth)
-        }
-    }
-
-    private var groundTruthSection: some View {
-        Section("Ground truth") {
-            ForEach(groundTruths.indices, id: \.self) { index in
-                let item = groundTruths[index]
-                row(label: item.kind == "dbh" ? "Tape diameter" : "Measured height",
-                    value: item.kind == "dbh"
-                        ? String(format: "%.1f cm", item.value)
-                        : String(format: "%.2f m", item.value))
-            }
-            // Says out loud what this section now is: a leftover, not the
-            // number the export reads.
-            Text("Kept with a raw capture, not on a reading — it is not exported. Type it in above to keep it.")
-                .font(ForestixType.caption)
-                .foregroundStyle(ForestixPalette.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -2249,3 +2350,33 @@ private struct FieldLogShareSheet: UIViewControllerRepresentable {
     func updateUIViewController(_: UIActivityViewController, context: Context) {}
 }
 #endif
+
+// MARK: - One ground truth per reading
+//
+// FIELD REPORT — the detail sheet used to show a tree's ground truth TWICE:
+// the editable truth field inside the Diameter and Height sections, and a
+// read-only "Ground truth" section at the foot that read RawCaptureStore
+// keyed on tree number. The two could hold different numbers, and nothing on
+// screen said which one the export read.
+//
+// The second surface is gone. The truth field in each section is now the only
+// place a truth is shown and the only place it is edited, and it is the one
+// that has always been exported: `QuickMeasureEntry.truth`, the `truth`
+// column in the readings CSV and `truth_cm` / `truth_m` in the stems and
+// heights CSVs.
+//
+// What stopped being DISPLAYED: a hand value that sits in a raw-capture
+// manifest and on no reading — typed before the truth lived on the reading,
+// or typed for a capture whose reading was later deleted. Those were the only
+// rows the section could still draw.
+//
+// What stopped being EXPORTED: nothing. That manifest value was never in any
+// CSV; the section itself said so. It is still written, still in the manifest,
+// and still ships inside the raw-capture ZIP exactly as before, where it
+// belongs to the CAPTURE rather than to a reading.
+//
+// The manifest copy is deliberately NOT written back from this sheet. A truth
+// keyed on tree number alone cannot say WHICH of that tree's readings it was
+// taped for — that is the reason the truth was moved onto the reading in the
+// first place (see `QuickMeasureEntry.truth`), and guessing here would put a
+// number the cruiser never entered into the research corpus.

@@ -184,6 +184,38 @@ object DBHEstimator {
     /// degenerate cases the gate exists for. Floor stays at 2.5 cm. iOS value 1:1.
     val PLAUSIBLE_DIAMETER_CM = 2.5..300.0
 
+    /// §7.9 tier thresholds, named once so the cruiser-facing confidence
+    /// explainer can QUOTE the numbers the checks apply instead of carrying a
+    /// prose copy of them that drifts the first time one of them moves. Every
+    /// value is the shipped one; this is a naming change, not a tuning one,
+    /// and no stored measurement, sigma, method or capture_mode moves with it.
+    ///
+    /// Mirrored byte-for-byte by iOS `DBHEstimator.TierThresholds`.
+    object TierThresholds {
+        // The §7.1 partial-arc circle fit (`estimate`). NOT the default
+        // capture — see FRAME_SPREAD_GREEN for the one that is.
+        const val MIN_INLIERS_REJECT = 10
+        const val MIN_INLIERS_WARN = 20
+        const val MIN_ARC_DEG_REJECT = 30.0
+        const val MIN_ARC_DEG_WARN = 45.0
+        const val RMSE_OVER_RADIUS_REJECT = 0.07
+        const val RMSE_OVER_RADIUS_WARN = 0.05
+        const val SIGMA_OVER_RADIUS_REJECT = 0.05
+        const val SIGMA_OVER_RADIUS_WARN = 0.02
+        const val RADIUS_COV_REJECT = 0.10
+        const val RADIUS_COV_WARN = 0.05
+
+        /// THE DEFAULT CAPTURE'S ONLY TIER RULE. The edge-bracket (Adjust)
+        /// path grades a burst on frame-to-frame agreement alone —
+        /// (max − min) / mean of the per-frame diameters. At or below this
+        /// it is green, above it yellow. None of the circle-fit criteria
+        /// above run on that path at all.
+        const val FRAME_SPREAD_GREEN = 0.15
+
+        /// A burst needs this many usable frames before it is graded; fewer
+        /// is the one way the default path produces a red.
+        const val MIN_USABLE_FRAMES = 3
+    }
 
     /// Full §7.1 pipeline. Returns null only if the burst is too small.
     fun estimate(input: DbhScanInput): DBHResult? {
@@ -261,23 +293,23 @@ object DBHEstimator {
         // WARN reasons stay in the estimator's own vocabulary — they never
         // leave the struct. Every THRESHOLD below is unchanged.
         val checks = listOf(
-            check(fit.inliers.size >= 10, Severity.REJECT,
+            check(fit.inliers.size >= TierThresholds.MIN_INLIERS_REJECT, Severity.REJECT,
                 "Too little of the trunk was picked up — move closer, fill the crosshair with bark, and capture again."),
-            check(fit.inliers.size >= 20, Severity.WARN, "Only 10\u201320 trunk surface points"),
-            check(arcDeg >= 30, Severity.REJECT,
+            check(fit.inliers.size >= TierThresholds.MIN_INLIERS_WARN, Severity.WARN, "Only 10\u201320 trunk surface points"),
+            check(arcDeg >= TierThresholds.MIN_ARC_DEG_REJECT, Severity.REJECT,
                 "Not enough of the trunk in view — step back or centre the guide line."),
-            check(arcDeg >= 45, Severity.WARN, "Trunk arc coverage 30\u00B0\u201345\u00B0"),
+            check(arcDeg >= TierThresholds.MIN_ARC_DEG_WARN, Severity.WARN, "Trunk arc coverage 30\u00B0\u201345\u00B0"),
             check(r >= 0.025 && r <= 1.0, Severity.REJECT,
                 "That doesn't measure like a trunk — aim at the stem and capture again."),
-            check(rmse / r <= 0.07, Severity.REJECT,
+            check(rmse / r <= TierThresholds.RMSE_OVER_RADIUS_REJECT, Severity.REJECT,
                 "The shape didn't match a trunk — hold steadier and capture again."),
-            check(rmse / r <= 0.05, Severity.WARN, "Fit error 5\u20137% of radius"),
-            check(sigmaR / r <= 0.05, Severity.REJECT,
+            check(rmse / r <= TierThresholds.RMSE_OVER_RADIUS_WARN, Severity.WARN, "Fit error 5\u20137% of radius"),
+            check(sigmaR / r <= TierThresholds.SIGMA_OVER_RADIUS_REJECT, Severity.REJECT,
                 "This diameter isn't settling — hold steadier and capture again."),
-            check(sigmaR / r <= 0.02, Severity.WARN, "Radius precision \u00B12\u20135%"),
-            check(radiusCoV <= 0.10, Severity.REJECT,
+            check(sigmaR / r <= TierThresholds.SIGMA_OVER_RADIUS_WARN, Severity.WARN, "Radius precision \u00B12\u20135%"),
+            check(radiusCoV <= TierThresholds.RADIUS_COV_REJECT, Severity.REJECT,
                 "The trunk width kept changing between shots — hold the phone steadier and capture again."),
-            check(radiusCoV <= 0.05, Severity.WARN, "Per-frame radius spread 5\u201310%"),
+            check(radiusCoV <= TierThresholds.RADIUS_COV_WARN, Severity.WARN, "Per-frame radius spread 5\u201310%"),
             check(!chordOverride, Severity.WARN, "Fit disagreed with silhouette; using chord"),
         )
         val tier = combineChecks(checks)
@@ -767,6 +799,86 @@ object DBHEstimator {
         return (iLo + quarter) to (iHi - quarter)
     }
 
+    /// Widest depth separation, in metres, that a bracket sitting entirely on
+    /// bark can produce across its middle half.
+    ///
+    /// GEOMETRY, not a tuned number. Over the middle half of a chord the stem
+    /// surface recedes from its nearest point by r·(1 − cos30°) = 0.134·r, so
+    /// even a 1 m stem contributes under 7 cm, and depth noise at bracket
+    /// range adds a centimetre or two. 0.20 m is several times anything bark
+    /// alone can produce, while the excursions it exists to name are 30–60 cm
+    /// of depth — the gap between a stem and whatever stands behind it. iOS
+    /// holds the identical value in
+    /// `DBHEstimator.bracketCoreDepthSpreadLimitM`.
+    const val BRACKET_CORE_DEPTH_SPREAD_LIMIT_M = 0.20
+
+    /// Interquartile depth spread over the ADJUST bracket's middle half, in
+    /// metres — READ-ONLY, and never consulted by any estimator.
+    ///
+    /// FIELD ROUND 10 — THE DIAMETER THAT JUMPS BY INCHES. Over 140 bursts the
+    /// median within-burst spread is 0.41 cm here and 0.49 cm on iOS, the
+    /// same; iOS carries a tail this platform does not (7 of 68 ADJUST bursts
+    /// spanning two inches or more, worst case 26 cm). d = w·z/(f − w/2) is
+    /// LINEAR in z, so 26 cm of diameter on a 30 cm stem is z moving by most
+    /// of a metre — nothing in a depth return moves that far, but that is
+    /// exactly the distance from the bark to what is behind it. Some of the
+    /// sample is not bark.
+    ///
+    /// `bracketCoreRange` already removed the worst of it — the handles sit ON
+    /// the silhouette, so the span's END samples read the background — but the
+    /// middle half is not immune: a gap between stems, a limb, or foliage seen
+    /// through a lean puts a far cluster under the middle too. The median only
+    /// MOVES when that cluster reaches half the sample, which is why the
+    /// failure is intermittent (about one capture in ten) rather than a bias.
+    ///
+    /// THE INTERQUARTILE RANGE IS THE RIGHT STATISTIC, precisely because the
+    /// median is what has to be defended. A handful of stray far samples
+    /// cannot move a median of a dozen and does not widen the IQR either. A
+    /// sample split near evenly between two surfaces moves the median on the
+    /// next return that flips validity — and puts the two clusters on opposite
+    /// sides of the quartiles, which is what a wide IQR reports. min–max would
+    /// fire on the single stray and blank a readout that was fine.
+    ///
+    /// WHAT THIS DELIBERATELY DOES NOT DO is change which samples the
+    /// estimator admits. `constrainedEstimate` below is called by BOTH the
+    /// live readout and the capture burst, and the estimator is frozen. Nor is
+    /// it needed: the stored value is a median of five frames and the
+    /// excursions do not reach it (rho = −0.11 between burst spread and error
+    /// against tape), so the corpus is intact and the defect is entirely in
+    /// what the cruiser sees. This reports; the screen decides.
+    ///
+    /// Mirrors iOS `DBHEstimator.bracketCoreDepthSpreadM`, and walks the same
+    /// interpolated samples `constrainedEstimate` medians so the two can never
+    /// describe different pixels.
+    fun bracketCoreDepthSpreadM(
+        frame: ArDepthFrame,
+        leftViewX: Float,
+        rightViewX: Float,
+        guideViewY: Float,
+    ): Double? {
+        val pL = frame.viewToDepth(min(leftViewX, rightViewX), guideViewY) ?: return null
+        val pR = frame.viewToDepth(max(leftViewX, rightViewX), guideViewY) ?: return null
+        val w = max(abs(pR.first - pL.first), abs(pR.second - pL.second))
+        if (w < 2.0) return null
+        val steps = Math.round(w).toInt().coerceAtLeast(2)
+        val depths = ArrayList<Float>(steps + 1)
+        val core = bracketCoreRange(0, steps)
+        for (i in core.first..core.second) {
+            val t = i.toDouble() / steps
+            val x = Math.round(pL.first + (pR.first - pL.first) * t).toInt()
+            val y = Math.round(pL.second + (pR.second - pL.second) * t).toInt()
+            if (x < 0 || x >= frame.width || y < 0 || y >= frame.height) continue
+            if (frame.confidenceAt(x, y) < 1) continue
+            val d = frame.depthAt(x, y)
+            if (d > 0f) depths.add(d)
+        }
+        // Same floor the fit uses: below it there is no median worth
+        // describing, and the fit has already refused.
+        if (depths.size < 3) return null
+        depths.sort()
+        return (depths[(depths.size * 3) / 4] - depths[depths.size / 4]).toDouble()
+    }
+
     /// Constrained estimate for the manual edge-bracket (ADJUST) mode: the
     /// user places the trunk's two silhouette edges as VIEW-space x
     /// positions on the horizontal guide line, so the handle span IS the
@@ -910,7 +1022,7 @@ object DBHEstimator {
             diameters.add(fit.diameterCm)
             spanPxSum += fit.spanPx
         }
-        if (diameters.size < 3) {
+        if (diameters.size < TierThresholds.MIN_USABLE_FRAMES) {
             return DBHResult(
                 diameterCm = 0f, centerX = 0f, centerZ = 0f,
                 arcCoverageDeg = 0f, rmseMm = 0f, sigmaRmm = 0f,
@@ -928,7 +1040,7 @@ object DBHEstimator {
             diameterCm = diaCm.toFloat(), centerX = 0f, centerZ = 0f,
             arcCoverageDeg = 0f, rmseMm = 0f, sigmaRmm = 0f,
             nInliers = spanPxSum,
-            confidence = if (cov <= 0.15) ConfidenceTier.GREEN else ConfidenceTier.YELLOW,
+            confidence = if (cov <= TierThresholds.FRAME_SPREAD_GREEN) ConfidenceTier.GREEN else ConfidenceTier.YELLOW,
             method = DBHMethod.LIDAR_CHORD_SILHOUETTE, rejectionReason = null,
         )
     }
@@ -959,7 +1071,7 @@ object DBHEstimator {
             if (c != null) diameters.add(c.diameterM)
             else if (scan.borderClippedRows >= EDGE_CLIP_ROWS_MIN) clippedFrames++
         }
-        if (diameters.size < 3) {
+        if (diameters.size < TierThresholds.MIN_USABLE_FRAMES) {
             // Distinguish the FRAMING failure (silhouette ran off the image
             // border — trunk edges not visible) from a plain surface miss.
             return if (clippedFrames > frames.size / 2)
@@ -976,6 +1088,12 @@ object DBHEstimator {
 
         val checks = listOf(
             check(medianM in 0.025..2.0, Severity.REJECT, "Diameter outside 2.5–200 cm"),
+            // NOT the same rule as the bracket path above, and NOT the
+            // same rule as iOS `chordEstimate`, which grades this method
+            // green/yellow at FRAME_SPREAD_GREEN and never reds it. Left
+            // exactly as shipped (the estimator is frozen) and deliberately
+            // NOT given a shared constant, because sharing a name with the
+            // bracket rule would hide that they disagree.
             check(cov <= 0.15, Severity.REJECT,
                 "The trunk width kept changing between shots — hold the phone steadier and capture again."),
             check(cov <= 0.08, Severity.WARN, "Per-frame spread 8–15%"),

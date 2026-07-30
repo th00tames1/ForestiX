@@ -84,6 +84,26 @@ public enum FieldLogWords {
 
     /// How a cruise plot is named everywhere in this feature.
     public static func plotName(number: Int) -> String { "Plot \(number)" }
+
+    /// Where a recorded coordinate came from, in words. The raws are
+    /// `PositionSource` values, shared with the cruise `Plot` record.
+    ///
+    /// A coordinate the cruiser typed MUST read differently from one the
+    /// satellites produced — otherwise a corrected position is
+    /// indistinguishable from a measured one on screen and in the export,
+    /// which is the same class of error as a typed diameter carrying a
+    /// sensor σ. Unknown raws print themselves rather than being folded
+    /// into "Device GPS": a wrong provenance is worse than an opaque one.
+    public static func positionSourceText(_ raw: String) -> String {
+        switch raw {
+        case "manual":      return "Typed by hand"
+        case "gpsSingle":   return "Device GPS"
+        case "gpsAveraged": return "Device GPS, averaged"
+        case "externalRTK": return "External RTK receiver"
+        case "vioOffset", "vioChain": return "Walked from a known point"
+        default:            return raw
+        }
+    }
 }
 
 // MARK: - Cruise-side rows

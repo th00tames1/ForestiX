@@ -41,6 +41,7 @@ data class EntryRow(
     val photoPath: String?,
     val captureMode: String?,
     val truth: Double?,
+    val positionSource: String?,
 ) {
     fun toDomain() = QuickMeasureEntry(
         id = UUID.fromString(id),
@@ -63,6 +64,7 @@ data class EntryRow(
         photoPath = photoPath,
         captureMode = captureMode,
         truth = truth,
+        positionSource = positionSource,
     )
 
     companion object {
@@ -87,6 +89,7 @@ data class EntryRow(
             photoPath = e.photoPath,
             captureMode = e.captureMode,
             truth = e.truth,
+            positionSource = e.positionSource,
         )
     }
 }
@@ -210,7 +213,18 @@ val QUICK_MEASURE_MIGRATION_4_5 = object : androidx.room.migration.Migration(4, 
     }
 }
 
-@Database(entities = [EntryRow::class, PlotRow::class], version = 5, exportSchema = false)
+/// v6: where the reading's coordinate came from — additive and nullable.
+/// Null on every existing row, which is not an unknown: until the field log
+/// let a coordinate be typed, the Accept-time GPS snapshot was the only
+/// writer of latitude/longitude, so an unlabelled located row IS a device
+/// fix. `QuickMeasureEntry.positionRecordedSource` holds that rule.
+val QUICK_MEASURE_MIGRATION_5_6 = object : androidx.room.migration.Migration(5, 6) {
+    override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE entries ADD COLUMN positionSource TEXT")
+    }
+}
+
+@Database(entities = [EntryRow::class, PlotRow::class], version = 6, exportSchema = false)
 @TypeConverters(Converters::class)
 abstract class ForestixDatabase : RoomDatabase() {
     abstract fun dao(): QuickMeasureDao

@@ -28,7 +28,7 @@
 
 package com.hcjeong.forestix.ui.screens.cruise
 
-import android.app.Activity
+import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -183,8 +183,7 @@ fun ProjectBrowserScreen(nav: NavController) {
                     deleteCandidate = null
                     scope.launch {
                         val failure = runCatching {
-                            deleteProjectCascade(
-                                env, context as? Activity, candidate.project.id)
+                            deleteProjectCascade(env, context, candidate.project.id)
                         }.exceptionOrNull()
                         if (failure != null) {
                             deleteFailure = deleteFailureMessage(
@@ -354,16 +353,17 @@ private fun activeProjectId(rows: List<ProjectBrowserRow>, picked: String?): UUI
 /// of it. See the file header for why nothing cascades on its own.
 private suspend fun deleteProjectCascade(
     env: AppEnvironment,
-    activity: Activity?,
+    context: Context,
     projectId: UUID,
 ) {
     for (plot in env.plotRepository.listByProject(projectId)) {
         // includeDeleted: the soft-deleted rows are about to lose the plot
         // that gives them meaning, exactly as "Delete plot" does.
         for (tree in env.treeRepository.listByPlot(plot.id, includeDeleted = true)) {
-            tree.photoPath?.let { name ->
-                activity?.let { MeasurePhotoStore.delete(it, name) }
-            }
+            // Plain Context, not `as? Activity`: the cast is null wherever
+            // the caller sits inside a dialog window, and a null there would
+            // drop the photo deletion without a word.
+            tree.photoPath?.let { name -> MeasurePhotoStore.delete(context, name) }
             env.treeRepository.hardDelete(tree.id)
         }
         env.plotRepository.delete(plot.id)

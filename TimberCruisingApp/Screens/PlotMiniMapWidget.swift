@@ -84,9 +84,13 @@ public struct PlotMiniMapInfo: Equatable {
     /// unplaceable) rather than being parked at the centre, which would
     /// read as a real measurement standing on the plot pin.
     public struct TreeDot: Equatable {
-        /// Tree number — the only label on the drawing, and the only one
-        /// the cruiser can act on.
+        /// Tree number — the identity behind the drawing's label.
         public let number: Int
+        /// The cruiser's own name for the tree, when it has one. The
+        /// drawing labels a named stem by its name (shortened by
+        /// `TreeLabel.pinTitle`), the same rule the map pins follow, so
+        /// one tree is not called two things on two maps.
+        public let name: String?
         /// GPS fix captured with the tree. nil when no fix was available
         /// at Accept.
         public let latitude: Double?
@@ -102,12 +106,14 @@ public struct PlotMiniMapInfo: Equatable {
         public let warn: Bool
 
         public init(number: Int,
+                    name: String? = nil,
                     latitude: Double?,
                     longitude: Double?,
                     bearingFromCenterDeg: Double?,
                     distanceFromCenterM: Double?,
                     warn: Bool) {
             self.number = number
+            self.name = name
             self.latitude = latitude
             self.longitude = longitude
             self.bearingFromCenterDeg = bearingFromCenterDeg
@@ -169,6 +175,10 @@ public struct PlotMiniMapInfo: Equatable {
     /// needs. Produced only for trees that HAVE a position.
     public struct PlacedTree: Equatable {
         public let number: Int
+        /// What the drawing prints under the dot — `TreeLabel.pinTitle`,
+        /// so a named stem reads by its name here exactly as it does on
+        /// the map pin.
+        public let label: String
         public let eastM: Double
         public let northM: Double
         public let warn: Bool
@@ -191,6 +201,9 @@ public struct PlotMiniMapInfo: Equatable {
         for tree in trees {
             if let offset = plotOffset(for: tree) {
                 placed.append(PlacedTree(number: tree.number,
+                                         label: TreeLabel.pinTitle(
+                                             name: tree.name,
+                                             number: tree.number),
                                          eastM: offset.east,
                                          northM: offset.north,
                                          warn: tree.warn))
@@ -779,7 +792,7 @@ struct PlotMapEnlargedView: View {
                                 : ForestixPalette.confidenceOk)
                 .frame(width: 8, height: 8)
             if showLabel {
-                Text("\(tree.number)")
+                Text(tree.label)
                     .font(.system(size: 9, weight: .semibold,
                                   design: .monospaced))
                     .foregroundStyle(ForestixPalette.textPrimary)

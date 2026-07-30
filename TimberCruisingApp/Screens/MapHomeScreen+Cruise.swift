@@ -446,7 +446,10 @@ extension MapHomeScreen {
                     id: "ctree-\(tree.id.uuidString)",
                     latitude: lat,
                     longitude: lon,
-                    title: "T\(tree.treeNumber)",
+                    // Named trees read by their name here too (shortened to
+                    // what the drop holds) — the peek prints it in full.
+                    title: TreeLabel.pinTitle(name: tree.treeName,
+                                              number: tree.treeNumber),
                     tint: ForestixPalette.primary))
             }
         }
@@ -1142,6 +1145,7 @@ extension MapHomeScreen {
             let heightWarn = tree.heightConfidence.map { $0 != .green } ?? false
             return PlotMiniMapInfo.TreeDot(
                 number: tree.treeNumber,
+                name: tree.treeName,
                 latitude: tree.latitude,
                 longitude: tree.longitude,
                 bearingFromCenterDeg: tree.bearingFromCenterDeg.map(Double.init),
@@ -1972,6 +1976,7 @@ extension MapHomeScreen {
                         value: MeasurementFormatter.diameter(cm: Double(tree.dbhCm),
                                                              in: system),
                         tier: tree.dbhConfidence.rawValue,
+                        explains: .diameter,
                         divided: tree.heightM != nil)
                     if let h = tree.heightM {
                         metricRow(
@@ -1979,6 +1984,7 @@ extension MapHomeScreen {
                             value: MeasurementFormatter.height(m: Double(h),
                                                                in: system),
                             tier: tree.heightConfidence?.rawValue ?? "green",
+                            explains: .height,
                             divided: false)
                     }
                 }
@@ -2089,7 +2095,8 @@ extension MapHomeScreen {
     // Peek display carries the value only; ±σ is deliberately NOT shown
     // here (the tree record / CSV / FieldLog keep it).
     func metricRow(label: String, value: String,
-                   tier: String, divided: Bool) -> some View {
+                   tier: String, explains: TierExplainer.Kind,
+                   divided: Bool) -> some View {
         HStack(spacing: ForestixSpace.xs) {
             Text(label)
                 .font(.system(size: 10, weight: .bold))
@@ -2102,7 +2109,15 @@ extension MapHomeScreen {
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
             Spacer(minLength: 4)
-            cruiseTierChip(tier)
+            // The grade is a criterion, not a mood: tapping it opens the
+            // same explainer the per-tree report and the quick peek open,
+            // scoped to the measurement this row is showing.
+            Button { explainingTier = explains } label: {
+                cruiseTierChip(tier)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("What this grade means")
+            .accessibilityIdentifier("cruiseMap.treePeek.tierChip.\(explains.rawValue)")
         }
         .padding(.vertical, 6)
         .overlay(alignment: .bottom) {

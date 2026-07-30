@@ -107,6 +107,79 @@ public final class ARCenterRaycaster: ObservableObject {
         return nil
     }
 
+    /// Screen-centre raycast for placing the HEIGHT TRUNK ANCHOR — the one
+    /// hit in the app that must land on the STEM and nothing else.
+    ///
+    /// FIELD ROUND 10. The cruiser re-shoots the anchor over and over on iOS
+    /// and almost never on Android. It is not an aim offset — that was
+    /// instrumented on device and closed (see the note at the top of this
+    /// file). It is the SELECTION POLICY, and `screenCenterHit()` above has
+    /// the wrong one for this job in three separate ways:
+    ///
+    ///   • GROUND FIRST. Its plane fallback tries `.horizontal` before
+    ///     `.any`. The anchor is aimed at eye level, so the ray is
+    ///     near-horizontal and its intersection with ARKit's estimated GROUND
+    ///     plane is tens of metres out. Android hit exactly this in field
+    ///     round 8 and measured it: 12.78 / 31.11 / 44.33 m as the pitch
+    ///     wobbled a few degrees at ~1.6 m eye height.
+    ///   • NO FACING TEST. An estimated plane is unbounded, so a ray that
+    ///     merely grazes it counts as a hit. A ground plane met at ~2° of
+    ///     incidence is not a surface the cruiser aimed at; a trunk face met
+    ///     near-perpendicular is.
+    ///   • THE RANGE GATE LIVES SOMEWHERE ELSE. `anchorHereNow` checks ≤ 4 m
+    ///     AFTER this returns, so a 31 m ground hit does not fall through to
+    ///     the next candidate — it consumes the tap and the "+" does nothing.
+    ///     That silent no-op IS the re-shooting.
+    ///
+    /// So this is `ArController.screenCenterAnchorHit(maxDistM)` ported: the
+    /// gate is inside the selection, candidates are tried in order rather than
+    /// the first path winning outright, a plane must be BOTH inside the gate
+    /// AND facing the ray (normal within 30° of the reverse ray, i.e.
+    /// dot ≤ −cos30°), and a miss is a miss rather than a far surface.
+    ///
+    /// `screenCenterHit()` is deliberately left alone: the aim-top / aim-base
+    /// taps and the plot-centre pin want far surfaces and the ground, which is
+    /// precisely what this refuses. Android keeps both functions for the same
+    /// split.
+    public func screenCenterAnchorHit(maxDistM: Float) -> SIMD3<Float>? {
+        guard let view = arview else { return nil }
+        let bounds = view.bounds
+        guard bounds.width > 1, bounds.height > 1 else { return nil }
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        guard let frame = view.session.currentFrame else { return nil }
+        let camT = frame.camera.transform.columns.3
+        let cam = SIMD3<Float>(camT.x, camT.y, camT.z)
+
+        // LiDAR mesh first, exactly as the general raycast does — a
+        // reconstructed stem surface is the best anchor target there is. The
+        // difference is that a mesh hit BEYOND the gate no longer ends the
+        // search: the ray may have skimmed past the trunk into distant
+        // reconstruction, and a plane candidate can still be right.
+        if preferLiDARMesh, let mesh = meshRaycastHit(at: center, in: view),
+           simd_distance(cam, mesh) <= maxDistM {
+            return mesh
+        }
+
+        // `.any` alignment, NOT horizontal-then-any: the facing test below is
+        // what decides which surface is acceptable, and asking for horizontal
+        // first is the ground-first bias this function exists to remove.
+        for hit in view.raycast(from: center,
+                                allowing: .estimatedPlane,
+                                alignment: .any) {
+            let t = hit.worldTransform
+            let p = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
+            guard simd_distance(cam, p) <= maxDistM else { continue }
+            // +Y of an ARKit raycast result is the surface normal, the same
+            // convention as ARCore's `hitPose.yAxis`.
+            let n = SIMD3<Float>(t.columns.1.x, t.columns.1.y, t.columns.1.z)
+            let ray = p - cam
+            let len = simd_length(ray)
+            guard len > 1e-4 else { continue }
+            if simd_dot(n, ray / len) <= -0.866 { return p }
+        }
+        return nil
+    }
+
     /// Projects the camera forward ray to a world point at exactly
     /// `horizontalDistanceM` metres of horizontal distance. Used as a
     /// fallback for top / base taps where no plane exists in the
@@ -603,6 +676,7 @@ public final class ARCenterRaycaster: ObservableObject {
     public var preferLiDARMesh: Bool = true
     public init() {}
     public func screenCenterHit() -> SIMD3<Float>? { nil }
+    public func screenCenterAnchorHit(maxDistM: Float) -> SIMD3<Float>? { nil }
     public func forwardPointAtHorizontalDistance(_ d: Float) -> SIMD3<Float>? { nil }
     public func hit(at screenPoint: CGPoint) -> SIMD3<Float>? { nil }
     public func rayDirection(at screenPoint: CGPoint) -> SIMD3<Float>? { nil }

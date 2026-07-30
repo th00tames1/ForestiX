@@ -18,6 +18,44 @@ object TreeLabel {
     /// and the tally both trim before storing) precisely so nothing downstream
     /// has to guess whether " Plot3-T07" and "Plot3-T07" are the same stem.
     fun title(name: String?, number: Int): String = name ?: "Tree #$number"
+
+    /// How many glyphs a map pin can actually hold.
+    ///
+    /// The pin is a 30 dp teardrop with a 10.5 sp monospaced label drawn
+    /// INSIDE it (see the PIN branch of `basemap/MapView.kt` and the iOS
+    /// `BasemapMapView.teardropHead`). Four monospaced characters is what
+    /// fits at full size; past that Android overflows the drop and iOS
+    /// shrinks the type towards illegible.
+    const val PIN_LABEL_MAX_CHARS = 4
+
+    /// What a MAP PIN calls this tree — the short form of [title].
+    ///
+    /// The map used to print "T104" even for a tree the cruiser had named,
+    /// which is the whole complaint. It cannot simply print the name: at
+    /// four glyphs "Starker32" becomes "Star", and every tree in a stand
+    /// named by one convention shares that prefix, so the pin would stop
+    /// distinguishing the very trees it exists to distinguish.
+    ///
+    /// So the rule is TRAILING-BIASED, because that is where a cruiser's
+    /// naming scheme puts the part that varies:
+    ///   • no name          -> "T<number>", exactly as before;
+    ///   • name that fits   -> the name, whole;
+    ///   • longer name with a trailing digit run -> those digits
+    ///     ("Starker32" -> "32", "Plot3-T07" -> "07");
+    ///   • otherwise        -> the last few characters ("Big Doug" -> "Doug").
+    /// Nothing is ellipsised: at four glyphs a "…" spends a quarter of the
+    /// label saying "there is more", which the peek already says by
+    /// printing the full [title] the moment the pin is tapped.
+    ///
+    /// A named pin therefore has no leading "T" and an unnamed one does,
+    /// which is itself the signal that this stem is called something.
+    fun pinTitle(name: String?, number: Int): String {
+        if (name.isNullOrEmpty()) return "T$number"
+        if (name.length <= PIN_LABEL_MAX_CHARS) return name
+        val tailDigits = name.takeLastWhile { it in '0'..'9' }
+        if (tailDigits.isNotEmpty()) return tailDigits.takeLast(PIN_LABEL_MAX_CHARS)
+        return name.takeLast(PIN_LABEL_MAX_CHARS)
+    }
 }
 
 /// What every cruise surface calls this tree — see [TreeLabel.title].

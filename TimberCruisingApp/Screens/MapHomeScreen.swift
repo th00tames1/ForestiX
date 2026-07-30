@@ -142,6 +142,20 @@ public struct MapHomeScreen: View {
     /// Quick-peek "Edit this tree" — the entry the compact edit sheet is
     /// editing (the pin's primary reading). nil = sheet closed.
     @State private var editingEntry: QuickMeasureEntry?
+    /// The tier chip a cruiser tapped on a peek, and therefore which
+    /// explainer to raise. Diameter and height are graded by different
+    /// checks, so the sheet must be told which one it is explaining.
+    ///
+    /// Deliberately not `private`: the cruise peek lives in
+    /// MapHomeScreen+Cruise.swift, Swift's `private` is file-scoped, and the
+    /// two peeks must raise ONE sheet rather than keep a state each.
+    @State var explainingTier: TierExplainer.Kind?
+    /// Quick-peek "Details" — the field log's own per-tree record sheet,
+    /// opened on the row behind the tapped pin. nil = closed.
+    @State private var inspectingRow: MapDetailTarget?
+    /// A "measure again" raised inside that sheet, held until the sheet is
+    /// actually gone. nil = none pending.
+    @State private var pendingRescanTree: Int?
     /// Chooser row picked — launched from the sheet's onDismiss so the
     /// fullScreenCover doesn't fight the sheet dismissal animation.
     @State private var pendingChoice: MeasureChoice?
@@ -344,6 +358,14 @@ public struct MapHomeScreen: View {
         case fullMeasurement, dbh, height, distance, sampling
     }
 
+    /// Which field-log row the peek's "Details" is showing. A wrapper only
+    /// because `.sheet(item:)` wants an Identifiable, and the row key IS the
+    /// identity.
+    private struct MapDetailTarget: Identifiable {
+        let rowID: String
+        var id: String { rowID }
+    }
+
     /// Payload for the far-GPS confirmation alert.
     private struct FarTreeWarning: Identifiable {
         let treeNumber: Int
@@ -469,11 +491,41 @@ public struct MapHomeScreen: View {
             .sheet(item: $editingEntry) { entry in
                 QuickEntryEditSheet(entry: entry, history: history)
             }
+            // "Good" / "Fair" / "Check" with no stated criteria is a mood,
+            // not a grade. The chip on the peek opens the same explainer the
+            // per-tree report opens — one sheet, one set of thresholds.
+            .sheet(item: $explainingTier) { kind in
+                TierExplainer(kind: kind)
+            }
+            // Quick-peek "Details" — the SAME sheet the field log opens, not
+            // a second copy of it. "Measure again" from inside it lands on
+            // the map's own route: close the sheet, then open the measure
+            // chooser scoped to that tree, which is what the peek's primary
+            // button does. Nothing else on the map can present a scan while
+            // a sheet is up, so the chooser is raised from onDismiss.
+            .sheet(item: $inspectingRow, onDismiss: {
+                if let tree = pendingRescanTree {
+                    pendingRescanTree = nil
+                    openChooser(scopedTo: tree)
+                }
+            }) { target in
+                FieldLogDetailSheet(
+                    rowID: target.rowID,
+                    unitSystem: settings.unitSystem,
+                    onRemeasure: { request in
+                        pendingRescanTree = request.treeNumber
+                        inspectingRow = nil
+                    })
+                    .environmentObject(history)
+                    .environmentObject(settings)
+            }
             // Far-GPS guard — confirm before measuring a tree whose pin
             // is > 30 m from the current fix (usually a wrong-pin tap).
             .modifier(PlotSaveRefusalAlert(message: $plotSaveRefusal))
+            // The alert names the tree the way every other surface does —
+            // the cruiser's name when it has one, else "Tree #n".
             .alert(farTreeWarning.map {
-                       "Tree \($0.treeNumber) is \($0.distanceM) m away"
+                       "\(TreeLabel.title(name: farTreeName($0.treeNumber), number: $0.treeNumber)) is \($0.distanceM) m away"
                    } ?? "",
                    isPresented: Binding(
                        get: { farTreeWarning != nil },
@@ -679,7 +731,12 @@ public struct MapHomeScreen: View {
             let all = history.entries.filter { $0.treeNumber == number }
             return MapPin(id: "tree-\(number)",
                           treeNumber: number,
-                          title: "T\(number)",
+                          // The pin says what the cruiser called this tree,
+                          // shortened to what a 30 pt drop holds — one rule,
+                          // shared with the cruise pins and both mini-maps.
+                          title: TreeLabel.pinTitle(
+                              name: all.compactMap(\.treeName).first,
+                              number: number),
                           entries: all,
                           latitude: anchor.latitude ?? 0,
                           longitude: anchor.longitude ?? 0)
@@ -1106,6 +1163,32 @@ public struct MapHomeScreen: View {
                 .frame(maxWidth: .infinity)
             }
 
+            // DETAILS — the whole record behind this pin, on the SAME
+            // surface the field log opens (`FieldLogDetailSheet`): species,
+            // stem position, damage, note, ±σ, where and when it was
+            // recorded, every photo. The word is "Details" because that is
+            // what the map's plot peek already calls its equivalent step;
+            // a second word for one idea is how a map ends up with two.
+            //
+            // Full width above the pair rather than a third button in the
+            // row: three 44 pt controls across a phone leave no label room.
+            Button {
+                inspectingRow = MapDetailTarget(rowID: detailRowID(for: pin))
+            } label: {
+                Text("Details")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(ForestixPalette.textPrimary)
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .background(
+                        RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                         style: .continuous)
+                            .stroke(ForestixPalette.divider, lineWidth: 1))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(MapPressableStyle())
+            .padding(.top, ForestixSpace.sm)
+            .accessibilityIdentifier("mapHome.peek.details")
+
             HStack(spacing: ForestixSpace.xs) {
                 Button {
                     editingEntry = primaryEntry(for: pin)
@@ -1210,6 +1293,12 @@ public struct MapHomeScreen: View {
         let label: String
         let value: String
         let confidenceRaw: String
+        /// Which explainer this row's chip opens, or nil where the grade is
+        /// not one an estimator computed. Crown, distance and plot rows
+        /// carry a tier field but no confidence framework behind it, and a
+        /// sheet describing diameter checks over a plot radius would be a
+        /// worse answer than no sheet.
+        let explainerKind: TierExplainer.Kind?
     }
 
     private func peekRows(_ pin: MapPin) -> [PeekRow] {
@@ -1235,10 +1324,17 @@ public struct MapHomeScreen: View {
                     ?? (.pi * entry.value * entry.value)
                 value = String(format: "%.1f m radius · %.0f m²", entry.value, area)
             }
+            let explainerKind: TierExplainer.Kind?
+            switch kind {
+            case .dbh:    explainerKind = .diameter
+            case .height: explainerKind = .height
+            default:      explainerKind = nil
+            }
             return PeekRow(id: kind.rawValue,
                            label: peekRowLabel(kind),
                            value: value,
-                           confidenceRaw: entry.confidenceRaw)
+                           confidenceRaw: entry.confidenceRaw,
+                           explainerKind: explainerKind)
         }
     }
 
@@ -1265,7 +1361,16 @@ public struct MapHomeScreen: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
             Spacer(minLength: 4)
-            tierChip(row.confidenceRaw)
+            if let explainerKind = row.explainerKind {
+                Button { explainingTier = explainerKind } label: {
+                    tierChip(row.confidenceRaw)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("What this grade means")
+                .accessibilityIdentifier("mapPeek.tierChip.\(row.id)")
+            } else {
+                tierChip(row.confidenceRaw)
+            }
         }
         .padding(.vertical, 6)
     }
@@ -1329,6 +1434,23 @@ public struct MapHomeScreen: View {
         photoViewer = PhotoViewerContext(pages: pages)
     }
 
+    /// Which field-log row the peek's "Details" opens.
+    ///
+    /// The log groups by (plot, tree number) because tree numbering restarts
+    /// on each plot; the map groups by tree number ALONE, so one pin can in
+    /// principle span two plots' trees. The row picked is the one the pin's
+    /// REPRESENTATIVE reading belongs to — the same reading "Edit this tree"
+    /// edits — so the two peek buttons can never be about different trees.
+    /// The key is built by `FieldLogRowModel.rows`, and this must stay in
+    /// step with it.
+    private func detailRowID(for pin: MapPin) -> String {
+        let entry = primaryEntry(for: pin)
+        guard let number = entry.treeNumber else {
+            return "e|\(entry.id.uuidString)"
+        }
+        return "t|\(entry.plotID?.uuidString ?? "-")|\(number)"
+    }
+
     /// The pin's representative reading for "Edit this tree" — DBH first,
     /// then height / crown / distance / plot, matching the peek row
     /// order. Single-entry pins just return their one reading.
@@ -1368,6 +1490,14 @@ public struct MapHomeScreen: View {
             }
         }
         openChooser(scopedTo: tree)
+    }
+
+    /// The cruiser's name for a tree number, from any reading that carries
+    /// one. Used only to NAME the tree in the far-GPS alert; nil falls the
+    /// title back to "Tree #n".
+    private func farTreeName(_ number: Int) -> String? {
+        history.entries.first { $0.treeNumber == number && $0.treeName != nil }?
+            .treeName
     }
 
     /// Present the measure chooser locked to `tree` — the Full / DBH /
@@ -1973,6 +2103,11 @@ private struct QuickEntryEditSheet: View {
     }
 
     private var headerText: String {
+        // A named stem is headed by its name, not by the number the cruiser
+        // stopped using the moment they named it. The name is NOT uppercased
+        // — it is the cruiser's own word, and "STARKER32" is not what they
+        // typed. Unnamed rows keep the header they have always had.
+        if let name = entry.treeName, !name.isEmpty { return "EDIT · \(name)" }
         if let n = entry.treeNumber { return "EDIT · TREE \(n)" }
         return "EDIT · \(kindTitle.uppercased())"
     }

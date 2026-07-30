@@ -108,6 +108,7 @@ import com.hcjeong.forestix.ar.ArSessionHub
 import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.common.Units
 import com.hcjeong.forestix.data.cruise.Tree
+import com.hcjeong.forestix.data.cruise.TreeLabel
 import com.hcjeong.forestix.positioning.GeoMath
 import com.hcjeong.forestix.positioning.LocationService
 import com.hcjeong.forestix.sensors.ConfidenceTier
@@ -242,13 +243,15 @@ fun BoxScope.SamplingPlotMiniMap(plotNumber: Int? = null) {
 private data class MiniYou(val eastM: Float, val northM: Float, val facingDeg: Float?)
 
 /// One measured tree, placed in the plot's own north-up local frame.
-/// `number` is the cruiser-facing tree number — the only label the
-/// enlarged view draws (no coordinates, no row ids).
+/// `label` is what the enlarged view draws under the dot — the tree's name
+/// when it has one, else its number, through the same `TreeLabel.pinTitle`
+/// rule the map pins use, so one stem is not called two things on two maps.
+/// No coordinates, no row ids.
 private data class MiniTreeDot(
     val eastM: Float,
     val northM: Float,
     val warn: Boolean,
-    val number: Int,
+    val label: String,
 )
 
 /// Placed trees plus the count that could NOT be placed, so the enlarged
@@ -288,7 +291,7 @@ private fun miniTreeDots(
                 northM = local.second,
                 warn = t.dbhConfidence != ConfidenceTier.GREEN ||
                     (t.heightConfidence != null && t.heightConfidence != ConfidenceTier.GREEN),
-                number = t.treeNumber,
+                label = TreeLabel.pinTitle(t.treeName, t.treeNumber),
             )
         }
     }
@@ -785,7 +788,7 @@ private fun PlotPreviewDiagram(
                 drawCircle(casing, radius = dotR + 1.5.dp.toPx(), center = p.at)
                 drawCircle(tint, radius = dotR, center = p.at)
                 if (showLabels) {
-                    val layout = measurer.measure(AnnotatedString(t.number.toString()), labelStyle)
+                    val layout = measurer.measure(AnnotatedString(t.label), labelStyle)
                     drawText(
                         layout,
                         topLeft = Offset(

@@ -106,6 +106,7 @@ import com.hcjeong.forestix.ui.screens.MeasureStatusPanel
 import com.hcjeong.forestix.ui.screens.MeasureTopChrome
 import com.hcjeong.forestix.ui.screens.MeasureTopStrip
 import com.hcjeong.forestix.ui.screens.MeasureMiniMapSlot
+import com.hcjeong.forestix.ui.screens.MeasurePillSize
 import com.hcjeong.forestix.ui.screens.MeasureValuePill
 import com.hcjeong.forestix.ui.screens.PlotPinCentreCard
 import com.hcjeong.forestix.ui.screens.rememberPlotPinCentreOffer
@@ -204,6 +205,22 @@ private const val EDGES_CLIPPED_TEXT =
 /// keep the stall clock from ever running. Three missed 150 ms ticks, so one
 /// dropped frame is not an outage; matches the iOS `depthSilentSec`.
 private const val DEPTH_SILENT_MS = 500L
+
+/// How long the ADJUST bracket may keep reading two surfaces before the held
+/// diameter stops being current enough to show. Long enough that the
+/// intermittent excursion never reaches it (it is one or two ticks), short
+/// enough that a cruiser who has walked the bracket off the stem is told so
+/// while they are still holding it there. iOS holds the identical value in
+/// `DBHScanViewModel.bracketUnsettledGraceSec`.
+private const val BRACKET_UNSETTLED_GRACE_MS = 1_000L
+
+/// Advice for a bracket spanning the stem AND what is behind it. Byte
+/// identical to the iOS `DBHScanViewModel.bracketTwoSurfacesText`.
+///
+/// NOT "widen it": a wider bracket takes in more background and more diameter
+/// at once, which is the same trap the sibling depth-advice line documents.
+private const val BRACKET_TWO_SURFACES =
+    "The bracket is reading past the trunk — narrow it onto the bark, or step closer."
 
 /// Fresh-vs-held tap-depth divergence treated as a possible re-aim: one
 /// such tick is bridged with the EMA seed (could be an ML-depth hole /
@@ -384,6 +401,36 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         mutableStateOf(0.5f + clampBracketHalfWidth(settings.dbhBracketHalfWidth))
     }
     var adjustPreview by remember { mutableStateOf<DBHEstimator.DbhPreview?>(null) }
+
+    // ADJUST live-readout settling (field round 10 — the diameter that jumps
+    // by inches). `adjustPreview` above stays THE FIT, always: the capture
+    // gate, the ring and the refusals all read it, and gating a burst on a
+    // live display tick would refuse a capture whose stored median is
+    // demonstrably unaffected (rho = -0.11). What is decided below is only
+    // which NUMBER reaches the badge.
+    //
+    // See DBHEstimator.bracketCoreDepthSpreadM for the measurement and the
+    // cause: the bracket's middle half intermittently straddles the stem AND
+    // what is behind it, and the median hops between the two clusters. WHY
+    // HOLD RATHER THAN BLANK — a bad tick lands roughly one time in ten at the
+    // preview cadence, so blanking each one would strobe the number in and out,
+    // harder to read than the jump it replaces. The held value is the most
+    // recent diameter actually measured across bark, not an invented one, and a
+    // settled tick publishes immediately so a handle drag still tracks exactly.
+    /// What the badge shows — the fit on a settled tick, the last settled fit
+    /// while a short excursion passes, nothing once the excursion outlasts the
+    /// grace.
+    var adjustShown by remember { mutableStateOf<DBHEstimator.DbhPreview?>(null) }
+    /// The last fit measured across a single surface, and when.
+    ///
+    /// THE CLOCK IS WHAT MAKES THIS SAFE ACROSS TREES, not the reset sites: a
+    /// capture burst takes seconds, so a value held from the previous tree is
+    /// already older than `BRACKET_UNSETTLED_GRACE_MS` by the time the aiming
+    /// loop resumes, and the first unsettled tick on the new tree discards it.
+    var adjustHeld by remember { mutableStateOf<DBHEstimator.DbhPreview?>(null) }
+    var adjustHeldAt by remember { mutableStateOf(0L) }
+    /// True while the bracket is spanning more than one surface.
+    var bracketTwoSurfaces by remember { mutableStateOf(false) }
     // Whether the on-screen result came from the ADJUST bracket — recorded
     // as captureMode "manual" vs "auto" on Accept.
     var resultFromAdjust by remember { mutableStateOf(false) }
@@ -942,6 +989,44 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         f, adjustLeftFrac * w, adjustRightFrac * w, cy, calibration,
                     )
                 } else null
+                // The settling decision for THIS tick — see `adjustShown`.
+                // The probe is read-only and the fit above is untouched on
+                // every branch.
+                val tick = SystemClock.elapsedRealtime()
+                val fitNow = adjustPreview
+                if (fitNow == null) {
+                    // No fit is already a fully-explained state on this path,
+                    // and it is not evidence about the bark either way — leave
+                    // the held value and its clock alone so a one-frame depth
+                    // outage mid-drag does not restart the grace.
+                    bracketTwoSurfaces = false
+                    adjustShown = null
+                } else {
+                    val spread = if (w > 1f) {
+                        DBHEstimator.bracketCoreDepthSpreadM(
+                            f, adjustLeftFrac * w, adjustRightFrac * w, cy,
+                        )
+                    } else null
+                    // A fit exists but the probe declined to describe it
+                    // (fewer than three valid depths cannot happen here — the
+                    // fit needs them too — so this is the bounds refusal).
+                    // Treat an unmeasurable spread as settled rather than
+                    // inventing a verdict about it.
+                    val settled = spread == null ||
+                        spread <= DBHEstimator.BRACKET_CORE_DEPTH_SPREAD_LIMIT_M
+                    if (settled) {
+                        adjustHeld = fitNow
+                        adjustHeldAt = tick
+                        bracketTwoSurfaces = false
+                        adjustShown = fitNow
+                    } else {
+                        bracketTwoSurfaces = true
+                        val held = adjustHeld
+                        adjustShown = if (held != null && adjustHeldAt != 0L &&
+                            tick - adjustHeldAt <= BRACKET_UNSETTLED_GRACE_MS
+                        ) held else null
+                    }
+                }
             }
             // Same gate as the auto loop: `adjustPreview` survives a frame
             // outage untouched, so a held lock would refresh the clock for
@@ -1180,7 +1265,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     diameters.add(est.diameterCm.toDouble())
                     spanPxSum += est.nPoints
                 }
-                if (diameters.size < 3) {
+                if (diameters.size < DBHEstimator.TierThresholds.MIN_USABLE_FRAMES) {
                     if (firstRed == null) {
                         firstRed = DBHResult(
                             diameterCm = 0f, centerX = 0f, centerZ = 0f,
@@ -1194,8 +1279,9 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 }
                 diameters.sort()
                 val medianCm = diameters[diameters.size / 2]
-                // Frame-to-frame agreement grades the sub-sample (iOS
-                // bracketChordEstimate: range/mean ≤ 15% ⇒ green).
+                // Frame-to-frame agreement grades the sub-sample — the same
+                // rule bracketChordEstimate applies, read from the same
+                // constant so this inline copy cannot drift away from it.
                 val mean = diameters.average()
                 val cov = if (mean > 0) (diameters.last() - diameters.first()) / mean else 1.0
                 subs.add(
@@ -1203,7 +1289,8 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         diameterCm = medianCm.toFloat(), centerX = 0f, centerZ = 0f,
                         arcCoverageDeg = 0f, rmseMm = 0f, sigmaRmm = 0f,
                         nInliers = spanPxSum,
-                        confidence = if (cov <= 0.15) ConfidenceTier.GREEN else ConfidenceTier.YELLOW,
+                        confidence = if (cov <= DBHEstimator.TierThresholds.FRAME_SPREAD_GREEN)
+                            ConfidenceTier.GREEN else ConfidenceTier.YELLOW,
                         method = DBHMethod.LIDAR_CHORD_SILHOUETTE, rejectionReason = null,
                     ),
                 )
@@ -1967,6 +2054,11 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                             AutoModePill {
                                 adjustMode = false
                                 adjustPreview = null
+                                // A held ADJUST value belongs to the bracket
+                                // that produced it, and there is no bracket
+                                // outside this mode.
+                                adjustShown = null; adjustHeld = null
+                                adjustHeldAt = 0L; bracketTwoSurfaces = false
                                 // The refusal was about the OTHER path's gate.
                                 captureRefusal = null
                                 // Remembered, so a cruiser who prefers the
@@ -2027,6 +2119,11 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                             adjustRightFrac = 0.5f + half
                             env.settings.setDbhEdgeAdjustDefault(true)
                             adjustPreview = null
+                            // Entering ADJUST starts a fresh bracket — nothing
+                            // held from a previous session of it may show
+                            // under the new handles.
+                            adjustShown = null; adjustHeld = null
+                            adjustHeldAt = 0L; bracketTwoSurfaces = false
                             // Park the auto preview so its chrome (chord,
                             // badge, cylinder) can't linger under the
                             // bracket.
@@ -2047,8 +2144,13 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 },
                 valueStrip = {
                     if (adjustMode) {
+                        // `adjustShown`, not `adjustPreview`: the badge is the
+                        // one surface the settling decision applies to. The
+                        // LOCK still comes from the fit, so a tick whose number
+                        // is being held does not also take the capture
+                        // affordance away. See `adjustShown`.
                         LivePreviewBadge(
-                            adjustPreview, adjustPreview?.locked == true, settings.unitSystem)
+                            adjustShown, adjustPreview?.locked == true, settings.unitSystem)
                     } else {
                         LivePreviewBadge(preview, locked, settings.unitSystem)
                     }
@@ -2078,7 +2180,17 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     // (iOS statusText parity): armed as soon as a
                     // bracket fit exists.
                     adjustMode ->
-                        if (adjustPreview?.locked == true) "Hold steady, then tap + to capture."
+                        // The bracket measured, but not across bark, and it
+                        // has been that way for longer than the grace — so the
+                        // number has been withheld and the strip has to say
+                        // what happened. Ahead of "hold steady", which is the
+                        // one remedy that cannot clear it. While the run is
+                        // shorter than the grace the held value is on screen
+                        // and this stays quiet: a sentence for every one-tick
+                        // excursion would flicker exactly as badly as the
+                        // number used to.
+                        if (bracketTwoSurfaces && adjustShown == null) BRACKET_TWO_SURFACES
+                        else if (adjustPreview?.locked == true) "Hold steady, then tap + to capture."
                         // Field report 15 — the bracket has been up for
                         // seconds with no depth behind it. Say what clears
                         // it instead of repeating "hold steady", which is
@@ -2496,7 +2608,7 @@ private fun LivePreviewBadge(
             // U2 value strip (iOS liveValueStrip parity).
             MeasureValuePill(
                 "DBH: " + MeasurementFormatter.diameter(p.diameterCm.toDouble(), unitSystem),
-                large = true,
+                size = MeasurePillSize.LARGE,
             )
         }
         if (p.distanceM > 0f) {

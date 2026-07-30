@@ -325,7 +325,7 @@ fun DistanceMeasureScreen(nav: NavController) {
                             dimmed = true,
                         )
                         val value = if (mode == DistMode.LIVE) liveDistance else twoPointDistance
-                        MeasureValuePill(value?.let { formatDistance(it) } ?: "—", large = true)
+                        MeasureValuePill(value?.let { formatDistance(it) } ?: "—", size = MeasurePillSize.LARGE)
                     }
                 },
             )

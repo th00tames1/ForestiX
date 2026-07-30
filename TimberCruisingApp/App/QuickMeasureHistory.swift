@@ -203,6 +203,20 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
     /// zero, which would read as a measured 0 cm.
     public let truth: Double?
 
+    /// Where this reading's coordinate came from — a `PositionSource` raw
+    /// string, the SAME vocabulary the cruise `Plot` records ("gpsSingle",
+    /// "manual", …), so one word means one thing in both worlds.
+    ///
+    /// nil on every row written before this column existed. That is not an
+    /// unknown: until the field log let a coordinate be typed, the
+    /// Accept-time GPS snapshot was the ONLY thing that ever wrote
+    /// latitude/longitude, so an unlabelled located row is a device fix.
+    /// `positionRecordedSource` states that rule once and everything that
+    /// displays or exports the source reads it through there — a typed
+    /// coordinate that exported as if the GPS produced it would be the same
+    /// class of error as a typed diameter carrying a sensor σ.
+    public let positionSource: String?
+
     public init(
         id: UUID = UUID(),
         kind: Kind,
@@ -223,7 +237,8 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         longitude: Double? = nil,
         photoPath: String? = nil,
         captureMode: String? = nil,
-        truth: Double? = nil
+        truth: Double? = nil,
+        positionSource: String? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -245,6 +260,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         self.photoPath = photoPath
         self.captureMode = captureMode
         self.truth = truth
+        self.positionSource = positionSource
     }
 
     // Custom decoding so entries written before any new field existed
@@ -272,6 +288,41 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         self.photoPath     = try c.decodeIfPresent(String.self, forKey: .photoPath)
         self.captureMode   = try c.decodeIfPresent(String.self, forKey: .captureMode)
         self.truth         = try c.decodeIfPresent(Double.self, forKey: .truth)
+        self.positionSource = try c.decodeIfPresent(String.self,
+                                                    forKey: .positionSource)
+    }
+
+    /// The source to SHOW and to EXPORT for this reading's coordinate: the
+    /// stored one, or `gpsSingle` for a located row that predates the
+    /// column (see `positionSource`). nil only when there is no coordinate.
+    public var positionRecordedSource: String? {
+        guard latitude != nil, longitude != nil else { return nil }
+        return positionSource ?? PositionSource.gpsSingle.rawValue
+    }
+
+    /// This reading with its coordinate replaced by one the cruiser TYPED,
+    /// or cleared back to no position at all (`nil, nil`).
+    ///
+    /// Nothing else moves — where a reading was taken is an observation
+    /// ABOUT it, not a change to the measurement — but the source is
+    /// restamped `manual` so no later reader can mistake a hand-entered
+    /// coordinate for a device fix. Clearing drops the source too: an
+    /// absent position has no provenance to record.
+    public func settingPosition(latitude newLat: Double?,
+                                longitude newLon: Double?) -> QuickMeasureEntry {
+        let hasFix = newLat != nil && newLon != nil
+        return QuickMeasureEntry(
+            id: id, kind: kind, value: value,
+            secondaryValue: secondaryValue, sigma: sigma,
+            confidenceRaw: confidenceRaw, method: method,
+            createdAt: createdAt, treeNumber: treeNumber, treeName: treeName,
+            plotID: plotID,
+            speciesCode: speciesCode, position: position,
+            damageCodes: damageCodes, note: note,
+            latitude: hasFix ? newLat : nil,
+            longitude: hasFix ? newLon : nil,
+            photoPath: photoPath, captureMode: captureMode, truth: truth,
+            positionSource: hasFix ? PositionSource.manual.rawValue : nil)
     }
 
     /// How this reading's tree is labelled anywhere a tree is named — the
@@ -350,7 +401,8 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             speciesCode: speciesCode, position: position,
             damageCodes: damageCodes, note: note,
             latitude: latitude, longitude: longitude,
-            photoPath: photoPath, captureMode: "typed", truth: truth)
+            photoPath: photoPath, captureMode: "typed", truth: truth,
+            positionSource: positionSource)
     }
 
     /// This reading re-homed into another plot. Every other field is
@@ -368,7 +420,8 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             speciesCode: speciesCode, position: position,
             damageCodes: damageCodes, note: note,
             latitude: latitude, longitude: longitude,
-            photoPath: photoPath, captureMode: captureMode, truth: truth)
+            photoPath: photoPath, captureMode: captureMode, truth: truth,
+            positionSource: positionSource)
     }
 
     /// This reading with its ground truth set (or cleared with nil).
@@ -384,7 +437,8 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             speciesCode: speciesCode, position: position,
             damageCodes: damageCodes, note: note,
             latitude: latitude, longitude: longitude,
-            photoPath: photoPath, captureMode: captureMode, truth: newTruth)
+            photoPath: photoPath, captureMode: captureMode, truth: newTruth,
+            positionSource: positionSource)
     }
 
     /// A brand-new reading the cruiser typed for a tree the sensors never
@@ -433,8 +487,11 @@ public final class QuickMeasureHistory: ObservableObject {
     /// position / damageCodes / note fields; a `QuickMeasurePlot` set
     /// is also persisted alongside. 3 adds the ground-truth field; it
     /// needs no migrator (absent decodes as nil), so a v2 sidecar still
-    /// replays without one.
-    public static let schemaVersion: Int = 3
+    /// replays without one. 4 adds `positionSource` — where a reading's
+    /// coordinate came from — on the same terms: absent decodes as nil,
+    /// which `positionRecordedSource` reads as the device fix it can only
+    /// have been.
+    public static let schemaVersion: Int = 4
 
     @Published public private(set) var entries: [QuickMeasureEntry] = []
     /// All Quick Measure plots known to the app, newest first. Always
@@ -802,17 +859,23 @@ public final class QuickMeasureHistory: ObservableObject {
             .replacingOccurrences(of: ":", with: "-")
         let url = dir.appendingPathComponent("quick-measure-\(stamp).csv")
 
-        // "capture_mode" is deliberately the LAST column — same order
+        // "position_source" is deliberately the LAST column — same order
         // as the Android exporter so the two platforms' CSVs diff clean.
         // "truth" sits beside the value it is the truth OF, in the same
         // unit (`value_unit`); blank means none was ever entered.
+        //
+        // position_source says where latitude/longitude came from
+        // ("gpsSingle" for a device fix, "manual" for one the cruiser
+        // typed). Without it a hand-entered coordinate exported exactly
+        // like a satellite one.
         let headers = ["id", "timestamp", "plot", "tree", "tree_name", "kind",
                        "value", "value_unit", "truth",
                        "secondary_value", "secondary_unit",
                        "sigma", "sigma_unit",
                        "species", "position", "damage", "note",
                        "confidence", "method",
-                       "latitude", "longitude", "photo", "capture_mode"]
+                       "latitude", "longitude", "photo", "capture_mode",
+                       "position_source"]
         var out = headers.map(Self.csvField).joined(separator: ",")
         out += "\r\n"
 
@@ -853,7 +916,8 @@ public final class QuickMeasureHistory: ObservableObject {
                 lat,
                 lon,
                 e.photoPath ?? "",
-                e.captureMode ?? ""
+                e.captureMode ?? "",
+                e.positionRecordedSource ?? ""
             ]
             let row = cols.map(Self.csvField).joined(separator: ",")
             out += row + "\r\n"

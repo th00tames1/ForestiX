@@ -141,7 +141,11 @@ extension MeasurePhotoPage {
 
     private static func treeText(_ entry: QuickMeasureEntry) -> String {
         var parts: [String] = []
-        if let n = entry.treeNumber { parts.append("T\(n)") }
+        // The caption strip has room for the whole name, so it prints the
+        // full title rather than the pin's shortened form.
+        if let n = entry.treeNumber {
+            parts.append(TreeLabel.title(name: entry.treeName, number: n))
+        }
         if let species = entry.speciesCode, !species.isEmpty {
             parts.append(RegionalSpecies.name(forCode: species))
         }

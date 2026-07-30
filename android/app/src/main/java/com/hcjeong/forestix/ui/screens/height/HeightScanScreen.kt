@@ -7,6 +7,10 @@
 
 package com.hcjeong.forestix.ui.screens.height
 
+// MONOTONIC, unlike the `System.currentTimeMillis()` the raw-capture trail
+// stamps its samples with: the pose-speed gate divides by an elapsed time, and
+// a wall clock that a network sync steps backwards would read as a jump.
+import android.os.SystemClock
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -85,6 +89,7 @@ import com.hcjeong.forestix.ui.screens.MeasureStatusPanel
 import com.hcjeong.forestix.ui.screens.MeasureTopChrome
 import com.hcjeong.forestix.ui.screens.MeasureTopStrip
 import com.hcjeong.forestix.ui.screens.MeasureMiniMapSlot
+import com.hcjeong.forestix.ui.screens.MeasurePillSize
 import com.hcjeong.forestix.ui.screens.MeasureValuePill
 import com.hcjeong.forestix.ui.screens.PlotPinCentreCard
 import com.hcjeong.forestix.ui.screens.rememberPlotPinCentreOffer
@@ -181,6 +186,41 @@ private const val TRACKING_DROPPED_DURING_WALK =
     "Tracking dropped during the walk-off, so the distance to the trunk may have shifted. Retake for a firm number."
 private const val ANCHOR_LOST =
     "The trunk anchor is gone — the camera couldn't hold it. Tap Retake and anchor the trunk again."
+
+/// Field round 10 — the runaway anchor. Byte identical to the iOS
+/// `HeightScanViewModel.poseJumpedText`.
+///
+/// THE REPORT WAS IOS-ONLY and the cause is worth recording here anyway,
+/// because the gate is not. On iOS `trackingLive` accepts
+/// `.limited(.insufficientFeatures)` and `.limited(.excessiveMotion)` as
+/// non-dropouts, so a motionless phone whose VIO has nothing to lock onto
+/// dead-reckons off the IMU and the camera position walks away on its own —
+/// "Walked back" climbing while the cruiser stands still. ARCore reports
+/// PAUSED for those same conditions and `trackingFrame()` refuses it, which is
+/// why the readouts here hold instead and Android never showed the runaway.
+///
+/// What Android IS exposed to is the other half: a relocalization re-fits the
+/// world frame, and `standingAtAnchor` is a raw Vec3 in the frame as it stood
+/// at anchoring, so the displacement across the re-fit is not a walk. A
+/// cruiser on foot cannot exceed MAX_CAMERA_SPEED_MPS, so anything that does
+/// is the world moving under the measurement, not the cruiser — and a distance
+/// the app cannot stand behind freezes and says so rather than counting on.
+private const val POSE_JUMPED =
+    "The camera's position jumped — the distance is frozen, not restarted, and can't be trusted from here. Tap Retake and anchor the trunk again."
+
+/// Ceiling on how fast the camera may move and still be a person on foot.
+/// 4.0 m/s is 14.4 km/h — about four times a cruiser's backwards walking pace,
+/// well clear of raising the phone overhead (~1.7 m/s) or a quick pivot
+/// (~1.5 m/s), and far below a world-frame re-fit, which lands metres inside
+/// one poll. iOS holds the identical value in
+/// `HeightScanViewModel.maxCameraSpeedMPS`.
+private const val MAX_CAMERA_SPEED_MPS = 4.0f
+
+/// Longest gap between two camera samples that may still be differenced into a
+/// speed. Beyond it the pair straddles a pose outage — ARCore hands back null
+/// through the whole of PAUSED — and the quotient describes nothing. That case
+/// belongs to TRACKING_DROPPED_DURING_WALK, not to this gate.
+private const val MAX_POSE_SAMPLE_GAP_MS = 500L
 /// ANDROID-ONLY, deliberately — the three constants above are byte-identical
 /// to their iOS siblings and this one has none, which is worth saying out loud
 /// rather than leaving to be discovered as drift. ARCore's
@@ -285,6 +325,13 @@ fun HeightScanScreen(
     var trackingLive by remember { mutableStateOf(true) }
     var trackingDropped by remember { mutableStateOf(false) }
     var anchorLost by remember { mutableStateOf(false) }
+    /// The camera pose moved faster than a cruiser can walk — see POSE_JUMPED.
+    /// Latched, and as fatal as `anchorLost`: d_h is frozen at a distance that
+    /// belongs to a world frame nothing is standing behind any more.
+    var poseJumped by remember { mutableStateOf(false) }
+    /// Previous camera sample for the speed test — position + the elapsed
+    /// clock it was read at.
+    var lastPoseSample by remember { mutableStateOf<Pair<Vec3, Long>?>(null) }
     var result by remember { mutableStateOf<HeightResult?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
 
@@ -554,7 +601,41 @@ fun HeightScanScreen(
             val tracking = controller.trackingOk()
             trackingLive = tracking
             if (!tracking && !trackingDropped) trackingDropped = true
-            if (stage == Stage.WALKING) {
+            // PHYSICAL PLAUSIBILITY, on top of the tracking latch — see
+            // POSE_JUMPED. A null pose drops the previous sample with it:
+            // differencing across an outage divides a world-frame re-fit by
+            // however long the cruiser stood in the dark and calls the result
+            // a walking pace.
+            val camNow = controller.currentCameraPosition()
+            if (camNow == null) {
+                lastPoseSample = null
+            } else {
+                val tNow = SystemClock.elapsedRealtime()
+                if (!poseJumped) {
+                    lastPoseSample?.let { (prev, tPrev) ->
+                        val dt = tNow - tPrev
+                        // A gap is not a speed, and two samples in the same
+                        // millisecond divide jitter by ~0 and read as a jump.
+                        if (dt in 10..MAX_POSE_SAMPLE_GAP_MS) {
+                            val dx = camNow.x - prev.x
+                            val dy = camNow.y - prev.y
+                            val dz = camNow.z - prev.z
+                            val speed =
+                                kotlin.math.sqrt(dx * dx + dy * dy + dz * dz) / (dt / 1000f)
+                            if (speed.isFinite() && speed > MAX_CAMERA_SPEED_MPS) poseJumped = true
+                        }
+                    }
+                }
+                lastPoseSample = camNow to tNow
+            }
+            // `poseJumped` freezes the readouts for the rest of the
+            // measurement, exactly as a null pose freezes them for as long as
+            // it lasts. The pose is still being published and still looks
+            // ordinary — it has simply already moved in a way the cruiser did
+            // not, so every distance derived from it is out by however far the
+            // world slid. The last figure the app can stand behind is the
+            // honest thing to leave on screen.
+            if (stage == Stage.WALKING && !poseJumped) {
                 anchorPt?.let { a -> controller.horizontalDistanceTo(a)?.let { dhLive = it } }
                 standingAtAnchor?.let { s0 -> controller.horizontalDistanceTo(s0)?.let { walkedLive = it } }
             }
@@ -843,6 +924,11 @@ fun HeightScanScreen(
                 anchorLost = false
                 trackingDropped = false
                 trackingLive = true
+                // A fresh trunk starts a fresh integrity record — the previous
+                // tree's runaway says nothing about this one, and the previous
+                // sample is in a world frame this walk does not share.
+                poseJumped = false
+                lastPoseSample = null
                 standingAtAnchor = standing
                 anchorInitialDistM = d0
                 dhLive = d0
@@ -869,6 +955,11 @@ fun HeightScanScreen(
                 val anchor = ArSessionHub.heightAnchorWorld()
                 if (anchor == null) { anchorLost = true; failure = ANCHOR_LOST; return }
                 anchorPt = anchor
+                // A pose that has already run away leaves d_h frozen at a
+                // distance from a world frame nothing stands behind. Same
+                // shape of refusal as the lost anchor, same reason: the stale
+                // number would still produce a confident-looking height.
+                if (poseJumped) { failure = POSE_JUMPED; return }
                 if (a == null || s == null) { failure = CAMERA_NOT_READY; return }
                 // Lock the standing pose on the first aim; both angles must
                 // come from the same spot (the §7.2 formula assumes it).
@@ -903,6 +994,8 @@ fun HeightScanScreen(
                 val anchor = ArSessionHub.heightAnchorWorld()
                 if (anchor == null) { anchorLost = true; failure = ANCHOR_LOST; return }
                 anchorPt = anchor
+                // Same refusal as the base aim — see it.
+                if (poseJumped) { failure = POSE_JUMPED; return }
                 val standing = standingLocked; val aBase = alphaBase
                 if (aTop == null || standing == null || aBase == null) {
                     failure = CAMERA_NOT_READY; return
@@ -998,6 +1091,7 @@ fun HeightScanScreen(
         // new measurement must pin its own trunk, never inherit the last one.
         ArSessionHub.clearHeightAnchor()
         trackingLive = true; trackingDropped = false; anchorLost = false
+        poseJumped = false; lastPoseSample = null
         result = null; failure = null; resetCrown()
         // Drop the raw-capture geometry so a fresh measurement starts clean.
         // Releasing the bundle id too: a discarded compute must not collect
@@ -1532,20 +1626,26 @@ fun HeightScanScreen(
                                 walkedLive.toDouble(), settings.unitSystem),
                             dimmed = true,
                         )
+                        // FIELD REPORT — Total distance is the MEDIUM step,
+                        // not LARGE: it carries its own label, so at 26 sp it
+                        // ran most of the width of the screen and the cruiser
+                        // read it as oversized. It is still the emphasised
+                        // line of the three. iOS matches.
                         MeasureValuePill(
                             "Total distance " + MeasurementFormatter.distance(
                                 dhLive.toDouble(), settings.unitSystem),
-                            large = true,
+                            size = MeasurePillSize.MEDIUM,
                         )
                     }
                 })
                 // Crown capture: keep the computed height on screen while
                 // the canopy taps run (iOS heightValueStrip parity).
                 crownActive && result != null -> ({
+                    // A bare number with no label — this one stays LARGE.
                     MeasureValuePill(
                         MeasurementFormatter.height(
                             result!!.heightM.toDouble(), settings.unitSystem),
-                        large = true,
+                        size = MeasurePillSize.LARGE,
                     )
                 })
                 else -> null
@@ -1562,6 +1662,14 @@ fun HeightScanScreen(
                 // useless advice while the camera has no idea where it is,
                 // and the anchor being gone ends the measurement outright.
                 anchorLost -> ANCHOR_LOST
+                // Ahead of `trackingLive`, and behind `anchorLost`, because
+                // the three are ordered by how final they are. A runaway pose
+                // is not something to hold still through — the distance is not
+                // coming back — so printing "hold still" over it would be
+                // advice that cannot work. Same precedence on iOS.
+                poseJumped && stage in listOf(
+                    Stage.WALKING, Stage.AIM_BASE, Stage.AIM_TOP,
+                ) -> POSE_JUMPED
                 !trackingLive && stage in listOf(
                     Stage.WALKING, Stage.AIM_BASE, Stage.AIM_TOP,
                 ) -> TRACKING_LOST_NOW

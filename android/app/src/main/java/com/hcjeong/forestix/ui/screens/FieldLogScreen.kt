@@ -41,7 +41,7 @@
 
 package com.hcjeong.forestix.ui.screens
 
-import android.app.Activity
+import android.graphics.Bitmap
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -110,6 +110,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
+import com.hcjeong.forestix.common.CoordinateInput
 import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.RegionalSpecies
 import com.hcjeong.forestix.common.TruthInput
@@ -118,7 +119,6 @@ import com.hcjeong.forestix.common.areaUnit
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
 import com.hcjeong.forestix.sensors.HeightEstimator
-import com.hcjeong.forestix.sensors.RawCaptureStore
 import com.hcjeong.forestix.ui.MeasurePhotoStore
 import com.hcjeong.forestix.ui.PendingTreeNumber
 import com.hcjeong.forestix.ui.Routes
@@ -323,8 +323,8 @@ fun FieldLogScreen(
                     Spacer(Modifier.size(ForestixSpace.md))
                 }
 
-                // Plot summary card — BA / TPA / QMD + stocking gauge +
-                // species mix for the active QUICK plot. It reads the
+                // Plot summary card — BA / TPA / QMD + species mix for the
+                // active QUICK plot. It reads the
                 // quick-measure store, so it is shown only while the quick
                 // world is on screen: under a cruise scope it would be a
                 // card about a different plot than every row beneath it.
@@ -915,9 +915,14 @@ private fun Cell(value: String, label: String) {
     val type = Forestix.type
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         // Both single-line and unwrappable: these cells size to their own
-        // content, and a 26 sp count split across two lines is the same
-        // defect as "PRECISI/ON" one card down (G3).
-        Text(value, style = type.dataLarge, color = colors.textPrimary,
+        // content, and a count split across two lines is the same defect as
+        // "PRECISI/ON" one card down (G3).
+        //
+        // FIELD REPORT — the values were `dataLarge` (26 sp) and read as
+        // oversized beside everything else on the screen. `data` (17 sp) is
+        // the next step of the same scale and the one the log's row values
+        // and the plot-summary card already use. iOS matches.
+        Text(value, style = type.data, color = colors.textPrimary,
             maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
         Text(label, style = type.sectionHead.copy(letterSpacing = 1.2.sp), color = colors.textTertiary,
             maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
@@ -1172,8 +1177,12 @@ private fun sigmaText(e: QuickMeasureEntry, system: UnitSystem): String? {
 /// the details sheet at capture time, the species, the ± band, where the
 /// reading was taken, and in developer mode the ground truth entered against
 /// this tree — lives one tap away instead of being squeezed into columns.
+///
+/// Internal, not private: the MAP peek opens THIS sheet for the row behind a
+/// tapped pin (map spec item 4). There is exactly one per-tree record surface
+/// in the quick-measure world and both entry points must land on it.
 @Composable
-private fun FieldLogDetailSheet(
+internal fun FieldLogDetailSheet(
     row: FieldLogRowModel,
     unitSystem: UnitSystem,
     developerMode: Boolean,
@@ -1184,12 +1193,16 @@ private fun FieldLogDetailSheet(
 ) {
     val colors = Forestix.colors
     val type = Forestix.type
-    val context = LocalContext.current
     // Every photo on this tree, in capture order — a Full measurement leaves
     // a diameter frame and a height frame, and this sheet used to show one
     // of them with no way to the other.
     val photoPages = measurePhotoPages(row.entries, unitSystem)
     var showPhotos by remember(row.id) { mutableStateOf(false) }
+    // The recorded-coordinate editor: whether it is up, what is in its
+    // field, and why the field cannot be saved (null = it can).
+    var editingPosition by remember(row.id) { mutableStateOf(false) }
+    var positionField by remember(row.id) { mutableStateOf("") }
+    var positionRefusal by remember(row.id) { mutableStateOf<String?>(null) }
 
     Column(
         Modifier
@@ -1261,12 +1274,35 @@ private fun FieldLogDetailSheet(
         SheetSection("RECORDED") {
             SheetRow("When", SimpleDateFormat("MMM d, HH:mm", Locale.US).format(Date(row.latest)))
             val fix = row.entries.firstOrNull { it.latitude != null && it.longitude != null }
+            // POSITION IS TAPPABLE. A fix that never arrived, or arrived on
+            // the wrong stem, used to be permanent — the reading carried it
+            // for the rest of the cruise and into every export. The row now
+            // opens an editor; what it shows is unchanged.
+            //
             // Said out loud rather than left blank: a reading with no fix is
             // a different thing from one whose fix was not shown.
-            SheetRow(
-                "Position",
-                fix?.let { String.format(Locale.US, "%.5f, %.5f", it.latitude, it.longitude) }
-                    ?: "not recorded")
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .clickableNoRipple(onClick = {
+                        positionField = fix?.let {
+                            CoordinateInput.text(it.latitude!!, it.longitude!!)
+                        } ?: ""
+                        positionRefusal = null
+                        editingPosition = true
+                    }),
+            ) {
+                SheetRow(
+                    "Position",
+                    fix?.let { CoordinateInput.text(it.latitude!!, it.longitude!!) }
+                        ?: "not recorded")
+            }
+            // WHERE THE COORDINATE CAME FROM. Without this a coordinate the
+            // cruiser typed reads on screen — and exports — exactly like one
+            // the satellites produced.
+            fix?.positionRecordedSource?.let {
+                SheetRow("Position source", FieldLogWords.positionSourceText(it))
+            }
             row.entries.firstNotNullOfOrNull { it.captureMode }?.let {
                 // "typed" is its own answer. Folding it into "Automatic" told
                 // the cruiser the sensors produced a number nobody ever
@@ -1288,54 +1324,113 @@ private fun FieldLogDetailSheet(
             }
         }
 
-        // Hand-measured values in this tree's RAW-CAPTURE bundles that are on
-        // no reading — typed before the truth lived on the reading, or typed
-        // for a capture whose reading has since been deleted.
-        //
-        // ORPHANS ONLY. The truth that IS on a reading is shown, and edited, in
-        // that reading's section above, and that is the one the CSV carries.
-        // Listing the manifest copy beside it gave the cruiser two ground
-        // truths for one tree that could disagree, with nothing on screen
-        // saying which one exports.
-        if (developerMode && row.treeNumber != null) {
-            val bundleTruths = remember(row.id) {
-                RawCaptureStore.list(context)
-                    .filter { it.treeNumber == row.treeNumber && it.truthValue != null }
-                    .map { it.kind to it.truthValue!! }
-            }
-            val truths = bundleTruths.filter { (kind, _) ->
-                when (kind) {
-                    // Already answered — and exported — by the reading itself.
-                    "dbh" -> row.dbh?.truth == null
-                    "height" -> row.height?.truth == null
-                    else -> true
-                }
-            }
-            if (truths.isNotEmpty()) {
-                SheetSection("GROUND TRUTH") {
-                    truths.forEach { (kind, value) ->
-                        SheetRow(
-                            if (kind == "dbh") "Tape diameter" else "Measured height",
-                            if (kind == "dbh") String.format(Locale.US, "%.1f cm", value)
-                            else String.format(Locale.US, "%.2f m", value))
-                    }
-                    // Says out loud what this section now is: a leftover, not
-                    // the number the export reads.
-                    Text(
-                        "Kept with a raw capture, not on a reading — it is not exported. Type it in above to keep it.",
-                        style = type.caption, color = colors.textTertiary)
-                }
-            }
-        }
+        // There is no second ground-truth section here any more. The truth
+        // field inside the DIAMETER and HEIGHT sections above is the only
+        // place a truth is shown and the only place it is edited — see the
+        // note at the foot of this file.
     }
 
     if (showPhotos) {
         PhotoViewerDialog(
             pages = photoPages,
-            activity = context as? Activity,
             onDismiss = { showPhotos = false },
         )
     }
+
+    if (editingPosition) {
+        // Write a typed coordinate — or a clearance — onto EVERY reading on
+        // this row. The cruiser is fixing where the TREE is, not where one
+        // of its two or three readings is; setting only the newest would
+        // leave the diameter and the height claiming different places, and
+        // clearing only the newest would make an older fix pop back into the
+        // row as if nothing had happened. `settingPosition` stamps the
+        // source "manual" so the typed coordinate can never be read back as
+        // a device fix.
+        val apply: (Double?, Double?) -> Unit = { lat, lon ->
+            row.entries.forEach { onSave(it.settingPosition(lat, lon)) }
+            editingPosition = false
+        }
+        PositionEditorDialog(
+            text = positionField,
+            refusal = positionRefusal,
+            canClear = row.entries.any { it.latitude != null && it.longitude != null },
+            onTextChange = { new ->
+                positionField = new
+                // Refuse as they type, so Save is never a surprise. A blank
+                // field is not a refusal: it means "clear", which Save then
+                // performs.
+                positionRefusal =
+                    (CoordinateInput.parse(new) as? CoordinateInput.Result.Refused)?.message
+            },
+            onSave = {
+                when (val parsed = CoordinateInput.parse(positionField)) {
+                    is CoordinateInput.Result.Coordinate ->
+                        apply(parsed.latitude, parsed.longitude)
+                    // Nothing is written. The sentence stays on screen.
+                    is CoordinateInput.Result.Refused -> positionRefusal = parsed.message
+                    CoordinateInput.Result.Cleared -> apply(null, null)
+                }
+            },
+            onClear = { apply(null, null) },
+            onDismiss = { editingPosition = false },
+        )
+    }
+}
+
+/// The recorded-coordinate editor. Save is off while the text cannot be read
+/// as a coordinate — the stored one is never replaced by a guess.
+@Composable
+private fun PositionEditorDialog(
+    text: String,
+    refusal: String?,
+    canClear: Boolean,
+    onTextChange: (String) -> Unit,
+    onSave: () -> Unit,
+    onClear: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val colors = Forestix.colors
+    val type = Forestix.type
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Position") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(ForestixSpace.xs)) {
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = onTextChange,
+                    label = { Text("Latitude, longitude") },
+                    placeholder = { Text("44.56417, -123.28556") },
+                    singleLine = true,
+                    isError = refusal != null,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                refusal?.let {
+                    Text(it, style = type.caption, color = colors.confidenceBad)
+                }
+                Text(
+                    "Decimal degrees, the way the app shows them. This is the " +
+                        "position for every reading on this tree, and it is " +
+                        "recorded as typed by hand.",
+                    style = type.caption,
+                    color = colors.textTertiary,
+                )
+                if (canClear) {
+                    TextButton(onClick = onClear) {
+                        Text("Clear position", color = colors.confidenceBad)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onSave, enabled = refusal == null) {
+                Text("Save position")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
 }
 
 // MARK: - Editing one reading ---------------------------------------------
@@ -1785,18 +1880,30 @@ private fun SheetRow(label: String, value: String) {
 private fun FieldLogPhoto(name: String, count: Int, onOpen: () -> Unit) {
     val colors = Forestix.colors
     val type = Forestix.type
+    // THIS is where every photo in the log went missing. The row is drawn
+    // inside the detail ModalBottomSheet, whose composition is hosted by a
+    // ComponentDialog built on ContextThemeWrapper(activity, …) — so
+    // LocalContext here is that wrapper and `as? Activity` was null for
+    // every row, every time. The map peek never hit it because MapHomeScreen
+    // resolved its Activity outside the dialog and passed it in.
+    //
+    // The store now resolves against a Context and loads off the main
+    // thread, so this reads the same file the map reads, by the same call.
     val context = LocalContext.current
-    val activity = context as? Activity
-    val bitmap = remember(name) {
-        activity?.let {
-            val f = MeasurePhotoStore.file(it, name)
-            if (f.exists()) android.graphics.BitmapFactory.decodeFile(f.absolutePath) else null
-        }
+    // Null while the decode is in flight AND when the file is really gone,
+    // so the two are held apart: "file missing" is only stated once the
+    // load has actually come back empty, never while it is still running.
+    var loaded by remember(name) { mutableStateOf(false) }
+    var bitmap by remember(name) { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(name, context) {
+        bitmap = MeasurePhotoStore.loadBitmap(context, name, targetPx = 1600)
+        loaded = true
     }
-    if (bitmap != null) {
+    val shot = bitmap
+    if (shot != null) {
         Box(Modifier.fillMaxWidth().clickableNoRipple(onOpen)) {
             Image(
-                bitmap.asImageBitmap(),
+                shot.asImageBitmap(),
                 contentDescription = "Capture photo",
                 contentScale = ContentScale.Fit,
                 modifier = Modifier
@@ -1822,7 +1929,7 @@ private fun FieldLogPhoto(name: String, count: Int, onOpen: () -> Unit) {
                 )
             }
         }
-    } else {
+    } else if (loaded) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text("Photo", style = type.body, color = colors.textSecondary)
             Spacer(Modifier.weight(1f))
@@ -1847,3 +1954,33 @@ private fun relativeAgo(epochMs: Long): String {
         else -> SimpleDateFormat("MMM d", Locale.US).format(Date(epochMs))
     }
 }
+
+// MARK: - One ground truth per reading
+//
+// FIELD REPORT — the detail sheet used to show a tree's ground truth TWICE:
+// the editable truth field inside the DIAMETER and HEIGHT sections, and a
+// read-only "GROUND TRUTH" section at the foot that read RawCaptureStore
+// keyed on tree number. The two could hold different numbers, and nothing on
+// screen said which one the export read.
+//
+// The second surface is gone. The truth field in each section is now the only
+// place a truth is shown and the only place it is edited, and it is the one
+// that has always been exported: `QuickMeasureEntry.truth`, the `truth`
+// column in the readings CSV and `truth_cm` / `truth_m` in the stems and
+// heights CSVs.
+//
+// What stopped being DISPLAYED: a hand value that sits in a raw-capture
+// manifest and on no reading — typed before the truth lived on the reading,
+// or typed for a capture whose reading was later deleted. Those were the only
+// rows the section could still draw.
+//
+// What stopped being EXPORTED: nothing. That manifest value was never in any
+// CSV; the section itself said so. It is still written, still in the manifest,
+// and still ships inside the raw-capture ZIP exactly as before, where it
+// belongs to the CAPTURE rather than to a reading.
+//
+// The manifest copy is deliberately NOT written back from this sheet. A truth
+// keyed on tree number alone cannot say WHICH of that tree's readings it was
+// taped for — that is the reason the truth was moved onto the reading in the
+// first place (see `QuickMeasureEntry.truth`), and guessing here would put a
+// number the cruiser never entered into the research corpus.

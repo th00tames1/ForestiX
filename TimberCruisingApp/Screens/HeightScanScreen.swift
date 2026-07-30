@@ -432,8 +432,16 @@ public struct HeightScanScreen: View {
             }
             while !Task.isCancelled {
                 raycaster.preferLiDARMesh = settings.measurementSource == .lidar
+                // THE SAME CALL THE "+" MAKES (field round 10). This used to
+                // sample the general `screenCenterHit()`, which accepts a
+                // grazed ground plane tens of metres out — so the status line
+                // read "Move closer" while the cruiser was already touching
+                // the bark, and it went on reading it however close they got.
+                // Sampling the gated hit makes the chrome and the button agree
+                // by construction: a distance here means the tap will take.
                 if let cam = raycaster.cameraWorldPosition,
-                   let hit = raycaster.screenCenterHit() {
+                   let hit = raycaster.screenCenterAnchorHit(
+                       maxDistM: HeightScanViewModel.anchorMaxRangeM) {
                     anchorAimDistanceM = simd_distance(cam, hit)
                 } else {
                     anchorAimDistanceM = nil
@@ -889,6 +897,11 @@ public struct HeightScanScreen: View {
     /// distance lines — Initial dist, Walked back (starts at 0.00), and
     /// the primary Total distance d_h — plus the computed height while
     /// the crown sub-flow is capturing so the value stays on screen.
+    ///
+    /// Total distance is the `.medium` step, not `.large`: it carries its
+    /// own label, so at 26 pt it ran most of the width of the screen and the
+    /// cruiser read it as oversized. It is still the emphasised line of the
+    /// three. The crown height below is a bare number and stays `.large`.
     @ViewBuilder
     private var heightValueStrip: some View {
         if viewModel.state == .walking {
@@ -907,7 +920,7 @@ public struct HeightScanScreen: View {
                     "Total distance " + MeasurementFormatter.distance(
                         m: Double(viewModel.dhMeters),
                         in: settings.unitSystem),
-                    large: true)
+                    size: .medium)
             }
             .accessibilityIdentifier("heightScan.walkingReadout")
         } else if crownActive, let r = viewModel.result {
@@ -916,7 +929,7 @@ public struct HeightScanScreen: View {
             MeasureValuePill(
                 MeasurementFormatter.height(m: Double(r.heightM),
                                             in: settings.unitSystem),
-                large: true)
+                size: .large)
         }
     }
 
@@ -953,6 +966,12 @@ public struct HeightScanScreen: View {
         // state that nothing on screen displayed.
         case .walking, .aimBaseArmed, .aimTopArmed, .aimTopCaptured:
             if viewModel.anchorLost { return HeightScanViewModel.anchorLostText }
+            // Ahead of `trackingLive`, and behind `anchorLost`, because the
+            // three are ordered by how final they are. A runaway pose is not
+            // something to hold still through — the distance will not come
+            // back — so printing "hold still" over it would be advice that
+            // cannot work. Same precedence on Android.
+            if viewModel.poseJumped { return HeightScanViewModel.poseJumpedText }
             if !viewModel.trackingLive { return HeightScanViewModel.trackingLostNow }
         default: break
         }
@@ -1710,8 +1729,15 @@ public struct HeightScanScreen: View {
         // from LIVE values as the measurement opens — see DBHScanScreen.
         configureRawCapture()
         let hitType = settings.measurementSource == .lidar ? "lidarMesh" : "estimatedPlane"
-        viewModel.anchorHereNow(screenCenterHit: raycaster.screenCenterHit(),
-                                hitType: hitType)
+        // The ANCHOR-specific raycast, not the general one: it applies the
+        // ≤ 4 m gate and the plane facing test inside the selection, so a
+        // grazed ground plane can no longer consume the tap and leave the "+"
+        // looking broken. See `ARCenterRaycaster.screenCenterAnchorHit`. The
+        // view model's own range gate below is unchanged and still authoritative.
+        viewModel.anchorHereNow(
+            screenCenterHit: raycaster.screenCenterAnchorHit(
+                maxDistM: HeightScanViewModel.anchorMaxRangeM),
+            hitType: hitType)
     }
 
     /// Push the raw-capture recording config onto the view model (developer

@@ -436,23 +436,45 @@ public struct MeasureShutterRow: View {
 
 /// One line of the compact live-value strip directly above the shutter
 /// row — the dark-glass capsule language of the under-crosshair pills.
-/// `large` renders `ForestixType.dataLarge` (the primary value line);
-/// default lines are `dataSmall`; `dimmed` drops to 0.85 white on a
-/// lighter 0.45 scrim. Identical to Android's MeasureValuePill.
+/// `size` picks the step of `ForestixType`'s data scale; `dimmed` drops to
+/// 0.85 white on a lighter 0.45 scrim. Identical to Android's
+/// MeasureValuePill.
 public struct MeasureValuePill: View {
+
+    /// The three steps of the data type scale, and nothing else — a pill
+    /// never invents a size of its own.
+    ///
+    /// `.medium` exists because of the field report on the height walk
+    /// strip: a line that carries a WORD as well as a number ("Total
+    /// distance 21.40 m") at the 26 pt step is far wider than the bare
+    /// numbers the step was drawn for, and read as oversized. It is still
+    /// the emphasised line of its strip, one step up from the two dimmed
+    /// lines above it.
+    public enum Size {
+        case large, medium, small
+
+        var font: Font {
+            switch self {
+            case .large:  return ForestixType.dataLarge
+            case .medium: return ForestixType.data
+            case .small:  return ForestixType.dataSmall
+            }
+        }
+    }
+
     private let text: String
-    private let large: Bool
+    private let size: Size
     private let dimmed: Bool
 
-    public init(_ text: String, large: Bool = false, dimmed: Bool = false) {
+    public init(_ text: String, size: Size = .small, dimmed: Bool = false) {
         self.text = text
-        self.large = large
+        self.size = size
         self.dimmed = dimmed
     }
 
     public var body: some View {
         Text(text)
-            .font(large ? ForestixType.dataLarge : ForestixType.dataSmall)
+            .font(size.font)
             .foregroundStyle(.white.opacity(dimmed ? 0.85 : 1))
             .padding(.horizontal, 10)
             .padding(.vertical, 4)

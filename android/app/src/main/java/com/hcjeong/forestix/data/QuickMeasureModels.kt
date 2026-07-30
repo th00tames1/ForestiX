@@ -6,6 +6,7 @@
 package com.hcjeong.forestix.data
 
 import com.hcjeong.forestix.common.Units
+import com.hcjeong.forestix.data.cruise.PositionSource
 import java.util.UUID
 
 /// What a reading measures. `value` / `secondaryValue` semantics:
@@ -91,6 +92,19 @@ data class QuickMeasureEntry(
     /// with the raw-capture bundle. Null = no truth was ever entered —
     /// never zero, which would read as a measured 0 cm.
     val truth: Double? = null,
+    /// Where this reading's coordinate came from — a [PositionSource] raw
+    /// string, the SAME vocabulary the cruise Plot records ("gpsSingle",
+    /// "manual", …), so one word means one thing in both worlds.
+    ///
+    /// Null on every row written before this column existed. That is not an
+    /// unknown: until the field log let a coordinate be typed, the
+    /// Accept-time GPS snapshot was the ONLY thing that ever wrote
+    /// latitude/longitude, so an unlabelled located row is a device fix.
+    /// [positionRecordedSource] states that rule once and everything that
+    /// displays or exports the source reads it through there — a typed
+    /// coordinate that exported as if the GPS produced it would be the same
+    /// class of error as a typed diameter carrying a sensor sigma.
+    val positionSource: String? = null,
 ) {
     /// How this reading's tree is labelled anywhere a tree is named — the
     /// cruiser's name when there is one, else the bare "#12" the log and the
@@ -138,6 +152,33 @@ data class QuickMeasureEntry(
     fun typedValue(newValue: Double): QuickMeasureEntry =
         copy(value = newValue, sigma = null,
              method = typedMethodRaw, captureMode = "typed")
+
+    /// The source to SHOW and to EXPORT for this reading's coordinate: the
+    /// stored one, or "gpsSingle" for a located row that predates the column
+    /// (see [positionSource]). Null only when there is no coordinate.
+    val positionRecordedSource: String?
+        get() = if (latitude == null || longitude == null) {
+            null
+        } else {
+            positionSource ?: PositionSource.GPS_SINGLE.raw
+        }
+
+    /// This reading with its coordinate replaced by one the cruiser TYPED,
+    /// or cleared back to no position at all (null, null).
+    ///
+    /// Nothing else moves — where a reading was taken is an observation
+    /// ABOUT it, not a change to the measurement — but the source is
+    /// restamped "manual" so no later reader can mistake a hand-entered
+    /// coordinate for a device fix. Clearing drops the source too: an absent
+    /// position has no provenance to record.
+    fun settingPosition(newLat: Double?, newLon: Double?): QuickMeasureEntry {
+        val hasFix = newLat != null && newLon != null
+        return copy(
+            latitude = if (hasFix) newLat else null,
+            longitude = if (hasFix) newLon else null,
+            positionSource = if (hasFix) PositionSource.MANUAL.raw else null,
+        )
+    }
 
     companion object {
         /// A brand-new reading the cruiser typed for a tree the sensors

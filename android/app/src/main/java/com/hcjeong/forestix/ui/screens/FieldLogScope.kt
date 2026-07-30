@@ -84,6 +84,24 @@ object FieldLogWords {
 
     /// How a cruise plot is named everywhere in this feature.
     fun plotName(number: Int) = "Plot $number"
+
+    /// Where a recorded coordinate came from, in words. The raws are
+    /// `PositionSource` values, shared with the cruise Plot record.
+    ///
+    /// A coordinate the cruiser typed MUST read differently from one the
+    /// satellites produced — otherwise a corrected position is
+    /// indistinguishable from a measured one on screen and in the export,
+    /// which is the same class of error as a typed diameter carrying a
+    /// sensor sigma. Unknown raws print themselves rather than being folded
+    /// into "Device GPS": a wrong provenance is worse than an opaque one.
+    fun positionSourceText(raw: String): String = when (raw) {
+        "manual" -> "Typed by hand"
+        "gpsSingle" -> "Device GPS"
+        "gpsAveraged" -> "Device GPS, averaged"
+        "externalRTK" -> "External RTK receiver"
+        "vioOffset", "vioChain" -> "Walked from a known point"
+        else -> raw
+    }
 }
 
 /// One cruise tree, flattened for the log's three-column table.

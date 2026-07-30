@@ -135,6 +135,38 @@ public enum DBHEstimator {
     /// still rejected. The floor stays at 2.5 cm.
     public static let plausibleDiameterCm: ClosedRange<Double> = 2.5...300.0
 
+    /// §7.9 tier thresholds, named once so the cruiser-facing confidence
+    /// explainer can QUOTE the numbers the checks apply instead of carrying a
+    /// prose copy of them that drifts the first time one of them moves. Every
+    /// value is the shipped one; this is a naming change, not a tuning one,
+    /// and no stored measurement, sigma, method or capture_mode moves with it.
+    ///
+    /// Mirrored byte-for-byte by Android `DBHEstimator.TierThresholds`.
+    public enum TierThresholds {
+        // The §7.1 partial-arc circle fit (`estimate`). NOT the default
+        // capture — see `frameSpreadGreen` for the one that is.
+        public static let minInliersReject = 10
+        public static let minInliersWarn = 20
+        public static let minArcDegReject: Double = 30
+        public static let minArcDegWarn: Double = 45
+        public static let rmseOverRadiusReject: Double = 0.07
+        public static let rmseOverRadiusWarn: Double = 0.05
+        public static let sigmaOverRadiusReject: Double = 0.05
+        public static let sigmaOverRadiusWarn: Double = 0.02
+        public static let radiusCoVReject: Double = 0.10
+        public static let radiusCoVWarn: Double = 0.05
+
+        /// THE DEFAULT CAPTURE'S ONLY TIER RULE. The edge-bracket (Adjust)
+        /// and chord/silhouette paths grade a burst on frame-to-frame
+        /// agreement alone — (max − min) / mean of the per-frame diameters.
+        /// At or below this it is green, above it yellow. None of the
+        /// circle-fit criteria above run on that path at all.
+        public static let frameSpreadGreen: Double = 0.15
+
+        /// A burst needs this many usable frames before it is graded; fewer
+        /// is the one way the default path produces a red.
+        public static let minUsableFrames = 3
+    }
 
     /// Full §7.1 pipeline. Returns nil only if the input cannot be
     /// attempted at all (e.g. burst too small). Quality failures return
@@ -299,32 +331,32 @@ public enum DBHEstimator {
             // wrong and what to change. "Fewer than 10 trunk surface points"
             // was the count the code tests, in the code's words. The COUNT
             // is unchanged.
-            check(fit.inliers.count >= 10, sev: .reject,
+            check(fit.inliers.count >= TierThresholds.minInliersReject, sev: .reject,
                   reason: "Too little of the trunk was picked up — move closer, fill the crosshair with bark, and capture again."),
-            check(fit.inliers.count >= 20, sev: .warn,
+            check(fit.inliers.count >= TierThresholds.minInliersWarn, sev: .warn,
                   reason: "Only 10–20 trunk surface points"),
             // Reject reasons are the ones a cruiser reads (the banner shows
             // `firstFailingRejectReason`), so they are written as
             // instructions. Warn reasons stay in the estimator's own
             // vocabulary — they never leave the struct. Every THRESHOLD
             // below is unchanged.
-            check(arcDeg >= 30, sev: .reject,
+            check(arcDeg >= TierThresholds.minArcDegReject, sev: .reject,
                   reason: "Not enough of the trunk in view — step back or centre the guide line."),
-            check(arcDeg >= 45, sev: .warn,
+            check(arcDeg >= TierThresholds.minArcDegWarn, sev: .warn,
                   reason: "Trunk arc coverage 30°–45°"),
             check(r >= 0.025 && r <= 1.0, sev: .reject,
                   reason: "That doesn't measure like a trunk — aim at the stem and capture again."),
-            check(rmse / r <= 0.07, sev: .reject,
+            check(rmse / r <= TierThresholds.rmseOverRadiusReject, sev: .reject,
                   reason: "The shape didn't match a trunk — hold steadier and capture again."),
-            check(rmse / r <= 0.05, sev: .warn,
+            check(rmse / r <= TierThresholds.rmseOverRadiusWarn, sev: .warn,
                   reason: "Fit error 5–7% of radius"),
-            check(sigmaR / r <= 0.05, sev: .reject,
+            check(sigmaR / r <= TierThresholds.sigmaOverRadiusReject, sev: .reject,
                   reason: "This diameter isn't settling — hold steadier and capture again."),
-            check(sigmaR / r <= 0.02, sev: .warn,
+            check(sigmaR / r <= TierThresholds.sigmaOverRadiusWarn, sev: .warn,
                   reason: "Radius precision ±2–5%"),
-            check(radiusCoV <= 0.10, sev: .reject,
+            check(radiusCoV <= TierThresholds.radiusCoVReject, sev: .reject,
                   reason: "The trunk width kept changing between shots — hold the phone steadier and capture again."),
-            check(radiusCoV <= 0.05, sev: .warn,
+            check(radiusCoV <= TierThresholds.radiusCoVWarn, sev: .warn,
                   reason: "Per-frame radius spread 5–10%"),
             // Extra warn when we had to override with the chord fallback
             // so the cruiser knows the fit didn't fully converge.
@@ -998,9 +1030,9 @@ public enum DBHEstimator {
                   reason: "Too little of the trunk was picked up — move closer, fill the crosshair with bark, and capture again."),
             check(inlierCount >= 18, sev: .warn,
                   reason: "Only 10–18 trunk surface points"),
-            check(arcDeg >= 30, sev: .reject,
+            check(arcDeg >= TierThresholds.minArcDegReject, sev: .reject,
                   reason: "Not enough of the trunk in view — step back or centre the guide line."),
-            check(arcDeg >= 45, sev: .warn,
+            check(arcDeg >= TierThresholds.minArcDegWarn, sev: .warn,
                   reason: "Trunk arc coverage 30°–45°"),
             check(radiusM_ >= 0.025 && radiusM_ <= 1.0, sev: .reject,
                   reason: "That doesn't measure like a trunk — aim at the stem and capture again."),
@@ -1337,7 +1369,7 @@ public enum DBHEstimator {
             widths.append(fit.inlierCount)
         }
 
-        guard diameters.count >= 3 else {
+        guard diameters.count >= TierThresholds.minUsableFrames else {
             return redResult(
                 reason: "Not enough usable frames; hold steadier or move closer",
                 method: .lidarChordSilhouette,
@@ -1352,7 +1384,7 @@ public enum DBHEstimator {
         let lo = sortedDia.first ?? mean
         let hi = sortedDia.last ?? mean
         let cov = mean > 0 ? (hi - lo) / mean : 1
-        let tier: ConfidenceTier = cov <= 0.15 ? .green : .yellow
+        let tier: ConfidenceTier = cov <= TierThresholds.frameSpreadGreen ? .green : .yellow
 
         // Apply cylinder calibration last so the published cm value
         // ends up identical to what a trained Cylinder calibration on
@@ -1436,7 +1468,7 @@ public enum DBHEstimator {
             centersZ.append((minZ + maxZ) / 2)
         }
 
-        guard diameters.count >= 3 else {
+        guard diameters.count >= TierThresholds.minUsableFrames else {
             return redResult(
                 reason: "Not enough usable frames; hold steadier or move closer",
                 method: .lidarChordSilhouette,
@@ -1449,7 +1481,7 @@ public enum DBHEstimator {
         let lo = sortedDia.first ?? mean
         let hi = sortedDia.last ?? mean
         let cov = mean > 0 ? (hi - lo) / mean : 1
-        let tier: ConfidenceTier = cov <= 0.15 ? .green : .yellow
+        let tier: ConfidenceTier = cov <= TierThresholds.frameSpreadGreen ? .green : .yellow
 
         let dbhCm = Double(cal.dbhCorrectionAlpha)
             + Double(cal.dbhCorrectionBeta) * medianRawCm
@@ -1594,6 +1626,132 @@ public enum DBHEstimator {
         return (iLo + quarter, iHi - quarter)
     }
 
+    /// The bracket's index arithmetic on the walk axis, lifted verbatim out of
+    /// `bracketChordFit` so the read-only probe below can ask about EXACTLY
+    /// the pixels the fit medians — not about pixels derived by a second copy
+    /// of the same arithmetic that is free to drift away from it.
+    ///
+    /// Pure index math: no depth is read here, and all three refusals are the
+    /// fit's own (axis in bounds, span at least 2 px, a non-empty index range).
+    static func bracketGeometry(
+        frame: ARDepthFrame,
+        guideAxis: GuideAxis,
+        leftFraction: Double,
+        rightFraction: Double
+    ) -> (lo: Double, hi: Double, widthPx: Double, iLo: Int, iHi: Int)? {
+        let extent: Int
+        switch guideAxis {
+        case .row(let y):
+            guard y >= 0, y < frame.height else { return nil }
+            extent = frame.width
+        case .col(let x):
+            guard x >= 0, x < frame.width else { return nil }
+            extent = frame.height
+        }
+        let lo = min(leftFraction, rightFraction)
+        let hi = max(leftFraction, rightFraction)
+        let leftPx = lo * Double(extent)
+        let rightPx = hi * Double(extent)
+        let widthPx = rightPx - leftPx
+        guard widthPx >= 2 else { return nil }
+        let iLo = max(0, Int(leftPx.rounded(.up)))
+        let iHi = min(extent - 1, Int(rightPx.rounded(.down)))
+        guard iHi >= iLo else { return nil }
+        return (lo, hi, widthPx, iLo, iHi)
+    }
+
+    /// The valid depths over the bracket's middle half, sorted ascending —
+    /// the exact sample `bracketChordFit` takes its median from. Also lifted
+    /// verbatim, for the same reason as `bracketGeometry`.
+    static func bracketCoreDepthsSorted(
+        frame: ARDepthFrame,
+        guideAxis: GuideAxis,
+        iLo: Int,
+        iHi: Int
+    ) -> [Float] {
+        var depths: [Float] = []
+        depths.reserveCapacity(iHi - iLo + 1)
+        let (cLo, cHi) = bracketCoreRange(iLo: iLo, iHi: iHi)
+        for idx in cLo...cHi {
+            let (px, py) = pixelCoords(axis: guideAxis, idx: idx)
+            guard frame.confidence(atX: px, y: py) >= 1 else { continue }
+            let d = frame.depth(atX: px, y: py)
+            if d > 0 { depths.append(d) }
+        }
+        depths.sort()
+        return depths
+    }
+
+    /// Widest depth separation, in metres, that a bracket sitting entirely on
+    /// bark can produce across its middle half.
+    ///
+    /// GEOMETRY, not a tuned number. Over the middle half of a chord the stem
+    /// surface recedes from its nearest point by r·(1 − cos30°) = 0.134·r, so
+    /// even a 1 m stem contributes under 7 cm, and LiDAR noise at bracket range
+    /// adds a centimetre or two. 0.20 m is therefore several times anything
+    /// bark alone can produce, while the excursions this exists to name are
+    /// 30–60 cm of depth — the gap between a stem and whatever stands behind
+    /// it. Same value on Android.
+    public static let bracketCoreDepthSpreadLimitM: Double = 0.20
+
+    /// Interquartile depth spread over the bracket's middle half, in metres —
+    /// READ-ONLY, and never consulted by any estimator.
+    ///
+    /// FIELD ROUND 10 — THE DIAMETER THAT JUMPS BY INCHES. Quantified over 140
+    /// bursts: the median within-burst spread is 0.49 cm on iOS and 0.41 cm on
+    /// Android, the same, but iOS carries a tail Android does not — 7 of 68
+    /// ADJUST bursts spanning two inches or more, worst case 26 cm. d = w·z/(f
+    /// − w/2) is LINEAR in z, so 26 cm of diameter on a 30 cm stem is z moving
+    /// by most of a metre. Nothing in a LiDAR return moves that far; a metre is
+    /// the distance from the bark to what is behind it. Some of the sample is
+    /// not bark.
+    ///
+    /// `bracketCoreRange` already removed the worst of it — the handles sit ON
+    /// the silhouette, so the span's END pixels read the background — but the
+    /// middle half is not immune: a gap between stems, a limb, or foliage seen
+    /// through a lean puts a far cluster under the middle of the bracket too.
+    /// The median only MOVES when that cluster reaches half the sample, which
+    /// is why the failure is intermittent (about one capture in ten) rather
+    /// than a constant bias.
+    ///
+    /// THE INTERQUARTILE RANGE IS THE RIGHT STATISTIC, precisely because the
+    /// median is what has to be defended. A handful of stray far pixels cannot
+    /// move a median of a dozen and does not widen the IQR either. A sample
+    /// split near evenly between two surfaces moves the median on the next
+    /// pixel that flips validity — and puts the two clusters on opposite sides
+    /// of the quartiles, which is exactly what a wide IQR reports. min–max
+    /// would fire on the single stray and blank a readout that was fine.
+    ///
+    /// WHAT THIS DELIBERATELY DOES NOT DO is change which pixels the estimator
+    /// admits. That was the better physical fix and it is not available: the
+    /// stored diameter is the median of five frames, `bracketChordFit` is the
+    /// per-frame fit BOTH the live readout and the burst call, and the
+    /// estimator is frozen. It is also not needed — the excursions do not
+    /// reach the stored value (rho = −0.11 between burst spread and error
+    /// against tape), so the corpus is intact and the defect is entirely in
+    /// what the cruiser sees. This reports; the screen decides.
+    public static func bracketCoreDepthSpreadM(
+        frame: ARDepthFrame,
+        guideAxis: GuideAxis,
+        leftFraction: Double,
+        rightFraction: Double
+    ) -> Double? {
+        guard let g = bracketGeometry(frame: frame,
+                                      guideAxis: guideAxis,
+                                      leftFraction: leftFraction,
+                                      rightFraction: rightFraction)
+        else { return nil }
+        let depths = bracketCoreDepthsSorted(frame: frame,
+                                             guideAxis: guideAxis,
+                                             iLo: g.iLo, iHi: g.iHi)
+        // Same floor the fit uses: below it there is no median worth
+        // describing, and the fit has already refused.
+        guard depths.count >= 3 else { return nil }
+        let q1 = depths[depths.count / 4]
+        let q3 = depths[(depths.count * 3) / 4]
+        return Double(q3 - q1)
+    }
+
     /// Single-frame DBH estimate constrained by two user-placed edge
     /// handles instead of the automatic silhouette walk — the DBH
     /// ADJUST mode's estimator. `leftFraction` / `rightFraction` are
@@ -1618,39 +1776,22 @@ public enum DBHEstimator {
         leftFraction: Double,
         rightFraction: Double
     ) -> PreviewFit? {
-        let extent: Int
-        switch guideAxis {
-        case .row(let y):
-            guard y >= 0, y < frame.height else { return nil }
-            extent = frame.width
-        case .col(let x):
-            guard x >= 0, x < frame.width else { return nil }
-            extent = frame.height
-        }
-        let lo = min(leftFraction, rightFraction)
-        let hi = max(leftFraction, rightFraction)
-        let leftPx = lo * Double(extent)
-        let rightPx = hi * Double(extent)
-        let widthPx = rightPx - leftPx
-        guard widthPx >= 2 else { return nil }
+        guard let g = bracketGeometry(frame: frame,
+                                      guideAxis: guideAxis,
+                                      leftFraction: leftFraction,
+                                      rightFraction: rightFraction)
+        else { return nil }
+        let lo = g.lo, hi = g.hi
+        let widthPx = g.widthPx
+        let iLo = g.iLo, iHi = g.iHi
 
         // Median depth inside the bracket's CENTRAL PORTION at the guide row.
         // Zero-depth / low-confidence pixels are skipped; a handful of valid
         // returns is required before the median is trusted.
-        let iLo = max(0, Int(leftPx.rounded(.up)))
-        let iHi = min(extent - 1, Int(rightPx.rounded(.down)))
-        guard iHi >= iLo else { return nil }
-        var depths: [Float] = []
-        depths.reserveCapacity(iHi - iLo + 1)
-        let (cLo, cHi) = bracketCoreRange(iLo: iLo, iHi: iHi)
-        for idx in cLo...cHi {
-            let (px, py) = pixelCoords(axis: guideAxis, idx: idx)
-            guard frame.confidence(atX: px, y: py) >= 1 else { continue }
-            let d = frame.depth(atX: px, y: py)
-            if d > 0 { depths.append(d) }
-        }
+        let depths = bracketCoreDepthsSorted(frame: frame,
+                                             guideAxis: guideAxis,
+                                             iLo: iLo, iHi: iHi)
         guard depths.count >= 3 else { return nil }
-        depths.sort()
         let z = Double(depths[depths.count / 2])
         guard (0.3...5.0).contains(z) else { return nil }
 
@@ -1741,7 +1882,7 @@ public enum DBHEstimator {
             widths.append(fit.inlierCount)
         }
 
-        guard diameters.count >= 3 else {
+        guard diameters.count >= TierThresholds.minUsableFrames else {
             return redResult(
                 reason: "Not enough usable frames; hold steadier or move closer",
                 method: .lidarChordSilhouette,
@@ -1754,7 +1895,7 @@ public enum DBHEstimator {
         let lo = sortedDia.first ?? mean
         let hi = sortedDia.last ?? mean
         let cov = mean > 0 ? (hi - lo) / mean : 1
-        let tier: ConfidenceTier = cov <= 0.15 ? .green : .yellow
+        let tier: ConfidenceTier = cov <= TierThresholds.frameSpreadGreen ? .green : .yellow
 
         let dbhCm = Double(cal.dbhCorrectionAlpha)
             + Double(cal.dbhCorrectionBeta) * medianRawCm

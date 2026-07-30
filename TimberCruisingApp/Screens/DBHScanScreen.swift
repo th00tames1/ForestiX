@@ -1380,7 +1380,7 @@ public struct DBHScanScreen: View {
                 MeasureValuePill(
                     "DBH: " + MeasurementFormatter.diameter(
                         cm: cm, in: settings.unitSystem),
-                    large: true)
+                    size: .large)
                     .accessibilityIdentifier("dbhScan.livePreview")
                 if let d = viewModel.distanceToStemCenterM {
                     MeasureValuePill(

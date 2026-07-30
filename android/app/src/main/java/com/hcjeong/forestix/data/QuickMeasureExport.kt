@@ -43,6 +43,12 @@ object QuickMeasureExport {
             "confidence", "method",
             "latitude", "longitude", "photo",
             "capture_mode",
+            // Where latitude/longitude came from ("gpsSingle" for a device
+            // fix, "manual" for one the cruiser typed). Without it a
+            // hand-entered coordinate exported exactly like a satellite one.
+            // LAST column, matching the iOS exporter so the two platforms'
+            // CSVs diff clean.
+            "position_source",
         )
         val sb = StringBuilder()
         sb.append(headers.joinToString(",") { csv(it) }).append("\r\n")
@@ -75,6 +81,7 @@ object QuickMeasureExport {
                 e.longitude?.let { String.format(java.util.Locale.US, "%.6f", it) } ?: "",
                 e.photoPath ?: "",
                 e.captureMode ?: "",
+                e.positionRecordedSource ?: "",
             ).joinToString(",") { csv(it) }
             sb.append(row).append("\r\n")
         }

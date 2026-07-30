@@ -337,7 +337,7 @@ public struct DistanceMeasureScreen: View {
             MeasureValuePill(mode == .live ? "PHONE → TARGET"
                                            : "POINT A → POINT B",
                              dimmed: true)
-            MeasureValuePill(currentDistanceString, large: true)
+            MeasureValuePill(currentDistanceString, size: .large)
         }
     }
 

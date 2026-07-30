@@ -6,9 +6,11 @@
 //
 // Renders:
 //   • Top-line stats — TREES, BASAL/AC, TREES/AC, MEAN DBH, in a 2 × 2
-//     grid so the labels and the 26 sp values fit a small phone (G3)
-//   • Stocking & Density gauge (Phase 1.2 component)
+//     grid so the labels and the values fit a small phone (G3)
 //   • Species mix breakdown
+//
+// The Stocking & Density gauge is gone — see the note at the foot of this
+// file for why.
 //
 // All math is pure functions on a list of `QuickMeasureEntry`. No
 // dependencies on plot acreage for now (variable-radius / unscaled
@@ -49,14 +51,12 @@ import com.hcjeong.forestix.data.QuickMeasureEntry
 import com.hcjeong.forestix.data.QuickMeasurePlot
 import com.hcjeong.forestix.sensors.LogRule
 import com.hcjeong.forestix.sensors.VolumeConversion
-import com.hcjeong.forestix.ui.screens.stand.StockingGauge
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixDenseTextScale
 import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import java.util.Locale
 import kotlin.math.max
-import kotlin.math.pow
 import kotlin.math.sqrt
 
 @Composable
@@ -133,20 +133,6 @@ fun PlotSummaryCard(
         }
 
         if (stats != null && stats.distinctTrees >= 1) {
-            HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
-
-            // MARK: - Stocking gauge
-            //
-            // Relative density via Reineke SDI / Max SDI ratio. With no
-            // species-specific Max SDI table yet, use a generic Max SDI of
-            // 717 (USFS PNW conifer mid-range) for the bar position.
-            // Refined per-species in Phase 5.
-            val maxSDI = 717.0
-            val relDensityPct = ((stats.sdi / maxSDI) * 100.0).coerceIn(0.0, 100.0)
-            StockingGauge(
-                relativeDensityPct = relDensityPct,
-                regimeLabel = regimeLabel(relDensityPct))
-
             HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
 
             // MARK: - Species mix
@@ -236,9 +222,16 @@ private fun StatsCell(label: String, value: String, modifier: Modifier = Modifie
     ) {
         // Neither line may wrap: a stat split as "12.4/cm" or "BASAL//HA"
         // is the defect this card was fixed for.
+        //
+        // FIELD REPORT — these values were `dataLarge` (26 sp), which the
+        // cruiser read as awkwardly oversized: a value carrying its unit
+        // ("31.4 cm") is far wider at that step than the bare counts it was
+        // drawn for. One step down the SAME data scale (`data`, 17 sp) is
+        // the size the log's own row values already use, so the card and the
+        // rows beneath it read as one sheet. iOS matches.
         Text(
             value,
-            style = type.dataLarge,
+            style = type.data,
             color = colors.textPrimary,
             maxLines = 1,
             softWrap = false,
@@ -274,13 +267,6 @@ private fun plotSubtitle(plot: QuickMeasurePlot, areaUnit: AreaUnit): String {
     return parts.joinToString(" · ")
 }
 
-private fun regimeLabel(pct: Double): String = when {
-    pct < 25 -> "Understocked"
-    pct < 35 -> "Low stocking"
-    pct < 60 -> "Adequately stocked"
-    else -> "Over-dense"
-}
-
 // MARK: - Stats compute
 
 private data class SpeciesShare(val code: String, val share: Double)
@@ -292,7 +278,6 @@ private data class Stats(
     val qmd: Double?,
     val meanHeightM: Double?,
     val bfPerAcre: Double?,
-    val sdi: Double,
     val speciesMix: List<SpeciesShare>,
 )
 
@@ -361,10 +346,6 @@ private fun computeStats(
         bfPerAcre = totalBF / acres
     }
 
-    // Reineke SDI = TPA × (QMD_in / 10)^1.605
-    val qmdIn = qmd / 2.54
-    val sdi = tpa * (qmdIn / 10.0).pow(1.605)
-
     // Species mix
     val totalTrees = trees.size
     val mix = trees.groupBy { it.species }
@@ -378,6 +359,31 @@ private fun computeStats(
         qmd = qmd,
         meanHeightM = meanH,
         bfPerAcre = bfPerAcre,
-        sdi = sdi,
         speciesMix = mix)
 }
+
+// MARK: - Why the stocking gauge is gone
+//
+// FIELD REPORT — "Over-dense" was shown with nothing on screen saying what
+// it crossed, so the cruiser asked for the rule to be named. The rule turned
+// out to be un-nameable:
+//
+//   • The verdict was `Reineke SDI / 717 >= 60 %`, and 717 was one hard-coded
+//     "generic PNW conifer mid-range" maximum applied to every species on
+//     every continent this app ships to. A maximum SDI is species-specific;
+//     against the wrong species the same stand is understocked or over-dense
+//     purely by which constant is in the source.
+//   • SDI is built from trees-per-acre, and this card divides by
+//     `max(plot.acres ?: 0.1, 0.05)` — a plot with no acreage entered gets an
+//     invented tenth of an acre. The density the word was computed from is
+//     therefore not a density of anything the cruiser measured.
+//
+// So there is no threshold to print, and printing "60 % of SDI 717" would
+// have dressed up a number nobody can defend as if it were a finding. The
+// whole gauge went with the word: the coloured band and the marker encode
+// the SAME percentage, so leaving them would have kept the verdict and only
+// removed its name. TREES, BASAL, TREES/AC, MEAN DBH and the species mix are
+// unchanged — they are counts and diameters, not a judgement.
+//
+// If a per-species maximum-SDI table ever lands, this comes back WITH the
+// species and the maximum on screen beside the word.

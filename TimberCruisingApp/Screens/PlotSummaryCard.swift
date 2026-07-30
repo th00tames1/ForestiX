@@ -5,8 +5,10 @@
 //
 // Renders:
 //   • Top-line stats — BA/ac, TPA, QMD, mean DBH, mean H, BF/ac
-//   • Stocking & Density gauge (Phase 1.2 component)
 //   • Species mix breakdown
+//
+// The Stocking & Density gauge is gone — see the note at the foot of this
+// file for why.
 //
 // All math is pure functions on a list of `QuickMeasureEntry`. No
 // dependencies on plot acreage for now (variable-radius / unscaled
@@ -48,8 +50,6 @@ public struct PlotSummaryCard: View {
             Divider()
             statsGrid
             if let stats = stats, stats.distinctTrees >= 1 {
-                Divider()
-                stockingGauge
                 Divider()
                 speciesMix
             }
@@ -148,17 +148,20 @@ public struct PlotSummaryCard: View {
 
     private func statsCell(_ label: String, _ value: String) -> some View {
         VStack(spacing: 2) {
+            // FIELD REPORT — these values were `dataLarge` (26 pt), which the
+            // cruiser read as awkwardly oversized, and which is also why the
+            // cell needed a 0.4 scale floor: "31.4 cm" measures ~113 pt at 26 pt
+            // monospaced against the ~56 pt a cell has on a 360 pt phone, so a
+            // QMD carrying its unit was being shrunk by more than half before it
+            // fitted. One step down the SAME data scale (`data`, 17 pt) is the
+            // size the log's own row values already use, so the card and the
+            // rows beneath it now read as one sheet. The floor stays — a
+            // measurement scaled down is still right, one truncated is wrong.
             Text(value)
-                .font(ForestixType.dataLarge)
+                .font(ForestixType.data)
                 .foregroundStyle(ForestixPalette.textPrimary)
                 .lineLimit(1)
                 .allowsTightening(true)
-                // 0.7 was not enough headroom for a QMD carrying its unit:
-                // "31.4 cm" measures 113 pt at 26 pt monospaced against the
-                // ~56 pt a cell has on a 360 pt phone, so the number itself
-                // was cut off — the "12…" in the field report. A measurement
-                // that is scaled down is still right; a measurement that is
-                // truncated is wrong, so the floor clears the worst case.
                 .minimumScaleFactor(0.4)
             Text(label)
                 .font(ForestixType.sectionHead)
@@ -171,32 +174,6 @@ public struct PlotSummaryCard: View {
         // Keeps the caps off the hairline dividers either side.
         .padding(.horizontal, ForestixSpace.xxs)
         .frame(maxWidth: .infinity)
-    }
-
-    // MARK: - Stocking gauge
-
-    @ViewBuilder
-    private var stockingGauge: some View {
-        if let s = stats, s.distinctTrees > 0 {
-            // Relative density via Reineke SDI / Max SDI ratio. With
-            // no species-specific Max SDI table yet, use a generic
-            // Max SDI of 717 (USFS PNW conifer mid-range) for the
-            // bar position. Refined per-species in Phase 5.
-            let maxSDI: Double = 717
-            let relDensityPct = min(100, max(0, (s.sdi / maxSDI) * 100))
-            StockingGauge(
-                relativeDensityPct: relDensityPct,
-                regimeLabel: regimeLabel(for: relDensityPct))
-        }
-    }
-
-    private func regimeLabel(for pct: Double) -> String {
-        switch pct {
-        case ..<25:    return "Understocked"
-        case ..<35:    return "Low stocking"
-        case ..<60:    return "Adequately stocked"
-        default:       return "Over-dense"
-        }
     }
 
     // MARK: - Species mix
@@ -246,7 +223,6 @@ public struct PlotSummaryCard: View {
         let qmd: Double?
         let meanHeightM: Double?
         let bfPerAcre: Double?
-        let sdi: Double
         let speciesMix: [(code: String, share: Double)]
     }
 
@@ -309,10 +285,6 @@ public struct PlotSummaryCard: View {
             bfPerAcre = totalBF / acres
         }
 
-        // Reineke SDI = TPA × (QMD_in / 10)^1.605
-        let qmdIn = qmd / 2.54
-        let sdi = tpa * pow(qmdIn / 10.0, 1.605)
-
         // Species mix
         let totalTrees = trees.count
         let bySpecies = Dictionary(grouping: trees, by: { $0.species })
@@ -327,7 +299,32 @@ public struct PlotSummaryCard: View {
             qmd: qmd,
             meanHeightM: meanH,
             bfPerAcre: bfPerAcre,
-            sdi: sdi,
             speciesMix: mix.map { (code: $0.0, share: $0.1) })
     }
 }
+
+// MARK: - Why the stocking gauge is gone
+//
+// FIELD REPORT — "Over-dense" was shown with nothing on screen saying what
+// it crossed, so the cruiser asked for the rule to be named. The rule turned
+// out to be un-nameable:
+//
+//   • The verdict was `Reineke SDI / 717 >= 60 %`, and 717 was one hard-coded
+//     "generic PNW conifer mid-range" maximum applied to every species on
+//     every continent this app ships to. A maximum SDI is species-specific;
+//     against the wrong species the same stand is understocked or over-dense
+//     purely by which constant is in the source.
+//   • SDI is built from trees-per-acre, and this card divides by
+//     `max(plot.acres ?? 0.1, 0.05)` — a plot with no acreage entered gets an
+//     invented tenth of an acre. The density the word was computed from is
+//     therefore not a density of anything the cruiser measured.
+//
+// So there is no threshold to print, and printing "60 % of SDI 717" would
+// have dressed up a number nobody can defend as if it were a finding. The
+// whole gauge went with the word: the coloured band and the marker encode
+// the SAME percentage, so leaving them would have kept the verdict and only
+// removed its name. TREES, BASAL, TREES/AC, MEAN DBH and the species mix are
+// unchanged — they are counts and diameters, not a judgement.
+//
+// If a per-species maximum-SDI table ever lands, this comes back WITH the
+// species and the maximum on screen beside the word.

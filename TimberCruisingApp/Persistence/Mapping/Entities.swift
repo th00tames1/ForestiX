@@ -55,6 +55,9 @@ public final class PlannedPlotEntity: NSManagedObject {
     @NSManaged public var plannedLon: Double
     @NSManaged public var visited: Bool
     @NSManaged public var skipped: Bool
+    /// `PositionSource` rawValue, or nil for a plot the generator laid /
+    /// a row written before the column existed — see `PlannedPlot.plannedSource`.
+    @NSManaged public var plannedSource: String?
 }
 
 @objc(PlotEntity)

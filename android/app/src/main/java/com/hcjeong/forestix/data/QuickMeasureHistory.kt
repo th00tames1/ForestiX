@@ -244,6 +244,27 @@ class QuickMeasureHistory private constructor(
         }?.treeName
     }
 
+    /// The species already recorded against a tree, if any reading carries
+    /// one. Entries are newest-first and this takes the FIRST match, which is
+    /// the cruiser's latest word on that stem — the same rule the map pin's
+    /// peek card already reads a species by, so the chooser and the pin cannot
+    /// disagree about what species a tree is.
+    ///
+    /// Deliberately the opposite end of the log from [treeName], which takes
+    /// the tree's FIRST reading. A name is an identifier other surfaces and
+    /// the export already join on, so it must not change under them; a
+    /// species is an observation, and a correction made later is the better
+    /// of the two.
+    fun speciesCode(forTreeNumber: Int?, plotID: UUID?): String? {
+        if (forTreeNumber == null) return null
+        val def = defaultPlotID()
+        return _entries.value.firstOrNull {
+            it.treeNumber == forTreeNumber &&
+                (it.plotID ?: def) == (plotID ?: def) &&
+                hasSpecies(it)
+        }?.speciesCode
+    }
+
     /// The name to offer for the next tree — the HIGHEST name in the series
     /// the cruiser is currently using, stepped on by [TreeNameSequence]. Null
     /// on a log that has never been named, and then the chooser's field simply
@@ -259,6 +280,36 @@ class QuickMeasureHistory private constructor(
     val suggestedNextTreeName: String?
         get() = TreeNameSequence.nextInSeries(
             _entries.value.mapNotNull { it.treeName })
+
+    /// The species to offer for the next tree — the code on the most recent
+    /// reading that carries one. Null on a log where nothing has been given a
+    /// species, and then the picker simply opens unset.
+    ///
+    /// It lives here beside the name suggestion because it is the same kind of
+    /// rule and the two are read together; the chooser and the field log's
+    /// new-tree sheet both take it from here rather than each deciding what
+    /// "the last species" means.
+    ///
+    /// Unlike the name, this is NOT a series that steps on — a stand is
+    /// usually one species tree after tree, so the last one seen is the
+    /// suggestion. Blank and whitespace-only codes are skipped: a reading
+    /// saved with the species left unset must not propose "" as a species.
+    ///
+    /// This is a suggestion for a control, never a recorded observation. What
+    /// the caller does with an untouched one is the caller's decision — see
+    /// the measure chooser.
+    val suggestedNextSpeciesCode: String?
+        get() = _entries.value.firstOrNull { hasSpecies(it) }?.speciesCode
+
+    /// A reading carries a species when the code is present AND not blank.
+    /// `isNullOrBlank()` matches the iOS sibling's `.whitespacesAndNewlines`
+    /// trim, so the same log proposes the same species on both phones.
+    ///
+    /// Takes the entry as a parameter rather than being an extension on it:
+    /// inside an extension, a bare `speciesCode` sits next to this class's own
+    /// `speciesCode(forTreeNumber:plotID:)` and reads ambiguously.
+    private fun hasSpecies(e: QuickMeasureEntry): Boolean =
+        !e.speciesCode.isNullOrBlank()
 
     fun summary(forTreeNumber: Int): String? {
         val n = forTreeNumber

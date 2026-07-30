@@ -177,6 +177,7 @@ object PlannedPlotMapper {
         plannedLon = s.plannedLon,
         visited = s.visited,
         skipped = s.skipped,
+        plannedSource = s.plannedSource?.raw,
     )
 
     fun toStruct(e: PlannedPlotEntity) = PlannedPlot(
@@ -188,6 +189,10 @@ object PlannedPlotMapper {
         plannedLon = e.plannedLon,
         visited = e.visited,
         skipped = e.skipped,
+        // An unrecognised string decodes to null rather than to a borrowed
+        // case: "I don't know how this point was placed" is the honest
+        // reading of a value this build cannot name.
+        plannedSource = PositionSource.fromRaw(e.plannedSource),
     )
 }
 

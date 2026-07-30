@@ -171,6 +171,26 @@ public struct PlannedPlot: Identifiable, Codable, Sendable {
     /// decision, so the (+) "nearest unvisited" navigation passes over it and
     /// exports mark it skipped rather than merely pending.
     public var skipped: Bool
+    /// How `plannedLat`/`plannedLon` came to exist.
+    ///
+    /// `.manual` — the cruiser DREW this point with a finger on the map. It
+    /// is an intention, not an observation: nothing measured it, and its
+    /// error is however far the finger was from the tree the cruiser meant.
+    /// The one rule this field exists to keep is that a drawn coordinate and
+    /// a GPS-measured one are never stored the same way — the plot that
+    /// eventually opens here still takes its `centerLat`/`centerLon` from
+    /// the ARRIVAL FIX and stamps that fix's own `positionSource`, so the
+    /// drawn point never becomes a measured one. Keeping both is the point:
+    /// their difference is the canopy GPS error, and it can only be read if
+    /// the plan says it was drawn.
+    ///
+    /// `nil` — NOT hand-placed. Every planned plot that existed before this
+    /// field, and every one `SamplingGenerator` lays down, is derived from a
+    /// boundary and a design rather than placed by a person, and there is no
+    /// `PositionSource` case that says "computed from a design". Inventing
+    /// one, or borrowing `.manual` for the generator, would make the field
+    /// say nothing. Absent means absent.
+    public var plannedSource: PositionSource?
 
     public init(
         id: UUID,
@@ -180,7 +200,8 @@ public struct PlannedPlot: Identifiable, Codable, Sendable {
         plannedLat: Double,
         plannedLon: Double,
         visited: Bool,
-        skipped: Bool = false
+        skipped: Bool = false,
+        plannedSource: PositionSource? = nil
     ) {
         self.id = id
         self.projectId = projectId
@@ -190,5 +211,6 @@ public struct PlannedPlot: Identifiable, Codable, Sendable {
         self.plannedLon = plannedLon
         self.visited = visited
         self.skipped = skipped
+        self.plannedSource = plannedSource
     }
 }

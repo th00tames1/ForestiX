@@ -42,11 +42,23 @@ struct MapSettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     let visibleRegion: BasemapRegion?
+    /// Where the boundary editor's map opens — the camera the cruiser was
+    /// already looking at, so "Draw an area" drops the rectangle on the
+    /// ground on screen and not on a remembered default.
+    let mapCamera: BasemapCamera
 
     @StateObject private var downloader = OfflineTileDownloader()
     @State private var baseStats: TileCache.Stats?
     @State private var overlayStats: TileCache.Stats?
     @State private var presentingImporter = false
+    @State private var presentingDrawEditor = false
+    /// A file that PARSED and passed the WGS84 gate, held back because a
+    /// boundary is already loaded and replacing it needs an answer first.
+    /// Held rather than saved: a refusal must not cost the cruiser the
+    /// boundary they already had, and neither must a replacement they did
+    /// not mean. (The drawn path asks the same question inside the editor,
+    /// at the moment Save is pressed.)
+    @State private var pendingImport: SurveyBoundary?
     /// The refusal / failure sentence, shown inline under the row. Never
     /// a toast: a boundary that was refused must stay refused on screen
     /// until the cruiser has read why.
@@ -106,7 +118,10 @@ struct MapSettingsSheet: View {
                     Button("Close") { dismiss() }
                 }
             }
-            .confirmationDialog("Remove the imported boundary?",
+            // "the boundary", not "the imported boundary": since the
+            // cruiser can draw one too, naming only the imported case
+            // would leave a drawn boundary looking un-removable.
+            .confirmationDialog("Remove the boundary?",
                                 isPresented: $confirmingRemove,
                                 titleVisibility: .visible) {
                 Button("Remove", role: .destructive) {
@@ -132,6 +147,25 @@ struct MapSettingsSheet: View {
                       allowedContentTypes: Self.boundaryContentTypes,
                       allowsMultipleSelection: false) { result in
             handleImport(result)
+        }
+        // REPLACEMENT IS NEVER SILENT. A boundary that came out of a
+        // surveyor's file and one drawn with a fingertip are not
+        // interchangeable, and the app keeps exactly one — so the swap is
+        // always an answered question, never a side effect of a button.
+        .confirmationDialog("Replace the boundary?",
+                            isPresented: Binding(
+                                get: { pendingImport != nil },
+                                set: { if !$0 { pendingImport = nil } }),
+                            titleVisibility: .visible,
+                            presenting: pendingImport) { incoming in
+            Button("Replace", role: .destructive) { commitPendingImport(incoming) }
+            Button("Cancel", role: .cancel) { pendingImport = nil }
+        } message: { _ in
+            Text(BoundaryDrawScreen.replacementMessage(for: boundaryModel.boundary))
+        }
+        .fullScreenCover(isPresented: $presentingDrawEditor) {
+            BoundaryDrawScreen(initialCamera: mapCamera)
+                .environmentObject(settings)
         }
     }
 }
@@ -245,6 +279,17 @@ private extension MapSettingsSheet {
                                       bottom: ForestixSpace.xs, trailing: ForestixSpace.md))
             .accessibilityIdentifier("mapSettings.boundary.import")
 
+            // Draw the stand instead of bringing a file for it. Sits in
+            // the same group as Import because it fills the same slot —
+            // there is one boundary, and this is the other way to get one.
+            Button {
+                importFailure = nil
+                presentingDrawEditor = true
+            } label: {
+                Label("Draw an area", systemImage: "pencil.and.outline")
+            }
+            .accessibilityIdentifier("mapSettings.boundary.draw")
+
             if boundaryModel.boundary != nil {
                 Button("Remove", role: .destructive) { confirmingRemove = true }
                     .accessibilityIdentifier("mapSettings.boundary.remove")
@@ -292,13 +337,18 @@ private extension MapSettingsSheet {
         .accessibilityIdentifier("mapSettings.boundary.state")
     }
 
+    /// The current-state row's second line. It names the PROVENANCE, not
+    /// just the date: "drawn" and "imported" are the difference between a
+    /// sketch and a survey, and the row is the one place a cruiser looks
+    /// to find out which one the cruise is being planned against.
     static func detail(for boundary: SurveyBoundary) -> String {
         let count = boundary.featureCount
         let features = count == 1 ? "1 feature" : "\(count) features"
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd"
-        return "\(features) · imported \(formatter.string(from: boundary.importedAt))"
+        let verb = boundary.origin == .drawn ? "drawn" : "imported"
+        return "\(features) · \(verb) \(formatter.string(from: boundary.importedAt))"
     }
 
     func handleImport(_ result: Result<[URL], Error>) {
@@ -308,8 +358,17 @@ private extension MapSettingsSheet {
         case .success(let urls):
             guard let url = urls.first else { return }
             do {
-                try boundaryModel.importBoundary(from: url)
+                // Parse and gate FIRST, store second. A file that fails the
+                // WGS84 gate must cost the cruiser nothing, and a file that
+                // passes must not overwrite a loaded boundary until they
+                // have said so.
+                let incoming = try boundaryModel.parseBoundary(from: url)
                 importFailure = nil
+                if boundaryModel.boundary != nil {
+                    pendingImport = incoming
+                } else {
+                    commitPendingImport(incoming)
+                }
             } catch let error as BoundaryImportError {
                 // The refusal sentence itself — quoted verbatim, never
                 // wrapped or softened.
@@ -317,6 +376,16 @@ private extension MapSettingsSheet {
             } catch {
                 importFailure = "That boundary could not be imported (\(error.localizedDescription))."
             }
+        }
+    }
+
+    func commitPendingImport(_ incoming: SurveyBoundary) {
+        pendingImport = nil
+        do {
+            try boundaryModel.commit(incoming)
+            importFailure = nil
+        } catch {
+            importFailure = "That boundary could not be saved (\(error.localizedDescription))."
         }
     }
 }

@@ -239,6 +239,10 @@ fun FieldLogScreen(
             // name in the series the cruiser is using, or blank if they have
             // never named a tree.
             suggestedName = env.history.suggestedNextTreeName.orEmpty(),
+            // And the same species suggestion, from the same place in the
+            // history — a hand-entered stem stands in the same stand as the
+            // scanned ones either side of it.
+            suggestedSpecies = env.history.suggestedNextSpeciesCode,
         )
     }
 
@@ -1703,6 +1707,11 @@ private data class FieldLogNewTree(
     /// exactly as the pre-plot readings are, rather than claiming one.
     val plotName: String?,
     val suggestedName: String,
+    /// The last species seen in the log, offered the same way the name is. It
+    /// is the app's guess, never an observation — the sheet draws it dim until
+    /// the cruiser picks in the control. Null when nothing in the log has a
+    /// species, and then the picker opens unset.
+    val suggestedSpecies: String?,
     /// Identity for the field state below, so a second "add a tree" opens on
     /// empty fields rather than the last one's leftovers.
     val id: UUID = UUID.randomUUID(),
@@ -1736,7 +1745,11 @@ private fun FieldLogNewTreeSheet(
     val imperial = unitSystem == UnitSystem.IMPERIAL
 
     var treeName by remember(request.id) { mutableStateOf(request.suggestedName) }
-    var speciesCode by remember(request.id) { mutableStateOf<String?>(null) }
+    var speciesCode by remember(request.id) { mutableStateOf(request.suggestedSpecies) }
+    // False while `speciesCode` is only the log's carry-over, true once the
+    // cruiser has picked. Styling only — the code is stored either way, on the
+    // same argument as the measure chooser's.
+    var speciesConfirmed by remember(request.id) { mutableStateOf(false) }
     var dbhText by remember(request.id) { mutableStateOf("") }
     var heightText by remember(request.id) { mutableStateOf("") }
 
@@ -1773,7 +1786,7 @@ private fun FieldLogNewTreeSheet(
                 OutlinedTextField(
                     value = treeName,
                     onValueChange = { treeName = it },
-                    placeholder = { Text("Tree name") },
+                    placeholder = { Text("e.g. Tree1") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -1781,9 +1794,15 @@ private fun FieldLogNewTreeSheet(
                 // species list, one typed-code escape, no second copy to drift.
                 SpeciesPickerField(
                     speciesCode = speciesCode,
-                    onSpeciesCode = { speciesCode = it },
+                    onSpeciesCode = {
+                        speciesCode = it
+                        // Any pick makes it definite, including re-picking the
+                        // code already showing — that IS the confirmation.
+                        speciesConfirmed = true
+                    },
                     unspecifiedLabel = "Species",
                     bordered = true,
+                    provisional = !speciesConfirmed,
                 )
                 // Named on screen rather than assumed: the cruiser can see
                 // which plot is about to own this stem.

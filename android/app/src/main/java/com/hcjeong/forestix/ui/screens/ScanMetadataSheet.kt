@@ -220,6 +220,13 @@ internal fun rememberSpeciesOptions(): List<Pair<String, String>> {
 ///
 /// [bordered] is the compact pill the measure chooser wants; the sheet's row
 /// sits bare inside its section card.
+///
+/// [provisional] says the code showing was filled in by the app, not chosen by
+/// the cruiser: it is drawn in the same dim tertiary the empty control uses, so
+/// a species the app guessed never looks like one somebody confirmed.
+/// [onSpeciesCode] already fires on EVERY selection — including re-picking the
+/// code already showing, which is exactly how a cruiser confirms a guess — so
+/// the host can clear [provisional] from it rather than watching the value.
 @Composable
 internal fun SpeciesPickerField(
     speciesCode: String?,
@@ -227,6 +234,7 @@ internal fun SpeciesPickerField(
     modifier: Modifier = Modifier,
     unspecifiedLabel: String = "— Unspecified —",
     bordered: Boolean = false,
+    provisional: Boolean = false,
 ) {
     val type = Forestix.type
     val colors = Forestix.colors
@@ -263,7 +271,11 @@ internal fun SpeciesPickerField(
             Text(
                 selectedLabel,
                 style = type.body,
-                color = if (speciesCode == null) colors.textTertiary else colors.textPrimary,
+                color = if (speciesCode == null || provisional) {
+                    colors.textTertiary
+                } else {
+                    colors.textPrimary
+                },
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = if (bordered) Modifier else Modifier.weight(1f, fill = false),

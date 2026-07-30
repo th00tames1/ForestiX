@@ -72,6 +72,9 @@ data class PlannedPlotEntity(
     val plannedLon: Double,
     val visited: Boolean,
     val skipped: Boolean,
+    /// `PositionSource.raw`, or null for a plot the generator laid / a row
+    /// written before the column existed — see `PlannedPlot.plannedSource`.
+    val plannedSource: String? = null,
 )
 
 @Entity(tableName = "PlotEntity", indices = [Index("projectId")])

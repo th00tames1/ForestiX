@@ -38,7 +38,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.FileOpen
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -65,6 +67,8 @@ import com.hcjeong.forestix.basemap.MapCameraState
 import com.hcjeong.forestix.geo.BoundaryFilePicker
 import com.hcjeong.forestix.geo.BoundaryImportError
 import com.hcjeong.forestix.geo.BoundaryImporter
+import com.hcjeong.forestix.geo.BoundaryOrigin
+import com.hcjeong.forestix.geo.ImportedBoundary
 import com.hcjeong.forestix.geo.SurveyBoundaryStore
 import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.theme.Forestix
@@ -82,6 +86,10 @@ import kotlinx.coroutines.withContext
 fun MapSettingsSheet(
     camera: MapCameraState,
     onDismiss: () -> Unit,
+    /// "Draw an area" — the host closes this sheet and opens the boundary
+    /// editor full-screen. The sheet does not own that screen: a map editor
+    /// inside a bottom sheet has nowhere to put the map.
+    onDrawArea: () -> Unit = {},
 ) {
     val colors = Forestix.colors
     val type = Forestix.type
@@ -117,7 +125,7 @@ fun MapSettingsSheet(
                 verticalArrangement = Arrangement.spacedBy(ForestixSpace.lg),
             ) {
                 MapTypeGroup()
-                SurveyBoundaryGroup()
+                SurveyBoundaryGroup(onDrawArea = onDrawArea)
                 OfflineMapsSection(camera = camera)
             }
         }
@@ -193,7 +201,7 @@ private fun MapTypeCard(
 // MARK: - Survey boundary
 
 @Composable
-private fun SurveyBoundaryGroup() {
+private fun SurveyBoundaryGroup(onDrawArea: () -> Unit) {
     val colors = Forestix.colors
     val type = Forestix.type
     val context = LocalContext.current
@@ -203,6 +211,33 @@ private fun SurveyBoundaryGroup() {
     val stored by SurveyBoundaryStore.state.collectAsStateWithLifecycle()
     var failure by remember { mutableStateOf<String?>(null) }
     var importing by remember { mutableStateOf(false) }
+    // A file that PARSED and passed the WGS84 gate, held back because a
+    // boundary is already loaded and replacing it needs an answer first.
+    // Held rather than saved: a refusal must not cost the cruiser the
+    // boundary they already had, and neither must a replacement they did
+    // not mean. (The drawn path asks the same question inside the editor,
+    // at the moment Save is pressed.)
+    var pendingImport by remember {
+        mutableStateOf<Pair<ImportedBoundary, String>?>(null)
+    }
+
+    fun commit(incoming: ImportedBoundary, sourceFormat: String) {
+        pendingImport = null
+        scope.launch {
+            failure = withContext(Dispatchers.IO) {
+                try {
+                    SurveyBoundaryStore.save(
+                        context = context,
+                        boundary = incoming,
+                        sourceFormat = sourceFormat,
+                    )
+                    null
+                } catch (e: Exception) {
+                    e.message ?: "That boundary could not be saved."
+                }
+            }
+        }
+    }
 
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -211,7 +246,11 @@ private fun SurveyBoundaryGroup() {
         failure = null
         importing = true
         scope.launch {
-            val outcome = withContext(Dispatchers.IO) {
+            // Parse and gate FIRST, store second. A file that fails the
+            // WGS84 gate must cost the cruiser nothing, and a file that
+            // passes must not overwrite a loaded boundary until they have
+            // said so.
+            val parsed = withContext(Dispatchers.IO) {
                 try {
                     val picked = BoundaryFilePicker.read(context, uri)
                     val boundary = BoundaryImporter.import(
@@ -219,21 +258,52 @@ private fun SurveyBoundaryGroup() {
                         bytes = picked.bytes,
                         sidecarPrj = picked.sidecarPrj,
                     )
-                    SurveyBoundaryStore.save(
-                        context = context,
-                        boundary = boundary,
-                        sourceFormat = picked.fileName.substringAfterLast('.', "").lowercase(),
+                    Result.success(
+                        boundary to picked.fileName.substringAfterLast('.', "").lowercase()
                     )
-                    null
                 } catch (e: BoundaryImportError) {
-                    e.message ?: "That boundary could not be imported."
+                    Result.failure(e)
                 } catch (e: Exception) {
-                    "That boundary could not be imported (${e.message ?: "unknown error"})."
+                    Result.failure(e)
                 }
             }
-            failure = outcome
             importing = false
+            parsed.fold(
+                onSuccess = { (boundary, format) ->
+                    failure = null
+                    if (SurveyBoundaryStore.state.value != null) {
+                        pendingImport = boundary to format
+                    } else {
+                        commit(boundary, format)
+                    }
+                },
+                onFailure = { e ->
+                    failure = if (e is BoundaryImportError) {
+                        e.message ?: "That boundary could not be imported."
+                    } else {
+                        "That boundary could not be imported (${e.message ?: "unknown error"})."
+                    }
+                },
+            )
         }
+    }
+
+    // REPLACEMENT IS NEVER SILENT. A boundary that came out of a surveyor's
+    // file and one drawn with a fingertip are not interchangeable, and the
+    // app keeps exactly one — so the swap is always an answered question,
+    // never a side effect of a button.
+    pendingImport?.let { (incoming, format) ->
+        AlertDialog(
+            onDismissRequest = { pendingImport = null },
+            title = { Text("Replace the boundary?") },
+            text = { Text(replacementMessage(stored)) },
+            confirmButton = {
+                TextButton(onClick = { commit(incoming, format) }) { Text("Replace") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingImport = null }) { Text("Cancel") }
+            },
+        )
     }
 
     // "Shapefile" is what a cruiser calls this — nobody arrives at the sheet
@@ -263,7 +333,11 @@ private fun SurveyBoundaryGroup() {
                 )
                 stored?.let { boundary ->
                     Text(
-                        featureSummary(boundary.featureCount, boundary.importedAtMillis),
+                        featureSummary(
+                            boundary.featureCount,
+                            boundary.importedAtMillis,
+                            boundary.origin,
+                        ),
                         style = type.dataSmall,
                         color = colors.textTertiary,
                         modifier = Modifier.padding(top = 2.dp),
@@ -315,6 +389,31 @@ private fun SurveyBoundaryGroup() {
             )
         }
 
+        HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
+
+        // Draw the stand instead of bringing a file for it. Sits in the
+        // same group as Import because it fills the same slot — there is
+        // one boundary, and this is the other way to get one.
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clickableNoRipple {
+                    failure = null
+                    onDrawArea()
+                }
+                .padding(ForestixSpace.sm),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs),
+        ) {
+            Icon(
+                Icons.Outlined.Edit,
+                contentDescription = null,
+                tint = colors.primary,
+                modifier = Modifier.size(20.dp),
+            )
+            Text("Draw an area", style = type.body, color = colors.primary)
+        }
+
         // A refusal is never swallowed — it stays until the next attempt.
         failure?.let { message ->
             HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
@@ -336,10 +435,19 @@ private fun LaunchedEffectLoad(context: android.content.Context) {
     }
 }
 
-private fun featureSummary(count: Int, importedAtMillis: Long): String {
+/// The current-state row's second line. It names the PROVENANCE, not just
+/// the date: "drawn" and "imported" are the difference between a sketch and
+/// a survey, and this row is the one place a cruiser looks to find out
+/// which one the cruise is being planned against.
+private fun featureSummary(
+    count: Int,
+    importedAtMillis: Long,
+    origin: BoundaryOrigin,
+): String {
     val features = if (count == 1) "1 feature" else "$count features"
     val date = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(importedAtMillis))
-    return "$features · imported $date"
+    val verb = if (origin == BoundaryOrigin.DRAWN) "drawn" else "imported"
+    return "$features · $verb $date"
 }
 
 // MARK: - Shared group chrome

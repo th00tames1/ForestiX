@@ -96,8 +96,11 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import com.hcjeong.forestix.AppEnvironment
@@ -117,6 +120,7 @@ import com.hcjeong.forestix.data.cruise.HeightSubsampleRule
 import com.hcjeong.forestix.data.cruise.PlannedPlot
 import com.hcjeong.forestix.data.cruise.Plot
 import com.hcjeong.forestix.data.cruise.PlotType
+import com.hcjeong.forestix.data.cruise.PositionSource
 import com.hcjeong.forestix.data.cruise.Project
 import com.hcjeong.forestix.data.cruise.SamplingScheme
 import com.hcjeong.forestix.data.cruise.Tree
@@ -159,6 +163,8 @@ import com.hcjeong.forestix.ui.shareFile
 import com.hcjeong.forestix.ui.softDropShadow
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixColors
+import com.hcjeong.forestix.ui.theme.ForestixBorderedButton
+import com.hcjeong.forestix.ui.theme.ForestixProminentButton
 import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import java.text.SimpleDateFormat
@@ -209,6 +215,11 @@ internal class CruiseModeState {
     /// refusal the cruiser has to see, because the alternative was writing a
     /// plot centre the app had guessed (iOS `plotSaveRefusal`).
     var plotSaveRefusal by mutableStateOf<String?>(null)
+    /// Why a PLAN could not be written. Its own channel rather than
+    /// `plotSaveRefusal`, whose dialog is titled "Can't save the plot centre"
+    /// — a plan has no centre, and a refusal that names the wrong thing sends
+    /// the cruiser looking for a GPS problem they do not have.
+    var planSaveRefusal by mutableStateOf<String?>(null)
     /// A "Start plot now" write is in flight. The storage write is a
     /// coroutine and the peek stays on screen until it lands, so without
     /// this a second tap inside that window runs the conversion twice: two
@@ -217,6 +228,59 @@ internal class CruiseModeState {
     /// has carried this guard since it was written (`if (saving) return`,
     /// RecordCentreSheet.kt); the peek path is the one that lost it.
     var startingPlanned by mutableStateOf(false)
+
+    // MARK: - Planning on the map (press and hold)
+
+    /// Coordinate a press-and-hold landed on, while its menu is up. This is
+    /// the ONE door into planning: the (+)'s "Pick on the map" arms the
+    /// prompt below and then waits for this same gesture, so there is a
+    /// single flow to learn and a single place a drawn coordinate is born.
+    var planMenuAt by mutableStateOf<CoordinateConversions.LatLon?>(null)
+    /// The cruiser asked to plan on the map and has not pressed yet — the
+    /// map shows the instruction banner until they do or cancel.
+    var awaitingPlanPress by mutableStateOf(false)
+    /// The planned plot a "Move on map" is in flight for. The next long press
+    /// MOVES it instead of raising the menu; a plan drawn in the wrong spot
+    /// is the ordinary case, not an exception.
+    var movingPlannedId by mutableStateOf<UUID?>(null)
+    /// Planned plot the delete confirmation is up for.
+    var deletePlannedCandidate by mutableStateOf<PlannedPlot?>(null)
+    /// The (+)'s two doors into a plot — start on the fix that exists now, or
+    /// plan the location on the map first.
+    var startPlotChoiceOpen by mutableStateOf(false)
+    /// JOB 1 <-> JOB 2 SEAM. The long-press menu's "Draw an area" writes the
+    /// pressed coordinate here and does nothing else — the area editor is not
+    /// this job's to build. Whoever owns drawing observes this, opens on the
+    /// coordinate, and sets it back to null when the editor closes. It is
+    /// deliberately the only handoff: one entry point, so "Draw an area"
+    /// cannot end up meaning two different things on the two platforms.
+    /// iOS carries the same seam as `MapHomeScreen.boundaryDrawSeed`.
+    var boundaryDrawSeed by mutableStateOf<CoordinateConversions.LatLon?>(null)
+
+    /// Drop a PlannedPlot where the cruiser pressed — wired by
+    /// CruiseModeEffects (it needs the environment + a coroutine scope).
+    var planPlot: (CoordinateConversions.LatLon) -> Unit = {}
+    /// Move an existing plan to where the cruiser just pressed.
+    var movePlanned: (PlannedPlot, CoordinateConversions.LatLon) -> Unit = { _, _ -> }
+    /// Delete a plan (never a measurement — a planned plot holds no trees).
+    var deletePlanned: (PlannedPlot) -> Unit = {}
+
+    /// Where every hand-drawn coordinate enters the app.
+    ///
+    /// A press with a MOVE armed relocates that plan and nothing else — the
+    /// cruiser asked one question ("where should this be instead?") and gets
+    /// no menu in the middle of answering it. Otherwise the menu comes up.
+    fun onMapLongPress(coordinate: CoordinateConversions.LatLon) {
+        val moving = movingPlannedId
+        if (moving != null) {
+            val planned = data.plannedPlots.firstOrNull { it.id == moving }
+            movingPlannedId = null
+            if (planned != null) movePlanned(planned, coordinate)
+            return
+        }
+        selectedId = null
+        planMenuAt = coordinate
+    }
 
     /// Actions — wired by CruiseModeEffects (they need nav/scope/settings).
     var startPlot: () -> Unit = {}
@@ -387,6 +451,9 @@ internal fun CruiseModeEffects(
     /// (+) with no active plot: ensure a CURRENT project exists (auto-named,
     /// units from settings — name-once philosophy, never a gate), then hand
     /// off to the AR sampling-ring plot creator.
+    /// "Start here" — the first of the (+)'s two doors, and the behaviour
+    /// that button has always had. The second door ("Pick on the map") arms
+    /// the press-and-hold instead and never reaches this.
     state.startPlot = {
         scope.launch {
             try {
@@ -491,6 +558,104 @@ internal fun CruiseModeEffects(
                     "The centre was not saved — try again."
             }
             state.startingPlanned = false
+            state.refresh++
+        }
+    }
+
+    /// Press-and-hold "Plan a plot here": drop a PlannedPlot where the
+    /// cruiser pressed.
+    ///
+    /// The coordinate is stamped MANUAL and stays in plannedLat/plannedLon.
+    /// It is an INTENTION: no fix is read here, nothing is measured, and the
+    /// plot this becomes will take its centre from the arrival fix instead
+    /// (`startPlannedNow`). Keeping the drawn point and the arrival fix apart
+    /// is the whole reason both are stored.
+    ///
+    /// The plot NUMBER is one past the highest already spoken for, planned
+    /// OR real: a planned plot carries its number into the Plot it becomes
+    /// (`convertPlannedToActivePlot`), so numbering off the planned list
+    /// alone would collide with an ad-hoc plot started earlier in the day —
+    /// two "Plot 4"s in one project, indistinguishable in every export.
+    state.planPlot = { coordinate ->
+        scope.launch {
+            try {
+                val p = state.project ?: createDefaultProject(env, settings).also {
+                    env.settings.setCruiseProjectId(it.id.toString())
+                }
+                val highest = maxOf(
+                    state.data.plannedPlots.maxOfOrNull { it.plotNumber } ?: 0,
+                    state.data.plots.maxOfOrNull { it.plotNumber } ?: 0,
+                )
+                val planned = PlannedPlot(
+                    id = UUID.randomUUID(),
+                    projectId = p.id,
+                    // No stratum: a finger on a map is not inside a stratum
+                    // the app knows about, and guessing one from a boundary
+                    // would file this plot under a stratum the cruiser never
+                    // chose.
+                    stratumId = null,
+                    plotNumber = highest + 1,
+                    plannedLat = coordinate.latitude,
+                    plannedLon = coordinate.longitude,
+                    visited = false,
+                    skipped = false,
+                    plannedSource = PositionSource.MANUAL,
+                )
+                env.plannedPlotRepository.create(planned)
+                // Open its peek straight away: the plan is only useful once
+                // the cruiser can navigate to it, and that is one tap inside.
+                state.selectedId = "planned-${planned.id}"
+            } catch (e: Exception) {
+                state.planSaveRefusal = "Storage error: ${e.message ?: e}. " +
+                    "The planned plot was not saved — try again."
+            }
+            state.refresh++
+        }
+    }
+
+    /// Planned peek "Move on map" → the next press-and-hold. Re-stamps
+    /// MANUAL whatever laid the point down first: after this the coordinate
+    /// IS a drawn one, and a generator's provenance left in place would be a
+    /// claim about a point the generator never produced.
+    state.movePlanned = { planned, coordinate ->
+        scope.launch {
+            val lat = planned.plannedLat
+            val lon = planned.plannedLon
+            val source = planned.plannedSource
+            try {
+                planned.plannedLat = coordinate.latitude
+                planned.plannedLon = coordinate.longitude
+                planned.plannedSource = PositionSource.MANUAL
+                env.plannedPlotRepository.update(planned)
+                state.selectedId = "planned-${planned.id}"
+            } catch (e: Exception) {
+                // Storage error — put the plan back where the map still
+                // shows it, then say so.
+                planned.plannedLat = lat
+                planned.plannedLon = lon
+                planned.plannedSource = source
+                state.planSaveRefusal = "Storage error: ${e.message ?: e}. " +
+                    "The planned plot was not moved — try again."
+            }
+            state.refresh++
+        }
+    }
+
+    /// Planned peek "Delete plan": remove the PlannedPlot row. Nothing
+    /// measured can be lost — a planned plot holds no trees and no centre,
+    /// and the moment it becomes a real plot it stops being reachable from
+    /// here (the pin turns solid).
+    state.deletePlanned = { planned ->
+        scope.launch {
+            try {
+                env.plannedPlotRepository.delete(planned.id)
+                if (state.navTargetId == planned.id) state.navTargetId = null
+                if (state.movingPlannedId == planned.id) state.movingPlannedId = null
+                state.selectedId = null
+            } catch (e: Exception) {
+                state.planSaveRefusal = "Storage error: ${e.message ?: e}. " +
+                    "The planned plot was not deleted — try again."
+            }
             state.refresh++
         }
     }
@@ -698,6 +863,65 @@ internal fun BoxScope.CruiseDistanceOverlay(
     }
 }
 
+/// The armed-gesture banner: the map is waiting for a press and says so,
+/// because an armed gesture with no visible state is a mode the cruiser
+/// cannot see they are in. Names the plot being moved, since a move and a
+/// fresh plan look identical once the finger is down. Strings byte-identical
+/// to iOS `mapPlanPromptText`.
+///
+/// `topPaddingDp` comes from the caller because this rides UNDER the plot
+/// status banner when there is one — two pills stacked, not one over the
+/// other.
+@Composable
+internal fun BoxScope.CruisePlanPromptBanner(
+    state: CruiseModeState,
+    topPaddingDp: Dp,
+) {
+    val colors = Forestix.colors
+    val type = Forestix.type
+    val moving = state.movingPlannedId
+        ?.let { id -> state.data.plannedPlots.firstOrNull { it.id == id } }
+    val text = if (moving != null) {
+        "Press and hold the map to move Plot ${moving.plotNumber}."
+    } else {
+        "Press and hold the map to plan a plot."
+    }
+    Row(
+        Modifier
+            .align(Alignment.TopCenter)
+            .statusBarsPadding()
+            .padding(top = topPaddingDp, start = ForestixSpace.md, end = ForestixSpace.md)
+            .widthIn(max = 340.dp)
+            .softDropShadow(Color.Black.copy(alpha = 0.18f), 8.dp, 2.dp, cornerRadius = 10.dp)
+            .clip(ForestixRadius.control)
+            .background(colors.surface)
+            .border(1.dp, colors.divider, ForestixRadius.control)
+            .padding(horizontal = 12.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs),
+    ) {
+        Text(
+            text,
+            style = type.bodyBold.copy(fontSize = 12.sp, fontWeight = FontWeight.SemiBold),
+            color = colors.textPrimary,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        Spacer(Modifier.weight(1f))
+        Box(
+            Modifier.pressableNoRipple {
+                state.awaitingPlanPress = false
+                state.movingPlannedId = null
+            },
+        ) {
+            Text(
+                "Cancel",
+                style = type.bodyBold.copy(fontSize = 12.sp),
+                color = colors.primary,
+            )
+        }
+    }
+}
+
 /// Bottom half of cruise mode: the morphing (+) cluster (with the mode
 /// toggle + Log circles in the map home's exact positions), or a peek card
 /// when a cruise pin is up.
@@ -743,6 +967,13 @@ internal fun CruiseModeBottomContent(
                     .padding(bottom = 20.dp),
                 starting = state.startingPlanned,
                 onStartNow = { state.startPlannedNow(peekPlanned) },
+                onMoveOnMap = {
+                    // Same press-and-hold that made the plan — the card gets
+                    // out of the way so the map underneath is pressable.
+                    state.selectedId = null
+                    state.movingPlannedId = peekPlanned.id
+                },
+                onDelete = { state.deletePlannedCandidate = peekPlanned },
                 onRecordCentre = {
                     state.selectedId = null
                     state.recordCentreFor = peekPlanned
@@ -819,7 +1050,14 @@ internal fun CruiseModeBottomContent(
                                 }
                                 nearest?.let { state.recordCentreFor = it }
                             }
-                            else -> state.startPlot()
+                            // TWO DOORS, because the cruiser sometimes plans
+                            // and sometimes just arrives. Neither is a new
+                            // path: "Start here" is `startPlot()` below, the
+                            // AR sampling-ring screen this button has always
+                            // opened, and "Pick on the map" arms the
+                            // press-and-hold that planning already uses.
+                            // Adding a third way to plan is what this avoids.
+                            else -> state.startPlotChoiceOpen = true
                         }
                     },
                     onProject = { state.projectSheetOpen = true },
@@ -957,6 +1195,108 @@ internal fun CruiseModeSheets(
         )
     }
 
+    // MARK: - Press-and-hold planning menu (mission planning, DJI-style)
+
+    // The two things a cruiser plans on a map. Raised by the gesture, and by
+    // the (+)'s "Pick on the map" arming the same gesture — one flow, so
+    // there is never a second way to plan that behaves differently. Strings
+    // byte-identical to the iOS confirmation dialog.
+    val planAt = state.planMenuAt
+    if (planAt != null) {
+        // Same shape as the drawn plot's tap menu (PlotOverlayMenu): a
+        // titled card of full-width buttons, which is this app's answer to
+        // the iOS confirmation dialog it mirrors.
+        ChoiceMenuDialog(
+            title = "Plan here",
+            primaryLabel = "Plan a plot here",
+            secondaryLabel = "Draw an area",
+            onPrimary = {
+                state.planMenuAt = null
+                state.awaitingPlanPress = false
+                state.planPlot(planAt)
+            },
+            onSecondary = {
+                // Hands the coordinate to whoever owns area drawing and
+                // stops — see `boundaryDrawSeed`. Nothing here decides what
+                // a drawn area becomes.
+                state.boundaryDrawSeed = planAt
+                state.planMenuAt = null
+                state.awaitingPlanPress = false
+            },
+            onDismiss = {
+                state.planMenuAt = null
+                state.awaitingPlanPress = false
+            },
+        )
+    }
+
+    // MARK: - The (+)'s two doors into a plot
+
+    // Not a third path: "Pick on the map" arms the press-and-hold above and
+    // nothing else.
+    if (state.startPlotChoiceOpen) {
+        ChoiceMenuDialog(
+            title = "Start plot",
+            primaryLabel = "Start here",
+            secondaryLabel = "Pick on the map",
+            onPrimary = {
+                state.startPlotChoiceOpen = false
+                state.startPlot()
+            },
+            onSecondary = {
+                state.startPlotChoiceOpen = false
+                state.selectedId = null
+                state.awaitingPlanPress = true
+            },
+            onDismiss = { state.startPlotChoiceOpen = false },
+        )
+    }
+
+    // MARK: - Delete a planned plot
+
+    // The plan, never a measurement. Worded so the cruiser can tell: no tally
+    // can be lost here, because a planned plot has never held one.
+    val deletePlanned = state.deletePlannedCandidate
+    if (deletePlanned != null) {
+        AlertDialog(
+            onDismissRequest = { state.deletePlannedCandidate = null },
+            title = { Text("Delete planned plot?") },
+            text = {
+                Text(
+                    "Delete the plan for Plot ${deletePlanned.plotNumber}? " +
+                        "Nothing measured is affected — this plot has no readings yet.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        state.deletePlannedCandidate = null
+                        state.deletePlanned(deletePlanned)
+                    },
+                ) { Text("Delete planned plot") }
+            },
+            dismissButton = {
+                TextButton(onClick = { state.deletePlannedCandidate = null }) { Text("Cancel") }
+            },
+        )
+    }
+
+    // MARK: - Planned-plot refusal
+
+    // A plan has no centre, so it gets its own refusal rather than borrowing
+    // the one titled "Can't save the plot centre".
+    val planRefusal = state.planSaveRefusal
+    if (planRefusal != null) {
+        AlertDialog(
+            onDismissRequest = { state.planSaveRefusal = null },
+            title = { Text("Can't save the planned plot") },
+            text = { Text(planRefusal) },
+            confirmButton = {
+                TextButton(onClick = { state.planSaveRefusal = null }) { Text("OK") }
+            },
+        )
+    }
+
     // MARK: - Plot-centre refusal (field 17 — "Start plot now" with no fix)
 
     val refusal = state.plotSaveRefusal
@@ -969,6 +1309,55 @@ internal fun CruiseModeSheets(
                 TextButton(onClick = { state.plotSaveRefusal = null }) { Text("OK") }
             },
         )
+    }
+}
+
+/// A two-choice menu over the map: the press-and-hold planning menu and the
+/// (+)'s two doors. Same card shape as `PlotOverlayMenu` — a titled column of
+/// full-width buttons — which is this app's answer to the iOS confirmation
+/// dialog these mirror. Both labels are ordinary (non-destructive) actions,
+/// so neither takes the danger treatment.
+@Composable
+private fun ChoiceMenuDialog(
+    title: String,
+    primaryLabel: String,
+    secondaryLabel: String,
+    onPrimary: () -> Unit,
+    onSecondary: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val colors = Forestix.colors
+    val type = Forestix.type
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth(0.86f)
+                .widthIn(max = 340.dp)
+                .clip(ForestixRadius.card)
+                .background(colors.surface)
+                .padding(ForestixSpace.md),
+            verticalArrangement = Arrangement.spacedBy(ForestixSpace.sm),
+        ) {
+            Text(title, style = type.bodyBold, color = colors.textPrimary)
+            ForestixProminentButton(
+                label = primaryLabel,
+                modifier = Modifier.fillMaxWidth(),
+                onClick = onPrimary,
+            )
+            ForestixBorderedButton(
+                label = secondaryLabel,
+                modifier = Modifier.fillMaxWidth(),
+                onClick = onSecondary,
+            )
+            ForestixBorderedButton(
+                label = "Cancel",
+                modifier = Modifier.fillMaxWidth(),
+                onClick = onDismiss,
+            )
+        }
     }
 }
 
@@ -1137,6 +1526,8 @@ private fun PlannedPeekCard(
     onRecordCentre: () -> Unit,
     onToggleNavigate: () -> Unit,
     onToggleSkip: () -> Unit,
+    onMoveOnMap: () -> Unit,
+    onDelete: () -> Unit,
 ) {
     val colors = Forestix.colors
     val type = Forestix.type
@@ -1320,6 +1711,43 @@ private fun PlannedPeekCard(
                 style = type.bodyBold.copy(fontSize = 14.sp),
                 color = if (skipped) colors.textPrimary else colors.confidenceWarn,
             )
+        }
+        Spacer(Modifier.size(8.dp))
+        // A PLAN IN THE WRONG SPOT IS THE NORMAL CASE. Move re-arms the same
+        // press-and-hold that made the plan; Delete throws the plan away.
+        // Both sit below the skip toggle because they change the plan itself
+        // rather than what to do about it. iOS carries the same pair.
+        Row(horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs)) {
+            Box(
+                Modifier
+                    .weight(1f)
+                    .heightIn(min = 44.dp)
+                    .pressableNoRipple(onClick = onMoveOnMap)
+                    .clip(ForestixRadius.control)
+                    .border(1.dp, colors.divider, ForestixRadius.control),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "Move on map",
+                    style = type.bodyBold.copy(fontSize = 14.sp),
+                    color = colors.textPrimary,
+                )
+            }
+            Box(
+                Modifier
+                    .weight(1f)
+                    .heightIn(min = 44.dp)
+                    .pressableNoRipple(onClick = onDelete)
+                    .clip(ForestixRadius.control)
+                    .border(1.dp, colors.confidenceBad.copy(alpha = 0.5f), ForestixRadius.control),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "Delete plan",
+                    style = type.bodyBold.copy(fontSize = 14.sp),
+                    color = colors.confidenceBad,
+                )
+            }
         }
     }
 }

@@ -204,6 +204,11 @@ public struct MapHomeScreen: View {
     /// is tapped.
     @State private var chooserTreeName: String = ""
     @State private var chooserSpeciesCode: String?
+    /// False while `chooserSpeciesCode` is only the app's carry-over guess,
+    /// true once the cruiser has picked in the control. It drives the dim
+    /// tertiary styling and nothing else — the code is stored either way (see
+    /// `suggestedSpecies`).
+    @State private var chooserSpeciesConfirmed = false
     /// Far-GPS guard — set when the peek primary button is tapped while
     /// the cruiser stands > 30 m from the pin; the alert asks before the
     /// scoped chooser opens.
@@ -279,6 +284,38 @@ public struct MapHomeScreen: View {
     @State var recordingTarget: PlannedPlot?
     @State var presentingCruiseSetup = false
     @State var pendingCruiseSetup = false
+
+    // MARK: Planning on the map (long press)
+
+    /// Coordinate a press-and-hold landed on, while its menu is up. This is
+    /// the ONE door into planning: the (+)'s "Pick on the map" arms the
+    /// prompt below and then waits for this same gesture, so there is a
+    /// single flow to learn and a single place a drawn coordinate is born.
+    @State var mapPlanCoordinate: CoordinateConversions.LatLon?
+    /// The cruiser asked to plan on the map and has not pressed yet — the
+    /// map shows the instruction banner until they do or cancel.
+    @State var awaitingMapPlanPress = false
+    /// The planned plot a "Move on map" is in flight for. The next long
+    /// press MOVES it instead of raising the menu; a plan drawn in the wrong
+    /// spot is the ordinary case, not an exception.
+    @State var movingPlannedID: UUID?
+    /// Planned plot the delete confirmation is up for.
+    @State var deletePlannedCandidate: PlannedPlot?
+    /// Why a PLAN could not be written. Its own channel rather than
+    /// `plotSaveRefusal`, whose alert is titled "Can't save the plot centre"
+    /// — a plan has no centre, and a refusal that names the wrong thing sends
+    /// the cruiser looking for a GPS problem they do not have.
+    @State var planSaveRefusal: String?
+    /// The (+)'s two doors into a plot — start on the fix that exists now,
+    /// or plan the location on the map first.
+    @State var presentingStartPlotChoice = false
+    /// JOB 1 ↔ JOB 2 SEAM. The long-press menu's "Draw an area" writes the
+    /// pressed coordinate here and does nothing else — the area editor is
+    /// not this job's to build. Whoever owns drawing observes this, opens on
+    /// the coordinate, and sets it back to nil when the editor closes. It is
+    /// deliberately the only handoff: one entry point, so "Draw an area"
+    /// cannot end up meaning two different things on the two platforms.
+    @State var boundaryDrawSeed: CoordinateConversions.LatLon?
 
     // One-button Export all, run inline in the project sheet.
     @State var isExportingAll = false
@@ -392,6 +429,12 @@ public struct MapHomeScreen: View {
                     // Absent entirely when no plot is drawn.
                     if isCruiseMode, let plot = cruisePlotOverlay {
                         cruisePlotBanner(plot)
+                    }
+                    // The map is waiting for a press: says so, because an
+                    // armed gesture with no visible state is a mode the
+                    // cruiser cannot see they are in.
+                    if isCruiseMode, awaitingMapPlanPress || movingPlannedID != nil {
+                        mapPlanPromptBanner
                     }
                     Spacer()
                 }
@@ -540,7 +583,8 @@ public struct MapHomeScreen: View {
                 Text("Your current GPS position is about \(warning.distanceM) m from this tree's pin. Measure it anyway?")
             }
             .sheet(isPresented: $presentingLayers) {
-                MapSettingsSheet(visibleRegion: visibleRegion)
+                MapSettingsSheet(visibleRegion: visibleRegion,
+                                 mapCamera: camera)
                     .environmentObject(settings)
             }
             // REMOVE, step two. The one destructive step on the plot
@@ -691,6 +735,14 @@ public struct MapHomeScreen: View {
             // A tap ON the drawn plot's boundary raises its small Edit /
             // Remove menu (M2) — the plot's own pin still owns the centre.
             onPlotTap: { id in openPlotMenu(id) },
+            // PLANNING IS A CRUISE ACT, so the gesture only means anything
+            // in cruise mode — measure mode's map carries no plots and no
+            // stand to bound, and a menu offering both there would name two
+            // things that do not exist in it.
+            onMapLongPress: { coordinate in
+                guard isCruiseMode else { return }
+                handleMapLongPress(at: coordinate)
+            },
             onCameraChange: { _, region in
                 visibleRegion = region
             })
@@ -1527,6 +1579,39 @@ public struct MapHomeScreen: View {
         return history.suggestedNextTreeName ?? ""
     }
 
+    /// Species the chooser's picker opens on, and whether that value counts as
+    /// already observed.
+    ///
+    /// Scoped from a peek card, the species comes off THAT tree's own readings
+    /// — somebody already recorded it against this stem, so it is confirmed and
+    /// draws normally. Otherwise it is the last species seen anywhere in the
+    /// log, which is a guess about the tree in front of the cruiser and draws
+    /// provisional.
+    ///
+    /// WHY THE UNTOUCHED GUESS IS STILL STORED. The alternative — show it, then
+    /// write nothing unless the cruiser taps the control — makes the sheet and
+    /// the log disagree about a value the cruiser was looking at when they
+    /// started the measurement, and this app does not silently drop what it
+    /// showed. Tapping "Full measurement" is already how the tree NAME above it
+    /// is accepted; the species is accepted by the same tap. The honesty is
+    /// bought at the point of decision instead: the value is visibly dim until
+    /// picked, and "— Unspecified —" is one tap away.
+    ///
+    /// This is the weaker half of the trade. A carried-over species that is
+    /// wrong is silent in a way a carried-over NAME is not — the name climbs, so
+    /// a stale one shows itself. What would actually close the gap is
+    /// per-field provenance on the reading, the way a coordinate carries its
+    /// `PositionSource`, so the export could say "carried over, never
+    /// confirmed". That is a schema change and is not in this job.
+    private var suggestedSpecies: (code: String?, confirmed: Bool) {
+        if let tree = chooserTreeOverride,
+           let recorded = history.speciesCode(forTreeNumber: tree,
+                                              plotID: history.activePlotID) {
+            return (recorded, true)
+        }
+        return (history.suggestedNextSpeciesCode, false)
+    }
+
     /// Copies the tree identity typed above the rows into the pending slots
     /// the covers read when they write the reading. Distance and sampling
     /// belong to no tree and never call this.
@@ -1560,7 +1645,12 @@ public struct MapHomeScreen: View {
             // one action rather than a second trip through the details sheet
             // once the number is already recorded.
             HStack(spacing: ForestixSpace.sm) {
-                TextField("Tree name", text: $chooserTreeName)
+                // The placeholder is an EXAMPLE, not the words "Tree name":
+                // the shape of the first name decides whether the app can name
+                // the rest of the stand, because `TreeNameSequence` only steps
+                // on a TRAILING NUMBER. "Big oak" comes back unchanged and the
+                // cruiser retypes every tree. Same string on both platforms.
+                TextField("e.g. Tree1", text: $chooserTreeName)
                     .textFieldStyle(.roundedBorder)
                     .autocorrectionDisabled()
                     .accessibilityIdentifier("mapHome.choose.treeName")
@@ -1569,7 +1659,9 @@ public struct MapHomeScreen: View {
                 // drift.
                 SpeciesPickerField(speciesCode: $chooserSpeciesCode,
                                    unspecifiedLabel: "Species",
-                                   compact: true)
+                                   compact: true,
+                                   provisional: !chooserSpeciesConfirmed,
+                                   onPick: { chooserSpeciesConfirmed = true })
                     .environmentObject(settings)
                     .fixedSize(horizontal: true, vertical: false)
             }
@@ -1616,12 +1708,17 @@ public struct MapHomeScreen: View {
             Spacer(minLength: 0)
         }
         .onAppear {
-            // Re-seeded on every presentation: the name follows the LOG, so a
-            // reading saved since the sheet last closed moves the suggestion
-            // on. Species starts unset — it is the one field that must not be
-            // inherited by accident from the previous tree.
+            // Re-seeded on every presentation: both follow the LOG, so a
+            // reading saved since the sheet last closed moves the suggestions
+            // on. Species used to start unset, on the grounds that it must not
+            // be inherited by accident — but in one stand it is the same
+            // species tree after tree, so that made it the most retyped field
+            // in the app. It is inherited now and marked provisional instead,
+            // which shows the inheritance rather than hiding it.
             chooserTreeName = suggestedTreeName
-            chooserSpeciesCode = nil
+            let species = suggestedSpecies
+            chooserSpeciesCode = species.code
+            chooserSpeciesConfirmed = species.confirmed
         }
         .padding(.horizontal, ForestixSpace.md)
         .presentationDetents([.height(530)])

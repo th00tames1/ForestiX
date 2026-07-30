@@ -242,6 +242,31 @@ class MapCameraState {
         )
     }
 
+    /// The exact inverse of `screenPoint` — where on the ground a point on
+    /// screen is. Null until the map has laid out and produced a camera.
+    ///
+    /// Needed by any host that lets the cruiser MOVE something with a
+    /// finger rather than just look at it (the boundary editor's corner and
+    /// edge handles). Derived from the same normalised-world maths as the
+    /// forward projection, so a coordinate round-trips through both
+    /// unchanged and a handle dragged one pixel moves one pixel's worth of
+    /// ground. Clamped to one world copy: a drag past the antimeridian or
+    /// into the Mercator pole cap has no sensible boundary meaning, and
+    /// wrapping silently would fling a corner to the far side of the planet.
+    /// iOS BasemapMapView.coordinate(at:camera:viewportSize:) is the same.
+    fun coordinateAt(point: Offset): CoordinateConversions.LatLon? {
+        val c = center ?: return null
+        val size = viewportSizePx
+        if (size.width <= 0 || size.height <= 0) return null
+        val worldPx = 256.0 * densityScale * 2.0.pow(zoom)
+        val xNorm = lonToXNorm(c.longitude) + (point.x - size.width / 2.0) / worldPx
+        val yNorm = latToYNorm(c.latitude) + (point.y - size.height / 2.0) / worldPx
+        return CoordinateConversions.LatLon(
+            latitude = yNormToLat(yNorm.coerceIn(0.0, 1.0)),
+            longitude = xNormToLon(xNorm.coerceIn(0.0, 1.0)),
+        )
+    }
+
     /// Lat/lon corners of what's on screen as an outer ring (NW, NE, SE,
     /// SW) — the shape OfflineBasemap.planJob consumes. Null until the map
     /// has laid out and produced a camera.
@@ -306,6 +331,10 @@ fun MapView(
     onPlotTap: ((String) -> Unit)? = null,
     /// Tap that hit no marker — the map home uses it to dismiss the peek card.
     onMapTap: (() -> Unit)? = null,
+    /// Press-and-hold anywhere on the map, carrying the coordinate under the
+    /// finger. The host raises its own menu; the map has no opinion about
+    /// what a long press means. iOS BasemapMapView takes the same callback.
+    onMapLongPress: ((CoordinateConversions.LatLon) -> Unit)? = null,
     /// Pulsing blue "you are here" dot (mock `.youdot`).
     youLocation: CoordinateConversions.LatLon? = null,
     /// Observable camera for hosts that need visibleBounds() on demand.
@@ -443,8 +472,28 @@ fun MapView(
                         }
                     }
                 }
-                .pointerInput(markers, plot, onMarkerTap, onPlotTap, onMapTap) {
+                .pointerInput(markers, plot, onMarkerTap, onPlotTap, onMapTap, onMapLongPress) {
                     detectTapGestures(
+                        // PRESS AND HOLD → the ground under the finger.
+                        // Compose's own long-press timing, so it agrees with
+                        // every other hold in the app; the projection is the
+                        // exact inverse of the draw pass below, evaluated
+                        // with the camera as of the press, so the pin the
+                        // host drops lands where the finger was.
+                        onLongPress = onLongPress@{ press ->
+                            val emit = onMapLongPress ?: return@onLongPress
+                            val worldPx = 256.0 * density * 2.0.pow(camZoom)
+                            val originX = lonToXNorm(camCenter.longitude) * worldPx - size.width / 2.0
+                            val originY = latToYNorm(camCenter.latitude) * worldPx - size.height / 2.0
+                            val xNorm = ((press.x + originX) / worldPx).mod(1.0)
+                            val yNorm = ((press.y + originY) / worldPx).coerceIn(0.0, 1.0)
+                            emit(
+                                CoordinateConversions.LatLon(
+                                    latitude = yNormToLat(yNorm),
+                                    longitude = xNormToLon(xNorm),
+                                ),
+                            )
+                        },
                         // iOS BasemapMapView doubleTapZoom: one level in,
                         // keeping the tapped point stationary.
                         onDoubleTap = { tap ->

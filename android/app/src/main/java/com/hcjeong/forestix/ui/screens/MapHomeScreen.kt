@@ -152,6 +152,7 @@ import com.hcjeong.forestix.ui.screens.cruise.CruiseModeBottomContent
 import com.hcjeong.forestix.ui.screens.cruise.CruiseModeEffects
 import com.hcjeong.forestix.ui.screens.cruise.CruiseModeSheets
 import com.hcjeong.forestix.ui.screens.cruise.CruiseModeState
+import com.hcjeong.forestix.ui.screens.cruise.CruisePlanPromptBanner
 import com.hcjeong.forestix.ui.screens.cruise.CruisePlotBanner
 import com.hcjeong.forestix.ui.screens.cruise.PendingPlotFraming
 import com.hcjeong.forestix.ui.screens.cruise.cruiseModeMarkers
@@ -320,6 +321,10 @@ fun MapHomeScreen(nav: NavController) {
     // when the current fix sits > 30 m from the tapped tree's pin.
     var farTreeConfirm by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var mapSettingsOpen by remember { mutableStateOf(false) }
+    // "Draw an area" — the boundary editor, raised full-screen over the
+    // home. Not a nav destination: it is a modal edit of one map object,
+    // and back out of it must land here, not wherever nav last was.
+    var drawingBoundary by remember { mutableStateOf(false) }
     // The photos the viewer is open on — every frame the tapped tree has,
     // in capture order. Empty = closed.
     var photoPages by remember { mutableStateOf<List<PhotoPage>>(emptyList()) }
@@ -500,6 +505,13 @@ fun MapHomeScreen(nav: NavController) {
             // Remove menu (M2) — the plot's own pin still owns the centre.
             onPlotTap = { id -> cruise.openPlotMenu(id) },
             onMapTap = { if (isCruise) cruise.selectedId = null else selectedPinId = null },
+            // PLANNING IS A CRUISE ACT, so the gesture only means anything in
+            // cruise mode — measure mode's map carries no plots and no stand
+            // to bound, and a menu offering both there would name two things
+            // that do not exist in it. iOS gates it the same way.
+            onMapLongPress = { coordinate ->
+                if (isCruise) cruise.onMapLongPress(coordinate)
+            },
             // The you-dot, from the gated fix ONLY. A dot is the map's
             // flattest assertion — "you are here" — so it may never outlive
             // the evidence for it. No usable fix, no dot: the map simply
@@ -566,6 +578,16 @@ fun MapHomeScreen(nav: NavController) {
         // the radius, and the live distance from the centre — all in the
         // cruiser's units.
         plotOverlay?.let { CruisePlotBanner(it, settings, cruise) }
+
+        // The map is waiting for a press: says so. Rides under the plot
+        // status banner when there is one, so the two stack rather than
+        // overlap (iOS puts them in the same top VStack).
+        if (isCruise && (cruise.awaitingPlanPress || cruise.movingPlannedId != null)) {
+            CruisePlanPromptBanner(
+                cruise,
+                topPaddingDp = if (plotOverlay != null) 108.dp else 56.dp,
+            )
+        }
 
         // Cruise navigate mode: floating live distance chip riding the
         // dashed guide line's midpoint (mock ⑦ `.distchip`).
@@ -675,6 +697,11 @@ fun MapHomeScreen(nav: NavController) {
     // MARK: - Sheets + photo detail
 
     if (chooserOpen) {
+        // The species already recorded against the tree the peek card scoped
+        // to. Read once so the sheet and its provisional flag cannot disagree
+        // about where the value came from.
+        val scopedSpecies = chooserTreeOverride
+            ?.let { env.history.speciesCode(it, env.history.activePlotID.value) }
         MeasureChooserSheet(
             nextTree = env.history.suggestedNextTreeNumber,
             treeOverride = chooserTreeOverride,
@@ -683,6 +710,8 @@ fun MapHomeScreen(nav: NavController) {
             suggestedName = chooserTreeOverride
                 ?.let { env.history.treeName(it, env.history.activePlotID.value) }
                 ?: env.history.suggestedNextTreeName,
+            suggestedSpecies = scopedSpecies ?: env.history.suggestedNextSpeciesCode,
+            suggestedSpeciesConfirmed = scopedSpecies != null,
             onDismiss = {
                 chooserOpen = false
                 chooserTreeOverride = null
@@ -739,6 +768,23 @@ fun MapHomeScreen(nav: NavController) {
         MapSettingsSheet(
             camera = camera,
             onDismiss = { mapSettingsOpen = false },
+            // The boundary editor needs the whole screen — a map you drag
+            // corners on cannot live inside a bottom sheet. Close the sheet
+            // and raise it over the home instead.
+            onDrawArea = {
+                mapSettingsOpen = false
+                drawingBoundary = true
+            },
+        )
+    }
+    // DRAW AN AREA — full-screen over the home, opening on the camera the
+    // cruiser was already looking at so the starting rectangle lands on the
+    // ground they had on screen.
+    if (drawingBoundary) {
+        BoundaryDrawScreen(
+            initialCenter = camera.center ?: mapCenter,
+            initialZoom = camera.zoom,
+            onDismiss = { drawingBoundary = false },
         )
     }
     if (photoPages.isNotEmpty()) {
@@ -1559,6 +1605,14 @@ private fun MeasureChooserSheet(
     /// peek card scoped this sheet, else the auto-incremented successor of the
     /// last name in the log. Null / blank starts the field empty.
     suggestedName: String? = null,
+    /// Species the picker opens on — the scoped tree's own recorded species,
+    /// else the last species seen anywhere in the log. Null opens it unset.
+    suggestedSpecies: String? = null,
+    /// True when [suggestedSpecies] came off the scoped tree's own readings, so
+    /// somebody already recorded it against this stem. False when it is the
+    /// log-wide carry-over, which is a guess about the tree in front of the
+    /// cruiser and is drawn provisional until they pick.
+    suggestedSpeciesConfirmed: Boolean = false,
     onDismiss: () -> Unit,
     /// (route, lockTree, name, speciesCode) — lockTree is true for the
     /// tree-bound rows (Full / DBH / Height), which pin the reading to
@@ -1573,7 +1627,18 @@ private fun MeasureChooserSheet(
     // than a second trip through the details sheet once the number is already
     // recorded.
     var treeName by remember(suggestedName) { mutableStateOf(suggestedName.orEmpty()) }
-    var speciesCode by remember { mutableStateOf<String?>(null) }
+    // Species used to start unset, on the grounds that it must not be inherited
+    // by accident — but in one stand it is the same species tree after tree, so
+    // that made it the most retyped field in the app. It is inherited now and
+    // marked provisional instead, which shows the inheritance rather than
+    // hiding it. `speciesConfirmed` drives that styling and nothing else: the
+    // code is stored either way, because the sheet showed it and this app does
+    // not silently drop what it showed. See the iOS sibling's
+    // `suggestedSpecies` for the full argument.
+    var speciesCode by remember(suggestedSpecies) { mutableStateOf(suggestedSpecies) }
+    var speciesConfirmed by remember(suggestedSpecies) {
+        mutableStateOf(suggestedSpeciesConfirmed)
+    }
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = colors.surface) {
         Column(
             Modifier
@@ -1594,10 +1659,15 @@ private fun MeasureChooserSheet(
                 horizontalArrangement = Arrangement.spacedBy(ForestixSpace.sm),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                // The placeholder is an EXAMPLE, not the words "Tree name": the
+                // shape of the first name decides whether the app can name the
+                // rest of the stand, because [TreeNameSequence] only steps on a
+                // TRAILING NUMBER. "Big oak" comes back unchanged and the
+                // cruiser retypes every tree. Same string on both platforms.
                 OutlinedTextField(
                     value = treeName,
                     onValueChange = { treeName = it },
-                    placeholder = { Text("Tree name") },
+                    placeholder = { Text("e.g. Tree1") },
                     singleLine = true,
                     modifier = Modifier.weight(1f),
                 )
@@ -1606,9 +1676,15 @@ private fun MeasureChooserSheet(
                 // drift.
                 SpeciesPickerField(
                     speciesCode = speciesCode,
-                    onSpeciesCode = { speciesCode = it },
+                    onSpeciesCode = {
+                        speciesCode = it
+                        // Any pick makes it definite, including re-picking the
+                        // code already showing — that IS the confirmation.
+                        speciesConfirmed = true
+                    },
                     unspecifiedLabel = "Species",
                     bordered = true,
+                    provisional = !speciesConfirmed,
                 )
             }
             // Field fix: the chained DBH → Height capture is the common

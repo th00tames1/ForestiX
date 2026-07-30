@@ -648,7 +648,11 @@ public struct FieldLogScreen: View {
             // Same suggestion the chooser offers: the successor of the highest
             // name in the series the cruiser is using, or blank if they have
             // never named a tree.
-            suggestedName: history.suggestedNextTreeName ?? "")
+            suggestedName: history.suggestedNextTreeName ?? "",
+            // And the same species suggestion, from the same place in the
+            // history — a hand-entered stem stands in the same stand as the
+            // scanned ones either side of it.
+            suggestedSpecies: history.suggestedNextSpeciesCode)
     }
 
     /// Writes the tree.
@@ -925,6 +929,11 @@ private struct FieldLogNewTree: Identifiable {
     /// exactly as the pre-plot readings are, rather than claiming one.
     let plotName: String?
     let suggestedName: String
+    /// The last species seen in the log, offered the same way the name is. It
+    /// is the app's guess, never an observation — the sheet draws it dim until
+    /// the cruiser picks in the control. nil when nothing in the log has a
+    /// species, and then the picker opens unset.
+    let suggestedSpecies: String?
 }
 
 // MARK: - Typed-measurement rules
@@ -1450,6 +1459,10 @@ private struct FieldLogNewTreeSheet: View {
 
     @State private var treeName: String
     @State private var speciesCode: String?
+    /// False while `speciesCode` is only the log's carry-over, true once the
+    /// cruiser has picked. Styling only — the code is stored either way, on the
+    /// same argument as the measure chooser's.
+    @State private var speciesConfirmed = false
     @State private var dbhText = ""
     @State private var heightText = ""
 
@@ -1460,6 +1473,7 @@ private struct FieldLogNewTreeSheet: View {
         self.unitSystem = unitSystem
         self.onCreate = onCreate
         _treeName = State(initialValue: request.suggestedName)
+        _speciesCode = State(initialValue: request.suggestedSpecies)
     }
 
     private var imperial: Bool { unitSystem == .imperial }
@@ -1506,7 +1520,7 @@ private struct FieldLogNewTreeSheet: View {
                     // the same rule the measure chooser follows, so a stem
                     // entered here cannot collide with a scanned one.
                     labelled("Tree number", "#\(request.treeNumber)")
-                    TextField("Tree name", text: $treeName)
+                    TextField("e.g. Tree1", text: $treeName)
                         .autocorrectionDisabled()
                         .foregroundStyle(ForestixPalette.textPrimary)
                         .accessibilityIdentifier("fieldLog.newTree.treeName")
@@ -1514,7 +1528,9 @@ private struct FieldLogNewTreeSheet: View {
                     // one species list, one typed-code escape, no second copy
                     // to drift.
                     SpeciesPickerField(speciesCode: $speciesCode,
-                                       unspecifiedLabel: "Species")
+                                       unspecifiedLabel: "Species",
+                                       provisional: !speciesConfirmed,
+                                       onPick: { speciesConfirmed = true })
                         .environmentObject(settings)
                     if let plotName = request.plotName {
                         // Named on screen rather than assumed: the cruiser can

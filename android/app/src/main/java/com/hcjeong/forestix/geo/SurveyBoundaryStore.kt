@@ -7,8 +7,8 @@
 //     BoundaryImporter produced (so the stored file opens in any GIS, and
 //     the map re-reads it after relaunch rather than re-parsing a SHP).
 //   * boundary.record  — display name, feature count, import date, source
-//     format; a flat key=value file so a partial write can never look
-//     like a valid record.
+//     format, origin; a flat key=value file so a partial write can never
+//     look like a valid record.
 //
 // The store is a process singleton exposing a StateFlow, so the map and
 // the settings sheet always agree about what is loaded.
@@ -26,9 +26,15 @@ import kotlinx.coroutines.flow.asStateFlow
 data class StoredBoundary(
     val displayName: String,
     val featureCount: Int,
+    /// When this boundary entered the app — the import for a file, the save
+    /// for a drawn one.
     val importedAtMillis: Long,
     val sourceFormat: String,
     val geometries: List<BoundaryGeometry>,
+    /// Survey or sketch — see BoundaryOrigin. Kept in the record as well as
+    /// in the GeoJSON so the sheet's row can say which without
+    /// deserialising the geometry.
+    val origin: BoundaryOrigin = BoundaryOrigin.IMPORTED,
 )
 
 object SurveyBoundaryStore {
@@ -57,26 +63,70 @@ object SurveyBoundaryStore {
     /// Replace the stored boundary with a freshly imported one. Returns the
     /// record now in effect; throws BoundaryImportError if it cannot be
     /// written (never silently keeps the old one).
-    fun save(context: Context, boundary: ImportedBoundary, sourceFormat: String): StoredBoundary {
+    fun save(context: Context, boundary: ImportedBoundary, sourceFormat: String): StoredBoundary =
+        write(
+            context = context,
+            displayName = boundary.displayName,
+            geometries = boundary.geometries,
+            geoJSON = boundary.geoJSON,
+            sourceFormat = sourceFormat,
+            origin = BoundaryOrigin.IMPORTED,
+        )
+
+    /// Replace the stored boundary with one the cruiser DREW. A separate
+    /// entry point from `save` on purpose: there is no file, no CRS to
+    /// confirm (the map handed the coordinates over already in WGS84) — and
+    /// above all a different PROVENANCE, which is stamped here and travels
+    /// with the geometry from now on.
+    ///
+    /// The CALLER is responsible for having asked first when something was
+    /// already loaded (see MapSettingsSheet's replace confirmation); this
+    /// method carries out a decision, it does not second-guess one.
+    fun saveDrawn(
+        context: Context,
+        geometry: BoundaryGeometry,
+        displayName: String,
+    ): StoredBoundary =
+        write(
+            context = context,
+            displayName = displayName,
+            geometries = listOf(geometry),
+            geoJSON = BoundaryGeoJSON.serialise(listOf(geometry), BoundaryOrigin.DRAWN),
+            sourceFormat = BoundaryDraft.DRAWN_SOURCE_FORMAT,
+            origin = BoundaryOrigin.DRAWN,
+        )
+
+    /// The one write path. Both entry points land here so a drawn boundary
+    /// and an imported one can never drift apart in what gets persisted.
+    private fun write(
+        context: Context,
+        displayName: String,
+        geometries: List<BoundaryGeometry>,
+        geoJSON: String,
+        sourceFormat: String,
+        origin: BoundaryOrigin,
+    ): StoredBoundary {
         val dir = dir(context)
         try {
             dir.mkdirs()
-            File(dir, GEOJSON).writeText(boundary.geoJSON)
+            File(dir, GEOJSON).writeText(geoJSON)
             val importedAt = System.currentTimeMillis()
             File(dir, RECORD).writeText(
                 buildString {
-                    append("name=").append(boundary.displayName.replace('\n', ' ')).append('\n')
-                    append("features=").append(boundary.featureCount).append('\n')
+                    append("name=").append(displayName.replace('\n', ' ')).append('\n')
+                    append("features=").append(geometries.size).append('\n')
                     append("importedAt=").append(importedAt).append('\n')
                     append("format=").append(sourceFormat).append('\n')
+                    append("origin=").append(origin.raw).append('\n')
                 }
             )
             val stored = StoredBoundary(
-                displayName = boundary.displayName,
-                featureCount = boundary.featureCount,
+                displayName = displayName,
+                featureCount = geometries.size,
                 importedAtMillis = importedAt,
                 sourceFormat = sourceFormat,
-                geometries = boundary.geometries,
+                geometries = geometries,
+                origin = origin,
             )
             loaded = true
             _state.value = stored
@@ -123,6 +173,9 @@ object SurveyBoundaryStore {
                 importedAtMillis = fields["importedAt"]?.toLongOrNull() ?: geojson.lastModified(),
                 sourceFormat = fields["format"] ?: "",
                 geometries = geometries,
+                // A record written before drawing existed carries no
+                // origin line, and every one of those came from a file.
+                origin = BoundaryOrigin.fromRaw(fields["origin"]),
             )
         } catch (e: Exception) {
             // Unreadable = not drawn. Leave the files in place so the user

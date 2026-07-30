@@ -321,7 +321,10 @@ public enum BackupArchive {
                 stratumId: p.stratumId.map { stratumIdMap[$0] ?? $0 },
                 plotNumber: p.plotNumber,
                 plannedLat: p.plannedLat, plannedLon: p.plannedLon,
-                visited: p.visited, skipped: p.skipped)
+                visited: p.visited, skipped: p.skipped,
+                // Carried, not re-derived: restoring a backup must not turn a
+                // point the cruiser drew into one of unknown origin.
+                plannedSource: p.plannedSource)
             _ = try dstPlannedRepo.create(copy)
         }
 

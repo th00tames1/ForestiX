@@ -509,9 +509,12 @@ extension MapHomeScreen {
             withAnimation(.easeOut(duration: 0.18)) { selectedPinID = nil }
             recordingTarget = planned
         } else {
-            // A fresh plot: whatever ring is up belongs to somewhere else.
-            armPlotSetup(editing: nil)
-            presentingPlotSetup = true
+            // TWO DOORS, because the cruiser sometimes plans and sometimes
+            // just arrives. Neither is a new path: "Start here" is the AR
+            // sampling-ring screen this button has always opened, and "Pick
+            // on the map" arms the press-and-hold that planning already
+            // uses. Adding a third way to plan is what this avoids.
+            presentingStartPlotChoice = true
         }
     }
 
@@ -698,6 +701,83 @@ extension MapHomeScreen {
                     let n = liveTrees(in: plot.id).count
                     Text("Delete Plot \(plot.plotNumber) and its \(n) tree\(n == 1 ? "" : "s")? This can't be undone.")
                 }
+            }
+            // PRESS-AND-HOLD MENU (mission planning, DJI-style): the two
+            // things a cruiser plans on a map. Raised by the gesture, and by
+            // the (+)'s "Pick on the map" arming the same gesture — one flow,
+            // so there is never a second way to plan that behaves differently.
+            .confirmationDialog(
+                "Plan here",
+                isPresented: Binding(
+                    get: { mapPlanCoordinate != nil },
+                    set: { if !$0 { mapPlanCoordinate = nil } }),
+                titleVisibility: .visible
+            ) {
+                Button("Plan a plot here") {
+                    if let at = mapPlanCoordinate { planPlot(at: at) }
+                    mapPlanCoordinate = nil
+                    awaitingMapPlanPress = false
+                }
+                Button("Draw an area") {
+                    // Hands the coordinate to whoever owns area drawing and
+                    // stops — see `boundaryDrawSeed`. Nothing here decides
+                    // what a drawn area becomes.
+                    boundaryDrawSeed = mapPlanCoordinate
+                    mapPlanCoordinate = nil
+                    awaitingMapPlanPress = false
+                }
+                Button("Cancel", role: .cancel) {
+                    mapPlanCoordinate = nil
+                    awaitingMapPlanPress = false
+                }
+            }
+            // The (+)'s two doors. Not a third path: "Pick on the map" arms
+            // the press-and-hold above and nothing else.
+            .confirmationDialog(
+                "Start plot",
+                isPresented: $presentingStartPlotChoice,
+                titleVisibility: .visible
+            ) {
+                Button("Start here") {
+                    // Unchanged behaviour: the AR sampling-ring screen,
+                    // which records the centre from the fix available now.
+                    armPlotSetup(editing: nil)
+                    presentingPlotSetup = true
+                }
+                Button("Pick on the map") {
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        selectedPinID = nil
+                        awaitingMapPlanPress = true
+                    }
+                }
+                Button("Cancel", role: .cancel) { }
+            }
+            // Delete a planned plot — the plan, never a measurement. Worded
+            // so the cruiser can tell: no tally can be lost here, because a
+            // planned plot has never held one.
+            .alert("Delete planned plot?",
+                   isPresented: Binding(
+                       get: { deletePlannedCandidate != nil },
+                       set: { if !$0 { deletePlannedCandidate = nil } }),
+                   presenting: deletePlannedCandidate) { planned in
+                Button("Delete planned plot", role: .destructive) {
+                    deletePlanned(planned)
+                    deletePlannedCandidate = nil
+                }
+                Button("Cancel", role: .cancel) { deletePlannedCandidate = nil }
+            } message: { planned in
+                Text("Delete the plan for Plot \(planned.plotNumber)? Nothing measured is affected — this plot has no readings yet.")
+            }
+            // A plan has no centre, so it gets its own refusal rather than
+            // borrowing the one titled "Can't save the plot centre".
+            .alert("Can't save the planned plot",
+                   isPresented: Binding(
+                       get: { planSaveRefusal != nil },
+                       set: { if !$0 { planSaveRefusal = nil } })
+            ) {
+                Button("OK", role: .cancel) { planSaveRefusal = nil }
+            } message: {
+                Text(planSaveRefusal ?? "")
             }
             // Delete tree (peek) — the tree row + its photo.
             .alert("Delete tree?",
@@ -1251,7 +1331,7 @@ extension MapHomeScreen {
             // and it keeps the cruiser on the trunk they are already aiming
             // at. LOCKED strings — Android's dialog says the same words.
             .alert("Name this tree", isPresented: $renamingTallyTree) {
-                TextField("Tree name", text: $tallyNameDraft)
+                TextField("e.g. Tree1", text: $tallyNameDraft)
                     .autocorrectionDisabled()
                 Button("Save") { commitTallyRename() }
                 Button("Cancel", role: .cancel) { renamingTallyTree = false }
@@ -1871,6 +1951,164 @@ extension MapHomeScreen {
     /// a skipped plot stays visible (still in `plannedPlots`, since skipped is
     /// not visited) but is excluded from the (+) nearest-unvisited navigation
     /// and renders with the warn tint + "SKIP" badge.
+    // MARK: Planning on the map (press and hold)
+
+    /// Where every hand-drawn coordinate enters the app.
+    ///
+    /// A press with a MOVE armed relocates that plan and nothing else — the
+    /// cruiser asked one question ("where should this be instead?") and gets
+    /// no menu in the middle of answering it. Otherwise the menu comes up.
+    func handleMapLongPress(at coordinate: CoordinateConversions.LatLon) {
+        if let id = movingPlannedID {
+            movePlanned(id: id, to: coordinate)
+            return
+        }
+        withAnimation(.easeOut(duration: 0.18)) { selectedPinID = nil }
+        mapPlanCoordinate = coordinate
+    }
+
+    /// The number a newly planned plot takes: one past the highest number
+    /// ALREADY SPOKEN FOR, planned or real.
+    ///
+    /// Both sets have to be consulted because a planned plot carries its
+    /// number into the Plot it becomes (`convertPlannedToActivePlot`), so a
+    /// plan numbered off the planned list alone would collide with an
+    /// ad-hoc plot started earlier in the day — two "Plot 4"s in one
+    /// project, indistinguishable in every export.
+    func nextPlotNumber() -> Int {
+        let planned = plannedPlots.map(\.plotNumber).max() ?? 0
+        let real = plots.map(\.plotNumber).max() ?? 0
+        return max(planned, real) + 1
+    }
+
+    /// Drop a PlannedPlot where the cruiser pressed.
+    ///
+    /// The coordinate is stamped `.manual` and stays in `plannedLat` /
+    /// `plannedLon`. It is an INTENTION: no fix is read here, nothing is
+    /// measured, and the plot this becomes will take its centre from the
+    /// arrival fix instead (`startPlannedPlotNow`). Keeping the drawn point
+    /// and the arrival fix apart is the whole reason both are stored.
+    func planPlot(at coordinate: CoordinateConversions.LatLon) {
+        let project = currentProject ?? autoCreateProject()
+        guard let project else {
+            planSaveRefusal = "Couldn't plan the plot: there is no project to put it in."
+            return
+        }
+        let planned = PlannedPlot(
+            id: UUID(),
+            projectId: project.id,
+            // No stratum: a finger on a map is not inside a stratum the app
+            // knows about, and guessing one from a boundary would file this
+            // plot under a stratum the cruiser never chose.
+            stratumId: nil,
+            plotNumber: nextPlotNumber(),
+            plannedLat: coordinate.latitude,
+            plannedLon: coordinate.longitude,
+            visited: false,
+            skipped: false,
+            plannedSource: .manual)
+        do {
+            _ = try environment.plannedPlotRepository.create(planned)
+            HapticFeedback.play(.success)
+            reloadCruise()
+            // Open its peek straight away: the plan is only useful once the
+            // cruiser can navigate to it, and that is one tap inside here.
+            withAnimation(.easeOut(duration: 0.18)) {
+                selectedPinID = "pplot-\(planned.id.uuidString)"
+            }
+        } catch {
+            planSaveRefusal =
+                "Storage error: \(error.localizedDescription). The planned plot was not saved — try again."
+        }
+    }
+
+    /// Move an existing plan to where the cruiser just pressed.
+    ///
+    /// Re-stamps `.manual` whatever laid the point down first: after this the
+    /// coordinate IS a drawn one, and a generator's provenance left in place
+    /// would be a claim about a point the generator never produced.
+    func movePlanned(id: UUID, to coordinate: CoordinateConversions.LatLon) {
+        movingPlannedID = nil
+        guard var planned = plannedPlots.first(where: { $0.id == id }) else { return }
+        planned.plannedLat = coordinate.latitude
+        planned.plannedLon = coordinate.longitude
+        planned.plannedSource = .manual
+        do {
+            _ = try environment.plannedPlotRepository.update(planned)
+            HapticFeedback.play(.success)
+            reloadCruise()
+            withAnimation(.easeOut(duration: 0.18)) {
+                selectedPinID = "pplot-\(planned.id.uuidString)"
+            }
+        } catch {
+            planSaveRefusal =
+                "Storage error: \(error.localizedDescription). The planned plot was not moved — try again."
+        }
+    }
+
+    /// Delete a plan. Nothing measured can be lost: a PlannedPlot holds no
+    /// trees and no centre, and the moment it becomes a real plot it stops
+    /// being reachable from here (the pin turns solid).
+    func deletePlanned(_ planned: PlannedPlot) {
+        do {
+            try environment.plannedPlotRepository.delete(id: planned.id)
+        } catch {
+            planSaveRefusal =
+                "Storage error: \(error.localizedDescription). The planned plot was not deleted — try again."
+            return
+        }
+        if navTargetPlannedID == planned.id { navTargetPlannedID = nil }
+        if movingPlannedID == planned.id { movingPlannedID = nil }
+        if selectedPinID == "pplot-\(planned.id.uuidString)" {
+            withAnimation(.easeOut(duration: 0.18)) { selectedPinID = nil }
+        }
+        reloadCruise()
+    }
+
+    /// The armed-gesture banner. Names the plot being moved, because a move
+    /// and a fresh plan look identical once the finger is down.
+    var mapPlanPromptBanner: some View {
+        HStack(spacing: ForestixSpace.xs) {
+            Text(mapPlanPromptText)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(ForestixPalette.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 4)
+            Button {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    awaitingMapPlanPress = false
+                    movingPlannedID = nil
+                }
+            } label: {
+                Text("Cancel")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(ForestixPalette.primary)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(
+            RoundedRectangle(cornerRadius: ForestixRadius.control,
+                             style: .continuous)
+                .fill(ForestixPalette.surface))
+        .overlay(
+            RoundedRectangle(cornerRadius: ForestixRadius.control,
+                             style: .continuous)
+                .stroke(ForestixPalette.divider, lineWidth: 1))
+        .padding(.horizontal, ForestixSpace.sm)
+        .accessibilityIdentifier("cruiseMap.planPrompt")
+    }
+
+    private var mapPlanPromptText: String {
+        if let id = movingPlannedID,
+           let planned = plannedPlots.first(where: { $0.id == id }) {
+            return "Press and hold the map to move Plot \(planned.plotNumber)."
+        }
+        return "Press and hold the map to plan a plot."
+    }
+
     func setPlannedSkipped(_ planned: PlannedPlot, _ value: Bool) {
         var p = planned
         p.skipped = value
@@ -2410,6 +2648,48 @@ extension MapHomeScreen {
                 }
                 .buttonStyle(CruisePressableStyle())
                 .accessibilityIdentifier("cruiseMap.plannedPeek.skip")
+
+                // A PLAN IN THE WRONG SPOT IS THE NORMAL CASE. Move re-arms
+                // the same press-and-hold that made the plan; Delete throws
+                // the plan away. Both sit below the skip toggle because they
+                // change the plan itself rather than what to do about it.
+                HStack(spacing: ForestixSpace.xs) {
+                    Button {
+                        withAnimation(.easeOut(duration: 0.18)) {
+                            selectedPinID = nil
+                            movingPlannedID = planned.id
+                        }
+                    } label: {
+                        Text("Move on map")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(ForestixPalette.textPrimary)
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                            .background(
+                                RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                                 style: .continuous)
+                                    .stroke(ForestixPalette.divider, lineWidth: 1))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(CruisePressableStyle())
+                    .accessibilityIdentifier("cruiseMap.plannedPeek.move")
+
+                    Button {
+                        deletePlannedCandidate = planned
+                    } label: {
+                        Text("Delete plan")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(ForestixPalette.confidenceBad)
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                            .background(
+                                RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                                 style: .continuous)
+                                    .stroke(ForestixPalette.confidenceBad.opacity(0.5),
+                                            lineWidth: 1))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(CruisePressableStyle())
+                    .accessibilityIdentifier("cruiseMap.plannedPeek.delete")
+                }
             }
             .padding(.top, ForestixSpace.sm)
         }

@@ -207,30 +207,47 @@ public struct ScanMetadataSheet: View {
 /// `compact` is the pill the measure chooser wants, where the control sits
 /// beside a text field with no section header to name it; the sheet's row
 /// spans its section and says "— Unspecified —" when empty.
+///
+/// `provisional` says the code showing was filled in by the app, not chosen by
+/// the cruiser: it is drawn in the same dim tertiary the empty control uses, so
+/// a species the app guessed never looks like one somebody confirmed. `onPick`
+/// fires on EVERY selection — including re-picking the code already showing,
+/// which is exactly how a cruiser confirms a guess — so the host cannot use a
+/// value change to decide the control was touched.
 public struct SpeciesPickerField: View {
 
     @EnvironmentObject private var settings: AppSettings
     @Binding public var speciesCode: String?
     public var unspecifiedLabel: String = "— Unspecified —"
     public var compact: Bool = false
+    public var provisional: Bool = false
+    public var onPick: (() -> Void)?
 
     @State private var promptingForCode = false
     @State private var typedCode = ""
 
     public init(speciesCode: Binding<String?>,
                 unspecifiedLabel: String = "— Unspecified —",
-                compact: Bool = false) {
+                compact: Bool = false,
+                provisional: Bool = false,
+                onPick: (() -> Void)? = nil) {
         self._speciesCode = speciesCode
         self.unspecifiedLabel = unspecifiedLabel
         self.compact = compact
+        self.provisional = provisional
+        self.onPick = onPick
     }
 
     public var body: some View {
         Menu {
-            Button("— Unspecified —") { speciesCode = nil }
+            Button("— Unspecified —") {
+                speciesCode = nil
+                onPick?()
+            }
             ForEach(speciesOptions, id: \.0) { code, name in
                 Button {
                     speciesCode = code
+                    onPick?()
                 } label: {
                     Text(Self.pickerLabel(name: name, code: code))
                 }
@@ -242,7 +259,7 @@ public struct SpeciesPickerField: View {
         } label: {
             HStack(spacing: 4) {
                 Text(selectedLabel)
-                    .foregroundStyle(speciesCode == nil
+                    .foregroundStyle(speciesCode == nil || provisional
                                      ? ForestixPalette.textTertiary
                                      : ForestixPalette.textPrimary)
                     .lineLimit(1)
@@ -271,6 +288,7 @@ public struct SpeciesPickerField: View {
                 let trimmed = typedCode
                     .trimmingCharacters(in: .whitespaces).uppercased()
                 speciesCode = trimmed.isEmpty ? nil : trimmed
+                onPick?()
             }
         }
     }

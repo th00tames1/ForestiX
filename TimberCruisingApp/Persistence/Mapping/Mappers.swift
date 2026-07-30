@@ -160,6 +160,7 @@ public enum PlannedPlotMapper {
         e.plannedLon = s.plannedLon
         e.visited = s.visited
         e.skipped = s.skipped
+        e.plannedSource = s.plannedSource?.rawValue
     }
 
     public static func toStruct(_ e: PlannedPlotEntity) -> PlannedPlot {
@@ -171,7 +172,11 @@ public enum PlannedPlotMapper {
             plannedLat: e.plannedLat,
             plannedLon: e.plannedLon,
             visited: e.visited,
-            skipped: e.skipped
+            skipped: e.skipped,
+            // An unrecognised string decodes to nil rather than to a
+            // borrowed case: "I don't know how this point was placed" is
+            // the honest reading of a value this build cannot name.
+            plannedSource: e.plannedSource.flatMap(PositionSource.init(rawValue:))
         )
     }
 }

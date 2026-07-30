@@ -2249,7 +2249,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         OutlinedTextField(
                             value = draft,
                             onValueChange = { renameDraft = it },
-                            placeholder = { Text("Tree name") },
+                            placeholder = { Text("e.g. Tree1") },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth(),
                         )

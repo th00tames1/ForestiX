@@ -630,6 +630,10 @@ public struct BasemapMapView: View {
     /// overlay's `id` back. Only ever fires while `plotOverlay` is
     /// non-nil, and only when no marker took the tap first.
     private let onPlotTap: (String) -> Void
+    /// A press-and-hold that ended without the finger travelling — carries
+    /// the coordinate under it. The host raises its own menu; the map has
+    /// no opinion about what a long press means.
+    private let onMapLongPress: (CoordinateConversions.LatLon) -> Void
     private let onCameraChange: (BasemapCamera, BasemapRegion) -> Void
 
     @StateObject private var baseLoader = BasemapTileLoader()
@@ -657,6 +661,7 @@ public struct BasemapMapView: View {
                 onMarkerTap: @escaping (String) -> Void = { _ in },
                 onMapTap: @escaping () -> Void = {},
                 onPlotTap: @escaping (String) -> Void = { _ in },
+                onMapLongPress: @escaping (CoordinateConversions.LatLon) -> Void = { _ in },
                 onCameraChange: @escaping (BasemapCamera, BasemapRegion) -> Void = { _, _ in }) {
         self._camera = camera
         self.baseTileCache = baseTileCache
@@ -671,6 +676,7 @@ public struct BasemapMapView: View {
         self.onMarkerTap = onMarkerTap
         self.onMapTap = onMapTap
         self.onPlotTap = onPlotTap
+        self.onMapLongPress = onMapLongPress
         self.onCameraChange = onCameraChange
     }
 
@@ -758,6 +764,15 @@ public struct BasemapMapView: View {
                 }
                 .gesture(panGesture(size: size)
                     .simultaneously(with: pinchGesture(size: size)))
+                // PRESS AND HOLD → a coordinate for the host's planning
+                // menu. Simultaneous, not exclusive, because the pan and
+                // pinch above are how the cruiser reaches the ground they
+                // want to press on, and a long press that stole the drag
+                // would make the map feel stuck. The cost of running
+                // alongside is that a hold-then-drag would fire on release
+                // too, so `longPressGesture` refuses any press whose finger
+                // travelled — see there.
+                .simultaneousGesture(longPressGesture(size: size))
 
                 if let you = youLocation,
                    let point = screenPoint(latitude: you.latitude,
@@ -813,6 +828,32 @@ public struct BasemapMapView: View {
             - worldY(latitude: camera.latitude)) * worldPts
             + Double(viewportSize.height) / 2
         return CGPoint(x: x, y: y)
+    }
+
+    /// The exact inverse of `screenPoint(latitude:longitude:camera:
+    /// viewportSize:)` — where on the ground a point on screen is.
+    ///
+    /// Needed by any host that lets the cruiser MOVE something with a
+    /// finger rather than just look at it (the boundary editor's corner
+    /// and edge handles). Derived from the same normalised-world maths as
+    /// the forward projection, so a coordinate round-trips through both
+    /// unchanged, and a handle dragged one pixel moves one pixel's worth
+    /// of ground.
+    public static func coordinate(at point: CGPoint,
+                                  camera: BasemapCamera,
+                                  viewportSize: CGSize) -> CoordinateConversions.LatLon {
+        let worldPts = worldPoints(zoom: camera.zoom)
+        let x = worldX(longitude: camera.longitude)
+            + (Double(point.x) - Double(viewportSize.width) / 2) / worldPts
+        let y = worldY(latitude: camera.latitude)
+            + (Double(point.y) - Double(viewportSize.height) / 2) / worldPts
+        // Clamped to one world copy: a drag past the antimeridian or into
+        // the Mercator pole cap has no sensible boundary meaning, and
+        // wrapping silently would fling a corner to the far side of the
+        // planet.
+        return CoordinateConversions.LatLon(
+            latitude: latitude(fromWorldY: min(max(y, 0), 1)),
+            longitude: longitude(fromWorldX: min(max(x, 0), 1)))
     }
 
     // MARK: Visible-region accessor (offline downloader)
@@ -1346,6 +1387,34 @@ public struct BasemapMapView: View {
             .onEnded { _ in
                 zoomStart = nil
                 emitCamera(size: size)
+            }
+    }
+
+    /// PRESS AND HOLD anywhere on the map — reports the ground under the
+    /// finger once, on release.
+    ///
+    /// Sequenced long-press-then-drag rather than `.onLongPressGesture`
+    /// because that modifier hands back no location, and a planning gesture
+    /// whose coordinate is unknown is no gesture at all.
+    ///
+    /// TWO GUARDS, both about not planning a plot the cruiser did not mean:
+    ///   • `maximumDistance` cancels the press if the finger moves while the
+    ///     0.5 s is still running — that is a pan starting, not a hold.
+    ///   • the translation test at the end rejects a press that completed
+    ///     and THEN travelled. That press panned the map, so the camera is
+    ///     no longer the one the coordinate would be computed against, and
+    ///     the pin would land somewhere the cruiser never touched.
+    private func longPressGesture(size: CGSize) -> some Gesture {
+        LongPressGesture(minimumDuration: 0.5, maximumDistance: 12)
+            .sequenced(before: DragGesture(minimumDistance: 0,
+                                           coordinateSpace: .local))
+            .onEnded { value in
+                guard case .second(true, let drag?) = value else { return }
+                guard hypot(drag.translation.width,
+                            drag.translation.height) < 12 else { return }
+                onMapLongPress(Self.coordinate(at: drag.location,
+                                               camera: camera,
+                                               viewportSize: size))
             }
     }
 

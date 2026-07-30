@@ -42,7 +42,7 @@ sealed class CruiseDataError(override val message: String) : Exception(message) 
         VolumeEquationEntity::class,
         HeightDiameterFitEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = false,
 )
 @TypeConverters(CruiseConverters::class)
@@ -97,6 +97,18 @@ abstract class CruiseDatabase : RoomDatabase() {
         val MIGRATION_4_5 = object : Migration(4, 5) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE TreeEntity ADD COLUMN dbhCaptureMode TEXT")
+            }
+        }
+
+        /// v5 → v6: PlannedPlot gains `plannedSource` — how the planned
+        /// coordinate was placed ("manual" when the cruiser drew it on the
+        /// map). Nullable TEXT, no backfill: every row that exists at this
+        /// point was laid by the sampling generator, and null is what "not
+        /// hand-placed" is spelled as. Backfilling "manual" would claim a
+        /// finger placed a grid the design computed.
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE PlannedPlotEntity ADD COLUMN plannedSource TEXT")
             }
         }
     }

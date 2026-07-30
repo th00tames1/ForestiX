@@ -39,6 +39,21 @@ enum class MeasureKind { DBH, HEIGHT, CROWN, DISTANCE, SAMPLING_PLOT;
     }
 }
 
+/// The vocabulary of [QuickMeasureEntry.truthSource]. One case, because there
+/// is exactly one way a truth arrives that is not "the cruiser typed it here";
+/// a second case for "typed" would have to be back-stamped onto a corpus that
+/// never recorded it, which is a claim about data we do not have.
+/// Raw string byte-identical to the iOS `QuickMeasureEntry.TruthSource`.
+enum class TruthSource(val raw: String) {
+    /// Recovered from a raw-capture manifest by TruthBackfill and attached to
+    /// this reading by (kind, tree, plot, nearest time).
+    CAPTURE("capture");
+
+    companion object {
+        fun fromRaw(s: String?) = entries.firstOrNull { it.raw == s }
+    }
+}
+
 enum class StemPosition(val raw: String, val displayName: String) {
     DBH("dbh", "DBH"),
     BUTT("butt", "Butt"),
@@ -92,6 +107,20 @@ data class QuickMeasureEntry(
     /// with the raw-capture bundle. Null = no truth was ever entered —
     /// never zero, which would read as a measured 0 cm.
     val truth: Double? = null,
+    /// How [truth] came to sit on this reading — the same shape of provenance
+    /// stamp as [captureMode] and [positionSource], and read through
+    /// [truthRecordedSource] for the same reason.
+    ///
+    /// Null is not an unknown: until the recovery pass existed, the ONLY
+    /// writer of [truth] was a number the cruiser typed against this reading
+    /// (scan screen or field log), so an unlabelled truth IS a typed one.
+    /// [TruthSource.CAPTURE] marks a truth that was typed for a raw CAPTURE
+    /// and attached to this reading by inference — same tree, same kind, same
+    /// plot, nearest timestamp. It is the cruiser's own tape number either
+    /// way, but the analysis must be able to separate "typed here" from
+    /// "matched here", because the second one carries a matching assumption
+    /// the first does not.
+    val truthSource: String? = null,
     /// Where this reading's coordinate came from — a [PositionSource] raw
     /// string, the SAME vocabulary the cruise Plot records ("gpsSingle",
     /// "manual", …), so one word means one thing in both worlds.
@@ -152,6 +181,25 @@ data class QuickMeasureEntry(
     fun typedValue(newValue: Double): QuickMeasureEntry =
         copy(value = newValue, sigma = null,
              method = typedMethodRaw, captureMode = "typed")
+
+    /// The source to SHOW and to EXPORT for this reading's truth: the stored
+    /// one, or "typed" for a truth that predates the column (see
+    /// [truthSource]). Null only when there is no truth.
+    val truthRecordedSource: String?
+        get() = if (truth == null) null else (truthSource ?: "typed")
+
+    /// This reading with its ground truth set (or cleared with null).
+    /// Nothing else moves — a truth is an observation ABOUT the reading, not
+    /// a change to it.
+    ///
+    /// [source] travels WITH the value because the two are one fact: a truth
+    /// and how it got here. It defaults to null, which is what every
+    /// hand-typed path means; only the recovery pass passes
+    /// [TruthSource.CAPTURE]. Clearing drops the source too — an absent truth
+    /// has no provenance, exactly as [settingPosition] treats an absent
+    /// coordinate.
+    fun settingTruth(newTruth: Double?, source: String? = null): QuickMeasureEntry =
+        copy(truth = newTruth, truthSource = if (newTruth == null) null else source)
 
     /// The source to SHOW and to EXPORT for this reading's coordinate: the
     /// stored one, or "gpsSingle" for a located row that predates the column

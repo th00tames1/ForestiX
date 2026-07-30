@@ -75,6 +75,7 @@ import com.hcjeong.forestix.common.Region
 import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.common.defaultLogRule
 import com.hcjeong.forestix.data.ResearchLog
+import com.hcjeong.forestix.data.TruthBackfill
 import com.hcjeong.forestix.sensors.ChordAlgorithm
 import com.hcjeong.forestix.sensors.LogRule
 import com.hcjeong.forestix.sensors.RawCaptureStore
@@ -85,9 +86,12 @@ import com.hcjeong.forestix.ui.screens.project.FormSection
 import com.hcjeong.forestix.ui.screens.project.MenuPickerRow
 import com.hcjeong.forestix.ui.shareFile
 import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixBorderedButton
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import java.io.File
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -112,6 +116,10 @@ fun SettingsScreen(nav: NavController) {
     // card away from the Export rows (a mis-tap used to wipe the corpus).
     var confirmClearResearch by remember { mutableStateOf(false) }
     var confirmClearEvents by remember { mutableStateOf(false) }
+
+    // Ground-truth recovery: the run is in flight, and what the last one did.
+    var truthBackfillRunning by remember { mutableStateOf(false) }
+    var truthBackfillResult by remember { mutableStateOf<String?>(null) }
 
     // Backup / restore (Data & backup group).
     val backup = remember(env) { BackupViewModel(env) }
@@ -601,6 +609,49 @@ fun SettingsScreen(nav: NavController) {
                         Icon(
                             Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null,
                             tint = colors.textTertiary, modifier = Modifier.size(14.dp))
+                    }
+
+                    // GROUND-TRUTH RECOVERY. A truth typed for a CAPTURE (on a
+                    // scan screen before the truth moved onto the reading, or
+                    // in the raw-captures console at any time since) lives only
+                    // in that capture's manifest, so the field log shows a
+                    // blank True field for a tree the cruiser taped. This
+                    // attaches those to the readings they belong to.
+                    //
+                    // DELIBERATELY NOT A LAUNCH MIGRATION. It reads every
+                    // manifest on disk — a few hundred after two field days,
+                    // each a whole JSON document with pose trails in it — and a
+                    // blocking pass on a cold morning is its own bug. It also
+                    // has no end date: the console can strand a new truth
+                    // today, so a run-once-at-version-N flag would be wrong by
+                    // design. It is idempotent, so running it again is free and
+                    // changes nothing.
+                    FormDivider()
+                    ForestixBorderedButton(
+                        label = "Recover ground truths",
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !truthBackfillRunning,
+                    ) {
+                        truthBackfillRunning = true
+                        truthBackfillResult = null
+                        scope.launch {
+                            val text = withContext(Dispatchers.IO) {
+                                TruthBackfill.run(context, env.history)
+                            }
+                            truthBackfillResult = text
+                            truthBackfillRunning = false
+                        }
+                    }
+                    Text(
+                        "Attach truths typed for a raw capture to the reading they belong to. Never overwrites a truth already on a reading.",
+                        style = type.caption, color = colors.textSecondary,
+                    )
+                    truthBackfillResult?.let {
+                        // The corpus was just rewritten — say by how much, so
+                        // the cruiser can check it against their own backup. A
+                        // silent repair of research data is the wrong shape
+                        // even when the arithmetic is right.
+                        Text(it, style = type.caption, color = colors.textSecondary)
                     }
                 }
             }

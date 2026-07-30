@@ -106,10 +106,15 @@ object FieldLogWords {
 
 /// One cruise tree, flattened for the log's three-column table.
 ///
-/// READ-ONLY here. The quick rows beside it can be edited, re-measured and
+/// NOT WRITTEN here. The quick rows beside it can be edited, re-measured and
 /// swiped away, because the field log owns that store. A cruise tree is
 /// owned by the cruise flow and edited on TreeDetailScreen — duplicating
 /// that editing here would give the same row two save paths.
+///
+/// It is still OPENED here: clicking the row navigates to TreeDetailScreen,
+/// so the cruiser can inspect a tree from the surface they are reading it on.
+/// That costs the cruise store no second save path, which is what the
+/// paragraph above is about.
 data class FieldLogCruiseRow(
     val id: UUID,
     val plotID: UUID,

@@ -25,6 +25,8 @@ public struct SettingsScreen: View {
 
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var environment: AppEnvironment
+    /// The quick-measure log — the readings ground-truth recovery writes into.
+    @EnvironmentObject private var history: QuickMeasureHistory
     @StateObject private var backup = BackupViewModel()
 
     @State private var tileTemplate: String = ""
@@ -43,6 +45,9 @@ public struct SettingsScreen: View {
     @State private var isPresentingClearEvents = false
     /// Bumped after a clear so the row count / disabled state re-reads.
     @State private var storeRefresh = 0
+    /// Ground-truth recovery: the run is in flight, and what the last one did.
+    @State private var truthBackfillRunning = false
+    @State private var truthBackfillResult: String?
 
     #if os(iOS)
     @State private var isPresentingImport = false
@@ -449,9 +454,64 @@ public struct SettingsScreen: View {
                     }
                 }
                 .accessibilityIdentifier("settings.rawCaptures")
+
+                // GROUND-TRUTH RECOVERY. A truth typed for a CAPTURE (on a
+                // scan screen before the truth moved onto the reading, or in
+                // the raw-captures console at any time since) lives only in
+                // that capture's manifest, so the field log shows a blank True
+                // field for a tree the cruiser taped. This attaches those to
+                // the readings they belong to.
+                //
+                // DELIBERATELY NOT A LAUNCH MIGRATION. It reads every manifest
+                // on disk — a few hundred after two field days, each one a
+                // whole JSON document with pose trails in it — and a blocking
+                // pass on a cold morning is its own bug. It also has no end
+                // date: the console can strand a new truth today, so a
+                // run-once-at-version-N flag would be wrong by design. It is
+                // idempotent, so running it again is free and changes nothing.
+                Button {
+                    runTruthBackfill()
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Label("Recover ground truths", systemImage: "arrow.uturn.down")
+                        Text("Attach truths typed for a raw capture to the reading they belong to. Never overwrites a truth already on a reading.")
+                            .font(ForestixType.caption)
+                            .foregroundStyle(ForestixPalette.textSecondary)
+                    }
+                }
+                .disabled(truthBackfillRunning)
+                .accessibilityIdentifier("settings.recoverGroundTruths")
+                if let result = truthBackfillResult {
+                    // The corpus was just rewritten — say by how much, so the
+                    // cruiser can check it against their own backup. A silent
+                    // repair of research data is the wrong shape even when the
+                    // arithmetic is right.
+                    Text(result)
+                        .font(ForestixType.caption)
+                        .foregroundStyle(ForestixPalette.textSecondary)
+                        .accessibilityIdentifier("settings.recoverGroundTruthsResult")
+                }
             }
         } header: {
             Text("Developer & research")
+        }
+    }
+
+    /// Off the main actor for the manifest sweep; the history write inside
+    /// `TruthBackfill.run` hops back on its own, once.
+    private func runTruthBackfill() {
+        guard !truthBackfillRunning else { return }
+        truthBackfillRunning = true
+        truthBackfillResult = nil
+        // Detached, like every other sweep over the raw-capture tree on this
+        // screen's sibling console: the pass reads a few hundred manifests and
+        // must not be on the main actor to do it.
+        Task.detached(priority: .userInitiated) {
+            let text = await TruthBackfill.run(history: history)
+            await MainActor.run {
+                truthBackfillResult = text
+                truthBackfillRunning = false
+            }
         }
     }
 

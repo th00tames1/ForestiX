@@ -29,6 +29,12 @@ object PendingTreeNumber {
         /// The tape value did not change because the scan did, so it rides
         /// along rather than being lost with the superseded reading.
         val truth: Double? = null,
+        /// How that truth got onto the superseded reading (a
+        /// `QuickMeasureEntry.truthSource` raw, null = typed against the
+        /// reading). It rides along with the value because the two are one
+        /// fact: re-labelling a capture-recovered truth as one typed here
+        /// would claim a provenance the cruiser never gave it.
+        val truthSource: String? = null,
         /// The plot the reading must land in. Null = the active plot, which
         /// is what the map home wants; the field log names it explicitly,
         /// because a row being re-measured can belong to a plot that is not
@@ -45,6 +51,7 @@ object PendingTreeNumber {
         speciesCode: String? = null,
         replaceExisting: Boolean = false,
         truth: Double? = null,
+        truthSource: String? = null,
         plotID: java.util.UUID? = null,
     ) {
         // TRIMMED before it is stored, exactly as iOS does in
@@ -54,7 +61,7 @@ object PendingTreeNumber {
         // A gloved thumb or a paste that leaves a leading space must not
         // create " Plot3-T07" here and "Plot3-T07" there.
         lock = Lock(number, name?.trim()?.takeIf { it.isNotEmpty() }, speciesCode,
-                    replaceExisting, truth, plotID)
+                    replaceExisting, truth, truthSource, plotID)
     }
 
     /// Read-and-clear, so a stale lock can never leak into a later,

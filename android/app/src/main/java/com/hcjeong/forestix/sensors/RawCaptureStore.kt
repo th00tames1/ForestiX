@@ -522,9 +522,16 @@ object RawCaptureStore {
     }
 
     fun inventory(context: Context): Inventory = Inventory(
-        directories = root(context).listFiles()?.count { it.isDirectory } ?: 0,
+        directories = directoryCount(context),
         parsed = list(context).size,
     )
+
+    /// Bundle DIRECTORIES on disk, parsing nothing — the same number
+    /// [Inventory.directories] carries, for a caller that already holds the
+    /// summaries and only needs the denominator. Calling [inventory] there
+    /// would re-parse every manifest on disk a second time.
+    fun directoryCount(context: Context): Int =
+        root(context).listFiles()?.count { it.isDirectory } ?: 0
 
     fun manifestOf(context: Context, id: String): JSONObject? {
         val mf = File(bundleDir(context, id), "manifest.json")

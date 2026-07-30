@@ -1326,6 +1326,15 @@ fun HeightScanScreen(
                         // pole measurement.
                         truth = (if (settings.developerMode) ownedTrue else null)
                             ?: pendingLock?.truth,
+                        // Provenance follows the value it belongs to: a truth
+                        // typed on THIS screen is typed (null), while one
+                        // riding across from the reading being re-measured
+                        // keeps whatever source it already had — a recovered
+                        // truth must not be re-labelled as hand-typed by a
+                        // re-measure that never touched the tape.
+                        truthSource =
+                            if (settings.developerMode && ownedTrue != null) null
+                            else pendingLock?.truthSource,
                     )
                 // A re-measure launched from the field log TAKES THE PLACE of
                 // the reading it was launched from — appending would leave the

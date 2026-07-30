@@ -203,6 +203,21 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
     /// zero, which would read as a measured 0 cm.
     public let truth: Double?
 
+    /// How `truth` came to sit on this reading — the same shape of provenance
+    /// stamp as `captureMode` and `positionSource`, and read through
+    /// `truthRecordedSource` for the same reason.
+    ///
+    /// nil is not an unknown: until the recovery pass existed, the ONLY writer
+    /// of `truth` was a number the cruiser typed against this reading (scan
+    /// screen or field log), so an unlabelled truth IS a typed one.
+    /// `TruthSource.capture` marks a truth that was typed for a raw CAPTURE
+    /// and attached to this reading by inference — same tree, same kind, same
+    /// plot, nearest timestamp. It is the cruiser's own tape number either
+    /// way, but the analysis must be able to separate "typed here" from
+    /// "matched here", because the second one carries a matching assumption
+    /// the first does not.
+    public let truthSource: String?
+
     /// Where this reading's coordinate came from — a `PositionSource` raw
     /// string, the SAME vocabulary the cruise `Plot` records ("gpsSingle",
     /// "manual", …), so one word means one thing in both worlds.
@@ -238,6 +253,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         photoPath: String? = nil,
         captureMode: String? = nil,
         truth: Double? = nil,
+        truthSource: String? = nil,
         positionSource: String? = nil
     ) {
         self.id = id
@@ -260,6 +276,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         self.photoPath = photoPath
         self.captureMode = captureMode
         self.truth = truth
+        self.truthSource = truthSource
         self.positionSource = positionSource
     }
 
@@ -288,8 +305,27 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         self.photoPath     = try c.decodeIfPresent(String.self, forKey: .photoPath)
         self.captureMode   = try c.decodeIfPresent(String.self, forKey: .captureMode)
         self.truth         = try c.decodeIfPresent(Double.self, forKey: .truth)
+        self.truthSource   = try c.decodeIfPresent(String.self, forKey: .truthSource)
         self.positionSource = try c.decodeIfPresent(String.self,
                                                     forKey: .positionSource)
+    }
+
+    /// The vocabulary of `truthSource`. One case, because there is exactly one
+    /// way a truth arrives that is not "the cruiser typed it here"; a second
+    /// case for "typed" would have to be back-stamped onto a corpus that never
+    /// recorded it, which is a claim about data we do not have.
+    public enum TruthSource: String, Sendable {
+        /// Recovered from a raw-capture manifest by `TruthBackfill` and
+        /// attached to this reading by (kind, tree, plot, nearest time).
+        case capture
+    }
+
+    /// The source to SHOW and to EXPORT for this reading's truth: the stored
+    /// one, or "typed" for a truth that predates the column (see
+    /// `truthSource`). nil only when there is no truth.
+    public var truthRecordedSource: String? {
+        guard truth != nil else { return nil }
+        return truthSource ?? "typed"
     }
 
     /// The source to SHOW and to EXPORT for this reading's coordinate: the
@@ -322,6 +358,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             latitude: hasFix ? newLat : nil,
             longitude: hasFix ? newLon : nil,
             photoPath: photoPath, captureMode: captureMode, truth: truth,
+            truthSource: truthSource,
             positionSource: hasFix ? PositionSource.manual.rawValue : nil)
     }
 
@@ -402,6 +439,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             damageCodes: damageCodes, note: note,
             latitude: latitude, longitude: longitude,
             photoPath: photoPath, captureMode: "typed", truth: truth,
+            truthSource: truthSource,
             positionSource: positionSource)
     }
 
@@ -421,13 +459,47 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             damageCodes: damageCodes, note: note,
             latitude: latitude, longitude: longitude,
             photoPath: photoPath, captureMode: captureMode, truth: truth,
+            truthSource: truthSource,
+            positionSource: positionSource)
+    }
+
+    /// This reading with the two free-form details the quick-edit sheet owns
+    /// replaced. Everything else is carried across verbatim.
+    ///
+    /// Same reason `inPlot` exists. The edit sheet used to rebuild the entry
+    /// from an argument list and silently dropped `positionSource` off the end
+    /// of it — so opening the sheet on a reading whose coordinate the cruiser
+    /// had TYPED, changing the species, and saving re-labelled that coordinate
+    /// a device fix. Adding `truthSource` to the same list would have made it
+    /// two provenance fields lost to the same shape, so the list is gone: only
+    /// what is being edited is named, and nothing else can fall off.
+    public func settingDetails(speciesCode newSpecies: String?,
+                               note newNote: String?) -> QuickMeasureEntry {
+        QuickMeasureEntry(
+            id: id, kind: kind, value: value,
+            secondaryValue: secondaryValue, sigma: sigma,
+            confidenceRaw: confidenceRaw, method: method,
+            createdAt: createdAt, treeNumber: treeNumber, treeName: treeName,
+            plotID: plotID,
+            speciesCode: newSpecies, position: position,
+            damageCodes: damageCodes, note: newNote,
+            latitude: latitude, longitude: longitude,
+            photoPath: photoPath, captureMode: captureMode, truth: truth,
+            truthSource: truthSource,
             positionSource: positionSource)
     }
 
     /// This reading with its ground truth set (or cleared with nil).
     /// Nothing else moves — a truth is an observation ABOUT the reading,
     /// not a change to it.
-    public func settingTruth(_ newTruth: Double?) -> QuickMeasureEntry {
+    ///
+    /// `source` travels WITH the value because the two are one fact: a truth
+    /// and how it got here. It defaults to nil, which is what every hand-typed
+    /// path means; only the recovery pass passes `TruthSource.capture`.
+    /// Clearing drops the source too — an absent truth has no provenance,
+    /// exactly as `settingPosition` treats an absent coordinate.
+    public func settingTruth(_ newTruth: Double?,
+                             source: String? = nil) -> QuickMeasureEntry {
         QuickMeasureEntry(
             id: id, kind: kind, value: value,
             secondaryValue: secondaryValue, sigma: sigma,
@@ -438,6 +510,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             damageCodes: damageCodes, note: note,
             latitude: latitude, longitude: longitude,
             photoPath: photoPath, captureMode: captureMode, truth: newTruth,
+            truthSource: newTruth == nil ? nil : source,
             positionSource: positionSource)
     }
 
@@ -490,8 +563,10 @@ public final class QuickMeasureHistory: ObservableObject {
     /// replays without one. 4 adds `positionSource` — where a reading's
     /// coordinate came from — on the same terms: absent decodes as nil,
     /// which `positionRecordedSource` reads as the device fix it can only
-    /// have been.
-    public static let schemaVersion: Int = 4
+    /// have been. 5 adds `truthSource` — how a ground truth came to sit on
+    /// the reading — on the same terms again: absent decodes as nil, which
+    /// `truthRecordedSource` reads as the typed value it can only have been.
+    public static let schemaVersion: Int = 5
 
     @Published public private(set) var entries: [QuickMeasureEntry] = []
     /// All Quick Measure plots known to the app, newest first. Always
@@ -573,6 +648,36 @@ public final class QuickMeasureHistory: ObservableObject {
         rewriteSidecar()
         persistCache()
         recomputeCapacityFlag()
+    }
+
+    /// Attach recovered ground truths to readings, in ONE persist.
+    ///
+    /// The per-entry `update` rewrites the whole sidecar and the whole cache
+    /// each time; a recovery pass touching a hundred readings would do that a
+    /// hundred times over on a phone the cruiser is holding. This applies the
+    /// whole set, then persists once.
+    ///
+    /// REFUSES to overwrite: an id whose reading already carries a truth is
+    /// skipped here as well as in the planner, because this is the call that
+    /// actually writes and the guarantee has to hold at the write. Returns how
+    /// many readings were actually changed — the number the cruiser is shown,
+    /// not the number that was requested.
+    @discardableResult
+    public func backfillTruths(_ attachments: [UUID: Double]) -> Int {
+        guard !attachments.isEmpty else { return 0 }
+        var changed = 0
+        var next = entries
+        for (idx, e) in next.enumerated() {
+            guard let value = attachments[e.id], e.truth == nil else { continue }
+            next[idx] = e.settingTruth(
+                value, source: QuickMeasureEntry.TruthSource.capture.rawValue)
+            changed += 1
+        }
+        guard changed > 0 else { return 0 }
+        entries = next
+        rewriteSidecar()
+        persistCache()
+        return changed
     }
 
     /// Saves `entry` as THE reading of its kind for its (plot, tree) — any
@@ -909,8 +1014,10 @@ public final class QuickMeasureHistory: ObservableObject {
             .replacingOccurrences(of: ":", with: "-")
         let url = dir.appendingPathComponent("quick-measure-\(stamp).csv")
 
-        // "position_source" is deliberately the LAST column — same order
-        // as the Android exporter so the two platforms' CSVs diff clean.
+        // "truth_source" is deliberately the LAST column — same order as the
+        // Android exporter so the two platforms' CSVs diff clean, and APPENDED
+        // rather than inserted beside "truth" so a reader written against the
+        // existing column order still lines up.
         // "truth" sits beside the value it is the truth OF, in the same
         // unit (`value_unit`); blank means none was ever entered.
         //
@@ -918,6 +1025,12 @@ public final class QuickMeasureHistory: ObservableObject {
         // ("gpsSingle" for a device fix, "manual" for one the cruiser
         // typed). Without it a hand-entered coordinate exported exactly
         // like a satellite one.
+        //
+        // truth_source is the same idea one column over: "typed" for a number
+        // entered against this reading, "capture" for one recovered from a
+        // raw-capture manifest and matched to it. Blank means no truth. The
+        // accuracy work must be able to drop the matched ones and still have
+        // a corpus, so the distinction cannot live only in a commit message.
         let headers = ["id", "timestamp", "plot", "tree", "tree_name", "kind",
                        "value", "value_unit", "truth",
                        "secondary_value", "secondary_unit",
@@ -925,7 +1038,7 @@ public final class QuickMeasureHistory: ObservableObject {
                        "species", "position", "damage", "note",
                        "confidence", "method",
                        "latitude", "longitude", "photo", "capture_mode",
-                       "position_source"]
+                       "position_source", "truth_source"]
         var out = headers.map(Self.csvField).joined(separator: ",")
         out += "\r\n"
 
@@ -967,7 +1080,8 @@ public final class QuickMeasureHistory: ObservableObject {
                 lon,
                 e.photoPath ?? "",
                 e.captureMode ?? "",
-                e.positionRecordedSource ?? ""
+                e.positionRecordedSource ?? "",
+                e.truthRecordedSource ?? ""
             ]
             let row = cols.map(Self.csvField).joined(separator: ",")
             out += row + "\r\n"
@@ -1055,8 +1169,11 @@ public final class QuickMeasureHistory: ObservableObject {
         }
 
         // -- Stems.csv (one per DBH measurement) --
-        // "capture_mode" appended as the LAST column (Android parity).
-        var stems = "id,plot_id,tree_number,timestamp,dbh_cm,truth_cm,sigma_mm,position,confidence,method,capture_mode\r\n"
+        // "capture_mode" then "truth_source" appended as the LAST columns
+        // (Android parity). truth_source qualifies truth_cm: "typed" here,
+        // "capture" when the value was recovered from a raw-capture manifest
+        // and matched to this stem. Blank when there is no truth.
+        var stems = "id,plot_id,tree_number,timestamp,dbh_cm,truth_cm,sigma_mm,position,confidence,method,capture_mode,truth_source\r\n"
         for e in entries where e.kind == .dbh {
             // Spelled out rather than inlined: adding the truth column tipped
             // this literal past what the type-checker will solve in one go.
@@ -1072,13 +1189,15 @@ public final class QuickMeasureHistory: ObservableObject {
                 sigma,
                 e.position?.rawValue ?? "",
                 e.confidenceRaw, e.method,
-                e.captureMode ?? ""
+                e.captureMode ?? "",
+                e.truthRecordedSource ?? ""
             ]
             stems += row.map(Self.csvField).joined(separator: ",") + "\r\n"
         }
 
         // -- Heights.csv (one per Height measurement) --
-        var heights = "id,plot_id,tree_number,timestamp,height_m,truth_m,sigma_m,confidence,method\r\n"
+        // "truth_source" appended LAST — see Stems.csv above.
+        var heights = "id,plot_id,tree_number,timestamp,height_m,truth_m,sigma_m,confidence,method,truth_source\r\n"
         for e in entries where e.kind == .height {
             let truth: String = e.truth.map { String(format: "%.3f", $0) } ?? ""
             let sigma: String = e.sigma.map { String(format: "%.3f", $0) } ?? ""
@@ -1090,7 +1209,8 @@ public final class QuickMeasureHistory: ObservableObject {
                 String(format: "%.3f", e.value),
                 truth,
                 sigma,
-                e.confidenceRaw, e.method
+                e.confidenceRaw, e.method,
+                e.truthRecordedSource ?? ""
             ]
             heights += row.map(Self.csvField).joined(separator: ",") + "\r\n"
         }

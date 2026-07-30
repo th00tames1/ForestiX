@@ -154,6 +154,7 @@ import com.hcjeong.forestix.ui.screens.cruise.CruiseModeSheets
 import com.hcjeong.forestix.ui.screens.cruise.CruiseModeState
 import com.hcjeong.forestix.ui.screens.cruise.CruisePlanPromptBanner
 import com.hcjeong.forestix.ui.screens.cruise.CruisePlotBanner
+import com.hcjeong.forestix.ui.screens.cruise.MapPlanMenu
 import com.hcjeong.forestix.ui.screens.cruise.PendingPlotFraming
 import com.hcjeong.forestix.ui.screens.cruise.cruiseModeMarkers
 import com.hcjeong.forestix.ui.screens.cruise.cruiseModePlotOverlay
@@ -505,12 +506,20 @@ fun MapHomeScreen(nav: NavController) {
             // Remove menu (M2) — the plot's own pin still owns the centre.
             onPlotTap = { id -> cruise.openPlotMenu(id) },
             onMapTap = { if (isCruise) cruise.selectedId = null else selectedPinId = null },
-            // PLANNING IS A CRUISE ACT, so the gesture only means anything in
-            // cruise mode — measure mode's map carries no plots and no stand
-            // to bound, and a menu offering both there would name two things
-            // that do not exist in it. iOS gates it the same way.
+            // PRESS AND HOLD BELONGS TO THE MAP, not to cruise. It used to be
+            // gated to cruise mode on the reasoning that measure mode has no
+            // plots and no stand to bound; both halves were wrong. The stand
+            // boundary is ONE record shared by both modes — it does not become
+            // a different object because the map that drew it was in measure
+            // mode — and measure mode does keep plots, they are just the
+            // project-less quick-measure ones. What the menu OFFERS narrows
+            // with the mode (see MapPlanMenu); the gesture itself never does.
+            // iOS ungates it the same way.
             onMapLongPress = { coordinate ->
-                if (isCruise) cruise.onMapLongPress(coordinate)
+                // The peek the press replaces is per-mode here (iOS keeps one
+                // selection for both), so clear the one this mode is showing.
+                if (!isCruise) selectedPinId = null
+                cruise.onMapLongPress(coordinate, inCruiseMode = isCruise)
             },
             // The you-dot, from the gated fix ONLY. A dot is the map's
             // flattest assertion — "you are here" — so it may never outlive
@@ -777,14 +786,20 @@ fun MapHomeScreen(nav: NavController) {
             },
         )
     }
-    // DRAW AN AREA — full-screen over the home, opening on the camera the
-    // cruiser was already looking at so the starting rectangle lands on the
-    // ground they had on screen.
-    if (drawingBoundary) {
+    // DRAW AN AREA — full-screen over the home, opening on the ground the
+    // cruiser was already looking at so the starting rectangle lands there.
+    // Two doors, one editor: the map's press-and-hold (both modes) opens
+    // CENTRED ON THE PRESS, Map settings has no pressed point and opens on
+    // the camera instead.
+    val drawSeed = cruise.boundaryDrawSeed
+    if (drawingBoundary || drawSeed != null) {
         BoundaryDrawScreen(
-            initialCenter = camera.center ?: mapCenter,
+            initialCenter = drawSeed ?: camera.center ?: mapCenter,
             initialZoom = camera.zoom,
-            onDismiss = { drawingBoundary = false },
+            onDismiss = {
+                drawingBoundary = false
+                cruise.boundaryDrawSeed = null
+            },
         )
     }
     if (photoPages.isNotEmpty()) {
@@ -844,11 +859,12 @@ fun MapHomeScreen(nav: NavController) {
                     developerMode = settings.developerMode,
                     onSave = { env.history.update(it) },
                     onAdd = { env.history.append(it) },
-                    onRemeasure = { kind, tree, name, species, truth ->
+                    onRemeasure = { kind, tree, name, species, truth, truthSource ->
                         inspectingRowId = null
                         PendingTreeNumber.set(
                             number = tree, name = name, speciesCode = species,
                             replaceExisting = true, truth = truth,
+                            truthSource = truthSource,
                             plotID = live.entries.firstOrNull()?.plotID)
                         nav.navigate(
                             if (kind == MeasureKind.DBH) Routes.DBH else Routes.HEIGHT)
@@ -874,6 +890,13 @@ fun MapHomeScreen(nav: NavController) {
             })
         }
     }
+
+    // MARK: - Press-and-hold planning menu — BOTH modes
+
+    // Outside the `if (isCruise)` below on purpose: the gesture that raises
+    // this belongs to the map, so the menu has to exist wherever the gesture
+    // does. It is MapPlanMenu that decides which items a mode can honour.
+    MapPlanMenu(cruise, inCruiseMode = isCruise)
 
     // MARK: - Cruise-mode sheets (project ⑤ / cruise setup ⑥ / record ⑧)
 

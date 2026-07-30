@@ -41,6 +41,7 @@ data class EntryRow(
     val photoPath: String?,
     val captureMode: String?,
     val truth: Double?,
+    val truthSource: String?,
     val positionSource: String?,
 ) {
     fun toDomain() = QuickMeasureEntry(
@@ -64,6 +65,7 @@ data class EntryRow(
         photoPath = photoPath,
         captureMode = captureMode,
         truth = truth,
+        truthSource = truthSource,
         positionSource = positionSource,
     )
 
@@ -89,6 +91,7 @@ data class EntryRow(
             photoPath = e.photoPath,
             captureMode = e.captureMode,
             truth = e.truth,
+            truthSource = e.truthSource,
             positionSource = e.positionSource,
         )
     }
@@ -224,7 +227,18 @@ val QUICK_MEASURE_MIGRATION_5_6 = object : androidx.room.migration.Migration(5, 
     }
 }
 
-@Database(entities = [EntryRow::class, PlotRow::class], version = 6, exportSchema = false)
+/// v7: how a ground truth came to sit on the reading — additive and
+/// nullable. Null on every existing row, which is not an unknown: until the
+/// recovery pass existed, the only writer of `truth` was a number typed
+/// against the reading itself, so an unlabelled truth IS a typed one.
+/// `QuickMeasureEntry.truthRecordedSource` holds that rule.
+val QUICK_MEASURE_MIGRATION_6_7 = object : androidx.room.migration.Migration(6, 7) {
+    override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE entries ADD COLUMN truthSource TEXT")
+    }
+}
+
+@Database(entities = [EntryRow::class, PlotRow::class], version = 7, exportSchema = false)
 @TypeConverters(Converters::class)
 abstract class ForestixDatabase : RoomDatabase() {
     abstract fun dao(): QuickMeasureDao

@@ -110,10 +110,15 @@ public enum FieldLogWords {
 
 /// One cruise tree, flattened for the log's three-column table.
 ///
-/// READ-ONLY here. The quick rows beside it can be edited, re-measured and
+/// NOT WRITTEN here. The quick rows beside it can be edited, re-measured and
 /// swiped away, because the field log owns that store. A cruise tree is
 /// owned by the cruise flow and edited on TreeDetailScreen — duplicating
 /// that editing here would give the same row two save paths.
+///
+/// It is still OPENED here: tapping the row pushes TreeDetailScreen, so the
+/// cruiser can inspect a tree from the surface they are reading it on. That
+/// costs the cruise store no second save path, which is what the paragraph
+/// above is about.
 public struct FieldLogCruiseRow: Identifiable, Equatable {
     public let id: UUID
     public let plotID: UUID

@@ -702,10 +702,20 @@ extension MapHomeScreen {
                     Text("Delete Plot \(plot.plotNumber) and its \(n) tree\(n == 1 ? "" : "s")? This can't be undone.")
                 }
             }
-            // PRESS-AND-HOLD MENU (mission planning, DJI-style): the two
-            // things a cruiser plans on a map. Raised by the gesture, and by
-            // the (+)'s "Pick on the map" arming the same gesture — one flow,
-            // so there is never a second way to plan that behaves differently.
+            // PRESS-AND-HOLD MENU (mission planning, DJI-style): the things a
+            // cruiser plans on a map. Raised by the gesture, and by the (+)'s
+            // "Pick on the map" arming the same gesture — one flow, so there
+            // is never a second way to plan that behaves differently.
+            //
+            // BOTH MODES, but not the same menu in both. "Draw an area" is
+            // always here: there is one stand boundary and it does not care
+            // which mode drew it. "Plan a plot here" plans a CRUISE plot, and
+            // measure mode's plots — the project-less quick-measure ones —
+            // hold no coordinate to plan (`QuickMeasurePlot` has no lat/lon
+            // at all), so there is nothing for it to write there. It is left
+            // OUT of the measure-mode menu rather than shown and refused: an
+            // item that cannot work is the defect this menu was fixed for.
+            // One item plus Cancel is still a menu, so it is never empty.
             .confirmationDialog(
                 "Plan here",
                 isPresented: Binding(
@@ -713,15 +723,16 @@ extension MapHomeScreen {
                     set: { if !$0 { mapPlanCoordinate = nil } }),
                 titleVisibility: .visible
             ) {
-                Button("Plan a plot here") {
-                    if let at = mapPlanCoordinate { planPlot(at: at) }
-                    mapPlanCoordinate = nil
-                    awaitingMapPlanPress = false
+                if isCruiseMode {
+                    Button("Plan a plot here") {
+                        if let at = mapPlanCoordinate { planPlot(at: at) }
+                        mapPlanCoordinate = nil
+                        awaitingMapPlanPress = false
+                    }
                 }
                 Button("Draw an area") {
-                    // Hands the coordinate to whoever owns area drawing and
-                    // stops — see `boundaryDrawSeed`. Nothing here decides
-                    // what a drawn area becomes.
+                    // Opens the boundary editor on the pressed coordinate —
+                    // see `boundaryDrawSeed`, which is the only handoff.
                     boundaryDrawSeed = mapPlanCoordinate
                     mapPlanCoordinate = nil
                     awaitingMapPlanPress = false
@@ -1953,13 +1964,16 @@ extension MapHomeScreen {
     /// and renders with the warn tint + "SKIP" badge.
     // MARK: Planning on the map (press and hold)
 
-    /// Where every hand-drawn coordinate enters the app.
+    /// Where every hand-drawn coordinate enters the app — in BOTH modes; the
+    /// menu it raises is what narrows (see the dialog above).
     ///
     /// A press with a MOVE armed relocates that plan and nothing else — the
     /// cruiser asked one question ("where should this be instead?") and gets
-    /// no menu in the middle of answering it. Otherwise the menu comes up.
+    /// no menu in the middle of answering it. That branch is cruise-only: a
+    /// planned plot exists only in the cruise world, and an arm that outlived
+    /// a mode flip must not relocate a plan from a map no longer showing it.
     func handleMapLongPress(at coordinate: CoordinateConversions.LatLon) {
-        if let id = movingPlannedID {
+        if isCruiseMode, let id = movingPlannedID {
             movePlanned(id: id, to: coordinate)
             return
         }

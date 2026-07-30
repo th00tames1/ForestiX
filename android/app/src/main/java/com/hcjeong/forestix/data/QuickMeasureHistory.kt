@@ -108,6 +108,30 @@ class QuickMeasureHistory private constructor(
         }
     }
 
+    /// Attach recovered ground truths to readings, and report how many
+    /// readings actually changed.
+    ///
+    /// REFUSES to overwrite: an id whose reading already carries a truth is
+    /// skipped here as well as in the planner, because this is the call that
+    /// actually writes and the guarantee has to hold at the write. Suspends
+    /// rather than firing into [scope] so the caller can show the real count;
+    /// a recovery that reported a number it had not yet written would be the
+    /// same class of lie as a silent one.
+    suspend fun backfillTruths(attachments: Map<UUID, Double>): Int {
+        if (attachments.isEmpty()) return 0
+        var changed = 0
+        for (row in dao.allEntries()) {
+            val e = row.toDomain()
+            val value = attachments[e.id] ?: continue
+            if (e.truth != null) continue
+            dao.upsertEntry(
+                EntryRow.from(e.settingTruth(value, TruthSource.CAPTURE.raw)))
+            changed++
+        }
+        if (changed > 0) _entries.value = dao.allEntries().map { it.toDomain() }
+        return changed
+    }
+
     /// Saves [entry] as THE reading of its kind for its (plot, tree) — any
     /// earlier reading of the same kind on the same tree is removed rather
     /// than left behind as a second one.

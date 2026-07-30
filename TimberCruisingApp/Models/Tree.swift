@@ -45,7 +45,14 @@ public enum HeightMethod: String, Codable, Sendable {
 
 public struct Tree: Identifiable, Codable, Sendable {
     public let id: UUID
-    public let plotId: UUID
+    /// The plot this tree is filed under — and, through that plot, the
+    /// project. `var` rather than `let` because the field log can re-file a
+    /// captured tree into another project's plot (see Screens/TreeMove.swift):
+    /// readings taken before a project existed, or under the wrong one, had
+    /// no way out otherwise. Nothing else in the app writes it after
+    /// creation, and Android's `Tree` is a data class whose `copy` has always
+    /// been able to.
+    public var plotId: UUID
     public var treeNumber: Int
     /// The cruiser's own name for this tree ("Plot3-T07"). nil for a tree
     /// that was never named, and every display falls back to

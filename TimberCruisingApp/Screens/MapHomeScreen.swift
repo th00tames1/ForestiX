@@ -309,12 +309,17 @@ public struct MapHomeScreen: View {
     /// The (+)'s two doors into a plot — start on the fix that exists now,
     /// or plan the location on the map first.
     @State var presentingStartPlotChoice = false
-    /// JOB 1 ↔ JOB 2 SEAM. The long-press menu's "Draw an area" writes the
-    /// pressed coordinate here and does nothing else — the area editor is
-    /// not this job's to build. Whoever owns drawing observes this, opens on
-    /// the coordinate, and sets it back to nil when the editor closes. It is
-    /// deliberately the only handoff: one entry point, so "Draw an area"
-    /// cannot end up meaning two different things on the two platforms.
+    /// Where the long-press menu's "Draw an area" opens the boundary editor:
+    /// the coordinate the cruiser pressed, so the starting rectangle lands on
+    /// the ground under their finger rather than on the screen centre. nil =
+    /// the editor is closed.
+    ///
+    /// This is the ONLY handoff from the map menu to the editor — one entry
+    /// point, so "Draw an area" cannot end up meaning two different things on
+    /// the two platforms. Map settings has its own door into the same editor
+    /// and opens on the camera instead, because there is no pressed point
+    /// there to open on. Set in BOTH modes: the boundary is a map object, not
+    /// a cruise object.
     @State var boundaryDrawSeed: CoordinateConversions.LatLon?
 
     // One-button Export all, run inline in the project sheet.
@@ -377,7 +382,11 @@ public struct MapHomeScreen: View {
     // MARK: Mode toggle
 
     /// `tc.mapMode` — the persisted mode the screen renders.
-    private var isCruiseMode: Bool { settings.mapMode == "cruise" }
+    ///
+    /// Internal rather than private because the press-and-hold menu lives in
+    /// the cruise extension but serves BOTH modes: it has to ask the same one
+    /// definition of "is this cruise", not re-derive it from `settings`.
+    var isCruiseMode: Bool { settings.mapMode == "cruise" }
 
     /// Flip modes (the left side-circle). Camera stays put — the map is
     /// shared — and the selection clears so a peek never leaks across
@@ -401,6 +410,15 @@ public struct MapHomeScreen: View {
     private struct MapDetailTarget: Identifiable {
         let rowID: String
         var id: String { rowID }
+    }
+
+    /// Where the boundary editor was asked to open. A wrapper only because
+    /// `.fullScreenCover(item:)` wants an Identifiable, and the pressed
+    /// coordinate IS the identity — press somewhere else and it is a
+    /// different opening.
+    private struct BoundaryDrawTarget: Identifiable {
+        let coordinate: CoordinateConversions.LatLon
+        var id: String { "\(coordinate.latitude),\(coordinate.longitude)" }
     }
 
     /// Payload for the far-GPS confirmation alert.
@@ -526,6 +544,22 @@ public struct MapHomeScreen: View {
             .fullScreenCover(item: $photoViewer) { context in
                 MeasurePhotoDetailView(context: context)
             }
+            // DRAW AN AREA — full screen over the home, because a map you
+            // drag corners on cannot live in a sheet. It opens CENTRED ON
+            // THE PRESS at the zoom already on screen, so the starting
+            // rectangle covers the ground the cruiser was pointing at; the
+            // Map settings door has no press to open on and passes the
+            // camera instead. Available in both modes — the boundary is one
+            // shared record, so the mode that drew it changes nothing.
+            .fullScreenCover(item: Binding(
+                get: { boundaryDrawSeed.map { BoundaryDrawTarget(coordinate: $0) } },
+                set: { if $0 == nil { boundaryDrawSeed = nil } })) { target in
+                BoundaryDrawScreen(initialCamera: BasemapCamera(
+                    latitude: target.coordinate.latitude,
+                    longitude: target.coordinate.longitude,
+                    zoom: camera.zoom))
+                    .environmentObject(settings)
+            }
             #endif
             .sheet(isPresented: $presentingChooser,
                    onDismiss: launchPendingChoice) { measureChooser }
@@ -621,6 +655,10 @@ public struct MapHomeScreen: View {
                 }
                 .environmentObject(environment)
                 .environmentObject(settings)
+                // A sheet does not inherit the host's environment objects.
+                // Settings' ground-truth recovery writes into the quick-measure
+                // log, so the log has to travel with it.
+                .environmentObject(history)
             }
             // CRASH RECOVERY — resume an in-progress plot from a recent
             // session. The summary (plot #, tree count, last-edited) is folded
@@ -735,12 +773,16 @@ public struct MapHomeScreen: View {
             // A tap ON the drawn plot's boundary raises its small Edit /
             // Remove menu (M2) — the plot's own pin still owns the centre.
             onPlotTap: { id in openPlotMenu(id) },
-            // PLANNING IS A CRUISE ACT, so the gesture only means anything
-            // in cruise mode — measure mode's map carries no plots and no
-            // stand to bound, and a menu offering both there would name two
-            // things that do not exist in it.
+            // PRESS AND HOLD BELONGS TO THE MAP, not to cruise. It used to
+            // be gated to cruise mode on the reasoning that measure mode has
+            // no plots and no stand to bound; both halves were wrong. The
+            // stand boundary is ONE record shared by both modes — it does
+            // not become a different object because the map that drew it was
+            // in measure mode — and measure mode does keep plots, they are
+            // just the project-less quick-measure ones. What the menu OFFERS
+            // narrows with the mode (see the dialog in the cruise extension);
+            // the gesture itself never does.
             onMapLongPress: { coordinate in
-                guard isCruiseMode else { return }
                 handleMapLongPress(at: coordinate)
             },
             onCameraChange: { _, region in
@@ -2175,27 +2217,13 @@ private struct QuickEntryEditSheet: View {
         let base = valueText == valuePrefill
             ? entry
             : (TruthInput.parsePositive(valueText).map { entry.typedValue($0) } ?? entry)
-        history.update(QuickMeasureEntry(
-            id: base.id,
-            kind: base.kind,
-            value: base.value,
-            secondaryValue: base.secondaryValue,
-            sigma: base.sigma,
-            confidenceRaw: base.confidenceRaw,
-            method: base.method,
-            createdAt: base.createdAt,
-            treeNumber: base.treeNumber,
-            treeName: base.treeName,
-            plotID: base.plotID,
+        // Only the two fields this sheet edits are named. Rebuilding the whole
+        // entry from an argument list here is what dropped `positionSource`
+        // off the end and re-labelled a typed coordinate a device fix — see
+        // `settingDetails`.
+        history.update(base.settingDetails(
             speciesCode: trimmedSpecies.isEmpty ? nil : trimmedSpecies.uppercased(),
-            position: base.position,
-            damageCodes: base.damageCodes,
-            note: trimmedNote.isEmpty ? nil : trimmedNote,
-            latitude: base.latitude,
-            longitude: base.longitude,
-            photoPath: base.photoPath,
-            captureMode: base.captureMode,
-            truth: base.truth))
+            note: trimmedNote.isEmpty ? nil : trimmedNote))
         dismiss()
     }
 

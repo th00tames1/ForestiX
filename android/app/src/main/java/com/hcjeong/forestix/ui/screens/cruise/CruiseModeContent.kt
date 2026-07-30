@@ -248,13 +248,18 @@ internal class CruiseModeState {
     /// The (+)'s two doors into a plot — start on the fix that exists now, or
     /// plan the location on the map first.
     var startPlotChoiceOpen by mutableStateOf(false)
-    /// JOB 1 <-> JOB 2 SEAM. The long-press menu's "Draw an area" writes the
-    /// pressed coordinate here and does nothing else — the area editor is not
-    /// this job's to build. Whoever owns drawing observes this, opens on the
-    /// coordinate, and sets it back to null when the editor closes. It is
-    /// deliberately the only handoff: one entry point, so "Draw an area"
-    /// cannot end up meaning two different things on the two platforms.
-    /// iOS carries the same seam as `MapHomeScreen.boundaryDrawSeed`.
+    /// Where the long-press menu's "Draw an area" opens the boundary editor:
+    /// the coordinate the cruiser pressed, so the starting rectangle lands on
+    /// the ground under their finger rather than on the screen centre. null =
+    /// the editor is closed.
+    ///
+    /// This is the ONLY handoff from the map menu to the editor — one entry
+    /// point, so "Draw an area" cannot end up meaning two different things on
+    /// the two platforms. Map settings has its own door into the same editor
+    /// and opens on the camera instead, because there is no pressed point
+    /// there to open on. Set in BOTH modes — the boundary is a map object,
+    /// not a cruise one, which is also why this holder (remembered across the
+    /// mode toggle) can carry it. iOS: `MapHomeScreen.boundaryDrawSeed`.
     var boundaryDrawSeed by mutableStateOf<CoordinateConversions.LatLon?>(null)
 
     /// Drop a PlannedPlot where the cruiser pressed — wired by
@@ -265,13 +270,19 @@ internal class CruiseModeState {
     /// Delete a plan (never a measurement — a planned plot holds no trees).
     var deletePlanned: (PlannedPlot) -> Unit = {}
 
-    /// Where every hand-drawn coordinate enters the app.
+    /// Where every hand-drawn coordinate enters the app — in BOTH modes; the
+    /// menu it raises is what narrows (see MapPlanMenu).
     ///
     /// A press with a MOVE armed relocates that plan and nothing else — the
     /// cruiser asked one question ("where should this be instead?") and gets
-    /// no menu in the middle of answering it. Otherwise the menu comes up.
-    fun onMapLongPress(coordinate: CoordinateConversions.LatLon) {
-        val moving = movingPlannedId
+    /// no menu in the middle of answering it. That branch is cruise-only: a
+    /// planned plot exists only in the cruise world, and an arm that outlived
+    /// a mode flip must not relocate a plan from a map no longer showing it.
+    fun onMapLongPress(
+        coordinate: CoordinateConversions.LatLon,
+        inCruiseMode: Boolean,
+    ) {
+        val moving = if (inCruiseMode) movingPlannedId else null
         if (moving != null) {
             val planned = data.plannedPlots.firstOrNull { it.id == moving }
             movingPlannedId = null
@@ -1195,41 +1206,6 @@ internal fun CruiseModeSheets(
         )
     }
 
-    // MARK: - Press-and-hold planning menu (mission planning, DJI-style)
-
-    // The two things a cruiser plans on a map. Raised by the gesture, and by
-    // the (+)'s "Pick on the map" arming the same gesture — one flow, so
-    // there is never a second way to plan that behaves differently. Strings
-    // byte-identical to the iOS confirmation dialog.
-    val planAt = state.planMenuAt
-    if (planAt != null) {
-        // Same shape as the drawn plot's tap menu (PlotOverlayMenu): a
-        // titled card of full-width buttons, which is this app's answer to
-        // the iOS confirmation dialog it mirrors.
-        ChoiceMenuDialog(
-            title = "Plan here",
-            primaryLabel = "Plan a plot here",
-            secondaryLabel = "Draw an area",
-            onPrimary = {
-                state.planMenuAt = null
-                state.awaitingPlanPress = false
-                state.planPlot(planAt)
-            },
-            onSecondary = {
-                // Hands the coordinate to whoever owns area drawing and
-                // stops — see `boundaryDrawSeed`. Nothing here decides what
-                // a drawn area becomes.
-                state.boundaryDrawSeed = planAt
-                state.planMenuAt = null
-                state.awaitingPlanPress = false
-            },
-            onDismiss = {
-                state.planMenuAt = null
-                state.awaitingPlanPress = false
-            },
-        )
-    }
-
     // MARK: - The (+)'s two doors into a plot
 
     // Not a third path: "Pick on the map" arms the press-and-hold above and
@@ -1312,19 +1288,72 @@ internal fun CruiseModeSheets(
     }
 }
 
-/// A two-choice menu over the map: the press-and-hold planning menu and the
-/// (+)'s two doors. Same card shape as `PlotOverlayMenu` — a titled column of
-/// full-width buttons — which is this app's answer to the iOS confirmation
-/// dialog these mirror. Both labels are ordinary (non-destructive) actions,
-/// so neither takes the danger treatment.
+// MARK: - Press-and-hold planning menu (mission planning, DJI-style)
+
+/// The things a cruiser plans on a map. Raised by the gesture, and by the
+/// (+)'s "Pick on the map" arming the same gesture — one flow, so there is
+/// never a second way to plan that behaves differently. Strings byte-identical
+/// to the iOS confirmation dialog.
+///
+/// BOTH MODES, but not the same menu in both. "Draw an area" is always here:
+/// there is one stand boundary and it does not care which mode drew it. "Plan
+/// a plot here" plans a CRUISE plot, and measure mode's plots — the
+/// project-less quick-measure ones — hold no coordinate to plan
+/// (`QuickMeasurePlot` has no lat/lon at all), so there is nothing for it to
+/// write there. It is left OUT of the measure-mode menu rather than shown and
+/// refused: an item that cannot work is the defect this menu was fixed for.
+/// One item plus Cancel is still a menu, so it is never empty.
+@Composable
+internal fun MapPlanMenu(state: CruiseModeState, inCruiseMode: Boolean) {
+    val planAt = state.planMenuAt ?: return
+    val dismiss = {
+        state.planMenuAt = null
+        state.awaitingPlanPress = false
+    }
+    // Opens the boundary editor on the pressed coordinate — see
+    // `boundaryDrawSeed`, which is the only handoff.
+    val drawArea = {
+        state.boundaryDrawSeed = planAt
+        dismiss()
+    }
+    if (inCruiseMode) {
+        ChoiceMenuDialog(
+            title = "Plan here",
+            primaryLabel = "Plan a plot here",
+            onPrimary = {
+                dismiss()
+                state.planPlot(planAt)
+            },
+            onDismiss = dismiss,
+            secondaryLabel = "Draw an area",
+            onSecondary = drawArea,
+        )
+    } else {
+        ChoiceMenuDialog(
+            title = "Plan here",
+            primaryLabel = "Draw an area",
+            onPrimary = drawArea,
+            onDismiss = dismiss,
+        )
+    }
+}
+
+/// A one- or two-choice menu over the map: the press-and-hold planning menu
+/// and the (+)'s two doors. Same card shape as `PlotOverlayMenu` — a titled
+/// column of full-width buttons — which is this app's answer to the iOS
+/// confirmation dialog these mirror. Every label is an ordinary
+/// (non-destructive) action, so none takes the danger treatment.
+///
+/// The second choice is optional because the planning menu drops it in
+/// measure mode; Cancel is always drawn, so the card is never a bare title.
 @Composable
 private fun ChoiceMenuDialog(
     title: String,
     primaryLabel: String,
-    secondaryLabel: String,
     onPrimary: () -> Unit,
-    onSecondary: () -> Unit,
     onDismiss: () -> Unit,
+    secondaryLabel: String? = null,
+    onSecondary: () -> Unit = {},
 ) {
     val colors = Forestix.colors
     val type = Forestix.type
@@ -1347,11 +1376,13 @@ private fun ChoiceMenuDialog(
                 modifier = Modifier.fillMaxWidth(),
                 onClick = onPrimary,
             )
-            ForestixBorderedButton(
-                label = secondaryLabel,
-                modifier = Modifier.fillMaxWidth(),
-                onClick = onSecondary,
-            )
+            if (secondaryLabel != null) {
+                ForestixBorderedButton(
+                    label = secondaryLabel,
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = onSecondary,
+                )
+            }
             ForestixBorderedButton(
                 label = "Cancel",
                 modifier = Modifier.fillMaxWidth(),

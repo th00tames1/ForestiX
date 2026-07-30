@@ -37,6 +37,16 @@
 // them. Quick rows keep every edit path they had; cruise rows are read-only
 // here, because TreeDetailScreen owns that store's writes.
 //
+// READ-ONLY MEANS NOT WRITTEN, NOT UNOPENABLE. That rule was over-applied:
+// a cruise row had no chevron and no tap target at all, so the log listed a
+// tree the cruiser could not inspect from the surface they were reading it
+// on. A cruise row now OPENS — it pushes the existing TreeDetailScreen, the
+// one surface that owns this store's writes. What the original argument was
+// actually about survives untouched: the log still writes no MEASUREMENT
+// onto a cruise tree. There is no inline editor and no swipe-delete for
+// those rows, so a diameter or a height on a cruise stem still has exactly
+// one save path.
+//
 // The three-column table did NOT grow two more columns for project and
 // plot: the whole point of the one-row-per-tree change above was that four
 // columns on a phone had every cell scaling to fit. The section heading
@@ -66,6 +76,11 @@ public struct FieldLogScreen: View {
     @State private var shareURL: URL?
     /// The row whose detail sheet is open. nil = closed.
     @State private var inspecting: FieldLogRowModel?
+    /// The CRUISE tree being pushed onto TreeDetailScreen. nil = nothing
+    /// pushed. Held as an id rather than a row because the destination reads
+    /// the tree back out of the cruise store — the row here is a flattened
+    /// three-column projection, not the record.
+    @State private var openingCruiseTree: UUID?
     /// The row a swipe asked to delete, held until the cruiser confirms.
     /// EVERY row a swipe reaches goes through here (see `requestDelete`).
     @State private var pendingDelete: FieldLogRowModel?
@@ -89,6 +104,31 @@ public struct FieldLogScreen: View {
     @State private var rescanPlotSetup = false
     /// The "add a tree" the toolbar or the empty state raised. nil = closed.
     @State private var newTree: FieldLogNewTree?
+
+    // MARK: Bulk re-file (see TreeMove.swift)
+
+    /// The cruise trees the cruiser has ticked, or nil when the log is NOT
+    /// in selection mode. nil vs. empty is load-bearing: an empty set is
+    /// "selecting, nothing ticked yet" and still shows the bar, so the way
+    /// out stays on screen after the last row is un-ticked.
+    ///
+    /// CRUISE ONLY. A quick reading has no project to be filed under (see
+    /// TreeMove.swift's closing note), so a long press on one explains that
+    /// instead of selecting it.
+    @State private var selection: Set<UUID>?
+    @State private var pickingDestination = false
+    /// The worked-out move, held while the confirmation is up. Nothing has
+    /// been written at this point.
+    @State private var pendingPlan: TreeMovePlan?
+    /// A finished move that did NOT fully succeed. A clean move reports
+    /// itself by the rows appearing under their new heading.
+    @State private var moveResult: TreeMoveOutcome?
+    /// The destination could not be read, so no move was planned.
+    @State private var planFailure: String?
+    /// Every picked tree was already in the chosen plot.
+    @State private var nothingToMove: String?
+    /// A long press landed on a quick-measure row.
+    @State private var quickHasNoProject = false
 
     /// `scope` defaults to everything; the cruise project sheet passes the
     /// plot in hand so the log opens on it.
@@ -152,15 +192,24 @@ public struct FieldLogScreen: View {
     }
 
     public var body: some View {
-        Group {
-            if logIsEmpty {
-                emptyState
-            } else {
-                populatedList
-            }
+        VStack(spacing: 0) {
+            // The count of what is ticked, and the way out, PINNED above the
+            // list rather than parked in a row of it — a selection the
+            // cruiser has scrolled away from is exactly the hidden mode this
+            // must not become.
+            if let selected = selection { selectionBar(selected) }
+            moveHost
         }
         .background(ForestixPalette.canvas.ignoresSafeArea())
         .onAppear { cruiseFeed.load(environment: environment) }
+        // Leaving the screen ends selection mode. A ticked set that survived
+        // a pop would re-appear over a list the cruiser has since filtered,
+        // pointing at trees they can no longer see.
+        .onDisappear { selection = nil }
+        // Same argument for the filter: changing scope hides rows, and a
+        // tick on a row that is no longer on screen still counts toward the
+        // move. The bar would say "12 selected" over a list of three.
+        .onChange(of: scope) { _, _ in selection = nil }
         .sheet(isPresented: $choosingScope) {
             FieldLogScopeSheet(
                 scope: $scope,
@@ -288,6 +337,175 @@ public struct FieldLogScreen: View {
         #endif
     }
 
+    // MARK: - Bulk re-file (see TreeMove.swift)
+
+    /// The list itself plus everything the move raises over it. Kept apart
+    /// from `body`'s modifier chain because that chain is already long
+    /// enough to be a type-checker cost on its own.
+    private var moveHost: some View {
+        Group {
+            if logIsEmpty {
+                emptyState
+            } else {
+                populatedList
+            }
+        }
+        .sheet(isPresented: $pickingDestination) {
+            TreeMovePicker(projects: cruiseFeed.projects,
+                           plotsByProject: cruiseFeed.plotsByProject,
+                           onPick: { choose($0) })
+        }
+        // Names what will move and where BEFORE anything is written. This
+        // rewrites which project a piece of field data was recorded in, and
+        // there is no undo behind it.
+        .alert(TreeMoveWords.confirmTitle,
+               isPresented: Binding(
+                   get: { pendingPlan != nil },
+                   set: { if !$0 { pendingPlan = nil } }),
+               presenting: pendingPlan) { plan in
+            Button(TreeMoveWords.confirmAction(plan.movers.count)) { commit(plan) }
+            Button(TreeMoveWords.cancel, role: .cancel) { pendingPlan = nil }
+        } message: { plan in
+            Text(TreeMoveWords.confirmMessage(
+                destination: plan.destination.label,
+                movers: plan.movers.count,
+                alreadyThere: plan.alreadyThere,
+                renumbered: plan.renumbered.count,
+                destinationClosed: plan.destination.isClosed))
+        }
+        // A PARTIAL move is reported as a partial move, naming every row
+        // that stayed put and why. Nothing here ever says "done" over rows
+        // that did not land.
+        .alert(TreeMoveWords.failureTitle,
+               isPresented: Binding(
+                   get: { moveResult != nil },
+                   set: { if !$0 { moveResult = nil } }),
+               presenting: moveResult) { _ in
+            Button("OK", role: .cancel) { moveResult = nil }
+        } message: { outcome in
+            Text(TreeMoveWords.failureMessage(
+                moved: outcome.movedCount,
+                total: outcome.attempted,
+                destination: outcome.destination.label,
+                failures: outcome.failures.map(\.line)))
+        }
+        .alert(TreeMoveWords.planFailedTitle,
+               isPresented: Binding(
+                   get: { planFailure != nil },
+                   set: { if !$0 { planFailure = nil } })) {
+            Button("OK", role: .cancel) { planFailure = nil }
+        } message: {
+            Text(planFailure ?? "")
+        }
+        .alert(TreeMoveWords.confirmTitle,
+               isPresented: Binding(
+                   get: { nothingToMove != nil },
+                   set: { if !$0 { nothingToMove = nil } })) {
+            Button("OK", role: .cancel) { nothingToMove = nil }
+        } message: {
+            Text(nothingToMove ?? "")
+        }
+        // The quick-measure world's answer to "assign a project", said in
+        // full rather than by a long press that does nothing.
+        .alert(TreeMoveWords.quickHasNoProjectTitle,
+               isPresented: $quickHasNoProject) {
+            Button("OK", role: .cancel) { quickHasNoProject = false }
+        } message: {
+            Text(TreeMoveWords.quickHasNoProjectBody)
+        }
+    }
+
+    /// What is ticked, where it can go, and the way out — all three on one
+    /// line, always visible while selecting.
+    private func selectionBar(_ selected: Set<UUID>) -> some View {
+        HStack(spacing: ForestixSpace.sm) {
+            Text(TreeMoveWords.selectionCount(selected.count))
+                .font(ForestixType.bodyBold)
+                .foregroundStyle(ForestixPalette.textPrimary)
+                .lineLimit(1)
+                .accessibilityIdentifier("fieldLog.selectionCount")
+            Spacer(minLength: 4)
+            Button(TreeMoveWords.moveButton) { pickingDestination = true }
+                .font(ForestixType.bodyBold)
+                .foregroundStyle(selected.isEmpty
+                                 ? ForestixPalette.textTertiary
+                                 : ForestixPalette.primary)
+                .buttonStyle(.plain)
+                .disabled(selected.isEmpty)
+                .accessibilityIdentifier("fieldLog.moveTo")
+            Button(TreeMoveWords.cancel) { selection = nil }
+                .font(ForestixType.body)
+                .foregroundStyle(ForestixPalette.textSecondary)
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("fieldLog.endSelection")
+        }
+        .padding(.horizontal, ForestixSpace.md)
+        .padding(.vertical, ForestixSpace.sm)
+        .frame(maxWidth: .infinity)
+        .background(ForestixPalette.surface)
+    }
+
+    /// The ticked ids in the order they appear on screen. `selection` is a
+    /// Set, and the tree-number allocation in `TreeMover.plan` walks the
+    /// list in order — reading it back off the sections keeps that
+    /// allocation deterministic and in the order the cruiser is looking at.
+    private var selectedIDsInOrder: [UUID] {
+        guard let selection else { return [] }
+        return sections.flatMap(\.cruiseRows).map(\.id)
+            .filter { selection.contains($0) }
+    }
+
+    /// A long press on a cruise row. The first one opens selection mode with
+    /// that row ticked; later ones just toggle, so a press that lands on an
+    /// already-selected list behaves like the tap beside it.
+    private func longPressCruise(_ id: UUID) {
+        if selection == nil {
+            HapticFeedback.play(.success)
+            selection = [id]
+        } else {
+            toggleCruise(id)
+        }
+    }
+
+    private func toggleCruise(_ id: UUID) {
+        guard var current = selection else { return }
+        if current.contains(id) { current.remove(id) } else { current.insert(id) }
+        selection = current
+    }
+
+    /// Destination picked. Plans the move — reading the destination plot's
+    /// existing tree numbers — and raises the confirmation. NOTHING is
+    /// written here.
+    private func choose(_ destination: TreeMoveDestination) {
+        pickingDestination = false
+        do {
+            let plan = try TreeMover.plan(treeIDs: selectedIDsInOrder,
+                                          to: destination,
+                                          environment: environment)
+            if plan.hasWork {
+                pendingPlan = plan
+            } else {
+                nothingToMove = TreeMoveWords.nothingToMove(
+                    destination: destination.label)
+            }
+        } catch {
+            // The free numbers in the destination are unknown, so the move
+            // cannot be planned without guessing them. Say so; write nothing.
+            planFailure = TreeMoveWords.planFailedMessage(
+                reason: error.localizedDescription)
+        }
+    }
+
+    private func commit(_ plan: TreeMovePlan) {
+        let outcome = TreeMover.apply(plan, environment: environment)
+        pendingPlan = nil
+        selection = nil
+        // Re-read: the moved rows belong under a different heading now, and
+        // a stale feed would go on showing them under the old one.
+        cruiseFeed.load(environment: environment)
+        if !outcome.isClean { moveResult = outcome }
+    }
+
     // MARK: - Populated list
 
     private var populatedList: some View {
@@ -386,15 +604,36 @@ public struct FieldLogScreen: View {
                                 Label("Delete", systemImage: "trash")
                             }
                         }
+                        // A quick row cannot be filed under a project, and a
+                        // long press that silently did nothing would read as
+                        // a bug. It answers instead.
+                        .onLongPressGesture { quickHasNoProject = true }
                     }
-                    // Cruise rows are READ-ONLY: no tap target, no swipe.
-                    // The cruise flow owns that store's writes, and a second
-                    // save path onto the same row is how two numbers for one
-                    // tree get created.
+                    // Cruise rows OPEN: the tap pushes TreeDetailScreen,
+                    // which owns that store's writes. No inline editor and
+                    // no swipe-delete here — a second path that saves a
+                    // MEASUREMENT onto the same row is how two numbers for
+                    // one tree get created, and that argument is untouched.
+                    // Press and hold enters selection mode; once in it the
+                    // ordinary tap TOGGLES instead of pushing, so a cruiser
+                    // ticking twelve rows never leaves the list by accident.
                     ForEach(section.cruiseRows) { row in
-                        FieldLogCruiseRowView(row: row,
-                                              unitSystem: settings.unitSystem)
-                            .listRowBackground(ForestixPalette.surface)
+                        Button {
+                            if selection == nil {
+                                openingCruiseTree = row.id
+                            } else {
+                                toggleCruise(row.id)
+                            }
+                        } label: {
+                            FieldLogCruiseRowView(
+                                row: row,
+                                unitSystem: settings.unitSystem,
+                                selecting: selection != nil,
+                                isSelected: selection?.contains(row.id) == true)
+                        }
+                        .buttonStyle(.plain)
+                        .listRowBackground(ForestixPalette.surface)
+                        .onLongPressGesture { longPressCruise(row.id) }
                     }
                     if section.isEmpty {
                         Text(FieldLogWords.emptyScope)
@@ -417,11 +656,31 @@ public struct FieldLogScreen: View {
                     .textCase(nil)
                 }
             }
+
+            // Discoverability for the long press. Shown only when there is a
+            // cruise row on screen to press, and not while already selecting
+            // — the bar above is saying what to do then.
+            if selection == nil, sections.contains(where: { !$0.cruiseRows.isEmpty }) {
+                Section {
+                    Text(TreeMoveWords.hint)
+                        .font(ForestixType.caption)
+                        .foregroundStyle(ForestixPalette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .listRowBackground(ForestixPalette.surface)
+                }
+            }
         }
         #if os(iOS)
         .listStyle(.insetGrouped)
         #endif
         .scrollContentBackground(.hidden)
+        // Declared on the List, not inside the ForEach: a destination
+        // registered from a lazy row is not reliably there when the push
+        // happens. Same shape as ProjectBrowserScreen's stand-summary push,
+        // and it resolves against whichever stack the log was pushed onto.
+        .navigationDestination(item: $openingCruiseTree) { id in
+            TreeDetailByIDScreen(treeID: id)
+        }
     }
 
     /// True while quick-measure rows can appear under the current scope.
@@ -540,7 +799,12 @@ public struct FieldLogScreen: View {
                         // tape reading did not change because the scan did,
                         // and a re-measure that dropped it would quietly cost
                         // the validation study its comparison.
-                        truth: meta.truth ?? request.truth))
+                        truth: meta.truth ?? request.truth,
+                        // Provenance follows the value it belongs to: a truth
+                        // typed on the scan screen is typed (nil), while one
+                        // riding across from the reading being re-measured
+                        // keeps the source it already had.
+                        truthSource: meta.truth != nil ? nil : request.truthSource))
                     rescan = nil
                     return true
                 },
@@ -575,7 +839,12 @@ public struct FieldLogScreen: View {
                         // See the diameter cover: a truth typed on the scan
                         // screen wins, else the row's own tape value rides
                         // across the re-measure.
-                        truth: meta.truth ?? request.truth))
+                        truth: meta.truth ?? request.truth,
+                        // Provenance follows the value it belongs to: a truth
+                        // typed on the scan screen is typed (nil), while one
+                        // riding across from the reading being re-measured
+                        // keeps the source it already had.
+                        truthSource: meta.truth != nil ? nil : request.truthSource))
                     rescan = nil
                     return true
                 },
@@ -910,6 +1179,12 @@ public struct FieldLogRescan: Identifiable, Equatable {
     public let plotID: UUID?
     public let speciesCode: String?
     public let truth: Double?
+    /// How that truth got onto the reading being superseded (a
+    /// `QuickMeasureEntry.truthSource` raw, nil = typed against the reading).
+    /// It rides along with the value because the two are one fact:
+    /// re-labelling a capture-recovered truth as one typed on the scan screen
+    /// would claim a provenance the cruiser never gave it.
+    public let truthSource: String?
 }
 
 // MARK: - New tree
@@ -1301,13 +1576,41 @@ private struct FieldLogRow: View {
 // MARK: - Cruise row (read-only)
 
 /// A cruise tree in the log's table. Same three columns as a quick row so
-/// the two read as one sheet of paper, but with no button and no swipe:
-/// this store is written by the cruise flow and edited on TreeDetailScreen.
+/// the two read as one sheet of paper, and the same chevron: the row opens
+/// TreeDetailScreen. It has no swipe and no inline editor — this store is
+/// written by the cruise flow and edited on TreeDetailScreen, and that is
+/// exactly where the tap goes.
 private struct FieldLogCruiseRowView: View {
     let row: FieldLogCruiseRow
     let unitSystem: UnitSystem
+    /// The log is in bulk-move selection mode. The tick box appears for
+    /// every cruise row while it is, so an UNticked row is visibly unticked
+    /// rather than merely missing a mark.
+    var selecting: Bool = false
+    var isSelected: Bool = false
 
     var body: some View {
+        HStack(spacing: ForestixSpace.xs) {
+            if selecting {
+                Image(systemName: isSelected
+                      ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 18))
+                    .foregroundStyle(isSelected
+                                     ? ForestixPalette.primary
+                                     : ForestixPalette.textTertiary)
+                    .accessibilityHidden(true)
+            }
+            table
+        }
+        .padding(.vertical, 2)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityHint(selecting
+                           ? "Selected for a move"
+                           : "Opens the full record")
+    }
+
+    private var table: some View {
         VStack(alignment: .leading, spacing: 4) {
             WeightedColumns(weights: FieldLogTable.weights,
                             spacing: FieldLogTable.gap) {
@@ -1341,10 +1644,18 @@ private struct FieldLogCruiseRowView: View {
                     .foregroundStyle(ForestixPalette.textTertiary)
                     .lineLimit(1)
                 Spacer(minLength: 0)
+                // The same "there is more behind this" affordance a quick row
+                // carries, for the same reason: this row opens. A chevron on
+                // a row that cannot be opened would be worse than none, so it
+                // appears here only because the tap above it is real — and
+                // while selecting the tap toggles instead, so it goes.
+                if !selecting {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(ForestixPalette.textTertiary)
+                }
             }
         }
-        .padding(.vertical, 2)
-        .accessibilityElement(children: .combine)
     }
 }
 
@@ -1689,6 +2000,9 @@ private struct FieldLogDetailForm: View {
     @State private var editingPosition = false
     @State private var positionText = ""
     @State private var positionRefusal: String?
+    /// The last ground-truth recovery run's leftovers, loaded once with the
+    /// fields. A small JSON file, not the manifest tree.
+    @State private var backfillReport: TruthBackfillReport?
 
     /// A prefilled field re-parses a hair off the number it was filled
     /// from — it is rendered to four decimals, and under imperial it makes
@@ -1829,9 +2143,18 @@ private struct FieldLogDetailForm: View {
     private func isDirty(_ kind: QuickMeasureEntry.Kind, value: Double) -> Bool {
         guard let existing = existing(kind) else { return true }
         if abs(value - existing.value) > Self.valueEpsilon { return true }
+        return truthEdited(kind, current: existing)
+    }
+
+    /// True when the truth field holds something different from what is stored.
+    /// With developer mode off the field is not on screen at all, so nothing
+    /// can have been edited and a save must leave the stored truth — and its
+    /// provenance — exactly as they were.
+    private func truthEdited(_ kind: QuickMeasureEntry.Kind,
+                             current: QuickMeasureEntry) -> Bool {
         guard settings.developerMode else { return false }
         let typed = TruthInput.parsePositiveBase(truthText(kind), unit: truthUnit(kind))
-        switch (typed, existing.truth) {
+        switch (typed, current.truth) {
         case (nil, nil):          return false
         case let (new?, old?):    return abs(new - old) > Self.valueEpsilon
         default:                  return true
@@ -1851,7 +2174,15 @@ private struct FieldLogDetailForm: View {
             if abs(value - current.value) > Self.valueEpsilon {
                 next = next.typedValue(value)
             }
-            history.update(next.settingTruth(truth))
+            // Only RESTAMP the truth when the number itself moved. Saving a
+            // corrected diameter used to rewrite the truth too, which would now
+            // relabel a truth recovered from a raw capture as one typed here —
+            // a provenance claim the cruiser never made. An unchanged truth
+            // keeps whatever source it already carries.
+            if truthEdited(kind, current: current) {
+                next = next.settingTruth(truth)
+            }
+            history.update(next)
         } else {
             history.append(.typed(kind: kind, value: value,
                                   treeNumber: tree,
@@ -1864,6 +2195,7 @@ private struct FieldLogDetailForm: View {
     private func seedFields() {
         guard !seeded else { return }
         seeded = true
+        backfillReport = TruthBackfillReport.load()
         dbhText = row.dbh.map {
             TruthInput.text(base: $0.value, unit: unit(.dbh))
         } ?? ""
@@ -1925,6 +2257,9 @@ private struct FieldLogDetailForm: View {
                 if let hint = truthNeedsReadingHint(kind) {
                     warningRow(hint)
                 }
+                ForEach(strandedTruths(kind, tree: tree), id: \.captureID) { s in
+                    strandedRow(s, kind: kind)
+                }
             }
             Button("Save changes") { save(kind, tree: tree) }
                 .disabled(!canSave(kind))
@@ -1936,7 +2271,11 @@ private struct FieldLogDetailForm: View {
                     plotID: row.entries.first?.plotID,
                     speciesCode: row.entries.compactMap(\.speciesCode)
                         .first(where: { !$0.isEmpty }),
-                    truth: current?.truth))
+                    // The tape value AND how it got onto the reading being
+                    // superseded — a truth recovered from a raw capture must
+                    // not come back stamped as one typed on the scan screen.
+                    truth: current?.truth,
+                    truthSource: current?.truthSource))
             }
         }
     }
@@ -1957,6 +2296,31 @@ private struct FieldLogDetailForm: View {
                                            unit: truthUnit(kind)) != nil
         else { return nil }
         return "A ground truth attaches to a reading. Type the tape number as the measurement above — it is saved as typed, not measured."
+    }
+
+    /// Truths that were typed for a raw capture of this tree and could not be
+    /// matched to any reading — the last recovery run's leftovers.
+    ///
+    /// The old read-only "Ground truth" section is NOT coming back; that
+    /// surface showed the manifest value beside the reading's and nothing said
+    /// which one the export read. This says only what the sheet cannot
+    /// otherwise show: a number exists, it is in the ZIP, and it is on no
+    /// reading. Read from the report the recovery pass leaves behind rather
+    /// than from disk, so opening a tree never costs ~300 manifest reads.
+    private func strandedTruths(_ kind: QuickMeasureEntry.Kind,
+                                tree: Int) -> [TruthBackfillReport.Stranded] {
+        backfillReport?.stranded(kind: kind, treeNumber: tree) ?? []
+    }
+
+    private func strandedRow(_ s: TruthBackfillReport.Stranded,
+                             kind: QuickMeasureEntry.Kind) -> some View {
+        // Rendered in the same unit as the truth field directly above, so the
+        // sentence and the field can never disagree about what the number is.
+        let text = TruthInput.text(base: s.value, unit: truthUnit(kind))
+        return Text(TruthBackfill.strandedLine(text))
+            .font(ForestixType.caption)
+            .foregroundStyle(ForestixPalette.textTertiary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private func remeasureTitle(_ kind: QuickMeasureEntry.Kind,
@@ -2396,3 +2760,21 @@ private struct FieldLogShareSheet: UIViewControllerRepresentable {
 // taped for — that is the reason the truth was moved onto the reading in the
 // first place (see `QuickMeasureEntry.truth`), and guessing here would put a
 // number the cruiser never entered into the research corpus.
+//
+// SINCE THEN. Hiding those rows turned out to hide the cruiser's own data: the
+// tape values from the field days before the truth moved onto the reading are
+// exactly the "manifest and no reading" class, and a blank True field is
+// indistinguishable on screen from a tree nobody taped. They are recovered now
+// rather than re-displayed — `TruthBackfill` attaches a manifest truth to the
+// reading it belongs to (same kind, same tree, unambiguous plot, nearest
+// timestamp) and stamps it `truth_source = capture`, so the value lives where
+// every export already reads it and the analysis can still tell a matched
+// truth from a typed one.
+//
+// What remains DISPLAY-ONLY is the residue: a manifest truth that matched no
+// reading at all, because its reading was deleted or its tree number is
+// ambiguous across plots. One quiet line in the section names that number and
+// says it is in the ZIP. It is still not written back, and still not exported
+// as a reading's truth, for the original reason — a value keyed on a tree
+// number alone cannot say which reading it was taped for, and inventing one
+// would put a number into the corpus that no measurement stands behind.

@@ -507,3 +507,83 @@ public struct TreeDetailScreen: View {
         }
     }
 }
+
+// MARK: - By-id entry point
+
+/// `TreeDetailScreen` for a caller that holds only the tree's ID.
+///
+/// The cruise map pushes the detail screen from a `Tree` it already has in
+/// memory. The FIELD LOG does not: it holds `FieldLogCruiseRow`, a flattened
+/// three-column projection, so it has to read the record back. That read
+/// happens ONCE, in `onAppear`, rather than inside the destination builder —
+/// the log is a read-back surface and a Core Data fetch in a view body runs
+/// inside SwiftUI's layout pass.
+///
+/// This is the iOS sibling of Android's `TreeDetailScreen(nav, treeId)`,
+/// which has always taken an id and loaded it; the failure sentence below is
+/// that loader's, verbatim, because the two phones must say the same thing.
+///
+/// `includeDeleted` is true on purpose, exactly as Android reads it: a tree
+/// soft-deleted after the caller listed it still has a record, and "Put back
+/// in tally" lives on this screen. Refusing to open it would strand the row.
+public struct TreeDetailByIDScreen: View {
+
+    private let treeID: UUID
+
+    @EnvironmentObject private var environment: AppEnvironment
+
+    @State private var tree: Tree?
+    /// Why there is no tree on screen. Never left nil-and-silent: an empty
+    /// form reads as "this tree has nothing on it", which is a different
+    /// fact from "this tree could not be read".
+    @State private var loadFailure: String?
+
+    public init(treeID: UUID) {
+        self.treeID = treeID
+    }
+
+    public var body: some View {
+        Group {
+            if let tree {
+                TreeDetailScreen(viewModel: TreeDetailViewModel(
+                    tree: tree,
+                    treeRepo: environment.treeRepository))
+            } else if let loadFailure {
+                Text(loadFailure)
+                    .font(.callout)
+                    .foregroundStyle(ForestixPalette.confidenceBad)
+                    .multilineTextAlignment(.center)
+                    .padding(ForestixSpace.lg)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .navigationTitle("Tree")
+            } else {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .navigationTitle("Tree")
+            }
+        }
+        .onAppear(perform: load)
+    }
+
+    /// Loads once. Re-appearing (a sheet closing over this screen, a child
+    /// popping back onto it) must not refetch and rebuild the detail screen's
+    /// view model underneath whatever the cruiser is editing.
+    private func load() {
+        guard tree == nil, loadFailure == nil else { return }
+        do {
+            guard let found = try environment.treeRepository
+                .read(id: treeID, includeDeleted: true) else {
+                loadFailure = Self.failureText("Tree not found")
+                return
+            }
+            tree = found
+        } catch {
+            loadFailure = Self.failureText(error.localizedDescription)
+        }
+    }
+
+    /// Android's `"Failed to load tree: ${e.message ?: e}"`, byte for byte.
+    private static func failureText(_ reason: String) -> String {
+        "Failed to load tree: \(reason)"
+    }
+}

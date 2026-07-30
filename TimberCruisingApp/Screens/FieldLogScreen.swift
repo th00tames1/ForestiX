@@ -105,18 +105,31 @@ public struct FieldLogScreen: View {
     /// The "add a tree" the toolbar or the empty state raised. nil = closed.
     @State private var newTree: FieldLogNewTree?
 
-    // MARK: Bulk re-file (see TreeMove.swift)
+    // MARK: Bulk re-file (see TreeMove.swift and QuickMove.swift)
 
-    /// The cruise trees the cruiser has ticked, or nil when the log is NOT
-    /// in selection mode. nil vs. empty is load-bearing: an empty set is
-    /// "selecting, nothing ticked yet" and still shows the bar, so the way
-    /// out stays on screen after the last row is un-ticked.
+    /// What the cruiser has ticked, or nil when the log is NOT in selection
+    /// mode. nil vs. empty is load-bearing: an empty set is "selecting,
+    /// nothing ticked yet" and still shows the bar, so the way out stays on
+    /// screen after the last row is un-ticked.
     ///
-    /// CRUISE ONLY. A quick reading has no project to be filed under (see
-    /// TreeMove.swift's closing note), so a long press on one explains that
-    /// instead of selecting it.
-    @State private var selection: Set<UUID>?
+    /// It carries its WORLD because the two worlds have different
+    /// destinations: a cruise tree is re-parented to a cruise plot inside a
+    /// project, a quick reading is re-filed under a quick-measure plot, and
+    /// nothing can go to both. The gesture, the bar, the wording and the
+    /// confirmation shape are shared — see `selectionBar` — so the two read
+    /// as one mode with one answer to "where is this going".
+    private enum Selection: Equatable {
+        case cruise(Set<UUID>)
+        /// Quick rows are keyed by `FieldLogRowModel.id`, not by entry id: a
+        /// row is a TREE, and it is the tree that moves.
+        case quick(Set<String>)
+    }
+    @State private var selection: Selection?
     @State private var pickingDestination = false
+    /// The quick rows handed to `quickMoveFlow`. Non-nil while that move is
+    /// in progress; the flow owns the picker, the confirmation and the
+    /// report.
+    @State private var quickMoveRequest: [QuickMoveRow]?
     /// The worked-out move, held while the confirmation is up. Nothing has
     /// been written at this point.
     @State private var pendingPlan: TreeMovePlan?
@@ -127,8 +140,6 @@ public struct FieldLogScreen: View {
     @State private var planFailure: String?
     /// Every picked tree was already in the chosen plot.
     @State private var nothingToMove: String?
-    /// A long press landed on a quick-measure row.
-    @State private var quickHasNoProject = false
 
     /// `scope` defaults to everything; the cruise project sheet passes the
     /// plot in hand so the log opens on it.
@@ -197,7 +208,7 @@ public struct FieldLogScreen: View {
             // list rather than parked in a row of it — a selection the
             // cruiser has scrolled away from is exactly the hidden mode this
             // must not become.
-            if let selected = selection { selectionBar(selected) }
+            if let ticked = selection { selectionBar(ticked) }
             moveHost
         }
         .background(ForestixPalette.canvas.ignoresSafeArea())
@@ -339,10 +350,24 @@ public struct FieldLogScreen: View {
 
     // MARK: - Bulk re-file (see TreeMove.swift)
 
-    /// The list itself plus everything the move raises over it. Kept apart
-    /// from `body`'s modifier chain because that chain is already long
-    /// enough to be a type-checker cost on its own.
+    /// The list plus BOTH moves. Split from `body`'s modifier chain, and
+    /// then split again between the two worlds, because a chain this long is
+    /// a type-checker cost on its own.
     private var moveHost: some View {
+        cruiseMoveHost
+            // The quick-measure move owns its picker, its confirmation and
+            // its report — see QuickMove.swift. The log only says which rows.
+            .quickMoveFlow(request: $quickMoveRequest) { _ in
+                // Selection mode ends whatever the outcome: the rows the
+                // cruiser ticked have either moved (and are now under a
+                // different heading) or been named in the report, and either
+                // way leaving them ticked would point at a list they can no
+                // longer read.
+                selection = nil
+            }
+    }
+
+    private var cruiseMoveHost: some View {
         Group {
             if logIsEmpty {
                 emptyState
@@ -405,35 +430,38 @@ public struct FieldLogScreen: View {
         } message: {
             Text(nothingToMove ?? "")
         }
-        // The quick-measure world's answer to "assign a project", said in
-        // full rather than by a long press that does nothing.
-        .alert(TreeMoveWords.quickHasNoProjectTitle,
-               isPresented: $quickHasNoProject) {
-            Button("OK", role: .cancel) { quickHasNoProject = false }
-        } message: {
-            Text(TreeMoveWords.quickHasNoProjectBody)
-        }
     }
 
     /// What is ticked, where it can go, and the way out — all three on one
     /// line, always visible while selecting.
-    private func selectionBar(_ selected: Set<UUID>) -> some View {
-        HStack(spacing: ForestixSpace.sm) {
-            Text(TreeMoveWords.selectionCount(selected.count))
+    ///
+    /// ONE bar for both worlds. Only the destination differs, so only the
+    /// Move button's words differ; the count, the Cancel and the layout are
+    /// the same object, because two selection modes on one list that behaved
+    /// differently would be worse than the gap they close.
+    private func selectionBar(_ selection: Selection) -> some View {
+        let count: Int
+        let moveTitle: String
+        switch selection {
+        case .cruise(let ids): count = ids.count; moveTitle = TreeMoveWords.moveButton
+        case .quick(let ids):  count = ids.count; moveTitle = QuickMoveWords.moveButton
+        }
+        return HStack(spacing: ForestixSpace.sm) {
+            Text(TreeMoveWords.selectionCount(count))
                 .font(ForestixType.bodyBold)
                 .foregroundStyle(ForestixPalette.textPrimary)
                 .lineLimit(1)
                 .accessibilityIdentifier("fieldLog.selectionCount")
             Spacer(minLength: 4)
-            Button(TreeMoveWords.moveButton) { pickingDestination = true }
+            Button(moveTitle) { startMove() }
                 .font(ForestixType.bodyBold)
-                .foregroundStyle(selected.isEmpty
+                .foregroundStyle(count == 0
                                  ? ForestixPalette.textTertiary
                                  : ForestixPalette.primary)
                 .buttonStyle(.plain)
-                .disabled(selected.isEmpty)
+                .disabled(count == 0)
                 .accessibilityIdentifier("fieldLog.moveTo")
-            Button(TreeMoveWords.cancel) { selection = nil }
+            Button(TreeMoveWords.cancel) { self.selection = nil }
                 .font(ForestixType.body)
                 .foregroundStyle(ForestixPalette.textSecondary)
                 .buttonStyle(.plain)
@@ -445,32 +473,82 @@ public struct FieldLogScreen: View {
         .background(ForestixPalette.surface)
     }
 
-    /// The ticked ids in the order they appear on screen. `selection` is a
-    /// Set, and the tree-number allocation in `TreeMover.plan` walks the
-    /// list in order — reading it back off the sections keeps that
+    /// Move tapped. Each world raises its own destination picker.
+    private func startMove() {
+        switch selection {
+        case .cruise:            pickingDestination = true
+        case .quick:             quickMoveRequest = selectedQuickRows
+        case .none:              break
+        }
+    }
+
+    /// The ticked cruise ids in the order they appear on screen. `selection`
+    /// holds a Set, and the tree-number allocation in `TreeMover.plan` walks
+    /// the list in order — reading it back off the sections keeps that
     /// allocation deterministic and in the order the cruiser is looking at.
     private var selectedIDsInOrder: [UUID] {
-        guard let selection else { return [] }
+        guard case .cruise(let ids) = selection else { return [] }
         return sections.flatMap(\.cruiseRows).map(\.id)
-            .filter { selection.contains($0) }
+            .filter { ids.contains($0) }
+    }
+
+    /// The ticked quick rows, on screen order, as the mover wants them. Same
+    /// reason as above: `QuickMover.plan` walks them in order when it works
+    /// out which tree numbers the destination has left.
+    private var selectedQuickRows: [QuickMoveRow] {
+        guard case .quick(let ids) = selection else { return [] }
+        return sections.flatMap(\.quickRows)
+            .filter { ids.contains($0.id) }
+            .map { QuickMoveRow($0) }
+    }
+
+    /// The ticked cruise ids, or nil when the log is not selecting cruise
+    /// rows. Read by the rows to draw their tick boxes.
+    private var cruiseSelection: Set<UUID>? {
+        if case .cruise(let ids) = selection { return ids }
+        return nil
+    }
+
+    private var quickSelection: Set<String>? {
+        if case .quick(let ids) = selection { return ids }
+        return nil
     }
 
     /// A long press on a cruise row. The first one opens selection mode with
     /// that row ticked; later ones just toggle, so a press that lands on an
-    /// already-selected list behaves like the tap beside it.
+    /// already-selected list behaves like the tap beside it. A press that
+    /// lands while the OTHER world is being selected switches worlds rather
+    /// than doing nothing — the two cannot go to one destination, and a
+    /// long press that silently did nothing would read as a bug.
     private func longPressCruise(_ id: UUID) {
-        if selection == nil {
-            HapticFeedback.play(.success)
-            selection = [id]
-        } else {
+        if case .cruise = selection {
             toggleCruise(id)
+        } else {
+            HapticFeedback.play(.success)
+            selection = .cruise([id])
         }
     }
 
     private func toggleCruise(_ id: UUID) {
-        guard var current = selection else { return }
-        if current.contains(id) { current.remove(id) } else { current.insert(id) }
-        selection = current
+        guard case .cruise(var ids) = selection else { return }
+        if ids.contains(id) { ids.remove(id) } else { ids.insert(id) }
+        selection = .cruise(ids)
+    }
+
+    /// The quick half of the same gesture. See `longPressCruise`.
+    private func longPressQuick(_ id: String) {
+        if case .quick = selection {
+            toggleQuick(id)
+        } else {
+            HapticFeedback.play(.success)
+            selection = .quick([id])
+        }
+    }
+
+    private func toggleQuick(_ id: String) {
+        guard case .quick(var ids) = selection else { return }
+        if ids.contains(id) { ids.remove(id) } else { ids.insert(id) }
+        selection = .quick(ids)
     }
 
     /// Destination picked. Plans the move — reading the destination plot's
@@ -591,9 +669,22 @@ public struct FieldLogScreen: View {
                 Section {
                     // Quick rows keep every path they had: tap to inspect,
                     // swipe to delete, re-measure from the detail sheet.
+                    // Press and hold now enters selection mode, exactly as it
+                    // does on a cruise row, and once in it the ordinary tap
+                    // TOGGLES instead of opening — so a cruiser ticking a
+                    // dozen readings never leaves the list by accident.
                     ForEach(section.quickRows) { row in
-                        Button { inspecting = row } label: {
-                            FieldLogRow(row: row, unitSystem: settings.unitSystem)
+                        Button {
+                            if quickSelection == nil {
+                                inspecting = row
+                            } else {
+                                toggleQuick(row.id)
+                            }
+                        } label: {
+                            FieldLogRow(row: row,
+                                        unitSystem: settings.unitSystem,
+                                        selecting: quickSelection != nil,
+                                        isSelected: quickSelection?.contains(row.id) == true)
                         }
                         .buttonStyle(.plain)
                         .listRowBackground(ForestixPalette.surface)
@@ -604,10 +695,7 @@ public struct FieldLogScreen: View {
                                 Label("Delete", systemImage: "trash")
                             }
                         }
-                        // A quick row cannot be filed under a project, and a
-                        // long press that silently did nothing would read as
-                        // a bug. It answers instead.
-                        .onLongPressGesture { quickHasNoProject = true }
+                        .onLongPressGesture { longPressQuick(row.id) }
                     }
                     // Cruise rows OPEN: the tap pushes TreeDetailScreen,
                     // which owns that store's writes. No inline editor and
@@ -619,7 +707,7 @@ public struct FieldLogScreen: View {
                     // ticking twelve rows never leaves the list by accident.
                     ForEach(section.cruiseRows) { row in
                         Button {
-                            if selection == nil {
+                            if cruiseSelection == nil {
                                 openingCruiseTree = row.id
                             } else {
                                 toggleCruise(row.id)
@@ -628,8 +716,8 @@ public struct FieldLogScreen: View {
                             FieldLogCruiseRowView(
                                 row: row,
                                 unitSystem: settings.unitSystem,
-                                selecting: selection != nil,
-                                isSelected: selection?.contains(row.id) == true)
+                                selecting: cruiseSelection != nil,
+                                isSelected: cruiseSelection?.contains(row.id) == true)
                         }
                         .buttonStyle(.plain)
                         .listRowBackground(ForestixPalette.surface)
@@ -657,16 +745,18 @@ public struct FieldLogScreen: View {
                 }
             }
 
-            // Discoverability for the long press. Shown only when there is a
-            // cruise row on screen to press, and not while already selecting
-            // — the bar above is saying what to do then.
-            if selection == nil, sections.contains(where: { !$0.cruiseRows.isEmpty }) {
+            // Discoverability for the long press — one line per world, each
+            // shown only when there is a row of that world on screen to
+            // press, and neither while already selecting: the bar above is
+            // saying what to do then.
+            if selection == nil, sections.contains(where: { !$0.isEmpty }) {
                 Section {
-                    Text(TreeMoveWords.hint)
-                        .font(ForestixType.caption)
-                        .foregroundStyle(ForestixPalette.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .listRowBackground(ForestixPalette.surface)
+                    if sections.contains(where: { !$0.quickRows.isEmpty }) {
+                        hintLine(QuickMoveWords.hint)
+                    }
+                    if sections.contains(where: { !$0.cruiseRows.isEmpty }) {
+                        hintLine(TreeMoveWords.hint)
+                    }
                 }
             }
         }
@@ -681,6 +771,15 @@ public struct FieldLogScreen: View {
         .navigationDestination(item: $openingCruiseTree) { id in
             TreeDetailByIDScreen(treeID: id)
         }
+    }
+
+    /// One line of press-and-hold discoverability under the list.
+    private func hintLine(_ text: String) -> some View {
+        Text(text)
+            .font(ForestixType.caption)
+            .foregroundStyle(ForestixPalette.textTertiary)
+            .fixedSize(horizontal: false, vertical: true)
+            .listRowBackground(ForestixPalette.surface)
     }
 
     /// True while quick-measure rows can appear under the current scope.
@@ -1123,6 +1222,26 @@ public struct FieldLogRowModel: Identifiable, Equatable {
         }
     }
 
+    /// The id of the row a TREE's readings collapse into.
+    ///
+    /// Stated once, because three surfaces have to agree on it: `rows(from:)`
+    /// builds it, the map peek resolves a pin to it, and the record sheet
+    /// re-resolves itself after a move — which changes the plot half of the
+    /// key, and therefore the row's identity. A second hand-written copy of
+    /// this format is how one of them silently stops finding the row.
+    ///
+    /// `plotID` is used RAW, exactly as the reading holds it, so a row's id
+    /// is a fact about the entries rather than about the default plot at the
+    /// time it was computed.
+    public static func treeRowID(plotID: UUID?, treeNumber: Int) -> String {
+        "t|\(plotID?.uuidString ?? "-")|\(treeNumber)"
+    }
+
+    /// The id of the row a LOOSE reading gets to itself.
+    public static func looseRowID(entryID: UUID) -> String {
+        "e|\(entryID.uuidString)"
+    }
+
     /// Collapses the flat entry list into rows, newest tree first.
     ///
     /// `entries` arrives newest-first from the history, and that order is
@@ -1135,10 +1254,10 @@ public struct FieldLogRowModel: Identifiable, Equatable {
         for entry in entries {
             let key: String
             if let n = entry.treeNumber {
-                key = "t|\(entry.plotID?.uuidString ?? "-")|\(n)"
+                key = treeRowID(plotID: entry.plotID, treeNumber: n)
             } else {
                 // Never merged with anything: one row, this reading.
-                key = "e|\(entry.id.uuidString)"
+                key = looseRowID(entryID: entry.id)
             }
             if grouped[key] == nil { order.append(key) }
             grouped[key, default: []].append(entry)
@@ -1443,8 +1562,35 @@ private struct FieldLogColumnHeader: View {
 private struct FieldLogRow: View {
     let row: FieldLogRowModel
     let unitSystem: UnitSystem
+    /// The log is in move-selection mode. The tick box appears for every
+    /// quick row while it is, so an UNticked row is visibly unticked rather
+    /// than merely missing a mark — same rule as the cruise row beside it.
+    var selecting: Bool = false
+    var isSelected: Bool = false
 
     var body: some View {
+        HStack(spacing: ForestixSpace.xs) {
+            if selecting {
+                Image(systemName: isSelected
+                      ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 18))
+                    .foregroundStyle(isSelected
+                                     ? ForestixPalette.primary
+                                     : ForestixPalette.textTertiary)
+                    .accessibilityHidden(true)
+            }
+            table
+        }
+        .padding(.vertical, 2)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityText)
+        .accessibilityHint(selecting
+                           ? "Selected for a move"
+                           : "Opens the full record")
+    }
+
+    private var table: some View {
         VStack(alignment: .leading, spacing: 4) {
             // Same weights as the column header — the two are one table.
             WeightedColumns(weights: FieldLogTable.weights,
@@ -1510,17 +1656,15 @@ private struct FieldLogRow: View {
                     .lineLimit(1)
                 Spacer(minLength: 0)
                 // The standard "there is more behind this" affordance —
-                // the row is a button and this says so.
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(ForestixPalette.textTertiary)
+                // the row is a button and this says so. While selecting the
+                // tap toggles instead of opening, so it goes.
+                if !selecting {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(ForestixPalette.textTertiary)
+                }
             }
         }
-        .padding(.vertical, 2)
-        .contentShape(Rectangle())
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(accessibilityText)
-        .accessibilityHint("Opens the full record")
     }
 
     /// Kinds on this tree beyond the two the table names.
@@ -1935,8 +2079,17 @@ struct FieldLogDetailSheet: View {
     @EnvironmentObject private var history: QuickMeasureHistory
     @Environment(\.dismiss) private var dismiss
 
+    /// Where the row went when it was moved to another plot. A tree row's id
+    /// carries its plot (see `FieldLogRowModel.treeRowID`), so a move from
+    /// inside this sheet retires the id it was opened with — and without
+    /// this the sheet would answer a successful move with "every reading on
+    /// this row has been deleted", which is exactly wrong.
+    @State private var movedRowID: String?
+
+    private var shownRowID: String { movedRowID ?? rowID }
+
     private var liveRow: FieldLogRowModel? {
-        FieldLogRowModel.rows(from: history.entries).first { $0.id == rowID }
+        FieldLogRowModel.rows(from: history.entries).first { $0.id == shownRowID }
     }
 
     var body: some View {
@@ -1945,7 +2098,8 @@ struct FieldLogDetailSheet: View {
                 if let row = liveRow {
                     FieldLogDetailForm(row: row,
                                        unitSystem: unitSystem,
-                                       onRemeasure: onRemeasure)
+                                       onRemeasure: onRemeasure,
+                                       onRowMoved: { movedRowID = $0 })
                 } else {
                     // Every reading behind this row went away while the
                     // sheet was open. An empty form would read as "this
@@ -1975,6 +2129,8 @@ private struct FieldLogDetailForm: View {
     let row: FieldLogRowModel
     let unitSystem: UnitSystem
     let onRemeasure: (FieldLogRescan) -> Void
+    /// Where this row's id went after a move. See `FieldLogDetailSheet`.
+    let onRowMoved: (String) -> Void
 
     @EnvironmentObject private var history: QuickMeasureHistory
     @EnvironmentObject private var settings: AppSettings
@@ -2003,6 +2159,10 @@ private struct FieldLogDetailForm: View {
     /// The last ground-truth recovery run's leftovers, loaded once with the
     /// fields. A small JSON file, not the manifest tree.
     @State private var backfillReport: TruthBackfillReport?
+    /// This one row, handed to the shared move flow. The single-tree case
+    /// where entering a selection mode over the whole log is overkill — same
+    /// picker, same confirmation, same report as the bulk move.
+    @State private var moveRequest: [QuickMoveRow]?
 
     /// A prefilled field re-parses a hair off the number it was filled
     /// from — it is rendered to four decimals, and under imperial it makes
@@ -2030,6 +2190,18 @@ private struct FieldLogDetailForm: View {
         }
         .onAppear(perform: seedFields)
         .sheet(isPresented: $editingPosition) { positionEditor }
+        // The move raised by the Plot row. Same flow the log's selection bar
+        // runs, given one row instead of a dozen.
+        .quickMoveFlow(request: $moveRequest) { outcome in
+            // A tree row's id carries its plot, so a row that actually moved
+            // is now a different row. Tell the sheet where it went; a row
+            // that did NOT move (already there, refused, destination gone)
+            // keeps the id it had, and the report says why.
+            guard outcome.movedCount > 0,
+                  case .tree(let number) = row.subject else { return }
+            onRowMoved(FieldLogRowModel.treeRowID(
+                plotID: outcome.destination.id, treeNumber: number))
+        }
         #if os(iOS)
         .fullScreenCover(item: $photoViewer) { context in
             MeasurePhotoDetailView(context: context)
@@ -2446,6 +2618,31 @@ private struct FieldLogDetailForm: View {
 
     private var contextSection: some View {
         Section("Recorded") {
+            // WHICH PLOT THIS IS IN, and the way to change it.
+            //
+            // The plot is the only grouping a quick reading has — it is what
+            // separates a validation set from a bench test, and it reaches
+            // every export — and until now the record sheet did not name it
+            // at all. A cruiser could not see what needed fixing, let alone
+            // fix it. Tapping opens the same picker the bulk move uses.
+            Button {
+                moveRequest = [QuickMoveRow(row)]
+            } label: {
+                HStack {
+                    Text(QuickMoveWords.plotRow)
+                        .foregroundStyle(ForestixPalette.textSecondary)
+                    Spacer(minLength: 8)
+                    Text(plotValueText)
+                        .foregroundStyle(ForestixPalette.textPrimary)
+                        .multilineTextAlignment(.trailing)
+                    Image(systemName: "chevron.right")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("fieldLog.detail.plot")
             row(label: "When", value: timestampText)
             // POSITION IS TAPPABLE. A fix that never arrived, or arrived on
             // the wrong stem, used to be permanent — the reading carried it
@@ -2499,6 +2696,18 @@ private struct FieldLogDetailForm: View {
                 }
             }
         }
+    }
+
+    /// The plot this row is filed under, read through the SAME nil rule the
+    /// rest of the app uses (`plotID ?? defaultPlotID`) rather than a second
+    /// one invented here. A plot id that no plot answers to says so — it is a
+    /// real state (the plot was deleted out from under the reading) and
+    /// quietly printing the default plot's name would be a claim about where
+    /// the reading is filed that is not true.
+    private var plotValueText: String {
+        let id = row.entries.first?.plotID ?? history.defaultPlotID()
+        guard let id else { return FieldLogWords.unknownPlot }
+        return history.plot(id: id)?.name ?? FieldLogWords.unknownPlot
     }
 
     private var timestampText: String {

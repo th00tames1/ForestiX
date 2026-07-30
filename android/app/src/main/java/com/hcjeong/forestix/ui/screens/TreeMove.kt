@@ -16,9 +16,10 @@
 //     history). There is no project column anywhere in that store either,
 //     and no plot with a project above it. Filing a quick reading under a
 //     project could only mean CONVERTING it into a cruise Tree, and this
-//     app does not do that. See [TreeMoveWords.QUICK_HAS_NO_PROJECT_BODY]
-//     for the reason stated to the cruiser, and the note at the foot of
-//     this file for the schema facts behind it.
+//     app does not do that — see the note at the foot of this file for the
+//     schema facts behind that refusal, which still stand. What a quick
+//     reading DOES have is a plot, and moving it between plots is a real,
+//     lossless operation: QuickMove.kt.
 //
 // WHAT A MOVE REWRITES, AND WHAT IT DOES NOT.
 //
@@ -200,19 +201,6 @@ object TreeMoveWords {
 
     fun storageError(reason: String): String = "storage error: $reason"
 
-    // The quick-measure world's answer
-    const val QUICK_HAS_NO_PROJECT_TITLE = "Quick measurements have no project"
-
-    /// Says NO, and says why, rather than offering a conversion that would
-    /// have to invent the fields a cruise tree carries. See the foot of this
-    /// file.
-    const val QUICK_HAS_NO_PROJECT_BODY =
-        "A quick measurement is a reading, not a cruise tree: it has no plot centre, no" +
-            " position within a plot, and it can be a crown or a distance with no diameter" +
-            " at all — none of which a project's plot and stand figures can be worked out" +
-            " without. Moving one into a project would mean inventing those. Measure the" +
-            " tree in a cruise plot to record it under a project."
-
     /// A destination as it is named on screen — the same "project · Plot n"
     /// heading the log's own sections carry, so the confirmation names the
     /// destination in words the cruiser has already been reading.
@@ -390,9 +378,16 @@ object TreeMover {
 
 /// What is ticked, where it can go, and the way out — all three on one line,
 /// always visible while selecting.
+///
+/// ONE bar for both worlds. Only the destination differs, so only [moveTitle]
+/// differs ([TreeMoveWords.MOVE_BUTTON] for cruise trees,
+/// [QuickMoveWords.MOVE_BUTTON] for quick readings); the count, the Cancel
+/// and the layout are the same object, because two selection modes on one
+/// list that behaved differently would be worse than the gap they close.
 @Composable
 fun TreeMoveSelectionBar(
     selected: Int,
+    moveTitle: String,
     onMove: () -> Unit,
     onCancel: () -> Unit,
 ) {
@@ -411,7 +406,7 @@ fun TreeMoveSelectionBar(
             maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f))
         Text(
-            TreeMoveWords.MOVE_BUTTON,
+            moveTitle,
             style = Forestix.type.bodyBold,
             // Dim AND deaf with nothing ticked: a Move that opens a picker
             // for an empty selection would end in a confirmation about no
@@ -545,7 +540,14 @@ fun TreeMovePicker(
 //      reading as it was captured.
 //
 // Any one of those makes the conversion lossy; together they make it a
-// fabrication. So the app says so, on screen, in
-// [TreeMoveWords.QUICK_HAS_NO_PROJECT_BODY], when a cruiser long-presses a
-// quick row — rather than offering a button that quietly manufactures the
-// missing half of a cruise record.
+// fabrication, so it is not offered — no button here quietly manufactures
+// the missing half of a cruise record.
+//
+// A long press on a quick row used to raise a dialog saying exactly that. It
+// no longer does, because there IS something sensible to do with a quick row
+// and it is now what the gesture does: move the reading to another
+// quick-measure plot (QuickMove.kt). Explaining a refusal is the right answer
+// only while there is nothing better to offer; a cruiser who long-presses a
+// reading wants to re-file it, and now they can. The paragraphs above remain
+// the reason the DESTINATION on that path is a quick plot and never a
+// project.

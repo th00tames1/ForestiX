@@ -1535,14 +1535,15 @@ public struct MapHomeScreen: View {
     /// principle span two plots' trees. The row picked is the one the pin's
     /// REPRESENTATIVE reading belongs to — the same reading "Edit this tree"
     /// edits — so the two peek buttons can never be about different trees.
-    /// The key is built by `FieldLogRowModel.rows`, and this must stay in
-    /// step with it.
+    /// The key is built by `FieldLogRowModel.rows`, and this reads it from
+    /// there rather than spelling the format a second time.
     private func detailRowID(for pin: MapPin) -> String {
         let entry = primaryEntry(for: pin)
         guard let number = entry.treeNumber else {
-            return "e|\(entry.id.uuidString)"
+            return FieldLogRowModel.looseRowID(entryID: entry.id)
         }
-        return "t|\(entry.plotID?.uuidString ?? "-")|\(number)"
+        return FieldLogRowModel.treeRowID(plotID: entry.plotID,
+                                          treeNumber: number)
     }
 
     /// The pin's representative reading for "Edit this tree" — DBH first,

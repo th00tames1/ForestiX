@@ -162,6 +162,13 @@ interface QuickMeasureDao {
     @Query("UPDATE entries SET plotID = :newPlot WHERE plotID = :oldPlot")
     suspend fun rehomeEntries(oldPlot: String, newPlot: String?)
 
+    /// Re-home a NAMED set of readings — the cruiser's own move (see
+    /// ui/screens/QuickMove.kt). One statement, so a tree's diameter and its
+    /// height land together rather than as two writes with a window between
+    /// them in which half the stem has moved. Returns rows updated.
+    @Query("UPDATE entries SET plotID = :newPlot WHERE id IN (:ids)")
+    suspend fun moveEntriesToPlot(ids: List<String>, newPlot: String): Int
+
     @Query("SELECT * FROM plots ORDER BY createdAt DESC")
     fun observePlots(): Flow<List<PlotRow>>
 

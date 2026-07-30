@@ -448,6 +448,11 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
     /// bootstrap, plot deletion) used to rebuild the entry from a partial
     /// argument list, which silently dropped the GPS fix, the photo, the
     /// capture mode — and would now drop the ground truth.
+    ///
+    /// The third caller is the cruiser's own move (`moveEntries`), and it is
+    /// the reason this matters most: re-filing a reading must change nothing
+    /// ABOUT the reading. A move that quietly lost a σ or a tape number would
+    /// cost the accuracy study the observation, not just its grouping.
     public func inPlot(_ newPlotID: UUID?) -> QuickMeasureEntry {
         QuickMeasureEntry(
             id: id, kind: kind, value: value,
@@ -738,6 +743,13 @@ public final class QuickMeasureHistory: ObservableObject {
 
     /// Adds a new plot to the front of the plot list, persists, and
     /// makes it the active plot.
+    ///
+    /// `makeActive` is true for every path that creates a plot in order to
+    /// measure INTO it, which is all of them but one: the field log's move
+    /// picker names a destination for readings already taken, and re-pointing
+    /// the next scan because the cruiser tidied up some old ones would be a
+    /// silent change to where their next measurement lands. Moving data and
+    /// choosing where new data goes are different acts.
     @discardableResult
     public func createPlot(name: String,
                             unitName: String = "",
@@ -746,16 +758,50 @@ public final class QuickMeasureHistory: ObservableObject {
                             baf: Double? = nil,
                             radiusFt: Double? = nil,
                             parentPlotID: UUID? = nil,
-                            nestedKind: String? = nil) -> QuickMeasurePlot {
+                            nestedKind: String? = nil,
+                            makeActive: Bool = true) -> QuickMeasurePlot {
         let plot = QuickMeasurePlot(
             name: name, unitName: unitName, acres: acres,
             typeRaw: typeRaw, baf: baf, radiusFt: radiusFt,
             parentPlotID: parentPlotID, nestedKind: nestedKind,
             createdAt: Date(), isDefault: false)
         plots.insert(plot, at: 0)
-        activePlotID = plot.id
+        if makeActive { activePlotID = plot.id }
         persistPlots()
         return plot
+    }
+
+    /// Re-homes readings into `plotID`, in ONE persist.
+    ///
+    /// The field log's move (see Screens/QuickMove.swift) exists because a
+    /// reading's plot could be chosen before the measurement and never after
+    /// it. This is the write behind it, and it is deliberately a SET rather
+    /// than a per-entry `update`: that one rewrites the whole sidecar and the
+    /// whole cache each time, and a tree's diameter and height must not be
+    /// two separate rewrites with a window in between where half the stem has
+    /// moved.
+    ///
+    /// Only `plotID` changes — `inPlot` carries every other field across
+    /// verbatim, including the ground truth and both provenance stamps.
+    /// Refuses an unknown destination outright rather than filing readings
+    /// under an id no plot answers to. Returns how many readings actually
+    /// changed, which is the number the caller may report.
+    @discardableResult
+    public func moveEntries(_ ids: Set<UUID>, toPlot plotID: UUID) -> Int {
+        guard !ids.isEmpty,
+              plots.contains(where: { $0.id == plotID }) else { return 0 }
+        var changed = 0
+        var next = entries
+        for (idx, entry) in next.enumerated() {
+            guard ids.contains(entry.id), entry.plotID != plotID else { continue }
+            next[idx] = entry.inPlot(plotID)
+            changed += 1
+        }
+        guard changed > 0 else { return 0 }
+        entries = next
+        rewriteSidecar()
+        persistCache()
+        return changed
     }
 
     /// Plots nested under `id`, sorted by creation time. Empty for

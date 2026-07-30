@@ -664,13 +664,13 @@ fun MapHomeScreen(nav: NavController) {
                         // pin's REPRESENTATIVE reading belongs to — the same
                         // reading "Edit this tree" edits — so the two peek
                         // buttons can never be about different trees. The key
-                        // is built by `fieldLogRows`, and this must stay in
-                        // step with it.
+                        // is built by `fieldLogRows`, and this reads it from
+                        // there rather than spelling the format a second time.
                         onDetails = { pin ->
                             val entry = pin.entries.first()
                             inspectingRowId = entry.treeNumber
-                                ?.let { "t|${entry.plotID?.toString() ?: "-"}|$it" }
-                                ?: "e|${entry.id}"
+                                ?.let { fieldLogTreeRowId(entry.plotID, it) }
+                                ?: fieldLogLooseRowId(entry.id)
                         },
                         onMeasureAgain = { pin ->
                             val tree = pin.treeNumber
@@ -859,6 +859,7 @@ fun MapHomeScreen(nav: NavController) {
                     developerMode = settings.developerMode,
                     onSave = { env.history.update(it) },
                     onAdd = { env.history.append(it) },
+                    onRowMoved = { inspectingRowId = it },
                     onRemeasure = { kind, tree, name, species, truth, truthSource ->
                         inspectingRowId = null
                         PendingTreeNumber.set(

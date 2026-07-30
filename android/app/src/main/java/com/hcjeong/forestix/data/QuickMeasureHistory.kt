@@ -183,6 +183,13 @@ class QuickMeasureHistory private constructor(
 
     // MARK: Plot management -------------------------------------------------
 
+    /// [makeActive] is true for every path that creates a plot in order to
+    /// measure INTO it, which is all of them but one: the field log's move
+    /// picker names a destination for readings already taken, and re-pointing
+    /// the next scan because the cruiser tidied up some old ones would be a
+    /// silent change to where their next measurement lands. Moving data and
+    /// choosing where new data goes are different acts. iOS `createPlot`
+    /// carries the same flag for the same reason.
     fun createPlot(
         name: String,
         unitName: String = "",
@@ -192,18 +199,49 @@ class QuickMeasureHistory private constructor(
         radiusFt: Double? = null,
         parentPlotID: UUID? = null,
         nestedKind: String? = null,
+        makeActive: Boolean = true,
     ): QuickMeasurePlot {
         val plot = QuickMeasurePlot(
             name = name, unitName = unitName, acres = acres, typeRaw = typeRaw,
             baf = baf, radiusFt = radiusFt, parentPlotID = parentPlotID,
             nestedKind = nestedKind, isDefault = false,
         )
+        // Published BEFORE the write lands, not after it. The DAO round-trip
+        // is a coroutine, and a caller that creates a destination and
+        // immediately moves readings into it (the field log's move picker,
+        // which does exactly that) would otherwise ask a plot list that does
+        // not know about the plot yet and be told the destination is gone.
+        // iOS inserts into its plot array synchronously for the same reason.
+        _plots.value = (_plots.value + plot).sortedByDescending { it.createdAt }
         scope.launch {
             dao.upsertPlot(PlotRow.from(plot))
             _plots.value = dao.allPlots().map { it.toDomain() }.sortedByDescending { it.createdAt }
         }
-        _activePlotID.value = plot.id
+        if (makeActive) _activePlotID.value = plot.id
         return plot
+    }
+
+    /// Re-homes readings into [toPlot], in ONE statement.
+    ///
+    /// The field log's move (see ui/screens/QuickMove.kt) exists because a
+    /// reading's plot could be chosen before the measurement and never after
+    /// it. This is the write behind it, and it is deliberately a SET rather
+    /// than a per-entry [update]: a tree's diameter and height must not be
+    /// two separate writes with a window in between where half the stem has
+    /// moved.
+    ///
+    /// Only plotID changes — the UPDATE names one column, so no other field
+    /// can be dropped on the way through. Refuses an unknown destination
+    /// outright rather than filing readings under an id no plot answers to.
+    /// Suspends rather than firing into [scope] so the caller can report what
+    /// actually happened; a move that reported a number it had not yet
+    /// written would be the same class of lie as a silent one.
+    suspend fun moveEntries(ids: Set<UUID>, toPlot: UUID): Int {
+        if (ids.isEmpty()) return 0
+        if (_plots.value.none { it.id == toPlot }) return 0
+        val changed = dao.moveEntriesToPlot(ids.map { it.toString() }, toPlot.toString())
+        if (changed > 0) _entries.value = dao.allEntries().map { it.toDomain() }
+        return changed
     }
 
     fun renamePlot(id: UUID, newName: String) {

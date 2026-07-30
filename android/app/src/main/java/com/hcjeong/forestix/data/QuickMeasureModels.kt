@@ -182,6 +182,17 @@ data class QuickMeasureEntry(
         copy(value = newValue, sigma = null,
              method = typedMethodRaw, captureMode = "typed")
 
+    /// This reading re-homed into another plot — the ONLY field a move
+    /// touches.
+    ///
+    /// Named rather than left as a bare `copy(plotID = …)` at each call site,
+    /// and matching the iOS `inPlot`: re-filing a reading must change nothing
+    /// ABOUT the reading, and a move that quietly lost a sigma or a tape
+    /// number would cost the accuracy study the observation, not just its
+    /// grouping. `copy` carries everything else across by construction, which
+    /// is exactly the guarantee wanted here.
+    fun inPlot(newPlotID: UUID?): QuickMeasureEntry = copy(plotID = newPlotID)
+
     /// The source to SHOW and to EXPORT for this reading's truth: the stored
     /// one, or "typed" for a truth that predates the column (see
     /// [truthSource]). Null only when there is no truth.

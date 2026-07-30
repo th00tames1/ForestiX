@@ -121,6 +121,18 @@ data class QuickMeasureEntry(
     /// "matched here", because the second one carries a matching assumption
     /// the first does not.
     val truthSource: String? = null,
+    /// The unit [truth] was TYPED in — a [TruthInput.Unit] raw ("cm" | "in" |
+    /// "m" | "ft"). The stored number is always the metric base, so nothing
+    /// else on the reading says whether the cruiser was working in inches or
+    /// centimetres, exactly as on the raw-capture manifest (`truth_unit`) and
+    /// in the research CSV.
+    ///
+    /// Null means NOT STATED — never "metric". It is the marker TruthUnitRepair
+    /// keys on: a truth carrying no unit was typed before the unit toggle
+    /// existed, and one carrying a unit was entered knowingly and is already
+    /// right. Writing the unit is therefore what makes the repair idempotent —
+    /// the repaired value no longer matches the rule that selected it.
+    val truthUnit: String? = null,
     /// Where this reading's coordinate came from — a [PositionSource] raw
     /// string, the SAME vocabulary the cruise Plot records ("gpsSingle",
     /// "manual", …), so one word means one thing in both worlds.
@@ -209,8 +221,34 @@ data class QuickMeasureEntry(
     /// [TruthSource.CAPTURE]. Clearing drops the source too — an absent truth
     /// has no provenance, exactly as [settingPosition] treats an absent
     /// coordinate.
-    fun settingTruth(newTruth: Double?, source: String? = null): QuickMeasureEntry =
-        copy(truth = newTruth, truthSource = if (newTruth == null) null else source)
+    ///
+    /// [unit] travels the same way and for the same reason, and defaults to
+    /// null because the hand-typed paths do not record it today. A NEW value is
+    /// a different fact from the one that was here, so it never inherits the
+    /// old value's unit: carrying [truthUnit] across a retype would leave a
+    /// number stamped with a unit nobody typed it in.
+    fun settingTruth(
+        newTruth: Double?,
+        source: String? = null,
+        unit: String? = null,
+    ): QuickMeasureEntry = copy(
+        truth = newTruth,
+        truthSource = if (newTruth == null) null else source,
+        truthUnit = if (newTruth == null) null else unit,
+    )
+
+    /// This reading with its ground truth RE-BASED into the unit it was
+    /// actually typed in — TruthUnitRepair's only mutator on a reading.
+    ///
+    /// Distinct from [settingTruth] because it is not a new observation: the
+    /// tape number is the same number the cruiser wrote down, and only the
+    /// scale it was stored at is being corrected. So [truthSource] is KEPT
+    /// (this truth still arrived here by the recovery pass's matching, and
+    /// re-labelling it "typed" would be a provenance claim nobody made), while
+    /// [truthUnit] is stamped — which is what makes the repair one-shot: the
+    /// rule that selected this reading requires an absent unit.
+    fun repairingTruthUnit(newTruth: Double, unit: String): QuickMeasureEntry =
+        copy(truth = newTruth, truthUnit = unit)
 
     /// The source to SHOW and to EXPORT for this reading's coordinate: the
     /// stored one, or "gpsSingle" for a located row that predates the column

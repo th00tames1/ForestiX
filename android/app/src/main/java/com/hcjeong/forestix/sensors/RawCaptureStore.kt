@@ -470,6 +470,12 @@ object RawCaptureStore {
         val unit: String,
         val tier: String?,
         val truthValue: Double?,
+        /// The unit [truthValue] was typed in, or null when the bundle records
+        /// none. Null is the marker TruthUnitRepair selects on, so it must be
+        /// carried into the summary rather than re-read per bundle: "absent"
+        /// and "present but JSON null" are the same state and both arrive here
+        /// as null, which is also how the iOS decoder reads them.
+        val truthUnit: String?,
         val selfCheckStatus: String?,
         /// Raw depth frames actually stored (DBH bundles). Null for height /
         /// pre-frame_count bundles.
@@ -497,6 +503,7 @@ object RawCaptureStore {
                 unit = if (kind == "height") "m" else "cm",
                 tier = resObj?.optString("tier")?.takeIf { it.isNotEmpty() },
                 truthValue = truthObj?.optDouble("value")?.takeIf { !it.isNaN() },
+                truthUnit = truthObj?.optString("truth_unit")?.takeIf { it.isNotEmpty() },
                 selfCheckStatus = selfObj?.optString("status")?.takeIf { it.isNotEmpty() },
                 frameCount = resObj?.optInt("frame_count", -1)?.takeIf { it >= 0 }
                     ?: m.optJSONObject("dbh")?.optJSONArray("frames")?.length(),
@@ -621,6 +628,53 @@ object RawCaptureStore {
                 if (writeQuietly(file, m)) TruthWrite.SAVED else TruthWrite.FAILED
             }
         }
+
+    /// Re-base a stored truth that was typed in imperial and stored as if it
+    /// were the metric base — TruthUnitRepair's write into a bundle.
+    ///
+    /// This is the ONE thing in the app that edits a manifest's truth without
+    /// the cruiser typing into that bundle. It is not an inference: it acts
+    /// only where the bundle ITSELF records no `truth_unit`, and it corrects
+    /// the scale of the field rather than replacing the observation. The digits
+    /// typed are kept in `repaired_from` and `entered_at` is NOT restamped —
+    /// when the cruiser measured the stem has not changed.
+    ///
+    /// RE-CHECKS UNDER pendingLock, the same lock [setTruth] and the recorder's
+    /// manifest drain hold: [before] must still be what is on disk and the
+    /// bundle must still record no unit, so a truth re-typed in the console
+    /// between the plan and this write is left alone, and a second run of the
+    /// repair finds a unit and does nothing. No pending-edit path: a bundle
+    /// with no manifest has no stored truth to re-base, and queueing a
+    /// correction for a value that does not exist yet would apply it to
+    /// whatever the recorder writes next.
+    suspend fun repairTruthUnit(
+        context: Context,
+        id: String,
+        before: Double,
+        after: Double,
+        unit: TruthInput.Unit,
+    ): Boolean = withContext(Dispatchers.IO) {
+        synchronized(pendingLock) {
+            val file = manifestFile(context, id)
+            if (!file.exists()) return@synchronized false
+            val m = manifestOf(context, id) ?: return@synchronized false
+            val truth = m.optJSONObject("truth") ?: return@synchronized false
+            if (truth.optString("truth_unit").isNotEmpty()) return@synchronized false
+            val stored = truth.optDouble("value")
+            if (stored.isNaN() || abs(stored - before) > TRUTH_VALUE_EPSILON) {
+                return@synchronized false
+            }
+            val enteredAt = truth.optString("entered_at").takeIf { it.isNotEmpty() }
+            m.put("truth", truthJson(after, enteredAt, unit, repairedFrom = stored))
+            writeQuietly(file, m)
+        }
+    }
+
+    /// Two truth values are the SAME value inside this band — the same number
+    /// and reasoning as TruthBackfill.VALUE_EPSILON: every writer puts the
+    /// metric base through one parser, so the only difference between two
+    /// copies of a truth is float round-trip.
+    const val TRUTH_VALUE_EPSILON = 0.001
 
     /// Zip result — a Uri, or the reason the export could not be produced.
     data class ExportResult(val uri: Uri?, val error: String?)
@@ -826,14 +880,24 @@ object RawCaptureStore {
     // one, because the conversion has already happened by the time the number
     // is written. Null on a bundle with no truth and on bundles written before
     // the tag existed — a reader must treat that as "not stated", not metric.
+    //
+    // `repaired_from` is the number that WAS in `value` before TruthUnitRepair
+    // re-based it, exactly as the cruiser typed it. Null on every truth that
+    // has not been repaired, which is nearly all of them. It is an audit crumb,
+    // not the idempotence mark — `truth_unit` is that, because "no unit
+    // recorded" is the whole definition of an affected truth. It is written
+    // unconditionally, like the other three, so the two platforms' manifests
+    // stay one document.
     private fun truthJson(
         value: Double?,
         enteredAt: String?,
         unit: TruthInput.Unit?,
+        repairedFrom: Double? = null,
     ): JSONObject = JSONObject().apply {
         put("value", value ?: JSONObject.NULL)
         put("entered_at", enteredAt ?: JSONObject.NULL)
         put("truth_unit", unit?.raw ?: JSONObject.NULL)
+        put("repaired_from", repairedFrom ?: JSONObject.NULL)
     }
 
     // GPS block — {lat, lon, acc_m}, byte-identical to the iOS schema.

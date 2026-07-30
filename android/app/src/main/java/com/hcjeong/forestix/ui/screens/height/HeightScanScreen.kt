@@ -1335,6 +1335,14 @@ fun HeightScanScreen(
                         truthSource =
                             if (settings.developerMode && ownedTrue != null) null
                             else pendingLock?.truthSource,
+                        // The unit rides with the same value, for the same
+                        // reason it is on the reading at all: dropping it on a
+                        // re-measure would take the mark off a truth
+                        // TruthUnitRepair had already re-based, and a mark that
+                        // a re-measure can erase is not a durable one.
+                        truthUnit =
+                            if (settings.developerMode && ownedTrue != null) null
+                            else pendingLock?.truthUnit,
                     )
                 // A re-measure launched from the field log TAKES THE PLACE of
                 // the reading it was launched from — appending would leave the

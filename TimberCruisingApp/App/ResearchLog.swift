@@ -14,6 +14,7 @@
 // exports concatenate for the cross-platform accuracy analysis.
 
 import Foundation
+import Common
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -292,6 +293,121 @@ public final class ResearchLog {
             try? FileManager.default.removeItem(at: self.fileURL)
             self.headerIsCurrent = false
         }
+    }
+
+    // MARK: - Ground-truth unit repair
+
+    /// What one pass of `TruthUnitRepair` found (and, when applying, did) in
+    /// this log.
+    public struct TruthRepairOutcome: Sendable {
+        public var rows: [TruthUnitRepair.Change] = []
+        public var kept = TruthUnitRepair.Kept()
+        public var written = 0
+        /// The rows were found but the file could not be rewritten. Reported,
+        /// never swallowed: a repair that silently skipped the log would leave
+        /// the `error` column disagreeing with every other store.
+        public var failed = false
+    }
+
+    /// Re-base the `true_value` column of rows whose truth was typed in
+    /// imperial and written as if it were the metric base, and recompute the
+    /// `error` those rows carry.
+    ///
+    /// SAME RULE AS EVERYWHERE ELSE, read straight off the row: a `true_value`
+    /// with an EMPTY `truth_unit`. The screens write those two together (see
+    /// DBHScanScreen / HeightScanScreen), so a truth with no unit beside it can
+    /// only have been written before the column existed — and re-emitting an
+    /// older log under the current header, which `prepareFileLocked` does,
+    /// leaves it empty for exactly that reason. Filling the unit in is what
+    /// makes a second pass find nothing.
+    ///
+    /// `error` is recomputed from `measured_value`, which is already in the
+    /// row and is not touched — the measurement is frozen. A row whose
+    /// `measured_value` will not parse gets an EMPTY error rather than the one
+    /// it had: the old number was computed from the wrong truth, and leaving it
+    /// there would be a wrong number presented as a right one.
+    ///
+    /// Runs on the log's own queue, so it cannot interleave with an append.
+    /// With `apply: false` it reads and reports and writes nothing.
+    public func repairImperialTruths(apply: Bool) -> TruthRepairOutcome {
+        queue.sync { self.repairLocked(apply: apply) }
+    }
+
+    /// Must run on `queue`.
+    private func repairLocked(apply: Bool) -> TruthRepairOutcome {
+        var out = TruthRepairOutcome()
+        // Nothing to repair in a log that does not exist, and a log this build
+        // cannot bring up to the current header must not be rewritten by a
+        // pass that is not about the header.
+        let state = prepareFileLocked()
+        guard state == .ready else {
+            out.failed = apply && state == .unusable
+            return out
+        }
+        guard let text = try? String(contentsOf: fileURL, encoding: .utf8) else {
+            out.failed = apply
+            return out
+        }
+        var records = Self.parseRecords(text)
+        guard let header = records.first, header == Self.columns else {
+            out.failed = apply
+            return out
+        }
+        let typeIdx = Self.columns.firstIndex(of: "measure_type") ?? 0
+        let treeIdx = Self.columns.firstIndex(of: "tree_id") ?? 0
+        let truthIdx = Self.columns.firstIndex(of: "true_value") ?? 0
+        let measIdx = Self.columns.firstIndex(of: "measured_value") ?? 0
+        let errIdx = Self.columns.firstIndex(of: "error") ?? 0
+        let unitIdx = Self.columns.firstIndex(of: "truth_unit") ?? 0
+
+        var changed = false
+        for i in records.indices.dropFirst() {
+            var row = records[i]
+            // A short row (written by a build with fewer columns and never
+            // re-emitted) is padded rather than skipped, so the columns this
+            // pass writes land where the header says they are.
+            if row.count < Self.columns.count {
+                row += Array(repeating: "", count: Self.columns.count - row.count)
+            }
+            guard let before = TruthInput.parsePositive(row[truthIdx]) else { continue }
+            guard row[unitIdx].isEmpty else {
+                out.kept.unitRecorded += 1
+                continue
+            }
+            guard let q = TruthUnitRepair.Quantity.ofRawKind(row[typeIdx]) else {
+                out.kept.otherQuantity += 1
+                continue
+            }
+            let after = TruthUnitRepair.repaired(before, q)
+            out.rows.append(TruthUnitRepair.Change(
+                quantity: q, before: before, after: after,
+                store: "log", key: row[treeIdx]))
+            guard apply else { continue }
+            row[truthIdx] = String(format: "%.2f", after)
+            row[unitIdx] = q.typedUnit.rawValue
+            if let measured = TruthInput.parse(row[measIdx]) {
+                row[errIdx] = String(format: "%.2f", measured - after)
+            } else {
+                row[errIdx] = ""
+            }
+            records[i] = row
+            changed = true
+            out.written += 1
+        }
+        guard apply, changed else { return out }
+        var rebuilt = ""
+        for row in records {
+            rebuilt += row.map(Self.csvEscape).joined(separator: ",") + "\n"
+        }
+        do {
+            // Atomic, for the same reason the header migration is: a crash
+            // here must not leave half a field season on disk.
+            try rebuilt.write(to: fileURL, atomically: true, encoding: .utf8)
+        } catch {
+            out.failed = true
+            out.written = 0
+        }
+        return out
     }
 
     // MARK: - Helpers

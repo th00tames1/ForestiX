@@ -211,14 +211,28 @@ public struct RawCaptureManifest: Codable, Sendable {
         /// before the unit was recorded and on bundles with no truth — a
         /// reader must treat that as "not stated", not as metric.
         public var truthUnit: String?
+        /// The number that WAS in `value` before `TruthUnitRepair` re-based it,
+        /// exactly as the cruiser typed it. Nil on every truth that has not
+        /// been repaired, which is nearly all of them.
+        ///
+        /// It is an audit crumb, not the idempotence mark — `truthUnit` is
+        /// that, because "no unit recorded" is the whole definition of an
+        /// affected truth. This is here so the cruiser can reconcile a repaired
+        /// bundle against their backup without needing the report file, and so
+        /// the digits they typed survive the correction rather than only the
+        /// product of it.
+        public var repairedFrom: Double?
         enum CodingKeys: String, CodingKey {
             case value
             case enteredAt = "entered_at"
             case truthUnit = "truth_unit"
+            case repairedFrom = "repaired_from"
         }
-        public init(value: Double?, enteredAt: String?, truthUnit: String? = nil) {
+        public init(value: Double?, enteredAt: String?, truthUnit: String? = nil,
+                    repairedFrom: Double? = nil) {
             self.value = value; self.enteredAt = enteredAt
             self.truthUnit = truthUnit
+            self.repairedFrom = repairedFrom
         }
 
         /// Explicit encoder. The SYNTHESIZED one emits `encodeIfPresent`, so a
@@ -235,6 +249,7 @@ public struct RawCaptureManifest: Codable, Sendable {
             try c.encode(value, forKey: .value)
             try c.encode(enteredAt, forKey: .enteredAt)
             try c.encode(truthUnit, forKey: .truthUnit)
+            try c.encode(repairedFrom, forKey: .repairedFrom)
         }
     }
 
@@ -841,6 +856,47 @@ public enum RawCaptureStore {
             return .failed(error.localizedDescription)
         }
     }
+
+    /// Re-base a stored truth that was typed in imperial and stored as if it
+    /// were the metric base — `TruthUnitRepair`'s write into a bundle.
+    ///
+    /// This is the ONE thing in the app that edits a manifest's truth without
+    /// the cruiser typing into that bundle. It is not an inference: it acts
+    /// only where the bundle ITSELF records no `truth_unit`, and it corrects
+    /// the scale of the field rather than replacing the observation. The digits
+    /// typed are kept in `repaired_from` and `entered_at` is NOT restamped —
+    /// when the cruiser measured the stem has not changed.
+    ///
+    /// RE-CHECKS UNDER THE LOCK. `before` must still be what is on disk and the
+    /// bundle must still record no unit, so a truth the console re-typed
+    /// between the plan and this write is left alone, and a second run of the
+    /// repair finds a unit and does nothing. No sidecar path: a bundle with no
+    /// manifest has no stored truth to re-base, and parking a correction for a
+    /// value that does not exist yet would apply it to whatever the recorder
+    /// writes next.
+    public static func repairTruthUnit(id: String,
+                                       before: Double,
+                                       after: Double,
+                                       unit: TruthInput.Unit) -> Bool {
+        patchLock.lock()
+        defer { patchLock.unlock() }
+        guard var m = loadManifest(id: id),
+              m.truth.truthUnit == nil,
+              let stored = m.truth.value,
+              abs(stored - before) <= truthValueEpsilon
+        else { return false }
+        m.truth = RawCaptureManifest.Truth(value: after,
+                                           enteredAt: m.truth.enteredAt,
+                                           truthUnit: unit.rawValue,
+                                           repairedFrom: stored)
+        do { try writeManifest(m, id: id); return true } catch { return false }
+    }
+
+    /// Two truth values are the SAME value inside this band — the same number
+    /// and the same reasoning as `TruthBackfill.valueEpsilon`: every writer
+    /// puts the metric base through one parser, so the only difference between
+    /// two copies of a truth is float round-trip.
+    static let truthValueEpsilon: Double = 0.001
 
     /// Clear a stored truth. EXPLICIT ONLY — an empty or unparseable input
     /// must never reach this (that is how a good truth got wiped).

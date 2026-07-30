@@ -76,6 +76,7 @@ import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.common.defaultLogRule
 import com.hcjeong.forestix.data.ResearchLog
 import com.hcjeong.forestix.data.TruthBackfill
+import com.hcjeong.forestix.data.TruthUnitRepair
 import com.hcjeong.forestix.sensors.ChordAlgorithm
 import com.hcjeong.forestix.sensors.LogRule
 import com.hcjeong.forestix.sensors.RawCaptureStore
@@ -120,6 +121,14 @@ fun SettingsScreen(nav: NavController) {
     // Ground-truth recovery: the run is in flight, and what the last one did.
     var truthBackfillRunning by remember { mutableStateOf(false) }
     var truthBackfillResult by remember { mutableStateOf<String?>(null) }
+
+    // Ground-truth unit repair. The PLAN is held between the preview and the
+    // confirm so what the cruiser agreed to is what gets written — recomputing
+    // it after the tap would let the corpus move under the sentence they read.
+    var truthRepairRunning by remember { mutableStateOf(false) }
+    var truthRepairPlan by remember { mutableStateOf<TruthUnitRepair.Plan?>(null) }
+    var truthRepairPreview by remember { mutableStateOf<String?>(null) }
+    var truthRepairResult by remember { mutableStateOf<String?>(null) }
 
     // Backup / restore (Data & backup group).
     val backup = remember(env) { BackupViewModel(env) }
@@ -653,6 +662,53 @@ fun SettingsScreen(nav: NavController) {
                         // even when the arithmetic is right.
                         Text(it, style = type.caption, color = colors.textSecondary)
                     }
+
+                    // GROUND-TRUTH UNIT REPAIR. Before the truth field had a
+                    // unit toggle the cruiser typed inches and feet off the
+                    // tape into a field the app stored as centimetres and
+                    // metres, so a stem taped at 27 in went into the corpus as
+                    // 27 cm. This multiplies those back into the base they
+                    // meant.
+                    //
+                    // PREVIEW, THEN WRITE. It rewrites research data in three
+                    // stores at once and the correction cannot be read back out
+                    // of the number afterwards, so the cruiser sees the counts
+                    // and worked examples first and nothing moves until they
+                    // confirm.
+                    //
+                    // Like the recovery above it is an action rather than a
+                    // launch migration, and for the same reason: it reads every
+                    // manifest on disk. It is one-shot by construction, not by
+                    // a version flag — repairing a truth records the unit it
+                    // was typed in, which is the very marker that selects an
+                    // unrepaired one.
+                    FormDivider()
+                    ForestixBorderedButton(
+                        label = "Repair imperial ground truths",
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !truthRepairRunning,
+                    ) {
+                        truthRepairRunning = true
+                        truthRepairResult = null
+                        scope.launch {
+                            val plan = withContext(Dispatchers.IO) {
+                                TruthUnitRepair.preview(context, env.history)
+                            }
+                            truthRepairPlan = plan
+                            truthRepairPreview = TruthUnitRepair.previewText(plan)
+                            truthRepairRunning = false
+                        }
+                    }
+                    Text(
+                        "Ground truths typed before the unit toggle were stored as if the digits were metric. This re-bases them — inches to centimetres, feet to metres. A truth that records the unit it was typed in is never touched.",
+                        style = type.caption, color = colors.textSecondary,
+                    )
+                    truthRepairResult?.let {
+                        // Same reason the recovery says what it did: research
+                        // data moved, so say by how much and where the full
+                        // list is.
+                        Text(it, style = type.caption, color = colors.textSecondary)
+                    }
                 }
             }
 
@@ -721,6 +777,42 @@ fun SettingsScreen(nav: NavController) {
             text = { Text(restoreSummary ?: "") },
             confirmButton = {
                 TextButton(onClick = { restoreSummary = null }) { Text("OK") }
+            },
+        )
+    }
+
+    // THE CONFIRM THE REPAIR MUST PASS BEFORE IT WRITES ANYTHING. The plan is
+    // read out of state rather than recomputed on the tap, so what the cruiser
+    // agreed to is what lands. The Repair button is offered only when there IS
+    // something to write — a confirm on an empty plan invites a tap that means
+    // nothing. iOS shows the same text in a `.alert`.
+    truthRepairPreview?.let { previewText ->
+        val plan = truthRepairPlan
+        AlertDialog(
+            onDismissRequest = { truthRepairPreview = null; truthRepairPlan = null },
+            title = { Text("Repair imperial ground truths") },
+            text = { Text(previewText) },
+            confirmButton = {
+                if (plan != null && !plan.isEmpty) {
+                    TextButton(onClick = {
+                        truthRepairPreview = null
+                        truthRepairPlan = null
+                        truthRepairRunning = true
+                        scope.launch {
+                            val result = withContext(Dispatchers.IO) {
+                                TruthUnitRepair.applyPlan(context, plan, env.history)
+                            }
+                            truthRepairResult = TruthUnitRepair.resultText(result)
+                            truthRepairRunning = false
+                        }
+                    }) { Text("Repair") }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    truthRepairPreview = null
+                    truthRepairPlan = null
+                }) { Text("Cancel") }
             },
         )
     }

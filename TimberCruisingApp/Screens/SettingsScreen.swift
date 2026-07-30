@@ -48,6 +48,13 @@ public struct SettingsScreen: View {
     /// Ground-truth recovery: the run is in flight, and what the last one did.
     @State private var truthBackfillRunning = false
     @State private var truthBackfillResult: String?
+    /// Ground-truth unit repair. The PLAN is held between the preview and the
+    /// confirm so what the cruiser agreed to is what gets written — recomputing
+    /// it after the tap would let the corpus move under the sentence they read.
+    @State private var truthRepairRunning = false
+    @State private var truthRepairPlan: TruthUnitRepair.Plan?
+    @State private var truthRepairPreview: String?
+    @State private var truthRepairResult: String?
 
     #if os(iOS)
     @State private var isPresentingImport = false
@@ -70,6 +77,27 @@ public struct SettingsScreen: View {
             dangerZoneSection
         }
         .navigationTitle("Settings")
+        // THE CONFIRM THE REPAIR MUST PASS. On the Form, not on the Section
+        // that raises it: an alert presented from inside a Form row is not
+        // reliably shown, and a repair whose confirm never appears would be
+        // either a silent write or a dead button.
+        .alert("Repair imperial ground truths",
+               isPresented: Binding(
+                get: { truthRepairPreview != nil },
+                set: { if !$0 { truthRepairPreview = nil; truthRepairPlan = nil } })
+        ) {
+            Button("Cancel", role: .cancel) {
+                truthRepairPreview = nil
+                truthRepairPlan = nil
+            }
+            // Offered only when there IS something to write — a confirm on an
+            // empty plan invites a tap that means nothing.
+            if let plan = truthRepairPlan, !plan.isEmpty {
+                Button("Repair") { applyTruthRepair(plan) }
+            }
+        } message: {
+            Text(truthRepairPreview ?? "")
+        }
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -491,9 +519,83 @@ public struct SettingsScreen: View {
                         .foregroundStyle(ForestixPalette.textSecondary)
                         .accessibilityIdentifier("settings.recoverGroundTruthsResult")
                 }
+
+                // GROUND-TRUTH UNIT REPAIR. Before the truth field had a unit
+                // toggle the cruiser typed inches and feet off the tape into a
+                // field the app stored as centimetres and metres, so a stem
+                // taped at 27 in went into the corpus as 27 cm. This multiplies
+                // those back into the base they meant.
+                //
+                // PREVIEW, THEN WRITE. It rewrites research data in three
+                // stores at once and the correction cannot be read back out of
+                // the number afterwards, so the cruiser sees the counts and
+                // worked examples first and nothing moves until they confirm.
+                //
+                // Like the recovery above it is an action rather than a launch
+                // migration, and for the same reason: it reads every manifest
+                // on disk. It is one-shot by construction, not by a version
+                // flag — repairing a truth records the unit it was typed in,
+                // which is the very marker that selects an unrepaired one.
+                Button {
+                    previewTruthRepair()
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Label("Repair imperial ground truths",
+                              systemImage: "ruler")
+                        Text("Ground truths typed before the unit toggle were stored as if the digits were metric. This re-bases them — inches to centimetres, feet to metres. A truth that records the unit it was typed in is never touched.")
+                            .font(ForestixType.caption)
+                            .foregroundStyle(ForestixPalette.textSecondary)
+                    }
+                }
+                .disabled(truthRepairRunning)
+                .accessibilityIdentifier("settings.repairTruthUnits")
+                if let result = truthRepairResult {
+                    // Same reason the recovery says what it did: research data
+                    // moved, so say by how much and where the full list is.
+                    Text(result)
+                        .font(ForestixType.caption)
+                        .foregroundStyle(ForestixPalette.textSecondary)
+                        .accessibilityIdentifier("settings.repairTruthUnitsResult")
+                }
             }
         } header: {
             Text("Developer & research")
+        }
+    }
+
+    /// Read all three stores and show what WOULD change. Writes nothing.
+    ///
+    /// Detached for the same reason the recovery pass is: it parses every
+    /// manifest on disk and the whole research CSV, and neither belongs on the
+    /// main actor.
+    private func previewTruthRepair() {
+        guard !truthRepairRunning else { return }
+        truthRepairRunning = true
+        truthRepairResult = nil
+        Task.detached(priority: .userInitiated) {
+            let plan = await TruthUnitRepair.preview(history: history)
+            let text = TruthUnitRepair.previewText(plan)
+            await MainActor.run {
+                truthRepairPlan = plan
+                truthRepairPreview = text
+                truthRepairRunning = false
+            }
+        }
+    }
+
+    /// Write the plan the cruiser just read. The plan is passed in rather than
+    /// recomputed, so what they confirmed is what lands.
+    private func applyTruthRepair(_ plan: TruthUnitRepair.Plan) {
+        truthRepairPreview = nil
+        truthRepairPlan = nil
+        truthRepairRunning = true
+        Task.detached(priority: .userInitiated) {
+            let result = await TruthUnitRepair.applyPlan(plan, history: history)
+            let text = TruthUnitRepair.resultText(result)
+            await MainActor.run {
+                truthRepairResult = text
+                truthRepairRunning = false
+            }
         }
     }
 

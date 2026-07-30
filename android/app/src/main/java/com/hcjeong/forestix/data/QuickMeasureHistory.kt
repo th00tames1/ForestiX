@@ -23,6 +23,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import kotlin.math.abs
 
 class QuickMeasureHistory private constructor(
     private val appContext: Context,
@@ -126,6 +127,40 @@ class QuickMeasureHistory private constructor(
             if (e.truth != null) continue
             dao.upsertEntry(
                 EntryRow.from(e.settingTruth(value, TruthSource.CAPTURE.raw)))
+            changed++
+        }
+        if (changed > 0) _entries.value = dao.allEntries().map { it.toDomain() }
+        return changed
+    }
+
+    /// Two truth values are the SAME value inside this band — the same number
+    /// and reasoning as [TruthBackfill.VALUE_EPSILON]: every writer puts the
+    /// metric base through one parser, so the only difference between two
+    /// copies of a truth is float round-trip.
+    private val truthValueEpsilon = 0.001
+
+    /// Re-base ground truths that were stored at the wrong scale, and report
+    /// how many readings actually changed — TruthUnitRepair's write into the
+    /// reading log.
+    ///
+    /// RE-CHECKS AT THE WRITE. The plan was computed off a snapshot and the log
+    /// can have moved since, so each reading must STILL be the one that was
+    /// planned for: the truth still the pre-repair number, and still carrying
+    /// no unit. A reading the cruiser retyped in between is left exactly as
+    /// they left it. Suspends rather than firing into [scope] for the same
+    /// reason [backfillTruths] does — a repair that reported a number it had
+    /// not yet written would be the same class of lie as a silent one.
+    suspend fun repairTruthUnits(repairs: Map<UUID, TruthUnitRepair.Change>): Int {
+        if (repairs.isEmpty()) return 0
+        var changed = 0
+        for (row in dao.allEntries()) {
+            val e = row.toDomain()
+            val r = repairs[e.id] ?: continue
+            if (e.truthUnit != null) continue
+            val stored = e.truth ?: continue
+            if (abs(stored - r.before) > truthValueEpsilon) continue
+            dao.upsertEntry(
+                EntryRow.from(e.repairingTruthUnit(r.after, r.quantity.typedUnit.raw)))
             changed++
         }
         if (changed > 0) _entries.value = dao.allEntries().map { it.toDomain() }

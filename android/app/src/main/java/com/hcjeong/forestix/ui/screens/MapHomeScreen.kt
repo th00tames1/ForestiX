@@ -860,12 +860,12 @@ fun MapHomeScreen(nav: NavController) {
                     onSave = { env.history.update(it) },
                     onAdd = { env.history.append(it) },
                     onRowMoved = { inspectingRowId = it },
-                    onRemeasure = { kind, tree, name, species, truth, truthSource ->
+                    onRemeasure = { kind, tree, name, species, truth, truthSource, truthUnit ->
                         inspectingRowId = null
                         PendingTreeNumber.set(
                             number = tree, name = name, speciesCode = species,
                             replaceExisting = true, truth = truth,
-                            truthSource = truthSource,
+                            truthSource = truthSource, truthUnit = truthUnit,
                             plotID = live.entries.firstOrNull()?.plotID)
                         nav.navigate(
                             if (kind == MeasureKind.DBH) Routes.DBH else Routes.HEIGHT)

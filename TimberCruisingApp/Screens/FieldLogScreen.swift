@@ -903,7 +903,13 @@ public struct FieldLogScreen: View {
                         // typed on the scan screen is typed (nil), while one
                         // riding across from the reading being re-measured
                         // keeps the source it already had.
-                        truthSource: meta.truth != nil ? nil : request.truthSource))
+                        truthSource: meta.truth != nil ? nil : request.truthSource,
+                        // The unit rides with the same value, for the same
+                        // reason it is on the reading at all: dropping it on a
+                        // re-measure would take the mark off a truth
+                        // `TruthUnitRepair` had already re-based, and a mark
+                        // that a re-measure can erase is not a durable one.
+                        truthUnit: meta.truth != nil ? nil : request.truthUnit))
                     rescan = nil
                     return true
                 },
@@ -943,7 +949,13 @@ public struct FieldLogScreen: View {
                         // typed on the scan screen is typed (nil), while one
                         // riding across from the reading being re-measured
                         // keeps the source it already had.
-                        truthSource: meta.truth != nil ? nil : request.truthSource))
+                        truthSource: meta.truth != nil ? nil : request.truthSource,
+                        // The unit rides with the same value, for the same
+                        // reason it is on the reading at all: dropping it on a
+                        // re-measure would take the mark off a truth
+                        // `TruthUnitRepair` had already re-based, and a mark
+                        // that a re-measure can erase is not a durable one.
+                        truthUnit: meta.truth != nil ? nil : request.truthUnit))
                     rescan = nil
                     return true
                 },
@@ -1304,6 +1316,12 @@ public struct FieldLogRescan: Identifiable, Equatable {
     /// re-labelling a capture-recovered truth as one typed on the scan screen
     /// would claim a provenance the cruiser never gave it.
     public let truthSource: String?
+    /// The unit that truth was typed in (a `QuickMeasureEntry.truthUnit` raw,
+    /// nil = not stated). Carried for the same reason as the source, and with
+    /// one extra consequence: it is `TruthUnitRepair`'s durable "already
+    /// re-based" mark, so a re-measure that dropped it would put a repaired
+    /// truth back in front of the repair.
+    public let truthUnit: String?
 }
 
 // MARK: - New tree
@@ -2445,9 +2463,12 @@ private struct FieldLogDetailForm: View {
                         .first(where: { !$0.isEmpty }),
                     // The tape value AND how it got onto the reading being
                     // superseded — a truth recovered from a raw capture must
-                    // not come back stamped as one typed on the scan screen.
+                    // not come back stamped as one typed on the scan screen,
+                    // and one already re-based by `TruthUnitRepair` must not
+                    // come back without the unit that says so.
                     truth: current?.truth,
-                    truthSource: current?.truthSource))
+                    truthSource: current?.truthSource,
+                    truthUnit: current?.truthUnit))
             }
         }
     }

@@ -28,7 +28,11 @@
 //     stays in the manifest; inventing a measurement to hang it from would put
 //     a number into the corpus that nothing measured.
 //   • It never edits a manifest. The manifest copy is the capture's own record
-//     and still ships in the ZIP exactly as before.
+//     and still ships in the ZIP exactly as before. (`TruthUnitRepair` does
+//     edit one — but it decides nothing: it corrects the SCALE of the bundle's
+//     own truth where the bundle itself records no unit, and it re-bases the
+//     reading to match, so the two stay equal and this pass keeps reporting
+//     them as already home rather than as newly stranded.)
 //   • It never touches the estimator, the value, σ, or anything but `truth`
 //     and its provenance stamp.
 

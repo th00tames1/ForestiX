@@ -42,6 +42,7 @@ data class EntryRow(
     val captureMode: String?,
     val truth: Double?,
     val truthSource: String?,
+    val truthUnit: String?,
     val positionSource: String?,
 ) {
     fun toDomain() = QuickMeasureEntry(
@@ -66,6 +67,7 @@ data class EntryRow(
         captureMode = captureMode,
         truth = truth,
         truthSource = truthSource,
+        truthUnit = truthUnit,
         positionSource = positionSource,
     )
 
@@ -92,6 +94,7 @@ data class EntryRow(
             captureMode = e.captureMode,
             truth = e.truth,
             truthSource = e.truthSource,
+            truthUnit = e.truthUnit,
             positionSource = e.positionSource,
         )
     }
@@ -245,7 +248,18 @@ val QUICK_MEASURE_MIGRATION_6_7 = object : androidx.room.migration.Migration(6, 
     }
 }
 
-@Database(entities = [EntryRow::class, PlotRow::class], version = 7, exportSchema = false)
+/// v8: the unit a ground truth was TYPED in — additive and nullable. Null on
+/// every existing row, and here null is not an unknown either: it is the marker
+/// TruthUnitRepair reads as "typed before the field could record a unit", which
+/// is the whole reason those values were stored at the wrong scale. Stamping
+/// the unit is what stops a repaired value from being repaired twice.
+val QUICK_MEASURE_MIGRATION_7_8 = object : androidx.room.migration.Migration(7, 8) {
+    override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE entries ADD COLUMN truthUnit TEXT")
+    }
+}
+
+@Database(entities = [EntryRow::class, PlotRow::class], version = 8, exportSchema = false)
 @TypeConverters(Converters::class)
 abstract class ForestixDatabase : RoomDatabase() {
     abstract fun dao(): QuickMeasureDao

@@ -858,7 +858,7 @@ fun FieldLogScreen(
                     onSave = { env.history.update(it) },
                     onAdd = { env.history.append(it) },
                     onRowMoved = { inspectingId = it },
-                    onRemeasure = { kind, tree, name, species, truth, truthSource ->
+                    onRemeasure = { kind, tree, name, species, truth, truthSource, truthUnit ->
                         // Close the sheet before leaving the screen, and hand
                         // the scan the tree it must land on plus the truth it
                         // must carry across (PendingTreeNumber is the same
@@ -869,7 +869,7 @@ fun FieldLogScreen(
                         PendingTreeNumber.set(
                             number = tree, name = name, speciesCode = species,
                             replaceExisting = true, truth = truth,
-                            truthSource = truthSource,
+                            truthSource = truthSource, truthUnit = truthUnit,
                             plotID = live.entries.firstOrNull()?.plotID)
                         nav.navigate(
                             if (kind == MeasureKind.DBH) Routes.DBH else Routes.HEIGHT)
@@ -1604,7 +1604,7 @@ internal fun FieldLogDetailSheet(
     onSave: (QuickMeasureEntry) -> Unit,
     onAdd: (QuickMeasureEntry) -> Unit,
     /// (kind, tree number, tree name, species code, ground truth, truth source)
-    onRemeasure: (MeasureKind, Int, String?, String?, Double?, String?) -> Unit,
+    onRemeasure: (MeasureKind, Int, String?, String?, Double?, String?, String?) -> Unit,
     /// Where this row's id went after a move to another plot. A tree row's id
     /// carries its plot (see [fieldLogTreeRowId]), so a move from inside this
     /// sheet retires the id the host opened it with — and without this the
@@ -2005,7 +2005,7 @@ private fun FieldLogEditSection(
     developerMode: Boolean,
     onSave: (QuickMeasureEntry) -> Unit,
     onAdd: (QuickMeasureEntry) -> Unit,
-    onRemeasure: (MeasureKind, Int, String?, String?, Double?, String?) -> Unit,
+    onRemeasure: (MeasureKind, Int, String?, String?, Double?, String?, String?) -> Unit,
 ) {
     val colors = Forestix.colors
     val type = Forestix.type
@@ -2188,8 +2188,10 @@ private fun FieldLogEditSection(
                 },
                 // The tape value AND how it got onto the reading being
                 // superseded — a truth recovered from a raw capture must not
-                // come back stamped as one typed on the scan screen.
-                existing?.truth, existing?.truthSource)
+                // come back stamped as one typed on the scan screen, and one
+                // already re-based by TruthUnitRepair must not come back
+                // without the unit that says so.
+                existing?.truth, existing?.truthSource, existing?.truthUnit)
         }
     }
 }

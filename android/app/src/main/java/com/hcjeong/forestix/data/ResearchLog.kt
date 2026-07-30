@@ -12,6 +12,7 @@ import android.content.Context
 import android.net.Uri
 import android.os.Build
 import androidx.core.content.FileProvider
+import com.hcjeong.forestix.common.TruthInput
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -277,6 +278,122 @@ object ResearchLog {
     fun clear(context: Context) {
         file(context).delete()
         headerIsCurrent = false
+    }
+
+    // MARK: - Ground-truth unit repair
+
+    /// What one pass of [TruthUnitRepair] found (and, when applying, did) in
+    /// this log.
+    data class TruthRepairOutcome(
+        val rows: List<TruthUnitRepair.Change> = emptyList(),
+        val kept: TruthUnitRepair.Kept = TruthUnitRepair.Kept(),
+        val written: Int = 0,
+        /// The rows were found but the file could not be rewritten. Reported,
+        /// never swallowed: a repair that silently skipped the log would leave
+        /// the `error` column disagreeing with every other store.
+        val failed: Boolean = false,
+    )
+
+    /// Re-base the `true_value` column of rows whose truth was typed in
+    /// imperial and written as if it were the metric base, and recompute the
+    /// `error` those rows carry.
+    ///
+    /// SAME RULE AS EVERYWHERE ELSE, read straight off the row: a `true_value`
+    /// with an EMPTY `truth_unit`. The screens write those two together (see
+    /// DBHScanScreen / HeightScanScreen), so a truth with no unit beside it can
+    /// only have been written before the column existed — and re-emitting an
+    /// older log under the current header, which [prepareFile] does, leaves it
+    /// empty for exactly that reason. Filling the unit in is what makes a
+    /// second pass find nothing.
+    ///
+    /// `error` is recomputed from `measured_value`, which is already in the row
+    /// and is not touched — the measurement is frozen. A row whose
+    /// `measured_value` will not parse gets an EMPTY error rather than the one
+    /// it had: the old number was computed from the wrong truth, and leaving it
+    /// there would be a wrong number presented as a right one.
+    ///
+    /// @Synchronized against [record] and [clear], so it cannot interleave with
+    /// an append. With `apply = false` it reads and reports and writes nothing.
+    @Synchronized
+    fun repairImperialTruths(context: Context, apply: Boolean): TruthRepairOutcome {
+        val out = file(context)
+        val kept = TruthUnitRepair.Kept()
+        // Nothing to repair in a log that does not exist, and a log this build
+        // cannot bring up to the current header must not be rewritten by a pass
+        // that is not about the header.
+        val state = prepareFile(out)
+        if (state != FileState.READY) {
+            return TruthRepairOutcome(
+                failed = apply && state == FileState.UNUSABLE)
+        }
+        val text = try { out.readText() } catch (_: Exception) {
+            return TruthRepairOutcome(failed = apply)
+        }
+        val records = parseRecords(text).map { ArrayList(it) }.toMutableList()
+        val header = records.firstOrNull()
+        if (header == null || header != COLUMNS) {
+            return TruthRepairOutcome(failed = apply)
+        }
+        val typeIdx = COLUMNS.indexOf("measure_type")
+        val treeIdx = COLUMNS.indexOf("tree_id")
+        val truthIdx = COLUMNS.indexOf("true_value")
+        val measIdx = COLUMNS.indexOf("measured_value")
+        val errIdx = COLUMNS.indexOf("error")
+        val unitIdx = COLUMNS.indexOf("truth_unit")
+
+        val rows = ArrayList<TruthUnitRepair.Change>()
+        var written = 0
+        var changed = false
+        for (i in 1 until records.size) {
+            val row = records[i]
+            // A short row (written by a build with fewer columns and never
+            // re-emitted) is padded rather than skipped, so the columns this
+            // pass writes land where the header says they are.
+            while (row.size < COLUMNS.size) row.add("")
+            val before = TruthInput.parsePositive(row[truthIdx]) ?: continue
+            if (row[unitIdx].isNotEmpty()) {
+                kept.unitRecorded++
+                continue
+            }
+            val q = TruthUnitRepair.Quantity.ofRawKind(row[typeIdx])
+            if (q == null) {
+                kept.otherQuantity++
+                continue
+            }
+            val after = TruthUnitRepair.repaired(before, q)
+            rows.add(TruthUnitRepair.Change(q, before, after, "log", row[treeIdx]))
+            if (!apply) continue
+            row[truthIdx] = String.format(Locale.US, "%.2f", after)
+            row[unitIdx] = q.typedUnit.raw
+            val measured = TruthInput.parse(row[measIdx])
+            row[errIdx] =
+                if (measured != null) String.format(Locale.US, "%.2f", measured - after)
+                else ""
+            changed = true
+            written++
+        }
+        if (!apply || !changed) {
+            return TruthRepairOutcome(rows, kept, if (apply) written else 0, false)
+        }
+        val sb = StringBuilder()
+        for (row in records) {
+            sb.append(row.joinToString(",") { csvEscape(it) }).append('\n')
+        }
+        // Write-then-rename, for the same reason the header migration is: a
+        // crash here must not leave half a field season on disk.
+        val tmp = File(out.parentFile, out.name + ".repairing")
+        return try {
+            tmp.writeText(sb.toString())
+            if (tmp.renameTo(out)) {
+                TruthRepairOutcome(rows, kept, written, false)
+            } else {
+                tmp.delete()
+                TruthRepairOutcome(rows, kept, 0, true)
+            }
+        } catch (_: Exception) {
+            tmp.delete()
+            TruthRepairOutcome(rows, kept, 0, true)
+        }
     }
 
     private fun timestamp(): String {

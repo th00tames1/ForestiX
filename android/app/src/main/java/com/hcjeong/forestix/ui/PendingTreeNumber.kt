@@ -35,6 +35,12 @@ object PendingTreeNumber {
         /// fact: re-labelling a capture-recovered truth as one typed here
         /// would claim a provenance the cruiser never gave it.
         val truthSource: String? = null,
+        /// The unit that truth was typed in (a `QuickMeasureEntry.truthUnit`
+        /// raw, null = not stated). Carried for the same reason as the source,
+        /// and with one extra consequence: it is TruthUnitRepair's durable
+        /// "already re-based" mark, so a re-measure that dropped it would put a
+        /// repaired truth back in front of the repair.
+        val truthUnit: String? = null,
         /// The plot the reading must land in. Null = the active plot, which
         /// is what the map home wants; the field log names it explicitly,
         /// because a row being re-measured can belong to a plot that is not
@@ -52,6 +58,7 @@ object PendingTreeNumber {
         replaceExisting: Boolean = false,
         truth: Double? = null,
         truthSource: String? = null,
+        truthUnit: String? = null,
         plotID: java.util.UUID? = null,
     ) {
         // TRIMMED before it is stored, exactly as iOS does in
@@ -61,7 +68,7 @@ object PendingTreeNumber {
         // A gloved thumb or a paste that leaves a leading space must not
         // create " Plot3-T07" here and "Plot3-T07" there.
         lock = Lock(number, name?.trim()?.takeIf { it.isNotEmpty() }, speciesCode,
-                    replaceExisting, truth, truthSource, plotID)
+                    replaceExisting, truth, truthSource, truthUnit, plotID)
     }
 
     /// Read-and-clear, so a stale lock can never leak into a later,

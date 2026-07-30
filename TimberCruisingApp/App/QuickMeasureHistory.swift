@@ -218,6 +218,19 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
     /// the first does not.
     public let truthSource: String?
 
+    /// The unit `truth` was TYPED in — a `TruthInput.Unit` raw ("cm" | "in" |
+    /// "m" | "ft"). The stored number is always the metric base, so nothing
+    /// else on the reading says whether the cruiser was working in inches or
+    /// centimetres, exactly as on the raw-capture manifest (`truth_unit`) and
+    /// in the research CSV.
+    ///
+    /// nil means NOT STATED — never "metric". It is the marker `TruthUnitRepair`
+    /// keys on: a truth carrying no unit was typed before the unit toggle
+    /// existed, and one carrying a unit was entered knowingly and is already
+    /// right. Writing the unit is therefore what makes the repair idempotent —
+    /// the repaired value no longer matches the rule that selected it.
+    public let truthUnit: String?
+
     /// Where this reading's coordinate came from — a `PositionSource` raw
     /// string, the SAME vocabulary the cruise `Plot` records ("gpsSingle",
     /// "manual", …), so one word means one thing in both worlds.
@@ -254,6 +267,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         captureMode: String? = nil,
         truth: Double? = nil,
         truthSource: String? = nil,
+        truthUnit: String? = nil,
         positionSource: String? = nil
     ) {
         self.id = id
@@ -277,6 +291,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         self.captureMode = captureMode
         self.truth = truth
         self.truthSource = truthSource
+        self.truthUnit = truthUnit
         self.positionSource = positionSource
     }
 
@@ -306,6 +321,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         self.captureMode   = try c.decodeIfPresent(String.self, forKey: .captureMode)
         self.truth         = try c.decodeIfPresent(Double.self, forKey: .truth)
         self.truthSource   = try c.decodeIfPresent(String.self, forKey: .truthSource)
+        self.truthUnit     = try c.decodeIfPresent(String.self, forKey: .truthUnit)
         self.positionSource = try c.decodeIfPresent(String.self,
                                                     forKey: .positionSource)
     }
@@ -358,7 +374,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             latitude: hasFix ? newLat : nil,
             longitude: hasFix ? newLon : nil,
             photoPath: photoPath, captureMode: captureMode, truth: truth,
-            truthSource: truthSource,
+            truthSource: truthSource, truthUnit: truthUnit,
             positionSource: hasFix ? PositionSource.manual.rawValue : nil)
     }
 
@@ -439,7 +455,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             damageCodes: damageCodes, note: note,
             latitude: latitude, longitude: longitude,
             photoPath: photoPath, captureMode: "typed", truth: truth,
-            truthSource: truthSource,
+            truthSource: truthSource, truthUnit: truthUnit,
             positionSource: positionSource)
     }
 
@@ -464,7 +480,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             damageCodes: damageCodes, note: note,
             latitude: latitude, longitude: longitude,
             photoPath: photoPath, captureMode: captureMode, truth: truth,
-            truthSource: truthSource,
+            truthSource: truthSource, truthUnit: truthUnit,
             positionSource: positionSource)
     }
 
@@ -490,7 +506,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             damageCodes: damageCodes, note: newNote,
             latitude: latitude, longitude: longitude,
             photoPath: photoPath, captureMode: captureMode, truth: truth,
-            truthSource: truthSource,
+            truthSource: truthSource, truthUnit: truthUnit,
             positionSource: positionSource)
     }
 
@@ -503,8 +519,15 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
     /// path means; only the recovery pass passes `TruthSource.capture`.
     /// Clearing drops the source too — an absent truth has no provenance,
     /// exactly as `settingPosition` treats an absent coordinate.
+    ///
+    /// `unit` travels the same way and for the same reason, and defaults to nil
+    /// because the hand-typed paths do not record it today. A NEW value is a
+    /// different fact from the one that was here, so it never inherits the old
+    /// value's unit: carrying `truthUnit` across a retype would leave a number
+    /// stamped with a unit nobody typed it in.
     public func settingTruth(_ newTruth: Double?,
-                             source: String? = nil) -> QuickMeasureEntry {
+                             source: String? = nil,
+                             unit: String? = nil) -> QuickMeasureEntry {
         QuickMeasureEntry(
             id: id, kind: kind, value: value,
             secondaryValue: secondaryValue, sigma: sigma,
@@ -516,6 +539,33 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             latitude: latitude, longitude: longitude,
             photoPath: photoPath, captureMode: captureMode, truth: newTruth,
             truthSource: newTruth == nil ? nil : source,
+            truthUnit: newTruth == nil ? nil : unit,
+            positionSource: positionSource)
+    }
+
+    /// This reading with its ground truth RE-BASED into the unit it was
+    /// actually typed in — `TruthUnitRepair`'s only mutator on a reading.
+    ///
+    /// Distinct from `settingTruth` because it is not a new observation: the
+    /// tape number is the same number the cruiser wrote down, and only the
+    /// scale it was stored at is being corrected. So `truthSource` is KEPT
+    /// (this truth still arrived here by the recovery pass's matching, and
+    /// re-labelling it "typed" would be a provenance claim nobody made), while
+    /// `truthUnit` is stamped — which is what makes the repair one-shot: the
+    /// rule that selected this reading requires an absent unit.
+    public func repairingTruthUnit(base newTruth: Double,
+                                   unit: String) -> QuickMeasureEntry {
+        QuickMeasureEntry(
+            id: id, kind: kind, value: value,
+            secondaryValue: secondaryValue, sigma: sigma,
+            confidenceRaw: confidenceRaw, method: method,
+            createdAt: createdAt, treeNumber: treeNumber, treeName: treeName,
+            plotID: plotID,
+            speciesCode: speciesCode, position: position,
+            damageCodes: damageCodes, note: note,
+            latitude: latitude, longitude: longitude,
+            photoPath: photoPath, captureMode: captureMode, truth: newTruth,
+            truthSource: truthSource, truthUnit: unit,
             positionSource: positionSource)
     }
 
@@ -571,7 +621,11 @@ public final class QuickMeasureHistory: ObservableObject {
     /// have been. 5 adds `truthSource` — how a ground truth came to sit on
     /// the reading — on the same terms again: absent decodes as nil, which
     /// `truthRecordedSource` reads as the typed value it can only have been.
-    public static let schemaVersion: Int = 5
+    /// 6 adds `truthUnit` — the unit a ground truth was typed in. Same terms
+    /// again (absent decodes as nil), and nil keeps its manifest meaning: NOT
+    /// STATED, never "metric". A v5 sidecar replays under 6 unchanged, and a
+    /// build reading a 6 sidecar with a v5 decoder simply ignores the key.
+    public static let schemaVersion: Int = 6
 
     @Published public private(set) var entries: [QuickMeasureEntry] = []
     /// All Quick Measure plots known to the app, newest first. Always
@@ -676,6 +730,48 @@ public final class QuickMeasureHistory: ObservableObject {
             guard let value = attachments[e.id], e.truth == nil else { continue }
             next[idx] = e.settingTruth(
                 value, source: QuickMeasureEntry.TruthSource.capture.rawValue)
+            changed += 1
+        }
+        guard changed > 0 else { return 0 }
+        entries = next
+        rewriteSidecar()
+        persistCache()
+        return changed
+    }
+
+    /// Two truth values are the SAME value inside this band — the field log's
+    /// `valueEpsilon` and `TruthBackfill.valueEpsilon` by the same reasoning:
+    /// everything that writes a truth writes the metric base through one
+    /// parser, so the only difference between two copies is float round-trip.
+    static let truthValueEpsilon: Double = 0.001
+
+    /// Re-base ground truths that were stored at the wrong scale, in ONE
+    /// persist — `TruthUnitRepair`'s write into the reading log.
+    ///
+    /// Same batching reason as `backfillTruths`: two hundred `update` calls
+    /// would rewrite the whole sidecar two hundred times on a phone in the
+    /// cruiser's hand.
+    ///
+    /// RE-CHECKS AT THE WRITE. The plan is computed off the main actor and the
+    /// log can have moved since, so each reading must STILL be the one that was
+    /// planned for: the truth still the pre-repair number, and still carrying
+    /// no unit. A reading the cruiser retyped in between is left exactly as
+    /// they left it. Returns how many readings actually changed — the number
+    /// reported, never the number requested.
+    @discardableResult
+    public func repairTruthUnits(
+        _ repairs: [UUID: (before: Double, after: Double, unit: String)]
+    ) -> Int {
+        guard !repairs.isEmpty else { return 0 }
+        var changed = 0
+        var next = entries
+        for (idx, e) in next.enumerated() {
+            guard let r = repairs[e.id],
+                  e.truthUnit == nil,
+                  let stored = e.truth,
+                  abs(stored - r.before) <= Self.truthValueEpsilon
+            else { continue }
+            next[idx] = e.repairingTruthUnit(base: r.after, unit: r.unit)
             changed += 1
         }
         guard changed > 0 else { return 0 }

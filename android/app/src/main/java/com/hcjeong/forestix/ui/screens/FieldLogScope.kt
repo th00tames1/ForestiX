@@ -70,6 +70,8 @@ object FieldLogWords {
             "— they are not part of any project."
     /// Scope has no rows (as opposed to the whole log being empty).
     const val EMPTY_SCOPE = "Nothing recorded in this plot yet."
+    /// The hint on a cruise section's heading, which opens that plot.
+    const val OPEN_PLOT_DETAIL = "Opens this plot's details"
     /// The cruise store could not be read. Never silently show an empty
     /// cruise section instead — an empty plot and an unreadable database
     /// look the same to the cruiser and only one of them means "no trees".
@@ -163,6 +165,15 @@ data class FieldLogCruiseRow(
 /// table growing two more columns it has no width for.
 data class FieldLogSection(
     val id: String,
+    /// The cruise plot this section is, when it is one. null on a quick
+    /// section.
+    ///
+    /// Carried EXPLICITLY rather than parsed back out of `id`. The id is a
+    /// display key with a "c|" prefix on it, and reaching into a string to
+    /// recover a UUID is the kind of thing that keeps working until somebody
+    /// changes the prefix. The header needs the id to open the plot's own
+    /// detail sheet, so the section states it. Mirrors iOS `cruisePlotID`.
+    val cruisePlotID: UUID? = null,
     val projectLabel: String,
     val plotLabel: String,
     /// Editable quick-measure rows. Empty on a cruise section.
@@ -226,6 +237,7 @@ data class FieldLogCruiseData(
                 if (rows.isEmpty() && scope != FieldLogScope.CruisePlot(plot.id)) continue
                 out += FieldLogSection(
                     id = "c|${plot.id}",
+                    cruisePlotID = plot.id,
                     projectLabel = project.name,
                     plotLabel = FieldLogWords.plotName(plot.plotNumber),
                     cruiseRows = rows,

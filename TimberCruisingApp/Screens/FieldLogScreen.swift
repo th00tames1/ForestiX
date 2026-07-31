@@ -90,6 +90,9 @@ public struct FieldLogScreen: View {
     /// layout pass is the same mistake `FieldLogCruiseFeed` exists to avoid.
     @State private var summary: FieldLogSummary?
     @State private var showingSummaryDetail = false
+    /// The cruise plot whose details the cruiser is editing, from a section
+    /// heading. Item 8's second door: the first is the cruising map.
+    @State private var editingPlotDetail: UUID?
     @State private var shareURL: URL?
     /// The row whose detail sheet is open. nil = closed.
     @State private var inspecting: FieldLogRowModel?
@@ -227,6 +230,18 @@ public struct FieldLogScreen: View {
         history.entries.isEmpty
             && cruiseFeed.rowsByPlot.values.allSatisfy(\.isEmpty)
             && cruiseFeed.failure == nil
+    }
+
+    /// Whether to hand the screen over to "you have measured nothing yet".
+    ///
+    /// ONLY UNDER "EVERYTHING". A cruiser who has filtered to one plot has
+    /// asked a question about that plot, and the answer is that plot's card
+    /// with "Nothing measured in this plot yet." on it — not a screen-filling
+    /// notice about the whole app. Routing every empty log to `emptyState`
+    /// swallowed the card in exactly the case it was most wanted: a plot just
+    /// planned, opened to check its design before the first tree goes in.
+    private var showsWholeLogEmptyState: Bool {
+        logIsEmpty && scope == .everything
     }
 
     public var body: some View {
@@ -454,10 +469,22 @@ public struct FieldLogScreen: View {
 
     private var cruiseMoveHost: some View {
         Group {
-            if logIsEmpty {
+            if showsWholeLogEmptyState {
                 emptyState
             } else {
                 populatedList
+            }
+        }
+        .sheet(item: Binding(
+            get: { editingPlotDetail.map { IdentifiedUUID(id: $0) } },
+            set: { editingPlotDetail = $0?.id })) { target in
+            PlotDetailSheet(plotId: target.id) { _ in
+                // The plot's own figures are on the summary card; a saved
+                // slope or canopy cover does not change them, but the sheet
+                // can also change the plot NUMBER, and the headings above
+                // every cruise row are built from it.
+                cruiseFeed.load(environment: environment)
+                rebuildSummary()
             }
         }
         .sheet(isPresented: $pickingDestination) {
@@ -710,6 +737,13 @@ public struct FieldLogScreen: View {
         // Re-read: the moved rows belong under a different heading now, and
         // a stale feed would go on showing them under the old one.
         cruiseFeed.load(environment: environment)
+        // AND rebuild the card. Moving trees between plots changes every
+        // figure the summary carries; reloading only the feed left the card
+        // stating the counts and the basal area of a plot that no longer holds
+        // those trees. Android gets this free because its effect is keyed on
+        // the cruise data — here the rebuild is explicit, so it has to be
+        // called at every site that writes.
+        rebuildSummary()
         if !outcome.isClean { moveResult = outcome }
     }
 
@@ -718,10 +752,10 @@ public struct FieldLogScreen: View {
     private var populatedList: some View {
         List {
             // The summary card — the computed values for WHATEVER THE FILTER
-            // IS SHOWING, quick plot or cruise plot or cruise project. Under
-            // "Everything" there is no card: that scope names no single plot,
-            // and the whole-log counts a cruiser wants there are already on
-            // the summary header below.
+            // IS SHOWING, quick plot or cruise plot or cruise project, and
+            // under "Everything" the log's counts. It is always present when
+            // anything has been measured: the card going missing on the
+            // screen's own default scope was the original complaint.
             if let summary {
                 Section {
                     PlotSummaryCard(summary: summary) {
@@ -880,11 +914,35 @@ public struct FieldLogScreen: View {
                         // The heading is where a row says which project and
                         // which plot it belongs to — it is true of every row
                         // beneath it, and it costs the table no column width.
-                        Text(section.heading)
-                            .font(ForestixType.sectionHead)
-                            .tracking(FieldLogTable.headerTracking)
-                            .foregroundStyle(ForestixPalette.textSecondary)
-                            .lineLimit(2)
+                        //
+                        // ON A CRUISE SECTION IT IS ALSO THE WAY IN TO THE
+                        // PLOT. Aspect, slope, elevation and canopy cover
+                        // could only be entered from the cruising map with the
+                        // pin selected, so a plot reviewed later — which is
+                        // what the field log is for — offered no way to record
+                        // or correct them. Tapping the plot's own heading is
+                        // where a cruiser looks for that.
+                        if let plotID = section.cruisePlotID {
+                            Button { editingPlotDetail = plotID } label: {
+                                HStack(spacing: 4) {
+                                    Text(section.heading)
+                                        .font(ForestixType.sectionHead)
+                                        .tracking(FieldLogTable.headerTracking)
+                                        .lineLimit(2)
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption2)
+                                }
+                                .foregroundStyle(ForestixPalette.textSecondary)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityHint(FieldLogWords.openPlotDetail)
+                        } else {
+                            Text(section.heading)
+                                .font(ForestixType.sectionHead)
+                                .tracking(FieldLogTable.headerTracking)
+                                .foregroundStyle(ForestixPalette.textSecondary)
+                                .lineLimit(2)
+                        }
                         FieldLogColumnHeader()
                     }
                     .textCase(nil)

@@ -89,6 +89,13 @@ data class FieldLogSummary(
         const val NO_CLOSED_PLOTS = "No closed plots yet."
         /// A plot with readings but nothing to compute from them.
         const val NOTHING_MEASURED = "Nothing measured in this plot yet."
+        /// The unfiltered scope's heading and title.
+        const val LOG_HEADING = "LOG SUMMARY"
+        const val EVERYTHING_TITLE = "Everything measured"
+        /// Said on the unfiltered card, because counts are all it can honestly
+        /// carry and the computed values are one tap away.
+        const val PICK_A_SCOPE =
+            "Pick a plot or a stand in the filter for computed values."
         /// The detail view's title, and the label on the card's heading.
         const val DETAIL_TITLE = "How this was computed"
     }
@@ -108,7 +115,8 @@ object FieldLogSummaryBuilder {
         env: AppEnvironment,
         cruiseData: FieldLogCruiseData,
     ): FieldLogSummary? = when (scope) {
-        is FieldLogScope.Everything -> null
+        is FieldLogScope.Everything ->
+            everything(quickPlots, quickEntries, settings, env, cruiseData)
         is FieldLogScope.QuickPlot -> {
             val plot = quickPlots.firstOrNull { it.id == scope.id }
             if (plot == null) {
@@ -134,6 +142,76 @@ object FieldLogSummaryBuilder {
             val project = cruiseData.projects.firstOrNull { it.id == scope.id }
             if (project == null) null else cruiseProject(project, settings, env)
         }
+    }
+
+    // MARK: Everything
+
+    /// The unfiltered scope: the one stand if that is unambiguous, else counts.
+    ///
+    /// Port of iOS `FieldLogSummaryBuilder.everything`. The delegation matters
+    /// more than the counts do — a cruiser running one project and nothing
+    /// else opens the field log and gets that stand's real figures without
+    /// learning that the funnel is where summaries live. The fallback is
+    /// COUNTS and not a density, because a quick plot's per-area figure is
+    /// divided by an assumed area while a cruise plot's is expanded by the
+    /// design's factor; those are not the same quantity and adding them makes
+    /// a number about nothing.
+    private suspend fun everything(
+        quickPlots: List<QuickMeasurePlot>,
+        quickEntries: List<QuickMeasureEntry>,
+        settings: SettingsSnapshot,
+        env: AppEnvironment,
+        cruiseData: FieldLogCruiseData,
+    ): FieldLogSummary? {
+        val quickCount = quickEntries.size
+        val cruiseTrees = cruiseData.rowsByPlot.values.sumOf { it.size }
+        val cruisePlots = cruiseData.plotsByProject.values.sumOf { it.size }
+
+        // Exactly one stand, and nothing measured outside it: "everything" and
+        // "that stand" name the same set, so show the stand.
+        val only = cruiseData.projects.singleOrNull()
+        if (only != null && quickCount == 0) {
+            return cruiseProject(only, settings, env)
+        }
+
+        // An empty log gets no card. Here — and only here — "nothing at all"
+        // is genuinely nothing to summarise, and a row of zeroes would read as
+        // a measurement.
+        if (quickCount == 0 && cruiseTrees == 0) return null
+
+        val areaUnit = settings.unitSystem.areaUnit
+        return FieldLogSummary(
+            heading = FieldLogSummary.LOG_HEADING,
+            title = FieldLogSummary.EVERYTHING_TITLE,
+            subtitle = null,
+            cells = listOf(
+                FieldLogSummary.Cell("TREES", "${quickCount + cruiseTrees}"),
+                FieldLogSummary.Cell("STANDS", "${cruiseData.projects.size}"),
+                FieldLogSummary.Cell("CRUISE PLOTS", "$cruisePlots"),
+                FieldLogSummary.Cell("QUICK PLOTS", "${quickPlots.size}")),
+            speciesMix = emptyList(),
+            groups = listOf(
+                FieldLogSummary.Group(
+                    "What the log holds",
+                    listOf(
+                        FieldLogSummary.Row("Cruise trees", "$cruiseTrees"),
+                        FieldLogSummary.Row("Cruise plots", "$cruisePlots"),
+                        FieldLogSummary.Row("Stands", "${cruiseData.projects.size}"),
+                        FieldLogSummary.Row("Quick readings", "$quickCount"),
+                        FieldLogSummary.Row("Quick plots", "${quickPlots.size}"))),
+                FieldLogSummary.Group(
+                    "Behind these numbers",
+                    listOf(
+                        FieldLogSummary.Row(
+                            "Why counts",
+                            "A quick plot's per-area figure is divided by an " +
+                                "assumed area and a cruise plot's is expanded " +
+                                "by the design's factor. They are not the same " +
+                                "quantity, so they are not added."),
+                        FieldLogSummary.Row(
+                            "Board-foot log rule", settings.logRule.displayName),
+                        FieldLogSummary.Row("Density basis", areaUnit.basisPhrase)))),
+            note = FieldLogSummary.PICK_A_SCOPE)
     }
 
     // MARK: Quick

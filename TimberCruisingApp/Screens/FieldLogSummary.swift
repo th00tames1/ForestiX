@@ -9,9 +9,25 @@
 //   • one QUICK plot    → that plot's readings
 //   • one CRUISE plot   → that plot's PlotStats
 //   • one CRUISE project→ that project's stand statistics
-//   • Everything        → no card. "Everything" names no single plot, and a
-//                         summary of two stores whose per-area bases are not
-//                         the same quantity would be a number about nothing.
+//   • Everything        → whatever "everything" unambiguously is: the one
+//                         stand, when there is exactly one and no quick
+//                         readings sit outside it, and otherwise a COUNT of
+//                         what the log holds.
+//
+// THE EVERYTHING BRANCH USED TO RETURN NOTHING, and that reproduced the
+// complaint this file was written to answer: the log opens on Everything, so
+// the cruiser opened the field log and saw no summary at all until they
+// worked out that the funnel was where summaries came from. "No card" also
+// says the same thing as "nothing measured", which is a different fact.
+//
+// What it must NOT do is add the two stores' densities together. A quick
+// plot's per-acre figure is divided by an assumed tenth of an acre and a
+// cruise plot's is expanded by the design's own factor; those are not the
+// same quantity and their sum is a number about nothing. So the Everything
+// card carries COUNTS, which are basis-free and additive, and says in one
+// line where the computed values are. When the log holds exactly one stand
+// and nothing outside it, "everything" IS that stand, and the cruiser gets
+// the real figures without touching the filter.
 //
 // NOTHING HERE COMPUTES A CRUISE NUMBER. The cruise branches build the same
 // view models the cruise screens build — `PlotSummaryViewModel` for a plot,
@@ -91,6 +107,13 @@ public struct FieldLogSummary: Equatable {
     public static let noClosedPlots = "No closed plots yet."
     /// A plot with readings but nothing to compute from them.
     public static let nothingMeasured = "Nothing measured in this plot yet."
+    /// The unfiltered scope's heading and title.
+    public static let logHeading = "LOG SUMMARY"
+    public static let everythingTitle = "Everything measured"
+    /// Said on the unfiltered card, because counts are all it can honestly
+    /// carry and the computed values are one tap away.
+    public static let pickAScope =
+        "Pick a plot or a stand in the filter for computed values."
     /// The detail view's title, and the hint on the card's heading.
     public static let detailTitle = "How this was computed"
 }
@@ -109,7 +132,8 @@ public enum FieldLogSummaryBuilder {
                             cruiseFeed: FieldLogCruiseFeed) -> FieldLogSummary? {
         switch scope {
         case .everything:
-            return nil
+            return everything(history: history, settings: settings,
+                              environment: environment, cruiseFeed: cruiseFeed)
         case .quickPlot(let id):
             guard let plot = history.plot(id: id) else { return nil }
             return quick(plot: plot,
@@ -126,6 +150,68 @@ public enum FieldLogSummaryBuilder {
             return cruiseProject(project: project,
                                  settings: settings, environment: environment)
         }
+    }
+
+    // MARK: Everything
+
+    /// The unfiltered scope: the one stand if that is unambiguous, else counts.
+    ///
+    /// The delegation matters more than the counts do. A cruiser running one
+    /// project and nothing else — the ordinary case — opens the field log and
+    /// gets that stand's real figures without learning that the funnel is
+    /// where summaries live. The counts are the fallback for a log that holds
+    /// more than one thing, and they are counts precisely because the two
+    /// stores' per-area figures cannot be added: see the note at the top.
+    private static func everything(history: QuickMeasureHistory,
+                                   settings: AppSettings,
+                                   environment: AppEnvironment,
+                                   cruiseFeed: FieldLogCruiseFeed) -> FieldLogSummary? {
+        let quickEntries = history.entries.count
+        let cruiseTrees = cruiseFeed.rowsByPlot.values.reduce(0) { $0 + $1.count }
+        let cruisePlots = cruiseFeed.plotsByProject.values.reduce(0) { $0 + $1.count }
+
+        // Exactly one stand, and nothing measured outside it: "everything" and
+        // "that stand" name the same set, so show the stand.
+        if cruiseFeed.projects.count == 1, quickEntries == 0,
+           let only = cruiseFeed.projects.first {
+            return cruiseProject(project: only, settings: settings,
+                                 environment: environment)
+        }
+
+        // An empty log gets no card. Here — and only here — "nothing at all"
+        // is genuinely nothing to summarise, and a row of zeroes would read as
+        // a measurement.
+        if quickEntries == 0 && cruiseTrees == 0 { return nil }
+
+        let cells = [
+            FieldLogSummary.Cell(label: "TREES",
+                                 value: "\(quickEntries + cruiseTrees)"),
+            FieldLogSummary.Cell(label: "STANDS",
+                                 value: "\(cruiseFeed.projects.count)"),
+            FieldLogSummary.Cell(label: "CRUISE PLOTS", value: "\(cruisePlots)"),
+            FieldLogSummary.Cell(label: "QUICK PLOTS",
+                                 value: "\(history.plots.count)")]
+
+        return FieldLogSummary(
+            heading: FieldLogSummary.logHeading,
+            title: FieldLogSummary.everythingTitle,
+            subtitle: nil,
+            cells: cells,
+            speciesMix: [],
+            groups: [
+                .init(title: "What the log holds", rows: [
+                    .init(label: "Cruise trees", value: "\(cruiseTrees)"),
+                    .init(label: "Cruise plots", value: "\(cruisePlots)"),
+                    .init(label: "Stands", value: "\(cruiseFeed.projects.count)"),
+                    .init(label: "Quick readings", value: "\(quickEntries)"),
+                    .init(label: "Quick plots", value: "\(history.plots.count)")]),
+                .init(title: "Behind these numbers", rows: [
+                    .init(label: "Why counts",
+                          value: "A quick plot's per-area figure is divided by an assumed area and a cruise plot's is expanded by the design's factor. They are not the same quantity, so they are not added."),
+                    .init(label: "Board-foot log rule", value: settings.logRule.displayName),
+                    .init(label: "Density basis",
+                          value: settings.unitSystem.areaUnit.basisPhrase)])],
+            note: FieldLogSummary.pickAScope)
     }
 
     // MARK: Quick

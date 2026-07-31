@@ -70,6 +70,8 @@ public enum FieldLogWords {
         "Cruise trees belong to a project and a plot. Quick measurements belong to a plot only — they are not part of any project."
     /// Scope has no rows (as opposed to the whole log being empty).
     public static let emptyScope = "Nothing recorded in this plot yet."
+    /// The hint on a cruise section's heading, which opens that plot.
+    public static let openPlotDetail = "Opens this plot's details"
     /// The cruise store could not be read. Never silently show an empty
     /// cruise section instead — an empty plot and an unreadable database
     /// look the same to the cruiser and only one of them means "no trees".
@@ -168,6 +170,15 @@ public struct FieldLogCruiseRow: Identifiable, Equatable {
 /// table growing two more columns it has no width for.
 public struct FieldLogSection: Identifiable, Equatable {
     public let id: String
+    /// The cruise plot this section is, when it is one. nil on a quick
+    /// section.
+    ///
+    /// Carried EXPLICITLY rather than parsed back out of `id`. The id is a
+    /// display key with a "c|" prefix on it, and reaching into a string to
+    /// recover a UUID is the kind of thing that keeps working until somebody
+    /// changes the prefix. The header needs the id to open the plot's own
+    /// detail sheet, so the section states it.
+    public var cruisePlotID: UUID?
     public let projectLabel: String
     public let plotLabel: String
     /// Editable quick-measure rows. Empty on a cruise section.
@@ -295,6 +306,7 @@ public final class FieldLogCruiseFeed: ObservableObject {
                 }
                 out.append(FieldLogSection(
                     id: "c|\(plot.id.uuidString)",
+                    cruisePlotID: plot.id,
                     projectLabel: project.name,
                     plotLabel: FieldLogWords.plotName(number: plot.plotNumber),
                     quickRows: [],

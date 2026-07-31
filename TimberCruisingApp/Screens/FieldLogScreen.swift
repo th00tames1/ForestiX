@@ -22,12 +22,19 @@
 // records; grouping by tree must not make them disappear.
 //
 // The screen otherwise keeps its shape:
-//   • Plot summary card for the active plot
+//   • Summary card for WHATEVER THE FILTER IS SHOWING — see FieldLogSummary
+//     .swift. It used to be a card about one special case (the active
+//     quick-measure plot) and so was blank or stale under any other filter.
 //   • Summary header — total count + readings-today + "last" timestamp
 //   • Capacity banner — only when the log is near its cap
 //   • Native iOS List, so swipe-to-delete and VoiceOver traversal are
 //     standard
-//   • Export CSV / bundle in the toolbar
+//   • Filter funnel + an overflow menu (New tree, Export) in the toolbar.
+//     The filter used to be a three-line bar at the top of the list; it is a
+//     toolbar glyph now, and the card below it says what the filter is set
+//     to. "New tree" gave up the (+) slot to the funnel and moved into the
+//     menu beside it — still in the toolbar, which is the only part of this
+//     screen that stays reachable however far the list is scrolled.
 //
 // FIELD REPORT 5 (second half) — the log is now READ PER PROJECT AND PER
 // PLOT. See FieldLogScope.swift for why that needed a closed enum: cruise
@@ -73,6 +80,16 @@ public struct FieldLogScreen: View {
     /// from the filter sheet.
     @State private var scope: FieldLogScope
     @State private var choosingScope = false
+    /// What the summary card is showing — a function of `scope`, recomputed
+    /// only when something it depends on changes. nil under `.everything`,
+    /// which names no single plot, and nil while the scope points at a plot
+    /// the store no longer has. See FieldLogSummary.swift.
+    ///
+    /// Held in state rather than computed in `body` because the two cruise
+    /// branches read the cruise store: a Core Data fetch inside SwiftUI's
+    /// layout pass is the same mistake `FieldLogCruiseFeed` exists to avoid.
+    @State private var summary: FieldLogSummary?
+    @State private var showingSummaryDetail = false
     @State private var shareURL: URL?
     /// The row whose detail sheet is open. nil = closed.
     @State private var inspecting: FieldLogRowModel?
@@ -222,7 +239,10 @@ public struct FieldLogScreen: View {
             moveHost
         }
         .background(ForestixPalette.canvas.ignoresSafeArea())
-        .onAppear { cruiseFeed.load(environment: environment) }
+        .onAppear {
+            cruiseFeed.load(environment: environment)
+            rebuildSummary()
+        }
         // Leaving the screen ends selection mode. A ticked set that survived
         // a pop would re-appear over a list the cruiser has since filtered,
         // pointing at trees they can no longer see.
@@ -230,7 +250,23 @@ public struct FieldLogScreen: View {
         // Same argument for the filter: changing scope hides rows, and a
         // tick on a row that is no longer on screen still counts toward the
         // move. The bar would say "12 selected" over a list of three.
-        .onChange(of: scope) { _, _ in selection = nil }
+        .onChange(of: scope) { _, _ in
+            selection = nil
+            rebuildSummary()
+        }
+        // A reading added, edited or deleted moves the quick branch's numbers,
+        // and a card that went on showing the count from before the delete
+        // would be the stale-card bug in a new place. Keyed on the readings
+        // themselves, not on how many there are: correcting a diameter in the
+        // record sheet changes the QMD without changing the count. The cruise
+        // branches are not written from this screen, so they ride on the
+        // appearance and the scope change above.
+        .onChange(of: history.entries) { _, _ in rebuildSummary() }
+        .sheet(isPresented: $showingSummaryDetail) {
+            if let summary {
+                FieldLogSummaryDetail(summary: summary)
+            }
+        }
         .sheet(isPresented: $choosingScope) {
             FieldLogScopeSheet(
                 scope: $scope,
@@ -243,42 +279,69 @@ public struct FieldLogScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .toolbar {
-            // Ungated, unlike Export: the case this exists for is a log with
-            // nothing in it yet and a stem the scan would not lock.
+            // THE FILTER LIVES HERE NOW. It used to be a bar at the top of the
+            // list carrying a chevron, the scope's name and a two-line caption
+            // explaining the two worlds — three lines of chrome above every
+            // reading, on the screen a cruiser scrolls most. The funnel is
+            // filled while a filter is applied, so the toolbar says whether the
+            // list is narrowed without spending a row saying it; WHAT it is
+            // narrowed to is on the summary card immediately below, which now
+            // follows the same scope.
             ToolbarItem(placement: .primaryAction) {
                 Button {
-                    startNewTree()
+                    choosingScope = true
                 } label: {
-                    Label("New tree", systemImage: "plus")
+                    Label(FieldLogWords.filterTitle,
+                          systemImage: scope == .everything
+                            ? "line.3.horizontal.decrease.circle"
+                            : "line.3.horizontal.decrease.circle.fill")
                         .foregroundStyle(ForestixPalette.primary)
                 }
-                .accessibilityIdentifier("fieldLog.newTree")
+                .accessibilityValue(scopeLabel)
+                .accessibilityIdentifier("fieldLog.scope")
             }
-            // Export writes the QUICK-MEASURE tables. Under a cruise scope
-            // none of the rows on screen are in them, so the button is not
-            // offered: a file that silently holds different trees than the
-            // list above it is worse than no button. The cruise bundle has
-            // its own "Export all" on the project screen.
-            if quickWorldVisible, !history.entries.isEmpty {
-                ToolbarItem(placement: .primaryAction) {
-                    Menu {
-                        Button {
-                            shareURL = history.exportCSV()
-                        } label: {
-                            Label("CSV (single file)", systemImage: "doc.text")
-                        }
-                        Button {
-                            shareURL = history.exportBundle(
-                                logRule: settings.logRule)
-                        } label: {
-                            Label("All tables (zip of 5 CSVs)", systemImage: "doc.zipper")
-                        }
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    // Ungated, unlike Export, and FIRST in the menu: the case
+                    // it exists for is a log with nothing in it yet and a stem
+                    // the scan would not lock. It lost the (+) slot to the
+                    // funnel, so it lives one tap deeper — but it is still in
+                    // the toolbar, which is the only part of this screen that
+                    // stays reachable however far the list is scrolled. The
+                    // empty state keeps its full-width button, because an empty
+                    // log is exactly where a cruiser looks for one.
+                    Button {
+                        startNewTree()
                     } label: {
-                        Label("Export", systemImage: "square.and.arrow.up")
-                            .foregroundStyle(ForestixPalette.primary)
+                        Label("New tree", systemImage: "plus")
                     }
-                    .accessibilityIdentifier("fieldLog.exportMenu")
+                    .accessibilityIdentifier("fieldLog.newTree")
+                    // Export writes the QUICK-MEASURE tables. Under a cruise
+                    // scope none of the rows on screen are in them, so it is
+                    // not offered: a file that silently holds different trees
+                    // than the list above it is worse than no button. The
+                    // cruise bundle has its own "Export all" on the project
+                    // screen.
+                    if quickWorldVisible, !history.entries.isEmpty {
+                        Section("Export") {
+                            Button {
+                                shareURL = history.exportCSV()
+                            } label: {
+                                Label("CSV (single file)", systemImage: "doc.text")
+                            }
+                            Button {
+                                shareURL = history.exportBundle(
+                                    logRule: settings.logRule)
+                            } label: {
+                                Label("All tables (zip of 5 CSVs)", systemImage: "doc.zipper")
+                            }
+                        }
+                    }
+                } label: {
+                    Label("More", systemImage: "ellipsis.circle")
+                        .foregroundStyle(ForestixPalette.primary)
                 }
+                .accessibilityIdentifier("fieldLog.moreMenu")
             }
         }
         .sheet(item: $newTree) { request in
@@ -654,39 +717,22 @@ public struct FieldLogScreen: View {
 
     private var populatedList: some View {
         List {
-            Section {
-                scopeBar
-                    .listRowInsets(EdgeInsets(top: ForestixSpace.sm,
-                                              leading: ForestixSpace.md,
-                                              bottom: ForestixSpace.sm,
-                                              trailing: ForestixSpace.md))
-                    .listRowBackground(ForestixPalette.surface)
-            }
-
-            // Plot summary card — BA / TPA / QMD + species mix for the
-            // active QUICK plot. It reads the quick-measure
-            // store, so it is shown only while the quick world is on screen:
-            // under a cruise scope it would be a card about a different plot
-            // than every row beneath it.
-            if quickWorldVisible,
-               let plotID = history.activePlotID,
-               let plot = history.plot(id: plotID) {
-                let plotEntries = history.entries(forPlot: plotID)
-                if plotEntries.count >= 1 {
-                    Section {
-                        PlotSummaryCard(
-                            plot: plot,
-                            entries: plotEntries,
-                            unitSystem: settings.unitSystem,
-                            logRule: settings.logRule,
-                            areaUnit: settings.unitSystem.areaUnit)
-                            .listRowInsets(EdgeInsets(
-                                top: ForestixSpace.sm,
-                                leading: ForestixSpace.md,
-                                bottom: ForestixSpace.sm,
-                                trailing: ForestixSpace.md))
-                            .listRowBackground(Color.clear)
+            // The summary card — the computed values for WHATEVER THE FILTER
+            // IS SHOWING, quick plot or cruise plot or cruise project. Under
+            // "Everything" there is no card: that scope names no single plot,
+            // and the whole-log counts a cruiser wants there are already on
+            // the summary header below.
+            if let summary {
+                Section {
+                    PlotSummaryCard(summary: summary) {
+                        showingSummaryDetail = true
                     }
+                        .listRowInsets(EdgeInsets(
+                            top: ForestixSpace.sm,
+                            leading: ForestixSpace.md,
+                            bottom: ForestixSpace.sm,
+                            trailing: ForestixSpace.md))
+                        .listRowBackground(Color.clear)
                 }
             }
             if quickWorldVisible {
@@ -890,39 +936,22 @@ public struct FieldLogScreen: View {
         }
     }
 
-    // MARK: - Scope bar
+    // MARK: - Scope
 
-    /// What the log is showing, and the way to change it.
-    private var scopeBar: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Button {
-                choosingScope = true
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "line.3.horizontal.decrease.circle")
-                        .foregroundStyle(ForestixPalette.primary)
-                    Text(scopeLabel)
-                        .font(ForestixType.bodyBold)
-                        .foregroundStyle(ForestixPalette.textPrimary)
-                        .lineLimit(1)
-                    Spacer(minLength: 0)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(ForestixPalette.textTertiary)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("fieldLog.scope")
-            // The cruiser's own question was "서브플롯? 스탠드?? 플롯??" — this
-            // is the answer, in one sentence, where they will be looking.
-            Text(FieldLogWords.worldsCaption)
-                .font(ForestixType.caption)
-                .foregroundStyle(ForestixPalette.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
+    /// The summary for the current scope, worked out once. Called on
+    /// appearance, on a scope change and when the quick readings move — never
+    /// from `body`, because two of the three branches read the cruise store.
+    private func rebuildSummary() {
+        summary = FieldLogSummaryBuilder.make(scope: scope,
+                                              history: history,
+                                              settings: settings,
+                                              environment: environment,
+                                              cruiseFeed: cruiseFeed)
     }
 
+    /// What the log is showing, spoken. The funnel in the toolbar is a glyph,
+    /// so this is the only thing that tells a VoiceOver user whether the list
+    /// is narrowed and to what.
     private var scopeLabel: String {
         switch scope {
         case .everything:
@@ -1823,44 +1852,56 @@ private struct FieldLogRow: View {
                                  scaleFloor: FieldLogTable.valueScaleFloor)
                 }
             }
-            HStack(spacing: 6) {
-                if case .loose = row.subject {} else {
-                    // The kind words that used to be the TYPE column, kept
-                    // here only when a row carries something other than the
-                    // two named columns (a crown on the same tree).
-                    ForEach(extraKinds, id: \.self) { word in
-                        Text(word)
-                            .font(FieldLogTable.metaFont)
+            // SPECIES SITS UNDER THE TREE NAME. It used to be the first thing
+            // on this line, which starts at the left edge of the row — so it
+            // was drawn under the ORDINAL, in front of the tree it describes,
+            // and read as a column of its own. Running the second line through
+            // the same weights as the first puts it exactly under the name,
+            // and costs the row no height: everything that was on this line
+            // still is.
+            WeightedColumns(weights: FieldLogTable.weights,
+                            spacing: FieldLogTable.gap) {
+                Color.clear.frame(height: 0)
+
+                FieldLogCell(text: speciesName ?? "",
+                             font: FieldLogTable.metaFont,
+                             color: ForestixPalette.textSecondary,
+                             alignment: .leading)
+
+                // The kind words that used to be the TYPE column, kept here
+                // only when a row carries something other than the two named
+                // columns (a crown on the same tree).
+                FieldLogCell(text: extraKinds.joined(separator: " "),
+                             font: FieldLogTable.metaFont,
+                             color: ForestixPalette.textTertiary)
+
+                HStack(spacing: 4) {
+                    Spacer(minLength: 0)
+                    // The time the row is SORTED on, so the order the cruiser
+                    // reads is the order this column explains.
+                    Text(compactRelativeAgo(row.measuredAt))
+                        .font(FieldLogTable.metaFont)
+                        .foregroundStyle(ForestixPalette.textTertiary)
+                        .lineLimit(1)
+                    // The standard "there is more behind this" affordance —
+                    // the row is a button and this says so. While selecting
+                    // the tap toggles instead of opening, so it goes.
+                    if !selecting {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(ForestixPalette.textTertiary)
                     }
                 }
-                if let species = speciesName {
-                    Text(species)
-                        .font(FieldLogTable.metaFont)
-                        .foregroundStyle(ForestixPalette.textSecondary)
-                        .lineLimit(1)
-                }
-                // The time the row is SORTED on, so the order the cruiser
-                // reads is the order this column explains.
-                Text(compactRelativeAgo(row.measuredAt))
-                    .font(FieldLogTable.metaFont)
-                    .foregroundStyle(ForestixPalette.textTertiary)
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-                // The standard "there is more behind this" affordance —
-                // the row is a button and this says so. While selecting the
-                // tap toggles instead of opening, so it goes.
-                if !selecting {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(ForestixPalette.textTertiary)
-                }
+                .frame(maxWidth: .infinity)
             }
         }
     }
 
-    /// Kinds on this tree beyond the two the table names.
+    /// Kinds on this tree beyond the two the table names. Empty for a loose
+    /// row: its kind is already what the TREE column reads, and repeating it
+    /// would print the same word twice on one row.
     private var extraKinds: [String] {
+        if case .loose = row.subject { return [] }
         let extras = row.entries
             .filter { $0.kind != .dbh && $0.kind != .height }
             .map { FieldLogRowModel.kindWord($0.kind) }
@@ -1976,28 +2017,40 @@ private struct FieldLogCruiseRowView: View {
                                 : ForestixPalette.textPrimary,
                              scaleFloor: FieldLogTable.valueScaleFloor)
             }
-            HStack(spacing: 6) {
-                if !row.speciesCode.isEmpty {
-                    Text(RegionalSpecies.name(forCode: row.speciesCode))
+            // Species under the tree name, through the same weights — see the
+            // quick row for why this line is a table row rather than a plain
+            // HStack.
+            WeightedColumns(weights: FieldLogTable.weights,
+                            spacing: FieldLogTable.gap) {
+                Color.clear.frame(height: 0)
+
+                FieldLogCell(text: row.speciesCode.isEmpty
+                                ? "" : RegionalSpecies.name(forCode: row.speciesCode),
+                             font: FieldLogTable.metaFont,
+                             color: ForestixPalette.textSecondary,
+                             alignment: .leading)
+
+                Color.clear.frame(height: 0)
+
+                HStack(spacing: 4) {
+                    Spacer(minLength: 0)
+                    Text(compactRelativeAgo(row.recordedAt))
                         .font(FieldLogTable.metaFont)
-                        .foregroundStyle(ForestixPalette.textSecondary)
-                        .lineLimit(1)
-                }
-                Text(compactRelativeAgo(row.recordedAt))
-                    .font(FieldLogTable.metaFont)
-                    .foregroundStyle(ForestixPalette.textTertiary)
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-                // The same "there is more behind this" affordance a quick row
-                // carries, for the same reason: this row opens. A chevron on
-                // a row that cannot be opened would be worse than none, so it
-                // appears here only because the tap above it is real — and
-                // while selecting the tap toggles instead, so it goes.
-                if !selecting {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(ForestixPalette.textTertiary)
+                        .lineLimit(1)
+                    // The same "there is more behind this" affordance a quick
+                    // row carries, for the same reason: this row opens. A
+                    // chevron on a row that cannot be opened would be worse
+                    // than none, so it appears here only because the tap above
+                    // it is real — and while selecting the tap toggles
+                    // instead, so it goes.
+                    if !selecting {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(ForestixPalette.textTertiary)
+                    }
                 }
+                .frame(maxWidth: .infinity)
             }
         }
     }
@@ -2041,6 +2094,17 @@ private struct FieldLogScopeSheet: View {
                             choice(plot.name, target: .quickPlot(plot.id))
                         }
                     }
+                }
+                // The cruiser's own question was "서브플롯? 스탠드?? 플롯??" —
+                // this is the answer, in one sentence. It used to sit above
+                // the list on the log itself, two lines of caption over every
+                // reading; it belongs here, under the two headers it explains,
+                // at the moment the cruiser is choosing between them.
+                Section {
+                    Text(FieldLogWords.worldsCaption)
+                        .font(ForestixType.caption)
+                        .foregroundStyle(ForestixPalette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .navigationTitle(FieldLogWords.filterTitle)

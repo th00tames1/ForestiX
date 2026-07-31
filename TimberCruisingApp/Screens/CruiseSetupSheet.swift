@@ -43,13 +43,26 @@ public struct CruiseSetupSheet: View {
     /// Anchor for the no-polygon fallback grid — the map centre the
     /// cruiser has framed (they are looking at their woodlot).
     public let mapCentre: CoordinateConversions.LatLon
+    /// The AREA this setup is for, when the sheet was opened from an
+    /// outline the cruiser selected on the map ("Cruise this area").
+    ///
+    /// It changes two things, and nothing else. The stratum row stops
+    /// offering to draw a boundary — one is already chosen, and its name
+    /// and size are shown instead — and generation lays plots into THIS
+    /// stratum only, replacing this area's previous plan and leaving every
+    /// other area's alone. Opened from the project strip it is nil and the
+    /// sheet behaves exactly as it always has: every stratum, or the
+    /// centred fallback grid when there are none.
+    public let area: Stratum?
     public var onGenerated: () -> Void
 
     public init(project: Project,
                 mapCentre: CoordinateConversions.LatLon,
+                area: Stratum? = nil,
                 onGenerated: @escaping () -> Void = {}) {
         self.project = project
         self.mapCentre = mapCentre
+        self.area = area
         self.onGenerated = onGenerated
     }
 
@@ -259,6 +272,12 @@ public struct CruiseSetupSheet: View {
     /// Optional stratum polygon — "Draw boundary" pushes the kept
     /// StratumDrawScreen; with none drawn, generation falls back to the
     /// centred default pattern around the map centre.
+    ///
+    /// Opened from an area on the map the row has nothing to offer: the
+    /// outline is already chosen, so it states which one and how big it is
+    /// and gets out of the way. A "Draw boundary" button there would offer
+    /// to change the very thing the cruiser opened this sheet to cruise.
+    @ViewBuilder
     private var stratumRow: some View {
         HStack(spacing: ForestixSpace.sm) {
             VStack(alignment: .leading, spacing: 2) {
@@ -266,40 +285,51 @@ public struct CruiseSetupSheet: View {
                 // beside this row already says "Draw boundary" and the
                 // state line below says "None drawn", so the label was
                 // the only place the GIS term appeared.
-                Text("Stratum boundary")
+                Text(area == nil ? "Stratum boundary" : "Area")
                     .font(.system(size: 14.5, weight: .bold))
                     .foregroundStyle(ForestixPalette.textPrimary)
                 // FIELD REPORT F7 — the field is named, not qualified. The
                 // word "Optional" told the cruiser nothing they could act on;
                 // "None drawn" says what the state actually is.
-                Text(strataCount == 0
-                     ? "None drawn — whole area"
-                     : "\(strataCount) boundar\(strataCount == 1 ? "y" : "ies") drawn")
+                Text(areaRowDetail)
                     .font(.system(size: 11.5))
                     .foregroundStyle(ForestixPalette.textTertiary)
             }
             Spacer(minLength: 4)
-            Button {
-                pushingStratumDraw = true
-            } label: {
-                Text("Draw boundary")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(ForestixPalette.textPrimary)
-                    .padding(.horizontal, 12)
-                    .frame(minHeight: 38)
-                    .background(
-                        RoundedRectangle(cornerRadius: ForestixRadius.control,
-                                         style: .continuous)
-                            .stroke(ForestixPalette.divider, lineWidth: 1))
-                    .contentShape(Rectangle())
+            if area == nil {
+                Button {
+                    pushingStratumDraw = true
+                } label: {
+                    Text("Draw boundary")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(ForestixPalette.textPrimary)
+                        .padding(.horizontal, 12)
+                        .frame(minHeight: 38)
+                        .background(
+                            RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                             style: .continuous)
+                                .stroke(ForestixPalette.divider, lineWidth: 1))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("cruiseSetup.drawBoundary")
             }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("cruiseSetup.drawBoundary")
         }
         .padding(.vertical, ForestixSpace.xs)
         .overlay(alignment: .top) {
             Rectangle().fill(ForestixPalette.divider).frame(height: 0.5)
         }
+    }
+
+    private var areaRowDetail: String {
+        if let area {
+            let acres = Double(area.areaAcres)
+            return String(format: "%@ · %.2f ha · %.2f ac",
+                          area.name, acres * 0.404685642, acres)
+        }
+        return strataCount == 0
+            ? "None drawn — whole area"
+            : "\(strataCount) boundar\(strataCount == 1 ? "y" : "ies") drawn"
     }
 
     // MARK: Data
@@ -380,12 +410,30 @@ public struct CruiseSetupSheet: View {
         }
 
         do {
-            let strata = try environment.stratumRepository
+            // Opened from an area, that area is the only stratum in play.
+            let strata = try area.map { [$0] }
+                ?? environment.stratumRepository.listByProject(project.id)
+            // Which plans this run REPLACES. From an area it is that
+            // area's own plans and nobody else's: generating into one
+            // outline must not wipe the plan laid inside another, which is
+            // the whole-project rule and would be a silent loss of work
+            // the cruiser never asked to touch.
+            let allPlanned = try environment.plannedPlotRepository
                 .listByProject(project.id)
-            // Continue numbering after the project's existing REAL plots
-            // so informal plots and the plan never share a number.
-            let startNumber = ((try? environment.plotRepository
-                .listByProject(project.id))?.map(\.plotNumber).max() ?? 0) + 1
+            let replacing = area.map { seed in
+                allPlanned.filter { $0.stratumId == seed.id }
+            } ?? allPlanned
+            let surviving = allPlanned.filter { plan in
+                !replacing.contains { $0.id == plan.id }
+            }
+            // Continue numbering after every number already spoken for —
+            // the project's REAL plots, so informal plots and the plan
+            // never share a number, and the plans that are surviving this
+            // run, so two areas never both hold a "Plot 4".
+            let startNumber = max(
+                (try? environment.plotRepository
+                    .listByProject(project.id))?.map(\.plotNumber).max() ?? 0,
+                surviving.map(\.plotNumber).max() ?? 0) + 1
 
             let planned: [PlannedPlot]
             if strata.isEmpty {
@@ -418,15 +466,15 @@ public struct CruiseSetupSheet: View {
                 // area"), so the fix names the same two controls the
                 // cruiser would go back to. Nothing about the generator
                 // changed — only the sentence when it returns nothing.
-                errorMessage = "No plot centres fell inside the boundary — try a tighter spacing or a bigger area."
+                errorMessage = area == nil
+                    ? "No plot centres fell inside the boundary — try a tighter spacing or a bigger area."
+                    : "No plot centres fell inside this area — try a tighter spacing, or make the area bigger."
                 return
             }
 
-            // Replace previously-generated planned plots (same semantics
-            // as the retired CruiseDesignScreen).
-            let existing = try environment.plannedPlotRepository
-                .listByProject(project.id)
-            for p in existing {
+            // Replace the plans this run is for (whole project, or just
+            // this area's — see `replacing`).
+            for p in replacing {
                 try environment.plannedPlotRepository.delete(id: p.id)
             }
             for p in planned {

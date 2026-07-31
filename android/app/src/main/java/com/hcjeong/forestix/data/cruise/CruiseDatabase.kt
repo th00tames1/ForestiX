@@ -28,6 +28,12 @@ sealed class CruiseDataError(override val message: String) : Exception(message) 
 
     /// update/delete addressed a row that does not exist.
     class NotFound(id: String) : CruiseDataError("Record not found: $id")
+
+    /// A write was refused because the record carries a value the model says
+    /// cannot exist — a canopy cover of 130 %, an aspect of 400°. The message
+    /// is the sentence the cruiser reads, built by the model, so the refusal
+    /// says the same thing wherever it surfaces.
+    class InvalidValue(detail: String) : CruiseDataError(detail)
 }
 
 @Database(
@@ -42,7 +48,7 @@ sealed class CruiseDataError(override val message: String) : Exception(message) 
         VolumeEquationEntity::class,
         HeightDiameterFitEntity::class,
     ],
-    version = 7,
+    version = 8,
     exportSchema = false,
 )
 @TypeConverters(CruiseConverters::class)
@@ -127,6 +133,23 @@ abstract class CruiseDatabase : RoomDatabase() {
         val MIGRATION_6_7 = object : Migration(6, 7) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE ProjectEntity ADD COLUMN dbhCalibrationEpoch INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /// v7 → v8: Plot gains the rest of its site description —
+        /// `groundElevationM` (metres, the app's canonical length) and
+        /// `canopyCoverPct` (0–100 %).
+        ///
+        /// NULLABLE, no backfill and no DEFAULT 0. Nobody stood on these plots
+        /// with an altimeter, so their elevation is unknown, not sea level;
+        /// their canopy is unknown, not a clearcut. A DEFAULT 0 would make
+        /// every plot recorded before today claim two readings it never had,
+        /// and no later screen could tell those apart from a coastal plot in
+        /// the open.
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE PlotEntity ADD COLUMN groundElevationM REAL")
+                db.execSQL("ALTER TABLE PlotEntity ADD COLUMN canopyCoverPct REAL")
             }
         }
     }

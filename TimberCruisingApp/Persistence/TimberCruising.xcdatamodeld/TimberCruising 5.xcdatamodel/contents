@@ -72,6 +72,8 @@
         <attribute name="offsetWalkM" optional="YES" attributeType="Float" usesScalarValueType="NO"/>
         <attribute name="slopeDeg" attributeType="Float" usesScalarValueType="YES"/>
         <attribute name="aspectDeg" attributeType="Float" usesScalarValueType="YES"/>
+        <attribute name="groundElevationM" optional="YES" attributeType="Float" usesScalarValueType="NO"/>
+        <attribute name="canopyCoverPct" optional="YES" attributeType="Float" usesScalarValueType="NO"/>
         <attribute name="plotAreaAcres" attributeType="Float" usesScalarValueType="YES"/>
         <attribute name="startedAt" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="closedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>

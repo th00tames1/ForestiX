@@ -22,7 +22,18 @@ interface PlotRepository {
 
 class RoomPlotRepository(private val dao: PlotDao) : PlotRepository {
 
+    /// Refuse a site description the model says cannot exist, BEFORE it
+    /// reaches the store. The sheet that types these numbers checks the same
+    /// rule and keeps Save off, but the sheet is only today's caller — a
+    /// restore, an importer or a future screen writing an aspect of 400° must
+    /// hit the same wall, because nothing downstream re-reads the range and a
+    /// stored 400° is wrong in every export from then on.
+    private fun validate(p: Plot) {
+        p.siteDescriptionRejection?.let { throw CruiseDataError.InvalidValue(it) }
+    }
+
     override suspend fun create(p: Plot): Plot {
+        validate(p)
         dao.upsert(PlotMapper.apply(p))
         return p
     }
@@ -31,6 +42,7 @@ class RoomPlotRepository(private val dao: PlotDao) : PlotRepository {
         dao.byId(id)?.let(PlotMapper::toStruct)
 
     override suspend fun update(p: Plot): Plot {
+        validate(p)
         dao.byId(p.id) ?: throw CruiseDataError.NotFound(p.id.toString())
         dao.upsert(PlotMapper.apply(p))
         return p

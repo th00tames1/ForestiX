@@ -104,6 +104,29 @@ public enum MeasurementFormatter {
         }
     }
 
+    // MARK: - Ground elevation
+
+    /// A stored elevation (metres) in the unit the cruiser reads — feet in
+    /// imperial, metres in metric.
+    ///
+    /// Elevation is the only length in this app the cruiser TYPES rather than
+    /// measures, so its field needs both directions of the conversion, not
+    /// just a rendered string; `elevationMetres` is the way back. Keeping the
+    /// pair here keeps the ft/m factor in the one file that owns it — the
+    /// alternative was a fourth hand-written 3.28084 out in a screen.
+    ///
+    /// Elevation renders and is typed in WHOLE units. The number comes off a
+    /// map, an altimeter or a phone's barometric fix, none of which are good
+    /// to a decimetre, and a cruiser typing "412" should read back "412".
+    public static func elevationDisplay(m: Double, in system: UnitSystem) -> Double {
+        system == .metric ? m : m * 3.28084
+    }
+
+    /// The inverse of `elevationDisplay` — what a typed elevation stores as.
+    public static func elevationMetres(display: Double, in system: UnitSystem) -> Double {
+        system == .metric ? display : display / 3.28084
+    }
+
     // MARK: - Editable fields
 
     /// The text an EDITABLE numeric field is PREFILLED with, for a value that

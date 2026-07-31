@@ -109,6 +109,7 @@ class AppEnvironment private constructor(
                     CruiseDatabase.MIGRATION_4_5,
                     CruiseDatabase.MIGRATION_5_6,
                     CruiseDatabase.MIGRATION_6_7,
+                    CruiseDatabase.MIGRATION_7_8,
                 )
                 .build()
             val speciesConfigRepository = RoomSpeciesConfigRepository(cruiseDb.speciesConfigDao())

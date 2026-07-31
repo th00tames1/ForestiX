@@ -1,26 +1,33 @@
 // Port of iOS Screens/PlotSummaryCard.swift.
-// In-app plot summary card — closes the "is this plot reasonable?"
-// loop in the field. An instant post-plot summary with
-// standard stand stats. Cruiser doesn't
-// need a desktop tool to know whether to re-cruise.
+// In-app summary card — closes the "is this reasonable?" loop in the field. A
+// cruiser gets an instant post-plot readout with standard stand stats and
+// doesn't need a desktop tool to know whether to re-cruise.
+//
+// THE CARD IS NOW A RENDERER. It used to hold the quick-measure math itself
+// and could therefore only ever describe a quick-measure plot — which is why
+// it appeared for one special case and went blank or, worse, stale under any
+// other filter. Every number it draws now arrives finished in a
+// [FieldLogSummary], built for whatever the field log's filter is currently
+// set to; see FieldLogSummary.kt for the three branches and for why the cruise
+// ones reuse the cruise view models rather than recomputing.
 //
 // Renders:
-//   • Top-line stats — TREES, BASAL/AC, TREES/AC, MEAN DBH, in a 2 × 2
-//     grid so the labels and the values fit a small phone (G3)
+//   • A tappable heading — it opens the detail sheet, which carries the values
+//     this card has no room for AND the settings behind them. A volume with no
+//     log rule or equation named beside it is a number a cruiser cannot check,
+//     and this card has never had space to name them.
+//   • Four top-line stats in a 2 × 2 grid so the labels and the values fit a
+//     small phone (G3)
 //   • Species mix breakdown
 //
 // The Stocking & Density gauge is gone — see the note at the foot of this
 // file for why.
-//
-// All math is pure functions on a list of `QuickMeasureEntry`. No
-// dependencies on plot acreage for now (variable-radius / unscaled
-// presentation); Phase 4 wires this to per-plot acreage when the
-// stand-and-stock report needs absolute-unit numbers.
 
 package com.hcjeong.forestix.ui.screens.plot
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,52 +37,46 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.hcjeong.forestix.common.AreaUnit
-import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.RegionalSpecies
-import com.hcjeong.forestix.common.UnitSystem
-import com.hcjeong.forestix.data.MeasureKind
-import com.hcjeong.forestix.data.QuickMeasureEntry
-import com.hcjeong.forestix.data.QuickMeasurePlot
-import com.hcjeong.forestix.sensors.LogRule
-import com.hcjeong.forestix.sensors.VolumeConversion
+import com.hcjeong.forestix.ui.screens.FieldLogSummary
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixDenseTextScale
 import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import java.util.Locale
-import kotlin.math.max
-import kotlin.math.sqrt
 
 @Composable
 fun PlotSummaryCard(
-    plot: QuickMeasurePlot,
-    entries: List<QuickMeasureEntry>,
-    unitSystem: UnitSystem,
-    logRule: LogRule,
-    areaUnit: AreaUnit = AreaUnit.ACRE,
-    // The card is a dense readout of labelled numbers, so it carries the
-    // same bound on the system font scale as the field-log table below it
-    // (G3). Nothing else on the screen is affected.
+    summary: FieldLogSummary,
+    /// Raised by the heading. The host owns the detail sheet because the card
+    /// sits inside a LazyColumn item.
+    onOpenDetail: () -> Unit,
+    // The card is a dense readout of labelled numbers, so it carries the same
+    // bound on the system font scale as the field-log table below it (G3).
+    // Nothing else on the screen is affected.
 ) = ForestixDenseTextScale {
     val colors = Forestix.colors
     val type = Forestix.type
-    val stats = remember(plot, entries, logRule, unitSystem) {
-        computeStats(plot, entries, logRule, unitSystem)
-    }
-    val densityFactor = areaUnit.perAcreDensityFactor
 
     Column(
         Modifier
@@ -88,14 +89,31 @@ fun PlotSummaryCard(
     ) {
         // MARK: - Header
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            // The heading is the control. A chevron rather than an info glyph:
+            // it opens a view, which is what a chevron means everywhere else in
+            // this app, and the row it sits on is the only thing on the card a
+            // tap could plausibly be aimed at.
+            Row(
+                Modifier.fillMaxWidth().clickable(onClick = onOpenDetail),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    summary.heading,
+                    style = type.sectionHead.copy(letterSpacing = 1.5.sp),
+                    color = colors.textTertiary)
+                Icon(
+                    Icons.Filled.ChevronRight,
+                    contentDescription = FieldLogSummary.DETAIL_TITLE,
+                    tint = colors.textTertiary, modifier = Modifier.size(14.dp))
+            }
             Text(
-                "PLOT SUMMARY",
-                style = type.sectionHead.copy(letterSpacing = 1.5.sp),
-                color = colors.textTertiary)
-            Text(plot.name, style = type.bodyBold, color = colors.textPrimary)
-            val subtitle = plotSubtitle(plot, areaUnit)
-            if (subtitle.isNotEmpty()) {
-                Text(subtitle, style = type.caption, color = colors.textSecondary)
+                summary.title, style = type.bodyBold, color = colors.textPrimary,
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
+            summary.subtitle?.let {
+                Text(
+                    it, style = type.caption, color = colors.textSecondary,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
         }
 
@@ -105,81 +123,69 @@ fun PlotSummaryCard(
         //
         // FIELD REPORT G3 — these four used to sit in ONE row of four cells
         // with no gutters between them. On a 360 dp phone that is ~62 dp a
-        // cell: "BASAL/HA" and "TREES/HA" ran straight into their
-        // neighbours, "MEAN DBH" clipped to "MEAN", and a 26 sp value came
-        // out as "12....". Two rows of two give each cell ~136 dp — room
-        // for the longest label AND for "12.4 cm" at full size — with a
-        // gutter around every divider. Same four labels, same wording on
-        // both platforms; only the flow changed.
-        val perAreaSuffix = areaUnit.abbreviation.uppercase(Locale.US)
+        // cell: "BASAL/HA" and "TREES/HA" ran straight into their neighbours,
+        // "MEAN DBH" clipped to "MEAN", and a 26 sp value came out as "12....".
+        // Two rows of two give each cell ~136 dp — room for the longest label
+        // AND for "12.4 cm" at full size — with a gutter around every divider.
         Column(verticalArrangement = Arrangement.spacedBy(ForestixSpace.sm)) {
-            StatsRow(
-                leftLabel = "TREES",
-                leftValue = stats?.distinctTrees?.toString() ?: "—",
-                rightLabel = "BASAL/$perAreaSuffix",
-                rightValue = stats?.let {
-                    String.format(Locale.US, "%.0f", it.baPerAcre * densityFactor)
-                } ?: "—")
-            HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
-            StatsRow(
-                leftLabel = "TREES/$perAreaSuffix",
-                leftValue = stats?.let {
-                    String.format(Locale.US, "%.0f", it.tpa * densityFactor)
-                } ?: "—",
-                rightLabel = "MEAN DBH",
-                rightValue = stats?.qmd?.let {
-                    MeasurementFormatter.diameter(it, unitSystem)
-                } ?: "—")
+            summary.cells.chunked(2).forEachIndexed { index, pair ->
+                if (index > 0) {
+                    HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
+                }
+                StatsRow(pair)
+            }
         }
 
-        if (stats != null && stats.distinctTrees >= 1) {
+        summary.note?.let {
+            Text(it, style = type.caption, color = colors.textSecondary)
+        }
+
+        if (summary.speciesMix.isNotEmpty()) {
             HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
 
             // MARK: - Species mix
-            if (stats.speciesMix.isNotEmpty()) {
-                Column(verticalArrangement = Arrangement.spacedBy(ForestixSpace.xs)) {
-                    Text(
-                        "SPECIES MIX",
-                        style = type.sectionHead.copy(letterSpacing = 1.5.sp),
-                        color = colors.textTertiary)
-                    stats.speciesMix.forEach { row ->
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs),
+            Column(verticalArrangement = Arrangement.spacedBy(ForestixSpace.xs)) {
+                Text(
+                    "SPECIES MIX",
+                    style = type.sectionHead.copy(letterSpacing = 1.5.sp),
+                    color = colors.textTertiary)
+                summary.speciesMix.forEach { row ->
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs),
+                    ) {
+                        Text(
+                            if (row.code.isEmpty()) "—"
+                            else RegionalSpecies.nameForCode(row.code),
+                            style = type.dataSmall,
+                            color = colors.textSecondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.width(96.dp))
+                        // Bar viz of the share, with a numeric label.
+                        Box(
+                            Modifier
+                                .weight(1f)
+                                .height(8.dp)
+                                .clip(CircleShape)
+                                .background(colors.surfaceRaised),
                         ) {
-                            Text(
-                                if (row.code.isEmpty()) "—"
-                                else RegionalSpecies.nameForCode(row.code),
-                                style = type.dataSmall,
-                                color = colors.textSecondary,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.width(96.dp))
-                            // Bar viz of the share, with a numeric label.
                             Box(
                                 Modifier
-                                    .weight(1f)
-                                    .height(8.dp)
+                                    .fillMaxHeight()
+                                    .fillMaxWidth(row.share.toFloat().coerceIn(0f, 1f))
                                     .clip(CircleShape)
-                                    .background(colors.surfaceRaised),
-                            ) {
-                                Box(
-                                    Modifier
-                                        .fillMaxHeight()
-                                        .fillMaxWidth(row.share.toFloat().coerceIn(0f, 1f))
-                                        .clip(CircleShape)
-                                        .background(colors.primary.copy(alpha = 0.5f)))
-                            }
-                            Text(
-                                String.format(Locale.US, "%.0f%%", row.share * 100),
-                                style = type.dataSmall,
-                                color = colors.textPrimary,
-                                modifier = Modifier.width(44.dp),
-                                maxLines = 1,
-                                softWrap = false,
-                                overflow = TextOverflow.Ellipsis)
+                                    .background(colors.primary.copy(alpha = 0.5f)))
                         }
+                        Text(
+                            String.format(Locale.US, "%.0f%%", row.share * 100),
+                            style = type.dataSmall,
+                            color = colors.textPrimary,
+                            modifier = Modifier.width(44.dp),
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis)
                     }
                 }
             }
@@ -194,25 +200,24 @@ fun PlotSummaryCard(
 /// cutting the label off, and a gutter on either side of the hairline so
 /// "TREES/HA" and "MEAN DBH" can never touch (G3).
 @Composable
-private fun StatsRow(
-    leftLabel: String,
-    leftValue: String,
-    rightLabel: String,
-    rightValue: String,
-) {
+private fun StatsRow(cells: List<FieldLogSummary.Cell>) {
     Row(
         Modifier.fillMaxWidth().heightIn(min = 48.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(ForestixSpace.sm),
     ) {
-        StatsCell(leftLabel, leftValue, Modifier.weight(1f))
-        CellDivider()
-        StatsCell(rightLabel, rightValue, Modifier.weight(1f))
+        cells.forEachIndexed { index, cell ->
+            if (index > 0) CellDivider()
+            StatsCell(cell, Modifier.weight(1f))
+        }
     }
 }
 
 @Composable
-private fun StatsCell(label: String, value: String, modifier: Modifier = Modifier) {
+private fun StatsCell(
+    cell: FieldLogSummary.Cell,
+    modifier: Modifier = Modifier,
+) {
     val colors = Forestix.colors
     val type = Forestix.type
     Column(
@@ -220,24 +225,24 @@ private fun StatsCell(label: String, value: String, modifier: Modifier = Modifie
         verticalArrangement = Arrangement.spacedBy(2.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        // Neither line may wrap: a stat split as "12.4/cm" or "BASAL//HA"
-        // is the defect this card was fixed for.
+        // Neither line may wrap: a stat split as "12.4/cm" or "BASAL//HA" is
+        // the defect this card was fixed for.
         //
         // FIELD REPORT — these values were `dataLarge` (26 sp), which the
         // cruiser read as awkwardly oversized: a value carrying its unit
         // ("31.4 cm") is far wider at that step than the bare counts it was
-        // drawn for. One step down the SAME data scale (`data`, 17 sp) is
-        // the size the log's own row values already use, so the card and the
-        // rows beneath it read as one sheet. iOS matches.
+        // drawn for. One step down the SAME data scale (`data`, 17 sp) is the
+        // size the log's own row values already use, so the card and the rows
+        // beneath it read as one sheet. iOS matches.
         Text(
-            value,
+            cell.value,
             style = type.data,
             color = colors.textPrimary,
             maxLines = 1,
             softWrap = false,
             overflow = TextOverflow.Ellipsis)
         Text(
-            label,
+            cell.label,
             style = type.sectionHead.copy(letterSpacing = 1.2.sp),
             color = colors.textTertiary,
             maxLines = 1,
@@ -255,111 +260,79 @@ private fun CellDivider() {
             .background(Forestix.colors.divider))
 }
 
-// MARK: - Header subtitle
+// MARK: - Detail sheet
 
-private fun plotSubtitle(plot: QuickMeasurePlot, areaUnit: AreaUnit): String {
-    val parts = mutableListOf<String>()
-    if (plot.unitName.isNotEmpty()) parts.add(plot.unitName)
-    plot.acres?.let {
-        parts.add(String.format(Locale.US, "%.2f %s",
-            areaUnit.fromAcres(it.toDouble()), areaUnit.abbreviation))
-    }
-    return parts.joinToString(" · ")
-}
-
-// MARK: - Stats compute
-
-private data class SpeciesShare(val code: String, val share: Double)
-
-private data class Stats(
-    val distinctTrees: Int,
-    val tpa: Double,
-    val baPerAcre: Double,
-    val qmd: Double?,
-    val meanHeightM: Double?,
-    val bfPerAcre: Double?,
-    val speciesMix: List<SpeciesShare>,
-)
-
-private fun computeStats(
-    plot: QuickMeasurePlot,
-    entries: List<QuickMeasureEntry>,
-    logRule: LogRule,
-    unitSystem: UnitSystem,
-): Stats? {
-    if (entries.isEmpty()) return null
-
-    // Group entries by tree number; each tree contributes the
-    // first DBH it has and the first Height it has.
-    data class TreeAgg(val dbhCm: Double?, val hM: Double?, val species: String)
-    val byTree = entries.groupBy { it.treeNumber ?: -1 }
-    val trees = byTree.map { (_, group) ->
-        val dbh = group.firstOrNull { it.kind == MeasureKind.DBH }?.value
-        val h = group.firstOrNull { it.kind == MeasureKind.HEIGHT }?.value
-        val sp = group.firstOrNull { !it.speciesCode.isNullOrEmpty() }?.speciesCode ?: ""
-        TreeAgg(dbhCm = dbh, hM = h, species = sp)
-    }
-
-    val dbhTrees = trees.mapNotNull { it.dbhCm }
-    if (dbhTrees.isEmpty()) return null
-
-    // BA per tree, in the cruiser's unit: ft² (imperial, the classic
-    // 0.005454·dbh_in² rule) or m² (metric, π/4·dbh_m²). Previously always
-    // ft², so a metric cruiser saw ft² under a "BASAL/HA" label — the /ha
-    // denominator was localized but the numerator was not. With no plot-acres
-    // tied to these readings yet, "per acre" means "per tree-bin" — a relative
-    // readout, refined in Phase 4 with real acreage.
-    val metric = unitSystem == UnitSystem.METRIC
-    val baPerTree = dbhTrees.map { cm ->
-        if (metric) {
-            val m = cm / 100.0
-            (Math.PI / 4.0) * m * m
-        } else {
-            val inches = cm / 2.54
-            0.005454 * inches * inches
+/// The full set of computed values, and the settings that produced them.
+///
+/// It exists because the card cannot name a log rule, a volume equation or a
+/// plot size, and a volume read without them is a number the cruiser has no
+/// way to check — the same figure means different things under Doyle and under
+/// Scribner, and under a 0.1 ac plot and a BAF 20 sweep. Everything here is
+/// text the builder already finished; this sheet only lays it out.
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun FieldLogSummaryDetailSheet(
+    summary: FieldLogSummary,
+    onDismiss: () -> Unit,
+) {
+    val colors = Forestix.colors
+    val type = Forestix.type
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = colors.canvas,
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(
+                    start = ForestixSpace.lg, end = ForestixSpace.lg,
+                    bottom = ForestixSpace.xl),
+            verticalArrangement = Arrangement.spacedBy(ForestixSpace.md),
+        ) {
+            Text(
+                FieldLogSummary.DETAIL_TITLE,
+                style = type.title, color = colors.textPrimary)
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(summary.title, style = type.bodyBold, color = colors.textPrimary)
+                summary.subtitle?.let {
+                    Text(it, style = type.caption, color = colors.textSecondary)
+                }
+                summary.note?.let {
+                    Text(it, style = type.caption, color = colors.textSecondary)
+                }
+            }
+            summary.groups.filter { it.rows.isNotEmpty() }.forEach { group ->
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(ForestixRadius.card)
+                        .background(colors.surface)
+                        .padding(ForestixSpace.md),
+                    verticalArrangement = Arrangement.spacedBy(ForestixSpace.sm),
+                ) {
+                    Text(
+                        group.title.uppercase(Locale.US),
+                        style = type.sectionHead.copy(letterSpacing = 1.2.sp),
+                        color = colors.textTertiary)
+                    group.rows.forEach { row ->
+                        // Label above value, not beside it: several of these
+                        // values are sentences, and a two-column row would
+                        // squeeze them into a column three words wide.
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(
+                                row.label, style = type.caption,
+                                color = colors.textSecondary)
+                            Text(
+                                row.value, style = type.body,
+                                color = colors.textPrimary)
+                        }
+                    }
+                }
+            }
         }
     }
-    val acres = max(plot.acres ?: 0.1, 0.05)   // sane fallback
-    val baPerAcre = baPerTree.sum() / acres
-    val tpa = dbhTrees.size.toDouble() / acres
-    // QMD in cm (display layer converts to inches if needed).
-    val qmdSqCm = dbhTrees.sumOf { it * it } / dbhTrees.size.toDouble()
-    val qmd = sqrt(qmdSqCm)
-
-    val heights = trees.mapNotNull { it.hM }
-    val meanH = if (heights.isEmpty()) null else heights.sum() / heights.size.toDouble()
-
-    // Optional BF/ac when DBH+H+rule available.
-    var bfPerAcre: Double? = null
-    var totalBF = 0.0
-    var bfCount = 0
-    for (t in trees) {
-        val dbh = t.dbhCm ?: continue
-        val h = t.hM ?: continue
-        val bf = VolumeConversion.boardFeet(dbhCm = dbh, totalHeightM = h, rule = logRule)
-        if (bf != null) {
-            totalBF += bf
-            bfCount += 1
-        }
-    }
-    if (bfCount > 0) {
-        bfPerAcre = totalBF / acres
-    }
-
-    // Species mix
-    val totalTrees = trees.size
-    val mix = trees.groupBy { it.species }
-        .map { (code, group) -> SpeciesShare(code, group.size.toDouble() / totalTrees) }
-        .sortedByDescending { it.share }
-
-    return Stats(
-        distinctTrees = dbhTrees.size,
-        tpa = tpa,
-        baPerAcre = baPerAcre,
-        qmd = qmd,
-        meanHeightM = meanH,
-        bfPerAcre = bfPerAcre,
-        speciesMix = mix)
 }
 
 // MARK: - Why the stocking gauge is gone
@@ -373,7 +346,7 @@ private fun computeStats(
 //     every continent this app ships to. A maximum SDI is species-specific;
 //     against the wrong species the same stand is understocked or over-dense
 //     purely by which constant is in the source.
-//   • SDI is built from trees-per-acre, and this card divides by
+//   • SDI is built from trees-per-acre, and the quick branch divides by
 //     `max(plot.acres ?: 0.1, 0.05)` — a plot with no acreage entered gets an
 //     invented tenth of an acre. The density the word was computed from is
 //     therefore not a density of anything the cruiser measured.
@@ -386,4 +359,5 @@ private fun computeStats(
 // unchanged — they are counts and diameters, not a judgement.
 //
 // If a per-species maximum-SDI table ever lands, this comes back WITH the
-// species and the maximum on screen beside the word.
+// species and the maximum on screen beside the word. The invented tenth of an
+// acre is now at least DISCLOSED, on the detail sheet's "Plot area" line.

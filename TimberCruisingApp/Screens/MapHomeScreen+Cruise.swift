@@ -262,6 +262,7 @@ extension MapHomeScreen {
             plannedPlots = []
             navTargetPlannedID = nil
             treesByPlot = [:]
+            reloadAreas()
             // No project ⇒ no plot the ring could still belong to.
             reconcileSamplingRing()
             return
@@ -282,6 +283,7 @@ extension MapHomeScreen {
                                                             includeDeleted: false)) ?? []
         }
         treesByPlot = byPlot
+        reloadAreas()
         reconcileSamplingRing()
     }
 
@@ -621,13 +623,23 @@ extension MapHomeScreen {
             // Simplified cruise setup (mock ⑥) — a defaulted bottom
             // sheet, not a pushed screen.
             .sheet(isPresented: $presentingCruiseSetup,
-                   onDismiss: { reloadCruise() }) {
+                   onDismiss: {
+                       cruiseSetupAreaID = nil
+                       reloadCruise()
+                   }) {
                 if let project = currentProject {
                     CruiseSetupSheet(
                         project: project,
                         mapCentre: CoordinateConversions.LatLon(
                             latitude: camera.latitude,
                             longitude: camera.longitude),
+                        // Opened from a selected area: the sheet lays plots
+                        // into THAT area and leaves the others alone. From
+                        // the project strip it is nil, and the sheet keeps
+                        // its whole-project behaviour.
+                        area: cruiseSetupAreaID.flatMap { id in
+                            areas.first { $0.id == id }
+                        },
                         onGenerated: { reloadCruise() })
                     .environmentObject(environment)
                 }
@@ -709,45 +721,40 @@ extension MapHomeScreen {
                     Text("Delete Plot \(plot.plotNumber) and its \(n) tree\(n == 1 ? "" : "s")? This can't be undone.")
                 }
             }
-            // PRESS-AND-HOLD MENU (mission planning, DJI-style): the things a
-            // cruiser plans on a map. Raised by the gesture, and by the (+)'s
-            // "Pick on the map" arming the same gesture — one flow, so there
-            // is never a second way to plan that behaves differently.
+            // The press-and-hold planning menu is no longer a dialog at all
+            // — it is a PIN dropped where the cruiser pressed, with the
+            // choices in a callout over it (`planPin`, in
+            // MapHomeScreen+Area.swift). A bottom action sheet asked "plan
+            // a plot here" while pointing at nothing; anchored to the
+            // press, the question and the ground it is about are one
+            // object. The state (`mapPlanCoordinate`) and the flow through
+            // "Pick on the map" are unchanged.
             //
-            // BOTH MODES, but not the same menu in both. "Draw an area" is
-            // always here: there is one stand boundary and it does not care
-            // which mode drew it. "Plan a plot here" plans a CRUISE plot, and
-            // measure mode's plots — the project-less quick-measure ones —
-            // hold no coordinate to plan (`QuickMeasurePlot` has no lat/lon
-            // at all), so there is nothing for it to write there. It is left
-            // OUT of the measure-mode menu rather than shown and refused: an
-            // item that cannot work is the defect this menu was fixed for.
-            // One item plus Cancel is still a menu, so it is never empty.
-            .confirmationDialog(
-                "Plan here",
-                isPresented: Binding(
-                    get: { mapPlanCoordinate != nil },
-                    set: { if !$0 { mapPlanCoordinate = nil } }),
-                titleVisibility: .visible
+            // AREA DELETED, step two. Never silent and never vague: the
+            // plan laid inside an area goes with it, and the count is in
+            // the sentence, because a cruiser about to lose a morning's
+            // planning has to know how much before they answer.
+            .alert(deleteAreaCandidate.map(areaDeletionTitle) ?? "",
+                   isPresented: Binding(
+                       get: { deleteAreaCandidateID != nil },
+                       set: { if !$0 { deleteAreaCandidateID = nil } }),
+                   presenting: deleteAreaCandidate) { stratum in
+                Button("Delete area", role: .destructive) { deleteArea(stratum) }
+                    .accessibilityIdentifier("mapHome.areaDelete.confirm")
+                Button("Cancel", role: .cancel) { deleteAreaCandidateID = nil }
+            } message: { stratum in
+                Text(areaDeletionMessage(stratum))
+            }
+            // A refusal the cruiser has to see: an area that did not
+            // persist must never look like one that did.
+            .alert("Couldn't save the area",
+                   isPresented: Binding(
+                       get: { areaSaveRefusal != nil && areaDraft == nil },
+                       set: { if !$0 { areaSaveRefusal = nil } })
             ) {
-                if isCruiseMode {
-                    Button("Plan a plot here") {
-                        if let at = mapPlanCoordinate { planPlot(at: at) }
-                        mapPlanCoordinate = nil
-                        awaitingMapPlanPress = false
-                    }
-                }
-                Button("Draw an area") {
-                    // Opens the boundary editor on the pressed coordinate —
-                    // see `boundaryDrawSeed`, which is the only handoff.
-                    boundaryDrawSeed = mapPlanCoordinate
-                    mapPlanCoordinate = nil
-                    awaitingMapPlanPress = false
-                }
-                Button("Cancel", role: .cancel) {
-                    mapPlanCoordinate = nil
-                    awaitingMapPlanPress = false
-                }
+                Button("OK", role: .cancel) { areaSaveRefusal = nil }
+            } message: {
+                Text(areaSaveRefusal ?? "")
             }
             // The (+)'s two doors. Not a third path: "Pick on the map" arms
             // the press-and-hold above and nothing else.

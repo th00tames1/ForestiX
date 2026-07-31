@@ -18,8 +18,21 @@ public final class CoreDataPlotRepository: PlotRepository {
     private let stack: CoreDataStack
     public init(stack: CoreDataStack) { self.stack = stack }
 
+    /// Refuse a site description the model says cannot exist, BEFORE it
+    /// reaches the store. The sheet that types these numbers checks the same
+    /// rule and keeps Save off, but the sheet is only today's caller — a
+    /// restore, an importer or a future screen writing an aspect of 400° must
+    /// hit the same wall, because nothing downstream re-reads the range and a
+    /// stored 400° is wrong in every export from then on.
+    private func validate(_ p: Plot) throws {
+        if let reason = p.siteDescriptionRejection {
+            throw CoreDataError.invalidValue(reason)
+        }
+    }
+
     public func create(_ p: Plot) throws -> Plot {
-        try performWrite(stack: stack) { ctx in
+        try validate(p)
+        return try performWrite(stack: stack) { ctx in
             let e = try insert(PlotEntity.self, entityName: "PlotEntity", in: ctx)
             PlotMapper.apply(p, to: e)
             return p
@@ -36,7 +49,8 @@ public final class CoreDataPlotRepository: PlotRepository {
     }
 
     public func update(_ p: Plot) throws -> Plot {
-        try performWrite(stack: stack) { ctx in
+        try validate(p)
+        return try performWrite(stack: stack) { ctx in
             guard let e = try fetchOne(PlotEntity.self, entityName: "PlotEntity",
                                        keyPath: "id", value: p.id as CVarArg, in: ctx)
             else { throw CoreDataError.notFound(id: p.id.uuidString) }

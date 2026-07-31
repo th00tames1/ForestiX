@@ -181,6 +181,53 @@ public struct BasemapBoundaryOverlay: Equatable {
     public var isEmpty: Bool { shapes.isEmpty }
 }
 
+// MARK: - Planned areas
+
+/// A CRUISE AREA the cruiser drew on this map — the outline a cruise is
+/// laid out inside.
+///
+/// Separate from `BasemapBoundaryOverlay` because the two are different
+/// objects to the cruiser and behave differently on screen: the imported
+/// boundary is a file's geometry and is hit-test transparent, while an
+/// area is the cruiser's own editable plan and TAKES TAPS — selecting it
+/// is how its menu is reached. They also sit in different layers, areas
+/// above the boundary, so an area drawn inside an imported stand reads as
+/// being inside it.
+///
+/// `rings[0]` is the outer ring; the rest are holes. The ring may be open
+/// or closed — the renderer closes it either way, so a stored polygon and
+/// a half-drawn draft can be handed over unchanged.
+public struct BasemapArea: Equatable, Identifiable {
+    /// Echoed back through `onOverlayTap` when this area takes a tap.
+    public let id: String
+    public let rings: [[CoordinateConversions.LatLon]]
+    /// Drawn heavier, with its corners marked — the cruiser has to be able
+    /// to tell which of several outlines their next action applies to.
+    public let selected: Bool
+
+    public init(id: String,
+                rings: [[CoordinateConversions.LatLon]],
+                selected: Bool = false) {
+        self.id = id
+        self.rings = rings
+        self.selected = selected
+    }
+}
+
+/// What a tap on the map landed on, once the markers have had their turn.
+///
+/// Both slots can be filled at once, and that is the whole reason this is
+/// one value rather than two callbacks: an area and a plot overlap all the
+/// time (a plot is laid INSIDE an area), and only the host knows which of
+/// the two is selected right now and therefore which the cruiser meant
+/// this time. The map reports what is under the finger and takes no view.
+public struct BasemapOverlayHit: Equatable {
+    public let plotID: String?
+    public let areaID: String?
+
+    public var isEmpty: Bool { plotID == nil && areaID == nil }
+}
+
 // MARK: - Sampling-plot overlay
 
 /// THE SAMPLING PLOT, drawn on the map at TRUE GEOGRAPHIC SCALE.
@@ -340,6 +387,12 @@ public struct BasemapStyle {
     public var badgeText: Color
     /// Halo ring around the selected pin.
     public var selectionHalo: Color
+    /// Outline and fill of a cruise area (`BasemapArea`). Deliberately not
+    /// the survey boundary's colour: an outline the cruiser drew to cruise
+    /// inside and an outline a surveyor filed are different objects, and
+    /// the map is where that difference is easiest to see.
+    public var areaStroke: Color
+    public var areaFill: Color
 
     public init(canvas: Color = Color(white: 0.93),
                 grid: Color = Color(white: 0.82),
@@ -348,7 +401,9 @@ public struct BasemapStyle {
                 badgeBackground: Color = .white,
                 badgeBorder: Color = Color(white: 0.82),
                 badgeText: Color = Color(white: 0.35),
-                selectionHalo: Color = Color.green.opacity(0.35)) {
+                selectionHalo: Color = Color.green.opacity(0.35),
+                areaStroke: Color = Color.blue,
+                areaFill: Color = Color.blue.opacity(0.12)) {
         self.canvas = canvas
         self.grid = grid
         self.pinStroke = pinStroke
@@ -357,6 +412,8 @@ public struct BasemapStyle {
         self.badgeBorder = badgeBorder
         self.badgeText = badgeText
         self.selectionHalo = selectionHalo
+        self.areaStroke = areaStroke
+        self.areaFill = areaFill
     }
 }
 
@@ -616,6 +673,9 @@ public struct BasemapMapView: View {
     /// Imported survey boundary — drawn ABOVE both tile layers and BELOW
     /// every app-owned marker.
     private let boundary: BasemapBoundaryOverlay?
+    /// Cruise areas — above the imported boundary, below the sampling
+    /// plot, and unlike the boundary they take taps (see `onOverlayTap`).
+    private let areas: [BasemapArea]
     /// The cruiser's sampling plot at true geographic scale — drawn
     /// directly ON TOP of the survey boundary and under the pins.
     private let plotOverlay: BasemapPlotOverlay?
@@ -626,10 +686,11 @@ public struct BasemapMapView: View {
     private let style: BasemapStyle
     private let onMarkerTap: (String) -> Void
     private let onMapTap: () -> Void
-    /// A tap that landed ON the sampling plot's boundary — carries the
-    /// overlay's `id` back. Only ever fires while `plotOverlay` is
-    /// non-nil, and only when no marker took the tap first.
-    private let onPlotTap: (String) -> Void
+    /// A tap that landed on the sampling plot's boundary, on an area, or
+    /// on both at once. Only fires when no marker took the tap first, and
+    /// only when at least one of the two was hit — an empty hit goes to
+    /// `onMapTap` instead.
+    private let onOverlayTap: (BasemapOverlayHit) -> Void
     /// A press-and-hold that ended without the finger travelling — carries
     /// the coordinate under it. The host raises its own menu; the map has
     /// no opinion about what a long press means.
@@ -652,6 +713,7 @@ public struct BasemapMapView: View {
                 baseTileCache: TileCache?,
                 overlayTileCache: TileCache? = nil,
                 boundary: BasemapBoundaryOverlay? = nil,
+                areas: [BasemapArea] = [],
                 plotOverlay: BasemapPlotOverlay? = nil,
                 markers: [BasemapMarker] = [],
                 selectedMarkerID: String? = nil,
@@ -660,13 +722,14 @@ public struct BasemapMapView: View {
                 style: BasemapStyle = BasemapStyle(),
                 onMarkerTap: @escaping (String) -> Void = { _ in },
                 onMapTap: @escaping () -> Void = {},
-                onPlotTap: @escaping (String) -> Void = { _ in },
+                onOverlayTap: @escaping (BasemapOverlayHit) -> Void = { _ in },
                 onMapLongPress: @escaping (CoordinateConversions.LatLon) -> Void = { _ in },
                 onCameraChange: @escaping (BasemapCamera, BasemapRegion) -> Void = { _, _ in }) {
         self._camera = camera
         self.baseTileCache = baseTileCache
         self.overlayTileCache = overlayTileCache
         self.boundary = boundary
+        self.areas = areas
         self.plotOverlay = plotOverlay
         self.markers = markers
         self.selectedMarkerID = selectedMarkerID
@@ -675,7 +738,7 @@ public struct BasemapMapView: View {
         self.style = style
         self.onMarkerTap = onMarkerTap
         self.onMapTap = onMapTap
-        self.onPlotTap = onPlotTap
+        self.onOverlayTap = onOverlayTap
         self.onMapLongPress = onMapLongPress
         self.onCameraChange = onCameraChange
     }
@@ -711,6 +774,14 @@ public struct BasemapMapView: View {
                         Self.drawBoundary(boundary, camera: camera,
                                           size: canvasSize, context: &context)
                     }
+                    // Cruise areas, between the imported boundary and the
+                    // sampling plot: an area drawn inside an imported
+                    // stand reads as being inside it, and a plot laid
+                    // inside an area reads as being inside that.
+                    if !areas.isEmpty {
+                        Self.drawAreas(areas, style: style, camera: camera,
+                                       size: canvasSize, context: &context)
+                    }
                     // THE SAMPLING PLOT — directly on top of the imported
                     // boundary and under everything the app owns, so a
                     // plot inside an imported stand reads as being inside
@@ -745,22 +816,29 @@ public struct BasemapMapView: View {
                 .onTapGesture(count: 2) { point in
                     doubleTapZoom(at: point, size: size)
                 }
-                // A tap that lands on the sampling plot's boundary belongs
-                // to the plot, everything else clears the selection.
-                // Routed HERE rather than through a tappable circle
-                // stacked over the Canvas on purpose: a hit-testing view
-                // that size would also swallow the pan gesture, and
-                // panning across your own plot is the most ordinary thing
-                // a cruiser does. Markers are views ABOVE the Canvas, so
-                // they consume their own taps before this ever runs.
+                // A tap that lands on the sampling plot's boundary or
+                // inside an area belongs to that object; everything else
+                // clears the selection. Routed HERE rather than through
+                // tappable shapes stacked over the Canvas on purpose: a
+                // hit-testing view that size would also swallow the pan
+                // gesture, and panning across your own plot is the most
+                // ordinary thing a cruiser does. Markers are views ABOVE
+                // the Canvas, so they consume their own taps first.
+                //
+                // BOTH hits are reported, never just the topmost. An area
+                // and the plots laid inside it overlap by construction, and
+                // the map cannot know which one the cruiser meant on this
+                // particular tap — the host can, because it knows what is
+                // selected right now.
                 .onTapGesture { point in
-                    if let plotOverlay,
-                       Self.plotHitTest(plotOverlay, at: point,
-                                        camera: camera, size: size) {
-                        onPlotTap(plotOverlay.id)
-                    } else {
-                        onMapTap()
+                    let plotHit = plotOverlay.flatMap {
+                        Self.plotHitTest($0, at: point, camera: camera, size: size)
+                            ? $0.id : nil
                     }
+                    let areaHit = Self.areaHitTest(areas, at: point,
+                                                   camera: camera, size: size)
+                    let hit = BasemapOverlayHit(plotID: plotHit, areaID: areaHit)
+                    if hit.isEmpty { onMapTap() } else { onOverlayTap(hit) }
                 }
                 .gesture(panGesture(size: size)
                     .simultaneously(with: pinchGesture(size: size)))
@@ -1057,6 +1135,119 @@ public struct BasemapMapView: View {
         for pt in points.dropFirst() { path.addLine(to: pt) }
         if closed { path.closeSubpath() }
         return path
+    }
+
+    // MARK: Cruise areas
+
+    /// Corner dot on a selected area. Purely a read-out — the draggable
+    /// handles the editor puts up are views, far bigger, and live in the
+    /// host. This just says "these are the corners you would be moving".
+    private static let areaCornerRadius: CGFloat = 3.5
+
+    private static func drawAreas(_ areas: [BasemapArea],
+                                  style: BasemapStyle,
+                                  camera: BasemapCamera,
+                                  size: CGSize,
+                                  context: inout GraphicsContext) {
+        let pad = 64.0
+        let viewport = CGRect(x: -pad, y: -pad,
+                              width: size.width + pad * 2,
+                              height: size.height + pad * 2)
+        // Selected areas draw last so a smaller area sitting inside a
+        // bigger one is never buried by the one the cruiser did not pick.
+        for area in areas.sorted(by: { !$0.selected && $1.selected }) {
+            var areaPath = Path()
+            var outlinePath = Path()
+            for ring in area.rings {
+                guard let sub = projectedPath(ring, camera: camera, size: size,
+                                              viewport: viewport, closed: true)
+                else { continue }
+                areaPath.addPath(sub)
+                outlinePath.addPath(sub)
+            }
+            guard !outlinePath.isEmpty else { continue }
+            context.fill(areaPath,
+                         with: .color(area.selected
+                                      ? style.areaFill.opacity(0.9)
+                                      : style.areaFill),
+                         style: FillStyle(eoFill: true))
+            let width: Double = area.selected ? 4.0 : 2.5
+            context.stroke(outlinePath, with: .color(.black.opacity(0.38)),
+                           style: StrokeStyle(lineWidth: width + 2.2,
+                                              lineCap: .round, lineJoin: .round))
+            context.stroke(outlinePath, with: .color(style.areaStroke),
+                           style: StrokeStyle(lineWidth: width,
+                                              lineCap: .round, lineJoin: .round))
+            guard area.selected, let outer = area.rings.first else { continue }
+            for corner in outer {
+                let pt = screenPoint(latitude: corner.latitude,
+                                     longitude: corner.longitude,
+                                     camera: camera, viewportSize: size)
+                guard viewport.contains(pt) else { continue }
+                let rect = CGRect(x: pt.x - areaCornerRadius,
+                                  y: pt.y - areaCornerRadius,
+                                  width: areaCornerRadius * 2,
+                                  height: areaCornerRadius * 2)
+                context.fill(Path(ellipseIn: rect), with: .color(style.areaStroke))
+                context.stroke(Path(ellipseIn: rect),
+                               with: .color(style.pinStroke), lineWidth: 1.5)
+            }
+        }
+    }
+
+    /// Which area a tap landed in — the SMALLEST one, by projected
+    /// bounding box, so an area nested inside a larger one is still
+    /// reachable. Whole-interior rather than an outline band: an area is
+    /// selected by tapping the ground it covers, which is how a cruiser
+    /// points at it, and a band would be unfindable on a stand the size
+    /// of the screen.
+    static func areaHitTest(_ areas: [BasemapArea],
+                            at point: CGPoint,
+                            camera: BasemapCamera,
+                            size: CGSize) -> String? {
+        var best: (id: String, extent: Double)?
+        for area in areas {
+            guard let outer = area.rings.first, outer.count >= 3 else { continue }
+            let projected = outer.map {
+                screenPoint(latitude: $0.latitude, longitude: $0.longitude,
+                            camera: camera, viewportSize: size)
+            }
+            guard pointInScreenRing(point, ring: projected) else { continue }
+            // Holes are holes: a tap in one is a tap on whatever is under
+            // the area, exactly as the even-odd fill draws it.
+            let inHole = area.rings.dropFirst().contains { hole in
+                hole.count >= 3 && pointInScreenRing(point, ring: hole.map {
+                    screenPoint(latitude: $0.latitude, longitude: $0.longitude,
+                                camera: camera, viewportSize: size)
+                })
+            }
+            if inHole { continue }
+            let xs = projected.map(\.x), ys = projected.map(\.y)
+            let extent = Double(((xs.max() ?? 0) - (xs.min() ?? 0))
+                * ((ys.max() ?? 0) - (ys.min() ?? 0)))
+            if best == nil || extent < best!.extent {
+                best = (area.id, extent)
+            }
+        }
+        return best?.id
+    }
+
+    /// Crossing-number point-in-polygon in viewport points. Screen space
+    /// rather than lat/lon so the answer matches what was drawn, including
+    /// at the projection's extremes.
+    private static func pointInScreenRing(_ p: CGPoint, ring: [CGPoint]) -> Bool {
+        guard ring.count >= 3 else { return false }
+        var inside = false
+        var j = ring.count - 1
+        for i in 0..<ring.count {
+            let a = ring[i], b = ring[j]
+            if (a.y > p.y) != (b.y > p.y),
+               p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x {
+                inside.toggle()
+            }
+            j = i
+        }
+        return inside
     }
 
     // MARK: Sampling plot

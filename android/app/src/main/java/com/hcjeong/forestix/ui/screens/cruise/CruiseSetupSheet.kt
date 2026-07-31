@@ -76,6 +76,7 @@ import com.hcjeong.forestix.data.cruise.PlannedPlot
 import com.hcjeong.forestix.data.cruise.PlotType
 import com.hcjeong.forestix.data.cruise.Project
 import com.hcjeong.forestix.data.cruise.SamplingScheme
+import com.hcjeong.forestix.data.cruise.Stratum
 import com.hcjeong.forestix.geo.CoordinateConversions
 import com.hcjeong.forestix.geo.SamplingGenerator
 import com.hcjeong.forestix.ui.pressableNoRipple
@@ -110,6 +111,16 @@ fun CruiseSetupSheet(
     onDismiss: () -> Unit,
     /// "Draw boundary" → the KEPT StratumDrawScreen route.
     onDrawBoundary: () -> Unit,
+    /// The AREA this setup is for, when the sheet was opened from an
+    /// outline the cruiser selected on the map ("Cruise this area").
+    ///
+    /// It changes two things, and nothing else. The stratum row stops
+    /// offering to draw a boundary — one is already chosen, and its name
+    /// and size are shown instead — and generation lays plots into THIS
+    /// stratum only, replacing this area's previous plan and leaving every
+    /// other area's alone. Opened from the project strip it is null and the
+    /// sheet behaves exactly as it always has. iOS `CruiseSetupSheet.area`.
+    area: Stratum? = null,
 ) {
     val env = LocalAppEnvironment.current
     val settings by env.settings.state.collectAsStateWithLifecycle()
@@ -203,6 +214,7 @@ fun CruiseSetupSheet(
                     count = count,
                     spacingM = spacing,
                     mapCentre = mapCentre,
+                    area = area,
                 )
                 onDismiss()
             } catch (e: Exception) {
@@ -288,7 +300,7 @@ fun CruiseSetupSheet(
             ) {
                 Column(Modifier.weight(1f)) {
                     Text(
-                        "Stratum boundary",
+                        if (area == null) "Stratum boundary" else "Area",
                         style = type.bodyBold.copy(fontSize = 14.5.sp),
                         color = colors.textPrimary,
                     )
@@ -296,7 +308,14 @@ fun CruiseSetupSheet(
                     // word "Optional" told the cruiser nothing they could act
                     // on; "None drawn" says what the state actually is.
                     Text(
-                        if (strataCount == 0) {
+                        if (area != null) {
+                            String.format(
+                                Locale.US, "%s · %.2f ha · %.2f ac",
+                                area.name,
+                                area.areaAcres.toDouble() * 0.404685642,
+                                area.areaAcres.toDouble(),
+                            )
+                        } else if (strataCount == 0) {
                             "None drawn — whole area"
                         } else {
                             "$strataCount boundar${if (strataCount == 1) "y" else "ies"} drawn"
@@ -306,20 +325,27 @@ fun CruiseSetupSheet(
                         modifier = Modifier.padding(top = 2.dp),
                     )
                 }
-                Box(
-                    Modifier
-                        .pressableNoRipple(onClick = onDrawBoundary)
-                        .heightIn(min = 38.dp)
-                        .clip(ForestixRadius.control)
-                        .border(1.dp, colors.divider, ForestixRadius.control)
-                        .padding(horizontal = 12.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        "Draw boundary",
-                        style = type.caption.copy(fontSize = 12.sp, fontWeight = FontWeight.SemiBold),
-                        color = colors.textPrimary,
-                    )
+                // Opened from an area the row has nothing to offer: the
+                // outline is already chosen, so a "Draw boundary" button
+                // here would offer to change the very thing the cruiser
+                // opened this sheet to cruise.
+                if (area == null) {
+                    Box(
+                        Modifier
+                            .pressableNoRipple(onClick = onDrawBoundary)
+                            .heightIn(min = 38.dp)
+                            .clip(ForestixRadius.control)
+                            .border(1.dp, colors.divider, ForestixRadius.control)
+                            .padding(horizontal = 12.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            "Draw boundary",
+                            style = type.caption.copy(
+                                fontSize = 12.sp, fontWeight = FontWeight.SemiBold),
+                            color = colors.textPrimary,
+                        )
+                    }
                 }
             }
 
@@ -514,12 +540,29 @@ private suspend fun generateCruisePlan(
     count: Int,
     spacingM: Double,
     mapCentre: CoordinateConversions.LatLon,
+    area: Stratum?,
 ) {
-    val strata = env.stratumRepository.listByProject(project.id)
-    // Continue numbering after the project's existing REAL plots so
-    // informal plots and the plan never share a number.
-    val startNumber = (env.plotRepository.listByProject(project.id)
-        .maxOfOrNull { it.plotNumber } ?: 0) + 1
+    // Opened from an area, that area is the only stratum in play.
+    val strata = area?.let { listOf(it) } ?: env.stratumRepository.listByProject(project.id)
+    // Which plans this run REPLACES. From an area it is that area's own
+    // plans and nobody else's: generating into one outline must not wipe
+    // the plan laid inside another, which is the whole-project rule and
+    // would be a silent loss of work the cruiser never asked to touch.
+    val allPlanned = env.plannedPlotRepository.listByProject(project.id)
+    val replacing = if (area != null) {
+        allPlanned.filter { it.stratumId == area.id }
+    } else {
+        allPlanned
+    }
+    val replacingIds = replacing.map { it.id }.toSet()
+    // Continue numbering after every number already spoken for — the
+    // project's REAL plots, so informal plots and the plan never share a
+    // number, and the plans surviving this run, so two areas never both
+    // hold a "Plot 4".
+    val startNumber = maxOf(
+        env.plotRepository.listByProject(project.id).maxOfOrNull { it.plotNumber } ?: 0,
+        allPlanned.filter { it.id !in replacingIds }.maxOfOrNull { it.plotNumber } ?: 0,
+    ) + 1
 
     val planned: List<PlannedPlot> = if (strata.isEmpty()) {
         centredGrid(
@@ -555,13 +598,17 @@ private suspend fun generateCruisePlan(
 
     if (planned.isEmpty()) {
         throw IllegalStateException(
-            "No plot centres fell inside the boundary — try a tighter spacing or a bigger area.")
+            if (area == null) {
+                "No plot centres fell inside the boundary — try a tighter spacing or a bigger area."
+            } else {
+                "No plot centres fell inside this area — try a tighter spacing, or make the area bigger."
+            },
+        )
     }
 
-    // Replace previously-generated planned plots (same semantics as the
-    // retired CruiseDesignScreen).
-    val existing = env.plannedPlotRepository.listByProject(project.id)
-    for (p in existing) env.plannedPlotRepository.delete(p.id)
+    // Replace the plans this run is for (whole project, or just this
+    // area's — see `replacing`).
+    for (p in replacing) env.plannedPlotRepository.delete(p.id)
     for (p in planned) env.plannedPlotRepository.create(p)
 
     // Upsert the single CruiseDesign record for the project.
@@ -626,7 +673,7 @@ internal fun centredGrid(
 
 /// Stored stratum GeoJSON → rings (extracted from the retired
 /// CruiseDesignViewModel — the generator's polygon input format).
-private fun parseRings(geojson: String): List<List<CoordinateConversions.LatLon>> {
+internal fun parseRings(geojson: String): List<List<CoordinateConversions.LatLon>> {
     val obj = try {
         JSONObject(geojson)
     } catch (_: Exception) {

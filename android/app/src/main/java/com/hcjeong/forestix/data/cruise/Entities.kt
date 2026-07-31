@@ -94,6 +94,11 @@ data class PlotEntity(
     val offsetWalkM: Float?,
     val slopeDeg: Float,
     val aspectDeg: Float,
+    /// The site description a cruiser fills in at the plot. Nullable; added in
+    /// schema v8 (CruiseDatabase.MIGRATION_7_8). null is "not recorded", which
+    /// 0 cannot stand for here (0 m is a coastal plot and 0 % is a clearcut).
+    val groundElevationM: Float? = null,
+    val canopyCoverPct: Float? = null,
     val plotAreaAcres: Float,
     val startedAt: Long,
     val closedAt: Long?,

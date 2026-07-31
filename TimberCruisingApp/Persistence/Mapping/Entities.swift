@@ -77,6 +77,12 @@ public final class PlotEntity: NSManagedObject {
     @NSManaged public var offsetWalkM: NSNumber?
     @NSManaged public var slopeDeg: Float
     @NSManaged public var aspectDeg: Float
+    // Model v5 — the site description a cruiser fills in at the plot.
+    // Optional: nil is "not recorded", which 0 cannot stand for here (0 m is
+    // a coastal plot and 0 % is a clearcut). Rows written before these
+    // columns existed read back nil, which is exactly true of them.
+    @NSManaged public var groundElevationM: NSNumber?
+    @NSManaged public var canopyCoverPct: NSNumber?
     @NSManaged public var plotAreaAcres: Float
     @NSManaged public var startedAt: Date
     @NSManaged public var closedAt: Date?

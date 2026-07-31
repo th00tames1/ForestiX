@@ -1,55 +1,54 @@
-// In-app plot summary card — closes the "is this plot reasonable?"
-// loop in the field. Modelled on an instant
-// post-plot summary + standard stand stats. Cruiser doesn't
-// need a desktop tool to know whether to re-cruise.
+// In-app summary card — closes the "is this reasonable?" loop in the field.
+// A cruiser gets an instant post-plot readout with standard stand stats and
+// doesn't need a desktop tool to know whether to re-cruise.
+//
+// THE CARD IS NOW A RENDERER. It used to hold the quick-measure math itself
+// and could therefore only ever describe a quick-measure plot — which is why
+// it appeared for one special case and went blank or, worse, stale under any
+// other filter. Every number it draws now arrives finished in a
+// `FieldLogSummary`, built for whatever the field log's filter is currently
+// set to; see FieldLogSummary.swift for the three branches and for why the
+// cruise ones reuse the cruise view models rather than recomputing.
 //
 // Renders:
-//   • Top-line stats — BA/ac, TPA, QMD, mean DBH, mean H, BF/ac
+//   • A tappable heading — it opens the detail view, which carries the values
+//     this card has no room for AND the settings behind them. A volume with
+//     no log rule or equation named beside it is a number a cruiser cannot
+//     check, and this card has never had space to name them.
+//   • Four top-line stats
 //   • Species mix breakdown
 //
 // The Stocking & Density gauge is gone — see the note at the foot of this
 // file for why.
-//
-// All math is pure functions on a list of `QuickMeasureEntry`. No
-// dependencies on plot acreage for now (variable-radius / unscaled
-// presentation); Phase 4 wires this to per-plot acreage when the
-// stand-and-stock report needs absolute-unit numbers.
 
 import SwiftUI
 import Models
-import Sensors
 
 public struct PlotSummaryCard: View {
 
-    public let plot: QuickMeasurePlot
-    public let entries: [QuickMeasureEntry]
-    public let unitSystem: UnitSystem
-    public let logRule: LogRule
-    /// Areal basis for the density stats (BA, TPA per unit land area). Metric
-    /// countries read per hectare; US per acre. Defaults to `.acre`.
-    public let areaUnit: AreaUnit
+    public let summary: FieldLogSummary
+    /// Raised by the heading. The host owns the detail view because it owns
+    /// the presentation — the card is inside a List row.
+    public let onOpenDetail: () -> Void
 
-    public init(plot: QuickMeasurePlot,
-                entries: [QuickMeasureEntry],
-                unitSystem: UnitSystem,
-                logRule: LogRule,
-                areaUnit: AreaUnit = .acre) {
-        self.plot = plot
-        self.entries = entries
-        self.unitSystem = unitSystem
-        self.logRule = logRule
-        self.areaUnit = areaUnit
+    public init(summary: FieldLogSummary,
+                onOpenDetail: @escaping () -> Void) {
+        self.summary = summary
+        self.onOpenDetail = onOpenDetail
     }
-
-    /// Per-acre → display-basis multiplier (1.0 US, 2.47105 metric hectares).
-    private var densityFactor: Double { areaUnit.perAcreDensityFactor }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: ForestixSpace.md) {
             header
             Divider()
             statsGrid
-            if let stats = stats, stats.distinctTrees >= 1 {
+            if let note = summary.note {
+                Text(note)
+                    .font(ForestixType.caption)
+                    .foregroundStyle(ForestixPalette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if !summary.speciesMix.isEmpty {
                 Divider()
                 speciesMix
             }
@@ -69,29 +68,37 @@ public struct PlotSummaryCard: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("PLOT SUMMARY")
-                .font(ForestixType.sectionHead)
-                .tracking(1.5)
-                .foregroundStyle(ForestixPalette.textTertiary)
-            Text(plot.name)
+            // The heading is the control. A chevron rather than an info glyph:
+            // it opens a view, which is what a chevron means everywhere else
+            // in this app, and the row it sits on is the only thing on the
+            // card a tap could plausibly be aimed at.
+            Button(action: onOpenDetail) {
+                HStack(spacing: 4) {
+                    Text(summary.heading)
+                        .font(ForestixType.sectionHead)
+                        .tracking(1.5)
+                        .foregroundStyle(ForestixPalette.textTertiary)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(ForestixPalette.textTertiary)
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(FieldLogSummary.detailTitle)
+            .accessibilityIdentifier("fieldLog.summaryDetail")
+            Text(summary.title)
                 .font(ForestixType.bodyBold)
                 .foregroundStyle(ForestixPalette.textPrimary)
-            if !plot.unitName.isEmpty || plot.acres != nil {
-                Text(plotSubtitle)
+                .lineLimit(2)
+            if let subtitle = summary.subtitle {
+                Text(subtitle)
                     .font(ForestixType.caption)
                     .foregroundStyle(ForestixPalette.textSecondary)
+                    .lineLimit(2)
             }
         }
-    }
-
-    private var plotSubtitle: String {
-        var parts: [String] = []
-        if !plot.unitName.isEmpty { parts.append(plot.unitName) }
-        if let ac = plot.acres {
-            parts.append(String(format: "%.2f %@",
-                                areaUnit.fromAcres(Double(ac)), areaUnit.abbreviation))
-        }
-        return parts.joined(separator: " · ")
     }
 
     // MARK: - Top stats
@@ -103,41 +110,14 @@ public struct PlotSummaryCard: View {
     /// their equal weights (they always shared the width correctly), and
     /// every label is now single-line, tightened and scaled rather than
     /// wrapped, so it is the SCALE that absorbs a long label instead of a
-    /// second line. That is what let "QMD" and "TPA"/"TPH" go back to
-    /// "MEAN DBH" and "TREES/AC"/"TREES/HA" — both land at ~0.85 of full
-    /// size, above the 0.8 floor below, and match the Android sibling.
+    /// second line.
     private var statsGrid: some View {
-        let s = stats
-        return HStack(spacing: 0) {
-            statsCell("TREES", s?.distinctTrees.description ?? "—")
-            divider
-            // "BA" was the last index initialism on this card, and it
-            // disagreed with both the comment above (which already claimed
-            // "BASAL/HA") and the Android sibling (which already ships
-            // "BASAL/$suffix"). Basal area is genuine forestry vocabulary,
-            // so it is spelled rather than renamed; the per-area suffix
-            // stays in the label because this cell has no unit slot.
-            statsCell(areaUnit.densityLabel("BASAL").uppercased(),
-                      s.map { String(format: "%.0f", $0.baPerAcre * densityFactor) } ?? "—")
-            divider
-            statsCell(treesPerAreaLabel,
-                      s.map { String(format: "%.0f", $0.tpa * densityFactor) } ?? "—")
-            divider
-            statsCell("MEAN DBH",
-                      s.flatMap { $0.qmd.map { qmd in
-                          MeasurementFormatter.diameter(cm: qmd, in: unitSystem)
-                      } } ?? "—")
+        HStack(spacing: 0) {
+            ForEach(Array(summary.cells.enumerated()), id: \.offset) { index, cell in
+                if index > 0 { divider }
+                statsCell(cell)
+            }
         }
-    }
-
-    /// Trees per unit land area, spelled so the label says what the number
-    /// is. "TPA"/"TPH" also swapped a letter with the units setting, so the
-    /// label a cruiser learned on one project was a different label on the
-    /// next. The cell can no longer wrap (single line, tightened, scaled),
-    /// so the width argument the old abbreviation rested on is gone; the
-    /// Android sibling already ships these words.
-    private var treesPerAreaLabel: String {
-        areaUnit == .hectare ? "TREES/HA" : "TREES/AC"
     }
 
     private var divider: some View {
@@ -146,7 +126,7 @@ public struct PlotSummaryCard: View {
             .frame(width: 0.5, height: 32)
     }
 
-    private func statsCell(_ label: String, _ value: String) -> some View {
+    private func statsCell(_ cell: FieldLogSummary.Cell) -> some View {
         VStack(spacing: 2) {
             // FIELD REPORT — these values were `dataLarge` (26 pt), which the
             // cruiser read as awkwardly oversized, and which is also why the
@@ -157,13 +137,13 @@ public struct PlotSummaryCard: View {
             // size the log's own row values already use, so the card and the
             // rows beneath it now read as one sheet. The floor stays — a
             // measurement scaled down is still right, one truncated is wrong.
-            Text(value)
+            Text(cell.value)
                 .font(ForestixType.data)
                 .foregroundStyle(ForestixPalette.textPrimary)
                 .lineLimit(1)
                 .allowsTightening(true)
                 .minimumScaleFactor(0.4)
-            Text(label)
+            Text(cell.label)
                 .font(ForestixType.sectionHead)
                 .tracking(0.8)
                 .foregroundStyle(ForestixPalette.textTertiary)
@@ -178,128 +158,112 @@ public struct PlotSummaryCard: View {
 
     // MARK: - Species mix
 
-    @ViewBuilder
     private var speciesMix: some View {
-        if let s = stats, !s.speciesMix.isEmpty {
-            VStack(alignment: .leading, spacing: ForestixSpace.xs) {
-                Text("SPECIES MIX")
-                    .font(ForestixType.sectionHead)
-                    .tracking(1.5)
-                    .foregroundStyle(ForestixPalette.textTertiary)
-                ForEach(s.speciesMix, id: \.code) { row in
-                    HStack {
-                        Text(row.code.isEmpty ? "—" : RegionalSpecies.name(forCode: row.code))
-                            .font(ForestixType.dataSmall)
-                            .foregroundStyle(ForestixPalette.textSecondary)
-                            .lineLimit(1)
-                            .frame(width: 96, alignment: .leading)
-                        // Bar viz of the share, with a numeric label.
-                        GeometryReader { geo in
-                            ZStack(alignment: .leading) {
-                                Capsule()
-                                    .fill(ForestixPalette.surfaceRaised)
-                                Capsule()
-                                    .fill(ForestixPalette.primary.opacity(0.5))
-                                    .frame(width: geo.size.width * CGFloat(row.share))
-                            }
+        VStack(alignment: .leading, spacing: ForestixSpace.xs) {
+            Text("SPECIES MIX")
+                .font(ForestixType.sectionHead)
+                .tracking(1.5)
+                .foregroundStyle(ForestixPalette.textTertiary)
+            ForEach(summary.speciesMix, id: \.code) { row in
+                HStack {
+                    Text(row.code.isEmpty ? "—" : RegionalSpecies.name(forCode: row.code))
+                        .font(ForestixType.dataSmall)
+                        .foregroundStyle(ForestixPalette.textSecondary)
+                        .lineLimit(1)
+                        .frame(width: 96, alignment: .leading)
+                    // Bar viz of the share, with a numeric label.
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule()
+                                .fill(ForestixPalette.surfaceRaised)
+                            Capsule()
+                                .fill(ForestixPalette.primary.opacity(0.5))
+                                .frame(width: geo.size.width * CGFloat(min(max(row.share, 0), 1)))
                         }
-                        .frame(height: 8)
-                        Text(String(format: "%.0f%%", row.share * 100))
-                            .font(ForestixType.dataSmall)
-                            .foregroundStyle(ForestixPalette.textPrimary)
-                            .frame(width: 44, alignment: .trailing)
                     }
+                    .frame(height: 8)
+                    Text(String(format: "%.0f%%", row.share * 100))
+                        .font(ForestixType.dataSmall)
+                        .foregroundStyle(ForestixPalette.textPrimary)
+                        .frame(width: 44, alignment: .trailing)
                 }
             }
         }
     }
+}
 
-    // MARK: - Stats compute
+// MARK: - Detail view
 
-    private struct Stats {
-        let distinctTrees: Int
-        let tpa: Double
-        let baPerAcre: Double
-        let qmd: Double?
-        let meanHeightM: Double?
-        let bfPerAcre: Double?
-        let speciesMix: [(code: String, share: Double)]
+/// The full set of computed values, and the settings that produced them.
+///
+/// It exists because the card cannot name a log rule, a volume equation or a
+/// plot size, and a volume read without them is a number the cruiser has no
+/// way to check — the same figure means different things under Doyle and
+/// under Scribner, and under a 0.1 ac plot and a BAF 20 sweep. Everything
+/// here is text the builder already finished; this view only lays it out.
+public struct FieldLogSummaryDetail: View {
+
+    public let summary: FieldLogSummary
+    @Environment(\.dismiss) private var dismiss
+
+    public init(summary: FieldLogSummary) {
+        self.summary = summary
     }
 
-    private var stats: Stats? {
-        guard !entries.isEmpty else { return nil }
-
-        // Group entries by tree number; each tree contributes the
-        // first DBH it has and the first Height it has.
-        let byTree = Dictionary(grouping: entries) { $0.treeNumber ?? -1 }
-        let trees = byTree.map { (_, group) -> (dbhCm: Double?, hM: Double?, species: String) in
-            let dbh = group.first(where: { $0.kind == .dbh })?.value
-            let h   = group.first(where: { $0.kind == .height })?.value
-            let sp  = group.first(where: { ($0.speciesCode ?? "").isEmpty == false })?.speciesCode ?? ""
-            return (dbh, h, sp)
-        }
-
-        let dbhTrees = trees.compactMap { $0.dbhCm }
-        guard !dbhTrees.isEmpty else { return nil }
-
-        // BA per tree, in the base unit that matches the displayed density
-        // label: ft² for the US "/ac" card, m² for the metric "/ha" card.
-        // Computing ft² and then labelling it "/ha" over-reads BA by ~10.76×
-        // (the ft²→m² factor), so the numerator has to switch with the label.
-        // With no plot-acres tied to these readings yet, "per acre" means
-        // "per tree-bin" — a relative readout, refined in Phase 4 with real
-        // acreage.
-        let baPerTree: [Double] = dbhTrees.map { cm in
-            if areaUnit == .hectare {
-                let m = cm / 100.0
-                return Double.pi / 4.0 * m * m          // m² basal area
-            } else {
-                let inches = cm / 2.54
-                return 0.005454 * inches * inches        // ft² basal area
+    public var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(summary.title)
+                            .font(ForestixType.bodyBold)
+                            .foregroundStyle(ForestixPalette.textPrimary)
+                        if let subtitle = summary.subtitle {
+                            Text(subtitle)
+                                .font(ForestixType.caption)
+                                .foregroundStyle(ForestixPalette.textSecondary)
+                        }
+                    }
+                    if let note = summary.note {
+                        Text(note)
+                            .font(ForestixType.caption)
+                            .foregroundStyle(ForestixPalette.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                ForEach(summary.groups.filter { !$0.rows.isEmpty }, id: \.title) { group in
+                    Section(group.title) {
+                        ForEach(group.rows, id: \.label) { row in
+                            // Label above value, not beside it: several of
+                            // these values are sentences, and a two-column row
+                            // would squeeze them into a column three words
+                            // wide.
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(row.label)
+                                    .font(ForestixType.caption)
+                                    .foregroundStyle(ForestixPalette.textSecondary)
+                                Text(row.value)
+                                    .font(ForestixType.body)
+                                    .foregroundStyle(ForestixPalette.textPrimary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .padding(.vertical, 2)
+                        }
+                    }
+                }
+            }
+            .navigationTitle(FieldLogSummary.detailTitle)
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                        .accessibilityIdentifier("fieldLog.summaryDetail.done")
+                }
             }
         }
-        let acres = max(plot.acres ?? 0.1, 0.05)   // sane fallback
-        let baPerAcre = baPerTree.reduce(0, +) / acres
-        let tpa = Double(dbhTrees.count) / acres
-        // QMD in cm (display layer converts to inches if needed).
-        let qmdSqCm = dbhTrees.map { $0 * $0 }.reduce(0, +) / Double(dbhTrees.count)
-        let qmd = qmdSqCm.squareRoot()
-
-        let heights = trees.compactMap { $0.hM }
-        let meanH = heights.isEmpty ? nil : heights.reduce(0, +) / Double(heights.count)
-
-        // Optional BF/ac when DBH+H+rule available.
-        var bfPerAcre: Double?
-        var totalBF: Double = 0
-        var bfCount = 0
-        for t in trees {
-            guard let dbh = t.dbhCm, let h = t.hM else { continue }
-            if let bf = VolumeConversion.boardFeet(dbhCm: dbh,
-                                                    totalHeightM: h,
-                                                    rule: logRule) {
-                totalBF += bf
-                bfCount += 1
-            }
-        }
-        if bfCount > 0 {
-            bfPerAcre = totalBF / acres
-        }
-
-        // Species mix
-        let totalTrees = trees.count
-        let bySpecies = Dictionary(grouping: trees, by: { $0.species })
-        let mix: [(String, Double)] = bySpecies
-            .map { (code, group) in (code, Double(group.count) / Double(totalTrees)) }
-            .sorted { $0.1 > $1.1 }
-
-        return Stats(
-            distinctTrees: dbhTrees.count,
-            tpa: tpa,
-            baPerAcre: baPerAcre,
-            qmd: qmd,
-            meanHeightM: meanH,
-            bfPerAcre: bfPerAcre,
-            speciesMix: mix.map { (code: $0.0, share: $0.1) })
+        .accessibilityIdentifier("fieldLog.summaryDetail.sheet")
     }
 }
 
@@ -314,7 +278,7 @@ public struct PlotSummaryCard: View {
 //     every continent this app ships to. A maximum SDI is species-specific;
 //     against the wrong species the same stand is understocked or over-dense
 //     purely by which constant is in the source.
-//   • SDI is built from trees-per-acre, and this card divides by
+//   • SDI is built from trees-per-acre, and the quick branch divides by
 //     `max(plot.acres ?? 0.1, 0.05)` — a plot with no acreage entered gets an
 //     invented tenth of an acre. The density the word was computed from is
 //     therefore not a density of anything the cruiser measured.
@@ -327,4 +291,5 @@ public struct PlotSummaryCard: View {
 // unchanged — they are counts and diameters, not a judgement.
 //
 // If a per-species maximum-SDI table ever lands, this comes back WITH the
-// species and the maximum on screen beside the word.
+// species and the maximum on screen beside the word. The invented tenth of
+// an acre is now at least DISCLOSED, on the detail view's "Plot area" line.

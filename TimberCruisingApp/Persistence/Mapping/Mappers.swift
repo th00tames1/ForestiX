@@ -201,6 +201,8 @@ public enum PlotMapper {
         e.offsetWalkM = s.offsetWalkM.map(NSNumber.init(value:))
         e.slopeDeg = s.slopeDeg
         e.aspectDeg = s.aspectDeg
+        e.groundElevationM = s.groundElevationM.map(NSNumber.init(value:))
+        e.canopyCoverPct = s.canopyCoverPct.map(NSNumber.init(value:))
         e.plotAreaAcres = s.plotAreaAcres
         e.startedAt = s.startedAt
         e.closedAt = s.closedAt
@@ -232,6 +234,8 @@ public enum PlotMapper {
             offsetWalkM: e.offsetWalkM?.floatValue,
             slopeDeg: e.slopeDeg,
             aspectDeg: e.aspectDeg,
+            groundElevationM: e.groundElevationM?.floatValue,
+            canopyCoverPct: e.canopyCoverPct?.floatValue,
             plotAreaAcres: e.plotAreaAcres,
             startedAt: e.startedAt,
             closedAt: e.closedAt,

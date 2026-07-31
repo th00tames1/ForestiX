@@ -1,5 +1,7 @@
-// A stand boundary being DRAWN on the map — the editable shape behind
-// "Draw an area", before it becomes a `SurveyBoundary`.
+// AN OUTLINE BEING DRAGGED ON THE MAP — the editable shape behind both
+// "Draw the boundary" (Map settings) and "Draw an area" (the home map's
+// press-and-hold), before it becomes a `SurveyBoundary` or the ring of a
+// cruise area.
 //
 // THE RULE THIS TYPE EXISTS TO KEEP: a coordinate a cruiser dragged on a
 // satellite tile is not a coordinate anything measured. Nothing in here
@@ -18,9 +20,9 @@
 // against come from the same maths.
 //
 // The vertex list is OPEN (first != last). The closing repeat is added once,
-// at `surveyBoundary(...)`, so the ring the store persists is byte-shaped
-// exactly like the one `SurveyBoundaryGeoJSON.closeRings` produces for an
-// import — every downstream consumer sees one kind of ring.
+// in `closedRing`, so the ring the store persists is byte-shaped exactly
+// like the one `SurveyBoundaryGeoJSON.closeRings` produces for an import —
+// every downstream consumer sees one kind of ring.
 
 import Foundation
 import Common
@@ -65,9 +67,29 @@ public struct BoundaryDraft: Equatable, Sendable {
         self.vertices = vertices
     }
 
+    /// Re-open a ring that was stored closed (first == last). The store is
+    /// the only place a closing repeat exists — see the file header — so
+    /// this is the one door back in, and it exists because an AREA is
+    /// edited again and again after it is first drawn.
+    public init(closedRing: [CoordinateConversions.LatLon]) {
+        var open = closedRing
+        if open.count >= 2, open.first == open.last { open.removeLast() }
+        self.vertices = open
+    }
+
+    /// The ring a store holds: wound counter-clockwise (RFC 7946 §3.1.6)
+    /// and closed. Shared by `surveyBoundary(displayName:createdAt:)` and
+    /// by the area a cruise is laid out inside, so a shape saved by either
+    /// door is byte-shaped the same on disk.
+    public var closedRing: [CoordinateConversions.LatLon] {
+        var ring = signedAreaSquareMeters < 0 ? vertices.reversed().map { $0 } : vertices
+        if let first = ring.first { ring.append(first) }
+        return ring
+    }
+
     // MARK: - The starting rectangle
 
-    /// The shape "Draw an area" drops: an axis-aligned rectangle spanning
+    /// The shape a draw gesture starts from: an axis-aligned rectangle spanning
     /// two opposite corners, wound counter-clockwise so it already obeys
     /// RFC 7946 §3.1.6 before the cruiser touches it.
     ///
@@ -256,19 +278,13 @@ public struct BoundaryDraft: Equatable, Sendable {
     /// verdict and the exports all keep working untouched. Throws the
     /// refusal rather than returning a shape nothing downstream can use.
     ///
-    /// Two normalisations happen here and nowhere else:
-    ///   • WINDING — the outer ring is forced counter-clockwise
-    ///     (RFC 7946 §3.1.6). Nothing in the app depends on it (the
-    ///     point-in-polygon test is a crossing count), but the file leaves
-    ///     the app and lands in someone's GIS, where it does.
-    ///   • CLOSING — the first coordinate is repeated last, matching what
-    ///     `SurveyBoundaryGeoJSON.closeRings` hands back for an imported
-    ///     polygon.
+    /// The winding and closing normalisations are `closedRing`'s, so the
+    /// ring a boundary is persisted with and the ring an area is persisted
+    /// with come out of one place.
     public func surveyBoundary(displayName: String,
                                createdAt: Date = Date()) throws -> SurveyBoundary {
         if let failure = validationFailure { throw failure }
-        var ring = signedAreaSquareMeters < 0 ? vertices.reversed().map { $0 } : vertices
-        if let first = ring.first { ring.append(first) }
+        let ring = closedRing
         let name = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         let feature = BoundaryFeature(kind: .polygon, rings: [ring],
                                       name: name.isEmpty ? nil : name)

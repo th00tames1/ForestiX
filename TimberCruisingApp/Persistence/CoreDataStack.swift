@@ -109,11 +109,24 @@ public final class CoreDataStack {
     }
 }
 
-public enum CoreDataError: Error, CustomStringConvertible {
+/// `LocalizedError`, not just `CustomStringConvertible`: every screen that
+/// reports a storage failure reaches for `error.localizedDescription`, and a
+/// bare Swift `Error` answers that with "The operation couldn't be completed
+/// (error 3.)" — the `description` below never reached a cruiser. It matters
+/// most for `.invalidValue`, whose whole payload is the sentence explaining
+/// what was refused; the Kotlin sibling's `CruiseDataError.message` has always
+/// carried through, so this is also what makes the two platforms say the same
+/// words when a write is refused.
+public enum CoreDataError: Error, LocalizedError, CustomStringConvertible {
     case modelNotFound
     case entityNotFound(String)
     case mappingFailed(String)
     case notFound(id: String)
+    /// A write was refused because the record carries a value the model says
+    /// cannot exist — a canopy cover of 130 %, an aspect of 400°. The payload
+    /// is the sentence the cruiser reads, built by the model, so the refusal
+    /// says the same thing wherever it surfaces.
+    case invalidValue(String)
 
     public var description: String {
         switch self {
@@ -121,6 +134,9 @@ public enum CoreDataError: Error, CustomStringConvertible {
         case .entityNotFound(let e): return "Core Data entity not found: \(e)"
         case .mappingFailed(let m): return "Mapping failed: \(m)"
         case .notFound(let id): return "Record not found: \(id)"
+        case .invalidValue(let m): return m
         }
     }
+
+    public var errorDescription: String? { description }
 }

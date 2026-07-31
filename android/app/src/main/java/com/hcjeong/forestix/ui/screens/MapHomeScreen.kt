@@ -90,6 +90,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -154,7 +155,20 @@ import com.hcjeong.forestix.ui.screens.cruise.CruiseModeSheets
 import com.hcjeong.forestix.ui.screens.cruise.CruiseModeState
 import com.hcjeong.forestix.ui.screens.cruise.CruisePlanPromptBanner
 import com.hcjeong.forestix.ui.screens.cruise.CruisePlotBanner
-import com.hcjeong.forestix.ui.screens.cruise.MapPlanMenu
+import com.hcjeong.forestix.ui.screens.cruise.MapAreaCallout
+import com.hcjeong.forestix.ui.screens.cruise.MapAreaDeleteDialog
+import com.hcjeong.forestix.ui.screens.cruise.MapAreaDraftBar
+import com.hcjeong.forestix.ui.screens.cruise.MapAreaEffects
+import com.hcjeong.forestix.ui.screens.cruise.MapAreaHandles
+import com.hcjeong.forestix.ui.screens.cruise.MapAreaRefusalDialog
+import com.hcjeong.forestix.ui.screens.cruise.MapAreaStackHintBanner
+import com.hcjeong.forestix.ui.screens.cruise.MapAreaState
+import com.hcjeong.forestix.ui.screens.cruise.MapPlanCallout
+import com.hcjeong.forestix.ui.screens.cruise.areaOverlays
+import com.hcjeong.forestix.ui.screens.cruise.beginAreaDraw
+import com.hcjeong.forestix.ui.screens.cruise.deleteArea
+import com.hcjeong.forestix.ui.screens.cruise.handleOverlayTap
+import com.hcjeong.forestix.ui.screens.cruise.saveAreaDraft
 import com.hcjeong.forestix.ui.screens.cruise.PendingPlotFraming
 import com.hcjeong.forestix.ui.screens.cruise.cruiseModeMarkers
 import com.hcjeong.forestix.ui.screens.cruise.cruiseModePlotOverlay
@@ -175,6 +189,7 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -197,6 +212,7 @@ private const val DefaultZoom = 18.0
 fun MapHomeScreen(nav: NavController) {
     val colors = Forestix.colors
     val env = LocalAppEnvironment.current
+    val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val settings by env.settings.state.collectAsStateWithLifecycle()
     val entries by env.history.entries.collectAsStateWithLifecycle()
@@ -346,6 +362,13 @@ fun MapHomeScreen(nav: NavController) {
     // the 180 ms exit crossfade renders from live data)
 
     val cruise = remember { CruiseModeState() }
+    // AREAS — the outlines a cruise is laid out inside, drawn and edited in
+    // place on this map. Its own holder rather than a corner of
+    // CruiseModeState because areas render in BOTH modes: an outline the
+    // cruiser dragged onto their stand does not stop existing because they
+    // flipped to quick measure. See ui/screens/cruise/MapAreas.kt.
+    val areaState = remember { MapAreaState() }
+    MapAreaEffects(areaState, env, settings.cruiseProjectId)
     if (isCruise) {
         CruiseModeEffects(
             state = cruise,
@@ -464,6 +487,9 @@ fun MapHomeScreen(nav: NavController) {
             },
             // Imported survey boundary — over the tiles, under app content.
             boundary = importedBoundary,
+            // The cruiser's own areas, above the imported boundary — an area
+            // drawn inside an imported stand reads as being inside it.
+            areas = areaOverlays(areaState),
             // Mode content separation (v3.1): quick pins are measure-only,
             // cruise pins/rings/guides cruise-only — the map itself (camera,
             // zoom, base + overlay) is shared across the toggle.
@@ -502,10 +528,16 @@ fun MapHomeScreen(nav: NavController) {
                     selectedPinId = if (selectedPinId == id) null else id
                 }
             },
-            // A tap ON the drawn plot's boundary raises its small Edit /
-            // Remove menu (M2) — the plot's own pin still owns the centre.
-            onPlotTap = { id -> cruise.openPlotMenu(id) },
-            onMapTap = { if (isCruise) cruise.selectedId = null else selectedPinId = null },
+            // A tap on the drawn plot's boundary raises its Edit / Remove
+            // menu (M2); a tap inside an area selects the area; a tap on
+            // both toggles between them — see `handleOverlayTap`.
+            onOverlayTap = { plotId, areaId ->
+                handleOverlayTap(areaState, cruise, plotId, areaId)
+            },
+            onMapTap = {
+                areaState.selectedId = null
+                if (isCruise) cruise.selectedId = null else selectedPinId = null
+            },
             // PRESS AND HOLD BELONGS TO THE MAP, not to cruise. It used to be
             // gated to cruise mode on the reasoning that measure mode has no
             // plots and no stand to bound; both halves were wrong. The stand
@@ -530,6 +562,38 @@ fun MapHomeScreen(nav: NavController) {
             },
             cameraState = camera,
         )
+
+        // MARK: - Anchored map furniture
+        //
+        // Everything drawn AT a coordinate rather than in a corner: the
+        // pressed-point pin and its menu, the selected area's menu, and the
+        // draft's drag handles. Children of the map's own Box, so their
+        // offsets and the map's projection are the same space.
+        if (areaState.draft != null) {
+            MapAreaHandles(areaState, camera)
+        } else {
+            MapPlanCallout(
+                cruise = cruise,
+                camera = camera,
+                inCruiseMode = isCruise,
+                onDrawArea = { at -> beginAreaDraw(areaState, camera, at) },
+            )
+            MapAreaCallout(
+                state = areaState,
+                camera = camera,
+                settings = settings,
+                onCruise = { stratum ->
+                    // Laying out a cruise puts the cruiser in cruise mode:
+                    // the pins this is about to generate are cruise content,
+                    // and generating them onto a map that does not draw them
+                    // would look like nothing happened.
+                    areaState.cruiseSetupArea = stratum
+                    areaState.selectedId = null
+                    setMode("cruise")
+                    cruise.cruiseSetupOpen = true
+                },
+            )
+        }
 
         // MARK: - Top chrome (mock `.topchrome`)
 
@@ -598,6 +662,12 @@ fun MapHomeScreen(nav: NavController) {
             )
         }
 
+        // The overlap toggle, said once — see MapAreaState.stackHint.
+        MapAreaStackHintBanner(
+            areaState,
+            topPaddingDp = if (plotOverlay != null) 152.dp else 100.dp,
+        )
+
         // Cruise navigate mode: floating live distance chip riding the
         // dashed guide line's midpoint (mock ⑦ `.distchip`).
         if (isCruise) {
@@ -623,8 +693,19 @@ fun MapHomeScreen(nav: NavController) {
                 .fillMaxWidth()
                 .navigationBarsPadding(),
         ) {
+            // An outline under the thumb owns the bottom of the screen: the
+            // cluster's actions all start something else, and offering them
+            // mid-drag is offering to throw the drag away.
+            if (areaState.draft != null) {
+                MapAreaDraftBar(areaState, settings) {
+                    scope.launch {
+                        saveAreaDraft(areaState, env, settings)
+                        cruise.refresh++
+                    }
+                }
+            }
             AnimatedContent(
-                targetState = isCruise,
+                targetState = isCruise && areaState.draft == null,
                 modifier = Modifier.align(Alignment.BottomCenter),
                 contentAlignment = Alignment.BottomCenter,
                 transitionSpec = {
@@ -633,6 +714,7 @@ fun MapHomeScreen(nav: NavController) {
                 },
                 label = "modeSwap",
             ) { cruiseMode ->
+                if (areaState.draft != null) return@AnimatedContent
                 if (cruiseMode) {
                     CruiseModeBottomContent(
                         state = cruise,
@@ -894,10 +976,19 @@ fun MapHomeScreen(nav: NavController) {
 
     // MARK: - Press-and-hold planning menu — BOTH modes
 
-    // Outside the `if (isCruise)` below on purpose: the gesture that raises
-    // this belongs to the map, so the menu has to exist wherever the gesture
-    // does. It is MapPlanMenu that decides which items a mode can honour.
-    MapPlanMenu(cruise, inCruiseMode = isCruise)
+    // The planning menu is no longer a dialog at all — it is a PIN dropped
+    // where the cruiser pressed, with the choices in a callout over it
+    // (MapPlanCallout, inside the map's Box above). A dialog in the middle
+    // of the screen asked "plan a plot here" while pointing at nothing;
+    // anchored to the press, the question and the ground it is about are one
+    // object. The state and the "Pick on the map" flow are unchanged.
+    MapAreaDeleteDialog(areaState) { stratum ->
+        scope.launch {
+            deleteArea(areaState, env, stratum)
+            cruise.refresh++
+        }
+    }
+    MapAreaRefusalDialog(areaState)
 
     // MARK: - Cruise-mode sheets (project ⑤ / cruise setup ⑥ / record ⑧)
 
@@ -907,6 +998,8 @@ fun MapHomeScreen(nav: NavController) {
             nav = nav,
             camera = camera,
             fallbackCentre = mapCenter,
+            setupArea = areaState.cruiseSetupArea,
+            onSetupClosed = { areaState.cruiseSetupArea = null },
         )
     }
 

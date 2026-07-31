@@ -43,8 +43,8 @@ struct MapSettingsSheet: View {
 
     let visibleRegion: BasemapRegion?
     /// Where the boundary editor's map opens — the camera the cruiser was
-    /// already looking at, so "Draw an area" drops the rectangle on the
-    /// ground on screen and not on a remembered default.
+    /// already looking at, so "Draw the boundary" drops the rectangle on
+    /// the ground on screen and not on a remembered default.
     let mapCamera: BasemapCamera
 
     @StateObject private var downloader = OfflineTileDownloader()
@@ -285,11 +285,17 @@ private extension MapSettingsSheet {
             // Draw the stand instead of bringing a file for it. Sits in
             // the same group as Import because it fills the same slot —
             // there is one boundary, and this is the other way to get one.
+            //
+            // NOT "Draw an area": the map's press-and-hold now uses those
+            // words for a cruise AREA, which is a different object (a
+            // stratum plots are generated inside). Two controls with one
+            // label and two meanings is the defect, so the one that means
+            // "the survey boundary" says so.
             Button {
                 importFailure = nil
                 presentingDrawEditor = true
             } label: {
-                Label("Draw an area", systemImage: "pencil.and.outline")
+                Label("Draw the boundary", systemImage: "pencil.and.outline")
             }
             .accessibilityIdentifier("mapSettings.boundary.draw")
 

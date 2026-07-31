@@ -121,19 +121,31 @@ def main() -> int:
                     help="also mirror the ~730 MB depth-frame corpus")
     ap.add_argument("--dry-run", action="store_true",
                     help="report what would be copied, write nothing")
+    ap.add_argument("--quiet", action="store_true",
+                    help="print only when something was copied — for scheduled runs")
     args = ap.parse_args()
 
+    # A scheduled run on a laptop finds Box unmounted often enough that a
+    # failure there is noise, not news. It still fails loudly when asked
+    # directly.
     root = box_root()
+    if root is None and args.quiet:
+        return 0
     if root is None:
         print("Box is not mounted on this machine. Looked for:", file=sys.stderr)
         for r in BOX_ROOTS:
             print(f"  {r}", file=sys.stderr)
         return 1
     dest = os.path.join(root, DEST_REL)
-    print(f"Box     {root}")
-    print(f"Target  {os.path.join(DEST_REL)}"
-          + ("   (DRY RUN — nothing will be written)" if args.dry_run else ""))
-    print()
+    lines = []
+    def out(msg):
+        lines.append(msg)
+        if not args.quiet:
+            print(msg)
+
+    out(f"Box     {root}")
+    out(f"Target  {os.path.join(DEST_REL)}"
+        + ("   (DRY RUN — nothing will be written)" if args.dry_run else ""))
 
     # The two phone exports live loose in val/; they are the input to
     # build_final.py and are useless separated from it.
@@ -150,22 +162,22 @@ def main() -> int:
                 os.makedirs(target, exist_ok=True)
                 shutil.copy2(s, d)
             n += 1
-        print(f"  data/      {len(data_src)} phone export(s), {n} updated")
+        out(f"  data/      {len(data_src)} phone export(s), {n} updated")
 
     total = 0
     for src, rel, desc, default_on in SETS:
         if rel == "raw" and not args.with_raw:
             if os.path.isdir(src):
-                print(f"  raw/       SKIPPED ({desc}) — pass --with-raw to include")
+                out(f"  raw/       SKIPPED ({desc}) — pass --with-raw to include")
             continue
         if not os.path.isdir(src):
-            print(f"  {rel + '/':10s} missing locally, skipped")
+            out(f"  {rel + '/':10s} missing locally, skipped")
             continue
         t0 = time.time()
         copied, skipped, nbytes = mirror(src, os.path.join(dest, rel), args.dry_run)
         total += nbytes
-        print(f"  {rel + '/':10s} {copied} copied, {skipped} already current"
-              f"   {human(nbytes)}   {time.time() - t0:.1f}s   ({desc})")
+        out(f"  {rel + '/':10s} {copied} copied, {skipped} already current"
+            f"   {human(nbytes)}   {time.time() - t0:.1f}s   ({desc})")
 
     readme = os.path.join(dest, "README.md")
     if not args.dry_run:
@@ -173,9 +185,34 @@ def main() -> int:
         with open(readme, "w") as fh:
             fh.write(README.format(stamp=time.strftime("%Y-%m-%d %H:%M"),
                                    raw="included" if args.with_raw else "NOT included"))
-    print(f"\n  total copied {human(total)}")
-    print("  Box will now sync in the background; large trees take a while.")
+    out(f"\n  total copied {human(total)}")
+    out("  Box will now sync in the background; large trees take a while.")
+    if args.quiet and total > 0:
+        print("\n".join(lines))
     return 0
+
+
+def sync_quietly() -> None:
+    """Mirror to Box as a side effect of producing something worth mirroring.
+
+    Called at the end of the deck builders. A backup that depends on somebody
+    remembering to run it is a backup that stops happening the week it matters,
+    so the copy rides along with the artefact instead. It never raises and never
+    blocks: an unmounted Box, a full disk or a permission error must not fail a
+    build that otherwise succeeded, so failure is reported and swallowed.
+
+    Set FORESTIX_NO_BOX_SYNC=1 to turn it off.
+    """
+    if os.environ.get("FORESTIX_NO_BOX_SYNC"):
+        return
+    if box_root() is None:
+        return
+    try:
+        import subprocess
+        subprocess.run([sys.executable, os.path.abspath(__file__), "--quiet"],
+                       check=False, capture_output=True, timeout=180)
+    except Exception as exc:
+        print(f"  (Box sync skipped: {exc})")
 
 
 README = """# ForestiX validation — analysis package

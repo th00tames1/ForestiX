@@ -123,6 +123,7 @@ import com.hcjeong.forestix.data.cruise.PlotType
 import com.hcjeong.forestix.data.cruise.PositionSource
 import com.hcjeong.forestix.data.cruise.Project
 import com.hcjeong.forestix.data.cruise.SamplingScheme
+import com.hcjeong.forestix.data.cruise.Stratum
 import com.hcjeong.forestix.data.cruise.Tree
 import com.hcjeong.forestix.data.cruise.TreeLabel
 import com.hcjeong.forestix.data.cruise.displayTitle
@@ -271,7 +272,7 @@ internal class CruiseModeState {
     var deletePlanned: (PlannedPlot) -> Unit = {}
 
     /// Where every hand-drawn coordinate enters the app — in BOTH modes; the
-    /// menu it raises is what narrows (see MapPlanMenu).
+    /// menu it raises is what narrows (see MapPlanCallout).
     ///
     /// A press with a MOVE armed relocates that plan and nothing else — the
     /// cruiser asked one question ("where should this be instead?") and gets
@@ -1086,6 +1087,12 @@ internal fun CruiseModeSheets(
     nav: NavController,
     camera: MapCameraState,
     fallbackCentre: CoordinateConversions.LatLon,
+    /// The AREA cruise setup was opened from, when it was opened from an
+    /// outline the cruiser selected on the map. Null from the project strip.
+    setupArea: Stratum? = null,
+    /// Clears that seed once the sheet is gone, so the next opening from the
+    /// project strip is not still pointed at an area.
+    onSetupClosed: () -> Unit = {},
 ) {
     val env = LocalAppEnvironment.current
     val settings by env.settings.state.collectAsStateWithLifecycle()
@@ -1128,12 +1135,17 @@ internal fun CruiseModeSheets(
             mapCentre = camera.center ?: fallbackCentre,
             onDismiss = {
                 state.cruiseSetupOpen = false
+                onSetupClosed()
                 state.refresh++
             },
             onDrawBoundary = {
                 state.cruiseSetupOpen = false
+                onSetupClosed()
                 nav.navigate(ProjectFlowRoutes.stratumDraw(setupProject.id.toString()))
             },
+            // Opened from an area on the map: the sheet lays plots into THAT
+            // area and leaves the others alone. Null from the project strip.
+            area = setupArea,
         )
     }
 
@@ -1288,64 +1300,14 @@ internal fun CruiseModeSheets(
     }
 }
 
-// MARK: - Press-and-hold planning menu (mission planning, DJI-style)
-
-/// The things a cruiser plans on a map. Raised by the gesture, and by the
-/// (+)'s "Pick on the map" arming the same gesture — one flow, so there is
-/// never a second way to plan that behaves differently. Strings byte-identical
-/// to the iOS confirmation dialog.
+/// A one- or two-choice menu over the map: the (+)'s two doors into a plot.
+/// Same card shape as `PlotOverlayMenu` — a titled column of full-width
+/// buttons — which is this app's answer to the iOS confirmation dialog it
+/// mirrors. Every label is an ordinary (non-destructive) action, so none
+/// takes the danger treatment.
 ///
-/// BOTH MODES, but not the same menu in both. "Draw an area" is always here:
-/// there is one stand boundary and it does not care which mode drew it. "Plan
-/// a plot here" plans a CRUISE plot, and measure mode's plots — the
-/// project-less quick-measure ones — hold no coordinate to plan
-/// (`QuickMeasurePlot` has no lat/lon at all), so there is nothing for it to
-/// write there. It is left OUT of the measure-mode menu rather than shown and
-/// refused: an item that cannot work is the defect this menu was fixed for.
-/// One item plus Cancel is still a menu, so it is never empty.
-@Composable
-internal fun MapPlanMenu(state: CruiseModeState, inCruiseMode: Boolean) {
-    val planAt = state.planMenuAt ?: return
-    val dismiss = {
-        state.planMenuAt = null
-        state.awaitingPlanPress = false
-    }
-    // Opens the boundary editor on the pressed coordinate — see
-    // `boundaryDrawSeed`, which is the only handoff.
-    val drawArea = {
-        state.boundaryDrawSeed = planAt
-        dismiss()
-    }
-    if (inCruiseMode) {
-        ChoiceMenuDialog(
-            title = "Plan here",
-            primaryLabel = "Plan a plot here",
-            onPrimary = {
-                dismiss()
-                state.planPlot(planAt)
-            },
-            onDismiss = dismiss,
-            secondaryLabel = "Draw an area",
-            onSecondary = drawArea,
-        )
-    } else {
-        ChoiceMenuDialog(
-            title = "Plan here",
-            primaryLabel = "Draw an area",
-            onPrimary = drawArea,
-            onDismiss = dismiss,
-        )
-    }
-}
-
-/// A one- or two-choice menu over the map: the press-and-hold planning menu
-/// and the (+)'s two doors. Same card shape as `PlotOverlayMenu` — a titled
-/// column of full-width buttons — which is this app's answer to the iOS
-/// confirmation dialog these mirror. Every label is an ordinary
-/// (non-destructive) action, so none takes the danger treatment.
-///
-/// The second choice is optional because the planning menu drops it in
-/// measure mode; Cancel is always drawn, so the card is never a bare title.
+/// The second choice is optional; Cancel is always drawn, so the card is
+/// never a bare title.
 @Composable
 private fun ChoiceMenuDialog(
     title: String,
@@ -1402,7 +1364,7 @@ private fun uuidOrNull(s: String): UUID? = try {
 
 /// Current project: the persisted chip choice when it still exists, else
 /// the newest project, else null ("New project" chip).
-private suspend fun resolveCurrentProject(
+internal suspend fun resolveCurrentProject(
     env: AppEnvironment,
     cruiseProjectId: String?,
 ): Project? {
@@ -1413,7 +1375,7 @@ private suspend fun resolveCurrentProject(
 /// Zero-gate fallback when (+) "Start plot" is tapped with no project yet:
 /// auto-named project, units from app settings, calibration defaults
 /// (identity + 5 mm depth noise — the retired project screen's create).
-private suspend fun createDefaultProject(
+internal suspend fun createDefaultProject(
     env: AppEnvironment,
     settings: SettingsSnapshot,
 ): Project {

@@ -109,6 +109,28 @@ data class MapBoundaryOverlay(
     val closed: Boolean,
 )
 
+/// A CRUISE AREA the cruiser drew on this map — the outline a cruise is
+/// laid out inside.
+///
+/// Separate from `MapBoundaryOverlay` because the two are different objects
+/// to the cruiser and behave differently on screen: the imported boundary
+/// is a file's geometry and is hit-test transparent, while an area is the
+/// cruiser's own editable plan and TAKES TAPS — selecting it is how its
+/// menu is reached. They also sit in different layers, areas above the
+/// boundary, so an area drawn inside an imported stand reads as inside it.
+///
+/// `rings[0]` is the outer ring; the rest are holes. The ring may be open
+/// or closed — the renderer closes it either way, so a stored polygon and a
+/// half-drawn draft can be handed over unchanged. iOS `BasemapArea`.
+data class MapAreaOverlay(
+    /// Echoed back through MapView's onOverlayTap when this area is tapped.
+    val id: String,
+    val rings: List<List<CoordinateConversions.LatLon>>,
+    /// Drawn heavier, with its corners marked — the cruiser has to be able
+    /// to tell which of several outlines their next action applies to.
+    val selected: Boolean = false,
+)
+
 /// An open polyline (v3 cruise mock `.guide`) — the dashed you-dot → plot
 /// navigation guide. Screen-projected like the polygon rings; `dashed`
 /// mirrors the mock's dotted 2/9 round-cap pattern (iOS BasemapGuideLine).
@@ -315,6 +337,9 @@ fun MapView(
     /// Imported survey boundary — over the tile layers, UNDER everything
     /// the app itself draws (the plot, pins, guide, you-dot).
     boundary: List<MapBoundaryOverlay> = emptyList(),
+    /// Cruise areas — above the imported boundary, below the sampling plot,
+    /// and unlike the boundary they take taps (see `onOverlayTap`).
+    areas: List<MapAreaOverlay> = emptyList(),
     polylines: List<MapPolylineOverlay> = emptyList(),
     /// The cruiser's sampling plot at true ground scale — over the survey
     /// boundary and the stratum/guide overlays, UNDER the you-dot and the
@@ -324,11 +349,18 @@ fun MapView(
     attribution: String? = null,
     /// Tap within ~24 dp of a marker's screen point → its `id`.
     onMarkerTap: ((String) -> Unit)? = null,
-    /// Tap within ~24 dp of the PLOT's boundary ring → its `id`. The ring is
-    /// the target, not the whole disc: the plot's own pin owns the centre,
-    /// and a disc-wide target would swallow every tap meant to dismiss a
-    /// peek card.
-    onPlotTap: ((String) -> Unit)? = null,
+    /// A tap that missed every marker and landed on the PLOT's boundary
+    /// ring (within ~24 dp — the ring is the target, not the whole disc:
+    /// the plot's own pin owns the centre, and a disc-wide target would
+    /// swallow every tap meant to dismiss a peek card), inside an AREA, or
+    /// on both at once. Carries `(plotId, areaId)`.
+    ///
+    /// BOTH hits are reported, never just the topmost: an area and the
+    /// plots laid inside it overlap by construction, and the map cannot
+    /// know which one the cruiser meant on this particular tap — the host
+    /// can, because it knows what is selected right now. A tap that hit
+    /// neither goes to `onMapTap` instead. iOS `onOverlayTap`.
+    onOverlayTap: ((String?, String?) -> Unit)? = null,
     /// Tap that hit no marker — the map home uses it to dismiss the peek card.
     onMapTap: (() -> Unit)? = null,
     /// Press-and-hold anywhere on the map, carrying the coordinate under the
@@ -472,7 +504,7 @@ fun MapView(
                         }
                     }
                 }
-                .pointerInput(markers, plot, onMarkerTap, onPlotTap, onMapTap, onMapLongPress) {
+                .pointerInput(markers, plot, areas, onMarkerTap, onOverlayTap, onMapTap, onMapLongPress) {
                     detectTapGestures(
                         // PRESS AND HOLD → the ground under the finger.
                         // Compose's own long-press timing, so it agrees with
@@ -517,7 +549,7 @@ fun MapView(
                         },
                         onTap = { tap ->
                             if (onMarkerTap == null && onMapTap == null &&
-                                onPlotTap == null
+                                onOverlayTap == null
                             ) {
                                 return@detectTapGestures
                             }
@@ -549,7 +581,7 @@ fun MapView(
                             // once the circle is bigger on screen than the
                             // hit band itself; below that it is a blob under
                             // its own pin and every tap would be a plot tap.
-                            val plotHit = if (hit == null && plot != null && onPlotTap != null) {
+                            val plotHit = if (hit == null && plot != null && onOverlayTap != null) {
                                 val pc = Offset(
                                     (lonToXNorm(plot.center.longitude) * worldPx - originX).toFloat(),
                                     (latToYNorm(plot.center.latitude) * worldPx - originY).toFloat(),
@@ -562,9 +594,28 @@ fun MapView(
                             } else {
                                 null
                             }
+                            // Which AREA a tap landed in — the SMALLEST one
+                            // by projected extent, so an area nested inside
+                            // a larger one is still reachable. Whole
+                            // interior rather than an outline band: an area
+                            // is selected by tapping the ground it covers,
+                            // which is how a cruiser points at it, and a
+                            // band would be unfindable on a stand the size
+                            // of the screen.
+                            val areaHit = if (hit == null && onOverlayTap != null) {
+                                areaHitTest(areas, tap) { p ->
+                                    Offset(
+                                        (lonToXNorm(p.longitude) * worldPx - originX).toFloat(),
+                                        (latToYNorm(p.latitude) * worldPx - originY).toFloat(),
+                                    )
+                                }
+                            } else {
+                                null
+                            }
                             when {
                                 hit != null && onMarkerTap != null -> onMarkerTap(hit)
-                                plotHit != null -> onPlotTap?.invoke(plotHit)
+                                plotHit != null || areaHit != null ->
+                                    onOverlayTap?.invoke(plotHit, areaHit)
                                 else -> onMapTap?.invoke()
                             }
                         },
@@ -676,6 +727,48 @@ fun MapView(
                         val pt = screenPoint(ring[0])
                         drawCircle(color = casing, radius = 5.dp.toPx(), center = pt)
                         drawCircle(color = boundaryTint, radius = 3.5.dp.toPx(), center = pt)
+                    }
+                }
+            }
+
+            // MARK: Cruise areas — between the imported boundary and the
+            // sampling plot, so an area drawn inside an imported stand
+            // reads as inside it and a plot laid inside an area reads as
+            // inside that. Selected areas draw LAST so a smaller area
+            // sitting inside a bigger one is never buried by the one the
+            // cruiser did not pick.
+            if (areas.isNotEmpty()) {
+                val areaTint = colors.cruiseAccent
+                val casing = Color.Black.copy(alpha = 0.45f)
+                for (area in areas.sortedBy { it.selected }) {
+                    val rings = area.rings.filter { it.size >= 3 }
+                    if (rings.isEmpty()) continue
+                    val path = Path()
+                    path.fillType = androidx.compose.ui.graphics.PathFillType.EvenOdd
+                    for (ring in rings) {
+                        ring.forEachIndexed { i, p ->
+                            val pt = screenPoint(p)
+                            if (i == 0) path.moveTo(pt.x, pt.y) else path.lineTo(pt.x, pt.y)
+                        }
+                        path.close()
+                    }
+                    val width = if (area.selected) 4.dp.toPx() else 2.5.dp.toPx()
+                    drawPath(
+                        path,
+                        color = areaTint.copy(alpha = if (area.selected) 0.22f else 0.14f),
+                    )
+                    drawPath(path, color = casing, style = Stroke(width = width + 2.5.dp.toPx()))
+                    drawPath(path, color = areaTint, style = Stroke(width = width))
+                    if (!area.selected) continue
+                    for (corner in rings[0]) {
+                        val pt = screenPoint(corner)
+                        drawCircle(color = areaTint, radius = 3.5.dp.toPx(), center = pt)
+                        drawCircle(
+                            color = colors.surface,
+                            radius = 3.5.dp.toPx(),
+                            center = pt,
+                            style = Stroke(width = 1.5.dp.toPx()),
+                        )
                     }
                 }
             }
@@ -1021,6 +1114,56 @@ private fun DrawScope.drawBadgeRow(
 /// ground metres. Paired with the 1/cos(latitude) scale factor below it
 /// gives the plot TRUE GEOGRAPHIC SCALE at any zoom.
 private const val EARTH_CIRCUMFERENCE_M = 40_075_016.686
+
+/// Which area a tap landed in, or null. Smallest projected extent wins so a
+/// nested area is reachable; a tap in a HOLE is a tap on whatever is under
+/// the area, exactly as the even-odd fill draws it. iOS
+/// `BasemapMapView.areaHitTest`.
+private fun areaHitTest(
+    areas: List<MapAreaOverlay>,
+    tap: Offset,
+    project: (CoordinateConversions.LatLon) -> Offset,
+): String? {
+    var bestId: String? = null
+    var bestExtent = Float.MAX_VALUE
+    for (area in areas) {
+        val outer = area.rings.firstOrNull() ?: continue
+        if (outer.size < 3) continue
+        val projected = outer.map(project)
+        if (!pointInScreenRing(tap, projected)) continue
+        val inHole = area.rings.drop(1).any { hole ->
+            hole.size >= 3 && pointInScreenRing(tap, hole.map(project))
+        }
+        if (inHole) continue
+        val xs = projected.map { it.x }
+        val ys = projected.map { it.y }
+        val extent = (xs.max() - xs.min()) * (ys.max() - ys.min())
+        if (extent < bestExtent) {
+            bestExtent = extent
+            bestId = area.id
+        }
+    }
+    return bestId
+}
+
+/// Crossing-number point-in-polygon in viewport pixels. Screen space rather
+/// than lat/lon so the answer matches what was drawn.
+private fun pointInScreenRing(p: Offset, ring: List<Offset>): Boolean {
+    if (ring.size < 3) return false
+    var inside = false
+    var j = ring.size - 1
+    for (i in ring.indices) {
+        val a = ring[i]
+        val b = ring[j]
+        if ((a.y > p.y) != (b.y > p.y) &&
+            p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x
+        ) {
+            inside = !inside
+        }
+        j = i
+    }
+    return inside
+}
 
 /// Screen pixels per ground metre at `latitude` for a world `worldPx` wide.
 private fun pxPerMetreAt(latitude: Double, worldPx: Double): Float {

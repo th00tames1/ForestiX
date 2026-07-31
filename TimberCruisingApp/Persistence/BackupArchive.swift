@@ -349,6 +349,8 @@ public enum BackupArchive {
                 gpsSampleStdXyM: p.gpsSampleStdXyM,
                 offsetWalkM: p.offsetWalkM,
                 slopeDeg: p.slopeDeg, aspectDeg: p.aspectDeg,
+                groundElevationM: p.groundElevationM,
+                canopyCoverPct: p.canopyCoverPct,
                 plotAreaAcres: p.plotAreaAcres,
                 startedAt: p.startedAt,
                 closedAt: p.closedAt, closedBy: p.closedBy,

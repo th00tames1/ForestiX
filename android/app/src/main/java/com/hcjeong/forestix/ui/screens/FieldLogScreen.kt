@@ -44,10 +44,18 @@
 // columns on a phone had every cell scaling to fit. The section heading
 // carries the project and the plot for every row beneath it instead.
 //
-// The screen otherwise keeps its shape: plot summary card for the active
-// plot, grouped summary card (total / today / last + capacity banner), then
-// one grouped surface card of rows with hairline dividers and trailing
-// swipe-to-delete, plus an Export menu (single CSV or 5-file ZIP bundle).
+// The screen otherwise keeps its shape: a summary card for WHATEVER THE
+// FILTER IS SHOWING (see FieldLogSummary.kt — it used to be a card about one
+// special case, the active quick-measure plot, and so was blank or stale under
+// any other filter), grouped summary card (total / today / last + capacity
+// banner), then one grouped surface card of rows with hairline dividers and
+// trailing swipe-to-delete.
+//
+// The filter used to be a three-line bar at the top of the list; it is a
+// toolbar funnel now, and the card below it says what the filter is set to.
+// "New tree" gave up the (+) slot to that funnel and moved into the overflow
+// menu beside it, alongside Export — still in the toolbar, which is the only
+// part of this screen that stays reachable however far the list is scrolled.
 
 package com.hcjeong.forestix.ui.screens
 
@@ -80,13 +88,13 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Description
-import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.FilterList
+import androidx.compose.material.icons.filled.FilterAlt
 import androidx.compose.material.icons.filled.FolderZip
 import androidx.compose.material.icons.filled.Inbox
-import androidx.compose.material.icons.filled.IosShare
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.outlined.FilterAlt
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
@@ -137,7 +145,6 @@ import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.RegionalSpecies
 import com.hcjeong.forestix.common.TruthInput
 import com.hcjeong.forestix.common.UnitSystem
-import com.hcjeong.forestix.common.areaUnit
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
 import com.hcjeong.forestix.data.TruthBackfill
@@ -148,6 +155,7 @@ import com.hcjeong.forestix.ui.PendingTreeNumber
 import com.hcjeong.forestix.ui.Routes
 import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.screens.plot.PlotFlowRoutes
+import com.hcjeong.forestix.ui.screens.plot.FieldLogSummaryDetailSheet
 import com.hcjeong.forestix.ui.screens.plot.PlotSummaryCard
 import com.hcjeong.forestix.ui.shareFile
 import com.hcjeong.forestix.ui.theme.Forestix
@@ -203,6 +211,11 @@ fun FieldLogScreen(
     /// must not put a Room query inside recomposition.
     var cruiseData by remember { mutableStateOf(FieldLogCruiseData()) }
     LaunchedEffect(Unit) { cruiseData = loadFieldLogCruiseData(env) }
+    /// What the summary card is showing — a function of [logScope]. Null under
+    /// Everything, which names no single plot, and null while the scope points
+    /// at a plot the store no longer has. See FieldLogSummary.kt.
+    var summary by remember { mutableStateOf<FieldLogSummary?>(null) }
+    var showingSummaryDetail by remember { mutableStateOf(false) }
 
     // Bulk re-file — see TreeMove.kt for the cruise move and QuickMove.kt
     // for the quick one.
@@ -289,6 +302,18 @@ fun FieldLogScreen(
         cruiseData.failure == null
 
     val rows = remember(entries) { fieldLogRows(entries) }
+
+    // Rebuilt when the filter moves, when the cruise store is re-read, and
+    // when the quick readings themselves change — keyed on the readings and
+    // not on how many there are, because correcting a diameter in the record
+    // sheet changes the QMD without changing the count. Two of the three
+    // branches read the cruise store, so this belongs in an effect rather
+    // than in composition.
+    LaunchedEffect(logScope, entries, plots, cruiseData, settings) {
+        summary = FieldLogSummaryBuilder.make(
+            scope = logScope, quickPlots = plots, quickEntries = entries,
+            settings = settings, env = env, cruiseData = cruiseData)
+    }
 
     // MARK: bulk re-file helpers
     //
@@ -409,21 +434,50 @@ fun FieldLogScreen(
     ForestixScaffold(
         nav, title = "Field log",
         actions = {
-            // Ungated, unlike Export: the case this exists for is a log with
-            // nothing in it yet and a stem the scan would not lock.
-            IconButton(onClick = startNewTree) {
-                Icon(Icons.Filled.Add, contentDescription = "New tree", tint = colors.primary)
+            // THE FILTER LIVES HERE NOW. It used to be a bar at the top of the
+            // list carrying a chevron, the scope's name and a two-line caption
+            // explaining the two worlds — three lines of chrome above every
+            // reading, on the screen a cruiser scrolls most. The funnel is
+            // filled while a filter is applied, so the toolbar says whether the
+            // list is narrowed without spending a row saying it; WHAT it is
+            // narrowed to is on the summary card immediately below, which now
+            // follows the same scope.
+            IconButton(onClick = { choosingScope = true }) {
+                Icon(
+                    if (logScope is FieldLogScope.Everything) Icons.Outlined.FilterAlt
+                    else Icons.Filled.FilterAlt,
+                    contentDescription = FieldLogWords.FILTER_TITLE + ": " +
+                        fieldLogScopeLabel(logScope, plots, cruiseData),
+                    tint = colors.primary)
             }
-            // Export writes the QUICK-MEASURE tables. Under a cruise scope
-            // none of the rows on screen are in them, so the button is not
-            // offered: a file that silently holds different trees than the
-            // list above it is worse than no button. The cruise bundle has
-            // its own "Export all" on the project screen.
-            if (quickWorldVisible && entries.isNotEmpty()) {
-                IconButton(onClick = { menuOpen = true }) {
-                    Icon(Icons.Filled.IosShare, contentDescription = "Export", tint = colors.primary)
-                }
-                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+            IconButton(onClick = { menuOpen = true }) {
+                Icon(Icons.Filled.MoreVert, contentDescription = "More", tint = colors.primary)
+            }
+            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                // Ungated, unlike Export, and FIRST in the menu: the case it
+                // exists for is a log with nothing in it yet and a stem the
+                // scan would not lock. It lost the (+) slot to the funnel, so
+                // it lives one tap deeper — but it is still in the toolbar,
+                // which is the only part of this screen that stays reachable
+                // however far the list is scrolled. The empty state keeps its
+                // full-width button, because an empty log is exactly where a
+                // cruiser looks for one.
+                DropdownMenuItem(
+                    text = { Text("New tree") },
+                    leadingIcon = {
+                        Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                    },
+                    onClick = {
+                        menuOpen = false
+                        startNewTree()
+                    })
+                // Export writes the QUICK-MEASURE tables. Under a cruise scope
+                // none of the rows on screen are in them, so it is not
+                // offered: a file that silently holds different trees than the
+                // list above it is worse than no button. The cruise bundle has
+                // its own "Export all" on the project screen.
+                if (quickWorldVisible && entries.isNotEmpty()) {
+                    HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
                     DropdownMenuItem(
                         text = { Text("CSV (single file)") },
                         leadingIcon = {
@@ -476,59 +530,17 @@ fun FieldLogScreen(
                 Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(ForestixSpace.md),
             ) {
-                // What the log is showing, and the way to change it. The
-                // caption under it answers the cruiser's own question —
-                // "서브플롯? 스탠드?? 플롯??" — where they will be looking.
-                item(key = "scopeBar") {
-                    Column(
-                        Modifier
-                            .fillMaxWidth()
-                            .clip(ForestixRadius.card)
-                            .background(colors.surface)
-                            .clickableNoRipple { choosingScope = true }
-                            .padding(ForestixSpace.md),
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                Icons.Filled.FilterList, contentDescription = null,
-                                tint = colors.primary, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.size(ForestixSpace.xs))
-                            Text(
-                                fieldLogScopeLabel(logScope, plots, cruiseData),
-                                style = Forestix.type.bodyBold, color = colors.textPrimary,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f))
-                            Icon(
-                                Icons.Filled.ExpandMore, contentDescription = null,
-                                tint = colors.textTertiary, modifier = Modifier.size(16.dp))
-                        }
-                        Text(
-                            FieldLogWords.WORLDS_CAPTION,
-                            style = Forestix.type.caption, color = colors.textTertiary,
-                            modifier = Modifier.padding(top = 4.dp))
-                    }
-                    Spacer(Modifier.size(ForestixSpace.md))
-                }
-
-                // Plot summary card — BA / TPA / QMD + species mix for the
-                // active QUICK plot. It reads the
-                // quick-measure store, so it is shown only while the quick
-                // world is on screen: under a cruise scope it would be a
-                // card about a different plot than every row beneath it.
-                val plotID = activePlotID
-                val plot = plotID?.let { id -> plots.firstOrNull { it.id == id } }
-                if (quickWorldVisible && plotID != null && plot != null) {
-                    val plotEntries = entries.filter { (it.plotID ?: defaultPlotID) == plotID }
-                    if (plotEntries.isNotEmpty()) {
-                        item(key = "plotSummary") {
-                            Box(Modifier.padding(bottom = ForestixSpace.md)) {
-                                PlotSummaryCard(
-                                    plot = plot,
-                                    entries = plotEntries,
-                                    unitSystem = settings.unitSystem,
-                                    logRule = settings.logRule,
-                                    areaUnit = settings.unitSystem.areaUnit)
-                            }
+                // The summary card — the computed values for WHATEVER THE
+                // FILTER IS SHOWING, quick plot or cruise plot or cruise
+                // project. Under Everything there is no card: that scope names
+                // no single plot, and the whole-log counts a cruiser wants
+                // there are already on the summary header below.
+                summary?.let { current ->
+                    item(key = "plotSummary") {
+                        Box(Modifier.padding(bottom = ForestixSpace.md)) {
+                            PlotSummaryCard(
+                                summary = current,
+                                onOpenDetail = { showingSummaryDetail = true })
                         }
                     }
                 }
@@ -739,6 +751,13 @@ fun FieldLogScreen(
             }
         }
         } // Column — selection bar above, list below
+    }
+
+    if (showingSummaryDetail) {
+        summary?.let {
+            FieldLogSummaryDetailSheet(
+                summary = it, onDismiss = { showingSummaryDetail = false })
+        }
     }
 
     if (choosingScope) {
@@ -1045,6 +1064,15 @@ private fun FieldLogScopeSheet(
                     ) { onPick(FieldLogScope.QuickPlot(plot.id)) }
                 }
             }
+            // The cruiser's own question was "서브플롯? 스탠드?? 플롯??" — this is
+            // the answer, in one sentence. It used to sit above the list on the
+            // log itself, two lines of caption over every reading; it belongs
+            // here, under the two headers it explains, at the moment the
+            // cruiser is choosing between them.
+            Text(
+                FieldLogWords.WORLDS_CAPTION,
+                style = Forestix.type.caption, color = colors.textTertiary,
+                modifier = Modifier.padding(top = ForestixSpace.md))
             Spacer(Modifier.size(ForestixSpace.lg))
         }
     }
@@ -1190,32 +1218,43 @@ private fun FieldLogCruiseRowView(
                     overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth())
             },
         )
-        Row(
-            Modifier.fillMaxWidth().padding(top = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            if (row.speciesCode.isNotEmpty()) {
-                Text(
-                    RegionalSpecies.nameForCode(row.speciesCode),
-                    style = Forestix.type.fieldLogMeta, color = colors.textSecondary,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-            Text(
-                relativeAgo(row.recordedAt),
-                style = Forestix.type.fieldLogMeta, color = colors.textTertiary, maxLines = 1)
-            Spacer(Modifier.weight(1f))
-            // The same "there is more behind this" affordance a quick row
-            // carries, for the same reason: this row opens. A chevron on a
-            // row that cannot be opened would be worse than none, so it
-            // appears here only because the click above it is real — and
-            // while selecting the click toggles instead, so it goes.
-            if (!selecting) {
-                Icon(
-                    Icons.Filled.ChevronRight, contentDescription = null,
-                    tint = colors.textTertiary, modifier = Modifier.size(14.dp))
-            }
-        }
+        // Species under the tree name, through the same grid — see the quick
+        // row for why this line is a table row rather than a plain Row.
+        FieldLogColumns(
+            Modifier.padding(top = 4.dp),
+            ordinalSlot = {},
+            treeSlot = {
+                if (row.speciesCode.isNotEmpty()) {
+                    Text(
+                        RegionalSpecies.nameForCode(row.speciesCode),
+                        style = Forestix.type.fieldLogMeta, color = colors.textSecondary,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            },
+            dbhSlot = {},
+            heightSlot = {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        relativeAgo(row.recordedAt),
+                        style = Forestix.type.fieldLogMeta, color = colors.textTertiary,
+                        maxLines = 1)
+                    // The same "there is more behind this" affordance a quick
+                    // row carries, for the same reason: this row opens. A
+                    // chevron on a row that cannot be opened would be worse
+                    // than none, so it appears here only because the click
+                    // above it is real — and while selecting the click toggles
+                    // instead, so it goes.
+                    if (!selecting) {
+                        Icon(
+                            Icons.Filled.ChevronRight, contentDescription = null,
+                            tint = colors.textTertiary, modifier = Modifier.size(14.dp))
+                    }
+                }
+            },
+        )
     }
     }
 }
@@ -1663,41 +1702,60 @@ private fun FieldLogRow(
                 }
             },
         )
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
+        // SPECIES SITS UNDER THE TREE NAME. It used to be the first thing on
+        // this line, which starts at the left edge of the row — so it was
+        // drawn under the ORDINAL, in front of the tree it describes, and read
+        // as a column of its own. Running the second line through the same
+        // grid as the first puts it exactly under the name, and costs the row
+        // no height: everything that was on this line still is.
+        FieldLogColumns(
+            ordinalSlot = {},
+            treeSlot = {
+                speciesName(row)?.let {
+                    Text(it, style = type.fieldLogMeta, color = colors.textSecondary,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            },
             // The kind words that used to be the TYPE column, kept here only
             // when a row carries something other than the two named columns
-            // (a crown on the same tree).
-            if (row.treeNumber != null) {
-                row.entries
-                    .filter { it.kind != MeasureKind.DBH && it.kind != MeasureKind.HEIGHT }
-                    .map { kindWord(it.kind) }.distinct().sorted()
-                    .forEach {
-                        Text(it, style = type.fieldLogMeta, color = colors.textTertiary,
-                            maxLines = 1, softWrap = false)
+            // (a crown on the same tree). A loose row's kind is already what
+            // the TREE column reads, so it is not repeated.
+            dbhSlot = {
+                if (row.treeNumber != null) {
+                    val extras = row.entries
+                        .filter { it.kind != MeasureKind.DBH && it.kind != MeasureKind.HEIGHT }
+                        .map { kindWord(it.kind) }.distinct().sorted()
+                    if (extras.isNotEmpty()) {
+                        Text(
+                            extras.joinToString(" "), style = type.fieldLogMeta,
+                            color = colors.textTertiary, textAlign = TextAlign.End,
+                            maxLines = 1, softWrap = false,
+                            overflow = TextOverflow.Ellipsis)
                     }
-            }
-            speciesName(row)?.let {
-                Text(it, style = type.fieldLogMeta, color = colors.textSecondary,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-            // The time the row is SORTED on, so the order the cruiser reads
-            // is the order this column explains.
-            Text(relativeAgo(row.measuredAt), style = type.fieldLogMeta, color = colors.textTertiary,
-                maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
-            Spacer(Modifier.weight(1f))
-            // The standard "there is more behind this" affordance — the row
-            // is tappable and this says so. While selecting the click
-            // toggles instead of opening, so it goes.
-            if (!selecting) {
-                Icon(
-                    Icons.Filled.ChevronRight, contentDescription = null,
-                    tint = colors.textTertiary, modifier = Modifier.size(14.dp))
-            }
-        }
+                }
+            },
+            heightSlot = {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    // The time the row is SORTED on, so the order the cruiser
+                    // reads is the order this column explains.
+                    Text(
+                        relativeAgo(row.measuredAt), style = type.fieldLogMeta,
+                        color = colors.textTertiary, maxLines = 1, softWrap = false,
+                        overflow = TextOverflow.Ellipsis)
+                    // The standard "there is more behind this" affordance —
+                    // the row is tappable and this says so. While selecting
+                    // the click toggles instead of opening, so it goes.
+                    if (!selecting) {
+                        Icon(
+                            Icons.Filled.ChevronRight, contentDescription = null,
+                            tint = colors.textTertiary, modifier = Modifier.size(14.dp))
+                    }
+                }
+            },
+        )
     }
     }
 }

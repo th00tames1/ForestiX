@@ -1,5 +1,8 @@
-// DRAW AN AREA — the stand boundary, sketched on the map instead of
-// imported from a file. The cruiser's reference is a drone mission
+// DRAW THE BOUNDARY — the stand boundary, sketched on the map instead of
+// imported from a file. Map settings is its one door: the map's own
+// press-and-hold draws a cruise AREA in place instead (a stratum, edited
+// on the home map — see MapHomeScreen+Area.swift), and that is a different
+// object with a different job. The cruiser's reference is a drone mission
 // planner: a rectangle appears, you pull its corners onto the stand.
 //
 // The gestures, in the cruiser's own words:
@@ -37,7 +40,7 @@ struct BoundaryDrawScreen: View {
     @Environment(\.dismiss) private var dismiss
 
     /// Where the map opens — the camera the cruiser was already looking at,
-    /// so "Draw an area" drops the rectangle on the ground they were
+    /// so "Draw the boundary" drops the rectangle on the ground they were
     /// looking at and not on some remembered default.
     let initialCamera: BasemapCamera
 
@@ -91,7 +94,7 @@ struct BoundaryDrawScreen: View {
                 mapArea
                 controlPanel
             }
-            .navigationTitle("Draw an area")
+            .navigationTitle("Draw the boundary")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
@@ -294,7 +297,7 @@ struct BoundaryDrawScreen: View {
 
     // MARK: - Editing actions
 
-    /// The rectangle "Draw an area" drops, sized from the VISIBLE viewport
+    /// The rectangle this editor drops, sized from the VISIBLE viewport
     /// (middle half of it) rather than from a fixed ground distance: at
     /// zoom 12 a 200 m box is a dot and at zoom 20 it is off-screen, and a
     /// cruiser who cannot see what they were given assumes nothing

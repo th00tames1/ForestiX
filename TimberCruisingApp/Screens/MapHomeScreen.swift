@@ -309,18 +309,56 @@ public struct MapHomeScreen: View {
     /// The (+)'s two doors into a plot — start on the fix that exists now,
     /// or plan the location on the map first.
     @State var presentingStartPlotChoice = false
-    /// Where the long-press menu's "Draw an area" opens the boundary editor:
-    /// the coordinate the cruiser pressed, so the starting rectangle lands on
-    /// the ground under their finger rather than on the screen centre. nil =
-    /// the editor is closed.
-    ///
-    /// This is the ONLY handoff from the map menu to the editor — one entry
-    /// point, so "Draw an area" cannot end up meaning two different things on
-    /// the two platforms. Map settings has its own door into the same editor
-    /// and opens on the camera instead, because there is no pressed point
-    /// there to open on. Set in BOTH modes: the boundary is a map object, not
-    /// a cruise object.
-    @State var boundaryDrawSeed: CoordinateConversions.LatLon?
+    // MARK: Areas drawn on this map (MapHomeScreen+Area.swift)
+    //
+    // An AREA is a `Stratum` — the polygon a cruise is generated inside.
+    // It is drawn, selected, edited, cruised and deleted here rather than
+    // on an editor screen of its own, so "Draw an area" never costs the
+    // cruiser the view they had framed.
+
+    /// The current project's areas, reloaded alongside the cruise data.
+    @State var areas: [Stratum] = []
+    /// The area whose callout is up. Mutually exclusive with a pin peek
+    /// and with the plot menu — one selection on the map at a time.
+    @State var selectedAreaID: UUID?
+    /// The outline being dragged. Non-nil is the whole "editing an area"
+    /// mode: the bottom cluster becomes the draft bar, the handles appear,
+    /// and press-and-hold planning is suppressed.
+    @State var areaDraft: BoundaryDraft?
+    /// Full-shape undo, pushed BEFORE each gesture rather than after, so a
+    /// dragged corner undoes to where the drag started.
+    @State var areaDraftUndo: [[CoordinateConversions.LatLon]] = []
+    @State var areaDraftName: String = ""
+    /// The stored area the draft is replacing. nil = the draft is new.
+    @State var editingAreaID: UUID?
+    /// The corner a drag is currently moving, so a gesture that outlives a
+    /// delete cannot start writing to a different vertex.
+    @State var areaDraggingCorner: Int?
+    /// Set when a long-press deleted a corner mid-touch — the drag
+    /// recogniser on that same finger is ignored until it lifts.
+    @State var areaSuppressDragUntilRelease = false
+    /// The corner an edge-handle drag CREATED, once it has moved far
+    /// enough to mean it.
+    @State var areaInsertedFromEdge: Int?
+    /// Why an area could not be saved or deleted. Its own channel: neither
+    /// `plotSaveRefusal` nor `planSaveRefusal` names an area, and a refusal
+    /// that names the wrong thing sends the cruiser looking for the wrong
+    /// problem.
+    @State var areaSaveRefusal: String?
+    @State var deleteAreaCandidateID: UUID?
+    /// The overlap toggle, announced the first time a tap hits both an area
+    /// and a plot. `areaStackHintSeen` keeps it to once a session — a hint
+    /// that reappears forever is noise, and one that never appears is a
+    /// gesture nobody finds.
+    @State var areaStackHint: String?
+    @State var areaStackHintSeen = false
+    /// The area Cruise setup was opened FROM, so generation lays plots into
+    /// that area and leaves every other area's plan alone.
+    @State var cruiseSetupAreaID: UUID?
+    /// The map's laid-out size, captured by the projected object layer. The
+    /// handles and callouts need it to turn coordinates into points, and
+    /// the starting rectangle needs it to be sized from what is on screen.
+    @State var mapViewportSize: CGSize = .zero
 
     // One-button Export all, run inline in the project sheet.
     @State var isExportingAll = false
@@ -397,7 +435,7 @@ public struct MapHomeScreen: View {
             selectedPinID = nil
             settings.mapMode = enteringCruise ? "cruise" : "measure"
         }
-        if enteringCruise { reloadCruise() }
+        if enteringCruise { reloadCruise() } else { reloadAreas() }
     }
 
     private enum MeasureChoice {
@@ -410,15 +448,6 @@ public struct MapHomeScreen: View {
     private struct MapDetailTarget: Identifiable {
         let rowID: String
         var id: String { rowID }
-    }
-
-    /// Where the boundary editor was asked to open. A wrapper only because
-    /// `.fullScreenCover(item:)` wants an Identifiable, and the pressed
-    /// coordinate IS the identity — press somewhere else and it is a
-    /// different opening.
-    private struct BoundaryDrawTarget: Identifiable {
-        let coordinate: CoordinateConversions.LatLon
-        var id: String { "\(coordinate.latitude),\(coordinate.longitude)" }
     }
 
     /// Payload for the far-GPS confirmation alert.
@@ -437,6 +466,12 @@ public struct MapHomeScreen: View {
         NavigationStack {
             cruisePresentations(over: ZStack {
                 map
+                // Everything drawn AT a coordinate rather than in a corner
+                // — the pressed-point pin and its menu, the selected area's
+                // menu, and the draft's drag handles. Directly over the map
+                // so it shares the map's coordinate space, and under the
+                // chrome so a callout never covers the GPS chip.
+                mapObjectLayer
                 if isCruiseMode, navGuide != nil { distanceChipOverlay }
                 attributionBadge
                 VStack(spacing: ForestixSpace.xs) {
@@ -454,11 +489,19 @@ public struct MapHomeScreen: View {
                     if isCruiseMode, awaitingMapPlanPress || movingPlannedID != nil {
                         mapPlanPromptBanner
                     }
+                    // The overlap toggle, said once — see `areaStackHint`.
+                    if areaStackHint != nil { areaStackHintBanner }
                     Spacer()
                 }
                 VStack {
                     Spacer()
-                    if isCruiseMode {
+                    // An outline under the thumb owns the bottom of the
+                    // screen: the cluster's actions all start something
+                    // else, and offering them mid-drag is offering to throw
+                    // the drag away.
+                    if areaDraft != nil {
+                        areaDraftBar
+                    } else if isCruiseMode {
                         // Cruise peeks — plot ring, planned ring, tree pin.
                         if let plot = selectedPlot {
                             plotPeekCard(for: plot)
@@ -486,7 +529,7 @@ public struct MapHomeScreen: View {
             .background(ForestixPalette.canvas.ignoresSafeArea())
             .onAppear {
                 startUp()
-                if isCruiseMode { reloadCruise() }
+                if isCruiseMode { reloadCruise() } else { reloadAreas() }
             }
             .onDisappear { location.release() }
             .onChange(of: location.latestSnapshot) { _, snap in
@@ -543,22 +586,6 @@ public struct MapHomeScreen: View {
             }
             .fullScreenCover(item: $photoViewer) { context in
                 MeasurePhotoDetailView(context: context)
-            }
-            // DRAW AN AREA — full screen over the home, because a map you
-            // drag corners on cannot live in a sheet. It opens CENTRED ON
-            // THE PRESS at the zoom already on screen, so the starting
-            // rectangle covers the ground the cruiser was pointing at; the
-            // Map settings door has no press to open on and passes the
-            // camera instead. Available in both modes — the boundary is one
-            // shared record, so the mode that drew it changes nothing.
-            .fullScreenCover(item: Binding(
-                get: { boundaryDrawSeed.map { BoundaryDrawTarget(coordinate: $0) } },
-                set: { if $0 == nil { boundaryDrawSeed = nil } })) { target in
-                BoundaryDrawScreen(initialCamera: BasemapCamera(
-                    latitude: target.coordinate.latitude,
-                    longitude: target.coordinate.longitude,
-                    zoom: camera.zoom))
-                    .environmentObject(settings)
             }
             #endif
             .sheet(isPresented: $presentingChooser,
@@ -729,6 +756,12 @@ public struct MapHomeScreen: View {
             // every pin/ring/you-dot (those are views over the Canvas,
             // so the boundary can never intercept a tap meant for one).
             boundary: surveyBoundary.overlay,
+            // The cruiser's own areas, above the imported boundary — an
+            // area drawn inside an imported stand reads as being inside
+            // it. Drawn in BOTH modes: an outline the cruiser dragged onto
+            // their stand does not stop existing because they flipped to
+            // quick measure.
+            areas: areaOverlays,
             // THE SAMPLING PLOT — one layer above the imported boundary,
             // still under every pin. Cruise-only, like every other piece
             // of cruise content on this shared map.
@@ -761,18 +794,28 @@ public struct MapHomeScreen: View {
                 badgeBackground: ForestixPalette.surface,
                 badgeBorder: ForestixPalette.divider,
                 badgeText: ForestixPalette.textSecondary,
-                selectionHalo: ForestixPalette.primaryMuted),
+                selectionHalo: ForestixPalette.primaryMuted,
+                // Cruise blue for the areas: the same accent cruise mode
+                // uses for the things a cruise is made of, and never the
+                // survey boundary's orange — those two outlines are
+                // different evidence and must not look alike.
+                areaStroke: ForestixPalette.cruiseAccent,
+                areaFill: ForestixPalette.cruiseAccent.opacity(0.14)),
             onMarkerTap: { id in
                 withAnimation(.easeOut(duration: 0.18)) {
                     selectedPinID = (selectedPinID == id) ? nil : id
                 }
             },
             onMapTap: {
-                withAnimation(.easeOut(duration: 0.18)) { selectedPinID = nil }
+                withAnimation(.easeOut(duration: 0.18)) {
+                    selectedPinID = nil
+                    selectedAreaID = nil
+                }
             },
-            // A tap ON the drawn plot's boundary raises its small Edit /
-            // Remove menu (M2) — the plot's own pin still owns the centre.
-            onPlotTap: { id in openPlotMenu(id) },
+            // A tap on the drawn plot's boundary raises its Edit / Remove
+            // menu (M2); a tap inside an area selects the area; a tap on
+            // both toggles between them — see `handleOverlayTap`.
+            onOverlayTap: { hit in handleOverlayTap(hit) },
             // PRESS AND HOLD BELONGS TO THE MAP, not to cruise. It used to
             // be gated to cruise mode on the reasoning that measure mode has
             // no plots and no stand to bound; both halves were wrong. The

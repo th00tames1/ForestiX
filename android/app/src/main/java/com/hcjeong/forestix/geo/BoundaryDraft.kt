@@ -80,6 +80,17 @@ enum class BoundaryDraftError(val message: String) {
 /// mid-way through reading.
 data class BoundaryDraft(val vertices: List<CoordinateConversions.LatLon>) {
 
+    /// The ring a store holds: wound counter-clockwise (RFC 7946 §3.1.6)
+    /// and closed. Shared by `toGeometry` and by the area a cruise is laid
+    /// out inside, so a shape saved by either door is shaped the same on
+    /// disk. iOS `BoundaryDraft.closedRing`.
+    val closedRing: List<CoordinateConversions.LatLon>
+        get() {
+            if (vertices.isEmpty()) return emptyList()
+            val wound = if (signedAreaSquareMeters < 0) vertices.reversed() else vertices
+            return wound + wound.first()
+        }
+
     // MARK: - Editing
 
     /// Move one corner. An out-of-range index is ignored rather than
@@ -214,17 +225,12 @@ data class BoundaryDraft(val vertices: List<CoordinateConversions.LatLon>) {
     /// verdict and the exports all keep working untouched. Throws the
     /// refusal rather than returning a shape nothing downstream can use.
     ///
-    /// Two normalisations happen here and nowhere else:
-    ///   • WINDING — the outer ring is forced counter-clockwise
-    ///     (RFC 7946 §3.1.6). Nothing in the app depends on it (the
-    ///     point-in-polygon test is a crossing count), but the file leaves
-    ///     the app and lands in someone's GIS, where it does.
-    ///   • CLOSING — the first coordinate is repeated last, matching what
-    ///     the GeoJSON parser hands back for an imported polygon.
+    /// The winding and closing normalisations are `closedRing`'s, so the
+    /// ring a boundary is persisted with and the ring an area is persisted
+    /// with come out of one place.
     fun toGeometry(displayName: String): BoundaryGeometry {
         validationFailure?.let { throw BoundaryImportError(it.message) }
-        val wound = if (signedAreaSquareMeters < 0) vertices.reversed() else vertices
-        val ring = wound + wound.first()
+        val ring = closedRing
         val name = displayName.trim()
         return BoundaryGeometry(
             kind = BoundaryGeometryKind.POLYGON,
@@ -257,7 +263,19 @@ data class BoundaryDraft(val vertices: List<CoordinateConversions.LatLon>) {
 
         private const val EPSILON: Double = 1e-6
 
-        /// The shape "Draw an area" drops: an axis-aligned rectangle
+        /// Re-open a ring that was stored closed (first == last). The one
+        /// door back in, and it exists because an AREA is edited again and
+        /// again after it is first drawn.
+        fun fromClosedRing(ring: List<CoordinateConversions.LatLon>): BoundaryDraft {
+            val open = if (ring.size >= 2 && ring.first() == ring.last()) {
+                ring.dropLast(1)
+            } else {
+                ring
+            }
+            return BoundaryDraft(open)
+        }
+
+        /// The shape a draw gesture starts from: an axis-aligned rectangle
         /// spanning two opposite corners, wound counter-clockwise so it
         /// already obeys RFC 7946 §3.1.6 before the cruiser touches it.
         ///

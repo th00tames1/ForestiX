@@ -258,20 +258,30 @@ object FieldLogSummaryBuilder {
         val stats = QuickPlotStats.compute(plot, entries, areaUnit, settings.logRule)
 
         // What the per-area figures were actually divided by, and whether the
-        // cruiser chose it. A plot entered as 0.01 ac is floored to 0.05 and is
-        // therefore as invented as a plot left blank, so it is marked too.
-        val divisor = QuickPlotStats.divisorAcres(plot.acres)
-        val assumed = plot.acres != divisor
+        // app chose it rather than the cruiser or the ring.
+        //
+        // The flag comes from the resolver rather than being re-derived by
+        // comparing the divisor with `plot.acres`: that comparison also read
+        // "assumed" for a plot floored from 0.01 ac, and on Kotlin it read
+        // the OPPOSITE of Swift for a NaN acreage, because boxed
+        // Double.equals calls NaN equal to itself where Swift's != does not.
+        val (divisor, assumed) = QuickPlotStats.resolvedArea(plot, entries)
         val mark = if (assumed) FieldLogSummary.ASSUMED_MARK else ""
         val divisorText = String.format(
             Locale.US, "%.2f %s", areaUnit.fromAcres(divisor), areaUnit.abbreviation)
 
         val subtitleParts = mutableListOf<String>()
         if (plot.unitName.isNotEmpty()) subtitleParts.add(plot.unitName)
-        plot.acres?.let {
+        // THE SUBTITLE SHOWS THE DIVISOR, not the raw stored acreage. Built
+        // from `plot.acres` it contradicted the area row on the same card: a
+        // plot stored as 0.01 ac read "0.01 ac" up here and "0.05 ac
+        // (assumed)" below, and a plot whose area came from the ring showed
+        // nothing up here at all. Mirrors iOS.
+        if (!assumed) {
             subtitleParts.add(
                 String.format(
-                    Locale.US, "%.2f %s", areaUnit.fromAcres(it), areaUnit.abbreviation))
+                    Locale.US, "%.2f %s",
+                    areaUnit.fromAcres(divisor), areaUnit.abbreviation))
         }
 
         // The basal-area numerator follows the areal basis: ft² per acre for a
@@ -681,6 +691,43 @@ data class QuickPlotStats(
         /// copies of this expression exist.
         fun divisorAcres(acres: Double?): Double = max(acres ?: ASSUMED_ACRES, MINIMUM_ACRES)
 
+        const val SQUARE_METRES_PER_ACRE = 4046.8564224
+
+        /// Acres per acre-basis figure, taking the plot's area from the best
+        /// source the app actually has.
+        ///
+        /// IT USUALLY HAS ONE. Placing the sampling ring writes a
+        /// SAMPLING_PLOT entry whose secondaryValue is that ring's area in
+        /// square metres (SamplingPlotScreen), so a cruiser who dropped an
+        /// 8 m ring has measured 201 m² — 0.0497 ac — and the app recorded
+        /// it. Reading only `plot.acres` ignored that, divided by an assumed
+        /// tenth of an acre, and then LABELLED the result as assumed: twice
+        /// the true density, stated with confidence. Being confidently wrong
+        /// is worse than the quiet guess it replaced.
+        ///
+        /// Order: what the cruiser typed, then what the ring measured, then
+        /// the assumption. The newest ring wins — resizing it is the cruiser
+        /// saying the earlier one was wrong.
+        ///
+        /// Mirrors iOS `QuickPlotStats.resolvedArea`.
+        fun resolvedArea(
+            plot: QuickMeasurePlot,
+            entries: List<QuickMeasureEntry>,
+        ): Pair<Double, Boolean> {
+            val typed = plot.acres
+            if (typed != null && typed > 0.0) {
+                return Pair(max(typed, MINIMUM_ACRES), false)
+            }
+            val m2 = entries
+                .filter { it.kind == MeasureKind.SAMPLING_PLOT && (it.secondaryValue ?: 0.0) > 0.0 }
+                .maxByOrNull { it.createdAt }
+                ?.secondaryValue
+            if (m2 != null && m2 > 0.0) {
+                return Pair(max(m2 / SQUARE_METRES_PER_ACRE, MINIMUM_ACRES), false)
+            }
+            return Pair(divisorAcres(null), true)
+        }
+
         fun compute(
             plot: QuickMeasurePlot,
             entries: List<QuickMeasureEntry>,
@@ -716,7 +763,7 @@ data class QuickPlotStats(
                     0.005454 * inches * inches
                 }
             }
-            val acres = divisorAcres(plot.acres)
+            val acres = resolvedArea(plot, entries).first
             val qmdSqCm = dbhTrees.sumOf { it * it } / dbhTrees.size.toDouble()
 
             val heights = trees.mapNotNull { it.hM }

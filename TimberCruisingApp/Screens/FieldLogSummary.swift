@@ -255,8 +255,8 @@ public enum FieldLogSummaryBuilder {
         // What the per-area figures were actually divided by, and whether the
         // cruiser chose it. A plot entered as 0.01 ac is floored to 0.05 and
         // is therefore as invented as a plot left blank, so it is marked too.
-        let divisor = QuickPlotStats.divisorAcres(plot.acres)
-        let assumed = plot.acres != divisor
+        let (divisor, assumed) = QuickPlotStats.resolvedArea(plot: plot,
+                                                             entries: entries)
         let mark = assumed ? FieldLogSummary.assumedMark : ""
         let divisorText = String(format: "%.2f %@",
                                  areaUnit.fromAcres(divisor),
@@ -264,9 +264,15 @@ public enum FieldLogSummaryBuilder {
 
         var subtitleParts: [String] = []
         if !plot.unitName.isEmpty { subtitleParts.append(plot.unitName) }
-        if let ac = plot.acres {
+        // THE SUBTITLE SHOWS THE DIVISOR, not the raw stored acreage. Built
+        // from `plot.acres` it contradicted the area row on the same card: a
+        // plot stored as 0.01 ac read "0.01 ac" up here and "0.05 ac
+        // (assumed)" below, and a plot whose area came from the ring showed
+        // nothing up here at all.
+        if !assumed {
             subtitleParts.append(String(format: "%.2f %@",
-                                        areaUnit.fromAcres(ac), areaUnit.abbreviation))
+                                        areaUnit.fromAcres(divisor),
+                                        areaUnit.abbreviation))
         }
 
         // The basal-area numerator follows the areal basis: ft² per acre for a
@@ -651,6 +657,38 @@ public struct QuickPlotStats: Equatable {
         max(acres ?? assumedAcres, minimumAcres)
     }
 
+    /// Acres per acre-basis figure, taking the plot's area from the best
+    /// source the app actually has.
+    ///
+    /// IT USUALLY HAS ONE. Placing the sampling ring writes a `.samplingPlot`
+    /// entry whose `secondaryValue` is that ring's area in square metres
+    /// (`SamplingPlotScreen`), so a cruiser who dropped an 8 m ring has
+    /// measured 201 m² — 0.0497 ac — and the app recorded it. Reading only
+    /// `plot.acres` ignored that, divided by an assumed tenth of an acre, and
+    /// then LABELLED the result as assumed: twice the true density, stated
+    /// with confidence. Being confidently wrong is worse than the quiet
+    /// guess it replaced.
+    ///
+    /// Order: what the cruiser typed, then what the ring measured, then the
+    /// assumption. The newest ring wins — resizing it is the cruiser saying
+    /// the earlier one was wrong.
+    public static func resolvedArea(plot: QuickMeasurePlot,
+                                    entries: [QuickMeasureEntry])
+    -> (acres: Double, assumed: Bool) {
+        if let typed = plot.acres, typed > 0 {
+            return (max(typed, minimumAcres), false)
+        }
+        let rings = entries
+            .filter { $0.kind == .samplingPlot && ($0.secondaryValue ?? 0) > 0 }
+            .sorted { $0.createdAt < $1.createdAt }
+        if let m2 = rings.last?.secondaryValue, m2 > 0 {
+            return (max(m2 / squareMetresPerAcre, minimumAcres), false)
+        }
+        return (divisorAcres(nil), true)
+    }
+
+    static let squareMetresPerAcre = 4046.8564224
+
     public let treeCount: Int
     public let tpa: Double
     public let baPerAcre: Double
@@ -691,7 +729,7 @@ public struct QuickPlotStats: Equatable {
                 return 0.005454 * inches * inches
             }
         }
-        let acres = divisorAcres(plot.acres)
+        let acres = resolvedArea(plot: plot, entries: entries).acres
         let qmdSqCm = dbhTrees.map { $0 * $0 }.reduce(0, +) / Double(dbhTrees.count)
 
         let heights = trees.compactMap { $0.hM }

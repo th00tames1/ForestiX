@@ -445,10 +445,27 @@ def grouped_legend(ax, loc="upper left", fontsize=8.5, **kw):
     entries themselves; keeping like with like means the key reads as two short
     lists rather than one shuffled one.
     """
+    from matplotlib.collections import Collection
+    from matplotlib.lines import Line2D
+
     handles, labels = ax.get_legend_handles_labels()
+
     def is_line(h):
-        ls = getattr(h, "get_linestyle", lambda: "None")()
-        return ls not in ("None", "none", "")
+        """Does this key draw a stroke the eye reads as a line?
+
+        TESTED ON THE TYPE FIRST, because `get_linestyle` does not answer the
+        same question for both: a scatter is a `PathCollection` and returns a
+        LIST of dash specs, which never equals the string "None", so every
+        marker was classified as a line and the sort became a no-op — the key
+        came out line, marker, marker, line. Only a `Line2D` can be either,
+        and there the string test is the right one.
+        """
+        if isinstance(h, Collection):
+            return False
+        if isinstance(h, Line2D):
+            return (h.get_linestyle() not in ("None", "none", "")
+                    and h.get_linewidth() > 0)
+        return False
     order = ([i for i, h in enumerate(handles) if not is_line(h)]
              + [i for i, h in enumerate(handles) if is_line(h)])
     return ax.legend([handles[i] for i in order], [labels[i] for i in order],

@@ -279,11 +279,16 @@ public struct MapHomeScreen: View {
     @State var deleteTreeCandidateID: UUID?
     @State var cruisePhotoContext: PhotoViewerContext?
 
-    // Planned-plot navigation + centre recording + setup.
+    // Planned-plot navigation + setup.
     @State var navTargetPlannedID: UUID?
-    @State var recordingTarget: PlannedPlot?
     @State var presentingCruiseSetup = false
     @State var pendingCruiseSetup = false
+    /// The plot whose SITE DESCRIPTION sheet is up ("Add details" on the plot
+    /// peek). nil = closed.
+    @State var sitePlotTarget: SitePlotTarget?
+    /// The camera glide in flight ("Go to Plot N"). Held so a second tap
+    /// cancels the first rather than two loops fighting over one camera.
+    @State var cameraFlight: Task<Void, Never>?
 
     // MARK: Planning on the map (long press)
 

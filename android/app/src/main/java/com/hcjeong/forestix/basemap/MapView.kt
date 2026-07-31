@@ -46,10 +46,12 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableDoubleStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -236,14 +238,56 @@ class MapCameraState {
     internal var viewportSizePx: IntSize by mutableStateOf(IntSize.Zero)
     internal var densityScale: Float = 1f
 
-    /// One-shot host-requested camera move — MapView consumes and clears it.
+    /// Host-requested camera move — MapView applies whatever is here whenever
+    /// [moveTick] changes.
     internal var pendingMove: Pair<CoordinateConversions.LatLon, Double>? by mutableStateOf(null)
+
+    /// Bumped by every requested move. MapView keys its consumption on this
+    /// COUNTER rather than on the value, so the same target can be asked for
+    /// twice (my-location tapped again after a pan back) and so a per-frame
+    /// glide costs one state write per frame instead of a write-then-clear
+    /// round trip through the consumer.
+    internal var moveTick: Int by mutableIntStateOf(0)
 
     /// Recentre on `target` at `zoom` — the same snap the map does when the
     /// host's `center` parameter changes, but usable when that parameter
     /// hasn't changed (my-location button after the user panned away).
     fun moveTo(target: CoordinateConversions.LatLon, zoom: Double) {
         pendingMove = target to zoom
+        moveTick++
+    }
+
+    /// GLIDE to `target` at `zoom` instead of cutting there.
+    ///
+    /// [moveTo] jumps, which is right for my-location (the cruiser knows
+    /// where they are) and wrong for "here is the plot you are walking to":
+    /// a cut answers "where is it?" with a different picture rather than
+    /// with a direction. Stepped on the frame clock, ease-out over ~0.6 s —
+    /// quick off the mark, settling onto the target.
+    ///
+    /// Suspends, so cancelling is the caller's job and costs nothing: the
+    /// coroutine a second tap launches replaces the first.
+    suspend fun flyTo(target: CoordinateConversions.LatLon, zoom: Double) {
+        val from = center
+        val fromZoom = this.zoom
+        val toZoom = zoom.coerceIn(MAP_ZOOM_MIN, MAP_ZOOM_MAX)
+        // No camera to fly FROM (the map has not laid out): nothing to
+        // interpolate, so land on the target rather than animate from a
+        // position we made up.
+        if (from == null) {
+            moveTo(target, toZoom)
+            return
+        }
+        val steps = 36
+        for (step in 1..steps) {
+            withFrameMillis { }
+            val eased = 1.0 - (1.0 - step.toDouble() / steps).pow(3)
+            pendingMove = CoordinateConversions.LatLon(
+                latitude = from.latitude + (target.latitude - from.latitude) * eased,
+                longitude = from.longitude + (target.longitude - from.longitude) * eased,
+            ) to (fromZoom + (toZoom - fromZoom) * eased)
+            moveTick++
+        }
     }
 
     /// Pure projection of a coordinate into viewport pixels for the
@@ -388,13 +432,13 @@ fun MapView(
         onCameraChange?.invoke(camCenter, camZoom)
     }
 
-    // Host-requested one-shot move (MapCameraState.moveTo — my-location
-    // button): same snap recentre as a `center` change, plus a zoom.
-    LaunchedEffect(cameraState?.pendingMove) {
+    // Host-requested move (MapCameraState.moveTo / flyTo): same recentre as
+    // a `center` change, plus a zoom. Keyed on the COUNTER so the same target
+    // can be requested twice and so a glide's per-frame writes all land.
+    LaunchedEffect(cameraState?.moveTick) {
         val move = cameraState?.pendingMove ?: return@LaunchedEffect
         camCenter = move.first
         camZoom = move.second.coerceIn(MAP_ZOOM_MIN, MAP_ZOOM_MAX)
-        cameraState.pendingMove = null
     }
 
     // Pulse phase for the "you" dot; only read during draw when a location

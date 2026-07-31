@@ -27,16 +27,21 @@
 //     clears it) — there is no separate navigation screen.
 //   • "Start plot now" (field report 17) converts the planned pin into
 //     a real active plot on the fix that is live at that instant — one
-//     tap, no window to sit out, measuring available immediately.
-//   • "Set plot centre (GPS)" → RecordCentreSheet (inline 60 s GPS
-//     averaging ring; offset fallback one line away); saving converts
-//     the planned pin into a real active plot. Kept, and now a choice
-//     rather than the only way past the planned pin.
+//     tap, no window to sit out, measuring available immediately. It
+//     and Navigate are the card's PAIR of primary actions.
+//   • The 60 s GPS-averaging sheet is gone from that card: field
+//     feedback found the window worse than not having it, since a
+//     cruiser standing under canopy is not going to be handed a better
+//     fix for waiting. RecordCentreSheet still exists but nothing on
+//     this map opens it (see the note in that file).
 //   • The project sheet exports with one primary "Export all" (full
 //     bundle + share sheet, progress inline); "Choose files…" keeps
 //     the per-file ExportScreen reachable.
 //
 // The single primary action is the state-morphing (+):
+//   • plans waiting   → "Go to Plot N" — glides the camera onto the
+//     lowest-numbered unvisited plan, draws the navigation guide to it
+//     and raises its card, which is the whole of "where is it?";
 //   • no active plot  → "Start plot" — the existing sampling-ring AR
 //     component places centre + radius; Save creates a cruise `Plot`
 //     in the current project (auto-numbered "Plot N", centre from the
@@ -52,7 +57,8 @@
 //     estimates the rest once ≥3 pairs exist). Zero typing per record.
 //
 // Tapping a plot ring peeks the tally card (live TREES/BA/TPA/QMD via
-// the InventoryEngine, Add tree, Close plot, Details); tapping a tree
+// the InventoryEngine, Add tree, sample heights, Add details — the
+// site description sheet — Close plot, Details); tapping a tree
 // pin peeks the v2-anatomy card (photo, metric rows, chips, Edit
 // details — post-hoc, never a gate). The project chip opens the
 // project sheet: switcher, one-time naming, Stand summary, advanced
@@ -128,6 +134,13 @@ struct ExportShareURL: Identifiable {
 /// "Sample heights · N of M"). Internal because MapHomeScreen.swift owns
 /// the state.
 struct HeightsSheetTarget: Identifiable {
+    let plotID: UUID
+    var id: UUID { plotID }
+}
+
+/// Plot whose SITE DESCRIPTION sheet is presented (plot peek → "Add
+/// details"). Internal for the same reason as `HeightsSheetTarget`.
+struct SitePlotTarget: Identifiable {
     let plotID: UUID
     var id: UUID { plotID }
 }
@@ -226,26 +239,22 @@ extension MapHomeScreen {
         return liveTrees(in: plotID).first(where: { $0.id == treeID })?.treeName
     }
 
-    /// The unvisited planned plot the (+) "Set plot centre" targets:
-    /// nearest to the current fix, or — with no fix — the lowest-numbered
-    /// one. nil when none exist. (`plannedPlots` is already filtered to
-    /// unvisited in `reloadCruise`.)
-    func nearestUnvisitedPlannedPlot() -> PlannedPlot? {
-        // Skipped plots (documented as inaccessible) are excluded from the
-        // (+) "nearest unvisited" target — they stay visible on the map but
-        // navigation passes over them.
-        let candidates = plannedPlots.filter { !$0.skipped }
-        guard !candidates.isEmpty else { return nil }
-        guard let fix = location.latestSnapshot ?? LocationService.lastGlobalFix
-        else {
-            return candidates.min(by: { $0.plotNumber < $1.plotNumber })
-        }
-        return candidates.min(by: { a, b in
-            GeoMath.distanceM(fromLat: fix.latitude, fromLon: fix.longitude,
-                              toLat: a.plannedLat, toLon: a.plannedLon)
-            < GeoMath.distanceM(fromLat: fix.latitude, fromLon: fix.longitude,
-                                toLat: b.plannedLat, toLon: b.plannedLon)
-        })
+    /// The unvisited planned plot the (+) takes the cruiser to: the
+    /// LOWEST-NUMBERED one. nil when none exist. (`plannedPlots` is already
+    /// filtered to unvisited in `reloadCruise`.)
+    ///
+    /// It used to be the nearest plan to the current fix, and that is the
+    /// wrong rule for a button that now MOVES THE MAP. A cruise is walked in
+    /// plot order and reported in plot order; picking by GPS meant standing
+    /// between two plans and being flung to Plot 9 because it happened to be
+    /// twenty metres closer, which is exactly the "where am I being sent?"
+    /// this button exists to answer. Numbering is the order the cruiser
+    /// already has in their head.
+    func nextUnvisitedPlannedPlot() -> PlannedPlot? {
+        // Skipped plots (documented as inaccessible) are excluded — they stay
+        // visible on the map but navigation passes over them.
+        plannedPlots.filter { !$0.skipped }
+            .min(by: { $0.plotNumber < $1.plotNumber })
     }
 
     // MARK: Data
@@ -484,19 +493,26 @@ extension MapHomeScreen {
     // MARK: The state-morphing (+) (label + action; the button itself
     // is the home's shared 74 pt circle)
 
-    /// LOCKED strings: "Add tree · Plot N" (active plot), "Set plot
-    /// centre" (unvisited planned plots waiting, none active), else
-    /// "Start plot" (ad-hoc). The (+) caption slot already absorbs the
-    /// variable width, so the cluster stays pixel-invariant.
+    /// LOCKED strings: "Add tree · Plot N" (active plot), "Go to Plot N"
+    /// (unvisited planned plots waiting, none active), else "Start plot"
+    /// (ad-hoc). The (+) caption slot already absorbs the variable width, so
+    /// the cluster stays pixel-invariant.
+    ///
+    /// It read "Set plot centre", which described a sheet that is no longer
+    /// what the button opens. It NAMES THE PLOT because the whole complaint
+    /// was that the cruiser could not tell which plan they were being sent
+    /// to; "Add tree · Plot N" beside it already establishes that this
+    /// button says what it is about to act on. ("Start cruising" was the
+    /// other candidate and reads wrong by the third plot of the morning —
+    /// the button is pressed once per plot all day, not once per cruise.)
     var cruisePrimaryLabel: String {
         if let plot = activePlot {
             return "Add tree · Plot \(plot.plotNumber)"
         }
-        // Only when a NON-skipped planned plot remains — mirrors the now-nil
-        // nearestUnvisitedPlannedPlot() so the label never promises a target
-        // the (+) can't reach.
-        if plannedPlots.contains(where: { !$0.skipped }) {
-            return "Set plot centre"
+        // Built from the SAME target the action uses, so the label can never
+        // promise a plot the (+) will not go to.
+        if let planned = nextUnvisitedPlannedPlot() {
+            return "Go to Plot \(planned.plotNumber)"
         }
         return "Start plot"
     }
@@ -504,12 +520,8 @@ extension MapHomeScreen {
     func cruisePrimaryAction() {
         if let plot = activePlot {
             startAddTree(in: plot)
-        } else if let planned = nearestUnvisitedPlannedPlot() {
-            // Unvisited planned plots exist: the (+) drives the nearest
-            // one's Set-plot-centre flow instead of an ad-hoc start —
-            // exactly as tapping that dashed pin → "Set plot centre (GPS)".
-            withAnimation(.easeOut(duration: 0.18)) { selectedPinID = nil }
-            recordingTarget = planned
+        } else if let planned = nextUnvisitedPlannedPlot() {
+            goToPlannedPlot(planned)
         } else {
             // TWO DOORS, because the cruiser sometimes plans and sometimes
             // just arrives. Neither is a new path: "Start here" is the AR
@@ -518,6 +530,69 @@ extension MapHomeScreen {
             // uses. Adding a third way to plan is what this avoids.
             presentingStartPlotChoice = true
         }
+    }
+
+    /// How far a glide is still worth watching, measured in screenfuls of
+    /// the ground the map is showing. Two and a half screens is a move the
+    /// eye can follow; twenty is a featureless slide over country nobody
+    /// asked to see, and it ends with the same question it started with.
+    private static let flightScreenWidths: Double = 2.5
+
+    /// THE (+) WITH PLANS WAITING — take the cruiser to the next plot.
+    ///
+    /// The button used to open the averaging sheet on a plan the cruiser
+    /// could not see, so it answered "record a centre" for a question that
+    /// was really "which plot, and where is it?". It now does the three
+    /// things they were doing by hand: glides the map onto the plot, draws
+    /// the navigation guide to it, and raises that plot's own card. Nothing
+    /// here is a new flow — the guide is `navTargetPlannedID` exactly as
+    /// Navigate sets it, and the card is the pin's own selection.
+    func goToPlannedPlot(_ planned: PlannedPlot) {
+        let target = CoordinateConversions.LatLon(latitude: planned.plannedLat,
+                                                  longitude: planned.plannedLon)
+        // Guide and card FIRST: they are what the cruiser reads, and waiting
+        // for the camera to land would leave the button looking dead for the
+        // length of the flight.
+        withAnimation(.easeOut(duration: 0.2)) {
+            navTargetPlannedID = planned.id
+            selectedPinID = "pplot-\(planned.id.uuidString)"
+        }
+
+        let travelM = GeoMath.distanceM(
+            fromLat: camera.latitude, fromLon: camera.longitude,
+            toLat: target.latitude, toLon: target.longitude)
+        let screenM = visibleSpanM(region: visibleRegion)
+        let tooFar = screenM.map { travelM > $0 * Self.flightScreenWidths } ?? false
+        let fix = location.latestSnapshot ?? LocationService.lastGlobalFix
+
+        guard tooFar else {
+            // Same zoom rule as My location, the app's other "take me
+            // there" control: close in if the map was pulled back, and
+            // never pull a cruiser out of a closer look they chose.
+            flyCamera(to: target, zoom: max(camera.zoom, Self.defaultZoom))
+            return
+        }
+        guard let fix else {
+            // Too far to watch and no position to fit against. Cut straight
+            // there rather than glide: a long slide over ground the cruiser
+            // is not standing on tells them nothing they can use.
+            camera = BasemapCamera(latitude: target.latitude,
+                                   longitude: target.longitude,
+                                   zoom: max(camera.zoom, Self.defaultZoom))
+            return
+        }
+        // BOTH ENDS ON SCREEN. The separation is used as the span across the
+        // SHORT side, so the pair fits whatever bearing the plot lies on.
+        let separationM = GeoMath.distanceM(
+            fromLat: fix.latitude, fromLon: fix.longitude,
+            toLat: target.latitude, toLon: target.longitude)
+        let zoom = spanFramingZoom(spanM: separationM,
+                                   currentZoom: camera.zoom,
+                                   region: visibleRegion) ?? camera.zoom
+        flyCamera(to: CoordinateConversions.LatLon(
+            latitude: (fix.latitude + target.latitude) / 2,
+            longitude: (fix.longitude + target.longitude) / 2),
+                  zoom: zoom)
     }
 
     /// CRUISE PROJECT STRIP text — "<project> · Plot N · M trees" while a
@@ -652,29 +727,16 @@ extension MapHomeScreen {
                     .environmentObject(environment)
                 }
             }
-            // Inline GPS-averaging sheet (mock ⑧) — planned pin → real plot.
-            .sheet(item: $recordingTarget) { planned in
-                if let project = currentProject {
-                    RecordCentreSheet(
-                        plannedPlot: planned,
-                        project: project,
-                        onSaved: { plot in
-                            if navTargetPlannedID == planned.id {
-                                navTargetPlannedID = nil
-                            }
-                            withAnimation(.easeOut(duration: 0.18)) {
-                                selectedPinID = "plot-\(plot.id.uuidString)"
-                            }
-                            // Third and last way a plot is created — frame
-                            // the new ring exactly as the other two do.
-                            frameCamera(onPlotAt: CoordinateConversions.LatLon(
-                                latitude: plot.centerLat,
-                                longitude: plot.centerLon),
-                                        radiusM: plotRadiusM(plot))
-                            reloadCruise()
-                        })
+            // SITE DESCRIPTION (plot peek → "Add details") — slope, aspect,
+            // ground elevation, canopy cover. It takes a plot ID and loads
+            // its own copy: this screen already holds `plots`, and two
+            // holders of one plot is how one of them saves over the other's
+            // edit.
+            .sheet(item: $sitePlotTarget) { target in
+                PlotDetailSheet(plotId: target.plotID,
+                                onSaved: { _ in reloadCruise() })
                     .environmentObject(environment)
-                }
+                    .environmentObject(settings)
             }
             // Returning from a pushed editor (Tree detail, Plot summary…)
             // re-reads the repositories so pins/peeks reflect the edits.
@@ -1727,6 +1789,28 @@ extension MapHomeScreen {
                 .buttonStyle(CruisePressableStyle())
                 .accessibilityIdentifier("cruiseMap.plotPeek.heights")
 
+                // SITE DESCRIPTION — slope, aspect, ground elevation, canopy
+                // cover. It sits beside Sample heights because both are the
+                // same kind of act: recording something about THIS PLOT that
+                // the tally itself cannot see. "Add details" rather than a
+                // second "Details" verb — the pair below opens the plot's
+                // report, this one is where a cruiser writes the ground down.
+                Button {
+                    sitePlotTarget = SitePlotTarget(plotID: plot.id)
+                } label: {
+                    Text("Add details")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(ForestixPalette.textPrimary)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .background(
+                            RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                             style: .continuous)
+                                .stroke(ForestixPalette.divider, lineWidth: 1))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(CruisePressableStyle())
+                .accessibilityIdentifier("cruiseMap.plotPeek.addDetails")
+
                 HStack(spacing: ForestixSpace.xs) {
                     if !isClosed {
                         Button {
@@ -2525,9 +2609,16 @@ extension MapHomeScreen {
     }
 
     /// Peek for a hollow dashed pin: live distance · bearing from the
-    /// current fix, "Start plot now" (opens the plot on that fix, field
-    /// report 17), "Set plot centre (GPS)" (→ inline averaging sheet) and
-    /// "Navigate" (toggles the map guide). Replaces NavigationScreen.
+    /// current fix, then the PAIR — "Start plot now" (opens the plot on that
+    /// fix, field report 17) and "Navigate" (toggles the map guide), both in
+    /// primary treatment because they are the two things a cruiser standing
+    /// in front of this pin actually does. Replaces NavigationScreen.
+    ///
+    /// "Set plot centre (GPS)" used to sit between them, in the outlined
+    /// primary this card now gives Navigate. Field feedback: the 60 s
+    /// averaging window was worse than not having it — a cruiser who has
+    /// already walked to the plot spends a minute standing still under a
+    /// canopy that will not give them a better fix.
     func plannedPeekCard(for planned: PlannedPlot) -> some View {
         let navigating = navTargetPlannedID == planned.id
         return VStack(spacing: 0) {
@@ -2590,42 +2681,27 @@ extension MapHomeScreen {
                     .foregroundStyle(ForestixPalette.textTertiary)
                     .frame(maxWidth: .infinity, alignment: .center)
 
-                // The averaged centre — kept, one tap away, no longer a gate.
-                Button {
-                    withAnimation(.easeOut(duration: 0.18)) {
-                        selectedPinID = nil
-                    }
-                    recordingTarget = planned
-                } label: {
-                    Text("Set plot centre (GPS)")
-                        .font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(ForestixPalette.primary)
-                        .frame(maxWidth: .infinity, minHeight: 54)
-                        .background(
-                            RoundedRectangle(cornerRadius: ForestixRadius.card,
-                                             style: .continuous)
-                                .stroke(ForestixPalette.primary, lineWidth: 1.5))
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(CruisePressableStyle())
-                .accessibilityIdentifier("cruiseMap.plannedPeek.record")
-
+                // THE OTHER HALF OF THE PAIR — same 54 pt outlined primary
+                // the removed averaging button had, so walking to the plot
+                // and opening it read as the two things this card is for.
+                // While the guide is up it takes the accent instead: the
+                // outline is what says "tapping this stops it".
                 Button {
                     withAnimation(.easeOut(duration: 0.2)) {
                         navTargetPlannedID = navigating ? nil : planned.id
                     }
                 } label: {
                     Text("Navigate")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.system(size: 15, weight: .bold))
                         .foregroundStyle(navigating ? ForestixPalette.accent
-                                                    : ForestixPalette.textPrimary)
-                        .frame(maxWidth: .infinity, minHeight: 44)
+                                                    : ForestixPalette.primary)
+                        .frame(maxWidth: .infinity, minHeight: 54)
                         .background(
-                            RoundedRectangle(cornerRadius: ForestixRadius.control,
+                            RoundedRectangle(cornerRadius: ForestixRadius.card,
                                              style: .continuous)
                                 .stroke(navigating ? ForestixPalette.accent
-                                                   : ForestixPalette.divider,
-                                        lineWidth: navigating ? 1.5 : 1))
+                                                   : ForestixPalette.primary,
+                                        lineWidth: 1.5))
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(CruisePressableStyle())
@@ -2634,12 +2710,17 @@ extension MapHomeScreen {
                 .accessibilityIdentifier("cruiseMap.plannedPeek.navigate")
 
                 // Skip toggle — an EXPLICIT cruiser action (unlike `visited`,
-                // which flips implicitly on recording a centre). "Mark
-                // unreachable" documents a cliff/water/private-land plot so
-                // navigation passes over it; "Restore plot" undoes it, mirroring
-                // PlotSummaryScreen's Reopen affordance. "Set plot centre (GPS)"
-                // stays available even when skipped — a cruiser who later
-                // reaches the plot can still record it (which sets visited).
+                // which flips implicitly when the plot is opened). "Skip this
+                // plot" documents a cliff/water/private-land plot so
+                // navigation passes over it; "Unskip this plot" undoes it.
+                //
+                // It read "Mark unreachable" / "Restore plot", which is
+                // office language: nobody in the field says they marked a
+                // plot unreachable, they say they skipped it. "Restore" was
+                // the worse of the two — it is the word for bringing back
+                // something deleted, and nothing here was ever deleted. Every
+                // action stays up on a skipped plot, because "can't reach it"
+                // is a judgement a cruiser is allowed to revise after lunch.
                 Button {
                     if planned.skipped {
                         setPlannedSkipped(planned, false)
@@ -2650,7 +2731,7 @@ extension MapHomeScreen {
                         }
                     }
                 } label: {
-                    Label(planned.skipped ? "Restore plot" : "Mark unreachable",
+                    Label(planned.skipped ? "Unskip this plot" : "Skip this plot",
                           systemImage: planned.skipped ? "lock.open" : "slash.circle")
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(planned.skipped ? ForestixPalette.textPrimary
@@ -2671,6 +2752,13 @@ extension MapHomeScreen {
                 // the same press-and-hold that made the plan; Delete throws
                 // the plan away. Both sit below the skip toggle because they
                 // change the plan itself rather than what to do about it.
+                //
+                // "Move plan", not "Move on map" and not "Relocate": it is
+                // the word-for-word pair of the "Delete plan" beside it, and
+                // it names WHAT moves. A cruiser reading "Relocate" on a card
+                // titled "Plot 4 (planned)" has to work out whether the plot
+                // they measured is about to move — this one cannot be read
+                // that way.
                 HStack(spacing: ForestixSpace.xs) {
                     Button {
                         withAnimation(.easeOut(duration: 0.18)) {
@@ -2678,7 +2766,7 @@ extension MapHomeScreen {
                             movingPlannedID = planned.id
                         }
                     } label: {
-                        Text("Move on map")
+                        Text("Move plan")
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundStyle(ForestixPalette.textPrimary)
                             .frame(maxWidth: .infinity, minHeight: 44)

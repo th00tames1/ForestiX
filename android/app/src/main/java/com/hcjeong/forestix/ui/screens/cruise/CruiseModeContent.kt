@@ -204,11 +204,12 @@ internal class CruiseModeState {
     var selectedId by mutableStateOf<String?>(null)
     var projectSheetOpen by mutableStateOf(false)
     var cruiseSetupOpen by mutableStateOf(false)
-    var recordCentreFor by mutableStateOf<PlannedPlot?>(null)
     /// Planned plot the dashed guide line + distance chip point at (mock ⑦).
     var navTargetId by mutableStateOf<UUID?>(null)
     /// Plot whose sample heights sheet is open ("Sample heights · N of M", B).
     var heightsSheetFor by mutableStateOf<UUID?>(null)
+    /// Plot whose SITE DESCRIPTION sheet is open (plot peek "Add details").
+    var detailPlotFor by mutableStateOf<UUID?>(null)
     /// Plot whose map-overlay menu (Edit / Remove) is open — raised by
     /// tapping the drawn plot's boundary on the map (M2).
     var plotMenuFor by mutableStateOf<UUID?>(null)
@@ -225,9 +226,7 @@ internal class CruiseModeState {
     /// coroutine and the peek stays on screen until it lands, so without
     /// this a second tap inside that window runs the conversion twice: two
     /// Plot rows with the SAME plotNumber and the same plannedPlotId, and
-    /// the planned pin marked visited twice. The averaging sheet's own save
-    /// has carried this guard since it was written (`if (saving) return`,
-    /// RecordCentreSheet.kt); the peek path is the one that lost it.
+    /// the planned pin marked visited twice.
     var startingPlanned by mutableStateOf(false)
 
     // MARK: - Planning on the map (press and hold)
@@ -240,7 +239,7 @@ internal class CruiseModeState {
     /// The cruiser asked to plan on the map and has not pressed yet — the
     /// map shows the instruction banner until they do or cancel.
     var awaitingPlanPress by mutableStateOf(false)
-    /// The planned plot a "Move on map" is in flight for. The next long press
+    /// The planned plot a "Move plan" is in flight for. The next long press
     /// MOVES it instead of raising the menu; a plan drawn in the wrong spot
     /// is the ordinary case, not an exception.
     var movingPlannedId by mutableStateOf<UUID?>(null)
@@ -287,10 +286,9 @@ internal class CruiseModeState {
     /// Planned-peek "Start plot now": open the planned plot on the fix that
     /// is live right now, with no averaging window in the way (field 17).
     var startPlannedNow: (PlannedPlot) -> Unit = {}
-    /// Toggle a planned plot's `skipped` flag (planned-peek "Mark
-    /// unreachable" / "Restore plot"). A skipped plot is inaccessible
-    /// (cliff/water/private land)
-    /// so it drops out of nearest-unvisited nav while still rendering.
+    /// Toggle a planned plot's `skipped` flag (planned-peek "Skip this plot"
+    /// / "Unskip this plot"). A skipped plot is inaccessible (cliff/water/
+    /// private land) so the (+) passes over it while it still renders.
     var skipPlanned: (PlannedPlot) -> Unit = {}
     /// Hard delete a plot + cascade its trees (plot peek "Delete plot").
     var deletePlot: (Plot) -> Unit = {}
@@ -611,7 +609,7 @@ internal fun CruiseModeEffects(
         }
     }
 
-    /// Planned peek "Move on map" → the next press-and-hold. Re-stamps
+    /// Planned peek "Move plan" → the next press-and-hold. Re-stamps
     /// MANUAL whatever laid the point down first: after this the coordinate
     /// IS a drawn one, and a generator's provenance left in place would be a
     /// claim about a point the generator never produced.
@@ -658,12 +656,12 @@ internal fun CruiseModeEffects(
         }
     }
 
-    /// Planned peek "Mark unreachable" / "Restore plot": flip the planned
+    /// Planned peek "Skip this plot" / "Unskip this plot": flip the planned
     /// plot's `skipped` flag and persist through the SAME
-    /// plannedPlotRepository.update path RecordCentreSheet uses to set
-    /// visited=true. A newly-skipped plot drops out of nearest-unvisited nav,
-    /// so any dashed guide line armed at it is cleared. Reverts the in-memory
-    /// flag on a storage error, mirroring closePlot.
+    /// plannedPlotRepository.update path the plot conversion uses to set
+    /// visited=true. A newly-skipped plot drops out of the (+)'s running
+    /// order, so any dashed guide line armed at it is cleared. Reverts the
+    /// in-memory flag on a storage error, mirroring closePlot.
     state.skipPlanned = { planned ->
         scope.launch {
             try {
@@ -675,10 +673,10 @@ internal fun CruiseModeEffects(
             } catch (_: Exception) {
                 planned.skipped = !planned.skipped
             }
-            // Dismiss on MARK UNREACHABLE (the plot is done with for now),
-            // stay up on RESTORE — the cruiser who just un-skipped a plot is
-            // about to start it, and the peek they need is the one already
-            // open. Same rule as iOS `setPlannedSkipped`.
+            // Dismiss on SKIP (the plot is done with for now), stay up on
+            // UNSKIP — the cruiser who just un-skipped a plot is about to
+            // start it, and the peek they need is the one already open.
+            // Same rule as iOS `setPlannedSkipped`.
             if (planned.skipped) state.selectedId = null
             state.refresh++
         }
@@ -928,11 +926,15 @@ internal fun CruiseModeBottomContent(
     state: CruiseModeState,
     nav: NavController,
     fix: CLLocationSnapshot?,
+    /// The shared map camera — the (+) MOVES it when plans are waiting, so
+    /// this content can no longer be written without one.
+    camera: MapCameraState,
     onToggleMode: () -> Unit,
 ) {
     val env = LocalAppEnvironment.current
     val settings by env.settings.state.collectAsStateWithLifecycle()
     val activePlot = state.activePlot(settings)
+    val scope = rememberCoroutineScope()
 
     AnimatedContent(
         targetState = state.selectedId,
@@ -965,17 +967,13 @@ internal fun CruiseModeBottomContent(
                     .padding(bottom = 20.dp),
                 starting = state.startingPlanned,
                 onStartNow = { state.startPlannedNow(peekPlanned) },
-                onMoveOnMap = {
+                onMovePlan = {
                     // Same press-and-hold that made the plan — the card gets
                     // out of the way so the map underneath is pressable.
                     state.selectedId = null
                     state.movingPlannedId = peekPlanned.id
                 },
                 onDelete = { state.deletePlannedCandidate = peekPlanned },
-                onRecordCentre = {
-                    state.selectedId = null
-                    state.recordCentreFor = peekPlanned
-                },
                 onToggleNavigate = {
                     state.navTargetId =
                         if (state.navTargetId == peekPlanned.id) null else peekPlanned.id
@@ -996,6 +994,7 @@ internal fun CruiseModeBottomContent(
                 onHeights = { state.heightsSheetFor = peekPlot.id },
                 onClose = { state.closePlot(peekPlot) },
                 onDelete = { state.deletePlot(peekPlot) },
+                onAddDetails = { state.detailPlotFor = peekPlot.id },
                 onDetails = {
                     nav.navigate(PlotFlowRoutes.plotSummary(peekPlot.id.toString()))
                 },
@@ -1016,17 +1015,17 @@ internal fun CruiseModeBottomContent(
             )
 
             else -> {
-                // (+) disambiguation (map-peek spec item 5): with unvisited
-                // planned plots and NO active plot, the (+) sets the nearest
-                // plot's centre (same flow as tapping its dashed pin →
-                // RecordCentreSheet) instead of starting a fresh plot.
-                // Nearest by current fix; no fix → first unvisited planned.
-                // Skipped plots are inaccessible (documented), so they are
-                // never nav-eligible even though they still render on the map.
-                val plannedUnvisited = state.data.plannedPlots.filter { !it.skipped }
+                // (+) WITH PLANS WAITING: it takes the cruiser to the
+                // LOWEST-NUMBERED unvisited plan — camera, guide line and
+                // that plot's own card. Skipped plots are documented
+                // inaccessible, so the running order passes over them even
+                // though they still render on the map.
+                val nextPlanned = state.data.plannedPlots
+                    .filter { !it.skipped }
+                    .minByOrNull { it.plotNumber }
                 CruiseActionCluster(
                     activePlot = activePlot,
-                    hasPlannedUnvisited = plannedUnvisited.isNotEmpty(),
+                    nextPlanned = nextPlanned,
                     treeCount = activePlot?.let { state.data.treesByPlot[it.id]?.size } ?: 0,
                     projectName = state.project?.name ?: "New project",
                     modifier = Modifier.padding(bottom = ForestixSpace.sm),
@@ -1035,19 +1034,8 @@ internal fun CruiseModeBottomContent(
                         val plot = state.activePlot(settings)
                         when {
                             plot != null -> state.addTree(plot)
-                            plannedUnvisited.isNotEmpty() -> {
-                                val f = fix ?: LocationService.lastGlobalFix
-                                val nearest = if (f == null) {
-                                    plannedUnvisited.first()
-                                } else {
-                                    plannedUnvisited.minByOrNull {
-                                        GeoMath.distanceM(
-                                            f.latitude, f.longitude,
-                                            it.plannedLat, it.plannedLon)
-                                    }
-                                }
-                                nearest?.let { state.recordCentreFor = it }
-                            }
+                            nextPlanned != null ->
+                                goToPlannedPlot(state, nextPlanned, camera, fix, scope)
                             // TWO DOORS, because the cruiser sometimes plans
                             // and sometimes just arrives. Neither is a new
                             // path: "Start here" is `startPlot()` below, the
@@ -1065,8 +1053,78 @@ internal fun CruiseModeBottomContent(
     }
 }
 
-/// Cruise-mode sheets (project ⑤ / cruise setup ⑥ / inline centre record
-/// ⑧), hosted by MapHomeScreen after its own measure-world sheets.
+/// How far a glide is still worth watching, measured in screenfuls of the
+/// ground the map is showing. Two and a half screens is a move the eye can
+/// follow; twenty is a featureless slide over country nobody asked to see,
+/// and it ends on the same question it started with. iOS uses the same 2.5.
+private const val FLIGHT_SCREEN_WIDTHS = 2.5
+
+/// THE (+) WITH PLANS WAITING — take the cruiser to the next plot.
+///
+/// The button used to open the averaging sheet on a plan the cruiser could
+/// not see, so it answered "record a centre" for a question that was really
+/// "which plot, and where is it?". It now does the three things they were
+/// doing by hand: glides the map onto the plot, draws the navigation guide to
+/// it, and raises that plot's own card. Nothing here is a new flow — the
+/// guide is `navTargetId` exactly as Navigate sets it, and the card is the
+/// pin's own selection. Port of iOS `goToPlannedPlot`.
+private fun goToPlannedPlot(
+    state: CruiseModeState,
+    planned: PlannedPlot,
+    camera: MapCameraState,
+    fix: CLLocationSnapshot?,
+    scope: CoroutineScope,
+) {
+    val target = CoordinateConversions.LatLon(
+        latitude = planned.plannedLat, longitude = planned.plannedLon)
+    // Guide and card FIRST: they are what the cruiser reads, and waiting for
+    // the camera to land would leave the button looking dead for the length
+    // of the flight.
+    state.navTargetId = planned.id
+    state.selectedId = "planned-${planned.id}"
+
+    val from = camera.center
+    val travelM = if (from == null) {
+        0.0
+    } else {
+        GeoMath.distanceM(from.latitude, from.longitude, target.latitude, target.longitude)
+    }
+    val screenM = visibleSpanM(camera)
+    val tooFar = screenM != null && travelM > screenM * FLIGHT_SCREEN_WIDTHS
+    val usableFix = fix ?: LocationService.lastGlobalFix
+
+    if (!tooFar) {
+        // Same zoom rule as my-location, the app's other "take me there"
+        // control: close in if the map was pulled back, and never pull a
+        // cruiser out of a closer look they chose.
+        scope.launch { camera.flyTo(target, max(camera.zoom, DefaultZoom)) }
+        return
+    }
+    if (usableFix == null) {
+        // Too far to watch and no position to fit against. Cut straight there
+        // rather than glide: a long slide over ground the cruiser is not
+        // standing on tells them nothing they can use.
+        camera.moveTo(target, max(camera.zoom, DefaultZoom))
+        return
+    }
+    // BOTH ENDS ON SCREEN. The separation is used as the span across the
+    // SHORT side, so the pair fits whatever bearing the plot lies on.
+    val separationM = GeoMath.distanceM(
+        usableFix.latitude, usableFix.longitude, target.latitude, target.longitude)
+    val zoom = spanFramingZoom(camera, separationM) ?: camera.zoom
+    scope.launch {
+        camera.flyTo(
+            CoordinateConversions.LatLon(
+                latitude = (usableFix.latitude + target.latitude) / 2,
+                longitude = (usableFix.longitude + target.longitude) / 2,
+            ),
+            zoom,
+        )
+    }
+}
+
+/// Cruise-mode sheets (project ⑤ / cruise setup ⑥ / site description),
+/// hosted by MapHomeScreen after its own measure-world sheets.
 @Composable
 internal fun CruiseModeSheets(
     state: CruiseModeState,
@@ -1180,27 +1238,16 @@ internal fun CruiseModeSheets(
         )
     }
 
-    // MARK: - Inline centre recording (mock ⑧ — replaces PlotCenterScreen)
+    // MARK: - Site description (plot peek "Add details")
 
-    val recordPlanned = state.recordCentreFor
-    val recordProject = state.project
-    if (recordPlanned != null && recordProject != null) {
-        RecordCentreSheet(
-            project = recordProject,
-            planned = recordPlanned,
-            onDismiss = { state.recordCentreFor = null },
-            onSaved = { plot ->
-                state.recordCentreFor = null
-                if (state.navTargetId == recordPlanned.id) state.navTargetId = null
-                state.selectedId = "plot-${plot.id}"
-                state.refresh++
-            },
-            onUseOffset = {
-                state.recordCentreFor = null
-                nav.navigate(
-                    CruiseRoutes.offset(
-                        recordProject.id.toString(), recordPlanned.id.toString()))
-            },
+    // Slope, aspect, ground elevation, canopy cover. It takes a plot ID and
+    // loads its own copy: this screen already holds `data.plots`, and two
+    // holders of one plot is how one of them saves over the other's edit.
+    state.detailPlotFor?.let { plotId ->
+        PlotDetailSheet(
+            plotId = plotId,
+            onDismiss = { state.detailPlotFor = null },
+            onSaved = { state.refresh++ },
         )
     }
 
@@ -1492,8 +1539,15 @@ private fun DistanceChip(text: String, modifier: Modifier = Modifier) {
 // MARK: - Planned-plot peek (mock ⑦) -------------------------------------------
 
 /// Peek for a HOLLOW DASHED planned pin: live distance + bearing from the
-/// current fix, a 54 dp "Set plot centre (GPS)" primary into the inline
-/// averaging sheet, and a "Navigate" toggle for the guide line.
+/// current fix, then the PAIR — a 54 dp "Start plot now" primary and a 54 dp
+/// outlined-primary "Navigate", the two things a cruiser standing in front of
+/// this pin actually does.
+///
+/// "Set plot centre (GPS)" used to sit between them, in the outlined primary
+/// this card now gives Navigate. Field feedback: the 60 s averaging window was
+/// worse than not having it — a cruiser who has already walked to the plot
+/// spends a minute standing still under a canopy that will not give them a
+/// better fix.
 @Composable
 private fun PlannedPeekCard(
     planned: PlannedPlot,
@@ -1502,10 +1556,9 @@ private fun PlannedPeekCard(
     starting: Boolean,
     modifier: Modifier = Modifier,
     onStartNow: () -> Unit,
-    onRecordCentre: () -> Unit,
     onToggleNavigate: () -> Unit,
     onToggleSkip: () -> Unit,
-    onMoveOnMap: () -> Unit,
+    onMovePlan: () -> Unit,
     onDelete: () -> Unit,
 ) {
     val colors = Forestix.colors
@@ -1627,43 +1680,28 @@ private fun PlannedPeekCard(
             textAlign = TextAlign.Center,
         )
         Spacer(Modifier.size(8.dp))
-        // 54 dp outline — LOCKED "Set plot centre (GPS)". The averaged
-        // centre is kept, one tap away, and is no longer a gate.
+        // THE OTHER HALF OF THE PAIR — LOCKED "Navigate", in the same 54 dp
+        // outlined primary the removed averaging button had, so walking to
+        // the plot and opening it read as the two things this card is for.
+        // While the guide is up it takes the accent instead: the outline is
+        // what says "tapping this stops it".
         Box(
             Modifier
                 .fillMaxWidth()
                 .heightIn(min = 54.dp)
-                .pressableNoRipple(onClick = onRecordCentre)
-                .clip(ForestixRadius.card)
-                .border(1.5.dp, colors.primary, ForestixRadius.card),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                "Set plot centre (GPS)",
-                style = type.bodyBold.copy(fontSize = 15.sp),
-                color = colors.primary,
-            )
-        }
-        Spacer(Modifier.size(8.dp))
-        // LOCKED secondary "Navigate" — toggles the dashed guide line;
-        // the active state reads in the accent outline.
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .heightIn(min = 44.dp)
                 .pressableNoRipple(onClick = onToggleNavigate)
-                .clip(ForestixRadius.control)
+                .clip(ForestixRadius.card)
                 .border(
-                    if (navigating) 1.5.dp else 1.dp,
-                    if (navigating) colors.accent else colors.divider,
-                    ForestixRadius.control,
+                    1.5.dp,
+                    if (navigating) colors.accent else colors.primary,
+                    ForestixRadius.card,
                 ),
             contentAlignment = Alignment.Center,
         ) {
             Text(
                 "Navigate",
-                style = type.bodyBold.copy(fontSize = 14.sp),
-                color = if (navigating) colors.accent else colors.textPrimary,
+                style = type.bodyBold.copy(fontSize = 15.sp),
+                color = if (navigating) colors.accent else colors.primary,
             )
         }
         Spacer(Modifier.size(8.dp))

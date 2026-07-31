@@ -191,6 +191,14 @@ private const val PLOT_FRAMING_HEADROOM = 1.6
 /// leaves the zoom alone. iOS `plotFramingZoom` is the same computation.
 internal fun plotFramingZoom(camera: MapCameraState, radiusM: Double): Double? {
     if (!radiusM.isFinite() || radiusM <= 0.0) return null
+    return spanFramingZoom(camera, 2 * radiusM)
+}
+
+/// Ground metres across the SHORTER side of what the map is showing. Null
+/// until it has laid out and produced bounds — every caller then has to
+/// decide what to do with "no idea how big the screen is" rather than being
+/// handed an invented number. iOS `visibleSpanM` is the same.
+internal fun visibleSpanM(camera: MapCameraState): Double? {
     val bounds = camera.visibleBounds() ?: return null
     val minLat = bounds.minOf { it.latitude }
     val maxLat = bounds.maxOf { it.latitude }
@@ -206,9 +214,18 @@ internal fun plotFramingZoom(camera: MapCameraState, radiusM: Double): Double? {
         LatLon(latitude = maxLat, longitude = minLon),
     )
     val shownM = min(widthM, heightM)
-    val wantM = 2 * radiusM * PLOT_FRAMING_HEADROOM
     if (!shownM.isFinite() || shownM <= 0.0) return null
-    val zoom = camera.zoom + log2(shownM / wantM)
+    return shownM
+}
+
+/// The zoom at which [spanM] of ground fits across the short side with the
+/// plot-framing headroom. [plotFramingZoom] is this expressed as a radius —
+/// one rule, so a plot frame and a fit around two points can never disagree
+/// about what "on screen" means. iOS `spanFramingZoom` is the same.
+internal fun spanFramingZoom(camera: MapCameraState, spanM: Double): Double? {
+    val shownM = visibleSpanM(camera) ?: return null
+    if (!spanM.isFinite() || spanM <= 0.0) return null
+    val zoom = camera.zoom + log2(shownM / (spanM * PLOT_FRAMING_HEADROOM))
     if (!zoom.isFinite()) return null
     return zoom.coerceIn(MAP_ZOOM_MIN, MAP_ZOOM_MAX)
 }

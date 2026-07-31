@@ -98,8 +98,8 @@ fun plotPillarPreviewMarkers(centre: Vec3?, radiusM: Float): List<ArSceneMarker>
 ///
 /// WHY THIS EXISTS. The subdued ring + pillar are drawn from an ARCore
 /// ANCHOR, and only the AR "Start plot" route creates one. A plot opened
-/// from a planned pin ("Start plot now" / "Set plot centre (GPS)" — the
-/// one-tap route field report 17 made the recommended one) and any plot
+/// from a planned pin ("Start plot now" — the one-tap route field report 17
+/// introduced, and now the only one that card offers) and any plot
 /// carried across an app restart have a centre that is a lat/lon and nothing
 /// else, so the scan screens showed a bare camera feed with a plot active.
 /// The ring is not synthesised from that lat/lon: a fix under canopy is

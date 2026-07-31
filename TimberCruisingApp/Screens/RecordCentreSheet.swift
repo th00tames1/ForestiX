@@ -13,6 +13,16 @@
 // its computed PlotCenterResult lands the centre through the same
 // save path.
 //
+// NOTHING OPENS THIS SHEET TODAY. Field feedback retired the averaging
+// window outright: the planned-plot card's "Set plot centre (GPS)" is gone
+// and the (+) now walks the cruiser to the next plan instead. The sheet is
+// kept because it is the ONLY door to the offset-from-opening fallback
+// below — the one path that produces a plot centre where GPS cannot, which
+// no feedback asked to lose — and deleting it would take OffsetFlowScreen,
+// OffsetFlowViewModel and their tests with it. That is a call for the field,
+// not for a rename item. `convertPlannedToActivePlot` and `singleFixCentre`
+// at the foot of this file are live: "Start plot now" runs through both.
+//
 // FIELD REPORT 17 — averaging is no longer a GATE. The 60 s window was
 // the only way out of this sheet, and a cruiser who has already walked to
 // the plot spends that minute standing still under a canopy that is not

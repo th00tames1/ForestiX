@@ -81,7 +81,18 @@ private let plotFramingHeadroom: Double = 1.6
 func plotFramingZoom(radiusM: Double,
                      currentZoom: Double,
                      region: BasemapRegion?) -> Double? {
-    guard let region, radiusM.isFinite, radiusM > 0 else { return nil }
+    guard radiusM.isFinite, radiusM > 0 else { return nil }
+    return spanFramingZoom(spanM: 2 * radiusM,
+                           currentZoom: currentZoom,
+                           region: region)
+}
+
+/// Ground metres across the SHORTER side of what the map is showing. nil
+/// until the map has laid out and reported a region — every caller then has
+/// to decide what to do with "no idea how big the screen is" rather than
+/// being handed an invented number.
+func visibleSpanM(region: BasemapRegion?) -> Double? {
+    guard let region else { return nil }
     let midLat = (region.minLatitude + region.maxLatitude) / 2
     let widthM = CoordinateConversions.haversineMeters(
         CoordinateConversions.LatLon(latitude: midLat,
@@ -94,9 +105,20 @@ func plotFramingZoom(radiusM: Double,
         CoordinateConversions.LatLon(latitude: region.maxLatitude,
                                      longitude: region.minLongitude))
     let shownM = min(widthM, heightM)
-    let wantM = 2 * radiusM * plotFramingHeadroom
-    guard shownM.isFinite, shownM > 0, wantM > 0 else { return nil }
-    let zoom = currentZoom + log2(shownM / wantM)
+    guard shownM.isFinite, shownM > 0 else { return nil }
+    return shownM
+}
+
+/// The zoom at which `spanM` of ground fits across the short side with the
+/// plot-framing headroom. `plotFramingZoom` is this expressed as a radius —
+/// one rule, so a plot frame and a fit around two points can never disagree
+/// about what "on screen" means.
+func spanFramingZoom(spanM: Double,
+                     currentZoom: Double,
+                     region: BasemapRegion?) -> Double? {
+    guard let shownM = visibleSpanM(region: region), spanM.isFinite, spanM > 0
+    else { return nil }
+    let zoom = currentZoom + log2(shownM / (spanM * plotFramingHeadroom))
     guard zoom.isFinite else { return nil }
     return min(max(zoom, BasemapMapView.zoomRange.lowerBound),
                BasemapMapView.zoomRange.upperBound)
@@ -174,6 +196,37 @@ extension MapHomeScreen {
             camera = BasemapCamera(latitude: centre.latitude,
                                    longitude: centre.longitude,
                                    zoom: zoom)
+        }
+    }
+
+    /// GLIDE the camera to `centre` at `zoom` — the ground travels under the
+    /// cruiser's eye instead of cutting.
+    ///
+    /// `withAnimation` cannot do this. The map is a Canvas that reads
+    /// `camera` at draw time, so an animated assignment slides the pin VIEWS
+    /// over tiles that have already jumped — which reads as a glitch, not as
+    /// a move. Showing someone where a plot is only works if they can watch
+    /// the trip, so the camera is stepped here, frame by frame, and the
+    /// tiles travel with the pins.
+    ///
+    /// Ease-out over ~0.6 s: quick off the mark, settling onto the target.
+    /// A second call replaces the first — two loops writing the same camera
+    /// would fight, and the cruiser's last tap is the one they meant.
+    func flyCamera(to centre: CoordinateConversions.LatLon, zoom: Double) {
+        let from = camera
+        let steps = 36
+        cameraFlight?.cancel()
+        cameraFlight = Task { @MainActor in
+            for step in 1...steps {
+                try? await Task.sleep(nanoseconds: 16_000_000)
+                if Task.isCancelled { return }
+                let t = Double(step) / Double(steps)
+                let eased = 1 - pow(1 - t, 3)
+                camera = BasemapCamera(
+                    latitude: from.latitude + (centre.latitude - from.latitude) * eased,
+                    longitude: from.longitude + (centre.longitude - from.longitude) * eased,
+                    zoom: from.zoom + (zoom - from.zoom) * eased)
+            }
         }
     }
 

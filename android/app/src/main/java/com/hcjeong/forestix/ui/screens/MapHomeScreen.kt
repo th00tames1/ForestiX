@@ -205,7 +205,7 @@ private val DefaultCenter = CoordinateConversions.LatLon(latitude = 44.56417, lo
 /// screen at arm's length without a pinch. Every camera move that has no
 /// better idea of a scale uses this one constant. iOS `MapHomeScreen
 /// .defaultZoom` is the same 18.
-private const val DefaultZoom = 18.0
+internal const val DefaultZoom = 18.0
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

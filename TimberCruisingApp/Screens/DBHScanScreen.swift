@@ -1554,9 +1554,9 @@ public struct DBHScanScreen: View {
     /// `plotOverlayMarkers` is empty and the cruiser is looking at a bare
     /// camera feed with a plot open.
     ///
-    /// That is every plot opened from a planned pin ("Start plot now" /
-    /// "Set plot centre (GPS)" — the fast route report 17 introduced) and
-    /// every plot carried across an app restart, because the ARKit world
+    /// That is every plot opened from a planned pin ("Start plot now" — the
+    /// fast route report 17 introduced) and every plot carried across an
+    /// app restart, because the ARKit world
     /// map dies with the process. The linked-id test is the same one the
     /// border chip and the mini-map use: an "Add tree" can target an OLDER
     /// open plot than the last-placed ring, and that ring is not this

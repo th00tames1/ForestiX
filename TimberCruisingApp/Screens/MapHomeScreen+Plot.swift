@@ -406,7 +406,7 @@ extension MapHomeScreen {
 
     // MARK: - Tap menu (M2)
 
-    /// A tap on the plot drawn on the map (the map's `onPlotTap`) — raises
+    /// A tap on the plot drawn on the map (the map's `onOverlayTap`) — raises
     /// that plot's Edit / Remove menu. Ignores an id that no longer names
     /// a plot in this project.
     func openPlotMenu(_ plotID: String) {

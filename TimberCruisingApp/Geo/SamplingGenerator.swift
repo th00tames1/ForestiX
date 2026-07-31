@@ -53,7 +53,7 @@ public enum SamplingGenerator {
         }
     }
 
-    public enum GenerationError: Error, CustomStringConvertible {
+    public enum GenerationError: Error, LocalizedError, CustomStringConvertible {
         case missingGridSpacing
         case missingNPerStratum
         case noStrata
@@ -67,6 +67,11 @@ public enum SamplingGenerator {
             case .invalidGeometry(let r): return "Invalid geometry: \(r)"
             }
         }
+
+        // Cruise setup reports a failed generation with `localizedDescription`.
+        // Without this, a bare Swift Error prints "The operation couldn't be
+        // completed (error 0.)" and the reason above never reaches the cruiser.
+        public var errorDescription: String? { description }
     }
 
     // MARK: - Public API

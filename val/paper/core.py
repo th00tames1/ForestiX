@@ -49,6 +49,9 @@ DEVICES = ["ios", "android"]
 DEVICE_LABEL = {"ios": "iOS (LiDAR)", "android": "Android (ARCore)"}
 DEVICE_SHORT = {"ios": "iOS", "android": "Android"}
 SITES = ["McDunn", "Starker"]
+# The stands' full names, for anything a reader sees. The short keys stay in the
+# data because that is what the capture files carry; only the label changes.
+SITE_LABEL = {"McDunn": "McDunn Forest", "Starker": "Starker Forest"}
 
 # Diameter classes a cruiser would recognise. Open-ended at the top because
 # the largest stems are few and a fixed top edge would leave an empty class.
@@ -322,6 +325,10 @@ def use_style():
         "axes.titlesize": 10, "axes.titleweight": "bold", "axes.labelsize": 9,
         "axes.edgecolor": "#4A4A4A", "axes.linewidth": 0.8,
         "axes.spines.top": False, "axes.spines.right": False,
+        # Item 3: bars are outlined in black everywhere. Set in the style so a
+        # new bar chart cannot be added without it.
+        "patch.edgecolor": "black", "patch.force_edgecolor": False,
+        "hatch.linewidth": 0.7,
         "axes.grid": True, "grid.color": PALETTE["grid"],
         "grid.linewidth": 0.6, "grid.alpha": 0.9,
         "xtick.labelsize": 8, "ytick.labelsize": 8,
@@ -352,6 +359,76 @@ def save_table(df: pd.DataFrame, name: str, caption: str = ""):
         with open(os.path.join(RESDIR, f"{name}.txt"), "w") as fh:
             fh.write(caption.strip() + "\n")
     return os.path.join(RESDIR, f"{name}.csv")
+
+
+def statbox(ax, pairs, loc="lower right", fontsize=9.5, gap=14.0):
+    """The statistics block, as a table with its rules taken out.
+
+    Labels ragged-left, values ragged-RIGHT, sharing one frame: a stat block
+    whose numbers do not line up is read digit by digit instead of at a glance,
+    and lining up the decimal points is the whole reason the block is there.
+    Two text artists on a measured grid do what a tab stop would — matplotlib
+    has no tab stops, and padding a string with spaces only aligns under a
+    monospace font, which the house style is not.
+
+    The columns are MEASURED, not estimated from character counts: `$R^2$`
+    renders four glyphs wide and reads as five characters, and one such guess
+    puts the two columns on top of each other.
+    """
+    from matplotlib.patches import FancyBboxPatch
+
+    labels = "\n".join(k for k, _ in pairs)
+    values = "\n".join(v for _, v in pairs)
+    right = "right" in loc
+    x0 = 0.97 if right else 0.03
+    y0, va = (0.05, "bottom") if "lower" in loc else (0.95, "top")
+    kw = dict(transform=ax.transAxes, va=va, fontsize=fontsize, zorder=7,
+              linespacing=1.5)
+    t_lab = ax.text(0, 0, labels, ha="left", **kw)
+    t_val = ax.text(0, 0, values, ha="right", **kw)
+
+    fig = ax.figure
+    fig.canvas.draw()
+    inv = ax.transAxes.inverted()
+    def width_of(t):
+        bb = t.get_window_extent(fig.canvas.get_renderer())
+        return abs(inv.transform((bb.x1, 0))[0] - inv.transform((bb.x0, 0))[0])
+    w_lab, w_val = width_of(t_lab), width_of(t_val)
+    g = gap / (ax.get_window_extent().width or 1) * 1.0
+    g = abs(inv.transform((gap, 0))[0] - inv.transform((0, 0))[0])
+    total = w_lab + g + w_val
+
+    left = x0 - total if right else x0
+    t_lab.set_position((left, y0))
+    t_val.set_position((left + total, y0))
+
+    pad = abs(inv.transform((6, 0))[0] - inv.transform((0, 0))[0])
+    bb = t_val.get_window_extent(fig.canvas.get_renderer())
+    h = abs(inv.transform((0, bb.y1))[1] - inv.transform((0, bb.y0))[1])
+    y_bot = y0 if va == "bottom" else y0 - h
+    ax.add_patch(FancyBboxPatch(
+        (left - pad, y_bot - pad), total + 2 * pad, h + 2 * pad,
+        boxstyle="round,pad=0.012", transform=ax.transAxes, zorder=6,
+        facecolor="white", edgecolor=PALETTE["grid"], linewidth=0.8,
+        alpha=0.94, clip_on=False))
+    return t_lab, t_val
+
+
+def grouped_legend(ax, loc="upper left", fontsize=8.5, **kw):
+    """Legend with the markers together and the lines together.
+
+    Mixing a fitted line in among the site markers makes the reader sort the
+    entries themselves; keeping like with like means the key reads as two short
+    lists rather than one shuffled one.
+    """
+    handles, labels = ax.get_legend_handles_labels()
+    def is_line(h):
+        ls = getattr(h, "get_linestyle", lambda: "None")()
+        return ls not in ("None", "none", "")
+    order = ([i for i, h in enumerate(handles) if not is_line(h)]
+             + [i for i, h in enumerate(handles) if is_line(h)])
+    return ax.legend([handles[i] for i in order], [labels[i] for i in order],
+                     loc=loc, fontsize=fontsize, **kw)
 
 
 def square_identity_axes(ax, *series, pad=0.04):

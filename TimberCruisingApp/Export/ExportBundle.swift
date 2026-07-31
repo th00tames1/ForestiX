@@ -52,8 +52,20 @@ public protocol ExportDataSource {
     func hdFits(forProjectId: UUID) throws -> [HeightDiameterFit]
 }
 
-public enum ExportBundleError: Error {
+public enum ExportBundleError: Error, LocalizedError, CustomStringConvertible {
     case designNotFound
+
+    public var description: String {
+        switch self {
+        case .designNotFound:
+            return "This project has no cruise design. Open Cruise setup and choose a plot design first."
+        }
+    }
+
+    // The export screens catch every failure and show `localizedDescription`.
+    // Without this, a bare Swift Error prints "The operation couldn't be
+    // completed (error 0.)", which tells a cruiser nothing about what to fix.
+    public var errorDescription: String? { description }
 }
 
 public enum ExportBundleBuilder {

@@ -132,7 +132,7 @@ public struct PDFReportInputs {
     }
 }
 
-public enum PDFReportBuilderError: Error, CustomStringConvertible {
+public enum PDFReportBuilderError: Error, LocalizedError, CustomStringConvertible {
     case contextCreationFailed
     case writeFailed(String)
 
@@ -142,6 +142,11 @@ public enum PDFReportBuilderError: Error, CustomStringConvertible {
         case .writeFailed(let m):    return "Failed to write PDF: \(m)"
         }
     }
+
+    // The export screens catch every failure and show `localizedDescription`.
+    // Without this, a bare Swift Error prints "The operation couldn't be
+    // completed (error 0.)" and the reason above never reaches the cruiser.
+    public var errorDescription: String? { description }
 }
 
 public enum PDFReportBuilder {

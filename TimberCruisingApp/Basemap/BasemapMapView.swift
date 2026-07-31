@@ -292,7 +292,7 @@ public struct BasemapPlotOverlay: Equatable {
     /// Inside / outside / unknown. `.outside` and `.inside` are only
     /// ever passed with a `cruiser`.
     public let state: CruiserState
-    /// Echoed back through `onPlotTap` when the boundary is tapped.
+    /// Echoed back through `onOverlayTap` when the boundary is tapped.
     public let id: String
 
     /// Calm boundary / ring / centre ink.

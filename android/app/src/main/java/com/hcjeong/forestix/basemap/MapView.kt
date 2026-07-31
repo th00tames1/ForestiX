@@ -185,7 +185,7 @@ data class MapPlotOverlay(
     val rings: List<MapPlotRing> = emptyList(),
     val cruiser: CoordinateConversions.LatLon? = null,
     val state: MapPlotFix = MapPlotFix.UNKNOWN,
-    /// Echoed back through MapView's onPlotTap when the boundary is tapped.
+    /// Echoed back through MapView's onOverlayTap when the boundary is tapped.
     val id: String = "plot",
 )
 

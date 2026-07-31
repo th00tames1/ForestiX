@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The analysis table, with every diameter recomputed from the raw depth.
+"""The analysis table: what both handsets reported, against the tape and laser.
 
 WHY NOT THE EXPORTED READINGS. The app stores each diameter twice — once on
 the reading in the field log, once as `result_live` in the raw-capture bundle —
@@ -38,8 +38,11 @@ import json, glob, os, csv, struct, math, datetime as dt, statistics as st, coll
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 VAL = os.path.dirname(HERE)
-CSVS = {"android": "quick-measure-2026-07-30T19-22-37.csv",
-        "ios": "quick-measure-2026-07-31T02-22-50Z.csv"}
+# Re-exported from both handsets on 2026-07-31, AFTER the tangent estimator
+# shipped. These carry what the application now reports, which is what the
+# recomputation below has to reproduce.
+CSVS = {"android": "quick-measure-2026-07-31T03-41-44.csv",
+        "ios": "quick-measure-2026-07-31T10-42-50Z.csv"}
 PLOTS = ("Val_McDunn", "Val_Starker")
 PT = dt.timezone(dt.timedelta(hours=-7))
 IN, FT = 2.54, 0.3048
@@ -93,6 +96,13 @@ def depth_of(path, w, h, fmt):
     return None
 
 
+# How far behind the near face the middle-half depth median sits, as a fraction
+# of the radius: 1 - sqrt(15)/4. Same constant as
+# `DBHEstimator.medianDepthOffsetFactor` on both platforms.
+MEDIAN_DEPTH_OFFSET_FACTOR = 1.0 - math.sqrt(15.0) / 4.0
+IDENTITY = os.environ.get("FORESTIX_IDENTITY", "tangent")
+
+
 def core_range(i_lo, i_hi):
     """`bracketCoreRange` — the bracket's middle half.
 
@@ -109,7 +119,7 @@ def core_range(i_lo, i_hi):
 
 
 def frame_diameter(frame, dirpath, lo, hi):
-    """One frame's diameter, by the estimator the app ships today.
+    """One frame's diameter, by the estimator the app ships today (epoch 3).
 
     ONE IMPLEMENTATION FOR EVERY CAPTURE, deliberately. The recording binary
     changed during the collection — the middle-half trim landed on 2026-07-28,
@@ -160,7 +170,20 @@ def frame_diameter(frame, dirpath, lo, hi):
     z = st.median(vals)
     if not (0.3 <= z <= 5.0):
         return None
-    return span * z / (focal - span / 2) * 100.0
+    # `DBHEstimator.silhouetteDiameterCm`, epoch 3 — the identity the app
+    # ships. The bracket's edges are TANGENT points, not the ends of a chord,
+    # and the middle-half depth median sits (1 - sqrt(15)/4) R behind the near
+    # face the tangent form wants, so R is substituted and solved rather than
+    # iterated. Keeping this in step with the Swift and the Kotlin is the whole
+    # point: the table has to say what the application says.
+    if IDENTITY == "chord":
+        return span * z / (focal - span / 2) * 100.0
+    k = span / (2.0 * focal)
+    kk = k * (k + math.sqrt(k * k + 1.0))
+    radius_m = z * kk / (1.0 + MEDIAN_DEPTH_OFFSET_FACTOR * kk)
+    if not (radius_m > 0):
+        return None
+    return 2.0 * radius_m * 100.0
 
 
 def recomputed(plat):
@@ -312,8 +335,23 @@ for plot, label, irec, arec, gap in pairs:
                     flags.append(f"{who}-auto")
         gt_i = i["truth"] if i else None
         gt_a = a["truth"] if a else None
-        iv = (i.get("recomputed") if kind == "dbh" else i["value"]) if i else None
-        av = (a.get("recomputed") if kind == "dbh" else a["value"]) if a else None
+        # THE APPLICATION'S OWN NUMBER IS THE MEASUREMENT. What is being
+        # validated is the app a cruiser carries, and the app's number is the
+        # one it wrote down in the field — so that is what goes in the table,
+        # for diameters exactly as it already did for heights.
+        #
+        # The from-raw recomputation still runs, and is kept beside each
+        # reading as `*_value_recomputed`. It earns its keep as a CHECK — it is
+        # how the wrong-guide-axis readings were found — but it is a
+        # reconstruction, and a reconstruction must not be reported as though
+        # the handset had displayed it.
+        #
+        # These 100 stems were captured before the tangent identity shipped, so
+        # the diameters here are the chord identity's. That is a fact about
+        # when the data was taken, not something to paper over: see
+        # `deprecated/README.md` and the limitation stated with the results.
+        iv = i["value"] if i else None
+        av = a["value"] if a else None
 
         # One tape, resolved. See the module docstring for the rule.
         if gt_i is None and gt_a is not None:
@@ -377,12 +415,12 @@ for plot, label, irec, arec, gap in pairs:
             "ios_value_imp": imp(iv), "android_value_imp": imp(av),
             "ios_ratio": f"{iv/truth:.4f}" if iv and truth else "",
             "android_ratio": f"{av/truth:.4f}" if av and truth else "",
-            "ios_value_source": ((i.get("recomputed_source", "") if kind == "dbh"
-                                  else "as-recorded") if iv is not None else ""),
-            "android_value_source": ((a.get("recomputed_source", "") if kind == "dbh"
-                                      else "as-recorded") if av is not None else ""),
-            "ios_value_asrecorded": cell(i["value"] if i else None),
-            "android_value_asrecorded": cell(a["value"] if a else None),
+            "ios_value_source": ("as-recorded" if iv is not None else ""),
+            "android_value_source": ("as-recorded" if av is not None else ""),
+            "ios_value_recomputed": cell(i.get("recomputed") if i and kind == "dbh"
+                                         else None),
+            "android_value_recomputed": cell(a.get("recomputed") if a and kind == "dbh"
+                                             else None),
             "ios_sigma": cell(i["sigma"] if i else None),
             "android_sigma": cell(a["sigma"] if a else None),
             "ios_confidence": (i["conf"] if i else ""),
@@ -425,7 +463,7 @@ for pid, kind, gi_, ga_, kept, meas, why in RESOLVED:
           f"{kepts:>9s}  {why}")
 
 print("\n" + "=" * 78)
-print("MEASURED / TAPE — every diameter recomputed from the raw depth")
+print("MEASURED / TAPE — as the two handsets reported it")
 print("=" * 78)
 print("  Cells the cruiser typed rather than measured are left out; they are")
 print("  the tape written back to itself, not an independent reading.")

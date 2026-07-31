@@ -1,7 +1,7 @@
 // Cruise MODE of the map home — the v3 cruise map (approved mock
 // design/forestix-redesign-v3-cruise.html: ① cruise map, ② plot peek,
-// ④ tree peek, ⑤ project sheet, ⑥ cruise setup, ⑦ planned plot + guide,
-// ⑧ inline centre record; ③ tally loop rides the shared DBH screen as a
+// ④ tree peek, ⑤ project sheet, ⑥ cruise setup, ⑦ planned plot + guide;
+// ③ tally loop rides the shared DBH screen as a
 // DIAMETER LOOP via CruiseCapture — heights on demand from the tree peek
 // / plot sample heights sheet) absorbed into MapHomeScreen as a TOGGLED MODE (v3.1):
 // one map, two modes, no navigation between them. MapHomeScreen owns the
@@ -11,14 +11,16 @@
 // The map IS the cruise: plot RING pins (amber = active/in-progress,
 // green = closed, HOLLOW DASHED = planned) + cruise tree teardrop pins
 // are the whole workflow surface. The single primary (+) STATE-MORPHS:
-// no active plot → "Start plot" (AR sampling-ring component saving a cruise
-// Plot row); active plot → "Add tree · Plot N" straight into the shared
-// DBH→Height chain on the next auto tree number. A planned pin peeks into
-// "Start plot now" (one tap, the fix that is live at that instant, plot
-// open and measurable immediately — field report 17), "Set plot centre
-// (GPS)" (the inline GPS-averaging sheet, kept but no longer a gate) or
-// "Navigate" (dashed you-dot→plot guide line + live distance chip — the
-// map is the nav).
+// no active plot and no plans → "Start plot" (AR sampling-ring component
+// saving a cruise Plot row); plans waiting → "Go to Plot N", which glides
+// the camera onto the lowest-numbered unvisited plan, draws the guide to
+// it and raises its card; active plot → "Add tree · Plot N" straight into
+// the shared DBH→Height chain on the next auto tree number. A planned pin
+// peeks into the PAIR: "Start plot now" (one tap, the fix that is live at
+// that instant, plot open and measurable immediately — field report 17)
+// and "Navigate" (dashed you-dot→plot guide line + live distance chip —
+// the map is the nav). The 60 s GPS-averaging sheet is no longer offered
+// there: field feedback found the window worse than not having it.
 // Quick-measure pins NEVER appear in cruise mode and cruise pins never
 // appear in measure mode — the two data worlds stay separate.
 
@@ -146,12 +148,14 @@ import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.pressableNoRipple
 import com.hcjeong.forestix.ui.screens.CaptureColumn
 import com.hcjeong.forestix.ui.screens.ClusterSlots
+import com.hcjeong.forestix.ui.screens.DefaultZoom
 import com.hcjeong.forestix.ui.screens.ExportViewModel
 import com.hcjeong.forestix.ui.screens.FieldLogWords
 import com.hcjeong.forestix.ui.screens.Haptics
 import com.hcjeong.forestix.ui.screens.PeekActionButton
 import com.hcjeong.forestix.ui.screens.PhotoThumb
 import com.hcjeong.forestix.ui.screens.PhotoViewerDialog
+import com.hcjeong.forestix.ui.screens.PlotDetailSheet
 import com.hcjeong.forestix.ui.screens.SideCircleButton
 import com.hcjeong.forestix.ui.screens.TierChipSoft
 import com.hcjeong.forestix.ui.screens.tree.TierExplainerKind
@@ -172,7 +176,9 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import kotlin.math.max
 import kotlin.math.roundToInt
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -320,7 +326,7 @@ internal class CruiseModeState {
             null -> settings.unitSystem
         }
 
-    /// A tap on the plot drawn on the map (MapView's onPlotTap) — raises
+    /// A tap on the plot drawn on the map (MapView's onOverlayTap) — raises
     /// that plot's Edit / Remove menu. Ignores an id that no longer names a
     /// plot in this project.
     fun openPlotMenu(plotId: String) {
@@ -1706,10 +1712,16 @@ private fun PlannedPeekCard(
         }
         Spacer(Modifier.size(8.dp))
         // 44 dp outline skip toggle — an EXPLICIT cruiser action (unlike
-        // `visited`, which flips implicitly on recording a centre).
-        // "Mark unreachable" documents a cliff/water/private-land plot so
-        // navigation passes over it; "Restore plot" undoes it. Same two
-        // words and same warn/neutral treatment as iOS.
+        // `visited`, which flips implicitly when the plot is opened). "Skip
+        // this plot" documents a cliff/water/private-land plot so navigation
+        // passes over it; "Unskip this plot" undoes it.
+        //
+        // It read "Mark unreachable" / "Restore plot", which is office
+        // language: nobody in the field says they marked a plot unreachable,
+        // they say they skipped it. "Restore" was the worse of the two — it
+        // is the word for bringing back something deleted, and nothing here
+        // was ever deleted. Same two words and same warn/neutral treatment
+        // as iOS.
         Box(
             Modifier
                 .fillMaxWidth()
@@ -1724,7 +1736,7 @@ private fun PlannedPeekCard(
             contentAlignment = Alignment.Center,
         ) {
             Text(
-                if (skipped) "Restore plot" else "Mark unreachable",
+                if (skipped) "Unskip this plot" else "Skip this plot",
                 style = type.bodyBold.copy(fontSize = 14.sp),
                 color = if (skipped) colors.textPrimary else colors.confidenceWarn,
             )
@@ -1734,18 +1746,24 @@ private fun PlannedPeekCard(
         // press-and-hold that made the plan; Delete throws the plan away.
         // Both sit below the skip toggle because they change the plan itself
         // rather than what to do about it. iOS carries the same pair.
+        //
+        // "Move plan", not "Move on map" and not "Relocate": it is the
+        // word-for-word pair of the "Delete plan" beside it, and it names
+        // WHAT moves. A cruiser reading "Relocate" on a card titled "Plot 4
+        // (planned)" has to work out whether the plot they measured is about
+        // to move — this one cannot be read that way.
         Row(horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs)) {
             Box(
                 Modifier
                     .weight(1f)
                     .heightIn(min = 44.dp)
-                    .pressableNoRipple(onClick = onMoveOnMap)
+                    .pressableNoRipple(onClick = onMovePlan)
                     .clip(ForestixRadius.control)
                     .border(1.dp, colors.divider, ForestixRadius.control),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
-                    "Move on map",
+                    "Move plan",
                     style = type.bodyBold.copy(fontSize = 14.sp),
                     color = colors.textPrimary,
                 )
@@ -1851,7 +1869,8 @@ private fun SkippedChip() {
 @Composable
 private fun CruiseActionCluster(
     activePlot: Plot?,
-    hasPlannedUnvisited: Boolean,
+    /// The plan the (+) will take the cruiser to, so the button can NAME it.
+    nextPlanned: PlannedPlot?,
     treeCount: Int,
     projectName: String,
     modifier: Modifier = Modifier,
@@ -1887,18 +1906,27 @@ private fun CruiseActionCluster(
             // 74 dp primary (+) — LOCKED cruise-accent fill + WHITE glyph;
             // accent-scoped outline while a plot is active (mock
             // `.capture.scoped`). LOCKED strings: active plot → "Add tree ·
-            // Plot N"; unvisited plan waiting → "Set plot centre" (map-peek
-            // spec item 5); otherwise → "Start plot".
+            // Plot N"; unvisited plan waiting → "Go to Plot N"; otherwise →
+            // "Start plot".
+            //
+            // It read "Set plot centre", which described a sheet that is no
+            // longer what the button opens. It NAMES THE PLOT because the
+            // whole complaint was that the cruiser could not tell which plan
+            // they were being sent to; "Add tree · Plot N" beside it already
+            // establishes that this button says what it is about to act on.
+            // ("Start cruising" was the other candidate and reads wrong by
+            // the third plot of the morning — the button is pressed once per
+            // plot all day, not once per cruise.)
             val captureLabel = when {
                 activePlot != null -> "Add tree · Plot ${activePlot.plotNumber}"
-                hasPlannedUnvisited -> "Set plot centre"
+                nextPlanned != null -> "Go to Plot ${nextPlanned.plotNumber}"
                 else -> "Start plot"
             }
             CaptureColumn(
                 caption = captureLabel,
                 contentDescription = when {
                     activePlot != null -> "Add tree"
-                    hasPlannedUnvisited -> "Set plot centre"
+                    nextPlanned != null -> "Go to Plot ${nextPlanned.plotNumber}"
                     else -> "Start plot"
                 },
                 fill = colors.cruiseAccent,
@@ -1980,6 +2008,7 @@ private fun PlotPeekCard(
     onHeights: () -> Unit,
     onClose: () -> Unit,
     onDelete: () -> Unit,
+    onAddDetails: () -> Unit,
     onDetails: () -> Unit,
 ) {
     val colors = Forestix.colors
@@ -2133,6 +2162,26 @@ private fun PlotPeekCard(
         ) {
             Text(
                 heightsLabel,
+                style = type.bodyBold.copy(fontSize = 13.sp, fontWeight = FontWeight.SemiBold),
+                color = colors.textPrimary,
+            )
+        }
+        // SITE DESCRIPTION — slope, aspect, ground elevation, canopy cover.
+        // It sits beside Sample heights because both are the same kind of
+        // act: recording something about THIS PLOT that the tally itself
+        // cannot see. "Add details" rather than a second "Details" verb — the
+        // pair below opens the plot's report, this one is where a cruiser
+        // writes the ground down.
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(min = 44.dp)
+                .clickableNoRipple(onAddDetails),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                "Add details",
                 style = type.bodyBold.copy(fontSize = 13.sp, fontWeight = FontWeight.SemiBold),
                 color = colors.textPrimary,
             )

@@ -16,6 +16,16 @@
 // CruiseOffsetHostScreen below); its computed PlotCenterResult lands
 // the centre through the same save path.
 //
+// NOTHING OPENS THIS SHEET TODAY. Field feedback retired the averaging
+// window outright: the planned-plot card's "Set plot centre (GPS)" is gone
+// and the (+) now walks the cruiser to the next plan instead. The sheet is
+// kept because it is the ONLY door to the offset-from-opening fallback — the
+// one path that produces a plot centre where GPS cannot, which no feedback
+// asked to lose — and deleting it would take OffsetFlowScreen and the
+// CruiseRoutes.OFFSET host with it. That is a call for the field, not for a
+// rename item. `singleFixCentre`, `convertPlannedToActivePlot` and
+// `CruiseOffsetHostScreen` further down this file are all live.
+//
 // FIELD REPORT 17 — averaging is no longer a GATE. The 60 s window was
 // the only way out of this sheet, and a cruiser who has already walked to
 // the plot spends that minute standing still under a canopy that is not
@@ -267,7 +277,8 @@ fun RecordCentreSheet(
                 .padding(bottom = ForestixSpace.xl),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // Sheet header — matches the planned-peek "Set plot centre" verb.
+                // Sheet header — names the act, since the peek that used to
+                // carry the same verb no longer offers it.
                 Text(
                     "SET PLOT CENTRE",
                     style = type.sectionHead.copy(

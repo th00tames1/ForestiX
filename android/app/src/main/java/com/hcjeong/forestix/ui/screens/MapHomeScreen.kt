@@ -545,7 +545,7 @@ fun MapHomeScreen(nav: NavController) {
             // a different object because the map that drew it was in measure
             // mode — and measure mode does keep plots, they are just the
             // project-less quick-measure ones. What the menu OFFERS narrows
-            // with the mode (see MapPlanMenu); the gesture itself never does.
+            // with the mode (see MapPlanCallout); the gesture itself never does.
             // iOS ungates it the same way.
             onMapLongPress = { coordinate ->
                 // A press while an outline is being dragged belongs to that
@@ -727,6 +727,7 @@ fun MapHomeScreen(nav: NavController) {
                         state = cruise,
                         nav = nav,
                         fix = fix,
+                        camera = camera,
                         onToggleMode = { setMode("measure") },
                     )
                 } else {

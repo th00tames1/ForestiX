@@ -14,8 +14,20 @@
 import Foundation
 import Models
 
-public enum GeoJSONExporterError: Error {
+public enum GeoJSONExporterError: Error, LocalizedError, CustomStringConvertible {
     case serializationFailed
+
+    public var description: String {
+        switch self {
+        case .serializationFailed:
+            return "The cruise could not be written as GeoJSON."
+        }
+    }
+
+    // The export screens catch every failure and show `localizedDescription`.
+    // Without this, a bare Swift Error prints "The operation couldn't be
+    // completed (error 0.)", which tells a cruiser nothing about what to fix.
+    public var errorDescription: String? { description }
 }
 
 public enum GeoJSONExporter {

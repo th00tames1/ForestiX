@@ -300,7 +300,7 @@ public struct MapHomeScreen: View {
     /// The cruiser asked to plan on the map and has not pressed yet — the
     /// map shows the instruction banner until they do or cancel.
     @State var awaitingMapPlanPress = false
-    /// The planned plot a "Move on map" is in flight for. The next long
+    /// The planned plot a "Move plan" is in flight for. The next long
     /// press MOVES it instead of raising the menu; a plan drawn in the wrong
     /// spot is the ordinary case, not an exception.
     @State var movingPlannedID: UUID?
@@ -828,7 +828,7 @@ public struct MapHomeScreen: View {
             // not become a different object because the map that drew it was
             // in measure mode — and measure mode does keep plots, they are
             // just the project-less quick-measure ones. What the menu OFFERS
-            // narrows with the mode (see the dialog in the cruise extension);
+            // narrows with the mode (see `planPin` in the area extension);
             // the gesture itself never does.
             onMapLongPress: { coordinate in
                 handleMapLongPress(at: coordinate)

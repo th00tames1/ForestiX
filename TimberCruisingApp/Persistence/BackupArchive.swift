@@ -26,7 +26,7 @@ import CoreData
 import Common
 import Models
 
-public enum BackupError: Error, CustomStringConvertible {
+public enum BackupError: Error, LocalizedError, CustomStringConvertible {
     case projectNotFound(UUID)
     case missingSqlite
     case archiveCorrupt(String)
@@ -47,6 +47,12 @@ public enum BackupError: Error, CustomStringConvertible {
             return "Filesystem I/O failed: \(m)"
         }
     }
+
+    // Backup and restore report failures with `localizedDescription`. Without
+    // this, a bare Swift Error prints "The operation couldn't be completed
+    // (error 0.)" — and on a failed RESTORE that sentence is the only thing
+    // telling the cruiser whether their archive is corrupt or merely too new.
+    public var errorDescription: String? { description }
 }
 
 public struct BackupManifest: Codable, Sendable, Equatable {

@@ -1165,7 +1165,30 @@ public final class DBHScanViewModel: ObservableObject {
         burstUsedBracket = edgeAdjustActive
         burstBracketLeft = edgeBracketLeftFraction
         burstBracketRight = edgeBracketRightFraction
-        burstBracketAxis = adjustAxisLatch
+        // VOTE THE AXIS HERE, on the frame the cruiser is aimed at right now.
+        //
+        // This used to copy `adjustAxisLatch`, the session-scoped preview
+        // latch, which is the failure its own doc comment warns about: the
+        // latch is taken on the first preview tick that measures anything —
+        // while the phone is still being raised — and then every capture of
+        // the plot inherits it. A wrong axis reads the handle fractions
+        // against the other extent (256 px instead of 192) and multiplies the
+        // diameter by 4:3, silently.
+        //
+        // It reached the field. Across the two validation plots the reading
+        // and the bundle disagreed on 60 of 107 iOS diameters, the reading
+        // running 1.38x high, and recomputing those 60 on the opposite axis
+        // reproduces the reading to a median ratio of 1.0000. The bundle —
+        // which votes per capture, below in `recordDBH` — is the one that
+        // matches the tape.
+        //
+        // So: vote per capture, off `latestFrameForBracket`, and hand that
+        // same axis to the recorder so the two records cannot diverge again.
+        // The preview keeps its latch; it costs one vote per capture here,
+        // not one per tick, which is what field report 9 asked for.
+        burstBracketAxis = latestFrameForBracket.map {
+            DBHEstimator.pickGuideAxis(frame: $0, tapPixel: tapPixel, calibration: calibration)
+        } ?? adjustAxisLatch
         burstBuffer.removeAll(keepingCapacity: true)
         burstTap = tapPixel
         subSamples.removeAll(keepingCapacity: true)
@@ -1409,6 +1432,11 @@ public final class DBHScanViewModel: ObservableObject {
         let tap = burstTap
         let cal = calibration
         let algo = dbhMeasurementMethod
+        // The axis the READING was computed on. The recorder used to vote its
+        // own, off a different frame, and a disagreement rescaled the bundle
+        // against the field log by 4:3 with nothing on screen to show for it.
+        // One vote, both records.
+        let axis = burstBracketAxis
         let bracket = RawCaptureManifest.DBHBundle.Bracket(
             enabled: burstUsedBracket, left: burstBracketLeft, right: burstBracketRight)
         let manual = burstUsedBracket
@@ -1423,7 +1451,7 @@ public final class DBHScanViewModel: ObservableObject {
             let outcome = RawCaptureRecorder.recordDBH(
                 id: id,
                 frames: framesToRecord, tapPixel: tap, calibration: cal,
-                algorithm: algo, bracket: bracket,
+                algorithm: algo, bracket: bracket, guideAxis: axis,
                 captureManual: manual, context: ctx,
                 referenceJPEG: jpeg, gps: gps)
             await MainActor.run { self?.lastCaptureOutcome = outcome }

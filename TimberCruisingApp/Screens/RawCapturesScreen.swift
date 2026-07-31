@@ -21,6 +21,12 @@ public struct RawCapturesScreen: View {
     @State private var inventory = RawCaptureStore.Inventory(directories: 0, parsed: 0)
     @State private var rerunSummary: String?
     @State private var isRerunning = false
+    /// The repair is two steps on purpose — see `previewRepair`. `pendingRepairs`
+    /// is what Apply would write; empty means there is nothing to apply.
+    @State private var pendingRepairs: [CaptureReadingMatch.Repair] = []
+    @State private var repairSummary: String?
+    @State private var isRepairing = false
+    @EnvironmentObject private var history: QuickMeasureHistory
     @State private var confirmClear = false
     /// Export runs off the main actor and can fail; both states are visible.
     @State private var isExporting = false
@@ -71,6 +77,43 @@ public struct RawCapturesScreen: View {
                     }
                 } header: {
                     Text("Stored captures")
+                }
+
+                // Re-run above only REPORTS. This is the one that writes, so
+                // it is a separate section, it previews first, and Apply only
+                // appears once there is something to apply.
+                Section {
+                    Button {
+                        previewRepair()
+                    } label: {
+                        HStack {
+                            Label("Check readings against captures",
+                                  systemImage: "checkmark.gobackward")
+                            Spacer()
+                            if isRepairing { ProgressView() }
+                        }
+                    }
+                    .disabled(isRepairing)
+                    .accessibilityIdentifier("rawCaptures.checkReadings")
+                    if let s = repairSummary {
+                        Text(s)
+                            .font(ForestixType.dataSmall)
+                            .foregroundStyle(ForestixPalette.textSecondary)
+                            .accessibilityIdentifier("rawCaptures.repairSummary")
+                    }
+                    if !pendingRepairs.isEmpty {
+                        Button(role: .destructive) {
+                            applyRepair()
+                        } label: {
+                            Label("Apply \(pendingRepairs.count) correction\(pendingRepairs.count == 1 ? "" : "s")",
+                                  systemImage: "square.and.pencil")
+                        }
+                        .accessibilityIdentifier("rawCaptures.applyRepair")
+                    }
+                } header: {
+                    Text("Field log")
+                } footer: {
+                    Text("Replays each capture with the current estimator and compares it with the reading it produced. Readings you typed are never touched.")
                 }
 
                 Section {
@@ -365,6 +408,99 @@ public struct RawCapturesScreen: View {
             lines.append(String(format: "vs truth (n=%d): mean %+.2f · median %+.2f",
                                 errorsVsTruth.count, mean, median))
         }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Which stored readings disagree with their own capture, without
+    /// changing anything. Always run before the repair, and shown on its own,
+    /// because "45 readings will change" is a thing the cruiser should get to
+    /// read before it happens rather than after.
+    private func previewRepair() {
+        isRepairing = true
+        let items = summaries
+        let entries = history.entries
+        Task.detached(priority: .userInitiated) {
+            let found = Self.plan(items: items, entries: entries)
+            await MainActor.run {
+                pendingRepairs = found
+                repairSummary = Self.repairPreviewText(found)
+                isRepairing = false
+            }
+        }
+    }
+
+    /// Write the previewed corrections into the field log.
+    private func applyRepair() {
+        let plan = pendingRepairs
+        guard !plan.isEmpty else { return }
+        let changed = history.repairValuesFromCaptures(CaptureReadingMatch.map(plan))
+        // Report what LANDED, not what was planned. The store re-checks every
+        // repair against the value it expected to find and skips any reading
+        // that moved in between, so the two counts can legitimately differ —
+        // and if they do, that is the interesting number.
+        repairSummary = changed == plan.count
+            ? "\(changed) reading\(changed == 1 ? "" : "s") corrected from their raw captures."
+            : "\(changed) of \(plan.count) corrected — the rest no longer held the value they were matched on."
+        pendingRepairs = []
+    }
+
+    /// Pure so it can run off the main actor and be reasoned about on its own:
+    /// replay every bundle, then pair the results with the readings.
+    static func plan(items: [RawCaptureSummary],
+                     entries: [QuickMeasureEntry]) -> [CaptureReadingMatch.Repair] {
+        var captures: [CaptureReadingMatch.Capture] = []
+        for sum in items {
+            let m = sum.manifest
+            // CRUISE CAPTURES ARE SKIPPED, for the reason `TruthBackfill`
+            // gives: a cruise capture's reading is a Tree/Stem record in Core
+            // Data, not a `QuickMeasureEntry`, so there is nothing here to
+            // pair it with and a tree number would collide across the two
+            // worlds if we tried.
+            guard m.context.mode != "cruise",
+                  let kind = readingKind(m.kind),
+                  let when = TruthBackfill.parseISO(m.createdAt)
+            else { continue }
+            let value: Double?
+            if m.kind == "dbh" {
+                value = RawCaptureReplay.rerunDBH(manifest: m, id: sum.id)
+                    .map { Double($0.diameterCm) }
+            } else {
+                value = RawCaptureReplay.rerunHeight(manifest: m)
+                    .map { Double($0.result.heightM) }
+            }
+            guard let v = value else { continue }
+            captures.append(.init(
+                bundleID: sum.id, kind: kind,
+                treeNumber: m.context.treeNumber,
+                plotID: m.context.plotId.flatMap(UUID.init(uuidString:)),
+                createdAt: when, value: v,
+                oppositeAxisValue: m.kind == "dbh"
+                    ? RawCaptureReplay.rerunDBHOppositeAxis(manifest: m, id: sum.id)
+                    : nil,
+                sigma: m.resultLive.sigma > 0 ? m.resultLive.sigma : nil))
+        }
+        return CaptureReadingMatch.repairs(captures: captures, entries: entries)
+    }
+
+    /// A bundle's kind string as a field-log kind. Only the two kinds the
+    /// estimators replay are repairable.
+    private static func readingKind(_ raw: String) -> QuickMeasureEntry.Kind? {
+        switch raw {
+        case "dbh":    return .dbh
+        case "height": return .height
+        default:       return nil
+        }
+    }
+
+    static func repairPreviewText(_ plan: [CaptureReadingMatch.Repair]) -> String {
+        guard !plan.isEmpty else {
+            return "No reading was measured on the wrong guide axis. Nothing to correct."
+        }
+        let factors = plan.map { $0.expected / $0.corrected }.sorted()
+        let median = factors[factors.count / 2]
+        var lines = ["\(plan.count) reading\(plan.count == 1 ? "" : "s") measured on the wrong guide axis."]
+        lines.append(String(format: "Stored / correct: median %.3f", median))
+        lines.append("Tap Apply to replace them with the values their captures give.")
         return lines.joined(separator: "\n")
     }
 

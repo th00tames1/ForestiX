@@ -581,6 +581,37 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             timeSource: timeSource)
     }
 
+    /// This reading re-stated with the value its OWN raw capture produces.
+    ///
+    /// Not `typedValue`. Nobody typed anything: the depth frames, the bracket
+    /// and the calibration are all still on disk, and this is what the shipped
+    /// estimator makes of them now that it reads them against the axis the
+    /// capture was actually taken on. So the σ, the confidence, the method and
+    /// the `captureMode` all survive — the measurement is the same
+    /// measurement, arithmetic and all; only a scale factor introduced between
+    /// the estimate and the log is being taken back out.
+    ///
+    /// `createdAt` is kept for the reason `typedValue` keeps it, doubled:
+    /// correcting a number is not a second visit, and the time is the only key
+    /// the bundle was matched on in the first place.
+    public func repairingValue(_ newValue: Double, sigma newSigma: Double?)
+        -> QuickMeasureEntry {
+        QuickMeasureEntry(
+            id: id, kind: kind, value: newValue,
+            secondaryValue: secondaryValue,
+            sigma: newSigma ?? sigma,
+            confidenceRaw: confidenceRaw, method: method,
+            createdAt: createdAt, treeNumber: treeNumber, treeName: treeName,
+            plotID: plotID,
+            speciesCode: speciesCode, position: position,
+            damageCodes: damageCodes, note: note,
+            latitude: latitude, longitude: longitude,
+            photoPath: photoPath, captureMode: captureMode, truth: truth,
+            truthSource: truthSource, truthUnit: truthUnit,
+            positionSource: positionSource,
+            timeSource: timeSource)
+    }
+
     /// This reading re-homed into another plot. Every other field is
     /// carried across verbatim: the two re-homing paths (default-plot
     /// bootstrap, plot deletion) used to rebuild the entry from a partial
@@ -974,6 +1005,61 @@ public final class QuickMeasureHistory: ObservableObject {
         persistCache()
         return changed
     }
+
+    /// Put stored readings back in step with their own raw captures.
+    ///
+    /// WHY THIS EXISTS. The diameter written to the log and the diameter kept
+    /// in the raw-capture bundle were computed against two separately-chosen
+    /// guide axes. When they disagreed, the log's copy was the bracket read
+    /// against the wrong extent — 256 px instead of 192 — and came out 4:3
+    /// too large, with nothing on screen to show for it. The estimator now
+    /// votes once per capture and hands that axis to the recorder, so new
+    /// captures cannot drift apart; this is for the ones already taken. On
+    /// the two validation plots it moves 41 of 49 diameters on one and 7 of
+    /// 49 on the other, from +38 % against the tape to +5 %.
+    ///
+    /// GUARDED THREE WAYS, because a bulk overwrite of measurements is the
+    /// most destructive thing in this file:
+    ///   - the caller passes the value it EXPECTS to find, and a reading that
+    ///     no longer holds it is skipped rather than overwritten — the same
+    ///     contract `repairTruthUnits` uses, and it is what makes running the
+    ///     repair twice a no-op;
+    ///   - a typed reading is never touched, whatever a bundle says, because
+    ///     the cruiser's own number outranks a replay of a capture they chose
+    ///     to override;
+    ///   - the replacement must be a plausible diameter, so a bundle that
+    ///     replays to nonsense cannot erase a good reading.
+    ///
+    /// Returns the number of readings actually changed.
+    @discardableResult
+    public func repairValuesFromCaptures(
+        _ repairs: [UUID: (expected: Double, corrected: Double, sigma: Double?)]
+    ) -> Int {
+        guard !repairs.isEmpty else { return 0 }
+        var changed = 0
+        var next = entries
+        for (idx, e) in next.enumerated() {
+            guard let r = repairs[e.id],
+                  e.captureMode != "typed",
+                  e.method != QuickMeasureEntry.typedMethodRaw(for: e.kind),
+                  abs(e.value - r.expected) <= Self.repairValueEpsilon,
+                  r.corrected.isFinite, r.corrected > 0,
+                  abs(e.value - r.corrected) > Self.repairValueEpsilon
+            else { continue }
+            next[idx] = e.repairingValue(r.corrected, sigma: r.sigma)
+            changed += 1
+        }
+        guard changed > 0 else { return 0 }
+        entries = next
+        rewriteSidecar()
+        persistCache()
+        return changed
+    }
+
+    /// Tighter than the truth epsilon: a repair is matched against a value
+    /// this file wrote itself, not against something a human typed, so it
+    /// should agree to the millimetre.
+    static let repairValueEpsilon = 1e-4
 
     /// Saves `entry` as THE reading of its kind for its (plot, tree) — any
     /// earlier reading of the same kind on the same tree is removed rather

@@ -486,8 +486,15 @@ public struct CruiseSetupSheet: View {
             // two areas never both hold a "Plot 4", and the ones this run
             // replaces, so old and new can sit in the store together without
             // either claiming the other's number.
-            let realNumbers = (try? environment.plotRepository
-                .listByProject(project.id))?.map(\.plotNumber) ?? []
+            //
+            // The real plots are READ, not attempted. An empty list from a
+            // refused read is indistinguishable from a project that has no
+            // measured plots, and both numberings below would then hand a new
+            // pin the number a tally is already filed under. This is still in
+            // front of every write, so refusing costs the run and nothing
+            // else — the same hard read `relayPlots` insists on.
+            let realNumbers = try environment.plotRepository
+                .listByProject(project.id).map(\.plotNumber)
             let startNumber =
                 ((realNumbers + allPlanned.map(\.plotNumber)).max() ?? 0) + 1
             // AND ONCE IT IS DONE the replaced numbers are free again, so the

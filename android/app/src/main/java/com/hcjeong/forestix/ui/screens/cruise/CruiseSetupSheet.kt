@@ -16,13 +16,15 @@
 //     spacing — ceil(√n) columns, row-major, exactly n plots. A small
 //     woodlot rarely needs a boundary before pins are useful.
 //
-// Planned-plot numbering continues after the project's existing real
-// plots (max plotNumber + 1) so informal plots started before setup
-// never collide with the plan, and after the plans that survive the run
-// so no two of them share a number. Generating replaces the previous
-// UNVISITED planned plots — a VISITED plan has a measured plot standing
-// on it and survives every re-run — and upserts the single CruiseDesign
-// record. Generation never gates measuring: planned pins are
+// Planned-plot numbering settles after the project's existing real plots
+// (max plotNumber + 1) so informal plots started before setup never
+// collide with the plan, and after the plans that survive the run so no
+// two of them share a number. It gets there in two steps, because the new
+// plan is written before the old one is deleted and the two are briefly
+// on disk together — see `generateCruisePlan`. Generating replaces the
+// previous UNVISITED planned plots — a VISITED plan has a measured plot
+// standing on it and survives every re-run — and upserts the single
+// CruiseDesign record. Generation never gates measuring: planned pins are
 // suggestions.
 
 package com.hcjeong.forestix.ui.screens.cruise

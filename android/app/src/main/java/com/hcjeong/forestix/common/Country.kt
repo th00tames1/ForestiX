@@ -48,6 +48,14 @@ enum class AreaUnit {
     fun fromAcres(acres: Double): Double =
         if (this == HECTARE) acres / Units.ACRES_PER_HECTARE else acres
 
+    /// The inverse: an area the cruiser TYPED in this unit, back to the acres
+    /// the store keeps. Only [fromAcres] existed here because until now this
+    /// platform could only display an area, never take one — which is exactly
+    /// why the field log's acreage entry was iOS-only. iOS
+    /// `AreaUnit.toAcres(_:)` parity.
+    fun toAcres(value: Double): Double =
+        if (this == HECTARE) value * Units.ACRES_PER_HECTARE else value
+
     /// Density-label suffix: "/ha" or "/ac".
     val densitySuffix: String get() = if (this == HECTARE) "/ha" else "/ac"
 

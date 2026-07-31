@@ -141,6 +141,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.common.CoordinateInput
+import com.hcjeong.forestix.common.areaUnit
 import com.hcjeong.forestix.common.MeasuredTimeInput
 import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.RegionalSpecies
@@ -807,7 +808,26 @@ fun FieldLogScreen(
     if (showingSummaryDetail) {
         summary?.let {
             FieldLogSummaryDetailSheet(
-                summary = it, onDismiss = { showingSummaryDetail = false })
+                summary = it,
+                onDismiss = { showingSummaryDetail = false },
+                areaUnit = settings.unitSystem.areaUnit,
+                onSaveArea = { plotID, acres ->
+                    // Re-read what LANDED rather than what was typed: the
+                    // store refuses an area it cannot divide by, and the sheet
+                    // must show the plot, not the draft. The same entry filter
+                    // the card was built with, so the two cannot disagree for
+                    // a second reason.
+                    val saved = env.history.setPlotAcres(plotID, acres)
+                    saved?.let { plot ->
+                        val defaultPlotID = plots.firstOrNull { p -> p.isDefault }?.id
+                        FieldLogSummaryBuilder.quick(
+                            plot,
+                            entries.filter { e ->
+                                (e.plotID ?: defaultPlotID) == plotID
+                            },
+                            settings)
+                    }
+                })
         }
     }
 

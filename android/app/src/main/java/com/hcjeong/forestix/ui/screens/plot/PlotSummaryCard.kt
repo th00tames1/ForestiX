@@ -63,6 +63,20 @@ import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixDenseTextScale
 import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.ui.theme.ForestixSpace
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.text.input.KeyboardType
+import com.hcjeong.forestix.common.TruthInput
+import com.hcjeong.forestix.ui.theme.ForestixBorderedButton
+import java.util.UUID
+import kotlinx.coroutines.launch
+import com.hcjeong.forestix.common.AreaUnit
 import java.util.Locale
 
 @Composable
@@ -274,9 +288,20 @@ private fun CellDivider() {
 fun FieldLogSummaryDetailSheet(
     summary: FieldLogSummary,
     onDismiss: () -> Unit,
+    /// Writes the plot's area and hands back the rebuilt summary, or null if
+    /// the store refused it. Null here hides the control, which is right for
+    /// the branches that do not name a quick plot.
+    onSaveArea: (suspend (UUID, Double?) -> FieldLogSummary?)? = null,
+    /// The cruiser's area unit, passed in rather than read from the
+    /// environment here: the caller already holds the settings snapshot, and
+    /// a composable that reaches for a composition local is one more thing
+    /// that has to be provided in a preview and in a test.
+    areaUnit: AreaUnit = AreaUnit.ACRE,
 ) {
     val colors = Forestix.colors
     val type = Forestix.type
+    val scope = rememberCoroutineScope()
+    var shown by remember(summary) { mutableStateOf(summary) }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -295,15 +320,30 @@ fun FieldLogSummaryDetailSheet(
                 FieldLogSummary.DETAIL_TITLE,
                 style = type.title, color = colors.textPrimary)
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(summary.title, style = type.bodyBold, color = colors.textPrimary)
-                summary.subtitle?.let {
+                Text(shown.title, style = type.bodyBold, color = colors.textPrimary)
+                shown.subtitle?.let {
                     Text(it, style = type.caption, color = colors.textSecondary)
                 }
-                summary.note?.let {
+                shown.note?.let {
                     Text(it, style = type.caption, color = colors.textSecondary)
                 }
             }
-            summary.groups.filter { it.rows.isNotEmpty() }.forEach { group ->
+            // THE PLOT'S AREA IS ENTERED HERE, on the one branch that names a
+            // quick plot. Without it the per-area figures are divided by an
+            // assumed tenth of an acre and carry the assumed mark for ever:
+            // iOS has had this control since the mark was introduced and this
+            // platform had no way to set an area at all, so the same plot read
+            // "measured" on one phone and "assumed" on the other.
+            val plotID = shown.quickPlotID
+            if (plotID != null && onSaveArea != null) {
+                AreaEntry(
+                    plotID = plotID,
+                    areaUnit = areaUnit,
+                    onSave = { id, acres ->
+                        scope.launch { onSaveArea(id, acres)?.let { shown = it } }
+                    })
+            }
+            shown.groups.filter { it.rows.isNotEmpty() }.forEach { group ->
                 Column(
                     Modifier
                         .fillMaxWidth()
@@ -363,3 +403,65 @@ fun FieldLogSummaryDetailSheet(
 // acre is no longer silent: every figure resting on it carries
 // [FieldLogSummary.ASSUMED_MARK], and the detail sheet names it on the
 // "Plot area" line.
+
+
+/// Enter or clear a quick plot's measured area.
+///
+/// Sibling of the iOS `PlotSummaryCard.areaSection`, down to the strings and
+/// the refusal. Blank is a legitimate answer and means "not measured" — the
+/// figures above then carry the assumed mark and are relative, not absolute —
+/// so the save is enabled for an empty field as well as for a valid number,
+/// and disabled only while the text is present but unparseable.
+@Composable
+private fun AreaEntry(
+    plotID: UUID,
+    areaUnit: AreaUnit,
+    onSave: (UUID, Double?) -> Unit,
+) {
+    val colors = Forestix.colors
+    val type = Forestix.type
+    var text by remember(plotID) { mutableStateOf("") }
+    val typedButUnparseable = text.isNotBlank() && TruthInput.parse(text) == null
+    val parsed = TruthInput.parsePositive(text)
+    val canSave = text.isBlank() || parsed != null
+
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(ForestixRadius.card)
+            .background(colors.surface)
+            .padding(ForestixSpace.md),
+        verticalArrangement = Arrangement.spacedBy(ForestixSpace.sm),
+    ) {
+        Text(FieldLogSummary.PLOT_AREA_TITLE, style = type.bodyBold,
+             color = colors.textPrimary)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Measured area", style = type.body, color = colors.textPrimary)
+            Spacer(Modifier.weight(1f))
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = TruthInput.sanitize(it) },
+                placeholder = { Text("—") },
+                singleLine = true,
+                isError = typedButUnparseable,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                modifier = Modifier.width(120.dp),
+            )
+            Spacer(Modifier.size(ForestixSpace.sm))
+            Text(areaUnit.abbreviation, style = type.body, color = colors.textSecondary)
+        }
+        if (typedButUnparseable) {
+            Text("Plot area is a number greater than zero, or blank.",
+                 style = type.caption, color = colors.confidenceBad)
+        }
+        ForestixBorderedButton(
+            label = "Save area",
+            enabled = canSave,
+            onClick = { onSave(plotID, parsed?.let { areaUnit.toAcres(it) }) })
+        Text(
+            "Leave it blank if you haven't measured it — the figures above " +
+                "then carry ${FieldLogSummary.ASSUMED_MARK} and are relative, " +
+                "not absolute.",
+            style = type.caption, color = colors.textSecondary)
+    }
+}

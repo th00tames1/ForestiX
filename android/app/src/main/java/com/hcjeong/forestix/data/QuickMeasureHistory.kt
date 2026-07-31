@@ -328,6 +328,33 @@ class QuickMeasureHistory private constructor(
         }
     }
 
+    /// Write the plot's area, or clear it.
+    ///
+    /// A quick plot with no area on it has its per-acre figures divided by an
+    /// assumed tenth of an acre, and the summary card says so. Placing the
+    /// sampling ring usually settles it — that entry carries the ring's own
+    /// area — but a cruiser who knows the plot's area without having placed a
+    /// ring had no way to say so on this platform at all.
+    ///
+    /// A non-finite or non-positive value CLEARS the area rather than storing
+    /// nonsense: 0 ac would divide every density by the floor and read as a
+    /// measurement, and NaN compares differently on the two platforms.
+    ///
+    /// Mirrors iOS `QuickMeasureHistory.setPlotAcres(id:to:)`.
+    /// SUSPENDS, unlike its neighbours, because the caller has to show what
+    /// LANDED rather than what was typed — the store refuses an area it cannot
+    /// divide by, and a fire-and-forget write would have the sheet re-read the
+    /// plot before the write finished and redraw the draft as though it had
+    /// been accepted.
+    suspend fun setPlotAcres(id: UUID, newAcres: Double?): QuickMeasurePlot? {
+        val p = dao.allPlots().firstOrNull { it.id == id.toString() } ?: return null
+        val clean = newAcres?.takeIf { it.isFinite() && it > 0.0 }
+        dao.upsertPlot(p.copy(acres = clean))
+        val fresh = dao.allPlots().map { it.toDomain() }.sortedByDescending { it.createdAt }
+        _plots.value = fresh
+        return fresh.firstOrNull { it.id == id }
+    }
+
     fun deletePlot(id: UUID) {
         scope.launch {
             val plots = dao.allPlots().map { it.toDomain() }

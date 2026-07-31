@@ -808,6 +808,13 @@ object TreeFormWords {
     const val BASAL_AREA = "Basal area"
     const val VOLUME = "Volume"
 
+    /// Every reading behind one row, in the order they were taken. Quick-only
+    /// — a cruise `Tree` holds one diameter and one height, not a history of
+    /// re-measurements — but drawn through the same section block as the rest,
+    /// because a sheet that changes shape halfway down is the "two different
+    /// forms" complaint in its most literal form.
+    const val READINGS = "Readings"
+
     // Recorded rows. Both forms draw all three, in this order.
     const val RECORDED = "Recorded"
     const val POSITION = "Position"

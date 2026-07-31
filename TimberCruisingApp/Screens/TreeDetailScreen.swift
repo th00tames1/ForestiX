@@ -899,6 +899,12 @@ enum TreeFormWords {
     static let basalArea = "Basal area"
     static let volume = "Volume"
 
+    /// Every reading behind one row, in the order they were taken. Quick-only
+    /// — a cruise `Tree` holds one diameter and one height, not a history of
+    /// re-measurements — but named here with the other section headers so the
+    /// two platforms cannot drift on it.
+    static let readings = "Readings"
+
     // Recorded rows.
     static let position = "Position"
     static let positionSource = "Position source"

@@ -2111,7 +2111,7 @@ internal fun FieldLogDetailSheet(
         // including the re-measurements the two rows above supersede, which
         // is the record the cruise store has no equivalent of. Each one keeps
         // its own time, and the click re-times THAT reading.
-        SheetSection("READINGS") {
+        TreeFormSection(header = TreeFormWords.READINGS) {
             row.entries.forEach { e ->
                 Column(
                     Modifier
@@ -2152,7 +2152,7 @@ internal fun FieldLogDetailSheet(
         // the note are up in DETAIL, where both kinds of tree carry them;
         // what is left here is what only a quick reading has — the fix it was
         // taken at, how it was captured, and the frame it was shot from.
-        SheetSection("RECORDED") {
+        TreeFormSection(header = TreeFormWords.RECORDED) {
             val fix = row.entries.firstOrNull { it.latitude != null && it.longitude != null }
             // POSITION IS TAPPABLE. A fix that never arrived, or arrived on
             // the wrong stem, used to be permanent — the reading carried it
@@ -2161,22 +2161,18 @@ internal fun FieldLogDetailSheet(
             //
             // Said out loud rather than left blank: a reading with no fix is
             // a different thing from one whose fix was not shown.
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .clickableNoRipple(onClick = {
-                        positionField = fix?.let {
-                            CoordinateInput.text(it.latitude!!, it.longitude!!)
-                        } ?: ""
-                        positionRefusal = null
-                        editingPosition = true
-                    }),
-            ) {
-                SheetRow(
-                    TreeFormWords.POSITION,
-                    fix?.let { CoordinateInput.text(it.latitude!!, it.longitude!!) }
-                        ?: "not recorded")
-            }
+            TreeFormRow(
+                label = TreeFormWords.POSITION,
+                value = fix?.let { CoordinateInput.text(it.latitude!!, it.longitude!!) }
+                    ?: TreeFormWords.NO_POSITION,
+                onTap = {
+                    positionField = fix?.let {
+                        CoordinateInput.text(it.latitude!!, it.longitude!!)
+                    } ?: ""
+                    positionRefusal = null
+                    editingPosition = true
+                },
+            )
             // WHERE THE COORDINATE CAME FROM. Without this a coordinate the
             // cruiser typed reads on screen — and exports — exactly like one
             // the satellites produced.
@@ -2185,18 +2181,17 @@ internal fun FieldLogDetailSheet(
             // no fix has no source to name, and "—" says that. It used to be
             // `?.let`, which took the row off the sheet entirely and left the
             // cruise form and this one with different Recorded sections.
-            SheetRow(
-                TreeFormWords.POSITION_SOURCE,
-                fix?.positionRecordedSource?.let(FieldLogWords::positionSourceText)
-                    ?: TreeFormWords.EMPTY)
+            TreeFormRow(
+                label = TreeFormWords.POSITION_SOURCE,
+                value = fix?.positionRecordedSource?.let(FieldLogWords::positionSourceText))
             // "typed" is its own answer. Folding it into "Automatic" told the
             // cruiser the sensors produced a number nobody ever pointed a
             // camera at. Absent on a reading recorded before the stamp
             // existed, which is the em dash's own case.
-            SheetRow(
-                TreeFormWords.CAPTURE,
-                row.entries.firstNotNullOfOrNull { it.captureMode }
-                    ?.let(TreeFormWords::captureText) ?: TreeFormWords.EMPTY)
+            TreeFormRow(
+                label = TreeFormWords.CAPTURE,
+                value = row.entries.firstNotNullOfOrNull { it.captureMode }
+                    ?.let(TreeFormWords::captureText))
             // The row's photos in the order they were shot. The sheet still
             // shows the first one in place, exactly as it always has; the
             // rest are one tap away in the shared viewer, which is the only

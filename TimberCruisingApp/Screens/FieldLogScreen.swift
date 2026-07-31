@@ -2991,7 +2991,7 @@ private struct FieldLogDetailForm: View {
     /// hand, and the tap re-times THAT reading. Android's READINGS section is
     /// the same list, in the same order, with the same three lines.
     private var readingsSection: some View {
-        Section(Self.readingsHeader) {
+        Section(TreeFormWords.readings) {
             ForEach(readingRows) { reading in
                 Button {
                     beginEditingTime(of: reading.entry)
@@ -3038,7 +3038,6 @@ private struct FieldLogDetailForm: View {
     /// The section's heading. A quick record is a list of readings and a
     /// cruise tree is not, so this word belongs to this form rather than to
     /// the shared `TreeFormWords`; Android names its section the same.
-    private static let readingsHeader = "Readings"
 
     /// One reading, with the name the accessibility layer knows it by.
     private struct ReadingRow: Identifiable {

@@ -21,6 +21,13 @@ class TreeDetailViewModel(tree: Tree, private val treeRepo: TreeRepository) {
 
     val speciesCode = MutableStateFlow(tree.speciesCode)
     val status = MutableStateFlow(tree.status)
+    /// WHEN THIS STEM WAS TALLIED. `createdAt` is the only measurement time a
+    /// cruise tree has — the analysis pairs stems across two phones by capture
+    /// time, so a stem that went into a notebook at the tree and into the app
+    /// back at the office carries the office time until somebody corrects it.
+    /// The form's Time row is that correction, so the instant is an edit mirror
+    /// like the species and the notes.
+    val measuredAt = MutableStateFlow(tree.createdAt)
     val dbhCm = MutableStateFlow(tree.dbhCm)
     val dbhIsIrregular = MutableStateFlow(tree.dbhIsIrregular)
     val heightM = MutableStateFlow<Float?>(tree.heightM)
@@ -80,6 +87,7 @@ class TreeDetailViewModel(tree: Tree, private val treeRepo: TreeRepository) {
             t.notes = notes.value
             t.bearingFromCenterDeg = bearingFromCenterDeg.value
             t.distanceFromCenterM = distanceFromCenterM.value
+            t.createdAt = measuredAt.value
             t.updatedAt = System.currentTimeMillis()
 
             _tree.value = treeRepo.update(t)
@@ -89,6 +97,26 @@ class TreeDetailViewModel(tree: Tree, private val treeRepo: TreeRepository) {
             _errorMessage.value = "Save failed: ${e.message ?: e}"
         } finally {
             _isSaving.value = false
+        }
+    }
+
+    /// Re-read the stored row after a write this screen did not make itself —
+    /// the Plot row re-parents the tree through `TreeMover`, which reads and
+    /// writes the row in the store, and a snapshot taken before that move
+    /// still names the plot the tree has left (and, when the destination was
+    /// already using its number, the number it no longer wears).
+    ///
+    /// The edit mirrors are deliberately left as the cruiser typed them: a
+    /// half-finished species or note is theirs, and their Save still lands —
+    /// on the row where it now lives, because `save()` copies from this
+    /// re-read tree.
+    suspend fun reload() {
+        try {
+            treeRepo.read(_tree.value.id, includeDeleted = true)?.let { fresh ->
+                _tree.value = fresh
+            }
+        } catch (e: Exception) {
+            _errorMessage.value = "Reload failed: ${e.message ?: e}"
         }
     }
 

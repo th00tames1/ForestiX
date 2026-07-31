@@ -115,16 +115,61 @@ public final class TreeDetailViewModel: ObservableObject {
         }
     }
 
+    /// Puts the tree back in the tally, and changes NOTHING else.
+    ///
+    /// The record is re-read first. `tree` is the copy this screen loaded when
+    /// it opened, and two rows on the form write straight to the store without
+    /// going through here — the plot (a move re-files the tree and may renumber
+    /// it) and the measured time (`createdAt` is not on this view model at
+    /// all). Writing the held copy back would put a moved tree in its old plot
+    /// under its old number and a re-timed one at its old instant, silently:
+    /// nothing is marked dirty by an undelete, so Save is not even offered as a
+    /// way to correct it. Clearing the flag on the record as it stands is the
+    /// only version of this that cannot lose someone's work.
     public func undelete() {
         do {
-            var t = tree
-            t.deletedAt = nil
-            t.updatedAt = Date()
-            tree = try treeRepo.update(t)
+            guard var fresh = try treeRepo.read(id: tree.id, includeDeleted: true) else {
+                // The row is gone from under the screen. Say so rather than
+                // re-creating it from the copy in memory, which would resurrect
+                // a tree the store no longer has. Worded as the move flow words
+                // the same fact (`TreeMoveWords.treeGone`), so a cruiser meets
+                // one sentence for one state.
+                errorMessage = "Undelete failed: no longer in this device's database"
+                return
+            }
+            fresh.deletedAt = nil
+            fresh.updatedAt = Date()
+            tree = try treeRepo.update(fresh)
             errorMessage = nil
         } catch {
             errorMessage = "Undelete failed: \(error.localizedDescription)"
         }
+    }
+
+    /// Re-read the stored row after a write this screen did not make itself —
+    /// the Plot row re-parents the tree through `TreeMover`, which reads and
+    /// writes the row in the store, and the time row writes `createdAt`, which
+    /// is not on this view model at all. A snapshot taken before either still
+    /// names the plot the tree has left (and, when the destination was already
+    /// using its number, the number it no longer wears), and `save()` builds
+    /// from that snapshot — so without this, saving an unrelated field puts
+    /// the tree back where it was.
+    ///
+    /// THE EDIT MIRRORS ARE LEFT AS THE CRUISER TYPED THEM: a half-finished
+    /// species or note is theirs, and their Save still lands — on the row where
+    /// it now lives. The exception is the placement pair, which has had no
+    /// editor since F8: those mirrors can only hold what the record held when
+    /// the screen opened, and `TreeMover` clears them at a move precisely
+    /// because they are measured from the centre the tree just left. Re-seeding
+    /// them is the difference between saving a cleared placement and
+    /// resurrecting a bearing to the wrong plot centre.
+    ///
+    /// Mirrors Android `TreeDetailViewModel.reload`.
+    public func reload() {
+        guard let fresh = try? treeRepo.read(id: tree.id, includeDeleted: true) else { return }
+        tree = fresh
+        bearingFromCenterDeg = fresh.bearingFromCenterDeg
+        distanceFromCenterM = fresh.distanceFromCenterM
     }
 
     /// External reset for the error alert.

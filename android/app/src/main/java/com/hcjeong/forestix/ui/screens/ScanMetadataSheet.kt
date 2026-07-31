@@ -246,7 +246,13 @@ internal fun SpeciesPickerField(
         options.firstOrNull { it.first == code }
             ?.let { speciesPickerLabel(it.second, it.first, colors.textSecondary) }
             // A code the list does not carry is shown as typed, not silently
-            // relabelled to something the cruiser did not choose.
+            // relabelled to something the cruiser did not choose — and not
+            // decorated here either, because a control that reads back the
+            // codes it was given has no room to explain one. WHERE IT IS
+            // EXPLAINED is the resolved-name row the tree form draws under
+            // this control (`TreeFormSpeciesRows`): a code nothing answers to
+            // reads "Not in this region's list" there. The capture sheets show
+            // the bare code on purpose — the cruiser typed it a moment ago.
             ?: AnnotatedString(code)
     } ?: AnnotatedString(unspecifiedLabel)
 

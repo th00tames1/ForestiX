@@ -14,8 +14,16 @@
 // cruiser was not reading in the field. Neither number is lost: sigma is
 // still recorded on the entry, still exported, and now shown in the detail
 // sheet — which is what a tap on a row opens, and which carries the whole
-// record (species, stem position, damage, note, position, photo, and in
-// developer mode the ground truth typed against that tree).
+// record (species, damage, note, position, photo, and in developer mode the
+// ground truth typed against that tree).
+//
+// THAT SHEET IS THE TREE FORM. It draws the same three sections in the same
+// order, with the same row labels and the same em dash, as the cruise tree's
+// own screen — see the shared definitions at the foot of TreeDetailScreen.kt.
+// A cruiser learns one screen. Where a quick reading does not carry a field
+// the form has (a tally status), the row is still there and reads "—";
+// where it carries something a cruise tree does not (the readings behind the
+// row, the fix, the capture mode, the frame), that follows underneath.
 //
 // Readings that were never attached to a tree — a sampling-plot record, a
 // standalone crown or distance — still get their own row. They are real
@@ -159,6 +167,17 @@ import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.screens.plot.PlotFlowRoutes
 import com.hcjeong.forestix.ui.screens.plot.FieldLogSummaryDetailSheet
 import com.hcjeong.forestix.ui.screens.plot.PlotSummaryCard
+// The record sheet draws THE tree form — the same sections, rows and words
+// the cruise tree's screen draws, from the same definitions.
+import com.hcjeong.forestix.ui.screens.tree.TierExplainerKind
+import com.hcjeong.forestix.ui.screens.tree.TierExplainerSheet
+import com.hcjeong.forestix.ui.screens.tree.TreeFormComputedSection
+import com.hcjeong.forestix.ui.screens.tree.TreeFormConfidenceRow
+import com.hcjeong.forestix.ui.screens.tree.TreeFormMeasurementRow
+import com.hcjeong.forestix.ui.screens.tree.TreeFormRow
+import com.hcjeong.forestix.ui.screens.tree.TreeFormSection
+import com.hcjeong.forestix.ui.screens.tree.TreeFormSpeciesRows
+import com.hcjeong.forestix.ui.screens.tree.TreeFormWords
 import com.hcjeong.forestix.ui.shareFile
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixBorderedButton
@@ -1928,6 +1947,14 @@ internal fun FieldLogDetailSheet(
     /// stamp simple. Held as an id, not a copy, so the editor writes to the
     /// reading as the store currently has it.
     var editingTimeOf by remember(row.id) { mutableStateOf<UUID?>(null) }
+    /// Which measurement has its editor open under its row. null = both rows
+    /// are readouts. One at a time: two open number fields on a phone push
+    /// the Save that decides whether they land off the screen.
+    var editingMeasure by remember(row.id) { mutableStateOf<MeasureKind?>(null) }
+    /// Which measurement's tier explainer is open — the same sheet the cruise
+    /// tree's confidence chip opens, so "Good / Fair / Check" is explained
+    /// once for both kinds of tree. null = closed.
+    var explaining by remember(row.id) { mutableStateOf<TierExplainerKind?>(null) }
     /// The time edit writes straight to the store rather than through the
     /// sheet's `onSave`, because the store's own `setMeasuredTime` is what
     /// re-checks the rule and stamps the provenance — routing it through a
@@ -1944,13 +1971,148 @@ internal fun FieldLogDetailSheet(
     ) {
         Text(row.title, style = type.title, color = colors.textPrimary)
 
-        SheetSection("MEASUREMENTS") {
+        // Every fact this record carries, resolved once. A row is a TREE, and
+        // these are facts about the stem rather than about one of its
+        // readings.
+        val species = row.entries.firstNotNullOfOrNull {
+            it.speciesCode?.takeIf(String::isNotEmpty)
+        }
+        val damage = row.entries.flatMap { it.damageCodes }.distinct().sorted()
+        val note = row.entries.mapNotNull { it.note?.trim()?.takeIf(String::isNotEmpty) }
+            .joinToString("\n").takeIf(String::isNotEmpty)
+        // Read through the SAME null rule the rest of the app uses
+        // (plotID ?: defaultPlotID) rather than a second one invented here. A
+        // plot id that no plot answers to says so — it is a real state (the
+        // plot was deleted out from under the reading) and quietly printing
+        // the default plot's name would be a claim about where the reading is
+        // filed that is not true.
+        val homeID = row.entries.firstOrNull()?.plotID ?: defaultPlotID
+        // The reading that gives the row its time: the moment the cruiser
+        // arrived at this stem (see [FieldLogRowModel.measuredAt]).
+        val earliest = row.entries.minByOrNull { it.createdAt }
+
+        // MARK: 1 — Detail
+        TreeFormSection(header = TreeFormWords.DETAIL) {
+            // WHICH PLOT THIS IS IN, and the way to change it.
+            //
+            // The plot is the only grouping a quick reading has — it is what
+            // separates a validation set from a bench test, and it reaches
+            // every export. Tapping opens the same picker the bulk move uses.
+            TreeFormRow(
+                label = TreeFormWords.PLOT,
+                // The em dash on this row means "still loading" and nothing
+                // else. The quick store keeps a permanent default plot, so it
+                // never legitimately answers with no plots at all — an empty
+                // list is the bootstrap not being back yet. Once it is back, a
+                // plot id nothing answers to is a plot that was deleted out
+                // from under the reading, and the row says that instead of
+                // shrugging. There is no third state here: the quick store
+                // holds its plots in memory and has no failed read to report,
+                // which is the one thing the cruise form can say and this one
+                // cannot.
+                value = if (plots.isEmpty()) {
+                    null
+                } else {
+                    plots.firstOrNull { it.id == homeID }?.name
+                        ?: FieldLogWords.UNKNOWN_PLOT
+                },
+                onTap = { moveRequest = listOf(quickMoveRow(row)) },
+            )
+            TreeFormSpeciesRows(
+                code = species,
+                onCode = { code ->
+                    // Written onto EVERY reading on the row, on the same
+                    // argument as the position: the cruiser is naming the
+                    // TREE, and a species on the diameter but not on the
+                    // height reads back as two different stems.
+                    row.entries.forEach { onSave(it.copy(speciesCode = code)) }
+                },
+            )
+            // MARKED when the reading that provides it was re-timed by hand:
+            // this row is where a reader looks to see when work on the tree
+            // began, and a hand-set time reaching it unlabelled would be
+            // exactly the silent edit that marker exists to prevent.
+            TreeFormRow(
+                label = TreeFormWords.TIME,
+                value = MeasuredTimeInput.Words.stamp(
+                    MeasuredTimeInput.text(row.measuredAt),
+                    earliest?.hasHandSetTime == true),
+                onTap = { earliest?.let { editingTimeOf = it.id } },
+            )
+            TreeFormRow(label = TreeFormWords.TREE, value = row.treeLabel)
+            // A quick reading records no tally status: it is a measurement,
+            // not a stem on a cruise sheet.
+            TreeFormRow(label = TreeFormWords.STATUS, value = null)
+            TreeFormRow(
+                label = TreeFormWords.DAMAGE,
+                value = damage.takeIf { it.isNotEmpty() }?.joinToString(", "),
+            )
+            TreeFormRow(label = TreeFormWords.NOTES, value = note)
+        }
+
+        // MARK: 2 — Measurement. Tapping the VALUE is how a cruiser changes
+        // it — the editor opens under the row it belongs to.
+        TreeFormSection(header = TreeFormWords.MEASUREMENT) {
+            listOf(MeasureKind.DBH, MeasureKind.HEIGHT).forEach { kind ->
+                val isDbh = kind == MeasureKind.DBH
+                val existing = if (isDbh) row.dbh else row.height
+                TreeFormMeasurementRow(
+                    label = if (isDbh) TreeFormWords.DBH else TreeFormWords.HEIGHT,
+                    value = existing?.let { looseValue(it, unitSystem) },
+                    // The measurement's own precision, read with the
+                    // measurement rather than as a row of its own.
+                    sigma = existing?.let { sigmaText(it, unitSystem) },
+                    onTap = { editingMeasure = if (editingMeasure == kind) null else kind },
+                )
+                if (editingMeasure == kind) {
+                    val tree = row.treeNumber
+                    if (tree == null) {
+                        // A crown, a distance or a sampling-plot record. There
+                        // is no tree for a diameter to belong to, so there is
+                        // nothing here to set.
+                        Text(
+                            "This reading isn't attached to a tree, so it has no " +
+                                "diameter or height to set.",
+                            style = type.caption, color = colors.textTertiary)
+                    } else {
+                        FieldLogEditSection(
+                            kind = kind, row = row, tree = tree,
+                            unitSystem = unitSystem, developerMode = developerMode,
+                            onSave = onSave, onAdd = onAdd, onRemeasure = onRemeasure)
+                    }
+                }
+                TreeFormConfidenceRow(
+                    label = if (isDbh) TreeFormWords.DBH_CONFIDENCE
+                    else TreeFormWords.HEIGHT_CONFIDENCE,
+                    // NOT the grade a typed number inherited. `typedValue`
+                    // clears the σ of a reading the cruiser overrode but keeps
+                    // `confidenceRaw`, so without this the chip beside a
+                    // hand-typed diameter is the last capture's Good/Fair/Check
+                    // — a sensor's verdict on a number no sensor produced. A
+                    // reading with no capture behind it has no grade, and the
+                    // row says so with the em dash it uses for every ungraded
+                    // measurement.
+                    tier = existing?.takeIf { !it.isTypedReading }?.confidenceRaw,
+                ) {
+                    explaining = if (isDbh) TierExplainerKind.DIAMETER
+                    else TierExplainerKind.HEIGHT
+                }
+            }
+        }
+
+        // MARK: 3 — Computed, from the measurements above.
+        TreeFormComputedSection(
+            dbhCm = row.dbh?.value?.toFloat(),
+            heightM = row.height?.value?.toFloat(),
+            speciesCode = species,
+        )
+
+        // Every reading behind this row, in the order they were taken —
+        // including the re-measurements the two rows above supersede, which
+        // is the record the cruise store has no equivalent of. Each one keeps
+        // its own time, and the click re-times THAT reading.
+        SheetSection("READINGS") {
             row.entries.forEach { e ->
-                // CLICKABLE, and the click re-times THIS reading. The record
-                // sheet never said when a reading was measured at all, which is
-                // exactly the value a cruiser needs to see and to correct when
-                // the number went into a notebook at the tree and into the app
-                // back at the office.
                 Column(
                     Modifier
                         .fillMaxWidth()
@@ -1986,88 +2148,11 @@ internal fun FieldLogDetailSheet(
             }
         }
 
-        // Editing is per TREE: the two named readings are what a tree has,
-        // and a loose crown / distance / plot record has no tree to
-        // re-measure or to complete.
-        row.treeNumber?.let { tree ->
-            FieldLogEditSection(
-                kind = MeasureKind.DBH, row = row, tree = tree,
-                unitSystem = unitSystem, developerMode = developerMode,
-                onSave = onSave, onAdd = onAdd, onRemeasure = onRemeasure)
-            FieldLogEditSection(
-                kind = MeasureKind.HEIGHT, row = row, tree = tree,
-                unitSystem = unitSystem, developerMode = developerMode,
-                onSave = onSave, onAdd = onAdd, onRemeasure = onRemeasure)
-        }
-
-        val species = row.entries.firstNotNullOfOrNull {
-            it.speciesCode?.takeIf(String::isNotEmpty)
-        }
-        val position = row.entries.firstNotNullOfOrNull { it.position }
-        val damage = row.entries.flatMap { it.damageCodes }.distinct().sorted()
-        val note = row.entries.mapNotNull { it.note?.trim()?.takeIf(String::isNotEmpty) }
-            .joinToString("\n").takeIf(String::isNotEmpty)
-
-        SheetSection("DETAILS") {
-            SheetRow("Species", species?.let { "${RegionalSpecies.nameForCode(it)} · $it" } ?: "—")
-            position?.let { SheetRow("Stem position", it.displayName) }
-            if (damage.isNotEmpty()) SheetRow("Damage", damage.joinToString(", "))
-            note?.let {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Note", style = type.body, color = colors.textSecondary)
-                    Text(it, style = type.body, color = colors.textPrimary)
-                }
-            }
-            if (species == null && position == null && damage.isEmpty() && note == null) {
-                Text("Nothing was attached to this reading.",
-                    style = type.caption, color = colors.textTertiary)
-            }
-        }
-
+        // WHERE AND HOW IT WAS RECORDED. The plot, the time, the species and
+        // the note are up in DETAIL, where both kinds of tree carry them;
+        // what is left here is what only a quick reading has — the fix it was
+        // taken at, how it was captured, and the frame it was shot from.
         SheetSection("RECORDED") {
-            // WHICH PLOT THIS IS IN, and the way to change it.
-            //
-            // The plot is the only grouping a quick reading has — it is what
-            // separates a validation set from a bench test, and it reaches
-            // every export — and until now the record sheet did not name it
-            // at all. A cruiser could not see what needed fixing, let alone
-            // fix it. Clicking opens the same picker the bulk move uses.
-            //
-            // The name is read through the SAME null rule the rest of the app
-            // uses (plotID ?: defaultPlotID) rather than a second one invented
-            // here. A plot id that no plot answers to says so — it is a real
-            // state (the plot was deleted out from under the reading) and
-            // quietly printing the default plot's name would be a claim about
-            // where the reading is filed that is not true.
-            val homeID = row.entries.firstOrNull()?.plotID ?: defaultPlotID
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .clickableNoRipple(onClick = { moveRequest = listOf(quickMoveRow(row)) }),
-            ) {
-                SheetRow(
-                    QuickMoveWords.PLOT_ROW,
-                    plots.firstOrNull { it.id == homeID }?.name
-                        ?: FieldLogWords.UNKNOWN_PLOT)
-            }
-            // The row's own time — the earliest reading on the tree, which is
-            // the sort key ([FieldLogRowModel.measuredAt]).
-            //
-            // Printed through the SAME formatter as the per-reading times a
-            // section above, so one instant is never rendered two ways on one
-            // screen. It used to be Locale.US with a hand-written pattern,
-            // which showed a Korean cruiser's field log in American English
-            // regardless of their phone.
-            //
-            // MARKED when the reading that provides it was re-timed by hand:
-            // this row is where a reader looks to see when work on the tree
-            // began, and a hand-set time reaching it unlabelled would be
-            // exactly the silent edit this feature exists to prevent.
-            SheetRow(
-                "When",
-                MeasuredTimeInput.Words.stamp(
-                    MeasuredTimeInput.text(row.measuredAt),
-                    row.entries.minByOrNull { it.createdAt }?.hasHandSetTime == true))
             val fix = row.entries.firstOrNull { it.latitude != null && it.longitude != null }
             // POSITION IS TAPPABLE. A fix that never arrived, or arrived on
             // the wrong stem, used to be permanent — the reading carried it
@@ -2088,28 +2173,30 @@ internal fun FieldLogDetailSheet(
                     }),
             ) {
                 SheetRow(
-                    "Position",
+                    TreeFormWords.POSITION,
                     fix?.let { CoordinateInput.text(it.latitude!!, it.longitude!!) }
                         ?: "not recorded")
             }
             // WHERE THE COORDINATE CAME FROM. Without this a coordinate the
             // cruiser typed reads on screen — and exports — exactly like one
             // the satellites produced.
-            fix?.positionRecordedSource?.let {
-                SheetRow("Position source", FieldLogWords.positionSourceText(it))
-            }
-            row.entries.firstNotNullOfOrNull { it.captureMode }?.let {
-                // "typed" is its own answer. Folding it into "Automatic" told
-                // the cruiser the sensors produced a number nobody ever
-                // pointed a camera at.
-                SheetRow(
-                    "Capture",
-                    when (it) {
-                        "manual" -> "Adjusted by hand"
-                        "typed" -> "Typed by hand"
-                        else -> "Automatic"
-                    })
-            }
+            //
+            // ALWAYS DRAWN, like every other row on both forms: a reading with
+            // no fix has no source to name, and "—" says that. It used to be
+            // `?.let`, which took the row off the sheet entirely and left the
+            // cruise form and this one with different Recorded sections.
+            SheetRow(
+                TreeFormWords.POSITION_SOURCE,
+                fix?.positionRecordedSource?.let(FieldLogWords::positionSourceText)
+                    ?: TreeFormWords.EMPTY)
+            // "typed" is its own answer. Folding it into "Automatic" told the
+            // cruiser the sensors produced a number nobody ever pointed a
+            // camera at. Absent on a reading recorded before the stamp
+            // existed, which is the em dash's own case.
+            SheetRow(
+                TreeFormWords.CAPTURE,
+                row.entries.firstNotNullOfOrNull { it.captureMode }
+                    ?.let(TreeFormWords::captureText) ?: TreeFormWords.EMPTY)
             // The row's photos in the order they were shot. The sheet still
             // shows the first one in place, exactly as it always has; the
             // rest are one tap away in the shared viewer, which is the only
@@ -2120,9 +2207,14 @@ internal fun FieldLogDetailSheet(
         }
 
         // There is no second ground-truth section here any more. The truth
-        // field inside the DIAMETER and HEIGHT sections above is the only
-        // place a truth is shown and the only place it is edited — see the
-        // note at the foot of this file.
+        // field inside the editor a measurement row opens is the only place a
+        // truth is shown and the only place it is edited — see the note at the
+        // foot of this file.
+    }
+
+    // Tier explainer — opened by tapping a confidence row.
+    explaining?.let { kind ->
+        TierExplainerSheet(kind) { explaining = null }
     }
 
     // The move raised by the Plot row. Same flow the log's selection bar
@@ -2195,7 +2287,18 @@ internal fun FieldLogDetailSheet(
     editingTimeOf?.let { id ->
         row.entries.firstOrNull { it.id == id }?.let { entry ->
             MeasuredTimeEditorDialog(
-                entry = entry,
+                epochMs = entry.createdAt,
+                subject = kindWord(entry.kind),
+                sourceText = MeasuredTimeInput.Words.sourceText(entry.timeRecordedSource),
+                // WHICH KIND OF READING THIS IS decides what the cruiser is
+                // told, and it is decided from the entry alone: a typed
+                // reading has no capture behind it, so its stored time is
+                // merely when it was typed.
+                footer = if (entry.isTypedReading) {
+                    MeasuredTimeInput.Words.TYPED_FOOTER
+                } else {
+                    MeasuredTimeInput.Words.SENSOR_FOOTER
+                },
                 onDismiss = { editingTimeOf = null },
                 onSave = { picked ->
                     // The store re-checks the rule and stamps the provenance;
@@ -2209,25 +2312,35 @@ internal fun FieldLogDetailSheet(
 }
 
 /// The measured-time editor: date and time to the minute, prefilled with the
-/// value the reading carries, Save off while the picked time cannot be stored.
+/// value the record carries, Save off while the picked time cannot be stored.
 ///
 /// The pickers are deliberately NOT clamped to the past. A cruiser who reaches
 /// for tomorrow gets told why it cannot be stored, which is the requirement; a
 /// control that silently refuses to move teaches nothing and reads as a bug.
+///
+/// It takes the INSTANT rather than a reading, because both kinds of tree set
+/// a time here: a quick reading (which also carries where its time came from,
+/// passed as [sourceText]) and a cruise tree (which does not). One editor, so
+/// the rule about what a time may be, the rounding and the words are decided
+/// in one place. [footer] is what the caller has to say about the record being
+/// re-timed; it is the one sentence that differs between them.
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun MeasuredTimeEditorDialog(
-    entry: QuickMeasureEntry,
+internal fun MeasuredTimeEditorDialog(
+    epochMs: Long,
+    subject: String,
+    sourceText: String?,
+    footer: String,
     onDismiss: () -> Unit,
     onSave: (Long) -> Unit,
 ) {
     val colors = Forestix.colors
     val type = Forestix.type
     val context = LocalContext.current
-    val opened = remember(entry.id) { Calendar.getInstance().apply { timeInMillis = entry.createdAt } }
+    val opened = remember(epochMs) { Calendar.getInstance().apply { timeInMillis = epochMs } }
     // The date half, held as the UTC midnight the material picker speaks in.
-    var dateUtcMs by remember(entry.id) { mutableStateOf(localDateAsUtcMillis(entry.createdAt)) }
-    var pickingDate by remember(entry.id) { mutableStateOf(false) }
+    var dateUtcMs by remember(epochMs) { mutableStateOf(localDateAsUtcMillis(epochMs)) }
+    var pickingDate by remember(epochMs) { mutableStateOf(false) }
     // The time half. `is24Hour` follows the phone's own clock setting so the
     // field matches the times printed everywhere else on this sheet.
     val timeState = rememberTimePickerState(
@@ -2247,17 +2360,18 @@ private fun MeasuredTimeEditorDialog(
                 Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(ForestixSpace.xs),
             ) {
-                Text(kindWord(entry.kind), style = type.caption, color = colors.textSecondary)
+                Text(subject, style = type.caption, color = colors.textSecondary)
                 // What is about to be stored, printed the way every other
                 // surface prints it, so Save is never a surprise.
                 Text(
                     MeasuredTimeInput.text(picked),
                     style = type.data, color = colors.textPrimary,
                 )
-                // What the reading's time currently CLAIMS, in the same word
+                // What the record's time currently CLAIMS, in the same word
                 // the `time_source` column exports, so the cruiser can see on
-                // screen what an analyst will read in the CSV.
-                SheetRow("Time source", MeasuredTimeInput.Words.sourceText(entry.timeRecordedSource))
+                // screen what an analyst will read in the CSV. A record with
+                // no such column says nothing here rather than guessing.
+                sourceText?.let { SheetRow("Time source", it) }
                 // The date is behind a button and the time is inline, because
                 // that is the shape Material gives us: there is no combined
                 // control, and a full calendar unfolded inside this dialog
@@ -2268,24 +2382,17 @@ private fun MeasuredTimeEditorDialog(
                 refusal?.let {
                     Text(it, style = type.caption, color = colors.confidenceBad)
                 }
-                // WHICH KIND OF READING THIS IS decides what the cruiser is
-                // told, and it is decided from the entry alone (see
-                // [QuickMeasureEntry.isTypedReading]): a typed reading has no
-                // capture behind it, so its stored time is merely when it was
-                // typed and the notebook time is strictly better. A sensor
-                // reading has a raw-capture bundle whose manifest holds the
-                // real capture instant, and that manifest is NOT rewritten — so
-                // the two records will disagree, and the cruiser is told so
-                // here, before they commit, rather than discovering it in an
-                // export months later.
-                Text(
-                    if (entry.isTypedReading) {
-                        MeasuredTimeInput.Words.TYPED_FOOTER
-                    } else {
-                        MeasuredTimeInput.Words.SENSOR_FOOTER
-                    },
-                    style = type.caption, color = colors.textTertiary,
-                )
+                // WHAT IS BEING RE-TIMED decides what the cruiser is told, and
+                // the caller decides it (see [QuickMeasureEntry.isTypedReading]
+                // for the quick side): a typed reading has no capture behind
+                // it, so its stored time is merely when it was typed and the
+                // notebook time is strictly better. A sensor reading has a
+                // raw-capture bundle whose manifest holds the real capture
+                // instant, and that manifest is NOT rewritten — so the two
+                // records will disagree, and the cruiser is told so here,
+                // before they commit, rather than discovering it in an export
+                // months later.
+                Text(footer, style = type.caption, color = colors.textTertiary)
             }
         },
         confirmButton = {
@@ -2500,8 +2607,12 @@ private object FieldLogTypedInput {
 
 /// One kind's editor: the number, its ground truth, and the two ways to
 /// change either — type it, or go and measure it again. A tree the sensors
-/// never read gets the same section, empty, so it can be completed from here
+/// never read gets the same editor, empty, so it can be completed from here
 /// instead of staying half-measured forever.
+///
+/// It draws BARE, with no header and no card of its own: it opens inside the
+/// Measurement section, directly under the row whose value it sets, and a
+/// second card nested in that one would read as a second screen.
 @Composable
 private fun FieldLogEditSection(
     kind: MeasureKind,
@@ -2559,7 +2670,10 @@ private fun FieldLogEditSection(
             abs(typed - existing.value) > FIELD_LOG_VALUE_EPSILON ||
             (developerMode && truthChanged(truthTyped, existing.truth)))
 
-    SheetSection(if (kind == MeasureKind.DBH) "DIAMETER" else "HEIGHT") {
+    Column(
+        Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(ForestixSpace.sm),
+    ) {
         if (existing == null) {
             Text("Not measured. Type the number, or measure it now.",
                 style = type.caption, color = colors.textTertiary)

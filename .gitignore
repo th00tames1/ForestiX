@@ -33,3 +33,19 @@ docs/AUDIT_PHASE_*.md
 # 390 MB of raw depth captures from McDunn, plus unpublished accuracy
 # results that belong in the manuscript before they belong in public.
 val/
+# ...but the ANALYSIS CODE is not data. A reviewer objected, correctly, that a
+# resolution rule asserted to have been "fixed before looking at what it would
+# do to the result" is unverifiable when its file has no history — and that
+# rule turned out to be the most serious defect in the study. The scripts are
+# what settles that, so they are tracked.
+#
+# THE DERIVED TABLES ARE NOT. This repository is public and the study is not
+# published, so the 100-stem table and the results CSVs stay out; they settle
+# nothing about provenance and publishing them is not reversible.
+!val/analysis/
+!val/analysis/**/*.py
+!val/analysis/**/*.md
+!val/paper/
+!val/paper/*.py
+val/analysis/*.csv
+val/paper/results/

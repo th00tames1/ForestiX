@@ -18,10 +18,12 @@
 //
 // Planned-plot numbering continues after the project's existing real
 // plots (max plotNumber + 1) so informal plots started before setup
-// never collide with the plan. Generating replaces the project's
-// previous planned plots and upserts the single CruiseDesign record —
-// identical persistence semantics to the retired screen. Generation
-// never gates measuring: planned pins are suggestions.
+// never collide with the plan, and after the plans that survive the run
+// so no two of them share a number. Generating replaces the previous
+// UNVISITED planned plots — a VISITED plan has a measured plot standing
+// on it and survives every re-run — and upserts the single CruiseDesign
+// record. Generation never gates measuring: planned pins are
+// suggestions.
 
 package com.hcjeong.forestix.ui.screens.cruise
 
@@ -42,12 +44,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -74,6 +78,7 @@ import com.hcjeong.forestix.common.areaUnit
 import com.hcjeong.forestix.data.cruise.CruiseDesign
 import com.hcjeong.forestix.data.cruise.PlannedPlot
 import com.hcjeong.forestix.data.cruise.PlotType
+import com.hcjeong.forestix.data.cruise.PositionSource
 import com.hcjeong.forestix.data.cruise.Project
 import com.hcjeong.forestix.data.cruise.SamplingScheme
 import com.hcjeong.forestix.data.cruise.Stratum
@@ -147,6 +152,11 @@ fun CruiseSetupSheet(
     var strataCount by remember { mutableIntStateOf(0) }
     var generating by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    /// Non-null while the "this run takes work you can't get back" question
+    /// is up; the string IS the sentence it asks. Its own channel beside
+    /// `error` because that one is a refusal and this one is a choice, and a
+    /// cruiser must never have to read which it is. (iOS `discardWarning`.)
+    var discardWarning by remember { mutableStateOf<String?>(null) }
 
     // Re-opening setup shows what was generated last time — same prefill
     // behaviour the old screen's refresh() had.
@@ -178,7 +188,13 @@ fun CruiseSetupSheet(
         }
     }
 
-    fun generate() {
+    /// `confirmedDiscard` is the answer to the question `generateCruisePlan`
+    /// asks: false on the press of "Generate plots", true only after the
+    /// cruiser has read what this run takes and said replace it anyway.
+    /// Running generation again after the answer costs nothing — the
+    /// generator is deterministic — and it keeps the question in front of
+    /// the writes rather than in front of a plan that might not generate.
+    fun generate(confirmedDiscard: Boolean = false) {
         if (generating) return
         val radiusM = radiusText.toDoubleOrNull() ?: 0.0
         val baf = bafText.toDoubleOrNull() ?: 0.0
@@ -204,7 +220,7 @@ fun CruiseSetupSheet(
         error = null
         scope.launch {
             try {
-                generateCruisePlan(
+                val warning = generateCruisePlan(
                     env = env,
                     project = project,
                     fixedRadius = fixedRadius,
@@ -215,8 +231,17 @@ fun CruiseSetupSheet(
                     spacingM = spacing,
                     mapCentre = mapCentre,
                     area = area,
+                    confirmedDiscard = confirmedDiscard,
                 )
-                onDismiss()
+                if (warning != null) {
+                    // Nothing was written — the run is waiting on an answer,
+                    // so the button comes back rather than sitting spinning
+                    // behind a dialog.
+                    discardWarning = warning
+                    generating = false
+                } else {
+                    onDismiss()
+                }
             } catch (e: Exception) {
                 error = e.message ?: "Plot generation failed: $e"
                 generating = false
@@ -375,7 +400,7 @@ fun CruiseSetupSheet(
                     .fillMaxWidth()
                     .heightIn(min = 54.dp)
                     .alpha(if (generating) 0.6f else 1f)
-                    .pressableNoRipple(enabled = !generating, onClick = ::generate)
+                    .pressableNoRipple(enabled = !generating, onClick = { generate() })
                     .clip(ForestixRadius.card)
                     .background(colors.primary),
                 contentAlignment = Alignment.Center,
@@ -404,6 +429,45 @@ fun CruiseSetupSheet(
                     .padding(top = ForestixSpace.xs),
             )
         }
+    }
+
+    // GENERATING OVER A PLAN, step two. The count is the whole point of the
+    // sentence — same reason `areaDeletionMessage` carries one: a cruiser
+    // about to lose a morning's planning has to know how much before they
+    // answer. Raised only when the run would take something generating again
+    // cannot put back (see `discardWarning`), and a sibling of the sheet
+    // rather than a child of its Column so it sits over the sheet.
+    val warning = discardWarning
+    if (warning != null) {
+        AlertDialog(
+            onDismissRequest = { discardWarning = null },
+            containerColor = colors.surface,
+            title = {
+                Text(
+                    if (area != null) {
+                        "Replace the plan in ${area.name}?"
+                    } else {
+                        "Replace the cruise plan?"
+                    },
+                    style = type.bodyBold,
+                    color = colors.textPrimary,
+                )
+            },
+            text = { Text(warning, style = type.caption, color = colors.textSecondary) },
+            confirmButton = {
+                TextButton(onClick = {
+                    discardWarning = null
+                    generate(confirmedDiscard = true)
+                }) {
+                    Text("Replace plan", style = type.body, color = colors.confidenceBad)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { discardWarning = null }) {
+                    Text("Cancel", style = type.body, color = colors.textPrimary)
+                }
+            },
+        )
     }
 }
 
@@ -528,8 +592,13 @@ private fun NumericRow(
 
 /// Runs SamplingGenerator over the drawn strata — or, with none drawn, the
 /// centred square-ish grid around `mapCentre` — then REPLACES the
-/// project's planned plots and upserts the CruiseDesign row. Throws with a
-/// user-facing message on failure; the sheet surfaces it.
+/// project's unvisited planned plots and upserts the CruiseDesign row.
+/// Throws with a user-facing message on failure; the sheet surfaces it.
+///
+/// Returns null when the plan was written, and the confirmation sentence
+/// when it stopped short of writing because the run would destroy work the
+/// cruiser cannot get back — nothing has been touched in that case, and the
+/// sheet asks before calling again with `confirmedDiscard = true`.
 private suspend fun generateCruisePlan(
     env: AppEnvironment,
     project: Project,
@@ -541,24 +610,34 @@ private suspend fun generateCruisePlan(
     spacingM: Double,
     mapCentre: CoordinateConversions.LatLon,
     area: Stratum?,
-) {
+    confirmedDiscard: Boolean = false,
+): String? {
     // Opened from an area, that area is the only stratum in play.
     val strata = area?.let { listOf(it) } ?: env.stratumRepository.listByProject(project.id)
     // Which plans this run REPLACES. From an area it is that area's own
     // plans and nobody else's: generating into one outline must not wipe
     // the plan laid inside another, which is the whole-project rule and
     // would be a silent loss of work the cruiser never asked to touch.
+    //
+    // A VISITED plan is never in it. The moment a planned plot is opened a
+    // real Plot stands on it with a tally inside, pointing back here through
+    // `Plot.plannedPlotId` — and this path does not merely orphan that
+    // reference the way deleting an area does, it destroys the row the
+    // reference names. `deleteArea` and `relayPlots` both carry `!visited`
+    // for that reason; all three paths agree, and this is the same predicate.
     val allPlanned = env.plannedPlotRepository.listByProject(project.id)
     val replacing = if (area != null) {
-        allPlanned.filter { it.stratumId == area.id }
+        allPlanned.filter { it.stratumId == area.id && !it.visited }
     } else {
-        allPlanned
+        allPlanned.filter { !it.visited }
     }
     val replacingIds = replacing.map { it.id }.toSet()
     // Continue numbering after every number already spoken for — the
     // project's REAL plots, so informal plots and the plan never share a
     // number, and the plans surviving this run, so two areas never both
-    // hold a "Plot 4".
+    // hold a "Plot 4". The visited plans this run now leaves standing are
+    // among the survivors, which is what keeps a new pin off a measured
+    // plot's number.
     val startNumber = maxOf(
         env.plotRepository.listByProject(project.id).maxOfOrNull { it.plotNumber } ?: 0,
         allPlanned.filter { it.id !in replacingIds }.maxOfOrNull { it.plotNumber } ?: 0,
@@ -606,8 +685,15 @@ private suspend fun generateCruisePlan(
         )
     }
 
+    // Everything above this line is a question; everything below it writes.
+    // The last question is what the run costs.
+    if (!confirmedDiscard) {
+        val warning = discardWarning(replacing)
+        if (warning != null) return warning
+    }
+
     // Replace the plans this run is for (whole project, or just this
-    // area's — see `replacing`).
+    // area's, and never a visited one — see `replacing`).
     for (p in replacing) env.plannedPlotRepository.delete(p.id)
     for (p in planned) env.plannedPlotRepository.create(p)
 
@@ -631,6 +717,63 @@ private suspend fun generateCruisePlan(
     } else {
         env.cruiseDesignRepository.create(design)
     }
+    return null
+}
+
+/// What a re-run takes that pressing "Generate plots" again cannot give
+/// back — or null, when it takes nothing of the kind and no question is
+/// worth asking. (Cross-platform: iOS `CruiseSetupSheet.discardWarning`.)
+///
+/// A generated pin is CHEAP to lose but not free, and the difference decides
+/// what this sentence has to say.
+///
+/// It is cheap because replacing it is the thing the cruiser pressed the
+/// button to do. It is not free because "reproducible from the design that
+/// laid it" — the reason this warning used to give itself for staying quiet —
+/// is not true of this code: the same run overwrites the project's single
+/// CruiseDesign row with the new parameters before it returns, and
+/// CruiseDesign carries no plot COUNT at all (plotType, plotAreaAcres, baf,
+/// samplingScheme, gridSpacingMeters, heightSubsampleRule). For a stratified
+/// design the old n therefore lived only in the plan rows this run is
+/// deleting, and nothing left on disk can say what it was. So the count of
+/// what goes is stated whenever anything goes, and the two kinds below are
+/// called out by name on top of it, because they are gone in a way even a
+/// rerun with the old numbers could not undo:
+///
+///   • DRAWN (`plannedSource == MANUAL`) — the cruiser put that point on the
+///     map with a finger. Nothing else in the project knows where it was, so
+///     a re-run is the end of it.
+///   • SKIPPED — a documented decision about ground somebody went and looked
+///     at (cliff, water, private land). Regenerating produces a fresh pin
+///     that says nothing, and the walk gets made twice.
+///
+/// A drawn plot that was also skipped is counted once, as drawn: two counts
+/// that add up to more plots than the plan holds would read as the run
+/// destroying more than it can.
+private fun discardWarning(replacing: List<PlannedPlot>): String? {
+    val drawn = replacing.count { it.plannedSource == PositionSource.MANUAL }
+    val skipped = replacing.count {
+        it.skipped && it.plannedSource != PositionSource.MANUAL
+    }
+    val clauses = mutableListOf<String>()
+    if (drawn > 0) clauses.add("$drawn plot${if (drawn == 1) "" else "s"} you placed by hand")
+    if (skipped > 0) {
+        clauses.add("$skipped plot${if (skipped == 1) "" else "s"} you marked skipped")
+    }
+    if (replacing.isEmpty()) return null
+    val n = replacing.size
+    var out = "$n planned plot${if (n == 1) "" else "s"} " +
+        "${if (n == 1) "is" else "are"} replaced by the new layout"
+    if (clauses.isNotEmpty()) {
+        val total = drawn + skipped
+        out += ", including " + clauses.joinToString(" and ") +
+            " that generating again cannot put ${if (total == 1) "it" else "them"} back"
+    }
+    // The design goes with them: this run writes the new parameters over the
+    // project's only CruiseDesign row, so the settings that produced the plan
+    // being replaced are not on disk afterwards either.
+    return out + ". The settings that laid the old plan are overwritten too. " +
+        "Plots you have already opened are kept — this only replaces the plan."
 }
 
 /// No-polygon default pattern: a centred, walkable square-ish grid around

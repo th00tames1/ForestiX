@@ -209,6 +209,11 @@ internal class CruiseModeState {
     /// Selected pin id ("plot-…" / "tree-…" / "planned-…") — peek card up.
     var selectedId by mutableStateOf<String?>(null)
     var projectSheetOpen by mutableStateOf(false)
+    /// Cruise setup (⑥) is up. Only ever raised with a project already in
+    /// `data` — the sheet cannot draw without one, and a flag raised against
+    /// no project is not a sheet that opens late, it is a tap that did
+    /// nothing and then surfaced a sheet at some unrelated later moment.
+    /// `CruiseModeSheets` drops it if a project goes away underneath it.
     var cruiseSetupOpen by mutableStateOf(false)
     /// Planned plot the dashed guide line + distance chip point at (mock ⑦).
     var navTargetId by mutableStateOf<UUID?>(null)
@@ -228,12 +233,28 @@ internal class CruiseModeState {
     /// — a plan has no centre, and a refusal that names the wrong thing sends
     /// the cruiser looking for a GPS problem they do not have.
     var planSaveRefusal by mutableStateOf<String?>(null)
+    /// Why Cruise setup could not be OPENED. A third channel because the tap
+    /// that raises it ("Cruise this area") arrives in either mode, so its
+    /// dialog has to be hosted outside the cruise-only sheets — and because
+    /// neither of the two above names a cruise that never got as far as a
+    /// plot or a plan.
+    var cruiseSetupRefusal by mutableStateOf<String?>(null)
     /// A "Start plot now" write is in flight. The storage write is a
     /// coroutine and the peek stays on screen until it lands, so without
     /// this a second tap inside that window runs the conversion twice: two
     /// Plot rows with the SAME plotNumber and the same plannedPlotId, and
     /// the planned pin marked visited twice.
     var startingPlanned by mutableStateOf(false)
+    /// A "Cruise this area" open is in flight. Same hazard as
+    /// [startingPlanned] and the same cure: resolving or creating the project
+    /// is a storage round trip, the area callout stays on screen until it
+    /// lands, and without this a second tap inside that window has both
+    /// coroutines find no project and both create one — two projects named
+    /// "Project 1", with the cruise laid into whichever `setCruiseProjectId`
+    /// wrote last. iOS has no such window: there,
+    /// `autoCreateProject()` and clearing the selection are one synchronous
+    /// main-actor turn (`MapHomeScreen+Area.swift`).
+    var openingAreaSetup by mutableStateOf(false)
 
     // MARK: - Planning on the map (press and hold)
 
@@ -1074,6 +1095,10 @@ private const val FLIGHT_SCREEN_WIDTHS = 2.5
 /// it, and raises that plot's own card. Nothing here is a new flow — the
 /// guide is `navTargetId` exactly as Navigate sets it, and the card is the
 /// pin's own selection. Port of iOS `goToPlannedPlot`.
+///
+/// Tapped again while the first glide is still running, the second tap
+/// REPLACES the first flight — `MapCameraState.flyTo` owns the job — so the
+/// camera is never being interpolated towards two plots at once.
 private fun goToPlannedPlot(
     state: CruiseModeState,
     planned: PlannedPlot,
@@ -1103,7 +1128,7 @@ private fun goToPlannedPlot(
         // Same zoom rule as my-location, the app's other "take me there"
         // control: close in if the map was pulled back, and never pull a
         // cruiser out of a closer look they chose.
-        scope.launch { camera.flyTo(target, max(camera.zoom, DefaultZoom)) }
+        camera.flyTo(scope, target, max(camera.zoom, DefaultZoom))
         return
     }
     if (usableFix == null) {
@@ -1118,15 +1143,104 @@ private fun goToPlannedPlot(
     val separationM = GeoMath.distanceM(
         usableFix.latitude, usableFix.longitude, target.latitude, target.longitude)
     val zoom = spanFramingZoom(camera, separationM) ?: camera.zoom
-    scope.launch {
-        camera.flyTo(
-            CoordinateConversions.LatLon(
-                latitude = (usableFix.latitude + target.latitude) / 2,
-                longitude = (usableFix.longitude + target.longitude) / 2,
-            ),
-            zoom,
-        )
+    camera.flyTo(
+        scope,
+        CoordinateConversions.LatLon(
+            latitude = (usableFix.latitude + target.latitude) / 2,
+            longitude = (usableFix.longitude + target.longitude) / 2,
+        ),
+        zoom,
+    )
+}
+
+/// THE AREA CALLOUT'S "Cruise this area" — open Cruise setup with this area
+/// already chosen. Port of iOS `openCruiseSetup(forArea:)`.
+///
+/// The tap arrives from EITHER mode, and that is what made the Android side
+/// of it a silent no-op: the cruise snapshot is only loaded while cruise
+/// mode is on, so pressed from measure mode `state.project` was still null,
+/// the setup sheet's own gate (`cruiseSetupOpen && project != null`) refused
+/// to draw, and the raised flag then sat there as a latch — surfacing the
+/// sheet at whatever unrelated later moment a project first appeared.
+///
+/// So the project is settled HERE, before anything is raised, the way iOS
+/// settles it: resolved, or created when the cruiser has not made one yet —
+/// a cruise needs a project and they did not come here to be told so. The
+/// resolved project is seeded into the snapshot as well, because the sheet
+/// reads the SNAPSHOT rather than this value, and a sheet that only appears
+/// once the mode flip's reload happens to land is the same silence again.
+/// The reload that follows replaces the seed with the full snapshot.
+internal suspend fun openCruiseSetupForArea(
+    env: AppEnvironment,
+    settings: SettingsSnapshot,
+    areaState: MapAreaState,
+    state: CruiseModeState,
+    stratum: Stratum,
+    /// Flips the map into cruise mode — the pins this sheet is about to
+    /// generate are cruise content, and generating them onto a map that does
+    /// not draw them would look like nothing happened.
+    enterCruiseMode: () -> Unit,
+) {
+    if (state.openingAreaSetup) return
+    state.openingAreaSetup = true
+    try {
+        openCruiseSetupForAreaInner(env, settings, areaState, state, stratum, enterCruiseMode)
+    } finally {
+        state.openingAreaSetup = false
     }
+}
+
+private suspend fun openCruiseSetupForAreaInner(
+    env: AppEnvironment,
+    settings: SettingsSnapshot,
+    areaState: MapAreaState,
+    state: CruiseModeState,
+    stratum: Stratum,
+    enterCruiseMode: () -> Unit,
+) {
+    val project = try {
+        resolveCurrentProject(env, settings.cruiseProjectId)
+            ?: createDefaultProject(env, settings)
+    } catch (e: Exception) {
+        // The one outcome that is not allowed here is nothing at all. Its own
+        // channel, not the area's: that dialog is titled "Couldn't save the
+        // area" and nothing was being saved, and a refusal that names the
+        // wrong thing sends the cruiser looking for the wrong problem.
+        state.cruiseSetupRefusal = "Storage error: ${e.message ?: e}. There is no " +
+            "project to lay the cruise into, so setup did not open — try again."
+        return
+    }
+    if (settings.cruiseProjectId != project.id.toString()) {
+        env.settings.setCruiseProjectId(project.id.toString())
+    }
+    // A snapshot for a DIFFERENT project is worse than an empty one: its
+    // plots and trees belong to somewhere else. The reload triggered by the
+    // mode flip fills this in a moment later.
+    if (state.data.project?.id != project.id) {
+        state.data = CruiseData(project, emptyList(), emptyMap())
+    }
+    areaState.cruiseSetupArea = stratum
+    areaState.selectedId = null
+    enterCruiseMode()
+    state.cruiseSetupOpen = true
+}
+
+/// Why Cruise setup did not open. Hosted by MapHomeScreen in BOTH modes,
+/// unlike the plot and plan refusals inside `CruiseModeSheets`: the tap that
+/// can raise this one is on an area callout, and areas are drawn in measure
+/// mode too — a refusal that only renders in cruise mode is the silence it
+/// was written to break.
+@Composable
+internal fun CruiseSetupRefusalDialog(state: CruiseModeState) {
+    val message = state.cruiseSetupRefusal ?: return
+    AlertDialog(
+        onDismissRequest = { state.cruiseSetupRefusal = null },
+        title = { Text("Can't open Cruise setup") },
+        text = { Text(message) },
+        confirmButton = {
+            TextButton(onClick = { state.cruiseSetupRefusal = null }) { Text("OK") }
+        },
+    )
 }
 
 /// Cruise-mode sheets (project ⑤ / cruise setup ⑥ / site description),
@@ -1179,6 +1293,19 @@ internal fun CruiseModeSheets(
     // MARK: - Cruise setup sheet (mock ⑥ — replaces CruiseDesignScreen)
 
     val setupProject = state.project
+    // A REQUEST, NOT A LATCH. `cruiseSetupOpen` is only ever raised with a
+    // project already in hand, but a project can also go away underneath it
+    // (deleted, or a switch that resolves to none) — and a flag left standing
+    // through that would re-open the sheet the next time any project appeared,
+    // which the cruiser reads as the app opening a sheet by itself. Dropping
+    // it here means the worst case is a sheet that closed, never one that
+    // opens unasked.
+    LaunchedEffect(state.cruiseSetupOpen, setupProject?.id) {
+        if (state.cruiseSetupOpen && setupProject == null) {
+            state.cruiseSetupOpen = false
+            onSetupClosed()
+        }
+    }
     if (state.cruiseSetupOpen && setupProject != null) {
         CruiseSetupSheet(
             project = setupProject,

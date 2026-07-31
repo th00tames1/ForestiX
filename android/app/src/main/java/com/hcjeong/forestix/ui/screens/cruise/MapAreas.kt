@@ -82,6 +82,7 @@ import com.hcjeong.forestix.basemap.MapCameraState
 import com.hcjeong.forestix.data.SettingsSnapshot
 import com.hcjeong.forestix.common.areaUnit
 import com.hcjeong.forestix.data.cruise.PlannedPlot
+import com.hcjeong.forestix.data.cruise.SamplingScheme
 import com.hcjeong.forestix.data.cruise.Stratum
 import com.hcjeong.forestix.geo.BoundaryDraft
 import com.hcjeong.forestix.geo.CoordinateConversions
@@ -372,7 +373,17 @@ internal fun beginAreaEdit(state: MapAreaState, stratum: Stratum) {
 /// place, keeping its id — which is what keeps the plots it already laid
 /// attached to it — and its plots are then re-laid on the new outline (see
 /// `relayPlots`). Returns the saved area, or null when it refused (the
-/// reason is on `state.saveRefusal`).
+/// reason is on `state.saveRefusal`). A re-lay that fails still returns the
+/// area: the outline is on disk by then, and saying otherwise is the defect
+/// the sentences below are for.
+///
+/// THE TWO PATHS DO NOT SHARE A PROJECT. A new area goes into the project
+/// the cruiser is looking at; an EDIT keeps the project the stored area is
+/// already in. They were one line, and it was the line a new area needs:
+/// saving an edit took `state.projectId`, so an outline edited while the
+/// current project had moved on was re-parented under the cruiser, while
+/// the plots it had laid kept the OLD projectId — the area in one project
+/// and its plan in another, with nothing left to tie them back together.
 internal suspend fun saveAreaDraft(
     state: MapAreaState,
     env: AppEnvironment,
@@ -384,27 +395,49 @@ internal suspend fun saveAreaDraft(
         state.saveRefusal = failure.message
         return null
     }
-    // An area needs a project to live in. Same door the rest of the map
-    // uses when a cruiser acts before naming anything.
-    val projectId = state.projectId ?: try {
-        createDefaultProject(env, settings).id
-    } catch (e: Exception) {
-        state.saveRefusal =
-            "Couldn't save the area: there is no project to put it in (${e.message ?: e})."
-        return null
-    }
     val name = state.draftName.trim().ifEmpty { state.defaultName() }
-    val stratum = Stratum(
-        id = state.editingId ?: UUID.randomUUID(),
-        projectId = projectId,
-        name = name,
-        areaAcres = draft.areaAcres.toFloat(),
-        polygonGeoJSON = GeoJSONImporter.serialise(listOf(draft.closedRing)),
-    )
+    val editingId = state.editingId
+    val stratum = if (editingId != null) {
+        // Read the stored row rather than trusting `state.areas`: what this
+        // branch needs is the project the area IS in, and the list on screen
+        // is the list for the project the cruiser is looking at.
+        val stored = try {
+            env.stratumRepository.read(editingId)
+        } catch (_: Exception) {
+            null
+        }
+        if (stored == null) {
+            state.saveRefusal = "This area could no longer be found, so the change was not saved."
+            return null
+        }
+        Stratum(
+            id = stored.id,
+            projectId = stored.projectId,
+            name = name,
+            areaAcres = draft.areaAcres.toFloat(),
+            polygonGeoJSON = GeoJSONImporter.serialise(listOf(draft.closedRing)),
+        )
+    } else {
+        // A new area needs a project to live in. Same door the rest of the
+        // map uses when a cruiser acts before naming anything.
+        val projectId = state.projectId ?: try {
+            createDefaultProject(env, settings).id
+        } catch (e: Exception) {
+            state.saveRefusal =
+                "Couldn't save the area: there is no project to put it in (${e.message ?: e})."
+            return null
+        }
+        Stratum(
+            id = UUID.randomUUID(),
+            projectId = projectId,
+            name = name,
+            areaAcres = draft.areaAcres.toFloat(),
+            polygonGeoJSON = GeoJSONImporter.serialise(listOf(draft.closedRing)),
+        )
+    }
     try {
-        if (state.editingId != null) {
+        if (editingId != null) {
             env.stratumRepository.update(stratum)
-            relayPlots(env, stratum)
         } else {
             env.stratumRepository.create(stratum)
         }
@@ -413,14 +446,44 @@ internal suspend fun saveAreaDraft(
             "Storage error: ${e.message ?: e}. The area was not saved — try again."
         return null
     }
+    // Past this line the outline IS on disk, so a failure below is a
+    // different piece of news and has to be a different sentence. The
+    // re-lay used to run inside the same `try`, so a throw there was
+    // announced as "The area was not saved — try again" and sent the
+    // cruiser back to redraw an outline that had already saved.
+    var relayFailure: String? = null
+    if (editingId != null) {
+        try {
+            relayPlots(env, stratum)
+        } catch (e: RelayStragglers) {
+            // The new plan landed. Do NOT tell the cruiser to save again: a
+            // second re-lay would count these leftovers as part of the area's
+            // plan and come back with about twice the plots.
+            val it1 = if (e.count == 1) "it" else "them"
+            relayFailure = "$RELAY_REFUSAL_PREFIX and its plots were re-laid, but " +
+                (if (e.count == 1) "1 old plot could not be removed"
+                 else "${e.count} old plots could not be removed") +
+                ". Delete $it1 from the plot list — saving the area again will not " +
+                "clear $it1."
+        } catch (e: Exception) {
+            relayFailure = "$RELAY_REFUSAL_PREFIX, but its plots could not be re-laid: " +
+                "${e.message ?: e}. The plan you had is still there — edit the area and " +
+                "save it again to re-lay it."
+        }
+    }
     state.editingId = null
     state.undoStack = emptyList()
-    state.saveRefusal = null
+    state.saveRefusal = relayFailure
     state.draft = null
     state.selectedId = stratum.id
     state.refresh++
     return stratum
 }
+
+/// The opening words of the re-lay refusal. `saveRefusal` carries both
+/// kinds of bad news and the dialog has to head them differently — see
+/// `areaRefusalTitle`.
+internal const val RELAY_REFUSAL_PREFIX = "The new outline was saved"
 
 /// RESIZING AN AREA MOVES ITS PLOTS. An area whose outline changed but
 /// whose plots stayed put is the worst of both: a plan that no longer
@@ -436,10 +499,35 @@ internal suspend fun saveAreaDraft(
 /// An area with no plans yet, or a project with no design yet, has nothing
 /// to re-lay and this does nothing.
 private suspend fun relayPlots(env: AppEnvironment, stratum: Stratum) {
-    val existing = env.plannedPlotRepository.listByProject(stratum.projectId)
-        .filter { it.stratumId == stratum.id && !it.visited }
+    val allPlanned = env.plannedPlotRepository.listByProject(stratum.projectId)
+    val existing = allPlanned.filter { it.stratumId == stratum.id && !it.visited }
     if (existing.isEmpty()) return
     val design = env.cruiseDesignRepository.forProject(stratum.projectId).firstOrNull() ?: return
+    // TWO NUMBERINGS, because the swap has two moments and they do not have
+    // the same free set.
+    //
+    // The old rule — "renumber consecutively from the lowest number in the
+    // set" — minted duplicates the moment the set had a hole in it: an area
+    // holding plots 1-5 with plot 3 visited re-lays {1,2,4,5} as 1,2,3,4, and
+    // the project then has two "Plot 3", one of them a measured tally.
+    //
+    // WHILE THE SWAP IS RUNNING the replacements have to clear the plans they
+    // replace, because those are still on disk — see the write order below.
+    // That is a WIDER rule than the one Cruise setup uses (it numbers past
+    // real plots and SURVIVING plans only, because it deletes first), and the
+    // difference is forced by the ordering, not chosen.
+    val realNumbers = env.plotRepository.listByProject(stratum.projectId).map { it.plotNumber }
+    val existingIds = existing.map { it.id }.toSet()
+    val surviving = allPlanned.filter { it.id !in existingIds }
+    // AND ONCE IT IS DONE the replaced numbers are free again, so the new
+    // plans come back down to them. Without that second pass every nudge of
+    // an outline pushed the whole area up a block — 1-5 became 6-10 became
+    // 11-15 — and those numbers are what the tally sheet, the export and the
+    // field log show. Settling them afterwards means a re-lay is idempotent:
+    // re-lay the same area twice and the second pass lands where the first
+    // one did.
+    val settledStart = ((realNumbers + surviving.map { it.plotNumber }).maxOrNull() ?: 0) + 1
+    val taken = realNumbers + allPlanned.map { it.plotNumber }
     val relaid: List<PlannedPlot> = SamplingGenerator.generate(
         strata = listOf(
             SamplingGenerator.StratumInput(
@@ -451,18 +539,95 @@ private suspend fun relayPlots(env: AppEnvironment, stratum: Stratum) {
             projectId = stratum.projectId,
             scheme = design.samplingScheme,
             gridSpacingMeters = design.gridSpacingMeters?.toDouble(),
-            // Count-based designs re-lay the number of plots the area is
-            // holding right now, which is the number the cruiser asked for
-            // the last time they generated into it.
-            nPerStratum = existing.size,
+            // A COUNT is a count-based design's number, and only that. A
+            // grid's count is its spacing and the ground it covers, so a
+            // resized grid is allowed to come back with more plots than the
+            // area held — cutting it back to the old count would keep the
+            // number and throw away the sample, leaving the first n points
+            // of the scan huddled in one corner of the stand. `existing.size`
+            // was handed to both schemes and the grid branch never read it
+            // (`SamplingGenerator.generateSystematicGrid`), so the argument
+            // was a fiction; it is passed now only where it is honoured.
+            // What a growing grid must never do is walk over another area's
+            // plot numbers, and that is the numbering rule above, not this.
+            nPerStratum = if (design.samplingScheme == SamplingScheme.STRATIFIED_RANDOM) {
+                existing.size
+            } else {
+                null
+            },
             seed = 1uL,
         ),
-        startingPlotNumber = existing.minOf { it.plotNumber },
+        startingPlotNumber = (taken.maxOrNull() ?: 0) + 1,
     )
     if (relaid.isEmpty()) return
-    for (p in existing) env.plannedPlotRepository.delete(p.id)
-    for (p in relaid) env.plannedPlotRepository.create(p)
+    // WRITE ORDER IS THE ONLY TRANSACTION THERE IS. The repositories have
+    // none, so the replacements go in FIRST and the plans they replace are
+    // dropped only once every replacement is on disk. Deleting first meant a
+    // throw between the two loops left the area with no plan at all — and
+    // the caller, catching it, told the cruiser the area had not been saved.
+    // The numbering above is past everything, so the old plans and the new
+    // ones can sit in the store together for the length of the swap without
+    // either one claiming the other's number.
+    val written = mutableListOf<PlannedPlot>()
+    try {
+        for (p in relaid) {
+            env.plannedPlotRepository.create(p)
+            written += p
+        }
+    } catch (e: Exception) {
+        // Half a plan is not a plan. Take back what went in so what is left
+        // standing is the plan the cruiser already had.
+        for (p in written) {
+            try {
+                env.plannedPlotRepository.delete(p.id)
+            } catch (_: Exception) {
+                // Nothing further to try; the throw below is the news.
+            }
+        }
+        throw e
+    }
+    // THE SWAP IS DONE ONCE THE REPLACEMENTS ARE ON DISK. What is left is
+    // tidying, and tidying must not be reported as failure: a throw here used
+    // to surface "The plan you had is still there — save it again to re-lay
+    // it", which was false twice over. The old plan was only partly there,
+    // the NEW plan was there too, and taking the advice re-laid an area whose
+    // `existing` now counted leftovers AND replacements, so a stratified
+    // design came back with roughly double the plots the cruiser asked for.
+    // Stragglers are counted and named instead.
+    var stragglers = 0
+    for (p in existing) {
+        try {
+            env.plannedPlotRepository.delete(p.id)
+        } catch (_: Exception) {
+            stragglers += 1
+        }
+    }
+    // Settle the new plans onto the numbers the old ones just freed, lowest
+    // first, in the order they were laid. A failure here leaves plans that
+    // are numbered high rather than plans that are missing or doubled, which
+    // is why it is a separate pass: at no instant does the project hold two
+    // plots with one number, and at no instant is the area without a plan.
+    // Only when every old plan actually went — a straggler still holds its
+    // number, and settling onto it would mint the duplicate this numbering
+    // exists to prevent.
+    if (stragglers == 0 &&
+        settledStart <= (written.minOfOrNull { it.plotNumber } ?: Int.MAX_VALUE)
+    ) {
+        written.forEachIndexed { offset, p ->
+            try {
+                env.plannedPlotRepository.update(p.copy(plotNumber = settledStart + offset))
+            } catch (_: Exception) {
+                // Cosmetic; the plan itself is correct and complete.
+            }
+        }
+    }
+    if (stragglers > 0) throw RelayStragglers(stragglers)
 }
+
+/// Old plans the tidy-up could not delete. The NEW plan is complete and in
+/// place; these are extra rows, not missing ones — so the caller must not
+/// tell the cruiser to save again. Mirrors iOS `RelayOutcome.stragglers`.
+internal class RelayStragglers(val count: Int) : Exception()
 
 // MARK: - Deleting
 
@@ -1061,7 +1226,7 @@ internal fun MapAreaRefusalDialog(state: MapAreaState) {
         onDismissRequest = { state.saveRefusal = null },
         containerColor = colors.surface,
         title = {
-            Text("Couldn't save the area", style = type.bodyBold, color = colors.textPrimary)
+            Text(areaRefusalTitle(message), style = type.bodyBold, color = colors.textPrimary)
         },
         text = { Text(message, style = type.caption, color = colors.textSecondary) },
         confirmButton = {
@@ -1071,3 +1236,15 @@ internal fun MapAreaRefusalDialog(state: MapAreaState) {
         },
     )
 }
+
+/// Which of the two failures the dialog is heading. An outline that IS on
+/// disk must not be announced as one that isn't: headed "Couldn't save the
+/// area", a re-lay failure sends the cruiser back to redraw an outline that
+/// already saved, and the second save then re-lays plots that were never
+/// the problem.
+private fun areaRefusalTitle(message: String): String =
+    if (message.startsWith(RELAY_REFUSAL_PREFIX)) {
+        "The area saved, but its plots did not move"
+    } else {
+        "Couldn't save the area"
+    }

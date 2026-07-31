@@ -275,28 +275,58 @@ extension MapHomeScreen {
     /// place, keeping its id — which is what keeps the plots it already
     /// laid attached to it — and its plots are then re-laid on the new
     /// outline (see `relayPlots(forArea:)`).
+    ///
+    /// THE TWO PATHS DO NOT SHARE A PROJECT. A new area goes into the
+    /// project the cruiser is looking at; an EDIT keeps the project the
+    /// stored area is already in. They were one line, and it was the line a
+    /// new area needs: saving an edit took `currentProject`, so an outline
+    /// edited while the current project had moved on was re-parented under
+    /// the cruiser, while the plots it had laid kept the OLD `projectId` —
+    /// the area in one project and its plan in another, with nothing left
+    /// to tie them back together.
     func saveAreaDraft() {
         guard let draft = areaDraft else { return }
         if let failure = draft.validationFailure {
             areaSaveRefusal = failure.description
             return
         }
-        guard let project = currentProject ?? autoCreateProject() else {
-            areaSaveRefusal = "Couldn't save the area: there is no project to put it in."
-            return
-        }
-        let name = areaDraftName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let typed = areaDraftName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = typed.isEmpty ? defaultAreaName : typed
         let ring = draft.closedRing
-        let stratum = Stratum(
-            id: editingAreaID ?? UUID(),
-            projectId: project.id,
-            name: name.isEmpty ? defaultAreaName : name,
-            areaAcres: Float(draft.areaAcres),
-            polygonGeoJSON: GeoJSONImporter.serialise(rings: [ring]))
+        let stratum: Stratum
+        if let editingAreaID {
+            // Read the stored row rather than trusting `areas`: what this
+            // branch needs is the project the area IS in, and the list on
+            // screen is the list for the project the cruiser is looking at.
+            guard let stored = (try? environment.stratumRepository
+                .read(id: editingAreaID)) ?? nil
+            else {
+                areaSaveRefusal =
+                    "This area could no longer be found, so the change was not saved."
+                return
+            }
+            stratum = Stratum(
+                id: stored.id,
+                projectId: stored.projectId,
+                name: name,
+                areaAcres: Float(draft.areaAcres),
+                polygonGeoJSON: GeoJSONImporter.serialise(rings: [ring]))
+        } else {
+            guard let project = currentProject ?? autoCreateProject() else {
+                areaSaveRefusal = "Couldn't save the area: there is no project to put it in."
+                return
+            }
+            stratum = Stratum(
+                id: UUID(),
+                projectId: project.id,
+                name: name,
+                areaAcres: Float(draft.areaAcres),
+                polygonGeoJSON: GeoJSONImporter.serialise(rings: [ring]))
+        }
+        let isEdit = editingAreaID != nil
         do {
-            if editingAreaID != nil {
+            if isEdit {
                 _ = try environment.stratumRepository.update(stratum)
-                try relayPlots(forArea: stratum)
             } else {
                 _ = try environment.stratumRepository.create(stratum)
             }
@@ -305,15 +335,50 @@ extension MapHomeScreen {
                 "Storage error: \(error.localizedDescription). The area was not saved — try again."
             return
         }
-        HapticFeedback.play(.success)
+        // Past this line the outline IS on disk, so a failure below is a
+        // different piece of news and has to be a different sentence. The
+        // re-lay used to run inside the same `do`, so a throw there was
+        // announced as "The area was not saved — try again" and sent the
+        // cruiser back to redraw an outline that had already saved.
+        var relayFailure: String?
+        if isEdit {
+            do {
+                try relayPlots(forArea: stratum)
+            } catch RelayOutcome.stragglers(let n) {
+                // The new plan landed. Do NOT tell the cruiser to save again:
+                // a second re-lay would count these leftovers as part of the
+                // area's plan and come back with about twice the plots.
+                relayFailure = Self.relayRefusalPrefix
+                    + " and its plots were re-laid, but "
+                    + (n == 1 ? "1 old plot could not be removed"
+                              : "\(n) old plots could not be removed")
+                    + ". Delete "
+                    + (n == 1 ? "it" : "them")
+                    + " from the plot list — saving the area again will not clear "
+                    + (n == 1 ? "it" : "them")
+                    + "."
+            } catch {
+                relayFailure = Self.relayRefusalPrefix
+                    + ", but its plots could not be re-laid: "
+                    + "\(error.localizedDescription). "
+                    + "The plan you had is still there — edit the area and save it again "
+                    + "to re-lay it."
+            }
+        }
+        if relayFailure == nil { HapticFeedback.play(.success) }
         editingAreaID = nil
         areaDraftUndo = []
-        areaSaveRefusal = nil
+        areaSaveRefusal = relayFailure
         withAnimation(.easeOut(duration: 0.18)) { areaDraft = nil }
         reloadAreas()
         reloadCruise()
         selectArea(stratum.id)
     }
+
+    /// The opening words of the re-lay refusal. `areaSaveRefusal` carries
+    /// both kinds of bad news and the alert has to head them differently —
+    /// see `areaRefusalTitle`.
+    static var relayRefusalPrefix: String { "The new outline was saved" }
 
     /// RESIZING AN AREA MOVES ITS PLOTS. An area whose outline changed but
     /// whose plots stayed put is the worst of both: a plan that no longer
@@ -330,9 +395,9 @@ extension MapHomeScreen {
     /// An area with no plans yet, or a project with no design yet, has
     /// nothing to re-lay and this does nothing.
     private func relayPlots(forArea stratum: Stratum) throws {
-        let existing = try environment.plannedPlotRepository
+        let allPlanned = try environment.plannedPlotRepository
             .listByProject(stratum.projectId)
-            .filter { $0.stratumId == stratum.id && !$0.visited }
+        let existing = allPlanned.filter { $0.stratumId == stratum.id && !$0.visited }
         guard !existing.isEmpty,
               let design = try environment.cruiseDesignRepository
                   .forProject(stratum.projectId).first
@@ -342,22 +407,118 @@ extension MapHomeScreen {
             projectId: stratum.projectId,
             scheme: design.samplingScheme,
             gridSpacingMeters: design.gridSpacingMeters.map(Double.init),
-            // Count-based designs re-lay the number of plots the area is
-            // holding right now, which is the number the cruiser asked for
-            // the last time they generated into it.
-            nPerStratum: existing.count,
+            // A COUNT is a count-based design's number, and only that. A
+            // grid's count is its spacing and the ground it covers, so a
+            // resized grid is allowed to come back with more plots than the
+            // area held — cutting it back to the old count would keep the
+            // number and throw away the sample, leaving the first n points
+            // of the scan huddled in one corner of the stand. `existing.count`
+            // was handed to both schemes and the grid branch never read it
+            // (`SamplingGenerator.generateSystematicGrid`), so the argument
+            // was a fiction; it is passed now only where it is honoured.
+            // What a growing grid must never do is walk over another area's
+            // plot numbers, and that is the numbering rule below, not this.
+            nPerStratum: design.samplingScheme == .stratifiedRandom
+                ? existing.count : nil,
             seed: 1)
+        // TWO NUMBERINGS, because the swap has two moments and they do not
+        // have the same free set.
+        //
+        // The old rule — "renumber consecutively from the lowest number in
+        // the set" — minted duplicates the moment the set had a hole in it:
+        // an area holding plots 1-5 with plot 3 visited re-lays {1,2,4,5} as
+        // 1,2,3,4, and the project then has two "Plot 3", one of them a
+        // measured tally.
+        //
+        // WHILE THE SWAP IS RUNNING the replacements have to clear the plans
+        // they replace, because those are still on disk — see the write
+        // order below. That is a WIDER rule than the one Cruise setup uses
+        // (`CruiseSetupSheet.generate` numbers past real plots and SURVIVING
+        // plans only, because it deletes first), and the difference is
+        // forced by the ordering, not chosen.
+        let realNumbers = try environment.plotRepository
+            .listByProject(stratum.projectId).map(\.plotNumber)
+        let surviving = allPlanned.filter { p in !existing.contains { $0.id == p.id } }
+        // AND ONCE IT IS DONE the replaced numbers are free again, so the
+        // new plans come back down to them. Without that second pass every
+        // nudge of an outline pushed the whole area up a block — 1-5 became
+        // 6-10 became 11-15 — and those numbers are what the tally sheet,
+        // the export and the field log show. Settling them afterwards means
+        // a relay is idempotent: re-lay the same area twice and the second
+        // pass lands on the numbers the first one did.
+        let settledStart = ((realNumbers + surviving.map(\.plotNumber)).max() ?? 0) + 1
+        let taken = realNumbers + allPlanned.map(\.plotNumber)
         let relaid = try SamplingGenerator.generate(
             strata: [.init(stratumId: stratum.id, rings: rings)],
             options: options,
-            startingPlotNumber: existing.map(\.plotNumber).min() ?? nextPlotNumber())
+            startingPlotNumber: (taken.max() ?? 0) + 1)
         guard !relaid.isEmpty else { return }
+        // WRITE ORDER IS THE ONLY TRANSACTION THERE IS. The repositories
+        // have none, so the replacements go in FIRST and the plans they
+        // replace are dropped only once every replacement is on disk.
+        // Deleting first meant a throw between the two loops left the area
+        // with no plan at all — and the caller, catching it, told the
+        // cruiser the area had not been saved. The numbering above is past
+        // everything, so the old plans and the new ones can sit in the
+        // store together for the length of the swap without either one
+        // claiming the other's number.
+        var written: [PlannedPlot] = []
+        do {
+            for plot in relaid {
+                _ = try environment.plannedPlotRepository.create(plot)
+                written.append(plot)
+            }
+        } catch {
+            // Half a plan is not a plan. Take back what went in so what is
+            // left standing is the plan the cruiser already had.
+            for plot in written {
+                try? environment.plannedPlotRepository.delete(id: plot.id)
+            }
+            throw error
+        }
+        // THE SWAP IS DONE ONCE THE REPLACEMENTS ARE ON DISK. What is left
+        // is tidying, and tidying must not be reported as failure: a throw
+        // here used to surface "The plan you had is still there — save it
+        // again to re-lay it", which was false twice over. The old plan was
+        // only partly there, the NEW plan was there too, and taking the
+        // advice re-laid an area whose `existing` now counted leftovers AND
+        // replacements, so a stratified design came back with roughly double
+        // the plots the cruiser asked for. Stragglers are counted and named
+        // instead.
+        var stragglers = 0
         for plot in existing {
-            try environment.plannedPlotRepository.delete(id: plot.id)
+            do { try environment.plannedPlotRepository.delete(id: plot.id) }
+            catch { stragglers += 1 }
         }
-        for plot in relaid {
-            _ = try environment.plannedPlotRepository.create(plot)
+        // The swap is complete and the old numbers are free. Settle the new
+        // plans onto them, lowest first, in the order they were laid.
+        //
+        // A throw here leaves plans that are numbered high rather than plans
+        // that are missing or doubled, which is the whole reason it is a
+        // separate pass and not part of the create loop: at no instant does
+        // the project hold two plots with one number, and at no instant is
+        // the area without a plan. `try?` for the same reason — a cruise
+        // whose plots are numbered 6-10 is a cosmetic complaint, and throwing
+        // here would report a failure to a caller whose work actually landed.
+        // Only when every old plan actually went: a straggler still holds
+        // its number, and settling onto it would mint the duplicate this
+        // whole numbering exists to prevent.
+        if stragglers == 0,
+           settledStart <= written.map(\.plotNumber).min() ?? Int.max {
+            for (offset, plot) in written.enumerated() {
+                var settled = plot
+                settled.plotNumber = settledStart + offset
+                _ = try? environment.plannedPlotRepository.update(settled)
+            }
         }
+        if stragglers > 0 { throw RelayOutcome.stragglers(stragglers) }
+    }
+
+    /// What a re-lay can go wrong at, when the two halves need different words.
+    enum RelayOutcome: Error {
+        /// Old plans the tidy-up could not delete. The NEW plan is complete
+        /// and in place; these are extra rows, not missing ones.
+        case stragglers(Int)
     }
 
     // MARK: - Deleting
@@ -419,10 +580,24 @@ extension MapHomeScreen {
     /// alone — see `CruiseSetupSheet.AreaSeed`.
     func openCruiseSetup(forArea stratum: Stratum) {
         cruiseSetupAreaID = stratum.id
-        if currentProject == nil {
-            // Same door the rest of the map uses: a cruise needs a project
-            // and the cruiser did not come here to be told so.
-            _ = autoCreateProject()
+        // A CRUISE NEEDS A PROJECT, and the cruiser did not come here to be
+        // told so — the rest of the map opens the same door silently. But if
+        // the door will not open, SAY SO. The sheet renders empty content
+        // when `currentProject` is nil, so presenting it anyway put a blank
+        // sheet on screen: the one outcome that is not allowed here is
+        // nothing at all, and a blank sheet is nothing at all with a
+        // dismiss gesture on it.
+        //
+        // Its own channel, not `areaSaveRefusal`: that alert is headed
+        // "Couldn't save the area" and nothing is being saved, and a refusal
+        // that names the wrong thing sends the cruiser looking for the wrong
+        // problem. Android says the same sentence through
+        // `CruiseModeState.cruiseSetupRefusal`.
+        if currentProject == nil, autoCreateProject() == nil {
+            cruiseSetupAreaID = nil
+            cruiseSetupRefusal = "There is no project to lay the cruise into, "
+                + "so setup did not open — try again."
+            return
         }
         // Laying out a cruise puts the cruiser in cruise mode: the pins this
         // is about to generate are cruise content, and generating them onto
@@ -464,7 +639,7 @@ extension MapHomeScreen {
             // A refusal the cruiser has to see: an area that did not persist
             // must never look like one that did. Only while no draft is open
             // — mid-drag the draft bar already carries the sentence.
-            .alert("Couldn't save the area",
+            .alert(areaRefusalTitle,
                    isPresented: Binding(
                        get: { areaSaveRefusal != nil && areaDraft == nil },
                        set: { if !$0 { areaSaveRefusal = nil } })
@@ -473,6 +648,28 @@ extension MapHomeScreen {
             } message: {
                 Text(areaSaveRefusal ?? "")
             }
+            // Cruise setup could not be opened. Separate from the area alert
+            // above because nothing was being saved — see `openCruiseSetup`.
+            .alert("Can't open Cruise setup",
+                   isPresented: Binding(
+                       get: { cruiseSetupRefusal != nil },
+                       set: { if !$0 { cruiseSetupRefusal = nil } })
+            ) {
+                Button("OK", role: .cancel) { cruiseSetupRefusal = nil }
+            } message: {
+                Text(cruiseSetupRefusal ?? "")
+            }
+    }
+
+    /// Which of the two failures the alert is heading. An outline that IS
+    /// on disk must not be announced as one that isn't: headed "Couldn't
+    /// save the area", a re-lay failure sends the cruiser back to redraw an
+    /// outline that already saved, and the second save then re-lays plots
+    /// that were never the problem.
+    private var areaRefusalTitle: String {
+        areaSaveRefusal?.hasPrefix(Self.relayRefusalPrefix) == true
+            ? "The area saved, but its plots did not move"
+            : "Couldn't save the area"
     }
 
     // MARK: - The projected layer (pin, callouts, handles)

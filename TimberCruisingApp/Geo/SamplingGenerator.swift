@@ -5,7 +5,11 @@
 //  • systematicGrid     — square grid at `gridSpacingMeters`, with a uniform
 //                         random offset in [0, spacing) applied once to the
 //                         whole project. Points that fall outside every
-//                         stratum polygon are discarded.
+//                         stratum polygon are discarded. HOW MANY it returns
+//                         is decided by the spacing and the ground covered,
+//                         never by `nPerStratum`: a grid asked for a fixed
+//                         count would have to drop points, and the ones a
+//                         scan drops are all on one side of the stand.
 //  • stratifiedRandom   — `nPerStratum` uniform-random points per stratum
 //                         (rejection-sampled inside the polygon bounding box).
 //  • manual             — passthrough; caller supplies the coordinates.
@@ -35,7 +39,11 @@ public enum SamplingGenerator {
         public var projectId: UUID
         public var scheme: SamplingScheme
         public var gridSpacingMeters: Double?          // required for .systematicGrid
-        public var nPerStratum: Int?                   // required for .stratifiedRandom
+        // Required for .stratifiedRandom, and READ BY NOTHING ELSE — a
+        // caller that sets it for .systematicGrid is describing an outcome
+        // the grid will not produce. A re-lay did exactly that and read the
+        // result as "the area kept its plot count".
+        public var nPerStratum: Int?
         public var seed: UInt64                        // deterministic testing
 
         public init(

@@ -212,20 +212,36 @@ extension MapHomeScreen {
     /// Ease-out over ~0.6 s: quick off the mark, settling onto the target.
     /// A second call replaces the first — two loops writing the same camera
     /// would fight, and the cruiser's last tap is the one they meant.
+    ///
+    /// EVERY OTHER WRITER ENDS THE FLIGHT TOO, and the loop finds that out by
+    /// looking rather than by being told. The map's own pan and pinch write
+    /// this `camera` straight through the binding, and no gesture can cancel
+    /// a Task it has never heard of — so a drag during a glide used to be
+    /// undone 60 times a second, the ground hauling itself back out from
+    /// under the cruiser's thumb. A camera that stops is a camera they can
+    /// work with; one that fights them is not. The same test also ends a
+    /// flight that a cut (`frameCamera`, my-location, the too-far branch of
+    /// "Go to Plot N") has overtaken, since those assign `camera` outright.
     func flyCamera(to centre: CoordinateConversions.LatLon, zoom: Double) {
         let from = camera
         let steps = 36
         cameraFlight?.cancel()
         cameraFlight = Task { @MainActor in
+            // Where this flight left the camera on its previous frame.
+            // Anything else in it means someone else has taken the camera.
+            var lastWritten = from
             for step in 1...steps {
                 try? await Task.sleep(nanoseconds: 16_000_000)
                 if Task.isCancelled { return }
+                guard camera == lastWritten else { return }
                 let t = Double(step) / Double(steps)
                 let eased = 1 - pow(1 - t, 3)
-                camera = BasemapCamera(
+                let next = BasemapCamera(
                     latitude: from.latitude + (centre.latitude - from.latitude) * eased,
                     longitude: from.longitude + (centre.longitude - from.longitude) * eased,
                     zoom: from.zoom + (zoom - from.zoom) * eased)
+                camera = next
+                lastWritten = next
             }
         }
     }

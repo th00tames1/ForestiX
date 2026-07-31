@@ -97,6 +97,9 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sinh
 import kotlin.math.tan
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 
 // MARK: - Overlay models (mirror MapPolygon / Marker content on iOS)
 
@@ -249,10 +252,38 @@ class MapCameraState {
     /// round trip through the consumer.
     internal var moveTick: Int by mutableIntStateOf(0)
 
+    /// The glide currently running, if any. A camera has ONE state and can
+    /// only be going to one place, so the flight is held here rather than
+    /// launched and forgotten: every other way the camera moves — a second
+    /// [flyTo], a [moveTo] cut, the cruiser's own pan or pinch — ends it
+    /// first. Two loops writing [pendingMove] on the same frame clock is a
+    /// camera that drags itself out from under the finger.
+    private var flight: Job? = null
+
+    /// End any glide in flight. Called by EVERY path that takes the camera
+    /// somewhere else — `moveTo`, a new `flyTo`, the map's own gesture
+    /// handling, and the host re-keying `center`. A cruiser who pans has said
+    /// where they want to look, and a glide that keeps hauling them back is
+    /// worse than one that simply stops; the same is true of a recentre.
+    fun cancelFlight() {
+        flight?.cancel()
+        flight = null
+        // The frame already posted but not yet consumed goes with it. The
+        // consumer reads this value when it runs, not when it was written, so
+        // leaving it would let one last glide frame land on top of the pan
+        // that just ended the glide — a visible tug at the start of the drag.
+        pendingMove = null
+    }
+
     /// Recentre on `target` at `zoom` — the same snap the map does when the
     /// host's `center` parameter changes, but usable when that parameter
     /// hasn't changed (my-location button after the user panned away).
+    ///
+    /// A cut REPLACES a glide, it does not race one: without this the
+    /// too-far branch of "Go to Plot N" would land on the plot and then be
+    /// dragged back along the previous flight's remaining frames.
     fun moveTo(target: CoordinateConversions.LatLon, zoom: Double) {
+        cancelFlight()
         pendingMove = target to zoom
         moveTick++
     }
@@ -265,21 +296,36 @@ class MapCameraState {
     /// with a direction. Stepped on the frame clock, ease-out over ~0.6 s —
     /// quick off the mark, settling onto the target.
     ///
-    /// Suspends, so cancelling is the caller's job and costs nothing: the
-    /// coroutine a second tap launches replaces the first.
-    suspend fun flyTo(target: CoordinateConversions.LatLon, zoom: Double) {
+    /// The flight is launched HERE, into the caller's `scope`, rather than
+    /// left for the caller to `launch` itself: the coroutine a second tap
+    /// starts has to replace the first, and it can only do that if one place
+    /// owns the [Job]. Callers used to launch their own, so two taps left two
+    /// loops interpolating from different origins into the same camera.
+    /// iOS `flyCamera(to:zoom:)` holds its Task the same way.
+    fun flyTo(scope: CoroutineScope, target: CoordinateConversions.LatLon, zoom: Double) {
+        cancelFlight()
+        flight = scope.launch { glide(target, zoom) }
+    }
+
+    private suspend fun glide(target: CoordinateConversions.LatLon, zoom: Double) {
         val from = center
         val fromZoom = this.zoom
         val toZoom = zoom.coerceIn(MAP_ZOOM_MIN, MAP_ZOOM_MAX)
         // No camera to fly FROM (the map has not laid out): nothing to
         // interpolate, so land on the target rather than animate from a
-        // position we made up.
+        // position we made up. The request is posted directly rather than
+        // through `moveTo`, whose first act is to cancel the flight — which
+        // here is this coroutine.
         if (from == null) {
-            moveTo(target, toZoom)
+            pendingMove = target to toZoom
+            moveTick++
             return
         }
         val steps = 36
         for (step in 1..steps) {
+            // Cancellation lands here: `withFrameMillis` is the flight's only
+            // suspension point, so a cancelled glide stops before it writes
+            // another frame's camera rather than at the end of the loop.
             withFrameMillis { }
             val eased = 1.0 - (1.0 - step.toDouble() / steps).pow(3)
             pendingMove = CoordinateConversions.LatLon(
@@ -288,6 +334,7 @@ class MapCameraState {
             ) to (fromZoom + (toZoom - fromZoom) * eased)
             moveTick++
         }
+        flight = null
     }
 
     /// Pure projection of a coordinate into viewport pixels for the
@@ -422,7 +469,17 @@ fun MapView(
     val density = LocalDensity.current.density
     val scope = rememberCoroutineScope()
 
-    var camCenter by remember(center) { mutableStateOf(center) }
+    // A HOST `center` CHANGE IS A WRITER TOO. `remember(center)` re-keys and
+    // resets the camera without going through `moveTo`, so it used to be the
+    // one path that moved the camera without ending a glide: a Go-to-Plot
+    // flight running when the first GPS fix lands (MapHomeScreen's
+    // `mapCenter`) went on writing `pendingMove` and dragged the camera back
+    // off the recentre. iOS never had the hole because its guard is a
+    // divergence test that catches any writer, not a list of call sites.
+    var camCenter by remember(center) {
+        cameraState?.cancelFlight()
+        mutableStateOf(center)
+    }
     var camZoom by remember { mutableDoubleStateOf(initialZoom) }
 
     // Mirror the camera into the host-observable state + change callback
@@ -530,6 +587,14 @@ fun MapView(
                 }
                 .pointerInput(Unit) {
                     detectTransformGestures { _, pan, gestureZoom, _ ->
+                        // THE FINGER WINS. A glide in flight is writing this
+                        // same camera on the frame clock, so a pan during one
+                        // used to be undone frame by frame — the map dragging
+                        // itself back out from under the cruiser's thumb. The
+                        // gesture is a statement about where they want to
+                        // look, so it ENDS the flight rather than competing
+                        // with it.
+                        cameraState?.cancelFlight()
                         if (gestureZoom != 1f && gestureZoom > 0f) {
                             // 24, not the native tile max (19): past 19 the
                             // renderer overzooms so dense stands separate.
@@ -573,6 +638,9 @@ fun MapView(
                         // iOS BasemapMapView doubleTapZoom: one level in,
                         // keeping the tapped point stationary.
                         onDoubleTap = { tap ->
+                            // Same rule as the pan above: a zoom the cruiser
+                            // asked for ends whatever glide was in flight.
+                            cameraState?.cancelFlight()
                             val oldZoom = camZoom
                             val newZoom = (oldZoom + 1.0).coerceIn(MAP_ZOOM_MIN, MAP_ZOOM_MAX)
                             if (newZoom != oldZoom) {

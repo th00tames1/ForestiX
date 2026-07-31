@@ -18,10 +18,12 @@
 //
 // Planned-plot numbering continues after the project's existing real
 // plots (max plotNumber + 1) so informal plots started before setup
-// never collide with the plan. Generating replaces the project's
-// previous planned plots and upserts the single CruiseDesign record —
-// identical persistence semantics to the retired screen. Generation
-// never gates measuring: planned pins are suggestions.
+// never collide with the plan, and after the plans that survive the run
+// so no two of them share a number. Generating replaces the previous
+// UNVISITED planned plots — a VISITED plan has a measured plot standing
+// on it and survives every re-run — and upserts the single CruiseDesign
+// record. Generation never gates measuring: planned pins are
+// suggestions.
 
 import SwiftUI
 import Common
@@ -78,6 +80,11 @@ public struct CruiseSetupSheet: View {
     @State private var strataCount = 0
     @State private var pushingStratumDraw = false
     @State private var errorMessage: String?
+    /// Non-nil while the "this run takes work you can't get back" question
+    /// is up; the string IS the sentence it asks. Its own channel beside
+    /// `errorMessage` because that one is a refusal and this one is a
+    /// choice, and a cruiser must never have to read which it is.
+    @State private var discardWarning: String?
     @State private var loadedExisting = false
 
     /// Radius of the default 0.1 ac fixed plot — the existing design
@@ -213,6 +220,30 @@ public struct CruiseSetupSheet: View {
             Button("OK", role: .cancel) { errorMessage = nil }
         } message: {
             Text(errorMessage ?? "")
+        }
+        // GENERATING OVER A PLAN, step two. The count is the whole point of
+        // the sentence — same reason the area-delete confirmation carries
+        // one: a cruiser about to lose a morning's planning has to know how
+        // much before they answer. Only raised when the run would take
+        // something generating again cannot put back (see `discardWarning`).
+        .alert(discardConfirmationTitle,
+               isPresented: Binding(
+                   get: { discardWarning != nil },
+                   set: { if !$0 { discardWarning = nil } })
+        ) {
+            Button("Replace plan", role: .destructive) {
+                discardWarning = nil
+                // The re-run waits until this alert is actually gone. A
+                // second alert raised while the first is still dismissing
+                // is one SwiftUI drops, and the alert this run can still
+                // raise is "Couldn't generate plots" — a storage refusal
+                // nobody sees reads as a plan that saved.
+                DispatchQueue.main.async { generate(confirmedDiscard: true) }
+            }
+            .accessibilityIdentifier("cruiseSetup.discard.confirm")
+            Button("Cancel", role: .cancel) { discardWarning = nil }
+        } message: {
+            Text(discardWarning ?? "")
         }
     }
 
@@ -386,7 +417,13 @@ public struct CruiseSetupSheet: View {
 
     // MARK: Generation (the existing engine)
 
-    private func generate() {
+    /// `confirmedDiscard` is the answer to the question below: false on the
+    /// press of "Generate plots", true only after the cruiser has read what
+    /// this run takes and said replace it anyway. Re-running generation
+    /// after the answer costs nothing — the generator is deterministic —
+    /// and it keeps the question in front of the writes rather than in
+    /// front of a plan that might not even generate.
+    private func generate(confirmedDiscard: Bool = false) {
         // Validate the three visible fields.
         let radiusM = Double(radiusText) ?? 0
         let baf = Double(bafText) ?? 0
@@ -418,18 +455,28 @@ public struct CruiseSetupSheet: View {
             // outline must not wipe the plan laid inside another, which is
             // the whole-project rule and would be a silent loss of work
             // the cruiser never asked to touch.
+            //
+            // A VISITED plan is never in it. The moment a planned plot is
+            // opened a real Plot stands on it with a tally inside, pointing
+            // back here through `Plot.plannedPlotId` — and this path does
+            // not merely orphan that reference the way deleting an area
+            // does, it destroys the row the reference names. `deleteArea`
+            // and `relayPlots` both carry `!visited` for that reason; all
+            // three paths agree, and this is the same predicate.
             let allPlanned = try environment.plannedPlotRepository
                 .listByProject(project.id)
-            let replacing = area.map { seed in
+            let replacing = (area.map { seed in
                 allPlanned.filter { $0.stratumId == seed.id }
-            } ?? allPlanned
+            } ?? allPlanned).filter { !$0.visited }
             let surviving = allPlanned.filter { plan in
                 !replacing.contains { $0.id == plan.id }
             }
             // Continue numbering after every number already spoken for —
             // the project's REAL plots, so informal plots and the plan
             // never share a number, and the plans that are surviving this
-            // run, so two areas never both hold a "Plot 4".
+            // run, so two areas never both hold a "Plot 4". The visited
+            // plans this run now leaves standing are among the survivors,
+            // which is what keeps a new pin off a measured plot's number.
             let startNumber = max(
                 (try? environment.plotRepository
                     .listByProject(project.id))?.map(\.plotNumber).max() ?? 0,
@@ -472,8 +519,16 @@ public struct CruiseSetupSheet: View {
                 return
             }
 
+            // Everything above this line is a question; everything below it
+            // writes. The last question is what the run costs.
+            if !confirmedDiscard,
+               let warning = Self.discardWarning(replacing: replacing) {
+                discardWarning = warning
+                return
+            }
+
             // Replace the plans this run is for (whole project, or just
-            // this area's — see `replacing`).
+            // this area's, and never a visited one — see `replacing`).
             for p in replacing {
                 try environment.plannedPlotRepository.delete(id: p.id)
             }
@@ -507,6 +562,72 @@ public struct CruiseSetupSheet: View {
         } catch {
             errorMessage = "Plot generation failed: \(error)"
         }
+    }
+
+    /// Named for what is being replaced, the way `areaDeletionTitle` is
+    /// named for the area it is about: from an outline it is that outline's
+    /// plan, from the project strip it is the cruise plan.
+    private var discardConfirmationTitle: String {
+        area.map { "Replace the plan in \($0.name)?" } ?? "Replace the cruise plan?"
+    }
+
+    /// What this run takes that pressing "Generate plots" again cannot give
+    /// back — or nil, when it takes nothing of the kind and no question is
+    /// worth asking.
+    ///
+    /// A generated pin is CHEAP to lose but not free, and the difference
+    /// decides what this sentence has to say.
+    ///
+    /// It is cheap because replacing it is the thing the cruiser pressed the
+    /// button to do. It is not free because "reproducible from the design
+    /// that laid it" — the reason this warning used to give itself for
+    /// staying quiet — is not true of this code: the same run overwrites the
+    /// project's single `CruiseDesign` row with the new parameters before it
+    /// returns, and `CruiseDesign` carries no plot COUNT at all
+    /// (`Models/Project.swift`: plotType, plotAreaAcres, baf, samplingScheme,
+    /// gridSpacingMeters, heightSubsampleRule). For a stratified design the
+    /// old n therefore lived only in the plan rows this run is deleting, and
+    /// nothing left on disk can say what it was. So the count of what goes is
+    /// stated whenever anything goes, and the two kinds below are called out
+    /// by name on top of it, because they are gone in a way even a rerun with
+    /// the old numbers could not undo:
+    ///
+    ///   • DRAWN (`plannedSource == .manual`) — the cruiser put that point
+    ///     on the map with a finger. Nothing else in the project knows
+    ///     where it was, so a re-run is the end of it.
+    ///   • SKIPPED — a documented decision about ground somebody went and
+    ///     looked at (cliff, water, private land). Regenerating produces a
+    ///     fresh pin that says nothing, and the walk gets made twice.
+    ///
+    /// A drawn plot that was also skipped is counted once, as drawn: two
+    /// counts that add up to more plots than the plan holds would read as
+    /// the run destroying more than it can.
+    private static func discardWarning(replacing: [PlannedPlot]) -> String? {
+        let drawn = replacing.filter { $0.plannedSource == .manual }.count
+        let skipped = replacing.filter {
+            $0.skipped && $0.plannedSource != .manual
+        }.count
+        var clauses: [String] = []
+        if drawn > 0 {
+            clauses.append("\(drawn) plot\(drawn == 1 ? "" : "s") you placed by hand")
+        }
+        if skipped > 0 {
+            clauses.append("\(skipped) plot\(skipped == 1 ? "" : "s") you marked skipped")
+        }
+        guard !replacing.isEmpty else { return nil }
+        let n = replacing.count
+        var out = "\(n) planned plot\(n == 1 ? "" : "s") "
+            + "\(n == 1 ? "is" : "are") replaced by the new layout"
+        if !clauses.isEmpty {
+            let total = drawn + skipped
+            out += ", including " + clauses.joined(separator: " and ")
+                + " that generating again cannot put \(total == 1 ? "it" : "them") back"
+        }
+        // The design goes with them: this run writes the new parameters over
+        // the project's only CruiseDesign row, so the settings that produced
+        // the plan being replaced are not on disk afterwards either.
+        return out + ". The settings that laid the old plan are overwritten too. "
+            + "Plots you have already opened are kept — this only replaces the plan."
     }
 
     /// No-polygon default pattern: a centred, walkable square-ish grid

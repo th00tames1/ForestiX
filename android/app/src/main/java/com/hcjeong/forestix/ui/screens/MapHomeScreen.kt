@@ -155,6 +155,7 @@ import com.hcjeong.forestix.ui.screens.cruise.CruiseModeSheets
 import com.hcjeong.forestix.ui.screens.cruise.CruiseModeState
 import com.hcjeong.forestix.ui.screens.cruise.CruisePlanPromptBanner
 import com.hcjeong.forestix.ui.screens.cruise.CruisePlotBanner
+import com.hcjeong.forestix.ui.screens.cruise.CruiseSetupRefusalDialog
 import com.hcjeong.forestix.ui.screens.cruise.MapAreaCallout
 import com.hcjeong.forestix.ui.screens.cruise.MapAreaDeleteDialog
 import com.hcjeong.forestix.ui.screens.cruise.MapAreaDraftBar
@@ -175,6 +176,7 @@ import com.hcjeong.forestix.ui.screens.cruise.cruiseModePlotOverlay
 import com.hcjeong.forestix.ui.screens.cruise.cruiseModePolylines
 import com.hcjeong.forestix.ui.screens.cruise.freshFixOrNull
 import com.hcjeong.forestix.ui.screens.cruise.msUntilFreshnessChanges
+import com.hcjeong.forestix.ui.screens.cruise.openCruiseSetupForArea
 import com.hcjeong.forestix.ui.screens.cruise.plotFramingZoom
 import com.hcjeong.forestix.ui.softDropShadow
 import com.hcjeong.forestix.ui.theme.Forestix
@@ -593,11 +595,22 @@ fun MapHomeScreen(nav: NavController) {
                     // Laying out a cruise puts the cruiser in cruise mode:
                     // the pins this is about to generate are cruise content,
                     // and generating them onto a map that does not draw them
-                    // would look like nothing happened.
-                    areaState.cruiseSetupArea = stratum
-                    areaState.selectedId = null
-                    setMode("cruise")
-                    cruise.cruiseSetupOpen = true
+                    // would look like nothing happened. Settling the project
+                    // first is what keeps the tap from doing nothing at all
+                    // when it comes from measure mode, where the cruise
+                    // snapshot has never been loaded — see
+                    // `openCruiseSetupForArea`, which is where the whole
+                    // sequence lives so it can refuse out loud.
+                    scope.launch {
+                        openCruiseSetupForArea(
+                            env = env,
+                            settings = settings,
+                            areaState = areaState,
+                            state = cruise,
+                            stratum = stratum,
+                            enterCruiseMode = { setMode("cruise") },
+                        )
+                    }
                 },
             )
         }
@@ -991,6 +1004,10 @@ fun MapHomeScreen(nav: NavController) {
         }
     }
     MapAreaRefusalDialog(areaState)
+    // Beside the area's own refusal, and outside the `isCruise` gate below
+    // for the same reason: "Cruise this area" is tapped from either mode, so
+    // the reason it could not open has to render in either mode.
+    CruiseSetupRefusalDialog(cruise)
 
     // MARK: - Cruise-mode sheets (project ⑤ / cruise setup ⑥ / record ⑧)
 

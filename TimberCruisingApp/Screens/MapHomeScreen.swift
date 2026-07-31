@@ -360,6 +360,10 @@ public struct MapHomeScreen: View {
     /// The area Cruise setup was opened FROM, so generation lays plots into
     /// that area and leaves every other area's plan alone.
     @State var cruiseSetupAreaID: UUID?
+    /// Why Cruise setup did not open. Its own channel rather than
+    /// `areaSaveRefusal`, which is headed "Couldn't save the area" — see
+    /// `openCruiseSetup(forArea:)`. Android: `CruiseModeState.cruiseSetupRefusal`.
+    @State var cruiseSetupRefusal: String?
     /// The map's laid-out size, captured by the projected object layer. The
     /// handles and callouts need it to turn coordinates into points, and
     /// the starting rectangle needs it to be sized from what is on screen.

@@ -477,6 +477,7 @@ public struct RawCapturesScreen: View {
                 oppositeAxisValue: m.kind == "dbh"
                     ? RawCaptureReplay.rerunDBHOppositeAxis(manifest: m, id: sum.id)
                     : nil,
+                storedValue: m.resultLive.value,
                 sigma: m.resultLive.sigma > 0 ? m.resultLive.sigma : nil))
         }
         return CaptureReadingMatch.repairs(captures: captures, entries: entries)

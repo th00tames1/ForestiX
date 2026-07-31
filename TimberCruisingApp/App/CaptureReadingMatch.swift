@@ -34,11 +34,17 @@ public enum CaptureReadingMatch {
         /// on the wrong axis. Nil when the capture has no bracket and so has
         /// no axis to be wrong about.
         public let oppositeAxisValue: Double?
+        /// What the bundle recorded as its live result AT CAPTURE TIME, by
+        /// whatever estimator was running then. Paired with the reading it
+        /// forms a ratio with no estimator in it, which is what lets
+        /// `isWrongAxisReading` survive an estimator change.
+        public let storedValue: Double
         public let sigma: Double?
 
         public init(bundleID: String, kind: QuickMeasureEntry.Kind, treeNumber: Int?,
                     plotID: UUID?, createdAt: Date, value: Double,
-                    oppositeAxisValue: Double?, sigma: Double?) {
+                    oppositeAxisValue: Double?, storedValue: Double,
+                    sigma: Double?) {
             self.bundleID = bundleID
             self.kind = kind
             self.treeNumber = treeNumber
@@ -46,6 +52,7 @@ public enum CaptureReadingMatch {
             self.createdAt = createdAt
             self.value = value
             self.oppositeAxisValue = oppositeAxisValue
+            self.storedValue = storedValue
             self.sigma = sigma
         }
     }
@@ -130,7 +137,8 @@ public enum CaptureReadingMatch {
             usedCapture.insert(ci); usedEntry.insert(ei)
             let c = captures[ci], e = entries[ei]
             guard abs(e.value - c.value) > tolerance,
-                  isWrongAxisReading(reading: e.value, capture: c)
+                  isWrongAxisReading(reading: e.value,
+                                     storedValue: c.storedValue, capture: c)
             else { continue }
             out.append(Repair(entryID: e.id, bundleID: c.bundleID,
                               expected: e.value, corrected: c.value,
@@ -142,18 +150,37 @@ public enum CaptureReadingMatch {
     /// Does this reading look like the wrong axis, rather than merely unlike
     /// the bundle?
     ///
-    /// Three things must hold. The capture must HAVE another axis to have
-    /// been read on. The two axes must be far enough apart to tell apart.
-    /// And the reading must land on the other one — closer to it, and within
-    /// a few per cent of it — which is the part that distinguishes a
-    /// rescaled reading from a re-measure or a different frame set.
-    public static func isWrongAxisReading(reading: Double, capture c: Capture) -> Bool {
-        guard let other = c.oppositeAxisValue, other > 0, c.value > 0 else { return false }
-        let separation = abs(other - c.value) / max(other, c.value)
-        guard separation >= axisSeparation else { return false }
-        let toOther = abs(reading - other) / other
-        let toStored = abs(reading - c.value) / c.value
-        return toOther <= axisMatchTolerance && toOther < toStored
+    /// COMPARE RATIOS, NOT VALUES, so that changing the estimator cannot break
+    /// the diagnosis. The obvious test — "is the reading within a few per cent
+    /// of the other axis's replay" — holds only while the replay computes
+    /// diameters the same way the reading was written. It stopped holding the
+    /// moment the tangent inversion shipped: every replay moved 3-5 % away
+    /// from the readings the chord form had produced, which is most of a 3 %
+    /// window, and identification fell from 49 of the validation captures to
+    /// 32. Silently, because a repair that finds nothing looks like a corpus
+    /// with nothing wrong with it.
+    ///
+    /// Two ratios avoid that. `observed` is the reading over the value stored
+    /// beside it, both written at capture time by one estimator. `axis` is the
+    /// two replays over each other, both computed now by one estimator. An
+    /// estimator change scales the members of each ratio together and cancels
+    /// out of both, so the test asks the geometric question — were these two
+    /// numbers measured against different extents — and nothing else.
+    ///
+    /// Three conditions, as before: there must be another axis; the two must
+    /// be far enough apart to tell apart; and the reading's ratio must sit on
+    /// the axis ratio and not on 1.
+    public static func isWrongAxisReading(reading: Double,
+                                          storedValue: Double,
+                                          capture c: Capture) -> Bool {
+        guard let other = c.oppositeAxisValue,
+              other > 0, c.value > 0, storedValue > 0, reading > 0
+        else { return false }
+        let axisRatio = other / c.value
+        guard abs(axisRatio - 1) >= axisSeparation else { return false }
+        let observed = reading / storedValue
+        let toAxis = abs(observed - axisRatio) / axisRatio
+        return toAxis <= axisMatchTolerance && abs(observed - axisRatio) < abs(observed - 1)
     }
 
     /// Two plots match when they agree, or when either side never recorded

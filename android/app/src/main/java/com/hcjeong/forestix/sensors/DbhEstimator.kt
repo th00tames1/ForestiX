@@ -18,6 +18,8 @@ import java.util.Locale
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
+import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sin
@@ -872,11 +874,37 @@ object DBHEstimator {
         )
     }
 
-    // MARK: - Manual edge-bracket (ADJUST) constrained estimate
+    // MARK: - Manual edge-bracket (ADJUST) fits
+    //
+    // TWO ENTRY POINTS, and the split is the whole point of this section.
+    //
+    //   `bracketDepthGeometry` is the BOUNDARY. It takes the handles where
+    //   the cruiser put them — VIEW-space pixels on the guide line — and
+    //   converts them ONCE, through the frame's own view→depth affine, into
+    //   a walk axis plus two fractions along it.
+    //
+    //   `bracketChordFit` / `bracketChordEstimate` work purely in DEPTH
+    //   space below that boundary, which is also the space the raw-capture
+    //   manifest stores, so a recorded bracket replays through exactly the
+    //   code that produced it.
+    //
+    // ONE MEASUREMENT, ONE PATH. The live readout used to carry its own copy
+    // of the arithmetic below the boundary: it kept the span fractional and
+    // medianed depth along the interpolated line between the two mapped
+    // handles, rounding x and y per step, while the recording rounded each
+    // handle to a pixel first and medianed a pure row. Across the validation
+    // corpus the two records of the SAME bracket differ by a median 1.0028,
+    // sd 2.6 %, worst 1.133, with only 38 of 106 inside 1 % — a 160×90 depth
+    // grid puts one pixel at ~2.4 % of a 42 px stem, and the two walks touch
+    // different pixels on top of that. Nothing a cruiser reads was wrong;
+    // the raw-capture corpus and the field log simply were not the same
+    // measurement, which is exactly what the study compares.
+    //
+    // iOS `DBHEstimator.bracketDepthGeometry` draws the same line, and the
+    // two platforms keep it in the same place.
 
-    /// The middle half of a bracket, as an inclusive index range along
-    /// whatever the caller is stepping (walk-axis pixels, or interpolation
-    /// steps between the two mapped handles).
+    /// The middle half of a bracket, as an inclusive index range on the
+    /// walk axis.
     ///
     /// FIELD REPORT 13 — with the bracket held perfectly still on a trunk,
     /// the diameter jumped by several inches at random. The bracket's z is a
@@ -922,6 +950,117 @@ object DBHEstimator {
         if (span < 8) return iLo to iHi
         val quarter = span / 4
         return (iLo + quarter) to (iHi - quarter)
+    }
+
+    /// The bracket as the DEPTH MAP sees it: which axis it walks, and where
+    /// its two ends fall along that axis, as fractions of that axis' extent.
+    data class BracketAxisSpan(
+        val axis: GuideAxis,
+        val leftFraction: Double,
+        val rightFraction: Double,
+    )
+
+    /// Convert the two view-space handles on the guide line into the depth
+    /// map's own terms — ONCE, here, for every ADJUST caller.
+    ///
+    /// The walk axis is whichever depth axis the screen-horizontal bracket
+    /// covers more of; the two sit 90° apart in portrait. It comes from the
+    /// display transform the affine carries, which is stable per frame,
+    /// rather than from a vote on depth content, which is not.
+    ///
+    /// Null when the frame carries no view mapping. Fail closed: a view span
+    /// and a depth span do not share a scale, so there is no 1:1 fallback to
+    /// reach for. iOS `DBHEstimator.bracketDepthGeometry` parity.
+    fun bracketDepthGeometry(
+        frame: ArDepthFrame,
+        leftViewX: Float,
+        rightViewX: Float,
+        guideViewY: Float,
+    ): BracketAxisSpan? {
+        if (frame.width < 2 || frame.height < 2) return null
+        val pL = frame.viewToDepth(min(leftViewX, rightViewX), guideViewY) ?: return null
+        val pR = frame.viewToDepth(max(leftViewX, rightViewX), guideViewY) ?: return null
+        val rowWalk = abs(pR.first - pL.first) >= abs(pR.second - pL.second)
+        val midX = (pL.first + pR.first) / 2.0
+        val midY = (pL.second + pR.second) / 2.0
+        val axis: GuideAxis = if (rowWalk) {
+            GuideAxis.Row(Math.round(midY).toInt().coerceIn(0, frame.height - 1))
+        } else {
+            GuideAxis.Col(Math.round(midX).toInt().coerceIn(0, frame.width - 1))
+        }
+        val extent = axisExtent(frame, axis).toDouble()
+        val a = (if (rowWalk) pL.first else pL.second) / extent
+        val b = (if (rowWalk) pR.first else pR.second) / extent
+        val lo = min(a, b)
+        val hi = max(a, b)
+        if (!lo.isFinite() || !hi.isFinite() || hi <= lo) return null
+        return BracketAxisSpan(axis, lo, hi)
+    }
+
+    /// The bracket's index arithmetic on the walk axis, in ONE place, so the
+    /// fit and the read-only spread probe can only ever ask about the same
+    /// pixels. Pure index math — no depth is read here.
+    ///
+    /// The span stays FRACTIONAL. The handles are continuous positions on
+    /// the depth axis, and rounding each to a pixel before subtracting costs
+    /// up to a whole pixel of width — on a stem 42 px across a 160-px grid
+    /// that is 2.4 % of the diameter. Only the SAMPLE range is integral, and
+    /// it is the pixels lying inside the span.
+    ///
+    /// iOS `DBHEstimator.bracketGeometry` parity.
+    data class BracketGeometry(
+        val lo: Double,
+        val hi: Double,
+        val widthPx: Double,
+        val iLo: Int,
+        val iHi: Int,
+    )
+
+    fun bracketGeometry(
+        frame: ArDepthFrame,
+        guideAxis: GuideAxis,
+        leftFraction: Double,
+        rightFraction: Double,
+    ): BracketGeometry? {
+        when (guideAxis) {
+            is GuideAxis.Row -> if (guideAxis.y < 0 || guideAxis.y >= frame.height) return null
+            is GuideAxis.Col -> if (guideAxis.x < 0 || guideAxis.x >= frame.width) return null
+        }
+        val extent = axisExtent(frame, guideAxis)
+        if (extent < 2) return null
+        val lo = min(leftFraction, rightFraction)
+        val hi = max(leftFraction, rightFraction)
+        val leftPx = lo * extent
+        val rightPx = hi * extent
+        val widthPx = rightPx - leftPx
+        if (!widthPx.isFinite() || widthPx < 2.0) return null
+        val iLo = max(0, ceil(leftPx).toInt())
+        val iHi = min(extent - 1, floor(rightPx).toInt())
+        if (iHi < iLo) return null
+        return BracketGeometry(lo, hi, widthPx, iLo, iHi)
+    }
+
+    /// The valid depths over the bracket's middle half, sorted ascending —
+    /// the exact sample the fit takes its median from, so the probe below
+    /// describes the fit's own pixels rather than a second copy of them.
+    /// iOS `DBHEstimator.bracketCoreDepthsSorted` parity.
+    fun bracketCoreDepthsSorted(
+        frame: ArDepthFrame,
+        guideAxis: GuideAxis,
+        iLo: Int,
+        iHi: Int,
+    ): List<Float> {
+        val depths = ArrayList<Float>(max(0, iHi - iLo + 1))
+        val core = bracketCoreRange(iLo, iHi)
+        for (idx in core.first..core.second) {
+            val (px, py) = pixelCoords(guideAxis, idx)
+            if (px < 0 || px >= frame.width || py < 0 || py >= frame.height) continue
+            if (frame.confidenceAt(px, py) < 1) continue
+            val d = frame.depthAt(px, py)
+            if (d > 0f) depths.add(d)
+        }
+        depths.sort()
+        return depths
     }
 
     /// Widest depth separation, in metres, that a bracket sitting entirely on
@@ -972,8 +1111,9 @@ object DBHEstimator {
     /// against tape), so the corpus is intact and the defect is entirely in
     /// what the cruiser sees. This reports; the screen decides.
     ///
-    /// Mirrors iOS `DBHEstimator.bracketCoreDepthSpreadM`, and walks the same
-    /// interpolated samples `constrainedEstimate` medians so the two can never
+    /// Mirrors iOS `DBHEstimator.bracketCoreDepthSpreadM`, and reaches the
+    /// samples through the same `bracketDepthGeometry` / `bracketGeometry` /
+    /// `bracketCoreDepthsSorted` the fit medians, so the two can never
     /// describe different pixels.
     fun bracketCoreDepthSpreadM(
         frame: ArDepthFrame,
@@ -981,40 +1121,29 @@ object DBHEstimator {
         rightViewX: Float,
         guideViewY: Float,
     ): Double? {
-        val pL = frame.viewToDepth(min(leftViewX, rightViewX), guideViewY) ?: return null
-        val pR = frame.viewToDepth(max(leftViewX, rightViewX), guideViewY) ?: return null
-        val w = max(abs(pR.first - pL.first), abs(pR.second - pL.second))
-        if (w < 2.0) return null
-        val steps = Math.round(w).toInt().coerceAtLeast(2)
-        val depths = ArrayList<Float>(steps + 1)
-        val core = bracketCoreRange(0, steps)
-        for (i in core.first..core.second) {
-            val t = i.toDouble() / steps
-            val x = Math.round(pL.first + (pR.first - pL.first) * t).toInt()
-            val y = Math.round(pL.second + (pR.second - pL.second) * t).toInt()
-            if (x < 0 || x >= frame.width || y < 0 || y >= frame.height) continue
-            if (frame.confidenceAt(x, y) < 1) continue
-            val d = frame.depthAt(x, y)
-            if (d > 0f) depths.add(d)
-        }
+        val span = bracketDepthGeometry(frame, leftViewX, rightViewX, guideViewY) ?: return null
+        val g = bracketGeometry(frame, span.axis, span.leftFraction, span.rightFraction)
+            ?: return null
+        val depths = bracketCoreDepthsSorted(frame, span.axis, g.iLo, g.iHi)
         // Same floor the fit uses: below it there is no median worth
         // describing, and the fit has already refused.
         if (depths.size < 3) return null
-        depths.sort()
         return (depths[(depths.size * 3) / 4] - depths[depths.size / 4]).toDouble()
     }
 
-    /// Constrained estimate for the manual edge-bracket (ADJUST) mode: the
-    /// user places the trunk's two silhouette edges as VIEW-space x
-    /// positions on the horizontal guide line, so the handle span IS the
-    /// width — depth only supplies z. Same pinhole chord identity and
-    /// axis-matched focal as the auto silhouette path,
-    /// d = w·z/(f_axis − w/2), where w is the span in depth walk-axis
-    /// pixels (view x mapped through the view↔depth affine) and z is the
-    /// median depth INSIDE the bracket at the guide row. The automatic
-    /// edge search never runs here; the auto path is untouched.
-    /// Null when the view↔depth mapping is unavailable or no usable depth
-    /// exists inside the bracket.
+    /// The VIEW-space entry to the manual edge-bracket (ADJUST) mode: the
+    /// cruiser places the trunk's two silhouette edges as x positions on the
+    /// horizontal guide line, so the handle span IS the width and depth only
+    /// supplies z. The automatic edge search never runs here; the auto path
+    /// is untouched.
+    ///
+    /// This function is the boundary crossing and nothing else — the handles
+    /// become a depth walk axis and two fractions, and `bracketChordFit`
+    /// does the measuring. The calibration is applied to what comes back,
+    /// which is the one thing the live readout does that the recorded fit
+    /// does not (the corpus stores raw).
+    ///
+    /// Null when the view↔depth mapping is unavailable or the fit refuses.
     fun constrainedEstimate(
         frame: ArDepthFrame,
         leftViewX: Float,
@@ -1022,107 +1151,63 @@ object DBHEstimator {
         guideViewY: Float,
         cal: ProjectCalibration,
     ): DbhPreview? {
-        val pL = frame.viewToDepth(min(leftViewX, rightViewX), guideViewY) ?: return null
-        val pR = frame.viewToDepth(max(leftViewX, rightViewX), guideViewY) ?: return null
-        val dxSpan = abs(pR.first - pL.first)
-        val dySpan = abs(pR.second - pL.second)
-        // Walk axis = the depth axis the screen-horizontal bracket spans
-        // (rotated 90° in portrait); divide by the SAME axis-matched focal
-        // as the auto path (fx for a depth-x walk, fy for a depth-y walk).
-        val isRowWalk = dxSpan >= dySpan
-        val focal = if (isRowWalk) frame.fx else frame.fy
-        if (focal <= 1.0) return null
-        val w = max(dxSpan, dySpan)
-        if (w < 2.0) return null
-        // Median depth over the bracket's MIDDLE HALF along the guide row —
-        // see bracketCoreRange.
-        val steps = Math.round(w).toInt().coerceAtLeast(2)
-        val depths = ArrayList<Float>(steps + 1)
-        val core = bracketCoreRange(0, steps)
-        for (i in core.first..core.second) {
-            val t = i.toDouble() / steps
-            val x = Math.round(pL.first + (pR.first - pL.first) * t).toInt()
-            val y = Math.round(pL.second + (pR.second - pL.second) * t).toInt()
-            if (x < 0 || x >= frame.width || y < 0 || y >= frame.height) continue
-            if (frame.confidenceAt(x, y) < 1) continue
-            val d = frame.depthAt(x, y)
-            if (d > 0f) depths.add(d)
-        }
-        if (depths.size < 3) return null
-        depths.sort()
-        val z = depths[depths.size / 2]
-        // Same null gates as iOS bracketChordFit: bracket depth 0.3–5 m,
-        // RAW diameter within PLAUSIBLE_DIAMETER_CM — outside them there is
-        // no fit at all.
-        if (z !in 0.3f..5.0f) return null
-        val halfW = w / 2.0
-        if (focal - halfW <= 1.0) return null
-        val rawCm = silhouetteDiameterCm(w, z.toDouble(), focal) ?: return null
-        if (rawCm !in PLAUSIBLE_DIAMETER_CM) return null
-        val dia = cal.appliedToRawCm(rawCm).toFloat()
+        val span = bracketDepthGeometry(frame, leftViewX, rightViewX, guideViewY) ?: return null
+        val fit = bracketChordFit(frame, span.axis, span.leftFraction, span.rightFraction)
+            ?: return null
+        val dia = cal.appliedToRawCm(fit.diameterCm).toFloat()
         // A returned fit IS capturable (the user vouches for the edges) —
         // iOS tap-gate parity. nPoints carries the bracket span in
         // walk-axis px (iOS PreviewFit.inlierCount).
-        return DbhPreview(dia, z, locked = true, nPoints = Math.round(w).toInt())
+        return DbhPreview(dia, fit.depthM.toFloat(), locked = true, nPoints = fit.spanPx)
     }
 
     /// Single-frame ADJUST bracket fit in DEPTH-axis-fraction space — the
-    /// cross-platform-canonical manual-bracket primitive (iOS
-    /// DBHEstimator.bracketChordFit parity). The two handles are fractions
-    /// [0,1] ALONG THE GUIDE AXIS of the depth grid (row → x, col → y); their
-    /// span is the silhouette width w in walk-axis pixels and z is the median
-    /// depth inside that span at the guide line. Same pinhole chord identity
-    /// as the auto path, d = w·z/(f_axis − w/2), axis-matched focal. Returns
-    /// the RAW (un-calibrated) diameter (cm) + span, or null on the same
+    /// one manual-bracket measurement on this platform, and the
+    /// cross-platform-canonical one (iOS `DBHEstimator.bracketChordFit`
+    /// parity). The live readout reaches it through `constrainedEstimate`,
+    /// the recording and the replay call it directly.
+    ///
+    /// The two handles are fractions [0,1] ALONG THE GUIDE AXIS of the depth
+    /// grid (row → x, col → y); their span is the silhouette width w in
+    /// walk-axis pixels and z is the median depth inside that span at the
+    /// guide line. `silhouetteDiameterCm` inverts the tangent form on that
+    /// pair. Returns the RAW (un-calibrated) diameter (cm), the span rounded
+    /// to whole pixels, and the depth the fit read — or null on the same
     /// gates iOS uses (bracket depth 0.3–5 m, raw diameter within
     /// PLAUSIBLE_DIAMETER_CM).
     ///
-    /// This lives in depth-fraction space (not view-px like constrainedEstimate)
-    /// so the raw-capture manifest can store the two handles as view-independent
-    /// fractions — byte-identical to the iOS bracket schema (no view size / no
-    /// guide_y needed to replay). The live view-space ADJUST UI keeps using
-    /// constrainedEstimate; this is the recording/replay-shared entry point.
-    data class BracketFit(val diameterCm: Double, val spanPx: Int)
+    /// Fractions, not view pixels, because that is what the raw-capture
+    /// manifest stores: view-independent, byte-identical to the iOS bracket
+    /// schema, so replaying a bundle needs neither view size nor guide_y.
+    ///
+    /// FOCAL CHOICE: the axis-matched focal (fx for a row walk, fy for a
+    /// column walk), which is what the auto path does and what the Android
+    /// depth grid requires — its texture-registered intrinsics have fx ≠ fy
+    /// whenever the depth aspect differs from the texture aspect. iOS
+    /// divides by fx on both axes and records that divergence in its own
+    /// `bracketChordFit`; settling it is a device-and-tape job on both
+    /// platforms at once.
+    data class BracketFit(val diameterCm: Double, val spanPx: Int, val depthM: Double)
 
     fun bracketChordFit(
         frame: ArDepthFrame, guideAxis: GuideAxis, leftFraction: Double, rightFraction: Double,
     ): BracketFit? {
-        val extent = axisExtent(frame, guideAxis)
-        if (extent < 2) return null
-        val lo = min(leftFraction, rightFraction)
-        val hi = max(leftFraction, rightFraction)
-        val a = Math.round(lo * extent).toInt().coerceIn(0, extent - 1)
-        val b = Math.round(hi * extent).toInt().coerceIn(0, extent - 1)
-        val w = b - a
-        if (w < 2) return null
+        val g = bracketGeometry(frame, guideAxis, leftFraction, rightFraction) ?: return null
         val focal = when (guideAxis) {
             is GuideAxis.Row -> frame.fx
             is GuideAxis.Col -> frame.fy
         }
         if (focal <= 1.0) return null
-        // Bounds check the fixed guide coordinate.
-        when (guideAxis) {
-            is GuideAxis.Row -> if (guideAxis.y < 0 || guideAxis.y >= frame.height) return null
-            is GuideAxis.Col -> if (guideAxis.x < 0 || guideAxis.x >= frame.width) return null
-        }
-        val depths = ArrayList<Float>(w + 1)
-        val core = bracketCoreRange(a, b)
-        for (idx in core.first..core.second) {
-            val (px, py) = pixelCoords(guideAxis, idx)
-            if (px < 0 || px >= frame.width || py < 0 || py >= frame.height) continue
-            if (frame.confidenceAt(px, py) < 1) continue
-            val d = frame.depthAt(px, py)
-            if (d > 0f) depths.add(d)
-        }
+        // Median depth over the bracket's MIDDLE HALF along the guide line —
+        // see bracketCoreRange.
+        val depths = bracketCoreDepthsSorted(frame, guideAxis, g.iLo, g.iHi)
         if (depths.size < 3) return null
-        depths.sort()
         val z = depths[depths.size / 2]
         if (z !in 0.3f..5.0f) return null
-        val halfW = w / 2.0
-        if (focal - halfW <= 1.0) return null
-        val rawCm = silhouetteDiameterCm(w.toDouble(), z.toDouble(), focal) ?: return null
+        if (focal - g.widthPx / 2.0 <= 1.0) return null
+        val rawCm = silhouetteDiameterCm(g.widthPx, z.toDouble(), focal) ?: return null
         if (rawCm !in PLAUSIBLE_DIAMETER_CM) return null
-        return BracketFit(rawCm, w)
+        return BracketFit(rawCm, Math.round(g.widthPx).toInt(), z.toDouble())
     }
 
     /// ADJUST bracket burst estimate over the stored frames — median of the

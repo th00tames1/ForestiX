@@ -115,6 +115,8 @@ import com.hcjeong.forestix.ui.screens.RawCaptureOffNotice
 import com.hcjeong.forestix.ui.screens.RawCaptureStatus
 import com.hcjeong.forestix.ui.screens.RawCaptureStrings
 import com.hcjeong.forestix.ui.screens.ResearchFieldsRow
+import com.hcjeong.forestix.ui.screens.tree.TreeFormWords
+import com.hcjeong.forestix.ui.screens.tree.treeBasalAreaText
 import com.hcjeong.forestix.ui.screens.TruthFieldNote
 import com.hcjeong.forestix.ui.screens.TruthFieldWarning
 import com.hcjeong.forestix.ui.screens.ScanPlotMiniMap
@@ -2379,6 +2381,20 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                             MeasurementFormatter.diameter(r.diameterCm.toDouble(), settings.unitSystem),
                             style = Forestix.type.dataLarge,
                             color = Color.White,
+                        )
+                        // BASAL AREA, beside the diameter that produced it.
+                        // It is the number a forester converts the diameter
+                        // into before doing anything else with it, and it
+                        // costs one line of arithmetic — through the engine's
+                        // own `basalAreaM2`, so this stem's basal area here,
+                        // on its record sheet and in the plot total are one
+                        // number. A diameter that is not a usable stem has
+                        // none, and the line reads the form's em dash.
+                        Text(
+                            treeBasalAreaText(r.diameterCm, settings.unitSystem)
+                                ?: TreeFormWords.EMPTY,
+                            style = Forestix.type.dataSmall,
+                            color = Color.White.copy(alpha = 0.75f),
                         )
                     }
                     if (settings.developerMode) {

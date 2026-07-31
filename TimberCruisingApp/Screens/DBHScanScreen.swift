@@ -1979,6 +1979,18 @@ public struct DBHScanScreen: View {
                     cm: Double(r.diameterCm), in: settings.unitSystem))
                     .font(ForestixType.dataLarge)
                     .foregroundStyle(.white)
+                // BASAL AREA, beside the diameter it comes from. It is one
+                // line of arithmetic off a number already on screen, and it is
+                // the number foresters actually ask a diameter for. Same
+                // function every plot and stand total is summed from
+                // (`TreeComputed.basalAreaText` → `InventoryEngine`), and the
+                // same square unit rule, so this and the tree form cannot
+                // disagree. Reads "—" until there is a usable diameter.
+                Text(TreeComputed.basalAreaText(dbhCm: Double(r.diameterCm),
+                                                in: settings.unitSystem))
+                    .font(ForestixType.data)
+                    .foregroundStyle(.white.opacity(0.8))
+                    .accessibilityIdentifier("dbhScan.basalArea")
                 Spacer()
             }
             // FIELD REPORT 7 — the details chip, identical to the height

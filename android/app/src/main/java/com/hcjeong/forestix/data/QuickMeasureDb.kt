@@ -44,6 +44,7 @@ data class EntryRow(
     val truthSource: String?,
     val truthUnit: String?,
     val positionSource: String?,
+    val timeSource: String?,
 ) {
     fun toDomain() = QuickMeasureEntry(
         id = UUID.fromString(id),
@@ -69,6 +70,7 @@ data class EntryRow(
         truthSource = truthSource,
         truthUnit = truthUnit,
         positionSource = positionSource,
+        timeSource = timeSource,
     )
 
     companion object {
@@ -96,6 +98,7 @@ data class EntryRow(
             truthSource = e.truthSource,
             truthUnit = e.truthUnit,
             positionSource = e.positionSource,
+            timeSource = e.timeSource,
         )
     }
 }
@@ -259,7 +262,18 @@ val QUICK_MEASURE_MIGRATION_7_8 = object : androidx.room.migration.Migration(7, 
     }
 }
 
-@Database(entities = [EntryRow::class, PlotRow::class], version = 8, exportSchema = false)
+/// v9: how a reading's `createdAt` came to be what it is — additive and
+/// nullable. Null on every existing row, and here null is not an unknown
+/// either: until the record sheet could set a time, nothing but the clock ever
+/// wrote one, so an unlabelled time IS a device-stamped one.
+/// `QuickMeasureEntry.timeRecordedSource` holds that rule.
+val QUICK_MEASURE_MIGRATION_8_9 = object : androidx.room.migration.Migration(8, 9) {
+    override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE entries ADD COLUMN timeSource TEXT")
+    }
+}
+
+@Database(entities = [EntryRow::class, PlotRow::class], version = 9, exportSchema = false)
 @TypeConverters(Converters::class)
 abstract class ForestixDatabase : RoomDatabase() {
     abstract fun dao(): QuickMeasureDao

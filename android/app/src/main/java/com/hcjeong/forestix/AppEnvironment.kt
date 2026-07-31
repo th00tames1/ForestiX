@@ -95,6 +95,7 @@ class AppEnvironment private constructor(
                     com.hcjeong.forestix.data.QUICK_MEASURE_MIGRATION_5_6,
                     com.hcjeong.forestix.data.QUICK_MEASURE_MIGRATION_6_7,
                     com.hcjeong.forestix.data.QUICK_MEASURE_MIGRATION_7_8,
+                    com.hcjeong.forestix.data.QUICK_MEASURE_MIGRATION_8_9,
                 )
                 .build()
             val history = QuickMeasureHistory.get(app, db.dao())

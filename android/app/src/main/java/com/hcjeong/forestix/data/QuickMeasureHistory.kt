@@ -9,6 +9,7 @@ package com.hcjeong.forestix.data
 import android.content.Context
 import androidx.core.content.FileProvider
 import android.net.Uri
+import com.hcjeong.forestix.common.MeasuredTimeInput
 import com.hcjeong.forestix.sensors.LogRule
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -107,6 +108,46 @@ class QuickMeasureHistory private constructor(
             _entries.value = dao.allEntries().map { it.toDomain() }
             recomputeCapacity()
         }
+    }
+
+    /// Re-state WHEN one reading was measured, and put the log back in order.
+    ///
+    /// ONE READING AT A TIME, deliberately. The cruiser was offered a bulk
+    /// offset and declined it: their notebook holds a per-tree time to the
+    /// minute, so they will type each one anyway and a shared offset buys
+    /// nothing. Keeping it singular also keeps the provenance simple — every
+    /// hand-set time is one deliberate act on one reading.
+    ///
+    /// RE-CHECKS AT THE WRITE, like [repairTruthUnits]: the screen already put
+    /// the picked time through [MeasuredTimeInput.resolve], but this is the
+    /// call that actually writes, so the rule has to hold here too. A future
+    /// time is refused and NOTHING is written.
+    ///
+    /// The re-sort the iOS sibling has to do by hand comes free here: every
+    /// read is `ORDER BY createdAt DESC` at the DAO, so re-reading after the
+    /// upsert puts the corrected reading where its new time belongs — which is
+    /// what makes the row move in the field log, the point of the feature.
+    ///
+    /// REFUSES A NO-OP. Opening the editor and saving the minute that was
+    /// already there is not an edit, and stamping "typed" on it would claim a
+    /// hand-set time for a reading nobody re-timed — and would quietly throw
+    /// away the seconds a sensor stamp carries, which are what makes a capture
+    /// and its manifest match to better than a minute. The comparison is
+    /// minute-to-minute because that is the precision the cruiser picks in.
+    ///
+    /// Suspends rather than firing into [scope] so the caller can act on the
+    /// real outcome; returns true only when a reading actually moved.
+    suspend fun setMeasuredTime(id: UUID, newTime: Long): Boolean {
+        val resolved = MeasuredTimeInput.resolve(newTime)
+        if (resolved !is MeasuredTimeInput.Result.Time) return false
+        val existing = dao.allEntries().firstOrNull { it.id == id.toString() }
+            ?.toDomain() ?: return false
+        if (MeasuredTimeInput.truncatedToMinute(existing.createdAt) == resolved.epochMs) {
+            return false
+        }
+        dao.upsertEntry(EntryRow.from(existing.settingCreatedAt(resolved.epochMs)))
+        _entries.value = dao.allEntries().map { it.toDomain() }
+        return true
     }
 
     /// Attach recovered ground truths to readings, and report how many

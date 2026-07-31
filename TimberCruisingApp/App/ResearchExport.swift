@@ -114,6 +114,18 @@ public enum ResearchExport {
         public let kind: String
         public let treeNumber: Int?
         public let value: Double
+        /// MAY BE A TIME THE CRUISER SET BY HAND (`QuickMeasureEntry`'s
+        /// `timeSource` == "typed"), and the join below deliberately uses it
+        /// anyway: a corrected time is the cruiser's best account of when the
+        /// tree was measured, which is precisely what "nearest row" and "is
+        /// there a later reading" are trying to ask.
+        ///
+        /// The research-log ROW keeps the stamp it was written with — this log
+        /// is append-only and nothing here rewrites it, exactly as nothing
+        /// rewrites a raw-capture manifest. So after a hand-set time the two
+        /// no longer agree, which is why the reading's own `time_source`
+        /// travels in the quick-measure CSV: an analyst who needs to know
+        /// whether a Δt is real can see it there.
         public let createdAt: Date
         public let truth: Double?
         public let truthUnit: String?

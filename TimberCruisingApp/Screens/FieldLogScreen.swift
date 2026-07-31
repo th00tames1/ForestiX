@@ -2356,6 +2356,16 @@ private struct FieldLogDetailForm: View {
     @State private var editingPosition = false
     @State private var positionText = ""
     @State private var positionRefusal: String?
+    /// The measured-time editor: WHICH reading is being re-timed (nil = the
+    /// editor is closed), the time in the picker, and why it cannot be saved.
+    ///
+    /// Held as one reading's id, not a set: this is deliberately one reading at
+    /// a time. The cruiser was offered a bulk offset and declined it — their
+    /// notebook holds a per-tree time to the minute — and one act on one
+    /// reading is also what keeps the provenance stamp simple.
+    @State private var editingTimeOf: IdentifiedUUID?
+    @State private var timeDraft = Date()
+    @State private var timeRefusal: String?
     /// The last ground-truth recovery run's leftovers, loaded once with the
     /// fields. A small JSON file, not the manifest tree.
     @State private var backfillReport: TruthBackfillReport?
@@ -2390,6 +2400,9 @@ private struct FieldLogDetailForm: View {
         }
         .onAppear(perform: seedFields)
         .sheet(isPresented: $editingPosition) { positionEditor }
+        // Presented on the id of the reading being re-timed, so the editor can
+        // never be showing one reading's picker while writing to another.
+        .sheet(item: $editingTimeOf) { picked in timeEditor(entryID: picked.id) }
         // The move raised by the Plot row. Same flow the log's selection bar
         // runs, given one row instead of a dozen.
         .quickMoveFlow(request: $moveRequest) { outcome in
@@ -2720,27 +2733,66 @@ private struct FieldLogDetailForm: View {
     private var measurementsSection: some View {
         Section("Measurements") {
             ForEach(row.entries) { entry in
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack {
-                        Text(FieldLogRowModel.kindWord(entry.kind))
-                            .foregroundStyle(ForestixPalette.textSecondary)
-                        Spacer(minLength: 8)
-                        Text(value(entry))
-                            .font(ForestixType.data)
-                            .foregroundStyle(ForestixPalette.textPrimary)
-                    }
-                    // The ± band the table used to carry. It is the
-                    // measurement's own precision, so it belongs with the
-                    // measurement rather than in a column being scaled to
-                    // fit on a phone.
-                    if let band = sigma(entry) {
-                        Text(band)
+                // TAPPABLE, and the tap re-times THIS reading. The record
+                // sheet never said when a reading was measured at all, which
+                // is exactly the value a cruiser needs to see and to correct
+                // when the number went into a notebook at the tree and into
+                // the app back at the office.
+                Button {
+                    beginEditingTime(of: entry)
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            Text(FieldLogRowModel.kindWord(entry.kind))
+                                .foregroundStyle(ForestixPalette.textSecondary)
+                            Spacer(minLength: 8)
+                            Text(value(entry))
+                                .font(ForestixType.data)
+                                .foregroundStyle(ForestixPalette.textPrimary)
+                            Image(systemName: "chevron.right")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        // The ± band the table used to carry. It is the
+                        // measurement's own precision, so it belongs with the
+                        // measurement rather than in a column being scaled to
+                        // fit on a phone.
+                        if let band = sigma(entry) {
+                            Text(band)
+                                .font(ForestixType.dataSmall)
+                                .foregroundStyle(ForestixPalette.textTertiary)
+                        }
+                        // WHEN IT WAS MEASURED, to the minute, in the
+                        // cruiser's locale — and carrying the marker when that
+                        // time was set by hand, so a desk-typed time can never
+                        // read like a sensor-stamped one.
+                        Text(MeasuredTimeInput.Words.line(
+                            MeasuredTimeInput.text(entry.createdAt),
+                            handSet: entry.hasHandSetTime))
                             .font(ForestixType.dataSmall)
-                            .foregroundStyle(ForestixPalette.textTertiary)
+                            .foregroundStyle(entry.hasHandSetTime
+                                             ? ForestixPalette.textSecondary
+                                             : ForestixPalette.textTertiary)
                     }
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                // Suffixed with the kind: a tree has a diameter row and a
+                // height row, and two controls sharing one identifier is a
+                // test that can only pick one of them by luck.
+                .accessibilityIdentifier(
+                    "fieldLog.detail.measuredAt.\(entry.kind.rawValue)")
             }
         }
+    }
+
+    /// Open the time editor on one reading, prefilled with the time it
+    /// currently carries — never with "now", which would offer to overwrite a
+    /// real measurement time with the moment the sheet happened to be opened.
+    private func beginEditingTime(of entry: QuickMeasureEntry) {
+        timeDraft = entry.createdAt
+        timeRefusal = nil
+        editingTimeOf = IdentifiedUUID(id: entry.id)
     }
 
     private func value(_ entry: QuickMeasureEntry) -> String {
@@ -2913,11 +2965,28 @@ private struct FieldLogDetailForm: View {
         return history.plot(id: id)?.name ?? FieldLogWords.unknownPlot
     }
 
+    /// The row's own time — the earliest reading on the tree, which is the
+    /// sort key (`FieldLogRowModel.measuredAt`).
+    ///
+    /// Printed through the SAME formatter as the per-reading times a section
+    /// above, so one instant is never rendered two ways on one screen. It used
+    /// to be `en_US` with a hand-written pattern, which showed a Korean
+    /// cruiser's field log in American English regardless of their phone.
+    ///
+    /// MARKED when the reading that provides it was re-timed by hand: this row
+    /// is where a reader looks to see when work on the tree began, and a
+    /// hand-set time reaching it unlabelled would be exactly the silent edit
+    /// this feature exists to prevent.
     private var timestampText: String {
-        let fmt = DateFormatter()
-        fmt.locale = Locale(identifier: "en_US")
-        fmt.dateFormat = "MMM d, HH:mm"
-        return fmt.string(from: row.measuredAt)
+        MeasuredTimeInput.Words.stamp(MeasuredTimeInput.text(row.measuredAt),
+                                      handSet: earliestEntry?.hasHandSetTime ?? false)
+    }
+
+    /// The reading `row.measuredAt` came from — the earliest, ties resolved the
+    /// way `min` resolves them, so the marker above describes the same reading
+    /// the time does.
+    private var earliestEntry: QuickMeasureEntry? {
+        row.entries.min { $0.createdAt < $1.createdAt }
     }
 
     // MARK: The recorded coordinate
@@ -3021,6 +3090,112 @@ private struct FieldLogDetailForm: View {
         case .refused(let message):
             // Nothing is written. The sentence stays on screen.
             positionRefusal = message
+        }
+    }
+
+    // MARK: When this reading was measured
+
+    /// The reading the time editor is working on, re-read from the row each
+    /// time rather than captured when the editor opened: the store can move
+    /// underneath an open sheet, and writing to a stale copy is how a
+    /// correction lands on the wrong reading.
+    private func entry(id: UUID) -> QuickMeasureEntry? {
+        row.entries.first { $0.id == id }
+    }
+
+    /// The editor. Date and time to the minute, prefilled with the value the
+    /// reading carries, Save off while the picked time cannot be stored.
+    ///
+    /// The picker's range is deliberately NOT clamped to the past. A cruiser
+    /// who reaches for tomorrow gets told why it cannot be stored, which is
+    /// the requirement; a control that silently refuses to move teaches
+    /// nothing and reads as a bug.
+    @ViewBuilder
+    private func timeEditor(entryID: UUID) -> some View {
+        NavigationStack {
+            Form {
+                if let entry = entry(id: entryID) {
+                    Section {
+                        DatePicker(MeasuredTimeInput.Words.editorTitle,
+                                   selection: $timeDraft,
+                                   displayedComponents: [.date, .hourAndMinute])
+                            .accessibilityIdentifier("fieldLog.timeField")
+                        // What the reading's time currently CLAIMS, in the
+                        // same word the `time_source` column exports, so the
+                        // cruiser can see on screen what an analyst will read
+                        // in the CSV.
+                        row(label: "Time source",
+                            value: MeasuredTimeInput.Words.sourceText(
+                                entry.timeRecordedSource))
+                        if let refusal = timeRefusal {
+                            Text(refusal)
+                                .font(ForestixType.caption)
+                                .foregroundStyle(ForestixPalette.confidenceBad)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    } header: {
+                        Text(FieldLogRowModel.kindWord(entry.kind))
+                    } footer: {
+                        // WHICH KIND OF READING THIS IS decides what the
+                        // cruiser is told, and it is decided from the entry
+                        // alone (see `isTypedReading`): a typed reading has no
+                        // capture behind it, so its stored time is merely when
+                        // it was typed and the notebook time is strictly
+                        // better. A sensor reading has a raw-capture bundle
+                        // whose manifest holds the real capture instant, and
+                        // that manifest is NOT rewritten — so the two records
+                        // will disagree, and the cruiser is told so here,
+                        // before they commit, rather than discovering it in an
+                        // export months later.
+                        Text(entry.isTypedReading
+                             ? MeasuredTimeInput.Words.typedFooter
+                             : MeasuredTimeInput.Words.sensorFooter)
+                    }
+
+                    Section {
+                        Button(MeasuredTimeInput.Words.save) {
+                            saveTime(entryID: entryID)
+                        }
+                        .disabled(timeRefusal != nil)
+                    }
+                } else {
+                    // The reading went away while the editor was open. Say so
+                    // rather than writing a time onto nothing.
+                    Text("Every reading on this row has been deleted.")
+                        .font(ForestixType.caption)
+                        .foregroundStyle(ForestixPalette.textTertiary)
+                }
+            }
+            .onChange(of: timeDraft) { _, new in
+                // Refuse as they turn the wheel, so Save is never a surprise —
+                // the same rule the coordinate editor follows.
+                switch MeasuredTimeInput.resolve(new) {
+                case .refused(let message): timeRefusal = message
+                case .time:                 timeRefusal = nil
+                }
+            }
+            .navigationTitle(MeasuredTimeInput.Words.editorTitle)
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(MeasuredTimeInput.Words.cancel) { editingTimeOf = nil }
+                }
+            }
+        }
+    }
+
+    /// Write the picked time onto ONE reading. The store re-checks the rule and
+    /// stamps the provenance; a refusal writes nothing and leaves the sentence
+    /// on screen.
+    private func saveTime(entryID: UUID) {
+        switch MeasuredTimeInput.resolve(timeDraft) {
+        case .time(let stamped):
+            history.setMeasuredTime(id: entryID, to: stamped)
+            editingTimeOf = nil
+        case .refused(let message):
+            timeRefusal = message
         }
     }
 
@@ -3132,6 +3307,14 @@ private func compactRelativeAgo(_ date: Date, now: Date = Date()) -> String {
 private struct ShareWrapper: Identifiable {
     let url: URL
     var id: URL { url }
+}
+
+/// A bare reading id, made presentable. `.sheet(item:)` needs `Identifiable`
+/// and `UUID` is not — and holding the ID rather than the reading is the point:
+/// the store can move under an open editor, so the editor re-reads the reading
+/// it is working on rather than writing back a copy taken when it opened.
+private struct IdentifiedUUID: Identifiable, Equatable {
+    let id: UUID
 }
 
 private struct FieldLogShareSheet: UIViewControllerRepresentable {

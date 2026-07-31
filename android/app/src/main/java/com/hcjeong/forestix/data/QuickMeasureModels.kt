@@ -54,6 +54,27 @@ enum class TruthSource(val raw: String) {
     }
 }
 
+/// The vocabulary of [QuickMeasureEntry.timeSource].
+///
+/// Unlike [TruthSource], this one names BOTH states, because both are claims we
+/// can actually make: `device` is what an absent stamp means and is provable
+/// (nothing but the clock could have written a time before the record sheet
+/// could set one), and `typed` is written the moment a cruiser sets one.
+/// Raw strings byte-identical to the iOS `QuickMeasureEntry.TimeSource`.
+enum class TimeSource(val raw: String) {
+    /// Set by hand from the record sheet — a notebook time typed at a desk.
+    TYPED("typed"),
+
+    /// The clock stamped it when the reading was recorded. Never STORED — it
+    /// is what an absent timeSource means, and what [QuickMeasureEntry
+    /// .timeRecordedSource] returns for one.
+    DEVICE("device");
+
+    companion object {
+        fun fromRaw(s: String?) = entries.firstOrNull { it.raw == s }
+    }
+}
+
 enum class StemPosition(val raw: String, val displayName: String) {
     DBH("dbh", "DBH"),
     BUTT("butt", "Butt"),
@@ -73,6 +94,19 @@ data class QuickMeasureEntry(
     val sigma: Double? = null,
     val confidenceRaw: String,
     val method: String,
+    /// WHEN THIS READING WAS MEASURED.
+    ///
+    /// Settable — through [settingCreatedAt] and nowhere else — because a value
+    /// that would not go into the app at the tree is written in a notebook and
+    /// typed in at the office, and the reading then carries the OFFICE time. It
+    /// is not decoration: the validation analysis paired 97 trees across two
+    /// phones on it, TruthBackfill matches a manifest truth to a reading by
+    /// nearest timestamp, and the export classifier reads live-vs-superseded
+    /// partly off time order.
+    ///
+    /// A bare `copy(createdAt = …)` would leave [timeSource] unstamped, which
+    /// makes a desk-typed time indistinguishable from a sensor-stamped one —
+    /// the one thing this must never be.
     val createdAt: Long = System.currentTimeMillis(),
     val treeNumber: Int? = null,
     /// Cruiser-typed name for the tree ("Plot3-T07"), chosen in the measure
@@ -146,6 +180,22 @@ data class QuickMeasureEntry(
     /// coordinate that exported as if the GPS produced it would be the same
     /// class of error as a typed diameter carrying a sensor sigma.
     val positionSource: String? = null,
+    /// How this reading's [createdAt] came to be what it is — the fourth
+    /// provenance stamp, the same shape as [captureMode], [truthSource] and
+    /// [positionSource], and read through [timeRecordedSource] for the same
+    /// reason.
+    ///
+    /// Null is not an unknown: until the record sheet could set a time, the
+    /// ONLY writer of [createdAt] was the clock at the moment the reading was
+    /// recorded, so an unlabelled time IS a device-stamped one.
+    /// [TimeSource.TYPED] marks a time the cruiser set by hand from their
+    /// notebook. Both are the cruiser's honest account of when the tree was
+    /// measured, but the analysis must be able to separate them: a hand-set
+    /// time is a claim about the past, and the joins that depend on time
+    /// (phone-to-phone pairing, TruthBackfill, live-vs-superseded) inherit that
+    /// claim's uncertainty. It is exported as its own column so that separation
+    /// survives leaving the phone.
+    val timeSource: String? = null,
 ) {
     /// How this reading's tree is labelled anywhere a tree is named — the
     /// cruiser's name when there is one, else the bare "#12" the log and the
@@ -175,12 +225,13 @@ data class QuickMeasureEntry(
     /// The `method` raw a hand-typed reading of this kind carries — the same
     /// manual-entry arms the scan screens stamp on a typed diameter/height.
     /// The compound kinds have no typed arm, so they keep what produced them.
+    ///
+    /// Reads the companion's rule rather than repeating it: three copies of
+    /// "which method means typed" is how [isTypedReading] and the `typed`
+    /// factory quietly stop agreeing about what a hand-entered reading looks
+    /// like.
     val typedMethodRaw: String
-        get() = when (kind) {
-            MeasureKind.DBH -> "manualVisual"
-            MeasureKind.HEIGHT -> "manualEntry"
-            else -> method
-        }
+        get() = typedMethodRaw(kind) ?: method
 
     /// This reading re-stated with a value the cruiser TYPED.
     ///
@@ -260,6 +311,56 @@ data class QuickMeasureEntry(
             positionSource ?: PositionSource.GPS_SINGLE.raw
         }
 
+    /// The source to SHOW and to EXPORT for this reading's time.
+    ///
+    /// Never null, unlike its three siblings: every reading has a time, so the
+    /// column is never blank and "old row" can never be confused with "no
+    /// answer". A row this app has not touched exports "device".
+    val timeRecordedSource: String
+        get() = timeSource ?: TimeSource.DEVICE.raw
+
+    /// True when this reading's time was SET BY HAND rather than stamped by the
+    /// clock. The one test every surface uses before printing the marker, so a
+    /// hand-set time cannot be flagged on one screen and silent on the next.
+    val hasHandSetTime: Boolean
+        get() = timeSource == TimeSource.TYPED.raw
+
+    /// True when NOTHING was captured for this reading — the number came off a
+    /// tape or a notebook, not a sensor. Decided FROM THE ENTRY ALONE, because
+    /// a reading carries no raw-capture id: the bundles are joined to readings
+    /// after the fact by (kind, tree, nearest time), which is the very join a
+    /// hand-set time disturbs, so it cannot be the thing that decides how to
+    /// warn about one.
+    ///
+    /// Two markers, either of which settles it, and both are written by the
+    /// scan screens themselves:
+    ///   • captureMode == "typed" — stamped by the DBH screen's manual-entry
+    ///     arm and by every `typed` / [typedValue] path, for both kinds.
+    ///   • [method] is the kind's manual arm ("manualVisual" / "manualEntry"),
+    ///     which is what the DBH screen branches on to write that stamp in the
+    ///     first place, and which is present on hand-typed readings recorded
+    ///     before captureMode existed.
+    ///
+    /// The compound kinds (crown, distance, sampling plot) have no typed arm,
+    /// so they fall through as captured, which they are: every one of them
+    /// comes from AR taps.
+    val isTypedReading: Boolean
+        get() = captureMode == "typed" || method == typedMethodRaw(kind)
+
+    /// This reading with the time it was MEASURED re-stated by hand.
+    ///
+    /// Nothing else moves — when a tree was measured is a fact ABOUT the
+    /// reading, not a change to the measurement, and the estimator is frozen —
+    /// but [timeSource] is stamped "typed" in the same call, so the two travel
+    /// as the one fact they are. There is no way to set the time without the
+    /// stamp, which is what "may be edited but never silently" means in code.
+    ///
+    /// The caller has already put [newValue] through
+    /// `MeasuredTimeInput.resolve`; `QuickMeasureHistory.setMeasuredTime` runs
+    /// that rule again at the write.
+    fun settingCreatedAt(newValue: Long): QuickMeasureEntry =
+        copy(createdAt = newValue, timeSource = TimeSource.TYPED.raw)
+
     /// This reading with its coordinate replaced by one the cruiser TYPED,
     /// or cleared back to no position at all (null, null).
     ///
@@ -278,6 +379,16 @@ data class QuickMeasureEntry(
     }
 
     companion object {
+        /// The `method` raw a hand-typed reading of [kind] carries — the same
+        /// manual-entry arms the scan screens stamp on a typed diameter or
+        /// height. Null for the compound kinds, which have no typed arm; the
+        /// iOS `QuickMeasureEntry.typedMethodRaw(for:)` returns the same.
+        fun typedMethodRaw(kind: MeasureKind): String? = when (kind) {
+            MeasureKind.DBH -> "manualVisual"
+            MeasureKind.HEIGHT -> "manualEntry"
+            else -> null
+        }
+
         /// A brand-new reading the cruiser typed for a tree the sensors
         /// never measured. No sigma, no GPS fix, no photo — none of those
         /// exist for a number that came off a tape. "yellow" is the tier the
@@ -302,7 +413,7 @@ data class QuickMeasureEntry(
             value = value,
             sigma = null,
             confidenceRaw = "yellow",
-            method = if (kind == MeasureKind.HEIGHT) "manualEntry" else "manualVisual",
+            method = typedMethodRaw(kind) ?: "manualVisual",
             treeNumber = treeNumber,
             treeName = treeName,
             plotID = plotID,

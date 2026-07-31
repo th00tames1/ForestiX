@@ -403,7 +403,12 @@ public struct SamplingPlotScreen: View {
                 // The ring was recorded when it was PLACED — an edit changes
                 // its radius, not when the cruiser stood at its centre.
                 createdAt: existing.createdAt,
-                plotID: existing.plotID))
+                plotID: existing.plotID,
+                // The stamp saying where that time came from rides with the
+                // time itself. A radius tweak that dropped it would re-label a
+                // hand-set time as one the clock produced — the same class of
+                // error as re-labelling a typed coordinate a device fix.
+                timeSource: existing.timeSource))
         } else {
             let entry = QuickMeasureEntry(
                 kind: .samplingPlot,

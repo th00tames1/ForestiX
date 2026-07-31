@@ -88,6 +88,8 @@ import androidx.compose.material.icons.filled.IosShare
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -98,7 +100,10 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TimeInput
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -127,6 +132,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.common.CoordinateInput
+import com.hcjeong.forestix.common.MeasuredTimeInput
 import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.RegionalSpecies
 import com.hcjeong.forestix.common.TruthInput
@@ -153,8 +159,10 @@ import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import com.hcjeong.forestix.ui.theme.ForestixTypography
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 import java.util.UUID
 import kotlin.math.PI
 import kotlin.math.abs
@@ -1750,7 +1758,8 @@ internal fun FieldLogDetailSheet(
 ) {
     val colors = Forestix.colors
     val type = Forestix.type
-    val plots by LocalAppEnvironment.current.history.plots.collectAsStateWithLifecycle()
+    val env = LocalAppEnvironment.current
+    val plots by env.history.plots.collectAsStateWithLifecycle()
     val defaultPlotID = plots.firstOrNull { it.isDefault }?.id
     /// This one row, handed to the shared move flow. The single-tree case
     /// where entering a selection mode over the whole log is overkill — same
@@ -1766,6 +1775,19 @@ internal fun FieldLogDetailSheet(
     var editingPosition by remember(row.id) { mutableStateOf(false) }
     var positionField by remember(row.id) { mutableStateOf("") }
     var positionRefusal by remember(row.id) { mutableStateOf<String?>(null) }
+    /// WHICH reading the measured-time editor is working on (null = closed).
+    ///
+    /// One reading at a time, deliberately: the cruiser was offered a bulk
+    /// offset and declined it — their notebook holds a per-tree time to the
+    /// minute — and one act on one reading is also what keeps the provenance
+    /// stamp simple. Held as an id, not a copy, so the editor writes to the
+    /// reading as the store currently has it.
+    var editingTimeOf by remember(row.id) { mutableStateOf<UUID?>(null) }
+    /// The time edit writes straight to the store rather than through the
+    /// sheet's `onSave`, because the store's own `setMeasuredTime` is what
+    /// re-checks the rule and stamps the provenance — routing it through a
+    /// plain entry save would let a caller set a time without either.
+    val writeScope = rememberCoroutineScope()
 
     Column(
         Modifier
@@ -1779,11 +1801,24 @@ internal fun FieldLogDetailSheet(
 
         SheetSection("MEASUREMENTS") {
             row.entries.forEach { e ->
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                // CLICKABLE, and the click re-times THIS reading. The record
+                // sheet never said when a reading was measured at all, which is
+                // exactly the value a cruiser needs to see and to correct when
+                // the number went into a notebook at the tree and into the app
+                // back at the office.
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickableNoRipple(onClick = { editingTimeOf = e.id }),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Text(kindWord(e.kind), style = type.body, color = colors.textSecondary)
                         Spacer(Modifier.weight(1f))
                         Text(looseValue(e, unitSystem), style = type.data, color = colors.textPrimary)
+                        Icon(
+                            Icons.Filled.ChevronRight, contentDescription = null,
+                            tint = colors.textTertiary, modifier = Modifier.size(14.dp))
                     }
                     // The ± band the table used to carry. It is the
                     // measurement's own precision, so it belongs with the
@@ -1792,6 +1827,16 @@ internal fun FieldLogDetailSheet(
                     sigmaText(e, unitSystem)?.let {
                         Text(it, style = type.dataSmall, color = colors.textTertiary)
                     }
+                    // WHEN IT WAS MEASURED, to the minute, in the cruiser's
+                    // locale — and carrying the marker when that time was set
+                    // by hand, so a desk-typed time can never read like a
+                    // sensor-stamped one.
+                    Text(
+                        MeasuredTimeInput.Words.line(
+                            MeasuredTimeInput.text(e.createdAt), e.hasHandSetTime),
+                        style = type.dataSmall,
+                        color = if (e.hasHandSetTime) colors.textSecondary else colors.textTertiary,
+                    )
                 }
             }
         }
@@ -1860,7 +1905,24 @@ internal fun FieldLogDetailSheet(
                     plots.firstOrNull { it.id == homeID }?.name
                         ?: FieldLogWords.UNKNOWN_PLOT)
             }
-            SheetRow("When", SimpleDateFormat("MMM d, HH:mm", Locale.US).format(Date(row.measuredAt)))
+            // The row's own time — the earliest reading on the tree, which is
+            // the sort key ([FieldLogRowModel.measuredAt]).
+            //
+            // Printed through the SAME formatter as the per-reading times a
+            // section above, so one instant is never rendered two ways on one
+            // screen. It used to be Locale.US with a hand-written pattern,
+            // which showed a Korean cruiser's field log in American English
+            // regardless of their phone.
+            //
+            // MARKED when the reading that provides it was re-timed by hand:
+            // this row is where a reader looks to see when work on the tree
+            // began, and a hand-set time reaching it unlabelled would be
+            // exactly the silent edit this feature exists to prevent.
+            SheetRow(
+                "When",
+                MeasuredTimeInput.Words.stamp(
+                    MeasuredTimeInput.text(row.measuredAt),
+                    row.entries.minByOrNull { it.createdAt }?.hasHandSetTime == true))
             val fix = row.entries.firstOrNull { it.latitude != null && it.longitude != null }
             // POSITION IS TAPPABLE. A fix that never arrived, or arrived on
             // the wrong stem, used to be permanent — the reading carried it
@@ -1980,6 +2042,169 @@ internal fun FieldLogDetailSheet(
             onDismiss = { editingPosition = false },
         )
     }
+
+    // The measured-time editor, on ONE reading. The reading is looked up here
+    // rather than captured when the click happened: the store can move under an
+    // open dialog, and writing back a stale copy is how a correction lands on
+    // the wrong reading.
+    editingTimeOf?.let { id ->
+        row.entries.firstOrNull { it.id == id }?.let { entry ->
+            MeasuredTimeEditorDialog(
+                entry = entry,
+                onDismiss = { editingTimeOf = null },
+                onSave = { picked ->
+                    // The store re-checks the rule and stamps the provenance;
+                    // nothing here can set a time without the stamp.
+                    writeScope.launch { env.history.setMeasuredTime(id, picked) }
+                    editingTimeOf = null
+                },
+            )
+        }
+    }
+}
+
+/// The measured-time editor: date and time to the minute, prefilled with the
+/// value the reading carries, Save off while the picked time cannot be stored.
+///
+/// The pickers are deliberately NOT clamped to the past. A cruiser who reaches
+/// for tomorrow gets told why it cannot be stored, which is the requirement; a
+/// control that silently refuses to move teaches nothing and reads as a bug.
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MeasuredTimeEditorDialog(
+    entry: QuickMeasureEntry,
+    onDismiss: () -> Unit,
+    onSave: (Long) -> Unit,
+) {
+    val colors = Forestix.colors
+    val type = Forestix.type
+    val context = LocalContext.current
+    val opened = remember(entry.id) { Calendar.getInstance().apply { timeInMillis = entry.createdAt } }
+    // The date half, held as the UTC midnight the material picker speaks in.
+    var dateUtcMs by remember(entry.id) { mutableStateOf(localDateAsUtcMillis(entry.createdAt)) }
+    var pickingDate by remember(entry.id) { mutableStateOf(false) }
+    // The time half. `is24Hour` follows the phone's own clock setting so the
+    // field matches the times printed everywhere else on this sheet.
+    val timeState = rememberTimePickerState(
+        initialHour = opened.get(Calendar.HOUR_OF_DAY),
+        initialMinute = opened.get(Calendar.MINUTE),
+        is24Hour = android.text.format.DateFormat.is24HourFormat(context),
+    )
+    val picked = combineLocal(dateUtcMs, timeState.hour, timeState.minute)
+    val resolved = MeasuredTimeInput.resolve(picked)
+    val refusal = (resolved as? MeasuredTimeInput.Result.Refused)?.message
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(MeasuredTimeInput.Words.EDITOR_TITLE) },
+        text = {
+            Column(
+                Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(ForestixSpace.xs),
+            ) {
+                Text(kindWord(entry.kind), style = type.caption, color = colors.textSecondary)
+                // What is about to be stored, printed the way every other
+                // surface prints it, so Save is never a surprise.
+                Text(
+                    MeasuredTimeInput.text(picked),
+                    style = type.data, color = colors.textPrimary,
+                )
+                // What the reading's time currently CLAIMS, in the same word
+                // the `time_source` column exports, so the cruiser can see on
+                // screen what an analyst will read in the CSV.
+                SheetRow("Time source", MeasuredTimeInput.Words.sourceText(entry.timeRecordedSource))
+                // The date is behind a button and the time is inline, because
+                // that is the shape Material gives us: there is no combined
+                // control, and a full calendar unfolded inside this dialog
+                // would push the sentence that explains the edit off-screen.
+                // iOS shows one DatePicker carrying both halves.
+                TextButton(onClick = { pickingDate = true }) { Text("Change date") }
+                TimeInput(state = timeState)
+                refusal?.let {
+                    Text(it, style = type.caption, color = colors.confidenceBad)
+                }
+                // WHICH KIND OF READING THIS IS decides what the cruiser is
+                // told, and it is decided from the entry alone (see
+                // [QuickMeasureEntry.isTypedReading]): a typed reading has no
+                // capture behind it, so its stored time is merely when it was
+                // typed and the notebook time is strictly better. A sensor
+                // reading has a raw-capture bundle whose manifest holds the
+                // real capture instant, and that manifest is NOT rewritten — so
+                // the two records will disagree, and the cruiser is told so
+                // here, before they commit, rather than discovering it in an
+                // export months later.
+                Text(
+                    if (entry.isTypedReading) {
+                        MeasuredTimeInput.Words.TYPED_FOOTER
+                    } else {
+                        MeasuredTimeInput.Words.SENSOR_FOOTER
+                    },
+                    style = type.caption, color = colors.textTertiary,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    if (resolved is MeasuredTimeInput.Result.Time) onSave(resolved.epochMs)
+                },
+                enabled = refusal == null,
+            ) { Text(MeasuredTimeInput.Words.SAVE) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(MeasuredTimeInput.Words.CANCEL) }
+        },
+        containerColor = colors.surface,
+    )
+
+    if (pickingDate) {
+        val dateState = rememberDatePickerState(initialSelectedDateMillis = dateUtcMs)
+        DatePickerDialog(
+            onDismissRequest = { pickingDate = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    // A cleared selection leaves the date it already had —
+                    // never "today", which would silently re-date the reading.
+                    dateState.selectedDateMillis?.let { dateUtcMs = it }
+                    pickingDate = false
+                }) { Text("Done") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pickingDate = false }) {
+                    Text(MeasuredTimeInput.Words.CANCEL)
+                }
+            },
+        ) {
+            DatePicker(state = dateState)
+        }
+    }
+}
+
+/// The UTC midnight that stands for a local date — what the material date
+/// picker takes and returns. Converting through the calendar rather than by
+/// arithmetic keeps a cruiser near a date boundary, or in a half-hour offset
+/// zone, on the day they are actually looking at.
+private fun localDateAsUtcMillis(epochMs: Long): Long {
+    val local = Calendar.getInstance().apply { timeInMillis = epochMs }
+    return Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
+        clear()
+        set(local.get(Calendar.YEAR), local.get(Calendar.MONTH), local.get(Calendar.DAY_OF_MONTH))
+    }.timeInMillis
+}
+
+/// The inverse: a picked UTC date plus a picked hour and minute, read back as a
+/// local instant. Seconds and milliseconds are cleared here as well as in
+/// [MeasuredTimeInput.truncatedToMinute] — the cruiser records to the minute,
+/// and a second nobody typed has no business in the stored time.
+private fun combineLocal(dateUtcMs: Long, hour: Int, minute: Int): Long {
+    val utc = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply { timeInMillis = dateUtcMs }
+    return Calendar.getInstance().apply {
+        clear()
+        set(
+            utc.get(Calendar.YEAR), utc.get(Calendar.MONTH), utc.get(Calendar.DAY_OF_MONTH),
+            hour, minute, 0,
+        )
+    }.timeInMillis
 }
 
 /// The recorded-coordinate editor. Save is off while the text cannot be read

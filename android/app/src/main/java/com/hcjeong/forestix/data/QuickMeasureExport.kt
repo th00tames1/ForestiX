@@ -56,6 +56,14 @@ object QuickMeasureExport {
             // beside "truth", matching the iOS exporter so the two platforms'
             // CSVs diff clean and an existing reader still lines up.
             "truth_source",
+            // Qualifies "timestamp", and the only one of the four that is
+            // never blank: every reading has a time. "device" is the clock at
+            // the moment the reading was recorded; "typed" is a time the
+            // cruiser set by hand from a notebook. The analysis joins on time —
+            // across phones, to raw-capture manifests, and for
+            // live-vs-superseded — so it must be able to see which timestamps
+            // are claims about the past.
+            "time_source",
         )
         val sb = StringBuilder()
         sb.append(headers.joinToString(",") { csv(it) }).append("\r\n")
@@ -90,6 +98,7 @@ object QuickMeasureExport {
                 e.captureMode ?: "",
                 e.positionRecordedSource ?: "",
                 e.truthRecordedSource ?: "",
+                e.timeRecordedSource,
             ).joinToString(",") { csv(it) }
             sb.append(row).append("\r\n")
         }
@@ -140,10 +149,13 @@ object QuickMeasureExport {
         }
 
         // -- Stems.csv (per DBH) --
-        // "truth_source" appended LAST: it qualifies truth_cm — "typed" here,
-        // "capture" when the value was recovered from a raw-capture manifest
-        // and matched to this stem. Blank when there is no truth.
-        val stems = StringBuilder("id,plot_id,tree_number,timestamp,dbh_cm,truth_cm,sigma_mm,position,confidence,method,capture_mode,truth_source\r\n")
+        // "truth_source" then "time_source" appended LAST. truth_source
+        // qualifies truth_cm — "typed" here, "capture" when the value was
+        // recovered from a raw-capture manifest and matched to this stem;
+        // blank when there is no truth. time_source qualifies "timestamp" and
+        // is never blank — "device" for the clock, "typed" for a time set by
+        // hand.
+        val stems = StringBuilder("id,plot_id,tree_number,timestamp,dbh_cm,truth_cm,sigma_mm,position,confidence,method,capture_mode,truth_source,time_source\r\n")
         for (e in entries.filter { it.kind == MeasureKind.DBH }) {
             stems.append(
                 listOf(
@@ -154,13 +166,14 @@ object QuickMeasureExport {
                     e.position?.raw ?: "", e.confidenceRaw, e.method,
                     e.captureMode ?: "",
                     e.truthRecordedSource ?: "",
+                    e.timeRecordedSource,
                 ).joinToString(",") { csv(it) }
             ).append("\r\n")
         }
 
         // -- Heights.csv (per Height) --
-        // "truth_source" appended LAST — see Stems.csv above.
-        val heights = StringBuilder("id,plot_id,tree_number,timestamp,height_m,truth_m,sigma_m,confidence,method,truth_source\r\n")
+        // "truth_source" then "time_source" appended LAST — see Stems.csv.
+        val heights = StringBuilder("id,plot_id,tree_number,timestamp,height_m,truth_m,sigma_m,confidence,method,truth_source,time_source\r\n")
         for (e in entries.filter { it.kind == MeasureKind.HEIGHT }) {
             heights.append(
                 listOf(
@@ -170,6 +183,7 @@ object QuickMeasureExport {
                     e.sigma?.let { fmt(it) } ?: "",
                     e.confidenceRaw, e.method,
                     e.truthRecordedSource ?: "",
+                    e.timeRecordedSource,
                 ).joinToString(",") { csv(it) }
             ).append("\r\n")
         }

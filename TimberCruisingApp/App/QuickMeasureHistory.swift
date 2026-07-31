@@ -156,7 +156,21 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
     public let sigma: Double?
     public let confidenceRaw: String
     public let method: String
-    public let createdAt: Date
+    /// WHEN THIS READING WAS MEASURED.
+    ///
+    /// Settable — `var`, as the cruise `Tree.createdAt` already is — because a
+    /// value that would not go into the app at the tree is written in a
+    /// notebook and typed in at the office, and the reading then carries the
+    /// OFFICE time. It is not decoration: the validation analysis paired 97
+    /// trees across two phones on it, `TruthBackfill` matches a manifest truth
+    /// to a reading by nearest timestamp, and the export classifier reads
+    /// live-vs-superseded partly off time order.
+    ///
+    /// Which is exactly why NOTHING assigns to it directly. Every re-statement
+    /// goes through `settingCreatedAt`, which stamps `timeSource` in the same
+    /// breath; a bare assignment would leave a desk-typed time indistinguishable
+    /// from a sensor-stamped one, which is the one thing this must never be.
+    public var createdAt: Date
     public let treeNumber: Int?
     /// Cruiser-typed name for the tree ("Plot3-T07"), chosen in the measure
     /// chooser before the scan. nil for every reading taken before naming
@@ -245,6 +259,23 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
     /// class of error as a typed diameter carrying a sensor σ.
     public let positionSource: String?
 
+    /// How this reading's `createdAt` came to be what it is — the fourth
+    /// provenance stamp, the same shape as `captureMode`, `truthSource` and
+    /// `positionSource`, and read through `timeRecordedSource` for the same
+    /// reason.
+    ///
+    /// nil is not an unknown: until the record sheet could set a time, the ONLY
+    /// writer of `createdAt` was the clock at the moment the reading was
+    /// recorded, so an unlabelled time IS a device-stamped one.
+    /// `TimeSource.typed` marks a time the cruiser set by hand from their
+    /// notebook. Both are the cruiser's honest account of when the tree was
+    /// measured, but the analysis must be able to separate them: a hand-set
+    /// time is a claim about the past, and the joins that depend on time
+    /// (phone-to-phone pairing, `TruthBackfill`, live-vs-superseded) inherit
+    /// that claim's uncertainty. It is exported as its own column so that
+    /// separation survives leaving the phone.
+    public let timeSource: String?
+
     public init(
         id: UUID = UUID(),
         kind: Kind,
@@ -268,7 +299,8 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         truth: Double? = nil,
         truthSource: String? = nil,
         truthUnit: String? = nil,
-        positionSource: String? = nil
+        positionSource: String? = nil,
+        timeSource: String? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -293,6 +325,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         self.truthSource = truthSource
         self.truthUnit = truthUnit
         self.positionSource = positionSource
+        self.timeSource = timeSource
     }
 
     // Custom decoding so entries written before any new field existed
@@ -324,6 +357,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         self.truthUnit     = try c.decodeIfPresent(String.self, forKey: .truthUnit)
         self.positionSource = try c.decodeIfPresent(String.self,
                                                     forKey: .positionSource)
+        self.timeSource    = try c.decodeIfPresent(String.self, forKey: .timeSource)
     }
 
     /// The vocabulary of `truthSource`. One case, because there is exactly one
@@ -352,6 +386,92 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         return positionSource ?? PositionSource.gpsSingle.rawValue
     }
 
+    /// The vocabulary of `timeSource`.
+    ///
+    /// Unlike `TruthSource`, this one names BOTH states, because both are
+    /// claims we can actually make: `device` is what an absent stamp means and
+    /// is provable (nothing but the clock could have written a time before this
+    /// feature existed), and `typed` is written the moment a cruiser sets one.
+    public enum TimeSource: String, Sendable {
+        /// Set by hand from the record sheet — a notebook time typed at a desk.
+        case typed
+        /// The clock stamped it when the reading was recorded. Never STORED —
+        /// it is what an absent `timeSource` means, and what
+        /// `timeRecordedSource` returns for one.
+        case device
+    }
+
+    /// The source to SHOW and to EXPORT for this reading's time.
+    ///
+    /// Never nil, unlike its three siblings: every reading has a time, so the
+    /// column is never blank and "old row" can never be confused with "no
+    /// answer". A row this app has not touched exports `device`.
+    public var timeRecordedSource: String {
+        timeSource ?? TimeSource.device.rawValue
+    }
+
+    /// True when this reading's time was SET BY HAND rather than stamped by
+    /// the clock. The one test every surface uses before printing the marker,
+    /// so a hand-set time cannot be flagged on one screen and silent on the
+    /// next.
+    public var hasHandSetTime: Bool {
+        timeSource == TimeSource.typed.rawValue
+    }
+
+    /// True when NOTHING was captured for this reading — the number came off a
+    /// tape or a notebook, not a sensor. Decided FROM THE ENTRY ALONE, because
+    /// a reading carries no raw-capture id: the bundles are joined to readings
+    /// after the fact by (kind, tree, nearest time), which is the very join a
+    /// hand-set time disturbs, so it cannot be the thing that decides how to
+    /// warn about one.
+    ///
+    /// Two markers, either of which settles it, and both are written by the
+    /// scan screens themselves:
+    ///   • `captureMode == "typed"` — stamped by the DBH screen's manual-entry
+    ///     arm and by every `typed` / `typedValue` path, for both kinds.
+    ///   • `method` is the kind's manual arm ("manualVisual" / "manualEntry"),
+    ///     which is what the DBH screen branches on to write that stamp in the
+    ///     first place, and which is present on hand-typed readings recorded
+    ///     before `captureMode` existed.
+    ///
+    /// The compound kinds (crown, distance, sampling plot) have no typed arm —
+    /// `typedMethodRaw(for:)` returns nil for them — so they fall through as
+    /// captured, which they are: every one of them comes from AR taps.
+    public var isTypedReading: Bool {
+        if captureMode == "typed" { return true }
+        guard let manual = QuickMeasureEntry.typedMethodRaw(for: kind) else {
+            return false
+        }
+        return method == manual
+    }
+
+    /// This reading with the time it was MEASURED re-stated by hand.
+    ///
+    /// Nothing else moves — when a tree was measured is a fact ABOUT the
+    /// reading, not a change to the measurement, and the estimator is frozen —
+    /// but `timeSource` is stamped `typed` in the same call, so the two travel
+    /// as the one fact they are. There is no way to set the time without the
+    /// stamp, which is what "may be edited but never silently" means in code.
+    ///
+    /// The caller has already put `newValue` through
+    /// `MeasuredTimeInput.resolve`; `QuickMeasureHistory.setMeasuredTime` runs
+    /// that rule again at the write.
+    public func settingCreatedAt(_ newValue: Date) -> QuickMeasureEntry {
+        QuickMeasureEntry(
+            id: id, kind: kind, value: value,
+            secondaryValue: secondaryValue, sigma: sigma,
+            confidenceRaw: confidenceRaw, method: method,
+            createdAt: newValue, treeNumber: treeNumber, treeName: treeName,
+            plotID: plotID,
+            speciesCode: speciesCode, position: position,
+            damageCodes: damageCodes, note: note,
+            latitude: latitude, longitude: longitude,
+            photoPath: photoPath, captureMode: captureMode, truth: truth,
+            truthSource: truthSource, truthUnit: truthUnit,
+            positionSource: positionSource,
+            timeSource: TimeSource.typed.rawValue)
+    }
+
     /// This reading with its coordinate replaced by one the cruiser TYPED,
     /// or cleared back to no position at all (`nil, nil`).
     ///
@@ -375,7 +495,8 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             longitude: hasFix ? newLon : nil,
             photoPath: photoPath, captureMode: captureMode, truth: truth,
             truthSource: truthSource, truthUnit: truthUnit,
-            positionSource: hasFix ? PositionSource.manual.rawValue : nil)
+            positionSource: hasFix ? PositionSource.manual.rawValue : nil,
+            timeSource: timeSource)
     }
 
     /// How this reading's tree is labelled anywhere a tree is named — the
@@ -456,7 +577,8 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             latitude: latitude, longitude: longitude,
             photoPath: photoPath, captureMode: "typed", truth: truth,
             truthSource: truthSource, truthUnit: truthUnit,
-            positionSource: positionSource)
+            positionSource: positionSource,
+            timeSource: timeSource)
     }
 
     /// This reading re-homed into another plot. Every other field is
@@ -481,7 +603,8 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             latitude: latitude, longitude: longitude,
             photoPath: photoPath, captureMode: captureMode, truth: truth,
             truthSource: truthSource, truthUnit: truthUnit,
-            positionSource: positionSource)
+            positionSource: positionSource,
+            timeSource: timeSource)
     }
 
     /// This reading with the two free-form details the quick-edit sheet owns
@@ -507,7 +630,8 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             latitude: latitude, longitude: longitude,
             photoPath: photoPath, captureMode: captureMode, truth: truth,
             truthSource: truthSource, truthUnit: truthUnit,
-            positionSource: positionSource)
+            positionSource: positionSource,
+            timeSource: timeSource)
     }
 
     /// This reading with its ground truth set (or cleared with nil).
@@ -540,7 +664,8 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             photoPath: photoPath, captureMode: captureMode, truth: newTruth,
             truthSource: newTruth == nil ? nil : source,
             truthUnit: newTruth == nil ? nil : unit,
-            positionSource: positionSource)
+            positionSource: positionSource,
+            timeSource: timeSource)
     }
 
     /// This reading with its ground truth RE-BASED into the unit it was
@@ -566,7 +691,8 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             latitude: latitude, longitude: longitude,
             photoPath: photoPath, captureMode: captureMode, truth: newTruth,
             truthSource: truthSource, truthUnit: unit,
-            positionSource: positionSource)
+            positionSource: positionSource,
+            timeSource: timeSource)
     }
 
     /// A brand-new reading the cruiser typed for a tree the sensors never
@@ -625,7 +751,11 @@ public final class QuickMeasureHistory: ObservableObject {
     /// again (absent decodes as nil), and nil keeps its manifest meaning: NOT
     /// STATED, never "metric". A v5 sidecar replays under 6 unchanged, and a
     /// build reading a 6 sidecar with a v5 decoder simply ignores the key.
-    public static let schemaVersion: Int = 6
+    /// 7 adds `timeSource` — how a reading's `createdAt` came to be what it is.
+    /// Same terms once more: absent decodes as nil, which `timeRecordedSource`
+    /// reads as the device stamp it can only have been, because until the
+    /// record sheet could set a time nothing but the clock ever wrote one.
+    public static let schemaVersion: Int = 7
 
     @Published public private(set) var entries: [QuickMeasureEntry] = []
     /// All Quick Measure plots known to the app, newest first. Always
@@ -737,6 +867,70 @@ public final class QuickMeasureHistory: ObservableObject {
         rewriteSidecar()
         persistCache()
         return changed
+    }
+
+    /// Re-state WHEN one reading was measured, and put the log back in order.
+    ///
+    /// ONE READING AT A TIME, deliberately. The cruiser was offered a bulk
+    /// offset and declined it: their notebook holds a per-tree time to the
+    /// minute, so they will type each one anyway and a shared offset buys
+    /// nothing. Keeping it singular also keeps the provenance simple — every
+    /// hand-set time is one deliberate act on one reading.
+    ///
+    /// RE-CHECKS AT THE WRITE, like `repairTruthUnits`: the screen already put
+    /// the picked time through `MeasuredTimeInput.resolve`, but this is the
+    /// call that actually writes, so the rule has to hold here too. A future
+    /// time is refused and NOTHING is written.
+    ///
+    /// RE-SORTS, which is the whole point of the feature. `entries` is
+    /// newest-first by contract — the field log takes each tree's newest
+    /// diameter and height off the head of a group, the summary header's LAST
+    /// cell reads `entries.first`, and `treeName(forTreeNumber:plotID:)` reads
+    /// the tail — and a corrected time that left the array in its old order
+    /// would move the row in the log (rows sort on their own earliest
+    /// `createdAt`) while those head/tail readings still answered from the
+    /// order the reading was ADDED in. Sorted stably, so readings sharing a
+    /// minute keep the order they already had rather than shuffling under a
+    /// cruiser who is looking at them.
+    ///
+    /// REFUSES A NO-OP. Opening the editor and saving the minute that was
+    /// already there is not an edit, and stamping `typed` on it would claim a
+    /// hand-set time for a reading nobody re-timed — and would quietly throw
+    /// away the seconds a sensor stamp carries, which are what makes a capture
+    /// and its manifest match to better than a minute. The comparison is
+    /// minute-to-minute because that is the precision the cruiser picks in.
+    ///
+    /// Returns true only when a reading actually moved.
+    @discardableResult
+    public func setMeasuredTime(id: UUID, to newTime: Date) -> Bool {
+        guard let idx = entries.firstIndex(where: { $0.id == id }) else { return false }
+        guard case .time(let stamped) = MeasuredTimeInput.resolve(newTime)
+        else { return false }
+        guard MeasuredTimeInput.truncatedToMinute(entries[idx].createdAt) != stamped
+        else { return false }
+        var next = entries
+        next[idx] = next[idx].settingCreatedAt(stamped)
+        entries = Self.newestFirst(next)
+        rewriteSidecar()
+        persistCache()
+        return true
+    }
+
+    /// `entries` in the order the whole app expects to read it: newest first,
+    /// ties in the order they were already in.
+    ///
+    /// Swift's `sorted(by:)` gives no stability guarantee, and an unstable sort
+    /// over a log where a burst of readings can share a second would reorder
+    /// rows nobody touched. Sorting on (time, original position) makes it
+    /// stable without depending on the algorithm.
+    static func newestFirst(_ list: [QuickMeasureEntry]) -> [QuickMeasureEntry] {
+        list.enumerated()
+            .sorted { a, b in
+                a.element.createdAt == b.element.createdAt
+                    ? a.offset < b.offset
+                    : a.element.createdAt > b.element.createdAt
+            }
+            .map(\.element)
     }
 
     /// Two truth values are the SAME value inside this band — the field log's
@@ -1173,6 +1367,13 @@ public final class QuickMeasureHistory: ObservableObject {
         // raw-capture manifest and matched to it. Blank means no truth. The
         // accuracy work must be able to drop the matched ones and still have
         // a corpus, so the distinction cannot live only in a commit message.
+        //
+        // time_source qualifies "timestamp", and is the only one of the four
+        // that is never blank: every reading has a time. "device" is the clock
+        // at the moment the reading was recorded; "typed" is a time the cruiser
+        // set by hand from a notebook. The analysis joins on time — across
+        // phones, to raw-capture manifests, and for live-vs-superseded — so it
+        // must be able to see which timestamps are claims about the past.
         let headers = ["id", "timestamp", "plot", "tree", "tree_name", "kind",
                        "value", "value_unit", "truth",
                        "secondary_value", "secondary_unit",
@@ -1180,7 +1381,7 @@ public final class QuickMeasureHistory: ObservableObject {
                        "species", "position", "damage", "note",
                        "confidence", "method",
                        "latitude", "longitude", "photo", "capture_mode",
-                       "position_source", "truth_source"]
+                       "position_source", "truth_source", "time_source"]
         var out = headers.map(Self.csvField).joined(separator: ",")
         out += "\r\n"
 
@@ -1223,7 +1424,8 @@ public final class QuickMeasureHistory: ObservableObject {
                 e.photoPath ?? "",
                 e.captureMode ?? "",
                 e.positionRecordedSource ?? "",
-                e.truthRecordedSource ?? ""
+                e.truthRecordedSource ?? "",
+                e.timeRecordedSource
             ]
             let row = cols.map(Self.csvField).joined(separator: ",")
             out += row + "\r\n"
@@ -1311,11 +1513,13 @@ public final class QuickMeasureHistory: ObservableObject {
         }
 
         // -- Stems.csv (one per DBH measurement) --
-        // "capture_mode" then "truth_source" appended as the LAST columns
-        // (Android parity). truth_source qualifies truth_cm: "typed" here,
-        // "capture" when the value was recovered from a raw-capture manifest
-        // and matched to this stem. Blank when there is no truth.
-        var stems = "id,plot_id,tree_number,timestamp,dbh_cm,truth_cm,sigma_mm,position,confidence,method,capture_mode,truth_source\r\n"
+        // "capture_mode", "truth_source" then "time_source" appended as the
+        // LAST columns (Android parity). truth_source qualifies truth_cm:
+        // "typed" here, "capture" when the value was recovered from a
+        // raw-capture manifest and matched to this stem. Blank when there is
+        // no truth. time_source qualifies "timestamp" and is never blank —
+        // "device" for the clock, "typed" for a time set by hand.
+        var stems = "id,plot_id,tree_number,timestamp,dbh_cm,truth_cm,sigma_mm,position,confidence,method,capture_mode,truth_source,time_source\r\n"
         for e in entries where e.kind == .dbh {
             // Spelled out rather than inlined: adding the truth column tipped
             // this literal past what the type-checker will solve in one go.
@@ -1332,14 +1536,15 @@ public final class QuickMeasureHistory: ObservableObject {
                 e.position?.rawValue ?? "",
                 e.confidenceRaw, e.method,
                 e.captureMode ?? "",
-                e.truthRecordedSource ?? ""
+                e.truthRecordedSource ?? "",
+                e.timeRecordedSource
             ]
             stems += row.map(Self.csvField).joined(separator: ",") + "\r\n"
         }
 
         // -- Heights.csv (one per Height measurement) --
-        // "truth_source" appended LAST — see Stems.csv above.
-        var heights = "id,plot_id,tree_number,timestamp,height_m,truth_m,sigma_m,confidence,method,truth_source\r\n"
+        // "truth_source" then "time_source" appended LAST — see Stems.csv.
+        var heights = "id,plot_id,tree_number,timestamp,height_m,truth_m,sigma_m,confidence,method,truth_source,time_source\r\n"
         for e in entries where e.kind == .height {
             let truth: String = e.truth.map { String(format: "%.3f", $0) } ?? ""
             let sigma: String = e.sigma.map { String(format: "%.3f", $0) } ?? ""
@@ -1352,7 +1557,8 @@ public final class QuickMeasureHistory: ObservableObject {
                 truth,
                 sigma,
                 e.confidenceRaw, e.method,
-                e.truthRecordedSource ?? ""
+                e.truthRecordedSource ?? "",
+                e.timeRecordedSource
             ]
             heights += row.map(Self.csvField).joined(separator: ",") + "\r\n"
         }
@@ -1533,14 +1739,21 @@ public final class QuickMeasureHistory: ObservableObject {
 
     /// Tries the UserDefaults cache first (fast path). If missing or
     /// unreadable, replays the JSONL sidecar. Last resort: empty log.
+    ///
+    /// SORTED on the way in, whichever source answered. The whole app reads
+    /// `entries` as newest-first, and the sidecar is an APPEND log: a reading
+    /// whose time was later set by hand sits in the file where it was written,
+    /// not where its time belongs, so replaying that file in order would hand
+    /// the app a list that quietly breaks the contract. Stable, so readings
+    /// sharing an instant keep the order the log recorded them in.
     private static func loadBest(defaults: UserDefaults,
                                   sidecar: URL?) -> [QuickMeasureEntry] {
         if let data = defaults.data(forKey: Keys.entries),
            let decoded = try? JSONDecoder().decode(
                 [QuickMeasureEntry].self, from: data) {
-            return decoded
+            return newestFirst(decoded)
         }
-        return loadSidecar(sidecar)
+        return newestFirst(loadSidecar(sidecar))
     }
 
     private static func loadSidecar(_ url: URL?) -> [QuickMeasureEntry] {

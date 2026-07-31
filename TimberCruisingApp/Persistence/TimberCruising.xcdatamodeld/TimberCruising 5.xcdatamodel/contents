@@ -14,6 +14,7 @@
         <attribute name="depthNoiseMm" attributeType="Float" usesScalarValueType="YES"/>
         <attribute name="dbhCorrectionAlpha" attributeType="Float" usesScalarValueType="YES"/>
         <attribute name="dbhCorrectionBeta" attributeType="Float" usesScalarValueType="YES"/>
+        <attribute name="dbhCalibrationEpoch" optional="YES" attributeType="Integer 32" defaultValueString="0" usesScalarValueType="YES"/>
         <attribute name="vioDriftFraction" attributeType="Float" usesScalarValueType="YES"/>
         <uniquenessConstraints>
             <uniquenessConstraint><constraint value="id"/></uniquenessConstraint>

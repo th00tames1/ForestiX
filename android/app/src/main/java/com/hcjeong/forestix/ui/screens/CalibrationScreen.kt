@@ -64,6 +64,7 @@ import com.hcjeong.forestix.ar.ArController
 import com.hcjeong.forestix.ar.ArSessionHub
 import com.hcjeong.forestix.data.cruise.Project
 import com.hcjeong.forestix.sensors.ArDepthFrame
+import com.hcjeong.forestix.sensors.DBHEstimator
 import com.hcjeong.forestix.sensors.CylinderCalibration
 import com.hcjeong.forestix.sensors.CylinderCalibrationResult
 import com.hcjeong.forestix.sensors.Vec3d
@@ -211,6 +212,9 @@ class CalibrationViewModel(
         if (c is CylinderState.Computed) {
             updated.dbhCorrectionAlpha = c.result.alpha.toFloat()
             updated.dbhCorrectionBeta = c.result.beta.toFloat()
+            // Stamp WHAT was calibrated. Without it the coefficients outlive
+            // the estimator they correct and stack with its successor's.
+            updated.dbhCalibrationEpoch = DBHEstimator.ESTIMATOR_EPOCH
         }
         updated.updatedAt = System.currentTimeMillis()
         return updated
@@ -280,6 +284,7 @@ class CalibrationViewModel(
             updated.lidarBiasMm = 0f
             updated.dbhCorrectionAlpha = 0f
             updated.dbhCorrectionBeta = 1f
+            updated.dbhCalibrationEpoch = 0
             updated.updatedAt = System.currentTimeMillis()
             return updated
         }
@@ -371,17 +376,33 @@ fun CalibrationScreen(nav: NavController, projectId: String? = null) {
                 )
                 // Identity correction (α = 0, β = 1) is exactly the untouched /
                 // "standard settings" state — see sensibleDefaultsApplied.
+                //
+                // THREE STATES, not two — iOS CalibrationScreen parity. A
+                // round-post scan corrects whatever the width estimator got
+                // wrong on the day it was fitted, so when that estimator
+                // changes the scan is answering a question that no longer
+                // exists and is no longer applied. "Corrected" would be false
+                // and "not corrected" would hide a scan the cruiser remembers
+                // doing, so the stale case gets its own sentence and names the
+                // one action that fixes it.
                 val widthsCorrected =
                     p.dbhCorrectionAlpha != 0f || p.dbhCorrectionBeta != 1f
+                val widthsStale = widthsCorrected &&
+                    p.dbhCalibrationEpoch != DBHEstimator.ESTIMATOR_EPOCH
                 Text(
-                    if (widthsCorrected) {
+                    if (widthsStale) {
+                        "Your round-post scan was made with an earlier version of the " +
+                            "width measurement and no longer applies, so it is being " +
+                            "ignored. Run the round-post scan again to correct widths " +
+                            "on this project."
+                    } else if (widthsCorrected) {
                         "Widths are being corrected using your round-post scan."
                     } else {
                         "Widths are being used exactly as the phone measures them — " +
                             "no round-post scan has been applied yet."
                     },
                     style = type.body,
-                    color = colors.textPrimary,
+                    color = if (widthsStale) colors.confidenceWarn else colors.textPrimary,
                 )
                 if (settings.developerMode) {
                     LabeledValueRow("Depth reading spread", String.format(Locale.US, "%.2f mm", p.depthNoiseMm))

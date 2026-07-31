@@ -285,6 +285,7 @@ public enum BackupArchive {
             depthNoiseMm: srcProject.depthNoiseMm,
             dbhCorrectionAlpha: srcProject.dbhCorrectionAlpha,
             dbhCorrectionBeta: srcProject.dbhCorrectionBeta,
+            dbhCalibrationEpoch: srcProject.dbhCalibrationEpoch,
             vioDriftFraction: srcProject.vioDriftFraction)
         _ = try targetProjectRepo.create(newProj)
 

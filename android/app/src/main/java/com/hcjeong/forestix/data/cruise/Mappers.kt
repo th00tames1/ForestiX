@@ -79,6 +79,7 @@ object ProjectMapper {
         depthNoiseMm = s.depthNoiseMm,
         dbhCorrectionAlpha = s.dbhCorrectionAlpha,
         dbhCorrectionBeta = s.dbhCorrectionBeta,
+        dbhCalibrationEpoch = s.dbhCalibrationEpoch,
         vioDriftFraction = s.vioDriftFraction,
     )
 
@@ -103,6 +104,7 @@ object ProjectMapper {
             depthNoiseMm = e.depthNoiseMm,
             dbhCorrectionAlpha = e.dbhCorrectionAlpha,
             dbhCorrectionBeta = e.dbhCorrectionBeta,
+            dbhCalibrationEpoch = e.dbhCalibrationEpoch,
             vioDriftFraction = e.vioDriftFraction,
         )
     }

@@ -151,6 +151,10 @@ public final class CalibrationViewModel: ObservableObject {
         if case .computed(let c, _) = cylinder {
             updated.dbhCorrectionAlpha = Float(c.alpha)
             updated.dbhCorrectionBeta = Float(c.beta)
+            // Stamp WHAT was calibrated, not just the result. Without this the
+            // coefficients outlive the estimator they correct and stack with
+            // its successor's own correction.
+            updated.dbhCalibrationEpoch = DBHEstimator.estimatorEpoch
         }
         updated.updatedAt = Date()
         return updated
@@ -167,6 +171,7 @@ public final class CalibrationViewModel: ObservableObject {
         updated.lidarBiasMm = 0
         updated.dbhCorrectionAlpha = 0
         updated.dbhCorrectionBeta = 1
+        updated.dbhCalibrationEpoch = 0
         updated.updatedAt = Date()
         return updated
     }

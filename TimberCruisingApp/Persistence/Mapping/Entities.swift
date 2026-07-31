@@ -21,6 +21,7 @@ public final class ProjectEntity: NSManagedObject {
     @NSManaged public var depthNoiseMm: Float
     @NSManaged public var dbhCorrectionAlpha: Float
     @NSManaged public var dbhCorrectionBeta: Float
+    @NSManaged public var dbhCalibrationEpoch: Int32
     @NSManaged public var vioDriftFraction: Float
 }
 

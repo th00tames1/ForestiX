@@ -159,6 +159,9 @@ data class Project(
     var depthNoiseMm: Float,
     var dbhCorrectionAlpha: Float,      // from cylinder calibration; default 0
     var dbhCorrectionBeta: Float,       // default 1
+    /// Which estimator the two coefficients above were fitted against —
+    /// see ProjectCalibration.dbhCalibrationEpoch. 0 = never calibrated.
+    var dbhCalibrationEpoch: Int = 0,
     var vioDriftFraction: Float,        // default 0.02
 )
 

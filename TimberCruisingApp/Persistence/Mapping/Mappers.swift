@@ -47,6 +47,7 @@ public enum ProjectMapper {
         e.depthNoiseMm = s.depthNoiseMm
         e.dbhCorrectionAlpha = s.dbhCorrectionAlpha
         e.dbhCorrectionBeta = s.dbhCorrectionBeta
+        e.dbhCalibrationEpoch = Int32(s.dbhCalibrationEpoch)
         e.vioDriftFraction = s.vioDriftFraction
     }
 
@@ -71,6 +72,7 @@ public enum ProjectMapper {
             depthNoiseMm: e.depthNoiseMm,
             dbhCorrectionAlpha: e.dbhCorrectionAlpha,
             dbhCorrectionBeta: e.dbhCorrectionBeta,
+            dbhCalibrationEpoch: Int(e.dbhCalibrationEpoch),
             vioDriftFraction: e.vioDriftFraction
         )
     }

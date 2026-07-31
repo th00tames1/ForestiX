@@ -39,6 +39,34 @@ public struct ProjectCalibration: Sendable, Equatable {
     /// Cylinder calibration: `DBH_true = alpha + beta · DBH_raw_cm`.
     public var dbhCorrectionAlpha: Float
     public var dbhCorrectionBeta: Float
+    /// The estimator epoch these coefficients were FITTED against.
+    ///
+    /// A cylinder calibration is a straight line through (raw, true) pairs, so
+    /// it absorbs whatever systematic error the estimator had on the day it
+    /// was fitted. Change the estimator and beta is answering a question that
+    /// no longer exists: the geometry's own correction and the fitted one both
+    /// pull the diameter down, they stack, and the project starts under-
+    /// reading silently and without limit. Nothing warns anyone, because a
+    /// calibrated project looks more trustworthy than an uncalibrated one.
+    ///
+    /// So the coefficients carry the epoch they belong to, and
+    /// `appliedToRawCm` refuses to use them under any other. 0 means "never
+    /// calibrated", which is safe at any epoch because the identity is.
+    public var dbhCalibrationEpoch: Int
+
+    /// Is this project's calibration still answering the current estimator?
+    public var calibrationIsStale: Bool {
+        (dbhCorrectionAlpha != 0 || dbhCorrectionBeta != 1)
+            && dbhCalibrationEpoch != DBHEstimator.estimatorEpoch
+    }
+
+    /// The published diameter for a raw one — the ONLY place the cylinder
+    /// coefficients may be applied, so the staleness check cannot be
+    /// forgotten at one of the call sites.
+    public func appliedToRawCm(_ rawCm: Double) -> Double {
+        guard !calibrationIsStale else { return rawCm }
+        return Double(dbhCorrectionAlpha) + Double(dbhCorrectionBeta) * rawCm
+    }
     /// §7.2 VIO drift fraction — σ_d = vioDriftFraction · d_h. Default 0.02.
     public var vioDriftFraction: Float
     /// Maximum allowed depth jump between adjacent guide-row pixels
@@ -57,6 +85,7 @@ public struct ProjectCalibration: Sendable, Equatable {
         depthNoiseMm: Float,
         dbhCorrectionAlpha: Float,
         dbhCorrectionBeta: Float,
+        dbhCalibrationEpoch: Int = 0,
         vioDriftFraction: Float = 0.02,
         depthDiscontinuityM: Float = 0.04
     ) {
@@ -65,6 +94,7 @@ public struct ProjectCalibration: Sendable, Equatable {
         self.dbhCorrectionBeta = dbhCorrectionBeta
         self.vioDriftFraction = vioDriftFraction
         self.depthDiscontinuityM = depthDiscontinuityM
+        self.dbhCalibrationEpoch = dbhCalibrationEpoch
     }
 
     /// Neutral calibration — pre-calibration projects start here.
@@ -72,6 +102,7 @@ public struct ProjectCalibration: Sendable, Equatable {
         depthNoiseMm: 5.0,
         dbhCorrectionAlpha: 0,
         dbhCorrectionBeta: 1,
+        dbhCalibrationEpoch: 0,
         vioDriftFraction: 0.02,
         depthDiscontinuityM: 0.04)
 }
@@ -374,8 +405,7 @@ public enum DBHEstimator {
 
         // Step 10: apply cylinder calibration.
         let dbhRawCm = 2 * r * 100
-        let dbhCm = Double(cal.dbhCorrectionAlpha)
-            + Double(cal.dbhCorrectionBeta) * dbhRawCm
+        let dbhCm = cal.appliedToRawCm(dbhRawCm)
 
         // Step 11: build the DBHResult.
         return DBHResult(
@@ -1390,8 +1420,7 @@ public enum DBHEstimator {
         // ends up identical to what a trained Cylinder calibration on
         // a chord-method burst would expect.
         let cal = input.projectCalibration
-        let dbhCm = Double(cal.dbhCorrectionAlpha)
-            + Double(cal.dbhCorrectionBeta) * medianRawCm
+        let dbhCm = cal.appliedToRawCm(medianRawCm)
 
         // Median centre across frames for the persisted XZ — robust to
         // a frame or two with bad depth.
@@ -1483,8 +1512,7 @@ public enum DBHEstimator {
         let cov = mean > 0 ? (hi - lo) / mean : 1
         let tier: ConfidenceTier = cov <= TierThresholds.frameSpreadGreen ? .green : .yellow
 
-        let dbhCm = Double(cal.dbhCorrectionAlpha)
-            + Double(cal.dbhCorrectionBeta) * medianRawCm
+        let dbhCm = cal.appliedToRawCm(medianRawCm)
 
         let sortedCx = centersX.sorted()
         let sortedCz = centersZ.sorted()
@@ -1682,6 +1710,83 @@ public enum DBHEstimator {
         return depths
     }
 
+    /// What the estimators compute, as a number that changes when they do.
+    ///
+    /// Stamped into every raw-capture bundle by `RawCaptureStore.appCommit`
+    /// and into every project's calibration by `CylinderCalibration`. Bump it
+    /// for ANY change to a published diameter — a new identity, a different
+    /// depth statistic, a different sample. Two corpora that disagree on this
+    /// number must not be pooled, and a calibration fitted under one epoch
+    /// must not be applied under another.
+    ///
+    ///   1  chord identity, full-span depth median
+    ///   2  chord identity, middle-half depth median (`bracketCoreRange`)
+    ///   3  cylinder-tangent inversion, middle-half median corrected to the
+    ///      near face — `silhouetteDiameterCm`
+    public static let estimatorEpoch = 3
+
+    /// A stem's diameter from the width of its silhouette.
+    ///
+    /// THE EDGES ARE TANGENT POINTS, NOT THE ENDS OF A DIAMETER. Sight lines
+    /// to the left and right of a round stem graze the bark; they touch it
+    /// nearer the camera than the axis and closer together than the full
+    /// width. Writing that out, with `theta` the half-angle the stem
+    /// subtends,
+    ///
+    ///     w/2 = f·tan(theta)                    the edges, in pixels
+    ///     R   = (z + R)·sin(theta)              tangency, z to the near face
+    ///
+    /// and eliminating theta with `k = w/2f = tan(theta)` gives
+    ///
+    ///     d = 2·z·k·(k + sqrt(k² + 1))
+    ///
+    /// The identity this replaces, `d = w·z/(f − w/2)`, is the same expression
+    /// with `sin` swapped for `tan`. Rearranged it reads `d = w·(z + d/2)/f`
+    /// — a segment of length d at the depth of the stem's AXIS — so it was
+    /// answering a different question from the one the bracket asks. It
+    /// agrees to second order and over-reads for every real k, by about
+    /// k²/2: a tenth of a percent on a distant sapling, 2.5 % on a stem
+    /// filling a fifth of the frame.
+    ///
+    /// z ARRIVES A LITTLE TOO FAR AWAY. The caller's depth is a median over
+    /// the bracket's middle half, and those pixels lie on a curved face, so
+    /// the median sits behind the near point the tangent form wants — by
+    /// `(1 − sqrt(15)/4)·R = 0.0318·R` for a uniform sample across the middle
+    /// half. (Over the FULL span it would be `1 − sqrt(3)/2 = 0.134·R`; the
+    /// trim already removed most of it, which is why the correction here is
+    /// small.) R is what we are solving for, so substitute and solve rather
+    /// than iterate:
+    ///
+    ///     R = z_median·K / (1 + 0.0318·K),   K = k·(k + sqrt(k² + 1))
+    ///
+    /// WHAT THIS DOES NOT FIX. Measured against tape on 100 stems it removes
+    /// about a third of the over-read — iOS +4.8 % to +2.1 %, Android +9.1 %
+    /// to +5.6 %, RMSE down 14 % and 12 %, and every diameter class improves
+    /// on both platforms. The rest of the bias is unexplained. Both this form
+    /// and the old one also assume the stem sits on the optical axis; off to
+    /// one side by psi the bracket spans about `sec²(psi)` too much, which at
+    /// 20° off-centre is larger than everything above.
+    ///
+    /// Returns nil when the geometry cannot produce a diameter at all.
+    public static func silhouetteDiameterCm(
+        spanPx: Double,
+        depthM: Double,
+        focalPx: Double
+    ) -> Double? {
+        guard spanPx > 0, depthM > 0, focalPx > 1 else { return nil }
+        let k = spanPx / (2.0 * focalPx)
+        let kk = k * (k + (k * k + 1).squareRoot())
+        let radiusM = depthM * kk / (1.0 + medianDepthOffsetFactor * kk)
+        guard radiusM.isFinite, radiusM > 0 else { return nil }
+        return 2.0 * radiusM * 100.0
+    }
+
+    /// How far behind the near face the middle-half depth median sits, as a
+    /// fraction of the radius: `1 − sqrt(15)/4`. Derivation in
+    /// `silhouetteDiameterCm`. Exact in the orthographic limit; the
+    /// perspective correction is first order in k and worth ~0.003 R here.
+    static let medianDepthOffsetFactor = 1.0 - (15.0.squareRoot() / 4.0)
+
     /// Widest depth separation, in metres, that a bracket sitting entirely on
     /// bark can produce across its middle half.
     ///
@@ -1812,8 +1917,9 @@ public enum DBHEstimator {
         // tape job on both platforms at once, not a keyboard edit to one.
         let fx = Double(frame.intrinsics[0, 0])
         guard fx - widthPx / 2.0 > 1.0 else { return nil }
-        let diameterM = widthPx * z / (fx - widthPx / 2.0)
-        let diameterCm = diameterM * 100.0
+        guard let diameterCm = silhouetteDiameterCm(
+            spanPx: widthPx, depthM: z, focalPx: fx) else { return nil }
+        let diameterM = diameterCm / 100.0
         guard plausibleDiameterCm.contains(diameterCm) else { return nil }
 
         // Centre for the cylinder overlay + distance HUD — bracket
@@ -1897,8 +2003,7 @@ public enum DBHEstimator {
         let cov = mean > 0 ? (hi - lo) / mean : 1
         let tier: ConfidenceTier = cov <= TierThresholds.frameSpreadGreen ? .green : .yellow
 
-        let dbhCm = Double(cal.dbhCorrectionAlpha)
-            + Double(cal.dbhCorrectionBeta) * medianRawCm
+        let dbhCm = cal.appliedToRawCm(medianRawCm)
 
         let sortedCx = centersX.sorted()
         let sortedCz = centersZ.sorted()

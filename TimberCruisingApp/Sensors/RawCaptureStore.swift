@@ -1055,11 +1055,29 @@ public enum RawCaptureStore {
         return machine.isEmpty ? "Apple" : machine
     }
 
+    /// What produced this bundle, in enough detail to partition the corpus.
+    ///
+    /// THIS USED TO BE THE MARKETING VERSION, and it never moved: every iOS
+    /// bundle in the validation corpus says "1.0 (2)" and every Android one
+    /// "1.0 (1)". A comment in `DBHEstimator` asserted that `app_commit` was
+    /// what separated two estimator eras. It was not, and the cost was real —
+    /// the bracket's middle-half depth trim shipped partway through a
+    /// 100-stem collection, moved every diameter, and stamped both eras
+    /// identically. Half that corpus cannot be attributed to the code that
+    /// produced it, and the only reason the study survived is that every
+    /// diameter was recomputed offline from the stored depth frames.
+    ///
+    /// So the estimator's OWN version leads, and it is a constant this file
+    /// controls rather than a build setting someone has to remember to bump:
+    /// any change to what the estimators compute changes
+    /// `DBHEstimator.estimatorEpoch`, and every bundle written afterwards
+    /// says so. The build string is kept after it, for the cases where the
+    /// estimator is innocent and the platform is not.
     static func appCommit() -> String {
         let info = Bundle.main.infoDictionary
         let short = info?["CFBundleShortVersionString"] as? String ?? "?"
         let build = info?["CFBundleVersion"] as? String ?? "?"
-        return "\(short) (\(build))"
+        return "est\(DBHEstimator.estimatorEpoch)/\(short) (\(build))"
     }
 
     // MARK: - Byte (de)serialization of an f32 depth buffer

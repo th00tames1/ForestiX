@@ -38,6 +38,7 @@ data class ProjectEntity(
     val depthNoiseMm: Float,
     val dbhCorrectionAlpha: Float,
     val dbhCorrectionBeta: Float,
+    val dbhCalibrationEpoch: Int = 0,
     val vioDriftFraction: Float,
 )
 

@@ -126,6 +126,7 @@ object CruiseCapture {
             depthNoiseMm = project.depthNoiseMm,
             dbhCorrectionAlpha = project.dbhCorrectionAlpha,
             dbhCorrectionBeta = project.dbhCorrectionBeta,
+            dbhCalibrationEpoch = project.dbhCalibrationEpoch,
             vioDriftFraction = project.vioDriftFraction,
         )
     }
@@ -155,6 +156,7 @@ object CruiseCapture {
             depthNoiseMm = project.depthNoiseMm,
             dbhCorrectionAlpha = project.dbhCorrectionAlpha,
             dbhCorrectionBeta = project.dbhCorrectionBeta,
+            dbhCalibrationEpoch = project.dbhCalibrationEpoch,
             vioDriftFraction = project.vioDriftFraction,
         )
     }

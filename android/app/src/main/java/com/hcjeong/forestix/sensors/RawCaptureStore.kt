@@ -1004,8 +1004,13 @@ object RawCaptureStore {
         val pkg = context.packageManager.getPackageInfo(context.packageName, 0)
         val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) pkg.longVersionCode
         else @Suppress("DEPRECATION") pkg.versionCode.toLong()
-        // iOS format parity: "<shortVersion> (<build>)".
-        "${pkg.versionName} ($code)"
+        // iOS format parity: "est<epoch>/<shortVersion> (<build>)".
+        //
+        // THE ESTIMATOR EPOCH LEADS, because the marketing version does
+        // not move and this field is what has to partition a corpus. It
+        // failed to: the bracket depth trim shipped partway through a
+        // 100-stem collection and both eras stamped the same string.
+        "est${DBHEstimator.ESTIMATOR_EPOCH}/${pkg.versionName} ($code)"
     } catch (_: Throwable) {
         "unknown"
     }

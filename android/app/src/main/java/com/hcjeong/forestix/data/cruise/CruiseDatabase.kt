@@ -42,7 +42,7 @@ sealed class CruiseDataError(override val message: String) : Exception(message) 
         VolumeEquationEntity::class,
         HeightDiameterFitEntity::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = false,
 )
 @TypeConverters(CruiseConverters::class)
@@ -109,6 +109,24 @@ abstract class CruiseDatabase : RoomDatabase() {
         val MIGRATION_5_6 = object : Migration(5, 6) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE PlannedPlotEntity ADD COLUMN plannedSource TEXT")
+            }
+        }
+
+        /// v6 → v7: Project gains `dbhCalibrationEpoch` — which diameter
+        /// estimator its cylinder calibration was fitted against.
+        ///
+        /// DEFAULT 0, NOT the current epoch, and the difference matters. A
+        /// project migrating in was calibrated under an older estimator, and
+        /// backfilling the current epoch would assert the opposite: that its
+        /// alpha/beta still apply. They do not — the fitted correction and the
+        /// new geometry's own correction would stack and the project would
+        /// under-read silently. 0 reads as "not fitted against this
+        /// estimator", which is exactly true, and the calibration screen asks
+        /// for a re-scan. A project that never calibrated is unaffected
+        /// either way: the identity correction is valid at every epoch.
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE ProjectEntity ADD COLUMN dbhCalibrationEpoch INTEGER NOT NULL DEFAULT 0")
             }
         }
     }

@@ -70,6 +70,10 @@ public struct Project: Identifiable, Codable, Sendable {
     public var depthNoiseMm: Float
     public var dbhCorrectionAlpha: Float    // from cylinder calibration; default 0
     public var dbhCorrectionBeta: Float     // default 1
+    /// Which estimator the two coefficients above were fitted against — see
+    /// `ProjectCalibration.dbhCalibrationEpoch`. 0 = never calibrated, which
+    /// is safe at any epoch because the identity correction always is.
+    public var dbhCalibrationEpoch: Int     // default 0
     public var vioDriftFraction: Float      // default 0.02
 
     public init(
@@ -86,6 +90,7 @@ public struct Project: Identifiable, Codable, Sendable {
         depthNoiseMm: Float,
         dbhCorrectionAlpha: Float,
         dbhCorrectionBeta: Float,
+        dbhCalibrationEpoch: Int = 0,
         vioDriftFraction: Float
     ) {
         self.id = id
@@ -101,6 +106,7 @@ public struct Project: Identifiable, Codable, Sendable {
         self.depthNoiseMm = depthNoiseMm
         self.dbhCorrectionAlpha = dbhCorrectionAlpha
         self.dbhCorrectionBeta = dbhCorrectionBeta
+        self.dbhCalibrationEpoch = dbhCalibrationEpoch
         self.vioDriftFraction = vioDriftFraction
     }
 }

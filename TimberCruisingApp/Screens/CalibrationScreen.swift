@@ -120,10 +120,26 @@ public struct CalibrationScreen: View {
             ) {
                 // Identity correction (α = 0, β = 1) is exactly the untouched /
                 // "standard settings" state — see sensibleDefaultsApplied.
-                Text(p.dbhCorrectionAlpha != 0 || p.dbhCorrectionBeta != 1
+                //
+                // THREE STATES, not two. A round-post scan corrects for
+                // whatever the width estimator got wrong on the day it was
+                // fitted, so when that estimator changes the correction is
+                // answering a question that no longer exists and is no longer
+                // applied. Saying "corrected" there would be a plain lie, and
+                // saying "not corrected" would hide a scan the cruiser
+                // remembers doing — so the stale case gets its own sentence
+                // and asks for the one action that fixes it.
+                let calibrated = p.dbhCorrectionAlpha != 0 || p.dbhCorrectionBeta != 1
+                let stale = calibrated && p.dbhCalibrationEpoch != DBHEstimator.estimatorEpoch
+                Text(stale
+                     ? "Your round-post scan was made with an earlier version of the width measurement and no longer applies, so it is being ignored. Run the round-post scan again to correct widths on this project."
+                     : calibrated
                      ? "Widths are being corrected using your round-post scan."
                      : "Widths are being used exactly as the phone measures them — no round-post scan has been applied yet.")
                     .fixedSize(horizontal: false, vertical: true)
+                    .foregroundStyle(stale ? ForestixPalette.confidenceWarn
+                                           : ForestixPalette.textPrimary)
+                    .accessibilityIdentifier("calibration.widthStatus")
                 if developerMode {
                     HStack {
                         Text("Depth reading spread")

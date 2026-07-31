@@ -29,7 +29,28 @@ data class ProjectCalibration(
     val dbhCorrectionBeta: Float = 1f,
     val vioDriftFraction: Float = 0.02f,
     val depthDiscontinuityM: Float = 0.04f,
+    /// The estimator epoch alpha/beta were FITTED against — iOS
+    /// `ProjectCalibration.dbhCalibrationEpoch` parity.
+    ///
+    /// A cylinder calibration is a line through (raw, true) pairs, so it
+    /// absorbs whatever systematic error the estimator had on the day it was
+    /// fitted. Change the estimator and beta corrects for something that is
+    /// no longer there: the geometry's own correction and the fitted one both
+    /// pull the diameter down, they stack, and the project under-reads
+    /// silently. 0 means never calibrated, which is safe at any epoch.
+    val dbhCalibrationEpoch: Int = 0,
 ) {
+    /// Do these coefficients still answer the estimator that is running?
+    val calibrationIsStale: Boolean
+        get() = (dbhCorrectionAlpha != 0f || dbhCorrectionBeta != 1f) &&
+            dbhCalibrationEpoch != DBHEstimator.ESTIMATOR_EPOCH
+
+    /// The published diameter for a raw one — the ONLY place the cylinder
+    /// coefficients may be applied, so no call site can forget the check.
+    fun appliedToRawCm(rawCm: Double): Double =
+        if (calibrationIsStale) rawCm
+        else dbhCorrectionAlpha + dbhCorrectionBeta * rawCm
+
     companion object { val identity = ProjectCalibration() }
 }
 
@@ -182,7 +203,55 @@ object DBHEstimator {
     ///
     /// 300 cm clears any stem this app will meet while still refusing the
     /// degenerate cases the gate exists for. Floor stays at 2.5 cm. iOS value 1:1.
+    /// What the estimators compute, as a number that changes when they do —
+    /// iOS `DBHEstimator.estimatorEpoch` parity, and the two MUST move
+    /// together or a pooled corpus silently mixes geometries.
+    ///
+    ///   1  chord identity, full-span depth median
+    ///   2  chord identity, middle-half depth median (bracketCoreRange)
+    ///   3  cylinder-tangent inversion, middle-half median corrected to the
+    ///      near face — silhouetteDiameterCm
+    const val ESTIMATOR_EPOCH = 3
+
     val PLAUSIBLE_DIAMETER_CM = 2.5..300.0
+
+    /// How far behind the near face the middle-half depth median sits, as a
+    /// fraction of the radius: 1 - sqrt(15)/4. iOS `medianDepthOffsetFactor`.
+    val MEDIAN_DEPTH_OFFSET_FACTOR = 1.0 - sqrt(15.0) / 4.0
+
+    /// A stem's diameter from the width of its silhouette — iOS
+    /// `DBHEstimator.silhouetteDiameterCm` parity, same derivation, same
+    /// constants. Keep the two in step.
+    ///
+    /// The bracket's edges are TANGENT points: sight lines graze the bark,
+    /// touching it nearer the camera than the axis and closer together than
+    /// the full width. With k = w/2f = tan(theta) and z the depth to the near
+    /// face, tangency gives R = (z + R) sin(theta), hence
+    ///
+    ///     d = 2 z k (k + sqrt(k^2 + 1))
+    ///
+    /// The identity this replaces, d = w z / (f - w/2), is the same
+    /// expression with sin swapped for tan; rearranged it reads
+    /// d = w (z + d/2) / f, a segment at the stem's AXIS depth, which is not
+    /// what a silhouette marks. It over-reads by about k^2/2.
+    ///
+    /// The caller's z is a median over the bracket's middle half, and those
+    /// pixels lie on a curved face, so it sits MEDIAN_DEPTH_OFFSET_FACTOR * R
+    /// behind the near point the formula wants. R is the unknown, so solve
+    /// rather than iterate: R = z K / (1 + c K), K = k(k + sqrt(k^2+1)).
+    ///
+    /// Measured on 100 taped stems this removes about a third of the
+    /// over-read (Android +9.1 % to +5.6 %, RMSE down 12 %); the remainder is
+    /// unexplained, and both forms assume the stem is centred in frame.
+    fun silhouetteDiameterCm(spanPx: Double, depthM: Double, focalPx: Double): Double? {
+        if (spanPx <= 0.0 || depthM <= 0.0 || focalPx <= 1.0) return null
+        val k = spanPx / (2.0 * focalPx)
+        val kk = k * (k + sqrt(k * k + 1.0))
+        val radiusM = depthM * kk / (1.0 + MEDIAN_DEPTH_OFFSET_FACTOR * kk)
+        if (!radiusM.isFinite() || radiusM <= 0.0) return null
+        return 2.0 * radiusM * 100.0
+    }
+
 
     /// §7.9 tier thresholds, named once so the cruiser-facing confidence
     /// explainer can QUOTE the numbers the checks apply instead of carrying a
@@ -318,7 +387,7 @@ object DBHEstimator {
 
         // Step 10: cylinder calibration.
         val dbhRawCm = 2 * r * 100
-        val dbhCm = cal.dbhCorrectionAlpha + cal.dbhCorrectionBeta * dbhRawCm
+        val dbhCm = cal.appliedToRawCm(dbhRawCm)
 
         return DBHResult(
             diameterCm = dbhCm.toFloat(),
@@ -731,7 +800,7 @@ object DBHEstimator {
                 cleanWidths = scan.cleanWidths,
             )
         val locked = chord.diameterM in 0.025..2.0
-        val dia = (cal.dbhCorrectionAlpha + cal.dbhCorrectionBeta * (chord.diameterM * 100)).toFloat()
+        val dia = cal.appliedToRawCm(chord.diameterM * 100).toFloat()
         // Preview tier — width consistency, iOS chordPreviewFit parity:
         // CoV ≤ 0.10 ⇒ green (chip shown); otherwise yellow (silent).
         val tier = if (chord.widthCov != null && chord.widthCov <= 0.10) {
@@ -932,10 +1001,9 @@ object DBHEstimator {
         if (z !in 0.3f..5.0f) return null
         val halfW = w / 2.0
         if (focal - halfW <= 1.0) return null
-        val diameterM = w * z / (focal - halfW)
-        val rawCm = diameterM * 100.0
+        val rawCm = silhouetteDiameterCm(w, z.toDouble(), focal) ?: return null
         if (rawCm !in PLAUSIBLE_DIAMETER_CM) return null
-        val dia = (cal.dbhCorrectionAlpha + cal.dbhCorrectionBeta * rawCm).toFloat()
+        val dia = cal.appliedToRawCm(rawCm).toFloat()
         // A returned fit IS capturable (the user vouches for the edges) —
         // iOS tap-gate parity. nPoints carries the bracket span in
         // walk-axis px (iOS PreviewFit.inlierCount).
@@ -996,8 +1064,7 @@ object DBHEstimator {
         if (z !in 0.3f..5.0f) return null
         val halfW = w / 2.0
         if (focal - halfW <= 1.0) return null
-        val diameterM = w * z.toDouble() / (focal - halfW)
-        val rawCm = diameterM * 100.0
+        val rawCm = silhouetteDiameterCm(w.toDouble(), z.toDouble(), focal) ?: return null
         if (rawCm !in PLAUSIBLE_DIAMETER_CM) return null
         return BracketFit(rawCm, w)
     }
@@ -1035,7 +1102,7 @@ object DBHEstimator {
         val medianRawCm = diameters[diameters.size / 2]
         val mean = diameters.average()
         val cov = if (mean > 0) (diameters.last() - diameters.first()) / mean else 1.0
-        val diaCm = cal.dbhCorrectionAlpha + cal.dbhCorrectionBeta * medianRawCm
+        val diaCm = cal.appliedToRawCm(medianRawCm)
         return DBHResult(
             diameterCm = diaCm.toFloat(), centerX = 0f, centerZ = 0f,
             arcCoverageDeg = 0f, rmseMm = 0f, sigmaRmm = 0f,
@@ -1084,7 +1151,7 @@ object DBHEstimator {
         val mean = diameters.average()
         val sd = sqrt(diameters.sumOf { (it - mean) * (it - mean) } / diameters.size)
         val cov = if (mean > 0) sd / mean else 1.0
-        val diaCm = (cal.dbhCorrectionAlpha + cal.dbhCorrectionBeta * (medianM * 100)).toFloat()
+        val diaCm = cal.appliedToRawCm(medianM * 100).toFloat()
 
         val checks = listOf(
             check(medianM in 0.025..2.0, Severity.REJECT, "Diameter outside 2.5–200 cm"),

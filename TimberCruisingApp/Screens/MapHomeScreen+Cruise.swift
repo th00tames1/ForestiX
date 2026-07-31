@@ -239,9 +239,9 @@ extension MapHomeScreen {
         return liveTrees(in: plotID).first(where: { $0.id == treeID })?.treeName
     }
 
-    /// The unvisited planned plot the (+) takes the cruiser to: the
-    /// LOWEST-NUMBERED one. nil when none exist. (`plannedPlots` is already
-    /// filtered to unvisited in `reloadCruise`.)
+    /// The unvisited planned plot the (+) takes the cruiser to when nothing
+    /// is being navigated to: the LOWEST-NUMBERED one. nil when none exist.
+    /// (`plannedPlots` is already filtered to unvisited in `reloadCruise`.)
     ///
     /// It used to be the nearest plan to the current fix, and that is the
     /// wrong rule for a button that now MOVES THE MAP. A cruise is walked in
@@ -255,6 +255,23 @@ extension MapHomeScreen {
         // visible on the map but navigation passes over them.
         plannedPlots.filter { !$0.skipped }
             .min(by: { $0.plotNumber < $1.plotNumber })
+    }
+
+    /// The plan the (+) acts on: THE ONE BEING NAVIGATED TO if a guide is up,
+    /// otherwise the lowest-numbered unvisited plan.
+    ///
+    /// The plot order is the right answer only until the cruiser starts
+    /// walking. Once the dashed guide is drawn to a plot, that plot is the
+    /// one they are on their way to, and a button pressed mid-walk that
+    /// re-aimed the map at some other plan — flinging the camera off the walk
+    /// in progress — is the opposite of what pressing it means. The guide's
+    /// target IS the answer to "which plot?" for as long as it exists.
+    func cruiseTargetPlannedPlot() -> PlannedPlot? {
+        if let id = navTargetPlannedID,
+           let navigating = plannedPlots.first(where: { $0.id == id }) {
+            return navigating
+        }
+        return nextUnvisitedPlannedPlot()
     }
 
     // MARK: Data
@@ -511,7 +528,7 @@ extension MapHomeScreen {
         }
         // Built from the SAME target the action uses, so the label can never
         // promise a plot the (+) will not go to.
-        if let planned = nextUnvisitedPlannedPlot() {
+        if let planned = cruiseTargetPlannedPlot() {
             return "Go to Plot \(planned.plotNumber)"
         }
         return "Start plot"
@@ -520,7 +537,7 @@ extension MapHomeScreen {
     func cruisePrimaryAction() {
         if let plot = activePlot {
             startAddTree(in: plot)
-        } else if let planned = nextUnvisitedPlannedPlot() {
+        } else if let planned = cruiseTargetPlannedPlot() {
             goToPlannedPlot(planned)
         } else {
             // TWO DOORS, because the cruiser sometimes plans and sometimes
@@ -2050,8 +2067,8 @@ extension MapHomeScreen {
     /// Toggle a planned plot's `skipped` flag (inaccessible — cliff, water,
     /// private land). Mirrors RecordCentreSheet's mutate → persist → refresh:
     /// a skipped plot stays visible (still in `plannedPlots`, since skipped is
-    /// not visited) but is excluded from the (+) nearest-unvisited navigation
-    /// and renders with the warn tint + "SKIP" badge.
+    /// not visited) but is excluded from the (+)'s running order and renders
+    /// with the warn tint + "SKIP" badge.
     // MARK: Planning on the map (press and hold)
 
     /// Where every hand-drawn coordinate enters the app — in BOTH modes; the
@@ -2220,10 +2237,15 @@ extension MapHomeScreen {
         return "Press and hold the map to plan a plot."
     }
 
+    /// A newly-skipped plot drops out of the (+)'s running order, so any
+    /// dashed guide armed at it is cleared: the guide is what the (+) aims
+    /// at while it is up, and a plot documented as unreachable is not
+    /// somewhere to be sent. Android does the same in `skipPlanned`.
     func setPlannedSkipped(_ planned: PlannedPlot, _ value: Bool) {
         var p = planned
         p.skipped = value
         _ = try? environment.plannedPlotRepository.update(p)
+        if value, navTargetPlannedID == planned.id { navTargetPlannedID = nil }
         reloadCruise()
     }
 

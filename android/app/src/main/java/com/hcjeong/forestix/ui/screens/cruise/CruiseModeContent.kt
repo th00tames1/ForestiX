@@ -1041,17 +1041,25 @@ internal fun CruiseModeBottomContent(
             )
 
             else -> {
-                // (+) WITH PLANS WAITING: it takes the cruiser to the
-                // LOWEST-NUMBERED unvisited plan — camera, guide line and
-                // that plot's own card. Skipped plots are documented
-                // inaccessible, so the running order passes over them even
-                // though they still render on the map.
-                val nextPlanned = state.data.plannedPlots
-                    .filter { !it.skipped }
-                    .minByOrNull { it.plotNumber }
+                // (+) WITH PLANS WAITING: it takes the cruiser to the plot
+                // they are ALREADY WALKING TO — the one the dashed guide is
+                // armed at — and only with no guide up to the
+                // LOWEST-NUMBERED unvisited plan. Camera, guide line and that
+                // plot's own card. Skipped plots are documented inaccessible,
+                // so the running order passes over them even though they
+                // still render on the map.
+                //
+                // The plot order answers "which plot?" only until the cruiser
+                // starts walking. Once a guide is drawn, re-aiming the button
+                // at a different plan would fling the map off the walk in
+                // progress, which is the opposite of what pressing it means.
+                val targetPlanned = state.navTarget()
+                    ?: state.data.plannedPlots
+                        .filter { !it.skipped }
+                        .minByOrNull { it.plotNumber }
                 CruiseActionCluster(
                     activePlot = activePlot,
-                    nextPlanned = nextPlanned,
+                    targetPlanned = targetPlanned,
                     treeCount = activePlot?.let { state.data.treesByPlot[it.id]?.size } ?: 0,
                     projectName = state.project?.name ?: "New project",
                     modifier = Modifier.padding(bottom = ForestixSpace.sm),
@@ -1060,8 +1068,10 @@ internal fun CruiseModeBottomContent(
                         val plot = state.activePlot(settings)
                         when {
                             plot != null -> state.addTree(plot)
-                            nextPlanned != null ->
-                                goToPlannedPlot(state, nextPlanned, camera, fix, scope)
+                            // The SAME target the label names, so the button
+                            // can never promise a plot it will not go to.
+                            targetPlanned != null ->
+                                goToPlannedPlot(state, targetPlanned, camera, fix, scope)
                             // TWO DOORS, because the cruiser sometimes plans
                             // and sometimes just arrives. Neither is a new
                             // path: "Start here" is `startPlot()` below, the
@@ -1988,7 +1998,7 @@ private fun SkippedChip() {
 private fun CruiseActionCluster(
     activePlot: Plot?,
     /// The plan the (+) will take the cruiser to, so the button can NAME it.
-    nextPlanned: PlannedPlot?,
+    targetPlanned: PlannedPlot?,
     treeCount: Int,
     projectName: String,
     modifier: Modifier = Modifier,
@@ -2037,14 +2047,14 @@ private fun CruiseActionCluster(
             // plot all day, not once per cruise.)
             val captureLabel = when {
                 activePlot != null -> "Add tree · Plot ${activePlot.plotNumber}"
-                nextPlanned != null -> "Go to Plot ${nextPlanned.plotNumber}"
+                targetPlanned != null -> "Go to Plot ${targetPlanned.plotNumber}"
                 else -> "Start plot"
             }
             CaptureColumn(
                 caption = captureLabel,
                 contentDescription = when {
                     activePlot != null -> "Add tree"
-                    nextPlanned != null -> "Go to Plot ${nextPlanned.plotNumber}"
+                    targetPlanned != null -> "Go to Plot ${targetPlanned.plotNumber}"
                     else -> "Start plot"
                 },
                 fill = colors.cruiseAccent,

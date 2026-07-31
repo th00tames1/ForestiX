@@ -11,9 +11,14 @@
 //   • one QUICK plot     → that plot's readings
 //   • one CRUISE plot    → that plot's PlotStats
 //   • one CRUISE project → that project's stand statistics
-//   • Everything         → no card. "Everything" names no single plot, and a
-//                          summary of two stores whose per-area bases are not
-//                          the same quantity would be a number about nothing.
+//   • Everything         → whatever "everything" unambiguously is: the one
+//                          stand, when there is exactly one and no quick
+//                          readings sit outside it, and otherwise a COUNT of
+//                          what the log holds. Counts and not a density,
+//                          because a quick plot's per-area figure is divided
+//                          by an assumed area and a cruise plot's is expanded
+//                          by the design's factor; those are not the same
+//                          quantity and their sum is a number about nothing.
 //
 // NOTHING HERE COMPUTES A CRUISE NUMBER. The cruise branches build the same
 // view models the cruise screens build — PlotSummaryViewModel for a plot,
@@ -34,6 +39,7 @@ package com.hcjeong.forestix.ui.screens
 import com.hcjeong.forestix.AppEnvironment
 import com.hcjeong.forestix.common.AreaUnit
 import com.hcjeong.forestix.common.MeasurementFormatter
+import com.hcjeong.forestix.common.Units
 import com.hcjeong.forestix.common.areaUnit
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
@@ -72,6 +78,16 @@ data class FieldLogSummary(
     /// Why there is nothing to compute, when there is nothing to compute. The
     /// cells then read "—" rather than 0, which is a measurement.
     val note: String? = null,
+    /// The quick-measure plot behind this summary, when there is one.
+    ///
+    /// The plot's area is the divisor under every per-area figure on the card,
+    /// and it is the one thing here the cruiser can still correct — a detail
+    /// view writes a typed area back through this id. Null on the cruise
+    /// branches, whose area comes from the design.
+    ///
+    /// iOS's detail view takes that entry today; the Android sheet cannot yet,
+    /// because QuickMeasureHistory has no plot-area write to call.
+    val quickPlotID: UUID? = null,
 ) {
     data class Cell(val label: String, val value: String)
     data class Species(val code: String, val share: Double)
@@ -98,6 +114,14 @@ data class FieldLogSummary(
             "Pick a plot or a stand in the filter for computed values."
         /// The detail view's title, and the label on the card's heading.
         const val DETAIL_TITLE = "How this was computed"
+        /// Carried by any per-area figure that rests on an ASSUMED plot area.
+        /// One character, on the value itself: the card has no room for a
+        /// second line, and a density divided by an area nobody measured must
+        /// not look like one divided by an area somebody did.
+        const val ASSUMED_MARK = "~"
+        /// The label the plot's area carries in the settings block, and the
+        /// heading over the entry that takes it.
+        const val PLOT_AREA_TITLE = "Plot area"
     }
 }
 
@@ -203,27 +227,28 @@ object FieldLogSummaryBuilder {
                     "Behind these numbers",
                     listOf(
                         FieldLogSummary.Row(
-                            "Why counts",
-                            "A quick plot's per-area figure is divided by an " +
-                                "assumed area and a cruise plot's is expanded " +
-                                "by the design's factor. They are not the same " +
-                                "quantity, so they are not added."),
-                        FieldLogSummary.Row(
                             "Board-foot log rule", settings.logRule.displayName),
                         FieldLogSummary.Row("Density basis", areaUnit.basisPhrase)))),
-            note = FieldLogSummary.PICK_A_SCOPE)
+            note = FieldLogSummary.PICK_A_SCOPE,
+            quickPlotID = null)
     }
 
     // MARK: Quick
 
     /// The quick-measure branch — the math PlotSummaryCard used to hold.
     ///
-    /// It divides by max(acres ?: 0.1, 0.05), which means a plot with no
-    /// acreage entered is being divided by an INVENTED tenth of an acre. That
-    /// was true before and is unchanged; what is new is that the detail view
-    /// says so on the "Plot area" line, so a density read off this card can be
-    /// recognised as relative rather than absolute.
-    private fun quick(
+    /// It divides by QuickPlotStats.divisorAcres, which fills in a tenth of an
+    /// acre for a plot with no acreage on it and floors a tiny one. Either way
+    /// the denominator is then the APP's and not the cruiser's, and every
+    /// figure standing on it carries ASSUMED_MARK — on the card, in the
+    /// computed rows and in the note — until a real area is entered.
+    ///
+    /// Callable on its own, unlike the cruise branches: the plot's area is a
+    /// thing a view can change, and a view that changed it has to rebuild
+    /// these figures from the store — going on showing the densities from
+    /// before the area just typed is the stale-card bug moved one screen
+    /// along. iOS's FieldLogSummaryDetail calls it for exactly that.
+    fun quick(
         plot: QuickMeasurePlot,
         entries: List<QuickMeasureEntry>,
         settings: SettingsSnapshot,
@@ -231,6 +256,15 @@ object FieldLogSummaryBuilder {
         val areaUnit = settings.unitSystem.areaUnit
         val factor = areaUnit.perAcreDensityFactor
         val stats = QuickPlotStats.compute(plot, entries, areaUnit, settings.logRule)
+
+        // What the per-area figures were actually divided by, and whether the
+        // cruiser chose it. A plot entered as 0.01 ac is floored to 0.05 and is
+        // therefore as invented as a plot left blank, so it is marked too.
+        val divisor = QuickPlotStats.divisorAcres(plot.acres)
+        val assumed = plot.acres != divisor
+        val mark = if (assumed) FieldLogSummary.ASSUMED_MARK else ""
+        val divisorText = String.format(
+            Locale.US, "%.2f %s", areaUnit.fromAcres(divisor), areaUnit.abbreviation)
 
         val subtitleParts = mutableListOf<String>()
         if (plot.unitName.isNotEmpty()) subtitleParts.add(plot.unitName)
@@ -252,11 +286,14 @@ object FieldLogSummaryBuilder {
             FieldLogSummary.Cell(
                 areaUnit.densityLabel("BASAL").uppercase(Locale.US),
                 stats?.let {
-                    String.format(Locale.US, "%.0f %s", it.baPerAcre * factor, baUnit)
+                    String.format(
+                        Locale.US, "%s%.0f %s", mark, it.baPerAcre * factor, baUnit)
                 } ?: "—"),
             FieldLogSummary.Cell(
                 treesPerAreaLabel(areaUnit),
-                stats?.let { String.format(Locale.US, "%.0f", it.tpa * factor) } ?: "—"),
+                stats?.let {
+                    String.format(Locale.US, "%s%.0f", mark, it.tpa * factor)
+                } ?: "—"),
             FieldLogSummary.Cell(
                 "MEAN DBH",
                 stats?.let {
@@ -268,12 +305,13 @@ object FieldLogSummaryBuilder {
             FieldLogSummary.Row(
                 "Basal area",
                 String.format(
-                    Locale.US, "%.1f %s%s", stats.baPerAcre * factor, baUnit,
+                    Locale.US, "%s%.1f %s%s", mark, stats.baPerAcre * factor, baUnit,
                     areaUnit.densitySuffix)),
             FieldLogSummary.Row(
                 "Trees",
                 String.format(
-                    Locale.US, "%.0f %s", stats.tpa * factor, areaUnit.densitySuffix)),
+                    Locale.US, "%s%.0f %s", mark, stats.tpa * factor,
+                    areaUnit.densitySuffix)),
             FieldLogSummary.Row(
                 "Quadratic mean diameter",
                 MeasurementFormatter.diameter(stats.qmdCm, settings.unitSystem)),
@@ -289,14 +327,23 @@ object FieldLogSummaryBuilder {
                 "Board feet",
                 stats.boardFeetPerAcre?.let {
                     String.format(
-                        Locale.US, "%.0f bf%s", it * factor, areaUnit.densitySuffix)
+                        Locale.US, "%s%.0f bf%s", mark, it * factor,
+                        areaUnit.densitySuffix)
                 } ?: "—"))
 
-        val areaRow = plot.acres?.let {
-            String.format(Locale.US, "%.2f %s", areaUnit.fromAcres(it), areaUnit.abbreviation)
-        } ?: String.format(
-            Locale.US, "Not entered — %.2f %s assumed",
-            areaUnit.fromAcres(QuickPlotStats.ASSUMED_ACRES), areaUnit.abbreviation)
+        // The area reads as a figure either way; "(assumed)" is what tells the
+        // cruiser it is the app's figure and not theirs.
+        val areaRow = if (assumed) "$divisorText (assumed)" else divisorText
+
+        // With nothing measured there is no per-area figure to qualify, and
+        // "nothing measured" is the more useful sentence.
+        val note = when {
+            stats == null -> FieldLogSummary.NOTHING_MEASURED
+            assumed ->
+                "Plot area assumed, not measured: every " +
+                    "${FieldLogSummary.ASSUMED_MARK} figure is divided by $divisorText."
+            else -> null
+        }
 
         return FieldLogSummary(
             heading = FieldLogSummary.PLOT_HEADING,
@@ -310,14 +357,12 @@ object FieldLogSummaryBuilder {
                 FieldLogSummary.Group(
                     "Behind these numbers",
                     listOf(
-                        FieldLogSummary.Row("Plot area", areaRow),
+                        FieldLogSummary.Row(FieldLogSummary.PLOT_AREA_TITLE, areaRow),
                         FieldLogSummary.Row(
                             "Board-foot log rule", settings.logRule.displayName),
-                        FieldLogSummary.Row("Density basis", areaUnit.basisPhrase),
-                        FieldLogSummary.Row(
-                            "Trees",
-                            "One per tree number, taking its newest diameter and height.")))),
-            note = if (stats == null) FieldLogSummary.NOTHING_MEASURED else null)
+                        FieldLogSummary.Row("Density basis", areaUnit.basisPhrase)))),
+            note = note,
+            quickPlotID = plot.id)
     }
 
     // MARK: Cruise plot
@@ -404,7 +449,8 @@ object FieldLogSummaryBuilder {
                         speciesCodes = stats.bySpecies.keys,
                         speciesByCode = viewModel.speciesByCode.value,
                         areaUnit = areaUnit, settings = settings, env = env))),
-            note = if (empty) FieldLogSummary.NOTHING_MEASURED else null)
+            note = if (empty) FieldLogSummary.NOTHING_MEASURED else null,
+            quickPlotID = null)
     }
 
     // MARK: Cruise project
@@ -475,19 +521,12 @@ object FieldLogSummaryBuilder {
             }
         }
 
+        // A project average is a plot mean, not a tree mean, and the plots it
+        // was taken over are already counted in "Closed plots" above and in the
+        // subtitle. This block carries the SETTINGS, not the method.
         val settingsRows = cruiseSettingsRows(
             design = design, speciesCodes = counts.keys, speciesByCode = emptyMap(),
-            areaUnit = areaUnit, settings = settings, env = env).toMutableList()
-        // A project average is a plot mean, not a tree mean. Which plots went
-        // into it is the first thing a cruiser questioning the number asks.
-        settingsRows.add(
-            1,
-            FieldLogSummary.Row(
-                "Averaged over",
-                if (empty) FieldLogSummary.NO_CLOSED_PLOTS
-                else "The project's ${plots.size} closed plot" +
-                    (if (plots.size == 1) "" else "s") +
-                    ", each weighted by its stratum's area."))
+            areaUnit = areaUnit, settings = settings, env = env)
 
         return FieldLogSummary(
             heading = FieldLogSummary.STAND_HEADING,
@@ -498,7 +537,8 @@ object FieldLogSummaryBuilder {
             groups = listOf(
                 FieldLogSummary.Group("Computed across closed plots", computed),
                 FieldLogSummary.Group("Behind these numbers", settingsRows)),
-            note = if (empty) FieldLogSummary.NO_CLOSED_PLOTS else null)
+            note = if (empty) FieldLogSummary.NO_CLOSED_PLOTS else null,
+            quickPlotID = null)
     }
 
     // MARK: Shared pieces
@@ -565,6 +605,11 @@ object FieldLogSummaryBuilder {
     /// The settings a cruise figure rests on. Named rather than assumed: a
     /// volume with no equation behind it is 0, and a 0 that looks like a
     /// measurement is the failure this block exists to prevent.
+    ///
+    /// Every row is the SETTING and nothing else — a value a cruiser can read
+    /// at arm's length and compare with what they set. The log rule is here
+    /// even though no cruise figure is board feet, because a cruiser who
+    /// changed it in Settings and saw no volume move looks for it here.
     private suspend fun cruiseSettingsRows(
         design: CruiseDesign,
         speciesCodes: Set<String>,
@@ -576,16 +621,7 @@ object FieldLogSummaryBuilder {
         FieldLogSummary.Row("Plot design", designPhrase(design, areaUnit)),
         FieldLogSummary.Row(
             "Volume equation", volumeEquationText(speciesCodes, speciesByCode, env)),
-        FieldLogSummary.Row(
-            "Heights",
-            "Measured where one was taken; the rest read off this project's height curve."),
-        // The log rule drives BOARD FEET, and no cruise number here is board
-        // feet. Saying so is the point: a cruiser who changed the rule in
-        // Settings and saw no volume move should know why.
-        FieldLogSummary.Row(
-            "Board-foot log rule",
-            settings.logRule.displayName +
-                " — not used here; this volume is m³ from the equation above."),
+        FieldLogSummary.Row("Board-foot log rule", settings.logRule.displayName),
         FieldLogSummary.Row("Density basis", areaUnit.basisPhrase))
 
     private suspend fun volumeEquationText(
@@ -608,7 +644,10 @@ object FieldLogSummaryBuilder {
         NO_VOLUME_EQUATION
     }
 
-    private const val NO_VOLUME_EQUATION = "None configured — volume reads 0."
+    /// What the volume-equation row says when the species carry none. The
+    /// consequence — a volume of 0 — is on the volume row itself, which reads
+    /// 0; this row names the setting.
+    private const val NO_VOLUME_EQUATION = "None configured"
 }
 
 // MARK: - Quick-measure plot statistics
@@ -631,7 +670,16 @@ data class QuickPlotStats(
         const val ASSUMED_ACRES = 0.1
         /// Floor under a typed acreage, so a plot entered as 0 cannot divide
         /// by nothing.
-        private const val MINIMUM_ACRES = 0.05
+        const val MINIMUM_ACRES = 0.05
+
+        /// The acreage the per-area figures are divided by: the cruiser's, or
+        /// the assumed tenth when they entered none, never below the floor.
+        ///
+        /// One place, because the card has to be able to ASK whether the
+        /// denominator is theirs — `divisorAcres(plot.acres) != plot.acres` is
+        /// exactly the question, and it stops being answerable the moment two
+        /// copies of this expression exist.
+        fun divisorAcres(acres: Double?): Double = max(acres ?: ASSUMED_ACRES, MINIMUM_ACRES)
 
         fun compute(
             plot: QuickMeasurePlot,
@@ -668,7 +716,7 @@ data class QuickPlotStats(
                     0.005454 * inches * inches
                 }
             }
-            val acres = max(plot.acres ?: ASSUMED_ACRES, MINIMUM_ACRES)
+            val acres = divisorAcres(plot.acres)
             val qmdSqCm = dbhTrees.sumOf { it * it } / dbhTrees.size.toDouble()
 
             val heights = trees.mapNotNull { it.hM }
@@ -710,3 +758,9 @@ data class QuickPlotStats(
 /// iOS's `AreaUnit.basisPhrase` returns the identical strings.
 val AreaUnit.basisPhrase: String
     get() = if (this == AreaUnit.HECTARE) "Per hectare" else "Per acre"
+
+/// The inverse of [AreaUnit.fromAcres] — an area TYPED in this unit, in the
+/// acres the model stores. A metric cruise enters hectares and a US one acres,
+/// and only this line knows which. iOS keeps the twin on its own `AreaUnit`.
+fun AreaUnit.toAcres(value: Double): Double =
+    if (this == AreaUnit.HECTARE) value * Units.ACRES_PER_HECTARE else value

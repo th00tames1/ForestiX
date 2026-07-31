@@ -317,9 +317,9 @@ fun FieldLogSummaryDetailSheet(
                         style = type.sectionHead.copy(letterSpacing = 1.2.sp),
                         color = colors.textTertiary)
                     group.rows.forEach { row ->
-                        // Label above value, not beside it: several of these
-                        // values are sentences, and a two-column row would
-                        // squeeze them into a column three words wide.
+                        // Label above value, not beside it: a plot design and
+                        // a volume-equation citation are both wider than the
+                        // column a two-column row would leave.
                         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Text(
                                 row.label, style = type.caption,
@@ -360,4 +360,6 @@ fun FieldLogSummaryDetailSheet(
 //
 // If a per-species maximum-SDI table ever lands, this comes back WITH the
 // species and the maximum on screen beside the word. The invented tenth of an
-// acre is now at least DISCLOSED, on the detail sheet's "Plot area" line.
+// acre is no longer silent: every figure resting on it carries
+// [FieldLogSummary.ASSUMED_MARK], and the detail sheet names it on the
+// "Plot area" line.

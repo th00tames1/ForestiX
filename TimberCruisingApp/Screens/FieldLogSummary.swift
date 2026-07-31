@@ -95,6 +95,13 @@ public struct FieldLogSummary: Equatable {
     /// Why there is nothing to compute, when there is nothing to compute.
     /// The cells then read "—" rather than 0, which is a measurement.
     public let note: String?
+    /// The quick-measure plot behind this summary, when there is one.
+    ///
+    /// The plot's area is the divisor under every per-area figure on the
+    /// card, and it is the one thing here the cruiser can still correct — the
+    /// detail view writes a typed area back through this id. Nil on the
+    /// cruise branches, whose area comes from the design.
+    public let quickPlotID: UUID?
 
     /// Headings, spelled where both platforms can read them off one line.
     public static let plotHeading = "PLOT SUMMARY"
@@ -116,6 +123,14 @@ public struct FieldLogSummary: Equatable {
         "Pick a plot or a stand in the filter for computed values."
     /// The detail view's title, and the hint on the card's heading.
     public static let detailTitle = "How this was computed"
+    /// Carried by any per-area figure that rests on an ASSUMED plot area.
+    /// One character, on the value itself: the card has no room for a second
+    /// line, and a density divided by an area nobody measured must not look
+    /// like one divided by an area somebody did.
+    public static let assumedMark = "~"
+    /// The detail view's editable plot-area section, and the label the same
+    /// area keeps in the settings block.
+    public static let plotAreaTitle = "Plot area"
 }
 
 // MARK: - Builder
@@ -206,31 +221,46 @@ public enum FieldLogSummaryBuilder {
                     .init(label: "Quick readings", value: "\(quickEntries)"),
                     .init(label: "Quick plots", value: "\(history.plots.count)")]),
                 .init(title: "Behind these numbers", rows: [
-                    .init(label: "Why counts",
-                          value: "A quick plot's per-area figure is divided by an assumed area and a cruise plot's is expanded by the design's factor. They are not the same quantity, so they are not added."),
                     .init(label: "Board-foot log rule", value: settings.logRule.displayName),
                     .init(label: "Density basis",
                           value: settings.unitSystem.areaUnit.basisPhrase)])],
-            note: FieldLogSummary.pickAScope)
+            note: FieldLogSummary.pickAScope,
+            quickPlotID: nil)
     }
 
     // MARK: Quick
 
     /// The quick-measure branch — the math `PlotSummaryCard` used to hold.
     ///
-    /// It divides by `max(acres ?? 0.1, 0.05)`, which means a plot with no
-    /// acreage entered is being divided by an INVENTED tenth of an acre. That
-    /// was true before and is unchanged; what is new is that the detail view
-    /// says so on the "Plot area" line, so a density read off this card can be
-    /// recognised as relative rather than absolute.
-    private static func quick(plot: QuickMeasurePlot,
-                              entries: [QuickMeasureEntry],
-                              settings: AppSettings) -> FieldLogSummary {
+    /// It divides by `QuickPlotStats.divisorAcres`, which fills in a tenth of
+    /// an acre for a plot with no acreage on it and floors a tiny one. Either
+    /// way the denominator is then the APP's and not the cruiser's, and every
+    /// figure standing on it carries `assumedMark` — on the card, in the
+    /// computed rows and in the note — until a real area is entered. The
+    /// detail view is where it is entered; see `quickPlotID`.
+    ///
+    /// Callable on its own, unlike the cruise branches: the detail view writes
+    /// the plot's area and must re-read its own figures from the store, and a
+    /// view that went on showing the densities from before the area it just
+    /// typed would be the stale-card bug moved one screen along.
+    public static func quick(plot: QuickMeasurePlot,
+                             entries: [QuickMeasureEntry],
+                             settings: AppSettings) -> FieldLogSummary {
         let areaUnit = settings.unitSystem.areaUnit
         let factor = areaUnit.perAcreDensityFactor
         let stats = QuickPlotStats.compute(plot: plot, entries: entries,
                                            areaUnit: areaUnit,
                                            logRule: settings.logRule)
+
+        // What the per-area figures were actually divided by, and whether the
+        // cruiser chose it. A plot entered as 0.01 ac is floored to 0.05 and
+        // is therefore as invented as a plot left blank, so it is marked too.
+        let divisor = QuickPlotStats.divisorAcres(plot.acres)
+        let assumed = plot.acres != divisor
+        let mark = assumed ? FieldLogSummary.assumedMark : ""
+        let divisorText = String(format: "%.2f %@",
+                                 areaUnit.fromAcres(divisor),
+                                 areaUnit.abbreviation)
 
         var subtitleParts: [String] = []
         if !plot.unitName.isEmpty { subtitleParts.append(plot.unitName) }
@@ -251,11 +281,12 @@ public enum FieldLogSummaryBuilder {
                                  value: stats.map { "\($0.treeCount)" } ?? "—"),
             FieldLogSummary.Cell(label: areaUnit.densityLabel("BASAL").uppercased(),
                                  value: stats.map {
-                                     String(format: "%.0f %@", $0.baPerAcre * factor, baUnit)
+                                     String(format: "%@%.0f %@", mark,
+                                            $0.baPerAcre * factor, baUnit)
                                  } ?? "—"),
             FieldLogSummary.Cell(label: treesPerAreaLabel(areaUnit),
                                  value: stats.map {
-                                     String(format: "%.0f", $0.tpa * factor)
+                                     String(format: "%@%.0f", mark, $0.tpa * factor)
                                  } ?? "—"),
             FieldLogSummary.Cell(label: "MEAN DBH",
                                  value: stats.map {
@@ -268,10 +299,11 @@ public enum FieldLogSummaryBuilder {
             computed = [
                 .init(label: "Trees with a diameter", value: "\(stats.treeCount)"),
                 .init(label: "Basal area",
-                      value: String(format: "%.1f %@%@", stats.baPerAcre * factor,
+                      value: String(format: "%@%.1f %@%@", mark,
+                                    stats.baPerAcre * factor,
                                     baUnit, areaUnit.densitySuffix)),
                 .init(label: "Trees",
-                      value: String(format: "%.0f %@", stats.tpa * factor,
+                      value: String(format: "%@%.0f %@", mark, stats.tpa * factor,
                                     areaUnit.densitySuffix)),
                 .init(label: "Quadratic mean diameter",
                       value: MeasurementFormatter.diameter(cm: stats.qmdCm,
@@ -285,15 +317,27 @@ public enum FieldLogSummaryBuilder {
                 // no heights on it reads "—" rather than 0.
                 .init(label: "Board feet",
                       value: stats.boardFeetPerAcre.map {
-                          String(format: "%.0f bf%@", $0 * factor, areaUnit.densitySuffix)
+                          String(format: "%@%.0f bf%@", mark, $0 * factor,
+                                 areaUnit.densitySuffix)
                       } ?? "—")]
         }
 
-        let areaRow = plot.acres.map {
-            String(format: "%.2f %@", areaUnit.fromAcres($0), areaUnit.abbreviation)
-        } ?? String(format: "Not entered — %.2f %@ assumed",
-                    areaUnit.fromAcres(QuickPlotStats.assumedAcres),
-                    areaUnit.abbreviation)
+        // The area reads as a figure either way; "(assumed)" is what tells the
+        // cruiser it is the app's figure and not theirs.
+        let areaRow = assumed ? divisorText + " (assumed)" : divisorText
+
+        // With nothing measured there is no per-area figure to qualify, and
+        // "nothing measured" is the more useful sentence.
+        let note: String?
+        if stats == nil {
+            note = FieldLogSummary.nothingMeasured
+        } else if assumed {
+            note = "Plot area assumed, not measured: every "
+                + FieldLogSummary.assumedMark + " figure is divided by "
+                + divisorText + "."
+        } else {
+            note = nil
+        }
 
         return FieldLogSummary(
             heading: FieldLogSummary.plotHeading,
@@ -305,11 +349,11 @@ public enum FieldLogSummaryBuilder {
             groups: [
                 .init(title: "Computed for this plot", rows: computed),
                 .init(title: "Behind these numbers", rows: [
-                    .init(label: "Plot area", value: areaRow),
+                    .init(label: FieldLogSummary.plotAreaTitle, value: areaRow),
                     .init(label: "Board-foot log rule", value: settings.logRule.displayName),
-                    .init(label: "Density basis", value: areaUnit.basisPhrase),
-                    .init(label: "Trees", value: "One per tree number, taking its newest diameter and height.")])],
-            note: stats == nil ? FieldLogSummary.nothingMeasured : nil)
+                    .init(label: "Density basis", value: areaUnit.basisPhrase)])],
+            note: note,
+            quickPlotID: plot.id)
     }
 
     // MARK: Cruise plot
@@ -392,7 +436,8 @@ public enum FieldLogSummaryBuilder {
                                                areaUnit: areaUnit,
                                                settings: settings,
                                                environment: environment))],
-            note: empty ? FieldLogSummary.nothingMeasured : nil)
+            note: empty ? FieldLogSummary.nothingMeasured : nil,
+            quickPlotID: nil)
     }
 
     // MARK: Cruise project
@@ -461,17 +506,13 @@ public enum FieldLogSummaryBuilder {
             }
         }
 
-        var settingsRows = cruiseSettingsRows(
+        // A project average is a plot mean, not a tree mean, and the plots it
+        // was taken over are already counted in "Closed plots" above and in
+        // the subtitle. This block carries the SETTINGS, not the method.
+        let settingsRows = cruiseSettingsRows(
             design: design, speciesCodes: Set(counts.keys),
             speciesByCode: [:], areaUnit: areaUnit,
             settings: settings, environment: environment)
-        // A project average is a plot mean, not a tree mean. Which plots went
-        // into it is the first thing a cruiser questioning the number asks.
-        settingsRows.insert(
-            .init(label: "Averaged over",
-                  value: empty ? FieldLogSummary.noClosedPlots
-                      : "The project's \(plots.count) closed plot\(plots.count == 1 ? "" : "s"), each weighted by its stratum's area."),
-            at: 1)
 
         return FieldLogSummary(
             heading: FieldLogSummary.standHeading,
@@ -482,7 +523,8 @@ public enum FieldLogSummaryBuilder {
             groups: [
                 .init(title: "Computed across closed plots", rows: computed),
                 .init(title: "Behind these numbers", rows: settingsRows)],
-            note: empty ? FieldLogSummary.noClosedPlots : nil)
+            note: empty ? FieldLogSummary.noClosedPlots : nil,
+            quickPlotID: nil)
     }
 
     // MARK: Shared pieces
@@ -530,6 +572,11 @@ public enum FieldLogSummaryBuilder {
     /// The settings a cruise figure rests on. Named rather than assumed: a
     /// volume with no equation behind it is 0, and a 0 that looks like a
     /// measurement is the failure this block exists to prevent.
+    ///
+    /// Every row is the SETTING and nothing else — a value a cruiser can read
+    /// at arm's length and compare with what they set. The log rule is here
+    /// even though no cruise figure is board feet, because a cruiser who
+    /// changed it in Settings and saw no volume move looks for it here.
     private static func cruiseSettingsRows(design: CruiseDesign,
                                            speciesCodes: Set<String>,
                                            speciesByCode: [String: SpeciesConfig],
@@ -537,21 +584,13 @@ public enum FieldLogSummaryBuilder {
                                            settings: AppSettings,
                                            environment: AppEnvironment)
         -> [FieldLogSummary.Row] {
-        var rows: [FieldLogSummary.Row] = [
-            .init(label: "Plot design", value: designPhrase(design, areaUnit: areaUnit))]
-        rows.append(.init(label: "Volume equation",
-                          value: volumeEquationText(speciesCodes: speciesCodes,
-                                                    speciesByCode: speciesByCode,
-                                                    environment: environment)))
-        rows.append(.init(label: "Heights",
-                          value: "Measured where one was taken; the rest read off this project's height curve."))
-        // The log rule drives BOARD FEET, and no cruise number here is board
-        // feet. Saying so is the point: a cruiser who changed the rule in
-        // Settings and saw no volume move should know why.
-        rows.append(.init(label: "Board-foot log rule",
-                          value: "\(settings.logRule.displayName) — not used here; this volume is m³ from the equation above."))
-        rows.append(.init(label: "Density basis", value: areaUnit.basisPhrase))
-        return rows
+        [.init(label: "Plot design", value: designPhrase(design, areaUnit: areaUnit)),
+         .init(label: "Volume equation",
+               value: volumeEquationText(speciesCodes: speciesCodes,
+                                         speciesByCode: speciesByCode,
+                                         environment: environment)),
+         .init(label: "Board-foot log rule", value: settings.logRule.displayName),
+         .init(label: "Density basis", value: areaUnit.basisPhrase)]
     }
 
     private static func volumeEquationText(speciesCodes: Set<String>,
@@ -568,14 +607,19 @@ public enum FieldLogSummaryBuilder {
         let equationIDs = Set(wanted.compactMap { configs[$0]?.volumeEquationId })
         guard !equationIDs.isEmpty,
               let equations = try? environment.volumeEquationRepository.list()
-        else { return "None configured — volume reads 0." }
+        else { return noVolumeEquation }
         let names = equations
             .filter { equationIDs.contains($0.id) }
             .map { $0.sourceCitation.isEmpty ? $0.form : $0.sourceCitation }
             .sorted()
-        return names.isEmpty ? "None configured — volume reads 0."
+        return names.isEmpty ? noVolumeEquation
             : names.joined(separator: FieldLogWords.headingSeparator)
     }
+
+    /// What the volume-equation row says when the species carry none. The
+    /// consequence — a volume of 0 — is on the volume row itself, which reads
+    /// 0; this row names the setting.
+    private static let noVolumeEquation = "None configured"
 }
 
 // MARK: - Quick-measure plot statistics
@@ -595,6 +639,17 @@ public struct QuickPlotStats: Equatable {
     /// Floor under a typed acreage, so a plot entered as 0 cannot divide by
     /// nothing.
     static let minimumAcres: Double = 0.05
+
+    /// The acreage the per-area figures are divided by: the cruiser's, or the
+    /// assumed tenth when they entered none, never below the floor.
+    ///
+    /// One place, because the card has to be able to ASK whether the
+    /// denominator is theirs — `divisorAcres(plot.acres) != plot.acres` is
+    /// exactly the question, and it stops being answerable the moment two
+    /// copies of this expression exist.
+    public static func divisorAcres(_ acres: Double?) -> Double {
+        max(acres ?? assumedAcres, minimumAcres)
+    }
 
     public let treeCount: Int
     public let tpa: Double
@@ -636,7 +691,7 @@ public struct QuickPlotStats: Equatable {
                 return 0.005454 * inches * inches
             }
         }
-        let acres = max(plot.acres ?? assumedAcres, minimumAcres)
+        let acres = divisorAcres(plot.acres)
         let qmdSqCm = dbhTrees.map { $0 * $0 }.reduce(0, +) / Double(dbhTrees.count)
 
         let heights = trees.compactMap { $0.hM }
@@ -675,5 +730,12 @@ extension AreaUnit {
     /// Android's `AreaUnit.basisPhrase` returns the identical strings.
     var basisPhrase: String {
         self == .hectare ? "Per hectare" : "Per acre"
+    }
+
+    /// The inverse of `fromAcres` — an area TYPED in this unit, in the acres
+    /// the model stores. A metric cruise enters hectares and a US one acres,
+    /// and only this line knows which.
+    func toAcres(_ value: Double) -> Double {
+        self == .hectare ? value * Units.acresPerHectare : value
     }
 }

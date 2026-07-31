@@ -48,7 +48,7 @@ sealed class CruiseDataError(override val message: String) : Exception(message) 
         VolumeEquationEntity::class,
         HeightDiameterFitEntity::class,
     ],
-    version = 8,
+    version = 9,
     exportSchema = false,
 )
 @TypeConverters(CruiseConverters::class)
@@ -150,6 +150,23 @@ abstract class CruiseDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE PlotEntity ADD COLUMN groundElevationM REAL")
                 db.execSQL("ALTER TABLE PlotEntity ADD COLUMN canopyCoverPct REAL")
+            }
+        }
+
+        /// v8 → v9: Tree gains `dbhEstimatorEpoch` — which diameter estimator
+        /// produced the number in `dbhCm`.
+        ///
+        /// NULLABLE, no backfill, and deliberately not DEFAULT 0. Every row
+        /// that exists at this point was written under some estimator, but the
+        /// row records nothing the diameter was derived from, so which one it
+        /// was cannot be read back out of it. Null says exactly that: unknown.
+        /// 0 would name an epoch no estimator ever had, and the current epoch
+        /// would be worse still — it would assert that diameters measured
+        /// under the chord identity came out of the tangent geometry, and the
+        /// recompute that exists to fix them would then skip every one.
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE TreeEntity ADD COLUMN dbhEstimatorEpoch INTEGER")
             }
         }
     }

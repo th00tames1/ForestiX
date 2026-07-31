@@ -240,7 +240,7 @@ public enum DBHEstimator {
                 axis: input.guideAxis,
                 tapAlongAxis: tapAlongAxis,
                 dTap: dTap,
-                deltaDepth: 0.15,
+                deltaDepth: guideStripDepthBudgetM,
                 discontinuityThresholdM: input.projectCalibration.depthDiscontinuityM)
             for idx in strip {
                 let (px, py) = pixelCoords(axis: input.guideAxis, idx: idx)
@@ -439,7 +439,7 @@ public enum DBHEstimator {
             let along = tapAlongAxis(tapPixel, axis: axis)
             let strip = extractGuideStemStrip(
                 frame: frame, axis: axis, tapAlongAxis: along, dTap: dTap,
-                deltaDepth: 0.15,
+                deltaDepth: guideStripDepthBudgetM,
                 discontinuityThresholdM: cal.depthDiscontinuityM)
             if strip.count < 4 { return 0 }
             let pts = strip.map { idx -> SIMD2<Double> in
@@ -705,7 +705,7 @@ public enum DBHEstimator {
                 axis: axis,
                 tapAlongAxis: tapAlongAxis,
                 dTap: dTap,
-                deltaDepth: 0.15,
+                deltaDepth: guideStripDepthBudgetM,
                 discontinuityThresholdM: discontinuityThresholdM)
             if strip.count < 5 { continue }
             let pts = strip.map { idx -> SIMD2<Double> in
@@ -1294,22 +1294,37 @@ public enum DBHEstimator {
         let sortedWidths = widths.sorted()
         let medianWidth = sortedWidths[sortedWidths.count / 2]
 
-        // Chord diameter formula. The naive d = w·z/fx underestimates
-        // because the surface depth `dTap` is closer than the cylinder
-        // axis (by one radius). The exact pinhole formula:
+        // Diameter from the silhouette, by the tangent form.
         //
-        //   diameter = pixel_width · (axis_distance) / fx
+        //   k  = w / 2fx                    half-angle, from the pinhole
+        //   K  = k(k + sqrt(k² + 1))        = R / z_near, the tangent solution
+        //   d  = 2 · dTap · K
         //
-        // and axis_distance = surface_depth + radius = dTap + d/2, so
+        // WHAT THIS REPLACED, and why. The old line inverted
+        // d = w·dTap/(fx − w/2), which comes from putting the edge at the
+        // widest point of the circle — half a diameter behind the near face
+        // — and calling the depth to THAT the axis distance. IT IS WRONG
+        // ABOUT WHERE THE EDGE IS. It puts the edge at
+        // the widest point of the circle, half a diameter behind the near
+        // face; the edge a camera actually sees is the TANGENT point, which
+        // is nearer and narrower. Every other diameter in this app inverts
+        // the tangent form (`silhouetteDiameterCm`) and this path is the
+        // last one that did not, which is why Auto and ADJUST stopped
+        // agreeing the day the bracket moved over.
         //
-        //   d · (fx − w/2) = w · dTap   →   d = w·dTap / (fx − w/2)
-        //
-        // For typical trunks (w ≪ fx) the correction is small (≤ 5 %),
-        // but it's free precision and lines the synthetic-cylinder
-        // tests up with the true diameter to within a percent.
+        // The offset term is ZERO here, and that is the difference between
+        // the two paths rather than an omission. `silhouetteDiameterCm`
+        // carries `medianDepthOffsetFactor` because the bracket medians the
+        // depth across the middle half of a curved face, which sits
+        // 0.031754 R behind the near face. This path has no such spread: the
+        // depth it uses is `dTap`, one reading at the tap, on the near face
+        // the tangent form already wants. Substituting the bracket's offset
+        // here would correct for a spread that is not in the number.
         let halfWidth = Double(medianWidth) / 2.0
         guard fx - halfWidth > 1.0 else { return nil }
-        let diameterM = Double(medianWidth) * Double(dTap) / (fx - halfWidth)
+        let k = Double(medianWidth) / (2.0 * fx)
+        let kk = k * (k + (k * k + 1).squareRoot())
+        let diameterM = 2.0 * Double(dTap) * kk
         let diameterCm = diameterM * 100.0
         guard plausibleDiameterCm.contains(diameterCm) else { return nil }
 
@@ -1469,7 +1484,7 @@ public enum DBHEstimator {
                   (0.3...5.0).contains(dTap) else { continue }
             let strip = extractGuideStemStrip(
                 frame: frame, axis: guideAxis, tapAlongAxis: tapAlong,
-                dTap: dTap, deltaDepth: 0.15,
+                dTap: dTap, deltaDepth: guideStripDepthBudgetM,
                 discontinuityThresholdM: cal.depthDiscontinuityM)
             guard strip.count >= 6 else { continue }
             var pts: [SIMD2<Double>] = []
@@ -1723,7 +1738,41 @@ public enum DBHEstimator {
     ///   2  chord identity, middle-half depth median (`bracketCoreRange`)
     ///   3  cylinder-tangent inversion, middle-half median corrected to the
     ///      near face — `silhouetteDiameterCm`
-    public static let estimatorEpoch = 3
+    /// 4 — the auto path joined the bracket on the tangent form, and the
+    /// guide strip stopped truncating at 0.15 m.
+    ///
+    /// THE NUMBER IS THE CONTRACT, and it was nearly broken. Epoch 3 shipped
+    /// on 7/30 with the BRACKET on the tangent inversion and the auto path
+    /// still on the chord-at-axis form. Changing the auto path and the walk's
+    /// depth budget alters an auto diameter by up to a fifth on a large stem
+    /// (traced: -4.4 % at 40 cm, -21.4 % at 90 cm against a cylinder), and
+    /// leaving the number at 3 would have meant two geometries under one
+    /// label — with `DBHEpochRecompute` then refusing, as "already at epoch
+    /// 3", precisely the rows that needed re-deriving.
+    ///
+    /// Bump this whenever a change moves a stored diameter. It is what the
+    /// recompute decides on and what an analysis splits the corpus by.
+    public static let estimatorEpoch = 4
+
+    /// How far the guide-strip walk lets the surface recede before it calls
+    /// the stem finished, in metres.
+    ///
+    /// THIS IS A RADIUS BUDGET, not a noise tolerance, and it was set as
+    /// though it were one. On a round stem the surface at the silhouette sits
+    /// exactly R behind the near face, so a walk that stops at 0.15 m stops
+    /// short of the tangent points on anything over 30 cm — and stops further
+    /// short the bigger the tree. Traced against a perfect cylinder, the auto
+    /// path read -0.9 % at 20 cm, -4.4 % at 40, -11.0 % at 60 and -21.4 % at
+    /// 90: not a bias, a taper.
+    ///
+    /// 0.80 m covers a 160 cm stem, which is past anything this app will meet
+    /// in a coastal-PNW cruise. What stops the walk running onto the next
+    /// trunk is NOT this number — it is `depthDiscontinuityM`, a 4 cm jump
+    /// between ADJACENT pixels, which is untouched and does that job on its
+    /// own. The remaining ~1 % under-read is the last pixel or two before the
+    /// tangent, where the surface turns faster than the grid can follow, and
+    /// it is the same at every size.
+    static let guideStripDepthBudgetM: Float = 0.80
 
     /// A stem's diameter from the width of its silhouette.
     ///

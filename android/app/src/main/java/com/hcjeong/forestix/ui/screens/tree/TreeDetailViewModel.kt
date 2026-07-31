@@ -52,7 +52,23 @@ class TreeDetailViewModel(tree: Tree, private val treeRepo: TreeRepository) {
             val t = _tree.value.copy()
             t.speciesCode = speciesCode.value
             t.status = status.value
-            t.dbhCm = dbhCm.value
+            if (dbhCm.value != t.dbhCm) {
+                t.dbhCm = dbhCm.value
+                // A diameter typed over on this screen was not produced by any
+                // estimator, so the row stops claiming one produced it — null
+                // is the epoch field's word for "unknown" — AND says it was
+                // typed, because clearing only the epoch re-arms the row for
+                // DbhEpochRecompute. A hand correction is normally a small
+                // nudge, well inside the 2 % window the bundle match uses, so
+                // the row would match its own old capture and the replay would
+                // write over the tape reading the cruiser came here to enter.
+                // A cruiser who overrides the app has said the last word on
+                // that stem.
+                //
+                // Mirrors iOS TreeDetailViewModel.
+                t.dbhEstimatorEpoch = null
+                t.dbhCaptureMode = "typed"
+            }
             t.dbhIsIrregular = dbhIsIrregular.value
             if (heightM.value != t.heightM) {
                 t.heightM = heightM.value

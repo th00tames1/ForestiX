@@ -71,10 +71,23 @@ def load(drop_typed: bool = True) -> pd.DataFrame:
     model here treats device as a factor, and a factor cannot live in a column
     name. This melts it, so each row is one device measuring one stem.
 
-    `drop_typed` removes readings the cruiser typed rather than measured.
-    Those are the tape written back into the app, so scoring them against the
-    tape measures nothing — they would enter as near-perfect agreement and
-    flatter every statistic they touch.
+    `drop_typed` removes readings the cruiser typed rather than measured —
+    but ONLY the ones that are the tape written back into the app. Those
+    measure nothing: they enter as near-perfect agreement and flatter every
+    statistic they touch.
+
+    A TYPED VALUE IS NOT AUTOMATICALLY A COPIED ONE, and treating it as one
+    threw away a real measurement. McD001's iOS height was typed because the
+    stem had been captured twice: the cruiser carried the reading from the
+    duplicate record into the surviving one and deleted the other. The number
+    is the app's own — 43.708 m against a 44.135 m reference — and dropping it
+    left the iOS height sample at 99 for no reason anybody could see from the
+    table.
+
+    So the test is the VALUE, not the entry method: a typed reading is
+    excluded only when it agrees with the reference closely enough that it
+    cannot be an independent observation. A transcription of a genuine capture
+    stays in.
     """
     raw = pd.read_csv(PAIRS)
     rows = []
@@ -87,7 +100,11 @@ def load(drop_typed: bool = True) -> pd.DataFrame:
                 continue
             flags = str(r.get("flags") or "")
             typed = f"{dev}-typed" in flags
-            if drop_typed and typed:
+            # Within a tenth of a per cent of the reference is not a
+            # measurement of it — it IS it, keyed in. Anything further out is
+            # an independent number whatever route it took into the store.
+            copied = typed and abs(float(val) - float(truth)) <= abs(float(truth)) * 1e-3
+            if drop_typed and copied:
                 continue
             rows.append(dict(
                 stem=r["pair_id"], site=r["plot"], measurand=r["kind"],
@@ -261,6 +278,13 @@ def summarize(sub: pd.DataFrame) -> dict:
         pct_bias=sub.pct_error.mean(),
         sd=ba["sd"], loa_low=ba["loa_low"], loa_high=ba["loa_high"],
         rmse=rmse(sub.error), mae=sub.abs_error.mean(),
+        # MAPE, in per cent. Reported on the 1:1 panels in place of MAE
+        # because a mean absolute error in inches is read against a sample
+        # that runs 6 to 50 inches: 1.8 in is most of a small stem and
+        # nothing on a large one, so one number cannot be judged without
+        # also knowing which trees it came from. The same error as a
+        # percentage of each stem's own reference can.
+        mape=sub.pct_error.abs().mean(),
         r2=r2, ccc=ccc(sub.reference, sub.measured),
         ols_slope=s_ols, ols_intercept=i_ols,
         deming_slope=s_dem, deming_intercept=i_dem,

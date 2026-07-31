@@ -60,7 +60,27 @@ public final class TreeDetailViewModel: ObservableObject {
         var t = tree
         t.speciesCode = speciesCode
         t.status = status
-        t.dbhCm = dbhCm
+        if dbhCm != t.dbhCm {
+            t.dbhCm = dbhCm
+            // A diameter typed over on this screen was not produced by any
+            // estimator, so the row must stop claiming one produced it — nil
+            // is the epoch field's word for "unknown".
+            //
+            // AND IT MUST SAY IT WAS TYPED, or clearing the epoch does the
+            // opposite of protecting the number. `DBHEpochRecompute` skips a
+            // row that is already at the current epoch and skips a typed one;
+            // clearing only the first re-arms the row, and a hand correction
+            // is normally a small nudge — well inside the 2 % window the
+            // bundle match uses — so the row matches its own old capture and
+            // the replay writes over the tape reading the cruiser came here
+            // to enter. A cruiser who overrides the app has said the last
+            // word on that stem.
+            //
+            // Left alone when the value is unchanged, which is every save
+            // that edits something else.
+            t.dbhEstimatorEpoch = nil
+            t.dbhCaptureMode = "typed"
+        }
         t.dbhIsIrregular = dbhIsIrregular
         if heightM != t.heightM {
             t.heightM = heightM

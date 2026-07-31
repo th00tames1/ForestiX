@@ -465,6 +465,7 @@ public enum BackupArchive {
             dbhCoverageDeg: t.dbhCoverageDeg, dbhNInliers: t.dbhNInliers,
             dbhConfidence: t.dbhConfidence, dbhIsIrregular: t.dbhIsIrregular,
             dbhCaptureMode: t.dbhCaptureMode,
+            dbhEstimatorEpoch: t.dbhEstimatorEpoch,
             heightM: t.heightM, heightMethod: t.heightMethod,
             heightSource: t.heightSource,
             heightSigmaM: t.heightSigmaM, heightDHM: t.heightDHM,

@@ -44,6 +44,7 @@ import com.hcjeong.forestix.data.cruise.TreeLabel
 import com.hcjeong.forestix.data.cruise.TreeStatus
 import com.hcjeong.forestix.positioning.CLLocationSnapshot
 import com.hcjeong.forestix.positioning.GeoMath
+import com.hcjeong.forestix.sensors.DBHEstimator
 import com.hcjeong.forestix.sensors.DBHResult
 import com.hcjeong.forestix.sensors.HeightResult
 import com.hcjeong.forestix.sensors.ProjectCalibration
@@ -333,6 +334,14 @@ object CruiseCapture {
             // mixing bracket and auto fits cannot be split at analysis time,
             // and the bracket is now the default path.
             dbhCaptureMode = captureMode,
+            // WHICH GEOMETRY this diameter came out of. The row keeps no span,
+            // no depth and no focal length, so nothing else on it can say —
+            // and once the estimator moves, a corpus holding both epochs reads
+            // as one population. A TYPED diameter is stamped null on purpose:
+            // no estimator touched it, so naming one would be a claim about
+            // arithmetic that never ran.
+            dbhEstimatorEpoch =
+                if (captureMode == "typed") null else DBHEstimator.ESTIMATOR_EPOCH,
             heightM = null,
             heightMethod = null,
             heightSource = null,

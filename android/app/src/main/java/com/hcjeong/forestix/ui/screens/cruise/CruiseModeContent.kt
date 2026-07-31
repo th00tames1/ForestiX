@@ -95,7 +95,6 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.Dp
@@ -1805,14 +1804,6 @@ private fun PlannedPeekCard(
             )
         }
         Spacer(Modifier.size(8.dp))
-        Text(
-            "Records one GPS fix, not an average.",
-            style = type.caption.copy(fontSize = 11.sp),
-            color = colors.textTertiary,
-            modifier = Modifier.fillMaxWidth(),
-            textAlign = TextAlign.Center,
-        )
-        Spacer(Modifier.size(8.dp))
         // THE OTHER HALF OF THE PAIR — LOCKED "Navigate", in the same 54 dp
         // outlined primary the removed averaging button had, so walking to
         // the plot and opening it read as the two things this card is for.
@@ -3073,15 +3064,12 @@ private fun ProjectSheet(
                     horizontalArrangement = Arrangement.spacedBy(ForestixSpace.sm),
                 ) {
                     RadioDot(on = false, dashed = true)
-                    Column(Modifier.weight(1f)) {
-                        Text("New project", style = type.bodyBold, color = colors.textSecondary)
-                        Text(
-                            "Name it once — plots and tree numbers are automatic",
-                            style = type.dataSmall.copy(fontSize = 10.5.sp),
-                            color = colors.textTertiary,
-                            modifier = Modifier.padding(top = 2.dp),
-                        )
-                    }
+                    Text(
+                        "New project",
+                        style = type.bodyBold,
+                        color = colors.textSecondary,
+                        modifier = Modifier.weight(1f),
+                    )
                 }
             } else {
                 Row(

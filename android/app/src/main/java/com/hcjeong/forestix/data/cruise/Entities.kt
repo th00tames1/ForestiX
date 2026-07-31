@@ -132,6 +132,11 @@ data class TreeEntity(
     /// column existed. `dbhMethod` cannot stand in for this — a bracket
     /// and an auto fit record the same method.
     val dbhCaptureMode: String? = null,
+    /// The estimator epoch `dbhCm` was produced under. Nullable; added in
+    /// schema v9 (CruiseDatabase.MIGRATION_8_9). Null on rows written before
+    /// the column existed — the geometry behind those diameters is unknown,
+    /// and 0 cannot stand for that (no estimator ever ran at epoch 0).
+    val dbhEstimatorEpoch: Int? = null,
     val dbhIsIrregular: Boolean,
 
     val heightM: Float?,

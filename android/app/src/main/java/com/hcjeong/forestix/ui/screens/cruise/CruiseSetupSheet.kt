@@ -242,6 +242,12 @@ fun CruiseSetupSheet(
                 } else {
                     onDismiss()
                 }
+            } catch (e: CruisePlanStragglers) {
+                // The plan landed. The sheet stays up so the sentence is read
+                // — dismissing would take the news away with it — and the map
+                // picks the new pins up when the cruiser closes it.
+                error = strayPlanMessage(e.count)
+                generating = false
             } catch (e: Exception) {
                 error = e.message ?: "Plot generation failed: $e"
                 generating = false
@@ -599,6 +605,12 @@ private fun NumericRow(
 /// when it stopped short of writing because the run would destroy work the
 /// cruiser cannot get back — nothing has been touched in that case, and the
 /// sheet asks before calling again with `confirmedDiscard = true`.
+///
+/// The replacement is written before the old plan is deleted, so a throw
+/// leaves the cruiser with one whole plan rather than none — see the write
+/// order below. `CruisePlanStragglers` is the exception to "throws means
+/// nothing was written": it says the new plan IS in place and old rows are
+/// left over beside it.
 private suspend fun generateCruisePlan(
     env: AppEnvironment,
     project: Project,
@@ -632,15 +644,30 @@ private suspend fun generateCruisePlan(
         allPlanned.filter { !it.visited }
     }
     val replacingIds = replacing.map { it.id }.toSet()
-    // Continue numbering after every number already spoken for — the
-    // project's REAL plots, so informal plots and the plan never share a
-    // number, and the plans surviving this run, so two areas never both
-    // hold a "Plot 4". The visited plans this run now leaves standing are
-    // among the survivors, which is what keeps a new pin off a measured
-    // plot's number.
-    val startNumber = maxOf(
-        env.plotRepository.listByProject(project.id).maxOfOrNull { it.plotNumber } ?: 0,
-        allPlanned.filter { it.id !in replacingIds }.maxOfOrNull { it.plotNumber } ?: 0,
+    val surviving = allPlanned.filter { it.id !in replacingIds }
+    // TWO NUMBERINGS, because the swap has two moments and they do not have
+    // the same free set — the same pair `relayPlots` uses and for the same
+    // reason: the new plan is written BEFORE the plans it replaces are
+    // deleted (see the write order below), so for the length of the swap the
+    // old plan is still on disk and its numbers are still spoken for.
+    //
+    // WHILE THE SWAP RUNS, number past everything the project has spoken for:
+    // its REAL plots, so informal plots and the plan never share a number, and
+    // EVERY plan — the surviving ones, so two areas never both hold a "Plot
+    // 4", and the ones this run replaces, so old and new can sit in the store
+    // together without either claiming the other's number.
+    val realNumbers = env.plotRepository.listByProject(project.id).map { it.plotNumber }
+    val startNumber = ((realNumbers + allPlanned.map { it.plotNumber }).maxOrNull() ?: 0) + 1
+    // AND ONCE IT IS DONE the replaced numbers are free again, so the new plan
+    // comes back down onto them: past the real plots and the plans that
+    // survive this run, and nothing further. The visited plans this run leaves
+    // standing are among the survivors, which is what keeps a new pin off a
+    // measured plot's number. Without this second pass every re-run pushed the
+    // plan up a block — 1-5 became 6-10 became 11-15 — and those numbers are
+    // what the tally sheet, the export and the field log show.
+    val settledStart = maxOf(
+        realNumbers.maxOrNull() ?: 0,
+        surviving.maxOfOrNull { it.plotNumber } ?: 0,
     ) + 1
 
     val planned: List<PlannedPlot> = if (strata.isEmpty()) {
@@ -692,10 +719,67 @@ private suspend fun generateCruisePlan(
         if (warning != null) return warning
     }
 
-    // Replace the plans this run is for (whole project, or just this
-    // area's, and never a visited one — see `replacing`).
-    for (p in replacing) env.plannedPlotRepository.delete(p.id)
-    for (p in planned) env.plannedPlotRepository.create(p)
+    // WRITE ORDER IS THE ONLY TRANSACTION THERE IS. The repositories have
+    // none, so the new plan goes in FIRST and the plans it replaces (whole
+    // project, or just this area's, and never a visited one — see
+    // `replacing`) are dropped only once every one of its plots is on disk.
+    // Deleting first meant a throw between the two loops left the area with no
+    // plan at all: an unvisited plan destroyed before its replacement existed,
+    // and a cruiser reading "Plot generation failed" over ground that now had
+    // nothing planned on it.
+    val written = mutableListOf<PlannedPlot>()
+    try {
+        for (p in planned) {
+            env.plannedPlotRepository.create(p)
+            written += p
+        }
+    } catch (e: Exception) {
+        // Half a plan is not a plan. Take back what went in so what is left
+        // standing is the plan the cruiser already had.
+        for (p in written) {
+            try {
+                env.plannedPlotRepository.delete(p.id)
+            } catch (_: Exception) {
+                // Nothing further to try; the throw below is the news.
+            }
+        }
+        throw e
+    }
+    // THE SWAP IS DONE ONCE THE NEW PLAN IS ON DISK. What is left is tidying,
+    // and tidying must not be reported as failure: a throw here reads as a run
+    // that did not write, and sends the cruiser to press Generate again over a
+    // plan that already landed — which replaces the good plan with a copy of
+    // itself and leaves the same rows behind. Stragglers are counted and named
+    // instead (see `CruisePlanStragglers`).
+    var stragglers = 0
+    for (p in replacing) {
+        try {
+            env.plannedPlotRepository.delete(p.id)
+        } catch (_: Exception) {
+            stragglers += 1
+        }
+    }
+    // The swap is complete and the old numbers are free. Settle the new plan
+    // onto them, lowest first, in the order it was laid, so generating twice
+    // with the same settings lands on the same numbers both times.
+    //
+    // Only when every old plan actually went: a straggler still holds its
+    // number, and settling onto it would mint the duplicate this whole
+    // numbering exists to prevent. Failures are swallowed for the reason the
+    // re-lay gives — a plan numbered 6-9 where it could read 4-7 is a cosmetic
+    // complaint, and failing the run over it would report a failure to a
+    // cruiser whose plan is complete and correct.
+    if (stragglers == 0 &&
+        settledStart <= (written.minOfOrNull { it.plotNumber } ?: Int.MAX_VALUE)
+    ) {
+        written.forEachIndexed { offset, p ->
+            try {
+                env.plannedPlotRepository.update(p.copy(plotNumber = settledStart + offset))
+            } catch (_: Exception) {
+                // Cosmetic; the plan itself is correct and complete.
+            }
+        }
+    }
 
     // Upsert the single CruiseDesign record for the project.
     val existingDesign = env.cruiseDesignRepository.forProject(project.id).firstOrNull()
@@ -717,7 +801,31 @@ private suspend fun generateCruisePlan(
     } else {
         env.cruiseDesignRepository.create(design)
     }
+    // Last, because the plan and the design it was laid with are both on disk
+    // by now and only the ending is left to choose.
+    if (stragglers > 0) throw CruisePlanStragglers(stragglers)
     return null
+}
+
+/// Old plan rows the tidy-up could not delete. The NEW plan is complete and
+/// in place; these are extra pins, not missing ones, so the caller must not
+/// tell the cruiser to generate again — a re-run cannot clear what a delete
+/// has just refused to clear, and would only lay the plan a second time to
+/// leave the same rows behind. Mirrors `RelayStragglers`, and iOS
+/// `CruiseSetupSheet.strayPlanMessage`.
+internal class CruisePlanStragglers(val count: Int) : Exception()
+
+/// What the sheet says when the swap left old pins behind. The plot list is
+/// where a stray pin can actually be removed, so that is where the cruiser is
+/// sent. Word for word iOS `CruiseSetupSheet.strayPlanMessage`, which builds
+/// the opening clause from a constant because its alert sniffs the prefix to
+/// pick a title; the sentence here stands alone above the button.
+private fun strayPlanMessage(n: Int): String {
+    val them = if (n == 1) "it" else "them"
+    return "The new plan was generated, but " +
+        (if (n == 1) "1 old planned plot could not be removed"
+         else "$n old planned plots could not be removed") +
+        ". Delete $them from the plot list — generating again will not clear $them."
 }
 
 /// What a re-run takes that pressing "Generate plots" again cannot give

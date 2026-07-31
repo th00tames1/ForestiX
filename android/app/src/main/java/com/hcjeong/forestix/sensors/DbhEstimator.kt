@@ -211,7 +211,19 @@ object DBHEstimator {
     ///   2  chord identity, middle-half depth median (bracketCoreRange)
     ///   3  cylinder-tangent inversion, middle-half median corrected to the
     ///      near face — silhouetteDiameterCm
-    const val ESTIMATOR_EPOCH = 3
+    /// 4 — the auto path joined the bracket on the tangent form, and the guide
+    /// strip stopped truncating at 0.15 m.
+    ///
+    /// THE NUMBER IS THE CONTRACT. Epoch 3 shipped on 7/30 with the BRACKET on
+    /// the tangent inversion and the auto path still on the chord-at-axis form.
+    /// Changing the auto path and the walk's depth budget alters an auto
+    /// diameter by up to a fifth on a large stem, and leaving the number at 3
+    /// would have meant two geometries under one label — with DbhEpochRecompute
+    /// then refusing, as "already at epoch 3", precisely the rows that needed
+    /// re-deriving.
+    ///
+    /// iOS `DBHEstimator.estimatorEpoch` parity — the two MUST move together.
+    const val ESTIMATOR_EPOCH = 4
 
     val PLAUSIBLE_DIAMETER_CM = 2.5..300.0
 
@@ -243,6 +255,25 @@ object DBHEstimator {
     /// Measured on 100 taped stems this removes about a third of the
     /// over-read (Android +9.1 % to +5.6 %, RMSE down 12 %); the remainder is
     /// unexplained, and both forms assume the stem is centred in frame.
+    /// How far the guide-strip walk lets the surface recede before it calls
+    /// the stem finished, in metres.
+    ///
+    /// THIS IS A RADIUS BUDGET, not a noise tolerance, and it was set as
+    /// though it were one. On a round stem the surface at the silhouette
+    /// sits exactly R behind the near face, so a walk that stops at 0.15 m
+    /// stops short of the tangent points on anything over 30 cm — and stops
+    /// further short the bigger the tree. Traced against a perfect cylinder,
+    /// the auto path read -0.9 % at 20 cm, -4.4 % at 40, -11.0 % at 60 and
+    /// -21.4 % at 90: not a bias, a taper.
+    ///
+    /// 0.80 m covers a 160 cm stem, past anything this app will meet in a
+    /// coastal-PNW cruise. What stops the walk running onto the next trunk
+    /// is NOT this number — it is `depthDiscontinuityM`, a 4 cm jump between
+    /// ADJACENT pixels, untouched and doing that job on its own.
+    ///
+    /// iOS `DBHEstimator.guideStripDepthBudgetM` parity.
+    const val GUIDE_STRIP_DEPTH_BUDGET_M = 0.80f
+
     fun silhouetteDiameterCm(spanPx: Double, depthM: Double, focalPx: Double): Double? {
         if (spanPx <= 0.0 || depthM <= 0.0 || focalPx <= 1.0) return null
         val k = spanPx / (2.0 * focalPx)
@@ -306,7 +337,7 @@ object DBHEstimator {
         for (frame in input.frames) {
             val strip = extractGuideStemStrip(
                 frame, input.guideAxis, tapAlong, dTap,
-                deltaDepth = 0.15f,
+                deltaDepth = GUIDE_STRIP_DEPTH_BUDGET_M,
                 discontinuityThresholdM = input.projectCalibration.depthDiscontinuityM,
             )
             for (idx in strip) {
@@ -718,9 +749,34 @@ object DBHEstimator {
         }
         fitWidths.sort()
         val medianWidth = fitWidths[fitWidths.size / 2]
+        // Diameter from the silhouette, by the tangent form.
+        //
+        //   k = w / 2f                      half-angle, from the pinhole
+        //   K = k(k + sqrt(k^2 + 1))        = R / z_near, the tangent solution
+        //   d = 2 * dTap * K
+        //
+        // WHAT THIS REPLACED, and why. The old line inverted
+        // d = w*dTap/(f - w/2), which puts the edge at the widest point of
+        // the circle — half a diameter behind the near face — and calls the
+        // depth to THAT the axis distance. It is wrong about where the edge
+        // is: a camera sees the TANGENT point, which is nearer and narrower.
+        // Every other diameter in this app inverts the tangent form, and
+        // this path was the last one that did not, which is why Auto and
+        // ADJUST stopped agreeing the day the bracket moved over.
+        //
+        // The offset term is ZERO here, and that is the difference between
+        // the two paths rather than an omission. `silhouetteDiameterCm`
+        // carries MEDIAN_DEPTH_OFFSET_FACTOR because the bracket medians
+        // depth across the middle half of a curved face, which sits
+        // 0.031754 R behind the near face. This path has no such spread:
+        // `dTap` is one reading at the tap, on the near face the tangent
+        // form already wants.
+        //
+        // Mirrors iOS `DBHEstimator` chordPreviewFit.
         val halfWidth = medianWidth / 2.0
         if (focal - halfWidth <= 1.0) return FrameScan(null, clippedRows, ownWidths)
-        val diameterM = medianWidth * dTap.toDouble() / (focal - halfWidth)
+        val kAuto = medianWidth / (2.0 * focal)
+        val diameterM = 2.0 * dTap.toDouble() * kAuto * (kAuto + sqrt(kAuto * kAuto + 1.0))
         if (diameterM <= 0.0) return FrameScan(null, clippedRows, ownWidths)
         // Width consistency across the row stack — iOS chordPreviewFit's
         // tier input (CoV ≤ 0.10 ⇒ green preview chip).

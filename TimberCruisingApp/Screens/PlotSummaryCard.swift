@@ -22,6 +22,7 @@
 // file for why.
 
 import SwiftUI
+import Common
 import Models
 
 public struct PlotSummaryCard: View {
@@ -201,43 +202,70 @@ public struct PlotSummaryCard: View {
 /// way to check — the same figure means different things under Doyle and
 /// under Scribner, and under a 0.1 ac plot and a BAF 20 sweep. Everything
 /// here is text the builder already finished; this view only lays it out.
+///
+/// One thing it also WRITES: a quick-measure plot's area. That area is the
+/// divisor under every per-area figure on the card, it was settable only when
+/// the plot was created — which is a scan, not a form — and so it was
+/// invariably unset and invariably invented. The cruiser types it here, in
+/// their own areal unit, and the figures stop being relative. The host needs
+/// `QuickMeasureHistory` and `AppSettings` in the environment, which every
+/// screen in this app already has.
 public struct FieldLogSummaryDetail: View {
 
     public let summary: FieldLogSummary
+
+    @EnvironmentObject private var history: QuickMeasureHistory
+    @EnvironmentObject private var settings: AppSettings
     @Environment(\.dismiss) private var dismiss
+
+    /// The summary as REBUILT after an area was saved here. The host's copy
+    /// was computed before the write, and a sheet that answered a typed area
+    /// with the densities from before it would be showing the very number the
+    /// cruiser opened it to correct.
+    @State private var edited: FieldLogSummary?
+    /// The plot's area, in the cruise's own unit, as typed.
+    @State private var areaText = ""
+    /// Filled from the store ONCE — re-filling on every redraw would take the
+    /// field away from the cruiser mid-entry.
+    @State private var seeded = false
 
     public init(summary: FieldLogSummary) {
         self.summary = summary
     }
+
+    private var shown: FieldLogSummary { edited ?? summary }
+    private var areaUnit: AreaUnit { settings.unitSystem.areaUnit }
 
     public var body: some View {
         NavigationStack {
             Form {
                 Section {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(summary.title)
+                        Text(shown.title)
                             .font(ForestixType.bodyBold)
                             .foregroundStyle(ForestixPalette.textPrimary)
-                        if let subtitle = summary.subtitle {
+                        if let subtitle = shown.subtitle {
                             Text(subtitle)
                                 .font(ForestixType.caption)
                                 .foregroundStyle(ForestixPalette.textSecondary)
                         }
                     }
-                    if let note = summary.note {
+                    if let note = shown.note {
                         Text(note)
                             .font(ForestixType.caption)
                             .foregroundStyle(ForestixPalette.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                ForEach(summary.groups.filter { !$0.rows.isEmpty }, id: \.title) { group in
+                if let plotID = shown.quickPlotID {
+                    areaSection(plotID)
+                }
+                ForEach(shown.groups.filter { !$0.rows.isEmpty }, id: \.title) { group in
                     Section(group.title) {
                         ForEach(group.rows, id: \.label) { row in
-                            // Label above value, not beside it: several of
-                            // these values are sentences, and a two-column row
-                            // would squeeze them into a column three words
-                            // wide.
+                            // Label above value, not beside it: a plot design
+                            // and a volume-equation citation are both wider
+                            // than the column a two-column row would leave.
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(row.label)
                                     .font(ForestixType.caption)
@@ -263,7 +291,92 @@ public struct FieldLogSummaryDetail: View {
                 }
             }
         }
+        .onAppear(perform: seedArea)
         .accessibilityIdentifier("fieldLog.summaryDetail.sheet")
+    }
+
+    // MARK: - Plot area
+
+    /// The one editable thing on this sheet. Hectares on a metric cruise,
+    /// acres on a US one — the same unit the figures above are expressed per,
+    /// so what the cruiser types and what they read carry one basis.
+    @ViewBuilder
+    private func areaSection(_ plotID: UUID) -> some View {
+        Section {
+            HStack(spacing: 8) {
+                Text("Measured area")
+                Spacer(minLength: 8)
+                TextField("—", text: $areaText)
+                    .font(.body.monospacedDigit())
+                    .multilineTextAlignment(.trailing)
+                    #if os(iOS)
+                    .keyboardType(.decimalPad)
+                    #endif
+                    .frame(maxWidth: 110)
+                    .accessibilityIdentifier("fieldLog.summaryDetail.area")
+                Text(areaUnit.abbreviation)
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: 28, alignment: .leading)
+            }
+            if !areaEntryValid {
+                Text("Plot area is a number greater than zero, or blank.")
+                    .font(.caption)
+                    .foregroundStyle(ForestixPalette.confidenceBad)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Button("Save area") { saveArea(plotID) }
+                .disabled(!canSaveArea(plotID))
+                .accessibilityIdentifier("fieldLog.summaryDetail.saveArea")
+        } header: {
+            Text(FieldLogSummary.plotAreaTitle)
+        } footer: {
+            Text("Leave it blank if you haven't measured it — the figures above then carry \(FieldLogSummary.assumedMark) and are relative, not absolute.")
+        }
+    }
+
+    private func seedArea() {
+        guard !seeded, let plotID = shown.quickPlotID else { return }
+        seeded = true
+        areaText = areaPrefill(history.plot(id: plotID)?.acres)
+    }
+
+    /// The stored area in the cruiser's unit, or empty when there is none.
+    /// Two decimals, the same width the summary prints it at, so an untouched
+    /// field compares equal to its prefill and Save stays off.
+    private func areaPrefill(_ acres: Double?) -> String {
+        guard let acres else { return "" }
+        return MeasurementFormatter.entryText(areaUnit.fromAcres(acres),
+                                              fractionDigits: 2)
+    }
+
+    /// Blank is a real answer — "I haven't measured it" — and clears the area.
+    /// Anything else must be a positive number; a typed 0 is refused here
+    /// rather than silently stored as "unknown", so the cruiser sees that the
+    /// entry did not take.
+    private var areaEntryValid: Bool {
+        if TruthInput.normalized(areaText).isEmpty { return true }
+        guard let v = TruthInput.parse(areaText) else { return false }
+        return v.isFinite && v > 0
+    }
+
+    private func canSaveArea(_ plotID: UUID) -> Bool {
+        guard areaEntryValid else { return false }
+        return areaText != areaPrefill(history.plot(id: plotID)?.acres)
+    }
+
+    private func saveArea(_ plotID: UUID) {
+        guard canSaveArea(plotID) else { return }
+        history.setPlotAcres(id: plotID,
+                             to: TruthInput.parse(areaText).map { areaUnit.toAcres($0) })
+        // Re-read what LANDED rather than what was typed: the store refuses an
+        // area it cannot divide by, and the sheet must show the plot, not the
+        // draft.
+        guard let plot = history.plot(id: plotID) else { return }
+        areaText = areaPrefill(plot.acres)
+        edited = FieldLogSummaryBuilder.quick(
+            plot: plot,
+            entries: history.entries(forPlot: plotID),
+            settings: settings)
     }
 }
 
@@ -292,4 +405,5 @@ public struct FieldLogSummaryDetail: View {
 //
 // If a per-species maximum-SDI table ever lands, this comes back WITH the
 // species and the maximum on screen beside the word. The invented tenth of
-// an acre is now at least DISCLOSED, on the detail view's "Plot area" line.
+// an acre is no longer silent: every figure resting on it carries
+// `FieldLogSummary.assumedMark`, and the detail view takes the real area.

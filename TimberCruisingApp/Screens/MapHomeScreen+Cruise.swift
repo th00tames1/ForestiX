@@ -1523,6 +1523,15 @@ extension MapHomeScreen {
             // mixing bracket and auto fits cannot be split at analysis time,
             // and the bracket is now the default path.
             dbhCaptureMode: meta.captureMode,
+            // WHICH ESTIMATOR read this stem. The row keeps only the
+            // diameter, so without this a number produced by the cylinder-
+            // tangent inversion and one produced by the chord identity sit
+            // side by side in a plot with nothing to tell them apart. A
+            // TYPED diameter is left unstamped: no estimator produced it,
+            // and nil is the field's word for that.
+            dbhEstimatorEpoch: meta.captureMode == "typed"
+                ? nil
+                : DBHEstimator.estimatorEpoch,
             heightM: nil,
             heightMethod: nil,
             heightSource: nil,
@@ -2676,11 +2685,6 @@ extension MapHomeScreen {
                 .buttonStyle(CruisePressableStyle())
                 .accessibilityIdentifier("cruiseMap.plannedPeek.startNow")
 
-                Text("Records one GPS fix, not an average.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(ForestixPalette.textTertiary)
-                    .frame(maxWidth: .infinity, alignment: .center)
-
                 // THE OTHER HALF OF THE PAIR — same 54 pt outlined primary
                 // the removed averaging button had, so walking to the plot
                 // and opening it read as the two things this card is for.
@@ -3214,14 +3218,9 @@ extension MapHomeScreen {
                             .stroke(ForestixPalette.divider,
                                     style: StrokeStyle(lineWidth: 2, dash: [3, 3]))
                             .frame(width: 20, height: 20)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("New project")
-                                .font(.system(size: 15, weight: .bold))
-                                .foregroundStyle(ForestixPalette.textSecondary)
-                            Text("Name it once — everything else is automatic")
-                                .font(.system(size: 10.5, design: .monospaced))
-                                .foregroundStyle(ForestixPalette.textTertiary)
-                        }
+                        Text("New project")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(ForestixPalette.textSecondary)
                         Spacer(minLength: 0)
                     }
                     .padding(.vertical, 12)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The analysis table: what both handsets reported, against the tape and laser.
+"""The analysis table: the shipped estimator on these captures, against tape and laser.
 
 WHY NOT THE EXPORTED READINGS. The app stores each diameter twice — once on
 the reading in the field log, once as `result_live` in the raw-capture bundle —
@@ -335,23 +335,28 @@ for plot, label, irec, arec, gap in pairs:
                     flags.append(f"{who}-auto")
         gt_i = i["truth"] if i else None
         gt_a = a["truth"] if a else None
-        # THE APPLICATION'S OWN NUMBER IS THE MEASUREMENT. What is being
-        # validated is the app a cruiser carries, and the app's number is the
-        # one it wrote down in the field — so that is what goes in the table,
-        # for diameters exactly as it already did for heights.
+        # THE SHIPPED ESTIMATOR, APPLIED TO THESE CAPTURES.
         #
-        # The from-raw recomputation still runs, and is kept beside each
-        # reading as `*_value_recomputed`. It earns its keep as a CHECK — it is
-        # how the wrong-guide-axis readings were found — but it is a
-        # reconstruction, and a reconstruction must not be reported as though
-        # the handset had displayed it.
+        # The diameters here are RECOMPUTED from each capture's own depth
+        # frames by the identity the app ships today (epoch 3, the cylinder
+        # tangent with the near-face correction) — not the number the handset
+        # displayed in the field. Those are different things and the
+        # difference is a date: the 100 stems were captured 2026-07-28/29 and
+        # the tangent identity landed on 07-30, so no export can carry it.
+        # Re-exporting on 07-31 moved 48 iOS diameters (the wrong-guide-axis
+        # repair) and zero Android ones.
         #
-        # These 100 stems were captured before the tangent identity shipped, so
-        # the diameters here are the chord identity's. That is a fact about
-        # when the data was taken, not something to paper over: see
-        # `deprecated/README.md` and the limitation stated with the results.
-        iv = i["value"] if i else None
-        av = a["value"] if a else None
+        # WHAT THAT COSTS, said plainly so nobody has to rediscover it: this
+        # table no longer says "what the phones showed". It says "what the
+        # shipped app computes from these captures", which is the accuracy a
+        # cruiser downloading the app today would get. Anything reporting from
+        # this table has to be able to say that in one sentence if asked.
+        #
+        # HEIGHTS ARE UNTOUCHED — there is no height recomputation, so those
+        # are as-recorded either way, and `*_value_source` says which is which
+        # row by row.
+        iv = (i.get("recomputed") if kind == "dbh" else i["value"]) if i else None
+        av = (a.get("recomputed") if kind == "dbh" else a["value"]) if a else None
 
         # One tape, resolved. See the module docstring for the rule.
         if gt_i is None and gt_a is not None:
@@ -415,12 +420,12 @@ for plot, label, irec, arec, gap in pairs:
             "ios_value_imp": imp(iv), "android_value_imp": imp(av),
             "ios_ratio": f"{iv/truth:.4f}" if iv and truth else "",
             "android_ratio": f"{av/truth:.4f}" if av and truth else "",
-            "ios_value_source": ("as-recorded" if iv is not None else ""),
-            "android_value_source": ("as-recorded" if av is not None else ""),
-            "ios_value_recomputed": cell(i.get("recomputed") if i and kind == "dbh"
-                                         else None),
-            "android_value_recomputed": cell(a.get("recomputed") if a and kind == "dbh"
-                                             else None),
+            "ios_value_source": ((i.get("recomputed_source", "") if kind == "dbh"
+                                  else "as-recorded") if iv is not None else ""),
+            "android_value_source": ((a.get("recomputed_source", "") if kind == "dbh"
+                                      else "as-recorded") if av is not None else ""),
+            "ios_value_asrecorded": cell(i["value"] if i else None),
+            "android_value_asrecorded": cell(a["value"] if a else None),
             "ios_sigma": cell(i["sigma"] if i else None),
             "android_sigma": cell(a["sigma"] if a else None),
             "ios_confidence": (i["conf"] if i else ""),
@@ -463,7 +468,7 @@ for pid, kind, gi_, ga_, kept, meas, why in RESOLVED:
           f"{kepts:>9s}  {why}")
 
 print("\n" + "=" * 78)
-print("MEASURED / TAPE — as the two handsets reported it")
+print("MEASURED / TAPE — diameters recomputed by the shipped estimator")
 print("=" * 78)
 print("  Cells the cruiser typed rather than measured are left out; they are")
 print("  the tape written back to itself, not an independent reading.")

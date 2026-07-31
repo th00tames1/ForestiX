@@ -80,6 +80,21 @@ public struct Tree: Identifiable, Codable, Sendable {
     /// collected for needs to know which estimator produced each diameter.
     /// nil for rows written before the field existed.
     public var dbhCaptureMode: String?
+    /// WHICH ESTIMATOR read this stem — `DBHEstimator.estimatorEpoch` as it
+    /// stood when the diameter was written.
+    ///
+    /// The row keeps only `dbhCm`: no span, no depth, no focal length, so
+    /// nothing about how the number was arrived at can be recovered from the
+    /// row itself. Two diameters produced by two different geometries are
+    /// therefore indistinguishable once they are side by side in a plot, and
+    /// the geometry HAS changed under a live corpus — epoch 3 solves the
+    /// silhouette as a cylinder where epoch 2 solved it as a chord, which
+    /// moves every stem by a few per cent.
+    ///
+    /// nil means the estimator is UNKNOWN, not "old": it is what rows written
+    /// before this field existed carry, and it is also what a hand-typed
+    /// diameter carries, because no estimator produced that one.
+    public var dbhEstimatorEpoch: Int?
     public var dbhIsIrregular: Bool
 
     // Height
@@ -132,6 +147,7 @@ public struct Tree: Identifiable, Codable, Sendable {
         dbhConfidence: ConfidenceTier,
         dbhIsIrregular: Bool,
         dbhCaptureMode: String? = nil,
+        dbhEstimatorEpoch: Int? = nil,
         heightM: Float?,
         heightMethod: HeightMethod?,
         heightSource: String?,
@@ -171,6 +187,7 @@ public struct Tree: Identifiable, Codable, Sendable {
         self.dbhConfidence = dbhConfidence
         self.dbhIsIrregular = dbhIsIrregular
         self.dbhCaptureMode = dbhCaptureMode
+        self.dbhEstimatorEpoch = dbhEstimatorEpoch
         self.heightM = heightM
         self.heightMethod = heightMethod
         self.heightSource = heightSource

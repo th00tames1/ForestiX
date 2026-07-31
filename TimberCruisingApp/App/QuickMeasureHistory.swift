@@ -1194,6 +1194,29 @@ public final class QuickMeasureHistory: ObservableObject {
         persistPlots()
     }
 
+    /// Records the plot's measured area, or clears it back to unknown.
+    ///
+    /// Acreage was writable only at creation, and a quick plot is created by
+    /// tapping Diameter and scanning — so in practice every quick plot had
+    /// none, and `QuickPlotStats` divided its densities by an assumed tenth
+    /// of an acre. This is the way in: the area the cruiser paced or read off
+    /// the map lands here, and the plot's per-area figures stop being
+    /// relative.
+    ///
+    /// `nil`, zero, negative and non-finite all store as UNKNOWN. "I haven't
+    /// measured it" is a real answer and it is the one the summary is honest
+    /// about; a stored 0 would instead divide every density by the floor and
+    /// look like a measurement.
+    public func setPlotAcres(id: UUID, to newAcres: Double?) {
+        guard let idx = plots.firstIndex(where: { $0.id == id }) else { return }
+        if let a = newAcres, a.isFinite, a > 0 {
+            plots[idx].acres = a
+        } else {
+            plots[idx].acres = nil
+        }
+        persistPlots()
+    }
+
     public func deletePlot(id: UUID) {
         // Default plot is permanent — protects the migrated legacy
         // log from accidental deletion.

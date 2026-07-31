@@ -62,6 +62,18 @@ data class Tree(
     /// collected for needs to know which estimator produced each diameter.
     /// Null for rows written before the column existed.
     var dbhCaptureMode: String? = null,
+    /// WHICH ESTIMATOR produced [dbhCm] — `DBHEstimator.ESTIMATOR_EPOCH` as it
+    /// stood at the moment the number was written.
+    ///
+    /// The row keeps the diameter and none of its inputs: no span, no depth,
+    /// no focal length. So a stored 42.3 cm cannot say which geometry made it,
+    /// and once the estimator's geometry moves, a corpus holding both reads as
+    /// one population. This names the geometry per row.
+    ///
+    /// Null is "unknown", which is what every row written before the field
+    /// existed genuinely is — not epoch 0, which is no estimator that ever
+    /// shipped. A typed diameter is null too: nothing estimated it.
+    var dbhEstimatorEpoch: Int? = null,
 
     // Height
     var heightM: Float?,

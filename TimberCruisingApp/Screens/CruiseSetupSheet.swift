@@ -16,14 +16,16 @@
 //     spacing — ceil(√n) columns, row-major, exactly n plots. A small
 //     woodlot rarely needs a boundary before pins are useful.
 //
-// Planned-plot numbering continues after the project's existing real
-// plots (max plotNumber + 1) so informal plots started before setup
-// never collide with the plan, and after the plans that survive the run
-// so no two of them share a number. Generating replaces the previous
-// UNVISITED planned plots — a VISITED plan has a measured plot standing
-// on it and survives every re-run — and upserts the single CruiseDesign
-// record. Generation never gates measuring: planned pins are
-// suggestions.
+// Planned-plot numbering settles after the project's existing real plots
+// (max plotNumber + 1) so informal plots started before setup never
+// collide with the plan, and after the plans that survive the run so no
+// two of them share a number. It gets there in two steps, because the
+// new plan is written before the old one is deleted and the two are
+// briefly on disk together — see `generate`. Generating replaces the
+// previous UNVISITED planned plots — a VISITED plan has a measured plot
+// standing on it and survives every re-run — and upserts the single
+// CruiseDesign record. Generation never gates measuring: planned pins
+// are suggestions.
 
 import SwiftUI
 import Common
@@ -212,7 +214,7 @@ public struct CruiseSetupSheet: View {
         .onChange(of: pushingStratumDraw) { _, pushing in
             if !pushing { refreshStrata() }
         }
-        .alert("Couldn't generate plots",
+        .alert(errorAlertTitle,
                isPresented: Binding(
                    get: { errorMessage != nil },
                    set: { if !$0 { errorMessage = nil } })
@@ -471,16 +473,33 @@ public struct CruiseSetupSheet: View {
             let surviving = allPlanned.filter { plan in
                 !replacing.contains { $0.id == plan.id }
             }
-            // Continue numbering after every number already spoken for —
-            // the project's REAL plots, so informal plots and the plan
-            // never share a number, and the plans that are surviving this
-            // run, so two areas never both hold a "Plot 4". The visited
-            // plans this run now leaves standing are among the survivors,
-            // which is what keeps a new pin off a measured plot's number.
-            let startNumber = max(
-                (try? environment.plotRepository
-                    .listByProject(project.id))?.map(\.plotNumber).max() ?? 0,
-                surviving.map(\.plotNumber).max() ?? 0) + 1
+            // TWO NUMBERINGS, because the swap has two moments and they do
+            // not have the same free set — the same pair `relayPlots` uses
+            // and for the same reason: the new plan is written BEFORE the
+            // plans it replaces are deleted (see the write order below), so
+            // for the length of the swap the old plan is still on disk and
+            // its numbers are still spoken for.
+            //
+            // WHILE THE SWAP RUNS, number past everything the project has
+            // spoken for: its REAL plots, so informal plots and the plan
+            // never share a number, and EVERY plan — the surviving ones, so
+            // two areas never both hold a "Plot 4", and the ones this run
+            // replaces, so old and new can sit in the store together without
+            // either claiming the other's number.
+            let realNumbers = (try? environment.plotRepository
+                .listByProject(project.id))?.map(\.plotNumber) ?? []
+            let startNumber =
+                ((realNumbers + allPlanned.map(\.plotNumber)).max() ?? 0) + 1
+            // AND ONCE IT IS DONE the replaced numbers are free again, so the
+            // new plan comes back down onto them: past the real plots and the
+            // plans that survive this run, and nothing further. The visited
+            // plans this run leaves standing are among the survivors, which is
+            // what keeps a new pin off a measured plot's number. Without this
+            // second pass every re-run pushed the plan up a block — 1-5 became
+            // 6-10 became 11-15 — and those numbers are what the tally sheet,
+            // the export and the field log show.
+            let settledStart = max(realNumbers.max() ?? 0,
+                                   surviving.map(\.plotNumber).max() ?? 0) + 1
 
             let planned: [PlannedPlot]
             if strata.isEmpty {
@@ -527,13 +546,58 @@ public struct CruiseSetupSheet: View {
                 return
             }
 
-            // Replace the plans this run is for (whole project, or just
-            // this area's, and never a visited one — see `replacing`).
-            for p in replacing {
-                try environment.plannedPlotRepository.delete(id: p.id)
+            // WRITE ORDER IS THE ONLY TRANSACTION THERE IS. The repositories
+            // have none, so the new plan goes in FIRST and the plans it
+            // replaces (whole project, or just this area's, and never a
+            // visited one — see `replacing`) are dropped only once every one
+            // of its plots is on disk. Deleting first meant a throw between
+            // the two loops left the area with no plan at all: an unvisited
+            // plan destroyed before its replacement existed, and a cruiser
+            // reading "Plot generation failed" over ground that now had
+            // nothing planned on it.
+            var written: [PlannedPlot] = []
+            do {
+                for p in planned {
+                    _ = try environment.plannedPlotRepository.create(p)
+                    written.append(p)
+                }
+            } catch {
+                // Half a plan is not a plan. Take back what went in so what
+                // is left standing is the plan the cruiser already had.
+                for p in written {
+                    try? environment.plannedPlotRepository.delete(id: p.id)
+                }
+                throw error
             }
-            for p in planned {
-                _ = try environment.plannedPlotRepository.create(p)
+            // THE SWAP IS DONE ONCE THE NEW PLAN IS ON DISK. What is left is
+            // tidying, and tidying must not be reported as failure: headed
+            // "Couldn't generate plots", a throw here sends the cruiser to
+            // press Generate again over a plan that already landed, which
+            // replaces the good plan with a copy of itself and leaves the same
+            // rows behind. Stragglers are counted and named instead.
+            var stragglers = 0
+            for p in replacing {
+                do { try environment.plannedPlotRepository.delete(id: p.id) }
+                catch { stragglers += 1 }
+            }
+            // The swap is complete and the old numbers are free. Settle the
+            // new plan onto them, lowest first, in the order it was laid, so
+            // generating twice with the same settings lands on the same
+            // numbers both times.
+            //
+            // Only when every old plan actually went: a straggler still holds
+            // its number, and settling onto it would mint the duplicate this
+            // whole numbering exists to prevent. `try?` for the reason the
+            // re-lay gives — a plan numbered 6-9 where it could read 4-7 is a
+            // cosmetic complaint, and failing the run over it would report a
+            // failure to a cruiser whose plan is complete and correct.
+            if stragglers == 0,
+               settledStart <= written.map(\.plotNumber).min() ?? Int.max {
+                for (offset, p) in written.enumerated() {
+                    var settled = p
+                    settled.plotNumber = settledStart + offset
+                    _ = try? environment.plannedPlotRepository.update(settled)
+                }
             }
 
             // Upsert the single CruiseDesign record for the project.
@@ -556,12 +620,51 @@ public struct CruiseSetupSheet: View {
                 _ = try environment.cruiseDesignRepository.create(design)
             }
 
-            HapticFeedback.play(.success)
+            // The plan IS generated, so the map is told either way; only the
+            // ending differs. A run with leftovers ends on a sentence the
+            // cruiser can act on rather than on a dismissal that would take
+            // the news away with the sheet.
             onGenerated()
+            guard stragglers == 0 else {
+                errorMessage = Self.strayPlanMessage(stragglers)
+                return
+            }
+            HapticFeedback.play(.success)
             dismiss()
         } catch {
             errorMessage = "Plot generation failed: \(error)"
         }
+    }
+
+    /// The opening words of the leftover-plot notice. `errorMessage` carries
+    /// both kinds of news and the alert has to head them differently — see
+    /// `errorAlertTitle`. Mirrors `MapHomeScreen.relayRefusalPrefix`.
+    static var strayPlanPrefix: String { "The new plan was generated" }
+
+    /// Old plan rows the tidy-up could not delete. The NEW plan is complete
+    /// and in place; these are extra pins, not missing ones, so the sentence
+    /// must not read as an invitation to press Generate again — a re-run
+    /// cannot clear what a delete has just refused to clear, and would only
+    /// lay the plan a second time to leave the same rows behind. The plot
+    /// list is where a stray pin can actually be removed, so that is where
+    /// the cruiser is sent.
+    private static func strayPlanMessage(_ n: Int) -> String {
+        let them = n == 1 ? "it" : "them"
+        return strayPlanPrefix + ", but "
+            + (n == 1 ? "1 old planned plot could not be removed"
+                      : "\(n) old planned plots could not be removed")
+            + ". Delete \(them) from the plot list — generating again will "
+            + "not clear \(them)."
+    }
+
+    /// Which of the two pieces of news the alert is heading. A plan that IS
+    /// on disk must not be announced as one that isn't: headed "Couldn't
+    /// generate plots", leftover rows send the cruiser to generate again over
+    /// a plan that already landed.
+    private var errorAlertTitle: String {
+        errorMessage?.hasPrefix(Self.strayPlanPrefix) == true
+            ? "The plan was generated, but old plots remain"
+            : "Couldn't generate plots"
     }
 
     /// Named for what is being replaced, the way `areaDeletionTitle` is

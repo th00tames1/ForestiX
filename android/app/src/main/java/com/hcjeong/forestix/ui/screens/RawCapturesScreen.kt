@@ -48,7 +48,10 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
+import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.common.TruthInput
+import com.hcjeong.forestix.data.cruise.DBHEpochRecompute
+import com.hcjeong.forestix.sensors.DBHEstimator
 import com.hcjeong.forestix.sensors.RawCaptureReplay
 import com.hcjeong.forestix.sensors.RawCaptureStore
 import com.hcjeong.forestix.ui.clickableNoRipple
@@ -133,6 +136,7 @@ private object SweepCopy {
 @Composable
 fun RawCapturesScreen(nav: NavController) {
     val context = LocalContext.current
+    val env = LocalAppEnvironment.current
     val scope = rememberCoroutineScope()
     val colors = Forestix.colors
     val type = Forestix.type
@@ -161,6 +165,16 @@ fun RawCapturesScreen(nav: NavController) {
     var clearConfirm by remember { mutableStateOf(false) }
     var exporting by remember { mutableStateOf(false) }
     var exportError by remember { mutableStateOf<String?>(null) }
+
+    // PREVIEW-THEN-COMMIT over the cruise diameters. Nothing here decides
+    // anything — the rule, the tolerance and the skip reasons are
+    // DBHEpochRecompute, and the arithmetic is the shipped estimator under it.
+    var recomputePlan by remember { mutableStateOf<DBHEpochRecompute.Plan?>(null) }
+    var recomputePlanning by remember { mutableStateOf(false) }
+    var recomputeConfirming by remember { mutableStateOf(false) }
+    // What LANDED. Set only after a run, and it replaces the plan on screen so
+    // a stale preview can never be confirmed twice.
+    var recomputeResult by remember { mutableStateOf<String?>(null) }
 
     // Detail overrides the list in-place (single scaffold, iOS push feel).
     val openId = detailId
@@ -322,6 +336,107 @@ fun RawCapturesScreen(nav: NavController) {
                 }
             }
 
+            // RECOMPUTE DIAMETERS — preview, then commit. It lives in this
+            // console because that is where the evidence is: a tree only HAS a
+            // bundle when raw capture was on, and this rewrites measured field
+            // data from those bundles. The counts, the largest move, the mean
+            // move and every per-tree before/after are on screen BEFORE the
+            // confirm, because "47 diameters changed" is a thing the cruiser
+            // should get to read before it happens rather than after.
+            FormSection(
+                header = "Estimator epoch ${DBHEstimator.ESTIMATOR_EPOCH}",
+                footer = DBHEpochRecompute.EXPLANATION,
+            ) {
+                SettingsActionRowLocal(
+                    title = if (recomputePlanning) "Checking…" else "Check stored diameters",
+                    icon = Icons.Filled.Replay,
+                    enabled = !recomputePlanning,
+                    tint = colors.primary,
+                ) {
+                    recomputePlanning = true
+                    recomputeResult = null
+                    scope.launch {
+                        // Read the trees off the store first, then replay the
+                        // depth bundles — the second is the slow half and it
+                        // touches no repository.
+                        val projects = DBHEpochRecompute.loadProjects(
+                            env.projectRepository, env.plotRepository, env.treeRepository)
+                        val bundles = DBHEpochRecompute.indexBundles(context)
+                        var merged = DBHEpochRecompute.Plan()
+                        for (p in projects) {
+                            merged = merged.merged(DBHEpochRecompute.plan(bundles, p))
+                        }
+                        recomputePlan = merged
+                        recomputePlanning = false
+                    }
+                }
+                recomputeResult?.let {
+                    FormDivider()
+                    Text(it, style = type.caption, color = colors.textSecondary)
+                }
+            }
+
+            recomputePlan?.let { plan ->
+                FormSection(
+                    header = "What would change",
+                    footer = "${plan.treesSeen} trees checked · ${plan.skips.size} left alone.",
+                ) {
+                    if (plan.isEmpty) {
+                        // A button that would do nothing is worse than a
+                        // sentence saying so — it invites the tap and then
+                        // reports zero.
+                        Text(
+                            DBHEpochRecompute.NOTHING_TO_DO,
+                            style = type.caption, color = colors.textSecondary,
+                        )
+                    } else {
+                        SummaryLine("Trees to rewrite", "${plan.changes.size}")
+                        SummaryLine(
+                            "Mean change", DBHEpochRecompute.signedCm(plan.meanDeltaCm))
+                        plan.largestChange?.let { largest ->
+                            SummaryLine(
+                                "Largest change",
+                                DBHEpochRecompute.signedCm(largest.deltaCm) +
+                                    " · " + largest.treeLabel,
+                            )
+                        }
+                        FormDivider()
+                        SettingsActionRowLocal(
+                            title = "Rewrite ${plan.changes.size} diameters",
+                            icon = Icons.Filled.Replay,
+                            enabled = true,
+                            tint = colors.confidenceBad,
+                        ) { recomputeConfirming = true }
+                    }
+                }
+                if (plan.skips.isNotEmpty()) {
+                    FormSection(header = "Left alone", footer = DBHEpochRecompute.SKIP_FOOTER) {
+                        plan.skipGroups.forEachIndexed { i, group ->
+                            if (i > 0) FormDivider()
+                            SummaryLine(group.reason.text, "${group.count}")
+                        }
+                    }
+                }
+                if (plan.changes.isNotEmpty()) {
+                    FormSection(header = "Every change") {
+                        plan.changes.forEachIndexed { i, change ->
+                            if (i > 0) FormDivider()
+                            Column {
+                                Text(
+                                    change.treeLabel,
+                                    style = type.body, color = colors.textPrimary,
+                                )
+                                Text(
+                                    DBHEpochRecompute.changeLine(change),
+                                    style = type.caption, color = colors.textSecondary,
+                                    fontFamily = FontFamily.Monospace,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             // Algorithm sweep: ranked table + per-capture value-vs-truth.
             sweepReport?.let { rep -> SweepView(rep) }
             sweepReportHeight?.let { rep -> SweepView(rep) }
@@ -362,6 +477,36 @@ fun RawCapturesScreen(nav: NavController) {
             title = { Text("Export failed") },
             text = { Text(msg) },
             confirmButton = { TextButton(onClick = { exportError = null }) { Text("OK") } },
+        )
+    }
+
+    // THE CONFIRM THE RECOMPUTE MUST PASS BEFORE IT WRITES ANYTHING. The
+    // changes are read out of state, never recomputed on the tap, so what the
+    // cruiser agreed to is exactly what is written.
+    if (recomputeConfirming) {
+        val plan = recomputePlan
+        AlertDialog(
+            onDismissRequest = { recomputeConfirming = false },
+            title = { Text("Rewrite ${plan?.changes?.size ?: 0} diameters?") },
+            text = { Text(DBHEpochRecompute.CONFIRM_MESSAGE) },
+            confirmButton = {
+                TextButton(onClick = {
+                    recomputeConfirming = false
+                    val changes = plan?.changes.orEmpty()
+                    if (changes.isNotEmpty()) {
+                        scope.launch {
+                            val result = DBHEpochRecompute.apply(changes, env.treeRepository)
+                            recomputeResult = DBHEpochRecompute.resultText(result)
+                            // The preview is spent: every row it described has
+                            // either been written or re-read and refused.
+                            recomputePlan = null
+                        }
+                    }
+                }) { Text("Rewrite", color = colors.confidenceBad) }
+            },
+            dismissButton = {
+                TextButton(onClick = { recomputeConfirming = false }) { Text("Cancel") }
+            },
         )
     }
 

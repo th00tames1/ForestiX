@@ -115,6 +115,10 @@ public final class TreeEntity: NSManagedObject {
     // written before the field existed. `dbhMethod` cannot stand in for
     // this — a bracket and an auto fit record the same method.
     @NSManaged public var dbhCaptureMode: String?
+    // Model v6 — the estimator epoch that produced `dbhCm`. Optional, and nil
+    // means UNKNOWN: rows written before the field existed carry it, and so
+    // does a hand-typed diameter, which no estimator produced.
+    @NSManaged public var dbhEstimatorEpoch: NSNumber?
     @NSManaged public var dbhIsIrregular: Bool
 
     @NSManaged public var heightM: NSNumber?

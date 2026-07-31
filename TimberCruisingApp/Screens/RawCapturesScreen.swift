@@ -116,6 +116,23 @@ public struct RawCapturesScreen: View {
                     Text("Replays each capture with the current estimator and compares it with the reading it produced. Readings you typed are never touched.")
                 }
 
+                // The other writer on this screen. It is filed with the
+                // captures rather than with the field log because what it
+                // rewrites is a CRUISE row, and the only thing that can
+                // re-derive one is the bundle it was measured from.
+                Section {
+                    NavigationLink {
+                        DBHEpochRecomputeScreen()
+                    } label: {
+                        Label("Recompute diameters", systemImage: "function")
+                    }
+                    .accessibilityIdentifier("rawCaptures.recomputeDiameters")
+                } header: {
+                    Text("Cruise diameters")
+                } footer: {
+                    Text("Re-derives cruise diameters from their raw captures with this build's estimator (epoch \(DBHEstimator.estimatorEpoch)). Previews every change before anything is written.")
+                }
+
                 Section {
                     NavigationLink {
                         DBHAlgorithmSweepView()

@@ -285,23 +285,39 @@ for col, (kind, tag) in enumerate((("dbh", "A"), ("height", "B"))):
     axr.spines["left"].set_visible(False)
     axr.set_xlabel(sp["label"])
 
+# THE CAPTION READS ITS OWN NUMBERS OFF THE DATA. Hard-coding them here is
+# how "15.8 in / 64.1 ft" survived a rebuild of the reference table and
+# contradicted the figure above it: re-running this script re-drew the plot
+# from the new data and re-wrote the caption from the old prose. Anything a
+# caption asserts about the sample is computed, so the two cannot drift.
+def _median(site, kind):
+    conv = core.MEASURANDS[kind]["conv"]
+    sub = df[(df.site == site) & (df.measurand == kind)]
+    ref = sub.drop_duplicates(subset="stem")["reference"]
+    return ref.median()
+
 core.save(fig, "fig01_sample",
-          "Figure 1. Size range covered by the validation sample (n = 100 stems, "
-          "50 per stand), from the reference instruments only. (A) Diameter at "
-          "breast height from a diameter tape; (B) total height from a laser "
-          "rangefinder in 3-point mode. Histograms are stems per bin (3 in and "
-          "10 ft bins) by stand — McDunn solid, Starker dashed with hatching. "
-          "Dotted verticals mark the diameter and height class boundaries used "
-          "throughout. The strip below each histogram plots every individual "
-          "stem, and the bracket gives the full span in imperial with the metric "
-          "equivalent. The sample occupies all six diameter classes and all five "
-          "height classes, but the two stands are not interchangeable: Starker "
-          "stems are both larger and much taller (median 20.3 in / 139.4 ft) "
-          "than McDunn stems (15.8 in / 64.1 ft), so stand and tree size are "
-          "confounded in this design. Eight stem-measurand records carry a "
-          "disputed tape value and are plotted here; dropping them leaves both "
-          "spans and every class occupied, changing only the McDunn diameter "
-          "maximum (34.9 to 29.0 in, that stem being one of the eight).")
+          "Figure 1. Size range covered by the validation sample "
+          f"({df.stem.nunique()} stems, 50 per stand), from the reference "
+          "instruments only. (A) Diameter at breast height from a diameter "
+          "tape; (B) total height from a laser rangefinder in 3-point mode, "
+          "which inverts the same tangent geometry the app does. Histograms "
+          "are stems per bin (3 in and 10 ft bins) by stand — McDunn solid, "
+          "Starker dashed with hatching. Dotted verticals mark the diameter "
+          "and height class boundaries used throughout. The strip below each "
+          "histogram plots every individual stem, and the bracket gives the "
+          "full span in imperial with the metric equivalent. The sample "
+          "occupies all six diameter classes and all five height classes, but "
+          "the two stands are not interchangeable: Starker stems are both "
+          f"larger and much taller (median {_median('Starker','dbh'):.1f} in / "
+          f"{_median('Starker','height'):.1f} ft) than McDunn stems "
+          f"({_median('McDunn','dbh'):.1f} in / {_median('McDunn','height'):.1f}"
+          " ft), so a difference between stands is a site difference confounded "
+          "with tree size and collection day, never a stand effect. Records "
+          "carrying a disputed tape value are plotted here; the two whose two "
+          "recorded tape values differ by more than 10 % have no recoverable "
+          "reference and are excluded from the table entirely. This describes "
+          "the stems measured on these two stands.")
 
 # --------------------------------------------------------------------------
 print("\n" + table.to_string(index=False))

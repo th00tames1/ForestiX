@@ -40,15 +40,51 @@ SLIDES = [
     ("fig02_accuracy", "Measured against reference diameter and height"),
     ("fig03_bland_altman", "Agreement with the reference across the size range"),
     ("fig04_crossplatform", "Concordance between the two handsets"),
+    ("fig13_shared_error", "Shared and independent components of measurement error"),
     ("fig06_by_size", "Error by diameter and height class"),
-    ("fig07_by_site", "Error by stand"),
+    ("fig07_by_site", "Difference between stands, confounded with tree size"),
     ("fig05_model_diagnostics", "Mixed-model residual diagnostics"),
     ("fig08_sigma", "Reported uncertainty against realised error"),
     ("fig09_budget", "Decomposition of the error budget"),
     ("fig10_equivalence", "Equivalence against operational tolerances"),
     ("fig11_estimator", "Chord and cylinder-tangent inversions compared"),
     ("fig12_impact", "Consequences for diameter class and plot totals"),
+    ("fig14_scope", "What this design supports, and what it does not"),
 ]
+
+# Slides whose result rests on hypothesis tests rather than estimates.
+# Multiplicity is not controlled across the result set, so these carry the word
+# on the slide itself — a caption a reader skips is not where that belongs.
+EXPLORATORY = {"fig06_by_size", "fig07_by_site", "fig05_model_diagnostics"}
+
+
+def p_value_count() -> int:
+    """How many hypothesis tests the result tables actually contain.
+
+    Counted, not asserted. The deck said "~634" until a new table added 24 more
+    and the slide went quietly stale — the same failure mode as a hard-coded
+    caption, in the one number whose whole purpose is to be honest about how
+    many chances the study took.
+    """
+    import csv as _csv
+    n = 0
+    for name in sorted(os.listdir(RESDIR)) if os.path.isdir(RESDIR) else []:
+        if not name.endswith(".csv"):
+            continue
+        try:
+            with open(os.path.join(RESDIR, name)) as fh:
+                rows = list(_csv.reader(fh))
+        except OSError:
+            continue
+        if not rows:
+            continue
+        cols = [i for i, h in enumerate(rows[0])
+                if h.strip().lower() in ("p", "p_value", "pvalue")
+                or h.strip().lower().startswith("p_")
+                or h.strip().lower().endswith("_p")]
+        for row in rows[1:]:
+            n += sum(1 for i in cols if i < len(row) and row[i].strip())
+    return n
 
 
 def txbox(slide, x, y, w, h, text, size=18, bold=False, color=INK,
@@ -112,6 +148,13 @@ def figure_slide(prs, name, title, index):
     txbox(slide, Inches(0.65), Inches(0.42), Inches(9.6), Inches(0.7),
           title, size=26, bold=True)
     rule(slide, Inches(0.65), Inches(1.12), Inches(1.1), CRIMSON, Pt(3))
+    if name in EXPLORATORY:
+        txbox(slide, Inches(10.35), Inches(0.52), Inches(2.4), Inches(0.4),
+              "EXPLORATORY", size=11, bold=True, color=CRIMSON,
+              align=PP_ALIGN.RIGHT)
+        txbox(slide, Inches(9.35), Inches(0.86), Inches(3.4), Inches(0.4),
+              f"multiplicity uncontrolled across {P_TESTS} tests",
+              size=8.5, color=MUTED, align=PP_ALIGN.RIGHT)
 
     # Figure on the left, the numbers it is evidence for on the right.
     numbers = read(os.path.join(FIGDIR, f"{name}.numbers.txt"))
@@ -136,15 +179,23 @@ def figure_slide(prs, name, title, index):
 
 def title_slide(prs, headline_lines):
     slide = prs.slides.add_slide(prs.slide_layouts[6])
-    txbox(slide, Inches(0.9), Inches(1.9), Inches(11.5), Inches(1.4),
+    txbox(slide, Inches(0.9), Inches(1.55), Inches(11.5), Inches(1.4),
           "Smartphone measurement of tree diameter and height", size=40, bold=True)
-    txbox(slide, Inches(0.9), Inches(3.15), Inches(11.5), Inches(0.8),
-          "Validation against hand measurement on 100 stems, two stands, two handsets",
-          size=20, color=MUTED)
-    rule(slide, Inches(0.9), Inches(4.15), Inches(1.6), CRIMSON, Pt(4))
+    # THE SUBTITLE CARRIES THE SCOPE, not the room's goodwill. "Validation" on
+    # its own invites the reader to hear a claim about the app; naming the two
+    # stands and the reference makes the claim exactly as large as the design.
+    txbox(slide, Inches(0.9), Inches(2.8), Inches(11.5), Inches(1.0),
+          "Agreement with a diameter tape and a 3-point laser on 100 stems\n"
+          "across two stands, measured by an iPhone and an Android handset",
+          size=19, color=MUTED, spacing=1.3)
+    rule(slide, Inches(0.9), Inches(4.05), Inches(1.6), CRIMSON, Pt(4))
     if headline_lines:
-        txbox(slide, Inches(0.9), Inches(4.6), Inches(11.5), Inches(2.2),
-              "\n".join(headline_lines), size=14, color=INK, spacing=1.5)
+        txbox(slide, Inches(0.9), Inches(4.45), Inches(11.5), Inches(2.1),
+              "\n".join(headline_lines), size=13, color=INK, spacing=1.45)
+    txbox(slide, Inches(0.9), Inches(6.75), Inches(11.5), Inches(0.4),
+          "Results describe these two stands. Height results are agreement with "
+          "the laser, which shares the app's tangent geometry.",
+          size=10, color=MUTED)
 
 
 def table_slide(prs, csv_name, title, max_rows=14, max_cols=8):
@@ -199,7 +250,12 @@ def table_slide(prs, csv_name, title, max_rows=14, max_cols=8):
     return True
 
 
-def build(version=1):
+P_TESTS = 0
+
+
+def build(version=2):
+    global P_TESTS
+    P_TESTS = p_value_count()
     prs = Presentation()
     prs.slide_width, prs.slide_height = W, H
 
@@ -217,9 +273,10 @@ def build(version=1):
 
     for csv_name, title in [
         ("t01_sample", "Sample summary"),
-        ("t02_accuracy", "Accuracy against the reference"),
-        ("t05_anova", "Mixed-model and ANOVA results"),
+        ("t02_accuracy", "Agreement with the reference, by measurand and stand"),
+        ("t05_anova", "Repeated-measures model results (exploratory)"),
         ("t10_equivalence", "Equivalence tests"),
+        ("t13_shared_error", "Shared and independent error components"),
     ]:
         table_slide(prs, csv_name, title)
 

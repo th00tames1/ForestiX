@@ -101,17 +101,19 @@ struct BoundaryDrawScreen: View {
                         .accessibilityIdentifier("boundaryDraw.cancel")
                 }
             }
-            .confirmationDialog("Replace the boundary?",
-                                isPresented: $confirmingReplace,
-                                titleVisibility: .visible) {
+            // ALERTS, not confirmationDialogs. A destructive confirmation is
+            // read before an irreversible write, so it is centred and it looks
+            // the same wherever the control that raised it happens to sit — an
+            // action sheet becomes a popover anchored to its source in a
+            // regular size class. Same rule as every other delete in this app;
+            // see the field log's delete for the full argument.
+            .alert("Replace the boundary?", isPresented: $confirmingReplace) {
                 Button("Replace", role: .destructive) { commitSave() }
                 Button("Cancel", role: .cancel) {}
             } message: {
                 Text(Self.replacementMessage(for: boundaryModel.boundary))
             }
-            .confirmationDialog("Discard this outline?",
-                                isPresented: $confirmingDiscard,
-                                titleVisibility: .visible) {
+            .alert("Discard this outline?", isPresented: $confirmingDiscard) {
                 Button("Discard", role: .destructive) { dismiss() }
                 Button("Keep editing", role: .cancel) {}
             } message: {

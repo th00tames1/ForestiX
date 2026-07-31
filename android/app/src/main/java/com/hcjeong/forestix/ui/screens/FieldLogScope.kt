@@ -85,6 +85,25 @@ object FieldLogWords {
     /// How a cruise plot is named everywhere in this feature.
     fun plotName(number: Int) = "Plot $number"
 
+    /// The DISPLAY ORDINAL drawn in front of a field-log row.
+    ///
+    /// IT IS THE ROW'S POSITION IN THE LIST AS CURRENTLY SHOWN, AND NOTHING
+    /// ELSE. It is not stored, not exported, and not an identity — it changes
+    /// the moment a row above it is deleted or the scope filter narrows the
+    /// list, which is exactly why it must never reach `TreeLabel.title` /
+    /// `Tree.displayTitle`. That is the app's one naming rule, shared by the
+    /// map, the cruise surfaces and the exports, and a number that moves when
+    /// the view changes has no business in it. The ordinal is applied where
+    /// the list is RENDERED, over the list the screen is actually drawing, so
+    /// it always agrees with the order on screen however that order was
+    /// arrived at.
+    ///
+    /// The trailing separator is the same middle dot as [HEADING_SEPARATOR];
+    /// the gap to the tree name is the table's column gutter, so the ordinal
+    /// stays inside its own narrow column instead of eating the name's.
+    /// iOS's `FieldLogWords.rowOrdinal` returns the identical string.
+    fun rowOrdinal(position: Int): String = "$position ·"
+
     /// Where a recorded coordinate came from, in words. The raws are
     /// `PositionSource` values, shared with the cruise Plot record.
     ///
@@ -150,8 +169,15 @@ data class FieldLogSection(
     val quickRows: List<FieldLogRowModel> = emptyList(),
     /// Read-only cruise rows. Empty on a quick section.
     val cruiseRows: List<FieldLogCruiseRow> = emptyList(),
-    /// Newest reading anywhere in the section — the sort key.
-    val latest: Long,
+    /// WHEN WORK IN THIS PLOT BEGAN — the sort key.
+    ///
+    /// The EARLIEST reading in the section, for the reason
+    /// [FieldLogRowModel.measuredAt] gives one level down: keyed on the
+    /// newest, as it was, a single late reading added to a plot the cruiser
+    /// finished an hour ago threw that whole plot back to the top of the log
+    /// while they were reading it. Keyed on the earliest, a section takes its
+    /// place the moment its first tree is measured and then stays there.
+    val measuredAt: Long,
 ) {
     val heading: String get() = projectLabel + FieldLogWords.HEADING_SEPARATOR + plotLabel
     val isEmpty: Boolean get() = quickRows.isEmpty() && cruiseRows.isEmpty()
@@ -177,9 +203,10 @@ data class FieldLogCruiseData(
         return projects.firstOrNull { it.id == projectID }
     }
 
-    /// Cruise sections in scope, newest plot first. A plot with no trees is
-    /// dropped from Everything and from a whole-project scope (there is
-    /// nothing to read), but KEPT when the cruiser asked for that one plot —
+    /// Cruise sections in scope, most recently STARTED plot first. A plot
+    /// with no trees is dropped from Everything and from a whole-project
+    /// scope (there is nothing to read), but KEPT when the cruiser asked for
+    /// that one plot —
     /// there the empty section is the answer to their question.
     fun sections(scope: FieldLogScope): List<FieldLogSection> {
         val out = mutableListOf<FieldLogSection>()
@@ -202,11 +229,21 @@ data class FieldLogCruiseData(
                     projectLabel = project.name,
                     plotLabel = FieldLogWords.plotName(plot.plotNumber),
                     cruiseRows = rows,
-                    latest = rows.firstOrNull()?.recordedAt ?: plot.startedAt,
+                    // The OLDEST tree in the plot, not the newest: same rule
+                    // as the quick sections, so one late tree cannot throw a
+                    // finished plot back to the top of the log. `rows` is
+                    // sorted newest-first at load, so the oldest is last. An
+                    // empty plot falls back to when it was started, which is
+                    // the only time it has.
+                    measuredAt = rows.lastOrNull()?.recordedAt ?: plot.startedAt,
                 )
             }
         }
-        return out.sortedByDescending { it.latest }
+        // Ties break on id so two sections stamped in the same millisecond
+        // cannot swap places between two reads. Matches the iOS sibling.
+        return out.sortedWith(
+            compareByDescending<FieldLogSection> { it.measuredAt }.thenBy { it.id },
+        )
     }
 }
 
@@ -225,9 +262,16 @@ suspend fun loadFieldLogCruiseData(
             .sortedBy { it.plotNumber }
         plots[project.id] = projectPlots
         for (plot in projectPlots) {
+            // `recordedAt` is the tree's own `createdAt` — a cruise row is
+            // one tree with one time, so it is already "when the tree was
+            // measured" and nothing later re-dates it. Ties break on id so
+            // two trees stamped in the same instant cannot swap places.
             rows[plot.id] = env.treeRepository.listByPlot(plot.id)
                 .map(FieldLogCruiseRow::from)
-                .sortedByDescending { it.recordedAt }
+                .sortedWith(
+                    compareByDescending<FieldLogCruiseRow> { it.recordedAt }
+                        .thenBy { it.id.toString() },
+                )
         }
     }
     FieldLogCruiseData(projects, plots, rows, failure = null)

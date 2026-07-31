@@ -664,12 +664,19 @@ extension MapHomeScreen {
             .navigationDestination(item: $pushed) { destination in
                 destinationView(destination)
             }
-            .confirmationDialog(
+            // ALERT, not a confirmationDialog — the same shape as the "Delete
+            // plot?" immediately below it, which is raised from the same peek.
+            // A destructive confirmation is centred and reads the same
+            // wherever the pin or row that raised it sits; an action sheet
+            // becomes a popover pinned to its source in a regular size class,
+            // so these two questions about the SAME plot would have appeared
+            // in two different places on the screen. See the field log's
+            // delete for the full argument.
+            .alert(
                 "Close this plot?",
                 isPresented: Binding(
                     get: { closePlotCandidateID != nil },
-                    set: { if !$0 { closePlotCandidateID = nil } }),
-                titleVisibility: .visible
+                    set: { if !$0 { closePlotCandidateID = nil } })
             ) {
                 Button("Close plot", role: .destructive) {
                     if let id = closePlotCandidateID { closePlot(id: id) }

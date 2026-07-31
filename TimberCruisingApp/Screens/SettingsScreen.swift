@@ -51,6 +51,11 @@ public struct SettingsScreen: View {
     /// Ground-truth unit repair. The PLAN is held between the preview and the
     /// confirm so what the cruiser agreed to is what gets written — recomputing
     /// it after the tap would let the corpus move under the sentence they read.
+    /// Research-CSV export: the run is in flight, and what the last one held
+    /// back. The sentence stays on screen after the share sheet closes — the
+    /// counts are the point, and a toast the cruiser dismissed is not a record.
+    @State private var researchExportRunning = false
+    @State private var researchExportResult: String?
     @State private var truthRepairRunning = false
     @State private var truthRepairPlan: TruthUnitRepair.Plan?
     @State private var truthRepairPreview: String?
@@ -149,10 +154,19 @@ public struct SettingsScreen: View {
         }
         // Developer-data clears — each Clear is confirmed, and the Clears
         // themselves live in their own section, never under an Export row.
-        .confirmationDialog(
+        //
+        // ALERTS, not confirmationDialogs. A destructive confirmation is read
+        // before an irreversible write, so it is centred and it looks the same
+        // wherever the row that raised it happens to sit — an action sheet
+        // raised from a Form row becomes a popover pinned to that row in a
+        // regular size class, and a two-step reset whose first sheet appears
+        // against the top edge and whose second appears somewhere else is the
+        // worst possible place for a wandering dialog. Same rule as every
+        // other delete in this app; see the field log's delete for the full
+        // argument.
+        .alert(
             "Clear research CSV?",
-            isPresented: $isPresentingClearResearch,
-            titleVisibility: .visible
+            isPresented: $isPresentingClearResearch
         ) {
             Button("Clear", role: .destructive) {
                 ResearchLog.shared.clear()
@@ -162,10 +176,9 @@ public struct SettingsScreen: View {
         } message: {
             Text("This deletes every research row on this device. Anything not already exported is gone for good.")
         }
-        .confirmationDialog(
+        .alert(
             "Clear diagnostic log?",
-            isPresented: $isPresentingClearEvents,
-            titleVisibility: .visible
+            isPresented: $isPresentingClearEvents
         ) {
             Button("Clear", role: .destructive) {
                 ForestixLogger.clear()
@@ -175,10 +188,9 @@ public struct SettingsScreen: View {
         } message: {
             Text("This deletes every logged event on this device. Anything not already exported is gone for good.")
         }
-        .confirmationDialog(
+        .alert(
             "Reset Forestix data?",
-            isPresented: $isPresentingResetStep1,
-            titleVisibility: .visible
+            isPresented: $isPresentingResetStep1
         ) {
             Button("Continue", role: .destructive) {
                 isPresentingResetStep2 = true
@@ -187,10 +199,9 @@ public struct SettingsScreen: View {
         } message: {
             Text("This deletes every project, plot, tree, photo, and scan. Back up anything you need to keep first. This cannot be undone.")
         }
-        .confirmationDialog(
+        .alert(
             "Are you absolutely sure?",
-            isPresented: $isPresentingResetStep2,
-            titleVisibility: .visible
+            isPresented: $isPresentingResetStep2
         ) {
             Button("Delete everything", role: .destructive) {
                 performFullReset()
@@ -434,13 +445,29 @@ public struct SettingsScreen: View {
                         .foregroundStyle(ForestixPalette.textSecondary)
                 }
                 .id(storeRefresh)
+                // THE EXPORT IS CLASSIFIED, NOT COPIED. The log is append-only,
+                // so it still holds the row a retake replaced and the ground
+                // truth a correction moved on from. `ResearchExport` splits it
+                // into what the FIELD LOG shows and what it no longer does,
+                // ships BOTH files in one archive, and returns the counts —
+                // which are put on screen below, because a quiet filter is how
+                // someone later concludes data went missing. Nothing on disk is
+                // touched.
                 Button {
-                    backup.shareURL = ResearchLog.shared.fileURL
+                    runResearchExport()
                 } label: {
-                    Label("Export research CSV", systemImage: "square.and.arrow.up")
+                    Label(researchExportRunning
+                          ? "Exporting…" : "Export research CSV",
+                          systemImage: "square.and.arrow.up")
                 }
-                .disabled(!ResearchLog.shared.hasData)
+                .disabled(!ResearchLog.shared.hasData || researchExportRunning)
                 .accessibilityIdentifier("settings.exportResearch")
+                if let result = researchExportResult {
+                    Text(result)
+                        .font(ForestixType.caption)
+                        .foregroundStyle(ForestixPalette.textSecondary)
+                        .accessibilityIdentifier("settings.exportResearchResult")
+                }
 
                 // Diagnostic log — gated here to match Android (it used to be a
                 // standalone, always-visible section). Share only; the Clear
@@ -595,6 +622,28 @@ public struct SettingsScreen: View {
             await MainActor.run {
                 truthRepairResult = text
                 truthRepairRunning = false
+            }
+        }
+    }
+
+    /// Classify the research log against the field log and hand the archive to
+    /// the share sheet. Detached for the same reason the two repair passes
+    /// beside it are: it parses the whole research CSV, which is a field
+    /// season's worth of rows, and that does not belong on the main actor.
+    ///
+    /// The share sheet is only raised when a file was actually written — an
+    /// empty log and a failed write both leave the sentence on screen and no
+    /// sheet, rather than sharing a file that is not there.
+    private func runResearchExport() {
+        guard !researchExportRunning else { return }
+        researchExportRunning = true
+        researchExportResult = nil
+        Task.detached(priority: .userInitiated) {
+            let outcome = await ResearchExport.run(history: history)
+            await MainActor.run {
+                researchExportResult = outcome.message
+                if let url = outcome.url { backup.shareURL = url }
+                researchExportRunning = false
             }
         }
     }

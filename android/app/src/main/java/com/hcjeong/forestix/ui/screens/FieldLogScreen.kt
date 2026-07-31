@@ -116,6 +116,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -150,6 +151,7 @@ import com.hcjeong.forestix.ui.theme.ForestixDenseTextScale
 import com.hcjeong.forestix.ui.theme.ForestixProminentButton
 import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.ui.theme.ForestixSpace
+import com.hcjeong.forestix.ui.theme.ForestixTypography
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -254,12 +256,18 @@ fun FieldLogScreen(
                     plotLabel = plots.firstOrNull { it.id == plotID }?.name
                         ?: FieldLogWords.UNKNOWN_PLOT,
                     quickRows = fieldLogRows(group),
-                    latest = group.maxOf { it.createdAt },
+                    // When work in this plot BEGAN — the same minimum the
+                    // rows use, one level up. See [FieldLogSection.measuredAt].
+                    measuredAt = group.minOf { it.createdAt },
                 )
             }
     }
     val sections = remember(quickSections, cruiseData, logScope) {
-        (quickSections + cruiseData.sections(logScope)).sortedByDescending { it.latest }
+        // Ties break on id so two sections stamped in the same millisecond
+        // cannot swap places between two recompositions.
+        (quickSections + cruiseData.sections(logScope)).sortedWith(
+            compareByDescending<FieldLogSection> { it.measuredAt }.thenBy { it.id },
+        )
     }
     /// True while quick-measure rows can appear under the current scope.
     val quickWorldVisible = logScope is FieldLogScope.Everything ||
@@ -589,6 +597,25 @@ fun FieldLogScreen(
 
                     // Quick rows keep every path they had: tap to inspect,
                     // swipe to delete, re-measure from the detail sheet.
+                    //
+                    // NUMBERED HERE, AT THE POINT OF RENDER, off the index
+                    // `itemsIndexed` hands back for the list the LazyColumn is
+                    // actually drawing — never earlier, and never stored on
+                    // the row. Whatever decides the order of
+                    // `section.quickRows` is upstream of this line, so the
+                    // ordinal cannot disagree with the order on screen. The
+                    // identity is still `row.id`: the ordinal is not in the
+                    // item key, so re-numbering after a delete moves no row's
+                    // identity.
+                    //
+                    // The count RESTARTS in every section rather than running
+                    // on through the screen. A section is one plot, the
+                    // heading above it names that plot, and the cruiser is
+                    // reading these rows against that plot's tally sheet — so
+                    // the last ordinal in a section is the count they are
+                    // checking. The whole-log total is already on the summary
+                    // card above, and a continuous run would have said that
+                    // number twice and the per-plot one nowhere.
                     val total = section.quickRows.size + section.cruiseRows.size
                     itemsIndexed(section.quickRows, key = { _, r -> "${section.id}|${r.id}" }) { index, row ->
                         FieldLogGroupedRow(
@@ -607,7 +634,7 @@ fun FieldLogScreen(
                                 // a dozen readings never leaves the list by
                                 // accident.
                                 FieldLogRow(
-                                    row, settings.unitSystem,
+                                    row, ordinal = index + 1, unitSystem = settings.unitSystem,
                                     onClick = {
                                         if (quickSelection == null) {
                                             inspectingId = row.id
@@ -631,12 +658,25 @@ fun FieldLogScreen(
                     // ordinary click TOGGLES instead of navigating, so a
                     // cruiser ticking twelve rows never leaves the list by
                     // accident.
+                    //
+                    // The ordinal CONTINUES from the quick rows above rather
+                    // than restarting: both blocks are one section under one
+                    // heading, and two rows numbered "1" under the same
+                    // heading would read as two lists. In practice a section
+                    // holds one world — quick sections carry no cruise rows
+                    // and vice versa — so this offset is normally zero; it is
+                    // written this way so the numbering follows the render
+                    // order rather than assuming that. It is the same offset
+                    // the grouped-row shell already uses to round the right
+                    // corners.
                     itemsIndexed(section.cruiseRows, key = { _, r -> "${section.id}|${r.id}" }) { index, row ->
                         FieldLogGroupedRow(
                             index = section.quickRows.size + index, total = total, colors = colors,
                         ) {
                             FieldLogCruiseRowView(
-                                row, settings.unitSystem,
+                                row,
+                                ordinal = section.quickRows.size + index + 1,
+                                system = settings.unitSystem,
                                 onClick = {
                                     if (cruiseSelection == null) {
                                         nav.navigate(PlotFlowRoutes.treeDetail(row.id.toString()))
@@ -1082,6 +1122,8 @@ private fun FieldLogGroupedRow(
 @OptIn(ExperimentalFoundationApi::class)
 private fun FieldLogCruiseRowView(
     row: FieldLogCruiseRow,
+    /// 1-based position in the list AS DRAWN — see [FieldLogRow]'s ordinal.
+    ordinal: Int,
     system: UnitSystem,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
@@ -1109,22 +1151,32 @@ private fun FieldLogCruiseRowView(
     }
     Column(Modifier.weight(1f)) {
         FieldLogColumns(
+            // Same display ordinal, same column, same dimming as the quick row
+            // — the two worlds read as one sheet of paper, and a cruise row
+            // that skipped the number would break the run.
+            ordinalSlot = {
+                Text(
+                    FieldLogWords.rowOrdinal(ordinal),
+                    style = Forestix.type.fieldLogValue, color = colors.textTertiary,
+                    textAlign = TextAlign.End, maxLines = 1, softWrap = false,
+                    overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth())
+            },
             treeSlot = {
                 Text(
-                    row.treeLabel, style = Forestix.type.data, color = colors.textPrimary,
+                    row.treeLabel, style = Forestix.type.fieldLogValue, color = colors.textPrimary,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
             },
             dbhSlot = {
                 Text(
                     MeasurementFormatter.diameter(row.dbhCm, system),
-                    style = Forestix.type.data, color = colors.textPrimary,
+                    style = Forestix.type.fieldLogValue, color = colors.textPrimary,
                     textAlign = TextAlign.End, maxLines = 1,
                     overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth())
             },
             heightSlot = {
                 Text(
                     row.heightM?.let { MeasurementFormatter.height(it, system) } ?: "—",
-                    style = Forestix.type.data,
+                    style = Forestix.type.fieldLogValue,
                     color = if (row.heightM == null) colors.textTertiary else colors.textPrimary,
                     textAlign = TextAlign.End, maxLines = 1,
                     overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth())
@@ -1138,12 +1190,12 @@ private fun FieldLogCruiseRowView(
             if (row.speciesCode.isNotEmpty()) {
                 Text(
                     RegionalSpecies.nameForCode(row.speciesCode),
-                    style = Forestix.type.dataSmall, color = colors.textSecondary,
+                    style = Forestix.type.fieldLogMeta, color = colors.textSecondary,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             Text(
                 relativeAgo(row.recordedAt),
-                style = Forestix.type.dataSmall, color = colors.textTertiary, maxLines = 1)
+                style = Forestix.type.fieldLogMeta, color = colors.textTertiary, maxLines = 1)
             Spacer(Modifier.weight(1f))
             // The same "there is more behind this" affordance a quick row
             // carries, for the same reason: this row opens. A chevron on a
@@ -1183,8 +1235,24 @@ data class FieldLogRowModel(
     val height: QuickMeasureEntry?,
     /// Every reading behind this row, newest first.
     val entries: List<QuickMeasureEntry>,
-    /// Sort key — the most recent reading in the group.
-    val latest: Long,
+    /// WHEN THIS TREE WAS MEASURED — the sort key, and the time the row and
+    /// the record sheet print.
+    ///
+    /// It is the EARLIEST reading in the group: the moment the cruiser
+    /// arrived at this stem. Every later reading on it — the height after the
+    /// diameter, a re-measure, a number corrected from the sheet — is the
+    /// same visit to the same tree, not a new one.
+    ///
+    /// NOT the newest reading, which is what this used to be and is what
+    /// scrambled the log: adding any reading to an old tree re-dated the
+    /// whole row and threw it to the top of a list the cruiser was reading in
+    /// order. NOT the diameter's time either, tempting as it is when DBH is
+    /// what the workflow measures first — a row can have no diameter at all
+    /// (height-only trees, and every loose reading), and a key that some rows
+    /// do not have is a key that has to be invented for them.
+    ///
+    /// The iOS `FieldLogRowModel.measuredAt` is the same minimum.
+    val measuredAt: Long,
 ) {
     /// What the TREE column shows. Null for a row that belongs to no tree.
     val treeLabel: String?
@@ -1244,11 +1312,18 @@ internal fun kindWord(kind: MeasureKind): String = when (kind) {
     MeasureKind.SAMPLING_PLOT -> "Plot"
 }
 
-/// Collapses the flat entry list into rows, newest tree first.
+/// Collapses the flat entry list into rows, most recently MEASURED tree
+/// first.
 ///
 /// [entries] arrives newest-first from the history, and that order is
-/// preserved inside each group, so `dbh` / `height` pick up the latest
+/// preserved INSIDE each group, so `dbh` / `height` pick up the latest
 /// reading of each kind without a second sort.
+///
+/// The rows themselves are then sorted on [FieldLogRowModel.measuredAt] —
+/// they used to be left in the order the groups first appeared, which is the
+/// order of each group's NEWEST reading, and that is the ordering that field
+/// note describes as the bug. Ties break on `id` so a row can never swap
+/// places with another between two renders of the same data.
 internal fun fieldLogRows(entries: List<QuickMeasureEntry>): List<FieldLogRowModel> {
     val order = mutableListOf<String>()
     val grouped = LinkedHashMap<String, MutableList<QuickMeasureEntry>>()
@@ -1272,9 +1347,11 @@ internal fun fieldLogRows(entries: List<QuickMeasureEntry>): List<FieldLogRowMod
             dbh = group.firstOrNull { it.kind == MeasureKind.DBH },
             height = group.firstOrNull { it.kind == MeasureKind.HEIGHT },
             entries = group,
-            latest = group.maxOf { it.createdAt },
+            measuredAt = group.minOf { it.createdAt },
         )
-    }
+    }.sortedWith(
+        compareByDescending<FieldLogRowModel> { it.measuredAt }.thenBy { it.id },
+    )
 }
 
 // MARK: - Summary / capacity / empty --------------------------------------
@@ -1370,36 +1447,71 @@ private fun EmptyState(modifier: Modifier, onNewTree: () -> Unit) {
 
 // MARK: - Column geometry -------------------------------------------------
 //
-// THREE columns now, not four. Dropping RANGE and QUAL gave back roughly
-// 128 dp on a 360 dp phone, which is why every cell here sits well inside
-// its column instead of scaling to fit as the four-column table did. A row
-// has screen − 32 (list inset) − 32 (row padding) − 12 (two 6 dp gutters)
-// to share:
+// FOUR columns now — a narrow display ordinal in front of the three the
+// cruiser reads. Dropping RANGE and QUAL gave back roughly 128 dp on a 360 dp
+// phone, and shrinking the row's type from `data` (17 sp) to `dataSmall`
+// (13 sp) gave back about a quarter of every string on top of that, which is
+// what pays for the ordinal column. A row has screen − 32 (list inset)
+// − 32 (row padding) − 18 (three 6 dp gutters) to share:
 //
 //   column   widest content        needs    360 dp   411 dp   320 dp
-//   TREE     "Plot3-T08"            68 dp    77 dp    93 dp    66 dp
-//   DBH      "150.0 cm"             82 dp   103 dp   124 dp    89 dp
-//   HEIGHT   "150.00 ft"            88 dp   103 dp   124 dp    89 dp
+//   #        "12 ·"                 31 dp    35 dp    41 dp    30 dp
+//   TREE     "Plot3-T08"            70 dp    82 dp    97 dp    71 dp
+//   DBH      "150.0 cm"             62 dp    80 dp    95 dp    69 dp
+//   HEIGHT   "328.1 ft"             62 dp    80 dp    95 dp    69 dp
 //
-// TREE carries a NAME now, not just "#128", so it holds a quarter of the row
-// rather than a fifth. The 8 dp it took came off the two measurement columns,
-// which were still 20 dp clear of their widest reading.
+// (Needs are at 13 sp monospaced, ~7.8 dp per glyph. Diameter and height
+// each print one decimal, so eight glyphs is the widest either unit system
+// produces. Every cell clears its column at 360 dp and above. On a 320 dp
+// phone a two-digit ordinal is 1 dp over and ellipsises to "12·" — the
+// number is still legible, and the alternative was taking that dp off a
+// tree name that is already level with its column there.)
+//
+// The ordinal column holds two digits and a separator and no more: it is a
+// reading aid, and the log has already lost a column to fit on a phone. Past
+// 99 rows in one section the cell ellipsises rather than taking width off the
+// name — a three-digit ordinal is a rarity, a truncated tree name is a row
+// the cruiser cannot identify. TREE carries a NAME, not just "#128", so it
+// holds the largest share of what is left.
+//
+// Same numbers as the iOS sibling's `FieldLogTable.weights` — only the ratios
+// matter, so the two files can be read side by side.
 //
 // Every heading is a single unwrappable word, so nothing can break
 // mid-word the way "PRECISI/ON" and "QUALI/TY" did. The two numeric cells
 // may take a second line instead — a sampling-plot reading is wider than
 // any phone column, and a taller row is better than a measurement the
 // cruiser cannot read in full.
-private const val ColTreeWeight = 1.3f
-private const val ColDbhWeight = 1.75f
-private const val ColHeightWeight = 1.75f
+private const val ColOrdinalWeight = 1.75f
+private const val ColTreeWeight = 4.15f
+private const val ColDbhWeight = 4.05f
+private const val ColHeightWeight = 4.05f
 private val ColGap = 6.dp
+
+/// The font every value cell in a TREE ROW uses.
+///
+/// FIELD REPORT — the rows were `data` (17 sp) and read as oversized under a
+/// summary card that had already come down to the same size, so the list and
+/// its header carried equal weight. `dataSmall` (13 sp) is the next step of
+/// the same scale and the floor of it: it is still monospaced and still
+/// medium-weight, so the columns line up and the digits stay solid at arm's
+/// length in daylight. The SUMMARY CARD is deliberately left at `data` — the
+/// cruiser said it was fine, and the step between the two is now what says
+/// which is the header. iOS: `FieldLogTable.valueFont`.
+private val ForestixTypography.fieldLogValue: TextStyle get() = dataSmall
+
+/// The row's second line — species, kinds, "2h ago". One step below the
+/// values, so the numbers still lead the row after the shrink above.
+/// `caption` (12 sp) is the existing scale's non-tabular small size, and none
+/// of what this line carries is a measurement. iOS: `FieldLogTable.metaFont`.
+private val ForestixTypography.fieldLogMeta: TextStyle get() = caption
 
 /// The ONE definition of the field-log grid. The header and every row go
 /// through it, so the columns cannot drift apart again.
 @Composable
 private fun FieldLogColumns(
     modifier: Modifier = Modifier,
+    ordinalSlot: @Composable () -> Unit,
     treeSlot: @Composable () -> Unit,
     dbhSlot: @Composable () -> Unit,
     heightSlot: @Composable () -> Unit,
@@ -1409,6 +1521,7 @@ private fun FieldLogColumns(
         horizontalArrangement = Arrangement.spacedBy(ColGap),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        Box(Modifier.weight(ColOrdinalWeight), contentAlignment = Alignment.CenterEnd) { ordinalSlot() }
         Box(Modifier.weight(ColTreeWeight), contentAlignment = Alignment.CenterStart) { treeSlot() }
         Box(Modifier.weight(ColDbhWeight), contentAlignment = Alignment.CenterEnd) { dbhSlot() }
         Box(Modifier.weight(ColHeightWeight), contentAlignment = Alignment.CenterEnd) { heightSlot() }
@@ -1437,6 +1550,14 @@ private fun ColumnHeader() = ForestixDenseTextScale {
         Modifier.padding(
             start = ForestixSpace.md, end = ForestixSpace.md,
             top = ForestixSpace.md, bottom = ForestixSpace.xs),
+        // The ordinal column is headed by nothing. It is a display ordinal,
+        // not a field of the record, so there is no name for it that would be
+        // true — and a heading here would be one more user-visible string to
+        // keep byte-identical across two platforms for a column whose meaning
+        // is obvious the moment the rows below it read 1, 2, 3. The slot still
+        // has to EXIST, or the header's TREE would sit over the rows'
+        // ordinals.
+        ordinalSlot = {},
         // Same three strings on iOS.
         treeSlot = { HeaderLabel("TREE") },
         dbhSlot = { HeaderLabel("DBH") },
@@ -1452,6 +1573,10 @@ private fun ColumnHeader() = ForestixDenseTextScale {
 @OptIn(ExperimentalFoundationApi::class)
 private fun FieldLogRow(
     row: FieldLogRowModel,
+    /// 1-based position in the list AS DRAWN. Handed in by the renderer, not
+    /// read off the model — see [FieldLogWords.rowOrdinal]. It is display
+    /// only: nothing here writes it, exports it, or joins on it.
+    ordinal: Int,
     unitSystem: UnitSystem,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
@@ -1484,10 +1609,19 @@ private fun FieldLogRow(
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         FieldLogColumns(
+            // The display ordinal, dimmed and in its own narrow column so it
+            // cannot be misread as part of the tree's name.
+            ordinalSlot = {
+                Text(
+                    FieldLogWords.rowOrdinal(ordinal),
+                    style = type.fieldLogValue, color = colors.textTertiary,
+                    textAlign = TextAlign.End, maxLines = 1, softWrap = false,
+                    overflow = TextOverflow.Ellipsis)
+            },
             treeSlot = {
                 Text(
                     row.treeLabel ?: kindWord(row.entries.first().kind),
-                    style = type.data, color = colors.textPrimary,
+                    style = type.fieldLogValue, color = colors.textPrimary,
                     maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
             },
             dbhSlot = {
@@ -1498,13 +1632,13 @@ private fun FieldLogRow(
                     // into one of them under a heading it does not match.
                     Text(
                         looseValue(row.entries.first(), unitSystem),
-                        style = type.data, color = colors.textPrimary,
+                        style = type.fieldLogValue, color = colors.textPrimary,
                         textAlign = TextAlign.End, maxLines = 3,
                         overflow = TextOverflow.Ellipsis)
                 } else {
                     Text(
                         row.dbh?.let { MeasurementFormatter.diameter(it.value, unitSystem) } ?: "—",
-                        style = type.data,
+                        style = type.fieldLogValue,
                         color = if (row.dbh == null) colors.textTertiary else colors.textPrimary,
                         textAlign = TextAlign.End, maxLines = 2,
                         overflow = TextOverflow.Ellipsis)
@@ -1514,7 +1648,7 @@ private fun FieldLogRow(
                 if (row.treeNumber != null) {
                     Text(
                         row.height?.let { MeasurementFormatter.height(it.value, unitSystem) } ?: "—",
-                        style = type.data,
+                        style = type.fieldLogValue,
                         color = if (row.height == null) colors.textTertiary else colors.textPrimary,
                         textAlign = TextAlign.End, maxLines = 2,
                         overflow = TextOverflow.Ellipsis)
@@ -1534,15 +1668,17 @@ private fun FieldLogRow(
                     .filter { it.kind != MeasureKind.DBH && it.kind != MeasureKind.HEIGHT }
                     .map { kindWord(it.kind) }.distinct().sorted()
                     .forEach {
-                        Text(it, style = type.dataSmall, color = colors.textTertiary,
+                        Text(it, style = type.fieldLogMeta, color = colors.textTertiary,
                             maxLines = 1, softWrap = false)
                     }
             }
             speciesName(row)?.let {
-                Text(it, style = type.dataSmall, color = colors.textSecondary,
+                Text(it, style = type.fieldLogMeta, color = colors.textSecondary,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            Text(relativeAgo(row.latest), style = type.dataSmall, color = colors.textTertiary,
+            // The time the row is SORTED on, so the order the cruiser reads
+            // is the order this column explains.
+            Text(relativeAgo(row.measuredAt), style = type.fieldLogMeta, color = colors.textTertiary,
                 maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
             Spacer(Modifier.weight(1f))
             // The standard "there is more behind this" affordance — the row
@@ -1724,7 +1860,7 @@ internal fun FieldLogDetailSheet(
                     plots.firstOrNull { it.id == homeID }?.name
                         ?: FieldLogWords.UNKNOWN_PLOT)
             }
-            SheetRow("When", SimpleDateFormat("MMM d, HH:mm", Locale.US).format(Date(row.latest)))
+            SheetRow("When", SimpleDateFormat("MMM d, HH:mm", Locale.US).format(Date(row.measuredAt)))
             val fix = row.entries.firstOrNull { it.latitude != null && it.longitude != null }
             // POSITION IS TAPPABLE. A fix that never arrived, or arrived on
             // the wrong stem, used to be permanent — the reading carried it

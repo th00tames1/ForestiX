@@ -122,6 +122,17 @@ public struct RawCapturesScreen: View {
                                              ? ForestixPalette.confidenceWarn
                                              : ForestixPalette.textSecondary)
                             .accessibilityIdentifier("rawCaptures.storage")
+                        // WHAT THE ZIP IS, said where the ZIP is exported. The
+                        // research CSV export splits itself against the field
+                        // log; this one deliberately does not, because a
+                        // complete capture archive is the thing worth having
+                        // and a bundle whose reading was retaken is exactly
+                        // what an accuracy study wants to see. Nothing is left
+                        // out — so the honest notice is the inverse one: what
+                        // is IN it that the field log no longer shows.
+                        Text(Self.corpusCompletenessNotice)
+                            .foregroundStyle(ForestixPalette.textSecondary)
+                            .accessibilityIdentifier("rawCaptures.completeness")
                     }
                 }
             }
@@ -169,9 +180,11 @@ public struct RawCapturesScreen: View {
         } message: {
             Text(exportError ?? "")
         }
-        .confirmationDialog("Clear all raw captures?",
-                            isPresented: $confirmClear,
-                            titleVisibility: .visible) {
+        // ALERT, not a confirmationDialog: a destructive confirmation is
+        // centred and reads the same wherever the control that raised it sits.
+        // Same rule as every other delete in this app; see the field log's
+        // delete for the full argument.
+        .alert("Clear all raw captures?", isPresented: $confirmClear) {
             Button("Delete all", role: .destructive) {
                 RawCaptureStore.clearAll()
                 reload()
@@ -239,6 +252,14 @@ public struct RawCapturesScreen: View {
         summaries = listing.summaries
         inventory = listing.inventory
     }
+
+    /// The ZIP holds every bundle, including ones the field log has moved on
+    /// from. Byte-identical to the Android sibling.
+    static let corpusCompletenessNotice =
+        "Export ZIP is the COMPLETE corpus, not the field log: a bundle whose "
+        + "reading was deleted or retaken is still in it, and a ground truth "
+        + "the field log has since corrected keeps its original value here. "
+        + "Nothing is filtered out."
 
     /// "X MB on device · Y GB free".
     private var storageFooter: String {

@@ -85,6 +85,25 @@ public enum FieldLogWords {
     /// How a cruise plot is named everywhere in this feature.
     public static func plotName(number: Int) -> String { "Plot \(number)" }
 
+    /// The DISPLAY ORDINAL drawn in front of a field-log row.
+    ///
+    /// IT IS THE ROW'S POSITION IN THE LIST AS CURRENTLY SHOWN, AND NOTHING
+    /// ELSE. It is not stored, not exported, and not an identity — it changes
+    /// the moment a row above it is deleted or the scope filter narrows the
+    /// list, which is exactly why it must never reach `TreeLabel.title` /
+    /// `Tree.displayTitle`. That is the app's one naming rule, shared by the
+    /// map, the cruise surfaces and the exports, and a number that moves when
+    /// the view changes has no business in it. The ordinal is applied where
+    /// the list is RENDERED, over the array the screen is actually drawing,
+    /// so it always agrees with the order on screen however that order was
+    /// arrived at.
+    ///
+    /// The trailing separator is the same middle dot as `headingSeparator`;
+    /// the gap to the tree name is the table's column gutter, so the ordinal
+    /// stays inside its own narrow column instead of eating the name's.
+    /// Android's `FieldLogWords.rowOrdinal` returns the identical string.
+    public static func rowOrdinal(_ position: Int) -> String { "\(position) ·" }
+
     /// Where a recorded coordinate came from, in words. The raws are
     /// `PositionSource` values, shared with the cruise `Plot` record.
     ///
@@ -155,8 +174,15 @@ public struct FieldLogSection: Identifiable, Equatable {
     public let quickRows: [FieldLogRowModel]
     /// Read-only cruise rows. Empty on a quick section.
     public let cruiseRows: [FieldLogCruiseRow]
-    /// Newest reading anywhere in the section — the sort key.
-    public let latest: Date
+    /// WHEN WORK IN THIS PLOT BEGAN — the sort key.
+    ///
+    /// The EARLIEST reading in the section, for the reason
+    /// `FieldLogRowModel.measuredAt` gives one level down: keyed on the
+    /// newest, as it was, a single late reading added to a plot the cruiser
+    /// finished an hour ago threw that whole plot back to the top of the log
+    /// while they were reading it. Keyed on the earliest, a section takes
+    /// its place the moment its first tree is measured and then stays there.
+    public let measuredAt: Date
 
     public var heading: String {
         projectLabel + FieldLogWords.headingSeparator + plotLabel
@@ -215,9 +241,18 @@ public final class FieldLogCruiseFeed: ObservableObject {
                     // Soft-deleted trees stay out: `listByPlot` already
                     // defaults to includeDeleted false, and a tree the
                     // cruiser deleted must not reappear in a read-back.
+                    // `recordedAt` is the tree's own `createdAt` — a cruise
+                    // row is one tree with one time, so it is already "when
+                    // the tree was measured" and nothing later re-dates it.
+                    // Ties break on id so two trees stamped in the same
+                    // instant cannot swap places between two reads.
                     rows[plot.id] = try environment.treeRepository.listByPlot(plot.id)
                         .map(FieldLogCruiseRow.init)
-                        .sorted { $0.recordedAt > $1.recordedAt }
+                        .sorted {
+                            $0.recordedAt == $1.recordedAt
+                                ? $0.id.uuidString < $1.id.uuidString
+                                : $0.recordedAt > $1.recordedAt
+                        }
                 }
             }
             projects = allProjects.sorted { $0.name < $1.name }
@@ -234,9 +269,10 @@ public final class FieldLogCruiseFeed: ObservableObject {
 
     // MARK: Sections
 
-    /// Cruise sections in scope, newest plot first. A plot with no trees is
-    /// dropped from `.everything` and from a whole-project scope (there is
-    /// nothing to read), but KEPT when the cruiser asked for that one plot —
+    /// Cruise sections in scope, most recently STARTED plot first. A plot
+    /// with no trees is dropped from `.everything` and from a whole-project
+    /// scope (there is nothing to read), but KEPT when the cruiser asked for
+    /// that one plot —
     /// there the empty section is the answer to their question.
     public func sections(for scope: FieldLogScope) -> [FieldLogSection] {
         var out: [FieldLogSection] = []
@@ -263,9 +299,19 @@ public final class FieldLogCruiseFeed: ObservableObject {
                     plotLabel: FieldLogWords.plotName(number: plot.plotNumber),
                     quickRows: [],
                     cruiseRows: rows,
-                    latest: rows.first?.recordedAt ?? plot.startedAt))
+                    // The OLDEST tree in the plot, not the newest: same rule
+                    // as the quick sections, so one late tree cannot throw a
+                    // finished plot back to the top of the log. `rows` is
+                    // sorted newest-first just above, so the oldest is last.
+                    // An empty plot falls back to when it was started, which
+                    // is the only time it has.
+                    measuredAt: rows.last?.recordedAt ?? plot.startedAt))
             }
         }
-        return out.sorted { $0.latest > $1.latest }
+        return out.sorted {
+            $0.measuredAt == $1.measuredAt
+                ? $0.id < $1.id
+                : $0.measuredAt > $1.measuredAt
+        }
     }
 }

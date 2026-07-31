@@ -178,9 +178,15 @@ public struct FieldLogScreen: View {
                     ?? FieldLogWords.unknownPlot,
                 quickRows: rows,
                 cruiseRows: [],
-                latest: group.map(\.createdAt).max() ?? Date.distantPast)
+                // When work in this plot BEGAN — the same minimum the rows
+                // use, one level up. See `FieldLogSection.measuredAt`.
+                measuredAt: group.map(\.createdAt).min() ?? Date.distantPast)
         }
-        .sorted { $0.latest > $1.latest }
+        .sorted {
+            $0.measuredAt == $1.measuredAt
+                ? $0.id < $1.id
+                : $0.measuredAt > $1.measuredAt
+        }
     }
 
     private var cruiseSections: [FieldLogSection] {
@@ -188,7 +194,11 @@ public struct FieldLogScreen: View {
     }
 
     private var sections: [FieldLogSection] {
-        (quickSections + cruiseSections).sorted { $0.latest > $1.latest }
+        (quickSections + cruiseSections).sorted {
+            $0.measuredAt == $1.measuredAt
+                ? $0.id < $1.id
+                : $0.measuredAt > $1.measuredAt
+        }
     }
 
     /// True when the whole log — both worlds — holds nothing at all, which
@@ -319,11 +329,23 @@ public struct FieldLogScreen: View {
         // back means walking to the tree again, and in an accuracy-validation
         // set the tree that gets re-measured is not the same observation.
         // One tap of friction is nothing against that.
-        .confirmationDialog(
+        //
+        // IT IS AN ALERT, NOT A CONFIRMATION DIALOG. A confirmationDialog is
+        // an action sheet, and an action sheet raised from a List row adopts
+        // that row as its source: in a regular size class UIKit turns it into
+        // a popover pinned to the swiped row, so a delete confirmation for the
+        // first tree in a plot renders against the top edge of the screen and
+        // one for the last renders at the bottom. The cruiser reads this
+        // sentence while deciding whether to destroy a measurement, and where
+        // it lands must not depend on which row they swiped. An alert is
+        // centred in every size class and orientation, and it is already what
+        // every other delete in this app uses — "Delete plot?", "Delete tree?",
+        // "Delete planned plot?", "Delete this reading?", "Delete this
+        // project?". Android has always shown this as a centred AlertDialog.
+        .alert(
             pendingDelete.map { "Delete \($0.title)?" } ?? "",
             isPresented: Binding(get: { pendingDelete != nil },
-                                 set: { if !$0 { pendingDelete = nil } }),
-            titleVisibility: .visible
+                                 set: { if !$0 { pendingDelete = nil } })
         ) {
             if let row = pendingDelete {
                 Button(FieldLogRowModel.deleteActionTitle(row.entries.count),
@@ -551,6 +573,50 @@ public struct FieldLogScreen: View {
         selection = .quick(ids)
     }
 
+    /// Android's `combinedClickable` timeout, so a hold that opens selection
+    /// on one phone opens it on the other after the same wait. It is also
+    /// SwiftUI's own default for `.onLongPressGesture`, which is what the
+    /// rows asked for before.
+    private static let rowLongPressSeconds: Double = 0.5
+
+    /// The tap AND the press-and-hold of one log row, as ONE gesture.
+    ///
+    /// WHY THE ROWS ARE NOT BUTTONS. They used to be `Button { … }` with
+    /// `.onLongPressGesture` hung on the outside. A SwiftUI Button installs
+    /// its own gesture over the whole row; that gesture wins the recognition
+    /// contest, and a long press hung outside it never fired — so press and
+    /// hold did nothing at all here while Android, whose `combinedClickable`
+    /// takes the tap and the hold TOGETHER, entered selection mode fine. One
+    /// gesture that owns both is the same bargain `combinedClickable` makes.
+    ///
+    /// WHY THIS DOES NOT RE-BREAK THE THREE THINGS THAT ALREADY WORKED:
+    ///
+    /// • THE SCROLL. Both halves are discrete gestures with a movement
+    ///   limit — `LongPressGesture`'s `maximumDistance` abandons the hold as
+    ///   soon as the finger travels, and `TapGesture` abandons on the same
+    ///   movement. Neither ever claims a drag, so the List's own pan is
+    ///   uncontested and a drag begun on a row still scrolls. A row that ate
+    ///   a scroll would be worse than one that ignored a hold.
+    ///
+    /// • THE SWIPE TO DELETE. `.swipeActions` is a List row facility, driven
+    ///   by the row's container rather than by anything the row's CONTENT
+    ///   recognises, so it is untouched by this. It is still attached to the
+    ///   quick rows, and still absent from the cruise rows for the reason
+    ///   stated there.
+    ///
+    /// • THE TAP. `exclusively(before:)` gives the hold priority and runs the
+    ///   tap only when the hold FAILS — which is exactly "the finger lifted
+    ///   before the threshold". So a quick tap still fires, once, on lift,
+    ///   and a hold fires the hold and never the tap. A `simultaneousGesture`
+    ///   on the old Button would have fired BOTH on lift: selection mode and
+    ///   the sheet, from one press.
+    private func rowGesture(tap: @escaping () -> Void,
+                            longPress: @escaping () -> Void) -> some Gesture {
+        LongPressGesture(minimumDuration: Self.rowLongPressSeconds)
+            .onEnded { _ in longPress() }
+            .exclusively(before: TapGesture().onEnded { tap() })
+    }
+
     /// Destination picked. Plans the move — reading the destination plot's
     /// existing tree numbers — and raises the confirmation. NOTHING is
     /// written here.
@@ -673,29 +739,50 @@ public struct FieldLogScreen: View {
                     // does on a cruise row, and once in it the ordinary tap
                     // TOGGLES instead of opening — so a cruiser ticking a
                     // dozen readings never leaves the list by accident.
-                    ForEach(section.quickRows) { row in
-                        Button {
-                            if quickSelection == nil {
-                                inspecting = row
-                            } else {
-                                toggleQuick(row.id)
+                    //
+                    // NUMBERED HERE, AT THE POINT OF RENDER, over the array
+                    // the List is actually drawing — never earlier, and never
+                    // stored on the row. Whatever decides the order of
+                    // `section.quickRows` is upstream of this line, so the
+                    // ordinal cannot disagree with the order on screen. The
+                    // identity is still `row.id`: the ordinal is not in the
+                    // ForEach key, so re-numbering after a delete moves no
+                    // row's identity.
+                    //
+                    // The count RESTARTS in every section rather than running
+                    // on through the screen. A section is one plot, the
+                    // heading above it names that plot, and the cruiser is
+                    // reading these rows against that plot's tally sheet — so
+                    // the last ordinal in a section is the count they are
+                    // checking. The whole-log total is already on the summary
+                    // card above, and a continuous run would have said that
+                    // number twice and the per-plot one nowhere.
+                    ForEach(Array(section.quickRows.enumerated()),
+                            id: \.element.id) { index, row in
+                        FieldLogRow(row: row,
+                                    ordinal: index + 1,
+                                    unitSystem: settings.unitSystem,
+                                    selecting: quickSelection != nil,
+                                    isSelected: quickSelection?.contains(row.id) == true)
+                            // The row is NOT a Button — see `rowGesture`.
+                            .accessibilityAddTraits(.isButton)
+                            .gesture(rowGesture(
+                                tap: {
+                                    if quickSelection == nil {
+                                        inspecting = row
+                                    } else {
+                                        toggleQuick(row.id)
+                                    }
+                                },
+                                longPress: { longPressQuick(row.id) }))
+                            .listRowBackground(ForestixPalette.surface)
+                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                Button(role: .destructive) {
+                                    requestDelete(row)
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
                             }
-                        } label: {
-                            FieldLogRow(row: row,
-                                        unitSystem: settings.unitSystem,
-                                        selecting: quickSelection != nil,
-                                        isSelected: quickSelection?.contains(row.id) == true)
-                        }
-                        .buttonStyle(.plain)
-                        .listRowBackground(ForestixPalette.surface)
-                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                            Button(role: .destructive) {
-                                requestDelete(row)
-                            } label: {
-                                Label("Delete", systemImage: "trash")
-                            }
-                        }
-                        .onLongPressGesture { longPressQuick(row.id) }
                     }
                     // Cruise rows OPEN: the tap pushes TreeDetailScreen,
                     // which owns that store's writes. No inline editor and
@@ -705,23 +792,36 @@ public struct FieldLogScreen: View {
                     // Press and hold enters selection mode; once in it the
                     // ordinary tap TOGGLES instead of pushing, so a cruiser
                     // ticking twelve rows never leaves the list by accident.
-                    ForEach(section.cruiseRows) { row in
-                        Button {
-                            if cruiseSelection == nil {
-                                openingCruiseTree = row.id
-                            } else {
-                                toggleCruise(row.id)
-                            }
-                        } label: {
-                            FieldLogCruiseRowView(
-                                row: row,
-                                unitSystem: settings.unitSystem,
-                                selecting: cruiseSelection != nil,
-                                isSelected: cruiseSelection?.contains(row.id) == true)
-                        }
-                        .buttonStyle(.plain)
-                        .listRowBackground(ForestixPalette.surface)
-                        .onLongPressGesture { longPressCruise(row.id) }
+                    //
+                    // The ordinal CONTINUES from the quick rows above rather
+                    // than restarting: both blocks are one section under one
+                    // heading, and two rows numbered "1" under the same
+                    // heading would read as two lists. In practice a section
+                    // holds one world — quick sections carry no cruise rows
+                    // and vice versa — so this offset is normally zero; it is
+                    // written this way so the numbering follows the render
+                    // order rather than assuming that.
+                    ForEach(Array(section.cruiseRows.enumerated()),
+                            id: \.element.id) { index, row in
+                        FieldLogCruiseRowView(
+                            row: row,
+                            ordinal: section.quickRows.count + index + 1,
+                            unitSystem: settings.unitSystem,
+                            selecting: cruiseSelection != nil,
+                            isSelected: cruiseSelection?.contains(row.id) == true)
+                            // Same construct as the quick row above, and for
+                            // the same reason — see `rowGesture`.
+                            .accessibilityAddTraits(.isButton)
+                            .gesture(rowGesture(
+                                tap: {
+                                    if cruiseSelection == nil {
+                                        openingCruiseTree = row.id
+                                    } else {
+                                        toggleCruise(row.id)
+                                    }
+                                },
+                                longPress: { longPressCruise(row.id) }))
+                            .listRowBackground(ForestixPalette.surface)
                     }
                     if section.isEmpty {
                         Text(FieldLogWords.emptyScope)
@@ -1191,8 +1291,24 @@ public struct FieldLogRowModel: Identifiable, Equatable {
     public let height: QuickMeasureEntry?
     /// Every reading behind this row, newest first.
     public let entries: [QuickMeasureEntry]
-    /// Sort key — the most recent reading in the group.
-    public let latest: Date
+    /// WHEN THIS TREE WAS MEASURED — the sort key, and the time the row and
+    /// the record sheet print.
+    ///
+    /// It is the EARLIEST reading in the group: the moment the cruiser
+    /// arrived at this stem. Every later reading on it — the height after
+    /// the diameter, a re-measure, a number corrected from the sheet — is
+    /// the same visit to the same tree, not a new one.
+    ///
+    /// NOT the newest reading, which is what this used to be and is what
+    /// scrambled the log: adding any reading to an old tree re-dated the
+    /// whole row and threw it to the top of a list the cruiser was reading
+    /// in order. NOT the diameter's time either, tempting as it is when DBH
+    /// is what the workflow measures first — a row can have no diameter at
+    /// all (height-only trees, and every loose reading), and a key that some
+    /// rows do not have is a key that has to be invented for them.
+    ///
+    /// Android's `FieldLogRowModel.measuredAt` is the same minimum.
+    public let measuredAt: Date
 
     /// What the TREE column shows. nil for a row that belongs to no tree.
     public var treeLabel: String? {
@@ -1254,11 +1370,18 @@ public struct FieldLogRowModel: Identifiable, Equatable {
         "e|\(entryID.uuidString)"
     }
 
-    /// Collapses the flat entry list into rows, newest tree first.
+    /// Collapses the flat entry list into rows, most recently MEASURED tree
+    /// first.
     ///
     /// `entries` arrives newest-first from the history, and that order is
-    /// preserved inside each group, so `dbh` / `height` pick up the latest
+    /// preserved INSIDE each group, so `dbh` / `height` pick up the latest
     /// reading of each kind without a second sort.
+    ///
+    /// The rows themselves are then sorted on `measuredAt` — they used to be
+    /// left in the order the groups first appeared, which is the order of
+    /// each group's NEWEST reading, and that is the ordering this row's
+    /// doc comment describes as the bug. Ties break on `id` so a row can
+    /// never swap places with another between two renders of the same data.
     public static func rows(from entries: [QuickMeasureEntry]) -> [FieldLogRowModel] {
         var order: [String] = []
         var grouped: [String: [QuickMeasureEntry]] = [:]
@@ -1289,7 +1412,12 @@ public struct FieldLogRowModel: Identifiable, Equatable {
                 dbh: group.first { $0.kind == .dbh },
                 height: group.first { $0.kind == .height },
                 entries: group,
-                latest: group.map(\.createdAt).max() ?? first.createdAt)
+                measuredAt: group.map(\.createdAt).min() ?? first.createdAt)
+        }
+        .sorted {
+            $0.measuredAt == $1.measuredAt
+                ? $0.id < $1.id
+                : $0.measuredAt > $1.measuredAt
         }
     }
 }
@@ -1495,25 +1623,51 @@ private struct WeightedColumns: Layout {
 
 /// Shared geometry for the field-log table.
 ///
-/// THREE columns now, not four. Dropping ± RANGE and QUALITY gave back
-/// roughly 110 pt on a 360 pt phone, which is why every cell here sits well
-/// inside its column instead of scaling to fit as the four-column table did:
-/// at 288 pt of content the shares are TREE 73.8 / DBH 99.1 / HEIGHT 99.1,
-/// against measured demands of "Plot3-T08" 68, "150.0 cm" 82 and
-/// "150.00 ft" 88. The scale floors below are a backstop for an unusually
+/// FOUR columns now — a narrow display ordinal in front of the three the
+/// cruiser reads. Dropping ± RANGE and QUALITY gave back roughly 110 pt on a
+/// 360 pt phone, and shrinking the row's type from `data` (17 pt) to
+/// `dataSmall` (13 pt) gave back about a quarter of every string on top of
+/// that, which is what pays for the ordinal column. At 288 pt of content and
+/// three 8 pt gutters the shares are #33.0 / TREE 78.3 / DBH 76.4 /
+/// HEIGHT 76.4, against demands at 13 pt monospaced (≈7.8 pt per glyph) of
+/// "12 ·" 31.2, "Plot3-T08" 70.2, and 62.4 for the widest measurement either
+/// unit system prints — "150.0 cm" and "328.1 ft" are both eight glyphs,
+/// diameter and height each carrying one decimal. Every cell still sits
+/// inside its column; the scale floors below are a backstop for an unusually
 /// long value, not the layout.
 private enum FieldLogTable {
-    /// TREE · DBH · HEIGHT. The two measurement columns are equal — either
-    /// can carry the longest string depending on the unit system.
+    /// # · TREE · DBH · HEIGHT. The two measurement columns are equal —
+    /// either can carry the longest string depending on the unit system.
     ///
-    /// TREE carries a NAME now, not just "#128", so it holds a quarter of the
-    /// row rather than a fifth. The width it took came off the two
-    /// measurement columns, which were still well clear of their widest
-    /// reading. Same proportions as the Android sibling's column weights.
-    static let weights: [CGFloat] = [3.8, 5.1, 5.1]
+    /// The ordinal column holds two digits and a separator and no more: it is
+    /// a reading aid, and the log has already lost a column to fit on a
+    /// phone. Past 99 rows in one section the cell tightens and scales rather
+    /// than taking width off the name — a three-digit ordinal is a rarity, a
+    /// truncated tree name is a row the cruiser cannot identify.
+    ///
+    /// TREE carries a NAME, not just "#128", so it holds the largest share of
+    /// what is left. Same numbers as the Android sibling's column weights —
+    /// only the ratios matter, so the two files can be read side by side.
+    static let weights: [CGFloat] = [1.75, 4.15, 4.05, 4.05]
     /// 8 pt, not the 12 pt row default: gaps are width the numbers could
     /// have had.
     static let gap: CGFloat = ForestixSpace.xs
+    /// The font every value cell in a TREE ROW uses.
+    ///
+    /// FIELD REPORT — the rows were `data` (17 pt) and read as oversized
+    /// under a summary card that had already come down to the same size, so
+    /// the list and its header carried equal weight. `dataSmall` (13 pt) is
+    /// the next step of the same scale and the floor of it: it is still
+    /// monospaced and still medium-weight, so the columns line up and the
+    /// digits stay solid at arm's length in daylight. The SUMMARY CARD is
+    /// deliberately left at `data` — the cruiser said it was fine, and the
+    /// step between the two is now what says which is the header.
+    static let valueFont = ForestixType.dataSmall
+    /// The row's second line — species, kinds, "2h ago". One step below the
+    /// values, so the numbers still lead the row after the shrink above.
+    /// `caption` (12 pt) is the existing scale's non-tabular small size, and
+    /// none of what this line carries is a measurement.
+    static let metaFont = ForestixType.caption
     /// ALL-CAPS header tracking. The house `sectionHead` value is 1.2, which
     /// adds ~8 pt to a seven-letter header. 0.8 keeps the spaced-caps look
     /// and leaves the headings comfortably inside their columns.
@@ -1559,6 +1713,14 @@ private struct FieldLogColumnHeader: View {
     var body: some View {
         WeightedColumns(weights: FieldLogTable.weights,
                         spacing: FieldLogTable.gap) {
+            // The ordinal column is headed by nothing. It is a display
+            // ordinal, not a field of the record, so there is no name for it
+            // that would be true — and a heading here would be one more
+            // user-visible string to keep byte-identical across two platforms
+            // for a column whose meaning is obvious the moment the rows below
+            // it read 1, 2, 3. The slot still has to EXIST, or the header's
+            // TREE would sit over the rows' ordinals.
+            cell("", alignment: .leading)
             cell("TREE", alignment: .leading)
             cell("DBH")
             cell("HEIGHT")
@@ -1579,6 +1741,10 @@ private struct FieldLogColumnHeader: View {
 
 private struct FieldLogRow: View {
     let row: FieldLogRowModel
+    /// 1-based position in the list AS DRAWN. Handed in by the renderer, not
+    /// read off the model — see `FieldLogWords.rowOrdinal`. It is display
+    /// only: nothing here writes it, exports it, or joins on it.
+    let ordinal: Int
     let unitSystem: UnitSystem
     /// The log is in move-selection mode. The tick box appears for every
     /// quick row while it is, so an UNticked row is visibly unticked rather
@@ -1613,9 +1779,15 @@ private struct FieldLogRow: View {
             // Same weights as the column header — the two are one table.
             WeightedColumns(weights: FieldLogTable.weights,
                             spacing: FieldLogTable.gap) {
+                // The display ordinal, dimmed and in its own narrow column so
+                // it cannot be misread as part of the tree's name.
+                FieldLogCell(text: FieldLogWords.rowOrdinal(ordinal),
+                             font: FieldLogTable.valueFont,
+                             color: ForestixPalette.textTertiary)
+
                 FieldLogCell(text: row.treeLabel
                                 ?? FieldLogRowModel.kindWord(row.entries[0].kind),
-                             font: ForestixType.data,
+                             font: FieldLogTable.valueFont,
                              color: ForestixPalette.textPrimary,
                              alignment: .leading)
 
@@ -1625,7 +1797,7 @@ private struct FieldLogRow: View {
                     // the two measurement columns rather than being forced
                     // into one of them under a heading it does not match.
                     FieldLogCell(text: looseValue(kind),
-                                 font: ForestixType.data,
+                                 font: FieldLogTable.valueFont,
                                  color: ForestixPalette.textPrimary,
                                  scaleFloor: FieldLogTable.valueScaleFloor)
                     Color.clear.frame(height: 0)
@@ -1634,7 +1806,7 @@ private struct FieldLogRow: View {
                                     MeasurementFormatter.diameter(
                                         cm: $0.value, in: unitSystem)
                                  } ?? "—",
-                                 font: ForestixType.data,
+                                 font: FieldLogTable.valueFont,
                                  color: row.dbh == nil
                                     ? ForestixPalette.textTertiary
                                     : ForestixPalette.textPrimary,
@@ -1644,7 +1816,7 @@ private struct FieldLogRow: View {
                                     MeasurementFormatter.height(
                                         m: $0.value, in: unitSystem)
                                  } ?? "—",
-                                 font: ForestixType.data,
+                                 font: FieldLogTable.valueFont,
                                  color: row.height == nil
                                     ? ForestixPalette.textTertiary
                                     : ForestixPalette.textPrimary,
@@ -1658,18 +1830,20 @@ private struct FieldLogRow: View {
                     // two named columns (a crown on the same tree).
                     ForEach(extraKinds, id: \.self) { word in
                         Text(word)
-                            .font(ForestixType.dataSmall)
+                            .font(FieldLogTable.metaFont)
                             .foregroundStyle(ForestixPalette.textTertiary)
                     }
                 }
                 if let species = speciesName {
                     Text(species)
-                        .font(ForestixType.dataSmall)
+                        .font(FieldLogTable.metaFont)
                         .foregroundStyle(ForestixPalette.textSecondary)
                         .lineLimit(1)
                 }
-                Text(compactRelativeAgo(row.latest))
-                    .font(ForestixType.dataSmall)
+                // The time the row is SORTED on, so the order the cruiser
+                // reads is the order this column explains.
+                Text(compactRelativeAgo(row.measuredAt))
+                    .font(FieldLogTable.metaFont)
                     .foregroundStyle(ForestixPalette.textTertiary)
                     .lineLimit(1)
                 Spacer(minLength: 0)
@@ -1744,6 +1918,8 @@ private struct FieldLogRow: View {
 /// exactly where the tap goes.
 private struct FieldLogCruiseRowView: View {
     let row: FieldLogCruiseRow
+    /// 1-based position in the list AS DRAWN — see `FieldLogRow.ordinal`.
+    let ordinal: Int
     let unitSystem: UnitSystem
     /// The log is in bulk-move selection mode. The tick box appears for
     /// every cruise row while it is, so an UNticked row is visibly unticked
@@ -1776,19 +1952,25 @@ private struct FieldLogCruiseRowView: View {
         VStack(alignment: .leading, spacing: 4) {
             WeightedColumns(weights: FieldLogTable.weights,
                             spacing: FieldLogTable.gap) {
+                // Same display ordinal, same column, same dimming as the quick
+                // row — the two worlds read as one sheet of paper, and a
+                // cruise row that skipped the number would break the run.
+                FieldLogCell(text: FieldLogWords.rowOrdinal(ordinal),
+                             font: FieldLogTable.valueFont,
+                             color: ForestixPalette.textTertiary)
                 FieldLogCell(text: row.treeLabel,
-                             font: ForestixType.data,
+                             font: FieldLogTable.valueFont,
                              color: ForestixPalette.textPrimary,
                              alignment: .leading)
                 FieldLogCell(text: MeasurementFormatter.diameter(
                                 cm: row.dbhCm, in: unitSystem),
-                             font: ForestixType.data,
+                             font: FieldLogTable.valueFont,
                              color: ForestixPalette.textPrimary,
                              scaleFloor: FieldLogTable.valueScaleFloor)
                 FieldLogCell(text: row.heightM.map {
                                 MeasurementFormatter.height(m: $0, in: unitSystem)
                              } ?? "—",
-                             font: ForestixType.data,
+                             font: FieldLogTable.valueFont,
                              color: row.heightM == nil
                                 ? ForestixPalette.textTertiary
                                 : ForestixPalette.textPrimary,
@@ -1797,12 +1979,12 @@ private struct FieldLogCruiseRowView: View {
             HStack(spacing: 6) {
                 if !row.speciesCode.isEmpty {
                     Text(RegionalSpecies.name(forCode: row.speciesCode))
-                        .font(ForestixType.dataSmall)
+                        .font(FieldLogTable.metaFont)
                         .foregroundStyle(ForestixPalette.textSecondary)
                         .lineLimit(1)
                 }
                 Text(compactRelativeAgo(row.recordedAt))
-                    .font(ForestixType.dataSmall)
+                    .font(FieldLogTable.metaFont)
                     .foregroundStyle(ForestixPalette.textTertiary)
                     .lineLimit(1)
                 Spacer(minLength: 0)
@@ -2735,7 +2917,7 @@ private struct FieldLogDetailForm: View {
         let fmt = DateFormatter()
         fmt.locale = Locale(identifier: "en_US")
         fmt.dateFormat = "MMM d, HH:mm"
-        return fmt.string(from: row.latest)
+        return fmt.string(from: row.measuredAt)
     }
 
     // MARK: The recorded coordinate

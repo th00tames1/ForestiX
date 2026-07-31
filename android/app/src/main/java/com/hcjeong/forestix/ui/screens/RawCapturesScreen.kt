@@ -66,6 +66,14 @@ import kotlin.math.sqrt
 
 private const val REL_TOL = 1e-3
 
+/// The ZIP holds every bundle, including ones the field log has moved on from.
+/// Byte-identical to the iOS sibling (RawCapturesScreen.corpusCompletenessNotice).
+private const val CORPUS_COMPLETENESS_NOTICE =
+    "Export ZIP is the COMPLETE corpus, not the field log: a bundle whose " +
+        "reading was deleted or retaken is still in it, and a ground truth " +
+        "the field log has since corrected keeps its original value here. " +
+        "Nothing is filtered out."
+
 /// Minimum scored captures before the ranking table dares to crown a winner
 /// (shared with the replay engine so both platforms use the same floor).
 private val MIN_RANK_N = RawCaptureReplay.MIN_RANKING_N
@@ -258,6 +266,18 @@ fun RawCapturesScreen(nav: NavController) {
                     }
                 }
                 FormDivider()
+                // WHAT THE ZIP IS, said where the ZIP is exported. The research
+                // CSV export splits itself against the field log; this one
+                // deliberately does not, because a complete capture archive is
+                // the thing worth having and a bundle whose reading was retaken
+                // is exactly what an accuracy study wants to see. Nothing is
+                // left out — so the honest notice is the inverse one: what is
+                // IN it that the field log no longer shows. Byte-identical to
+                // the iOS sibling.
+                Text(
+                    CORPUS_COMPLETENESS_NOTICE,
+                    style = type.caption, color = colors.textSecondary,
+                )
                 SettingsActionRowLocal(
                     title = if (exporting) "Exporting…" else "Export ZIP",
                     icon = Icons.Filled.IosShare,

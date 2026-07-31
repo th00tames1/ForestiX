@@ -429,8 +429,11 @@ object PDFReportBuilder {
             val pno = plotNumberById[t.plotId]?.let { "$it" } ?: "?"
             // Spelled out. "del / ms / irr" was three codes with no key
             // anywhere in the document.
+            // "Deleted", not "Removed": the same flag prints "Deleted" in the
+            // iOS appendix and the CSV column beside it is `deleted_at`, so
+            // one word means one thing across both platforms and both files.
             val flagBits = listOfNotNull(
-                if (t.deletedAt != null) "Removed" else null,
+                if (t.deletedAt != null) "Deleted" else null,
                 if (t.isMultistem) "Multistem" else null,
                 if (t.dbhIsIrregular) "Irregular" else null,
             )

@@ -74,6 +74,7 @@ import com.hcjeong.forestix.common.ForestixLogger
 import com.hcjeong.forestix.common.Region
 import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.common.defaultLogRule
+import com.hcjeong.forestix.data.ResearchExport
 import com.hcjeong.forestix.data.ResearchLog
 import com.hcjeong.forestix.data.TruthBackfill
 import com.hcjeong.forestix.data.TruthUnitRepair
@@ -117,6 +118,12 @@ fun SettingsScreen(nav: NavController) {
     // card away from the Export rows (a mis-tap used to wipe the corpus).
     var confirmClearResearch by remember { mutableStateOf(false) }
     var confirmClearEvents by remember { mutableStateOf(false) }
+
+    // Research-CSV export: the run is in flight, and what the last one held
+    // back. The sentence stays on screen after the share sheet closes — the
+    // counts are the point, and a toast the cruiser dismissed is not a record.
+    var researchExportRunning by remember { mutableStateOf(false) }
+    var researchExportResult by remember { mutableStateOf<String?>(null) }
 
     // Ground-truth recovery: the run is in flight, and what the last one did.
     var truthBackfillRunning by remember { mutableStateOf(false) }
@@ -533,13 +540,40 @@ fun SettingsScreen(nav: NavController) {
                             modifier = Modifier.weight(1f))
                         Text("$rowCount rows", style = type.body, color = colors.textSecondary)
                     }
+                    // THE EXPORT IS CLASSIFIED, NOT COPIED. The log is
+                    // append-only, so it still holds the row a retake replaced
+                    // and the ground truth a correction moved on from.
+                    // [ResearchExport] splits it into what the FIELD LOG shows
+                    // and what it no longer does, ships BOTH files in one
+                    // archive, and returns the counts — which go on screen
+                    // below, because a quiet filter is how someone later
+                    // concludes data went missing. Nothing on disk is touched.
                     FormDivider()
                     SettingsActionRow(
-                        title = "Export research CSV",
+                        title = if (researchExportRunning) "Exporting…"
+                                else "Export research CSV",
                         icon = Icons.Filled.IosShare,
-                        enabled = hasData,
+                        enabled = hasData && !researchExportRunning,
                     ) {
-                        ResearchLog.exportUri(context)?.let { shareFile(context, it, "text/csv") }
+                        researchExportRunning = true
+                        researchExportResult = null
+                        scope.launch {
+                            // Off the main thread: the pass parses the whole
+                            // research CSV, which is a field season of rows.
+                            val outcome = withContext(Dispatchers.IO) {
+                                ResearchExport.run(context, env.history.entries.value)
+                            }
+                            researchExportResult = outcome.message
+                            researchExportRunning = false
+                            // Shared only when a file was actually written — an
+                            // empty log and a failed write both leave the
+                            // sentence on screen and no share sheet, rather
+                            // than sharing a file that is not there.
+                            outcome.uri?.let { shareFile(context, it, "application/zip") }
+                        }
+                    }
+                    researchExportResult?.let {
+                        Text(it, style = type.caption, color = colors.textSecondary)
                     }
 
                     // Event log — local-only structured analytics (plot open,

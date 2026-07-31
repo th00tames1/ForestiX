@@ -9,9 +9,13 @@
 //
 // WIRED (developer mode only): the DBH / Height / Distance screens append a
 // row on every accepted reading, with an optional user-entered true value →
-// error column. Settings › Developer exports/clears this CSV. The Android
-// data/ResearchLog.kt mirrors the same column order so the two platforms'
-// exports concatenate for the cross-platform accuracy analysis.
+// error column. Settings › Developer clears this CSV, and exports it through
+// `ResearchExport` — the log is append-only, so the row a retake replaced and
+// the ground truth a correction moved on from are both still in here, and the
+// export is what separates them from what the field log shows. Nothing in this
+// file removes a row. The Android data/ResearchLog.kt mirrors the same column
+// order so the two platforms' exports concatenate for the cross-platform
+// accuracy analysis.
 
 import Foundation
 import Common
@@ -286,6 +290,28 @@ public final class ResearchLog {
             records.append(record)
         }
         return records
+    }
+
+    /// The whole log as parsed records, header first — what `ResearchExport`
+    /// classifies. nil when there is nothing usable on disk.
+    ///
+    /// Runs the header migration FIRST and refuses a log it could not bring up
+    /// to the current column order: an export written from a stale header
+    /// would name its columns wrong, which is the same silent corruption
+    /// appending under one would be. On the log's own queue, so it cannot
+    /// interleave with an append and see half a row.
+    ///
+    /// Read-only — the export never removes a row. `ResearchLog` is
+    /// append-only by design and stays that way; deciding what an export
+    /// SHOWS is a different question from what the device KEEPS.
+    public func snapshotRecords() -> [[String]]? {
+        queue.sync {
+            guard prepareFileLocked() == .ready else { return nil }
+            guard let text = try? String(contentsOf: fileURL, encoding: .utf8)
+            else { return nil }
+            let records = Self.parseRecords(text)
+            return records.isEmpty ? nil : records
+        }
     }
 
     public func clear() {

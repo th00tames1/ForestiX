@@ -4,14 +4,16 @@
 //
 // WIRED (developer mode only): the DBH / Height / Distance screens append a
 // row on every accepted reading, with an optional user-entered true value →
-// error column. Settings › Developer exports/clears this CSV.
+// error column. Settings › Developer clears this CSV, and exports it through
+// [ResearchExport] — the log is append-only, so the row a retake replaced and
+// the ground truth a correction moved on from are both still in here, and the
+// export is what separates them from what the field log shows. Nothing in this
+// file removes a row.
 
 package com.hcjeong.forestix.data
 
 import android.content.Context
-import android.net.Uri
 import android.os.Build
-import androidx.core.content.FileProvider
 import com.hcjeong.forestix.common.TruthInput
 import java.io.File
 import java.text.SimpleDateFormat
@@ -263,15 +265,33 @@ object ResearchLog {
         return n + 1
     }
 
-    /// Copy the log into the shared-export cache and return a shareable Uri
-    /// (same FileProvider flow as QuickMeasureHistory.writeExport).
-    fun exportUri(context: Context): Uri? {
-        val src = file(context)
-        if (!src.exists()) return null
-        val dir = File(context.cacheDir, "Exports").apply { mkdirs() }
-        val dst = File(dir, "forestix_research_log.csv")
-        src.copyTo(dst, overwrite = true)
-        return FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", dst)
+    // The old `exportUri` — a straight copy of this file into the share cache —
+    // is deliberately GONE. It shipped the append-only log verbatim, so a
+    // reading the cruiser had retaken and a ground truth they had corrected
+    // both came out beside their replacements with nothing to tell them apart.
+    // [ResearchExport.run] is the only export path now: it classifies the log
+    // against the field log, ships the held-back rows in the same archive, and
+    // states the counts. A second entry point that bypassed that would put the
+    // original complaint one wiring mistake away from coming back.
+
+    /// The whole log as parsed records, header first — what [ResearchExport]
+    /// classifies. null when there is nothing usable on disk.
+    ///
+    /// Runs the header migration FIRST and refuses a log it could not bring up
+    /// to the current column order: an export written from a stale header would
+    /// name its columns wrong, which is the same silent corruption appending
+    /// under one would be. @Synchronized against [record] and [clear], so it
+    /// cannot interleave with an append and see half a row.
+    ///
+    /// Read-only — the export never removes a row. [ResearchLog] is
+    /// append-only by design and stays that way; deciding what an export SHOWS
+    /// is a different question from what the device KEEPS.
+    @Synchronized
+    fun snapshotRecords(context: Context): List<List<String>>? {
+        val out = file(context)
+        if (prepareFile(out) != FileState.READY) return null
+        val text = try { out.readText() } catch (_: Exception) { return null }
+        return parseRecords(text).ifEmpty { null }
     }
 
     @Synchronized
@@ -402,7 +422,10 @@ object ResearchLog {
         return fmt.format(Date())
     }
 
-    private fun csvEscape(s: String): String =
+    /// Internal, not private: [ResearchExport] re-emits these same rows into
+    /// the exported CSVs and must quote them the identical way, or a note
+    /// containing a comma would survive the log and not the export.
+    internal fun csvEscape(s: String): String =
         if (s.contains(",") || s.contains("\"") || s.contains("\n"))
             "\"" + s.replace("\"", "\"\"") + "\""
         else s

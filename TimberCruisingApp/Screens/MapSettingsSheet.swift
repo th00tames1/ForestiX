@@ -121,9 +121,13 @@ struct MapSettingsSheet: View {
             // "the boundary", not "the imported boundary": since the
             // cruiser can draw one too, naming only the imported case
             // would leave a drawn boundary looking un-removable.
-            .confirmationDialog("Remove the boundary?",
-                                isPresented: $confirmingRemove,
-                                titleVisibility: .visible) {
+            // ALERT, not a confirmationDialog: a destructive confirmation is
+            // centred and reads the same wherever the row that raised it sits.
+            // An action sheet raised from a List row inside a sheet becomes a
+            // popover pinned to that row in a regular size class. Same rule as
+            // every other delete in this app; see the field log's delete for
+            // the full argument.
+            .alert("Remove the boundary?", isPresented: $confirmingRemove) {
                 Button("Remove", role: .destructive) {
                     boundaryModel.remove()
                     importFailure = nil
@@ -152,12 +156,11 @@ struct MapSettingsSheet: View {
         // surveyor's file and one drawn with a fingertip are not
         // interchangeable, and the app keeps exactly one — so the swap is
         // always an answered question, never a side effect of a button.
-        .confirmationDialog("Replace the boundary?",
-                            isPresented: Binding(
-                                get: { pendingImport != nil },
-                                set: { if !$0 { pendingImport = nil } }),
-                            titleVisibility: .visible,
-                            presenting: pendingImport) { incoming in
+        .alert("Replace the boundary?",
+               isPresented: Binding(
+                   get: { pendingImport != nil },
+                   set: { if !$0 { pendingImport = nil } }),
+               presenting: pendingImport) { incoming in
             Button("Replace", role: .destructive) { commitPendingImport(incoming) }
             Button("Cancel", role: .cancel) { pendingImport = nil }
         } message: { _ in

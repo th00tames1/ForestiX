@@ -548,10 +548,17 @@ fun MapHomeScreen(nav: NavController) {
             // with the mode (see MapPlanMenu); the gesture itself never does.
             // iOS ungates it the same way.
             onMapLongPress = { coordinate ->
-                // The peek the press replaces is per-mode here (iOS keeps one
-                // selection for both), so clear the one this mode is showing.
-                if (!isCruise) selectedPinId = null
-                cruise.onMapLongPress(coordinate, inCruiseMode = isCruise)
+                // A press while an outline is being dragged belongs to that
+                // outline: raising a planning menu mid-edit would offer to
+                // start something else on top of unsaved work.
+                if (areaState.draft == null) {
+                    // The peek the press replaces is per-mode here (iOS keeps
+                    // one selection for both), so clear the one this mode is
+                    // showing.
+                    if (!isCruise) selectedPinId = null
+                    areaState.selectedId = null
+                    cruise.onMapLongPress(coordinate, inCruiseMode = isCruise)
+                }
             },
             // The you-dot, from the gated fix ONLY. A dot is the map's
             // flattest assertion — "you are here" — so it may never outlive
@@ -868,20 +875,14 @@ fun MapHomeScreen(nav: NavController) {
             },
         )
     }
-    // DRAW AN AREA — full-screen over the home, opening on the ground the
-    // cruiser was already looking at so the starting rectangle lands there.
-    // Two doors, one editor: the map's press-and-hold (both modes) opens
-    // CENTRED ON THE PRESS, Map settings has no pressed point and opens on
-    // the camera instead.
-    val drawSeed = cruise.boundaryDrawSeed
-    if (drawingBoundary || drawSeed != null) {
+    // DRAW THE BOUNDARY — full-screen over the home, opening on the ground
+    // the cruiser was already looking at. Map settings is its one door; the
+    // map's press-and-hold draws a cruise AREA in place instead.
+    if (drawingBoundary) {
         BoundaryDrawScreen(
-            initialCenter = drawSeed ?: camera.center ?: mapCenter,
+            initialCenter = camera.center ?: mapCenter,
             initialZoom = camera.zoom,
-            onDismiss = {
-                drawingBoundary = false
-                cruise.boundaryDrawSeed = null
-            },
+            onDismiss = { drawingBoundary = false },
         )
     }
     if (photoPages.isNotEmpty()) {
@@ -999,7 +1000,12 @@ fun MapHomeScreen(nav: NavController) {
             camera = camera,
             fallbackCentre = mapCenter,
             setupArea = areaState.cruiseSetupArea,
-            onSetupClosed = { areaState.cruiseSetupArea = null },
+            // Generation just changed how many plots sit inside this area,
+            // and that count is what the area's own callout reports.
+            onSetupClosed = {
+                areaState.cruiseSetupArea = null
+                areaState.refresh++
+            },
         )
     }
 

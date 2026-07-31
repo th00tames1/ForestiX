@@ -86,9 +86,9 @@ import kotlinx.coroutines.withContext
 fun MapSettingsSheet(
     camera: MapCameraState,
     onDismiss: () -> Unit,
-    /// "Draw an area" — the host closes this sheet and opens the boundary
-    /// editor full-screen. The sheet does not own that screen: a map editor
-    /// inside a bottom sheet has nowhere to put the map.
+    /// "Draw the boundary" — the host closes this sheet and opens the
+    /// boundary editor full-screen. The sheet does not own that screen: a
+    /// map editor inside a bottom sheet has nowhere to put the map.
     onDrawArea: () -> Unit = {},
 ) {
     val colors = Forestix.colors
@@ -394,6 +394,12 @@ private fun SurveyBoundaryGroup(onDrawArea: () -> Unit) {
         // Draw the stand instead of bringing a file for it. Sits in the
         // same group as Import because it fills the same slot — there is
         // one boundary, and this is the other way to get one.
+        //
+        // NOT "Draw an area": the map's press-and-hold now uses those words
+        // for a cruise AREA, which is a different object (a stratum plots
+        // are generated inside). Two controls with one label and two
+        // meanings is the defect, so the one that means "the survey
+        // boundary" says so.
         Row(
             Modifier
                 .fillMaxWidth()
@@ -411,7 +417,7 @@ private fun SurveyBoundaryGroup(onDrawArea: () -> Unit) {
                 tint = colors.primary,
                 modifier = Modifier.size(20.dp),
             )
-            Text("Draw an area", style = type.body, color = colors.primary)
+            Text("Draw the boundary", style = type.body, color = colors.primary)
         }
 
         // A refusal is never swallowed — it stays until the next attempt.

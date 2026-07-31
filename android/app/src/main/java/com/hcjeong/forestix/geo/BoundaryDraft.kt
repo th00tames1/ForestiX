@@ -1,5 +1,7 @@
-// A stand boundary being DRAWN on the map — the editable shape behind
-// "Draw an area", before it becomes a stored boundary.
+// AN OUTLINE BEING DRAGGED ON THE MAP — the editable shape behind both
+// "Draw the boundary" (Map settings) and "Draw an area" (the home map's
+// press-and-hold), before it becomes a stored boundary or the ring of a
+// cruise area.
 // 1:1 port of iOS Geo/BoundaryDraft.swift; every user-visible sentence and
 // every persisted string in here is byte-identical to the sibling's.
 //
@@ -18,8 +20,8 @@
 // against come from the same maths.
 //
 // The vertex list is OPEN (first != last). The closing repeat is added once,
-// in `toGeometry()`, so the ring the store persists is shaped exactly like
-// the one the GeoJSON parser hands back for an import.
+// in `closedRing`, so the ring the store persists is shaped exactly like the
+// one the GeoJSON parser hands back for an import.
 
 package com.hcjeong.forestix.geo
 

@@ -406,12 +406,21 @@ fun FieldLogScreen(
     }
 
     // The plot this screen is reporting on — the one whose summary card sits
-    // at the top of the log — resolved through the default plot the same way
-    // every entry's plotID is read. A hand-entered stem joins the plot the
-    // cruiser is LOOKING at, and it is captured when the sheet opens rather
-    // than read again on Create, so a plot switched elsewhere in the app
-    // mid-typing cannot claim the tree.
-    val shownPlotID = activePlotID ?: plots.firstOrNull { it.isDefault }?.id
+    // at the top of the log.
+    //
+    // A hand-entered stem joins the plot the cruiser is LOOKING at, so THE
+    // FILTER decides it: filtered to one quick plot, the stem joins that one.
+    // The card above the list is now that plot's card, and a "New tree" that
+    // landed somewhere else would file a stem under a plot the cruiser is not
+    // looking at and cannot see it appear in. Every other scope falls back to
+    // the active plot, resolved through the default the same way every entry's
+    // plotID is read — a cruise scope included, because a quick reading has no
+    // cruise plot it could join.
+    //
+    // It is captured when the sheet opens rather than read again on Create, so
+    // a plot switched elsewhere in the app mid-typing cannot claim the tree.
+    val shownPlotID = (logScope as? FieldLogScope.QuickPlot)?.id
+        ?: activePlotID ?: plots.firstOrNull { it.isDefault }?.id
     val startNewTree = {
         newTree = FieldLogNewTree(
             // The measure chooser's own rule — max(existing) + 1 across the

@@ -290,7 +290,10 @@ internal fun handleOverlayTap(
                 announceStack(state, showingArea = true)
             }
         }
-        plotId != null -> cruise.openPlotMenu(plotId)
+        plotId != null -> {
+            state.selectedId = null
+            cruise.openPlotMenu(plotId)
+        }
         // Tapping the selected area again lets it go — otherwise an area
         // covering the viewport would be a selection with no way out except
         // a pin tap.

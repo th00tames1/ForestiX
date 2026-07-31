@@ -249,20 +249,6 @@ internal class CruiseModeState {
     /// The (+)'s two doors into a plot — start on the fix that exists now, or
     /// plan the location on the map first.
     var startPlotChoiceOpen by mutableStateOf(false)
-    /// Where the long-press menu's "Draw an area" opens the boundary editor:
-    /// the coordinate the cruiser pressed, so the starting rectangle lands on
-    /// the ground under their finger rather than on the screen centre. null =
-    /// the editor is closed.
-    ///
-    /// This is the ONLY handoff from the map menu to the editor — one entry
-    /// point, so "Draw an area" cannot end up meaning two different things on
-    /// the two platforms. Map settings has its own door into the same editor
-    /// and opens on the camera instead, because there is no pressed point
-    /// there to open on. Set in BOTH modes — the boundary is a map object,
-    /// not a cruise one, which is also why this holder (remembered across the
-    /// mode toggle) can carry it. iOS: `MapHomeScreen.boundaryDrawSeed`.
-    var boundaryDrawSeed by mutableStateOf<CoordinateConversions.LatLon?>(null)
-
     /// Drop a PlannedPlot where the cruiser pressed — wired by
     /// CruiseModeEffects (it needs the environment + a coroutine scope).
     var planPlot: (CoordinateConversions.LatLon) -> Unit = {}

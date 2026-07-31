@@ -131,6 +131,7 @@ extension MapHomeScreen {
                 showAreaStackHint(showingArea: true)
             }
         case let (plotID?, nil):
+            clearAreaSelection()
             openPlotMenu(plotID)
         case let (nil, id?):
             // Tapping the selected area again lets it go — otherwise an
@@ -423,7 +424,55 @@ extension MapHomeScreen {
             // and the cruiser did not come here to be told so.
             _ = autoCreateProject()
         }
+        // Laying out a cruise puts the cruiser in cruise mode: the pins this
+        // is about to generate are cruise content, and generating them onto
+        // a map that does not draw them would look like nothing happened.
+        if !isCruiseMode {
+            withAnimation(.easeOut(duration: 0.18)) {
+                selectedPinID = nil
+                settings.mapMode = "cruise"
+            }
+            reloadCruise()
+        }
+        clearAreaSelection()
         presentingCruiseSetup = true
+    }
+
+    // MARK: - Presentations
+
+    /// The area alerts, hung off the map stack. Its own function beside
+    /// `cruisePresentations` rather than more modifiers on that chain,
+    /// which is already long enough that two more put the type-checker over
+    /// its budget and failed the build.
+    func areaPresentations<Content: View>(over content: Content) -> some View {
+        content
+            // AREA DELETED, step two. Never silent and never vague: the plan
+            // laid inside an area goes with it, and the count is in the
+            // sentence, because a cruiser about to lose a morning's planning
+            // has to know how much before they answer.
+            .alert(deleteAreaCandidate.map(areaDeletionTitle) ?? "",
+                   isPresented: Binding(
+                       get: { deleteAreaCandidateID != nil },
+                       set: { if !$0 { deleteAreaCandidateID = nil } }),
+                   presenting: deleteAreaCandidate) { stratum in
+                Button("Delete area", role: .destructive) { deleteArea(stratum) }
+                    .accessibilityIdentifier("mapHome.areaDelete.confirm")
+                Button("Cancel", role: .cancel) { deleteAreaCandidateID = nil }
+            } message: { stratum in
+                Text(areaDeletionMessage(stratum))
+            }
+            // A refusal the cruiser has to see: an area that did not persist
+            // must never look like one that did. Only while no draft is open
+            // — mid-drag the draft bar already carries the sentence.
+            .alert("Couldn't save the area",
+                   isPresented: Binding(
+                       get: { areaSaveRefusal != nil && areaDraft == nil },
+                       set: { if !$0 { areaSaveRefusal = nil } })
+            ) {
+                Button("OK", role: .cancel) { areaSaveRefusal = nil }
+            } message: {
+                Text(areaSaveRefusal ?? "")
+            }
     }
 
     // MARK: - The projected layer (pin, callouts, handles)
@@ -880,7 +929,7 @@ struct MapCallout<Content: View>: View {
     let anchor: CGPoint
     let viewport: CGSize
     let title: String
-    var subtitle: String?
+    var subtitle: String? = nil
     @ViewBuilder let content: Content
 
     private static var width: CGFloat { 240 }

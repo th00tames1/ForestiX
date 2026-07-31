@@ -1,5 +1,8 @@
-// DRAW AN AREA — the stand boundary, sketched on the map instead of
-// imported from a file. 1:1 port of iOS Screens/BoundaryDrawScreen.swift;
+// DRAW THE BOUNDARY — the stand boundary, sketched on the map instead of
+// imported from a file. Map settings is its one door: the map's own
+// press-and-hold draws a cruise AREA in place instead (a stratum, edited on
+// the home map — see ui/screens/cruise/MapAreas.kt), and that is a
+// different object with a different job. 1:1 port of iOS Screens/BoundaryDrawScreen.swift;
 // every user-visible sentence here is byte-identical to the sibling's.
 //
 // The cruiser's reference is a drone mission planner: a rectangle appears,
@@ -107,7 +110,7 @@ private val HandleInk = Color(0xFFFFB454)
 @Composable
 fun BoundaryDrawScreen(
     /// Where the map opens — the camera the cruiser was already looking at,
-    /// so "Draw an area" drops the rectangle on the ground on screen and
+    /// so "Draw the boundary" drops the rectangle on the ground on screen and
     /// not on a remembered default.
     initialCenter: CoordinateConversions.LatLon,
     initialZoom: Double,
@@ -212,7 +215,7 @@ fun BoundaryDrawScreen(
                 .padding(vertical = ForestixSpace.xs)
         ) {
             Text(
-                "Draw an area",
+                "Draw the boundary",
                 style = type.bodyBold.copy(fontSize = 17.sp),
                 color = colors.textPrimary,
                 modifier = Modifier.align(Alignment.Center),

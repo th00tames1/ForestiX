@@ -564,6 +564,14 @@ extension MapHomeScreen {
     /// the home's map stack in one place. Presentation FLAGS are only
     /// ever set from cruise-mode UI, so these are inert in measure mode.
     func cruisePresentations<Content: View>(over content: Content) -> some View {
+        // The area alerts hang off a SEPARATE function rather than the end
+        // of this chain: this one is already long enough that adding two
+        // more modifiers put the type-checker over its budget and failed
+        // the build outright.
+        areaPresentations(over: cruiseOwnPresentations(over: content))
+    }
+
+    private func cruiseOwnPresentations<Content: View>(over content: Content) -> some View {
         content
         #if os(iOS)
             .fullScreenCover(isPresented: $presentingPlotSetup,
@@ -730,32 +738,6 @@ extension MapHomeScreen {
             // object. The state (`mapPlanCoordinate`) and the flow through
             // "Pick on the map" are unchanged.
             //
-            // AREA DELETED, step two. Never silent and never vague: the
-            // plan laid inside an area goes with it, and the count is in
-            // the sentence, because a cruiser about to lose a morning's
-            // planning has to know how much before they answer.
-            .alert(deleteAreaCandidate.map(areaDeletionTitle) ?? "",
-                   isPresented: Binding(
-                       get: { deleteAreaCandidateID != nil },
-                       set: { if !$0 { deleteAreaCandidateID = nil } }),
-                   presenting: deleteAreaCandidate) { stratum in
-                Button("Delete area", role: .destructive) { deleteArea(stratum) }
-                    .accessibilityIdentifier("mapHome.areaDelete.confirm")
-                Button("Cancel", role: .cancel) { deleteAreaCandidateID = nil }
-            } message: { stratum in
-                Text(areaDeletionMessage(stratum))
-            }
-            // A refusal the cruiser has to see: an area that did not
-            // persist must never look like one that did.
-            .alert("Couldn't save the area",
-                   isPresented: Binding(
-                       get: { areaSaveRefusal != nil && areaDraft == nil },
-                       set: { if !$0 { areaSaveRefusal = nil } })
-            ) {
-                Button("OK", role: .cancel) { areaSaveRefusal = nil }
-            } message: {
-                Text(areaSaveRefusal ?? "")
-            }
             // The (+)'s two doors. Not a third path: "Pick on the map" arms
             // the press-and-hold above and nothing else.
             .confirmationDialog(
@@ -1988,11 +1970,18 @@ extension MapHomeScreen {
     /// planned plot exists only in the cruise world, and an arm that outlived
     /// a mode flip must not relocate a plan from a map no longer showing it.
     func handleMapLongPress(at coordinate: CoordinateConversions.LatLon) {
+        // A press while an outline is being dragged belongs to that outline:
+        // raising a planning menu mid-edit would offer to start something
+        // else on top of unsaved work.
+        guard areaDraft == nil else { return }
         if isCruiseMode, let id = movingPlannedID {
             movePlanned(id: id, to: coordinate)
             return
         }
-        withAnimation(.easeOut(duration: 0.18)) { selectedPinID = nil }
+        withAnimation(.easeOut(duration: 0.18)) {
+            selectedPinID = nil
+            selectedAreaID = nil
+        }
         mapPlanCoordinate = coordinate
     }
 

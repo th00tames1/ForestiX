@@ -1222,9 +1222,16 @@ public struct BasemapMapView: View {
                 })
             }
             if inHole { continue }
+            // Widths and heights are pulled out and annotated rather than
+            // multiplied inside one `Double(…)`. Written as a single
+            // expression, the CGFloat-vs-Double overload search across four
+            // optional-coalesced operands ran past the type checker's
+            // per-expression budget and failed the build outright. Same
+            // arithmetic, same result.
             let xs = projected.map(\.x), ys = projected.map(\.y)
-            let extent = Double(((xs.max() ?? 0) - (xs.min() ?? 0))
-                * ((ys.max() ?? 0) - (ys.min() ?? 0)))
+            let width: Double = Double((xs.max() ?? 0) - (xs.min() ?? 0))
+            let height: Double = Double((ys.max() ?? 0) - (ys.min() ?? 0))
+            let extent = width * height
             if best == nil || extent < best!.extent {
                 best = (area.id, extent)
             }

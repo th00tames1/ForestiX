@@ -1135,14 +1135,22 @@ public struct FieldLogScreen: View {
     // MARK: - A tree the sensors never read
 
     /// The plot this screen is reporting on — the one whose summary card sits
-    /// at the top of the log — resolved through the default plot the same way
-    /// every entry's `plotID` is read.
+    /// at the top of the log.
     ///
-    /// A hand-entered stem joins the plot the cruiser is LOOKING at. It is
-    /// captured when the sheet opens rather than read again on Create, so a
-    /// plot switched elsewhere in the app mid-typing cannot claim the tree.
+    /// A hand-entered stem joins the plot the cruiser is LOOKING at, so THE
+    /// FILTER decides it: filtered to one quick plot, the stem joins that one.
+    /// The card above the list is now that plot's card, and a "New tree" that
+    /// landed somewhere else would file a stem under a plot the cruiser is not
+    /// looking at and cannot see it appear in. Every other scope falls back to
+    /// the active plot, resolved through the default the same way every entry's
+    /// `plotID` is read — a cruise scope included, because a quick reading has
+    /// no cruise plot it could join.
+    ///
+    /// It is captured when the sheet opens rather than read again on Create, so
+    /// a plot switched elsewhere in the app mid-typing cannot claim the tree.
     private var shownPlotID: UUID? {
-        history.activePlotID ?? history.defaultPlotID()
+        if case .quickPlot(let id) = scope { return id }
+        return history.activePlotID ?? history.defaultPlotID()
     }
 
     private func startNewTree() {

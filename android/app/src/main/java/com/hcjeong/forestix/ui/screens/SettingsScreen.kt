@@ -616,6 +616,28 @@ fun SettingsScreen(nav: NavController) {
                             style = type.caption, color = colors.confidenceWarn,
                         )
                     }
+                    // Breast-height guide — answers "how does the phone know
+                    // it is reading the stem AT breast height?" by putting
+                    // breast height in the world where the cruiser can see it.
+                    // Drawing only: it is never read by the estimator, never
+                    // stored, and never exported.
+                    FormDivider()
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text("Breast-height guide", style = type.body, color = colors.textPrimary)
+                            Text(
+                                "Draw a 1.37 m (4.5 ft) marker up from the tree base on the " +
+                                    "Diameter scan so the diameter is read at breast height. " +
+                                    "Guide only — it never changes the recorded diameter. " +
+                                    "Off by default.",
+                                style = type.caption, color = colors.textSecondary,
+                            )
+                        }
+                        Switch(
+                            checked = settings.breastHeightGuide,
+                            onCheckedChange = { env.settings.setBreastHeightGuide(it) },
+                        )
+                    }
                     // Readable bundles + the ones that exist on disk but whose
                     // manifest won't parse: the latter are in NO list and no
                     // total, so the count alone used to under-report the

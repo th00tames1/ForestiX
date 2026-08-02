@@ -14,6 +14,21 @@ object Units {
     fun metersToFeet(m: Double) = m / METERS_PER_FOOT
     fun feetToMeters(ft: Double) = ft * METERS_PER_FOOT
 
+    /// Breast height, US convention: 4.5 ft written in metres.
+    ///
+    /// THE ONE PLACE THIS NUMBER LIVES ON ANDROID. Anything that draws,
+    /// labels or reasons about breast height reads it from here, so the
+    /// convention can be changed in a single edit. Kept equal to the iOS
+    /// `Units.breastHeightM` — one rule, two platforms.
+    ///
+    /// It is NOT the 1.3 m that appears throughout the inventory engine
+    /// (Näslund's asymptote in the H–D model, the `h > 1.3` volume guards,
+    /// Laasasenaho's `(h − 1.3)` form). Those 1.3s belong to published
+    /// equations and mean the international convention; retuning them to
+    /// this value would move every fitted height and every volume in the
+    /// corpus, which is a study-level decision, not a constant swap.
+    const val BREAST_HEIGHT_M = 1.37
+
     const val CM_PER_INCH = 2.54
     fun cmToInches(cm: Double) = cm / CM_PER_INCH
     fun inchesToCm(inches: Double) = inches * CM_PER_INCH

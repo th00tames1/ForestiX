@@ -51,6 +51,7 @@ public final class AppSettings: ObservableObject {
         public static let measurementSource       = "tc.measurementSource"
         public static let developerMode           = "tc.developerMode"
         public static let rawCaptureEnabled       = "tc.rawCaptureEnabled"
+        public static let breastHeightGuide       = "tc.breastHeightGuide"
         public static let appearance              = "tc.appearance"
         // RETIRED: "tc.dbhMethodSource" (depth / AR-motion / AR-caliper
         // picker). The AR arms are gone — they recorded no raw captures —
@@ -243,6 +244,18 @@ public final class AppSettings: ObservableObject {
     public var rawCaptureEnabled: Bool {
         get { defaults.bool(forKey: Keys.rawCaptureEnabled) }
         set { defaults.set(newValue, forKey: Keys.rawCaptureEnabled); objectWillChange.send() }
+    }
+
+    /// BREAST-HEIGHT GUIDE (developer-mode) — draws a marker from the tree
+    /// base up to `Units.breastHeightM` on the Diameter scan so the cruiser
+    /// can see where breast height crosses the stem instead of judging it.
+    /// Gated by BOTH this flag AND `developerMode`; `defaults.bool` so a
+    /// cruiser who has never seen the row gets it OFF. It is a GUIDE: it
+    /// writes nothing, changes no recorded diameter and reaches no export.
+    /// The Android sibling reads the same `tc.breastHeightGuide` key.
+    public var breastHeightGuide: Bool {
+        get { defaults.bool(forKey: Keys.breastHeightGuide) }
+        set { defaults.set(newValue, forKey: Keys.breastHeightGuide); objectWillChange.send() }
     }
 
     /// App appearance — "light" (default) or "dark". Both are the same

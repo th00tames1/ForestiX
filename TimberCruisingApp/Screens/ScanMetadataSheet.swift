@@ -108,10 +108,21 @@ public struct ScanMetadataSheet: View {
 
     // MARK: - Position
 
+    /// Breast height in the cruiser's own unit.
+    ///
+    /// The two are the SAME HEIGHT, not a conversion of one another: 4.5 ft is
+    /// the US definition and 1.37 m is that height written in metres. Both are
+    /// spelled out rather than computed, because a formatter would render the
+    /// imperial side as "4.49 ft" and invite the reader to think the app had
+    /// rounded a metric standard into an imperial one.
+    private var breastHeightWord: String {
+        settings.unitSystem == .metric ? "1.37 m" : "4.5 ft"
+    }
+
     private var positionSection: some View {
         Section(
             header: Text("POSITION").font(ForestixType.sectionHead),
-            footer: Text("Default DBH = 1.3 m. Mark butt / upper / stump if you measured elsewhere.")
+            footer: Text("Default DBH = \(breastHeightWord). Mark butt / upper / stump if you measured elsewhere.")
         ) {
             Picker("Where on the stem",
                    selection: Binding(

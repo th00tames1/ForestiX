@@ -510,6 +510,23 @@ public struct SettingsScreen: View {
                 }
                 .accessibilityIdentifier("settings.rawCaptures")
 
+                // BREAST-HEIGHT GUIDE — answers "how does the phone know it
+                // read the stem AT breast height?" by putting breast height
+                // in the world where the cruiser can see it. Drawn only, on
+                // the Diameter scan, off by default.
+                Toggle(isOn: Binding(
+                    get: { settings.breastHeightGuide },
+                    set: { settings.breastHeightGuide = $0 })
+                ) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Breast-height guide")
+                        Text("Draw a 1.37 m (4.5 ft) marker up from the tree base on the Diameter scan so the diameter is read at breast height. Guide only — it never changes the recorded diameter. Off by default.")
+                            .font(ForestixType.caption)
+                            .foregroundStyle(ForestixPalette.textSecondary)
+                    }
+                }
+                .accessibilityIdentifier("settings.breastHeightGuide")
+
                 // GROUND-TRUTH RECOVERY. A truth typed for a CAPTURE (on a
                 // scan screen before the truth moved onto the reading, or in
                 // the raw-captures console at any time since) lives only in

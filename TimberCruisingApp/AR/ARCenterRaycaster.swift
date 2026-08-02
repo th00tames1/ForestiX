@@ -244,6 +244,24 @@ public final class ARCenterRaycaster: ObservableObject {
         return SIMD3<Float>(c.x, c.y, c.z)
     }
 
+    /// Where a world point lands on the AR view, in AR-VIEW coordinates —
+    /// the inverse direction of every other call here, and the way 2D chrome
+    /// is pinned to a world position without a world-space text renderer.
+    ///
+    /// It hangs off this class because this class already holds the view: a
+    /// label placed from `arview.project` and the raycast that produced the
+    /// point it labels are then reading the same rect by construction, which
+    /// is exactly what goes wrong when a caller measures against the safe
+    /// area instead. Callers must position from a full-bleed reader.
+    ///
+    /// nil when the point is behind the camera (RealityKit's own answer) or
+    /// while no view is bound — both mean "draw nothing", which is the hide
+    /// condition a projected label wants anyway.
+    public func projectToScreen(_ world: SIMD3<Float>) -> CGPoint? {
+        guard let view = arview else { return nil }
+        return view.project(world)
+    }
+
     /// Elevation (deg) of the camera's forward aim above the horizon —
     /// positive = aiming up. Logged by the developer-mode research CSV so
     /// distance/DBH accuracy can be analysed against aim angle.
@@ -680,6 +698,7 @@ public final class ARCenterRaycaster: ObservableObject {
     public func forwardPointAtHorizontalDistance(_ d: Float) -> SIMD3<Float>? { nil }
     public func hit(at screenPoint: CGPoint) -> SIMD3<Float>? { nil }
     public func rayDirection(at screenPoint: CGPoint) -> SIMD3<Float>? { nil }
+    public func projectToScreen(_ world: SIMD3<Float>) -> CGPoint? { nil }
     public var cameraWorldPosition: SIMD3<Float>? { nil }
     public var cameraPitchDeg: Double? { nil }
 }

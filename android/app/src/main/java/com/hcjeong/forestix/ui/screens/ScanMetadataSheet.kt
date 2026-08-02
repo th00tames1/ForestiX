@@ -60,6 +60,7 @@ import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.common.CountrySpecies
 import com.hcjeong.forestix.common.Region
 import com.hcjeong.forestix.common.RegionalSpecies
+import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.data.StemPosition
 import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.theme.Forestix
@@ -88,6 +89,15 @@ fun ScanMetadataSheet(
 ) {
     val type = Forestix.type
     val colors = Forestix.colors
+    // Breast height in the cruiser's own unit.
+    //
+    // The two are the SAME HEIGHT, not a conversion of one another: 4.5 ft is
+    // the US definition and 1.37 m is that height written in metres. Both are
+    // spelled out rather than computed, because a formatter would render the
+    // imperial side as "4.49 ft" and invite the reader to think the app had
+    // rounded a metric standard into an imperial one.
+    val settings by LocalAppEnvironment.current.settings.state.collectAsStateWithLifecycle()
+    val breastHeightWord = if (settings.unitSystem == UnitSystem.METRIC) "1.37 m" else "4.5 ft"
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -130,7 +140,8 @@ fun ScanMetadataSheet(
             if (showPosition) {
                 MetadataSection(
                     header = "POSITION",
-                    footer = "Default DBH = 1.3 m. Mark butt / upper / stump if you measured elsewhere.",
+                    footer = "Default DBH = $breastHeightWord. Mark butt / upper / stump " +
+                        "if you measured elsewhere.",
                 ) {
                     // Single-choice segmented control, default DBH, never
                     // deselectable (tap-again keeps the selection) — iOS

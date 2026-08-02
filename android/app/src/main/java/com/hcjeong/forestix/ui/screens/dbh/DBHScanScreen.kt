@@ -63,6 +63,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -71,6 +72,7 @@ import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.ar.ArCameraView
 import com.hcjeong.forestix.ar.ArSceneMarker
 import com.hcjeong.forestix.ar.ArSessionHub
+import com.hcjeong.forestix.ar.BreastHeightGuide
 import com.hcjeong.forestix.ar.MarkerShape
 import com.hcjeong.forestix.ar.Vec3
 import com.hcjeong.forestix.ar.distance
@@ -108,6 +110,7 @@ import com.hcjeong.forestix.ui.screens.MeasureTopStrip
 import com.hcjeong.forestix.ui.screens.MeasureMiniMapSlot
 import com.hcjeong.forestix.ui.screens.MeasurePillSize
 import com.hcjeong.forestix.ui.screens.MeasureValuePill
+import com.hcjeong.forestix.ui.screens.PLOT_GROUND_NOT_SEEN
 import com.hcjeong.forestix.ui.screens.PlotPinCentreCard
 import com.hcjeong.forestix.ui.screens.rememberPlotPinCentreOffer
 import com.hcjeong.forestix.ui.screens.RawCaptureBadge
@@ -344,6 +347,71 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     val depthBlocked = !settings.developerMode &&
         (settings.depthUnsupported ||
             (controller.depthSupportKnown && !controller.supportsDepth))
+    // BREAST-HEIGHT GUIDE (developer feature). A reviewer's objection was
+    // that a phone cannot know it is reading the stem AT breast height; this
+    // draws breast height in the world so the cruiser can put the diameter
+    // there instead of near there. It is chrome and nothing else — it never
+    // reaches the estimator, the stored reading or an export.
+    //
+    // The two flags are ONE gate. The toggle is never read on its own, so a
+    // key left true by a developer session cannot draw anything once
+    // developer mode goes off.
+    val bhGuideOn = settings.developerMode && settings.breastHeightGuide
+    val bhGuide = remember { BreastHeightGuide(controller) }
+    /// Where the ring's centre lands on screen, so the value pill can sit
+    /// beside it rather than in the middle of the rim.
+    var bhLabelPos by remember { mutableStateOf<Offset?>(null) }
+    /// Why the last "Place base" planted nothing.
+    var bhFailure by remember { mutableStateOf<String?>(null) }
+    // The gate owns the lifecycle in both directions: arming when it comes
+    // on, and taking the anchor down with it when it goes off, so a toggle
+    // flipped mid-scan leaves nothing anchored behind it.
+    LaunchedEffect(bhGuideOn) {
+        bhFailure = null
+        if (bhGuideOn) bhGuide.arm() else bhGuide.disable()
+    }
+    // This screen is REUSED across a cruise tally — only the tree number
+    // advances — so a base placed at tree 7's foot must not still be standing
+    // there while tree 8 is measured.
+    LaunchedEffect(cruiseTreeNumber) {
+        bhGuide.clearBase()
+        bhFailure = null
+    }
+    DisposableEffect(Unit) {
+        onDispose { bhGuide.disable() }
+    }
+    // 5 Hz. That is the cadence the sampling-plot ghost preview already runs
+    // a centre raycast at, and this is the same act — the cost is a hit test
+    // against accumulated depth, so it runs ONLY while the base is being
+    // aimed. Once placed there is no raycast at all: the poll only re-reads
+    // the anchor's corrected pose.
+    LaunchedEffect(bhGuide.stage) {
+        while (bhGuide.stage != BreastHeightGuide.Stage.OFF) {
+            when (bhGuide.stage) {
+                // screenCenterHit, NOT screenCenterAnchorHit: this ray is
+                // aimed DOWN at the ground, and the gated variant exists
+                // specifically to refuse ground planes.
+                BreastHeightGuide.Stage.AIMING -> bhGuide.updateGhost(controller.screenCenterHit())
+                BreastHeightGuide.Stage.PLACED -> bhGuide.refresh()
+                else -> {}
+            }
+            delay(200)
+        }
+    }
+    // 20 Hz, deliberately faster than the poll above and deliberately cheap:
+    // this is a view x projection multiply against the live frame, not a hit
+    // test. It keeps the pill on the ring while the cruiser walks round the
+    // stem, which is exactly when a 5 Hz label would visibly lag the rim.
+    LaunchedEffect(bhGuide.stage) {
+        while (bhGuide.stage != BreastHeightGuide.Stage.OFF) {
+            bhLabelPos = bhGuide.ringWorldPoint()
+                ?.let { controller.projectToScreen(it) }
+                ?.let { (x, y) -> Offset(x, y) }
+            delay(50)
+        }
+        bhLabelPos = null
+    }
+
     var stage by remember { mutableStateOf(Stage.AIMING) }
     var result by remember { mutableStateOf<DBHResult?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
@@ -1706,7 +1774,24 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         // cylinder is what makes that photo evidence of WHERE the cruiser
         // aimed rather than a bare camera frame. Result stages drop it, as
         // before.
-        val dbhMarkers = if (stage == Stage.AIMING || stage == Stage.CAPTURING) {
+        //
+        // The breast-height guide's three shapes LEAD the list and hold a
+        // fixed order, because syncMarkers diffs by index: it moves nodes
+        // only when count, shape, colour and scaling flag match position for
+        // position. Guide first means the trunk cylinder coming and going
+        // costs the same single structural rebuild it already costs.
+        //
+        // The guide is dropped for the accept snapshot along with the 2D
+        // chrome. That JPEG is exported, and the guide must never appear in
+        // an export.
+        // GATED ON THE FLAG ITSELF, not only on the guide's own stage. The
+        // stage is driven to OFF by a LaunchedEffect, so between the toggle
+        // flipping and that effect running there is a frame where `markers()`
+        // still answers with the shapes for a guide the cruiser has just
+        // turned off. iOS tests the flag here; this is that test.
+        val bhMarkers = if (!bhGuideOn || hidingChromeForCapture) emptyList()
+                        else bhGuide.markers()
+        val dbhMarkers = bhMarkers + if (stage == Stage.AIMING || stage == Stage.CAPTURING) {
             listOfNotNull(cylinderMarker)
         } else {
             emptyList()
@@ -2056,11 +2141,77 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             }
         }
 
+        // BREAST-HEIGHT GUIDE — 2D chrome.
+        //
+        // The prompt rides the SAME crosshair affordance the Height flow
+        // uses: its label pill, at HEIGHT_AIM_LABEL_OFFSET_DP (40) below true
+        // centre. No second ring is drawn — DbhRing above is already the
+        // aiming instrument on this screen, and a second one would compete
+        // with it for the cruiser's eye.
+        if (bhGuideOn && !hidingChromeForCapture && !depthBlocked && stage == Stage.AIMING) {
+            val bhPrompt = bhFailure
+                ?: if (bhGuide.trackingLost) BreastHeightGuide.TRACKING_LOST_HINT
+                else if (bhGuide.stage == BreastHeightGuide.Stage.AIMING) {
+                    BreastHeightGuide.AIM_PROMPT
+                } else {
+                    null
+                }
+            bhPrompt?.let {
+                Text(
+                    it,
+                    style = Forestix.type.dataSmall,
+                    color = Color.White,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .offset(y = 40.dp)
+                        .padding(horizontal = 32.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Color.Black.copy(alpha = 0.65f))
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                )
+            }
+            // The height itself, at the ring. BLACK ON WHITE so it survives
+            // both bark and a bright sky behind the crown — the two
+            // backgrounds this label is guaranteed to be read against.
+            //
+            // Placed from the root Box, which is fillMaxSize with the AR view
+            // filling the same rect, so these Compose pixels are the
+            // viewWidthPx/viewHeightPx the projection divided by.
+            bhLabelPos?.let { p ->
+                Text(
+                    bhGuide.label(settings.unitSystem),
+                    style = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Bold),
+                    color = Color.Black,
+                    modifier = Modifier
+                        .offset {
+                            // Clear of the rim to the right, and lifted half
+                            // a pill so the text reads level with the ring's
+                            // centre rather than hanging off it.
+                            IntOffset(
+                                Math.round(p.x) + 14.dp.roundToPx(),
+                                Math.round(p.y) - 12.dp.roundToPx(),
+                            )
+                        }
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Color.White)
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                )
+            }
+        }
+
         // 12 dp above the bottom block: the Undo toast (F), then the ADJUST
         // exit pill while the bracket is up.
         val showAutoPill = stage == Stage.AIMING && adjustMode
+        // The guide is placed by a BUTTON, never by a screen tap: the
+        // screen-wide tap catcher was deliberately removed from this screen
+        // so a stray touch can never fire anything, and Height places its
+        // points from the shutter for the same reason. Both shutter flanks
+        // are already Type and Adjust, so the guide's control sits here,
+        // beside the Auto pill.
+        val showBhGuidePill = bhGuideOn && stage == Stage.AIMING && !depthBlocked
         val aboveBottomBlock: (@Composable () -> Unit)? =
-            if (undoToast != null || showAutoPill) {
+            if (undoToast != null || showAutoPill || showBhGuidePill) {
                 {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
@@ -2068,6 +2219,25 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     ) {
                         undoToast?.let { savedTitle ->
                             UndoToastPill(savedTitle) { undoTally() }
+                        }
+                        if (showBhGuidePill) {
+                            val placed = bhGuide.stage == BreastHeightGuide.Stage.PLACED
+                            ScanModePill(
+                                if (placed) BreastHeightGuide.CLEAR_BUTTON
+                                else BreastHeightGuide.PLACE_BUTTON,
+                            ) {
+                                if (placed) {
+                                    bhGuide.clearBase()
+                                    bhFailure = null
+                                } else {
+                                    val hit = controller.screenCenterHit()
+                                    bhFailure = if (hit != null && bhGuide.place(hit)) {
+                                        null
+                                    } else {
+                                        PLOT_GROUND_NOT_SEEN
+                                    }
+                                }
+                            }
                         }
                         if (showAutoPill) {
                             AutoModePill {
@@ -2611,11 +2781,17 @@ private fun UndoToastPill(treeTitle: String, onUndo: () -> Unit) {
 }
 
 /// "Auto" exit pill shown 12 dp above the status panel while the ADJUST
-/// edge-bracket is up — black-0.55 capsule, white 12 sp semibold.
+/// edge-bracket is up.
 @Composable
-private fun AutoModePill(onClick: () -> Unit) {
+private fun AutoModePill(onClick: () -> Unit) = ScanModePill("Auto", onClick)
+
+/// The dark-glass capsule this slot speaks in — black-0.55, white 12 sp
+/// semibold. Shared so the ADJUST exit and the breast-height guide's control
+/// cannot drift apart while sitting one above the other.
+@Composable
+private fun ScanModePill(label: String, onClick: () -> Unit) {
     Text(
-        "Auto",
+        label,
         style = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.SemiBold),
         color = Color.White,
         modifier = Modifier

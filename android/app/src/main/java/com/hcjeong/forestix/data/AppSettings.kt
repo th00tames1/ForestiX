@@ -154,6 +154,16 @@ data class SettingsSnapshot(
     /// field ground truth. Default OFF; zero cost while off (mirror of iOS
     /// tc.rawCaptureEnabled). Cross-platform schema is identical.
     val rawCaptureEnabled: Boolean = false,
+    /// Breast-height guide (developer mode only) — draws a 1.37 m marker up
+    /// from the tree base on the Diameter scan so the cruiser can see where
+    /// breast height crosses the stem before reading the diameter there.
+    ///
+    /// Default OFF, and NEVER read on its own: the effective gate is
+    /// `developerMode && breastHeightGuide`, the same shape the raw-capture
+    /// arm above uses. Purely a drawing — it writes nothing to the
+    /// measurement and appears in no export. Same key as iOS
+    /// (`AppSettings.Keys.breastHeightGuide`, "tc.breastHeightGuide").
+    val breastHeightGuide: Boolean = false,
     /// App appearance — "light" (default) or "dark". Same Field
     /// High-Contrast identity in both; ForestixTheme maps this to the
     /// light or dark token set (mirror of iOS tc.appearance).
@@ -210,6 +220,7 @@ class AppSettings(private val context: Context) {
         val measureHeightAfterDBH = booleanPreferencesKey("tc.measureHeightAfterDiameter")
         val developerMode = booleanPreferencesKey("tc.developerMode")
         val rawCaptureEnabled = booleanPreferencesKey("tc.rawCaptureEnabled")
+        val breastHeightGuide = booleanPreferencesKey("tc.breastHeightGuide")
         val appearance = stringPreferencesKey("tc.appearance")
         // Unified with the iOS sibling's key (was "tc.cruiseProjectId"); the
         // one-time reset of this transient current-project pointer is
@@ -261,6 +272,7 @@ class AppSettings(private val context: Context) {
             measureHeightAfterDiameter = p[Keys.measureHeightAfterDBH] ?: true,
             developerMode = p[Keys.developerMode] ?: false,
             rawCaptureEnabled = p[Keys.rawCaptureEnabled] ?: false,
+            breastHeightGuide = p[Keys.breastHeightGuide] ?: false,
             appearance = p[Keys.appearance] ?: "light",
             cruiseProjectId = p[Keys.cruiseProjectId],
             cruisePlotId = p[Keys.cruisePlotId],
@@ -297,6 +309,11 @@ class AppSettings(private val context: Context) {
     fun setRawCaptureEnabled(value: Boolean) = update {
         _state.value = _state.value.copy(rawCaptureEnabled = value)
         it[Keys.rawCaptureEnabled] = value
+    }
+
+    fun setBreastHeightGuide(value: Boolean) = update {
+        _state.value = _state.value.copy(breastHeightGuide = value)
+        it[Keys.breastHeightGuide] = value
     }
 
     fun setMeasureHeightAfterDiameter(value: Boolean) = update {

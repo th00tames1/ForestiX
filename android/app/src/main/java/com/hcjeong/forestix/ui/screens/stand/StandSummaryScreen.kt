@@ -149,17 +149,25 @@ fun StandSummaryScreen(nav: NavController, projectId: UUID) {
                 perPlot = perPlotStats.map {
                     Pair(it.plot, it.stats.baPerAcreM2.toDouble() * baFactor)
                 })
-            // Volume unit branches on the country: metric countries render m³
-            // (the engine's native unit); the US keeps m³ here as it does today.
-            // Korea is a scaffold — its official NIFoS coefficients are pending,
-            // so stand volume shows "—" rather than a fabricated figure.
+            // And volume gets its own for the same reason: the engine reports
+            // m³ per ACRE. The mean, the ± range and every per-plot dot go
+            // through the one factor, or the band and the scatter stop
+            // belonging to the average drawn over them.
+            //
+            // Korea is a scaffold — its official NIFoS coefficients are
+            // pending, so stand volume shows "—" rather than a fabricated
+            // figure.
             if (settings.country.volumeStandardPending) {
                 PendingVolumeCard()
             } else {
+                val volFactor = MeasurementFormatter.volumeDensityFactor(areaUnit)
                 StatCardSection(
-                    title = "Gross volume", unit = areaUnit.densityLabel("m³"),
-                    stat = volStat.scaledPerArea(densityFactor), vm = vm,
-                    perPlot = perPlotStats.map { Pair(it.plot, it.stats.grossVolumePerAcreM3.toDouble() * densityFactor) })
+                    title = "Gross volume",
+                    unit = MeasurementFormatter.volumeDensityUnit(areaUnit),
+                    stat = volStat.scaledPerArea(volFactor), vm = vm,
+                    perPlot = perPlotStats.map {
+                        Pair(it.plot, it.stats.grossVolumePerAcreM3.toDouble() * volFactor)
+                    })
             }
 
             PerPlotTableSection(perPlotStats, areaUnit)
@@ -376,7 +384,15 @@ private fun PerPlotTableSection(
                             style = type.dataSmall, color = colors.textPrimary,
                             textAlign = TextAlign.End, modifier = Modifier.weight(1f),
                         )
-                        Text(String.format(Locale.US, "%.1f", row.stats.grossVolumePerAcreM3 * f), style = type.dataSmall, color = colors.textPrimary, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
+                        Text(
+                            String.format(
+                                Locale.US, "%.1f",
+                                MeasurementFormatter.volumeDensity(
+                                    row.stats.grossVolumePerAcreM3.toDouble(), areaUnit),
+                            ),
+                            style = type.dataSmall, color = colors.textPrimary,
+                            textAlign = TextAlign.End, modifier = Modifier.weight(1f),
+                        )
                     }
                 }
             }

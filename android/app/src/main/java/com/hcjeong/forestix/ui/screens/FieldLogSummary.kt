@@ -423,8 +423,10 @@ object FieldLogSummaryBuilder {
             FieldLogSummary.Cell(
                 areaUnit.densityLabel("VOLUME").uppercase(Locale.US),
                 if (empty || pending) "—" else String.format(
-                    Locale.US, "%.1f m³",
-                    stats.grossVolumePerAcreM3.toDouble() * factor)))
+                    Locale.US, "%.1f %s",
+                    MeasurementFormatter.volumeDensity(
+                        stats.grossVolumePerAcreM3.toDouble(), areaUnit),
+                    MeasurementFormatter.volumeNumeratorUnit(areaUnit))))
 
         val computed = if (empty) emptyList() else listOf(
             FieldLogSummary.Row("Live trees", stats.liveTreeCount.toString()),
@@ -446,13 +448,17 @@ object FieldLogSummaryBuilder {
             FieldLogSummary.Row(
                 "Gross volume",
                 if (pending) VOLUME_PENDING else String.format(
-                    Locale.US, "%.1f %s", stats.grossVolumePerAcreM3.toDouble() * factor,
-                    areaUnit.densityLabel("m³"))),
+                    Locale.US, "%.1f %s",
+                    MeasurementFormatter.volumeDensity(
+                        stats.grossVolumePerAcreM3.toDouble(), areaUnit),
+                    MeasurementFormatter.volumeDensityUnit(areaUnit))),
             FieldLogSummary.Row(
                 "Merchantable volume",
                 if (pending) VOLUME_PENDING else String.format(
-                    Locale.US, "%.1f %s", stats.merchVolumePerAcreM3.toDouble() * factor,
-                    areaUnit.densityLabel("m³"))))
+                    Locale.US, "%.1f %s",
+                    MeasurementFormatter.volumeDensity(
+                        stats.merchVolumePerAcreM3.toDouble(), areaUnit),
+                    MeasurementFormatter.volumeDensityUnit(areaUnit))))
 
         return FieldLogSummary(
             heading = FieldLogSummary.PLOT_HEADING,
@@ -508,7 +514,10 @@ object FieldLogSummaryBuilder {
         // bracketing the value it belongs to.
         val ba = viewModel.baStat.value.scaledPerArea(
             MeasurementFormatter.basalAreaDensityFactor(areaUnit))
-        val volume = viewModel.volStat.value.scaledPerArea(factor)
+        // Volume is the same shape of quantity — m³ per ACRE — so it takes a
+        // factor of its own too, and the same one scales its band.
+        val volume = viewModel.volStat.value.scaledPerArea(
+            MeasurementFormatter.volumeDensityFactor(areaUnit))
 
         val cells = listOf(
             FieldLogSummary.Cell("TREES", if (empty) "—" else liveTrees.toString()),
@@ -523,7 +532,9 @@ object FieldLogSummaryBuilder {
             FieldLogSummary.Cell(
                 areaUnit.densityLabel("VOLUME").uppercase(Locale.US),
                 if (empty || pending) "—"
-                else String.format(Locale.US, "%.1f m³", volume.mean)))
+                else String.format(
+                    Locale.US, "%.1f %s", volume.mean,
+                    MeasurementFormatter.volumeNumeratorUnit(areaUnit))))
 
         val computed = if (empty) emptyList() else listOf(
             FieldLogSummary.Row("Closed plots", plots.size.toString()),
@@ -540,7 +551,7 @@ object FieldLogSummaryBuilder {
                 "Gross volume",
                 if (pending) VOLUME_PENDING else confidenceText(
                     volume.mean, volume.ci95HalfWidth, 1,
-                    " " + areaUnit.densityLabel("m³"))))
+                    " " + MeasurementFormatter.volumeDensityUnit(areaUnit))))
 
         // Species counts summed over the plots that were averaged, so the mix
         // describes the same trees the figures above it do.

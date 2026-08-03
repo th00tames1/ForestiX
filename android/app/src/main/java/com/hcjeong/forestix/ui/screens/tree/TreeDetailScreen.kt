@@ -1143,14 +1143,20 @@ internal fun TreeFormNumberField(
 /// Basal area and volume, worked out from the two measurements above.
 ///
 /// VOLUME IS THE STAND SUMMARY'S VOLUME, treated the way that screen treats
-/// it: cubic metres from the species' own configured equation, and nothing at
-/// all for a region whose coefficients are not bundled (see
+/// it: a cubic volume from the species' own configured equation, and nothing
+/// at all for a region whose coefficients are not bundled (see
 /// `Country.volumeStandardPending`) — it prints an em dash and the stand
 /// summary's own sentence rather than a fabricated figure. A species with no
 /// equation, a tree with no height and a tree with no diameter each read the
-/// same em dash: there is no number to show, and 0 m³ is not one — which is
+/// same em dash: there is no number to show, and a zero is not one — which is
 /// why the figure an equation returns is checked too. A coefficient set that
 /// integrates a real stem to nothing has not measured that stem.
+///
+/// A STEM'S VOLUME IS A VOLUME, NOT A DENSITY, so it reads in the cruiser's
+/// own cubic unit — m³ metric, ft³ imperial — with no per-area suffix to
+/// carry. Same rule the basal-area row above follows, and the same reason:
+/// integrating a stem in cubic metres and printing the answer as cubic feet
+/// would misread it by 35.3x.
 ///
 /// THE PENDING-REGION SENTENCE IS THIS PLATFORM'S, DELIBERATELY. iOS puts its
 /// stand summary's wording in the row itself; here the row is an em dash and
@@ -1200,7 +1206,7 @@ internal fun TreeFormComputedSection(
             // fit this species, a form the factory built wrong — and "0.000 m³"
             // is that failure printed as a measurement of the tree.
             .takeIf { it > 0f }
-            ?.let { String.format(Locale.US, "%.3f m³", it) }
+            ?.let { treeVolumeText(it.toDouble(), settings.unitSystem) }
     }
 
     TreeFormSection(header = TreeFormWords.COMPUTED) {
@@ -1240,6 +1246,22 @@ internal fun treeBasalAreaText(dbhCm: Float?, system: UnitSystem): String? {
         String.format(Locale.US, "%.3f m²", m2)
     }
 }
+
+/// One tree's stem volume, in the unit the cruiser's basis is expressed in:
+/// cubic feet for a per-acre cruise, cubic metres for a per-hectare one. The
+/// engine integrates every stem in m³, so printing that number under a "ft³"
+/// heading — or under no heading at all, beside a plot total that has been
+/// converted — misreads the stem by 35.3x.
+///
+/// Three decimals metric, two imperial: one stem is ~0.3 m³ / ~10 ft³, so both
+/// carry the same significant figures. The same pair, and the same reason, as
+/// [treeBasalAreaText] one row above.
+internal fun treeVolumeText(m3: Double, system: UnitSystem): String =
+    if (system == UnitSystem.IMPERIAL) {
+        String.format(Locale.US, "%.2f ft³", Units.cubicMetersToCubicFeet(m3))
+    } else {
+        String.format(Locale.US, "%.3f m³", m3)
+    }
 
 // MARK: - Unit-aware entry helpers
 //

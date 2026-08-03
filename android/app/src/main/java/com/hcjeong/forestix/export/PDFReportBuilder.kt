@@ -244,7 +244,11 @@ object PDFReportBuilder {
         val metricRows = listOf(
             Triple("Trees per $areaWord", inputs.tpaStand.scaledPerArea(f), "trees$suffix"),
             Triple("Basal area",          baStandScaled,                    "$baUnit$suffix"),
-            Triple("Gross volume",        inputs.volStand.scaledPerArea(f),  "m³$suffix"),
+            // And volume gets its own for the same reason — m³ per acre is
+            // half a metric fraction, and both halves turn together.
+            Triple("Gross volume",
+                inputs.volStand.scaledPerArea(volumeFactor(areaUnit)),
+                "${volumeUnit(areaUnit)}$suffix"),
         )
         // The standard-error and Satterthwaite effective-degrees-of-freedom
         // columns are gone: this page is read by a landowner, and neither is a
@@ -350,8 +354,12 @@ object PDFReportBuilder {
             kv("Quadratic mean DBH",  String.format(Locale.US, "%.2f %s",
                                           diameterFromCm(inputs, s.qmdCm.toDouble()),
                                           diameterUnit(inputs)))
-            kv("Gross volume",        String.format(Locale.US, "%.4f m³$suffix", s.grossVolumePerAcreM3 * f))
-            kv("Merchantable volume", String.format(Locale.US, "%.4f m³$suffix", s.merchVolumePerAcreM3 * f))
+            kv("Gross volume",        String.format(Locale.US, "%.4f %s$suffix",
+                                          s.grossVolumePerAcreM3 * volumeFactor(areaUnit),
+                                          volumeUnit(areaUnit)))
+            kv("Merchantable volume", String.format(Locale.US, "%.4f %s$suffix",
+                                          s.merchVolumePerAcreM3 * volumeFactor(areaUnit),
+                                          volumeUnit(areaUnit)))
         } else {
             drawBody(canvas, "(no stats available)", frame.left, y, frame.width())
             y += 18f
@@ -364,7 +372,8 @@ object PDFReportBuilder {
         val colWidths = listOf(80f, 50f, 90f, 110f, 110f)
         drawTableRow(canvas,
             listOf("Species", "n", "Trees$suffix",
-                "Basal ${basalAreaUnit(areaUnit)}$suffix", "Volume m³$suffix"),
+                "Basal ${basalAreaUnit(areaUnit)}$suffix",
+                "Volume ${volumeUnit(areaUnit)}$suffix"),
             bold = true, frame.left, y, colWidths)
         y += 16f
         if (s != null) {
@@ -375,7 +384,7 @@ object PDFReportBuilder {
                     speciesLabel(inputs, code), "${ss.count}",
                     String.format(Locale.US, "%.2f", ss.tpa * f),
                     String.format(Locale.US, "%.4f", ss.baPerAcreM2 * basalAreaFactor(areaUnit)),
-                    String.format(Locale.US, "%.4f", ss.grossVolumePerAcreM3 * f),
+                    String.format(Locale.US, "%.4f", ss.grossVolumePerAcreM3 * volumeFactor(areaUnit)),
                 ), bold = false, frame.left, y, colWidths)
                 y += 16f
             }
@@ -676,6 +685,18 @@ object PDFReportBuilder {
 
     private fun basalAreaFactor(unit: AreaUnit): Double =
         MeasurementFormatter.basalAreaDensityFactor(unit)
+
+    /// Volume arrives as CUBIC METRES per ACRE, and had the same half-converted
+    /// fraction basal area had: an imperial report scaled the denominator and
+    /// printed "m³/ac", 35.3x away from the cubic feet per acre the page is
+    /// read in — on the one line a landowner is paid on. The numerator follows
+    /// the AREA unit, as the basal-area pair above it does, so the two rows of
+    /// the same table cannot declare different systems.
+    private fun volumeUnit(unit: AreaUnit): String =
+        MeasurementFormatter.volumeNumeratorUnit(unit)
+
+    private fun volumeFactor(unit: AreaUnit): Double =
+        MeasurementFormatter.volumeDensityFactor(unit)
 
     /// Resolve a species code to a common name for metric reports (their
     /// country-prefixed codes like "FI-PISY" are opaque). The US report keeps

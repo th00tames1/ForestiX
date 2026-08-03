@@ -406,8 +406,11 @@ public enum FieldLogSummaryBuilder {
                                      : String(format: "%.0f", Double(stats.tpa) * factor)),
             FieldLogSummary.Cell(label: areaUnit.densityLabel("VOLUME").uppercased(),
                                  value: empty || pending ? "—"
-                                     : String(format: "%.1f m³",
-                                              Double(stats.grossVolumePerAcreM3) * factor))]
+                                     : String(format: "%.1f %@",
+                                              MeasurementFormatter.volumeDensity(
+                                                m3PerAcre: Double(stats.grossVolumePerAcreM3),
+                                                in: areaUnit),
+                                              MeasurementFormatter.volumeNumeratorUnit(areaUnit)))]
 
         var computed: [FieldLogSummary.Row] = []
         if !empty {
@@ -427,13 +430,17 @@ public enum FieldLogSummaryBuilder {
                 .init(label: "Gross volume",
                       value: pending ? volumePendingText
                           : String(format: "%.1f %@",
-                                   Double(stats.grossVolumePerAcreM3) * factor,
-                                   areaUnit.densityLabel("m³"))),
+                                   MeasurementFormatter.volumeDensity(
+                                    m3PerAcre: Double(stats.grossVolumePerAcreM3),
+                                    in: areaUnit),
+                                   MeasurementFormatter.volumeDensityUnit(areaUnit))),
                 .init(label: "Merchantable volume",
                       value: pending ? volumePendingText
                           : String(format: "%.1f %@",
-                                   Double(stats.merchVolumePerAcreM3) * factor,
-                                   areaUnit.densityLabel("m³")))]
+                                   MeasurementFormatter.volumeDensity(
+                                    m3PerAcre: Double(stats.merchVolumePerAcreM3),
+                                    in: areaUnit),
+                                   MeasurementFormatter.volumeDensityUnit(areaUnit)))]
         }
 
         return FieldLogSummary(
@@ -488,7 +495,10 @@ public enum FieldLogSummaryBuilder {
         // bracketing the value it belongs to.
         let ba = viewModel.baStat.scaledPerArea(
             by: MeasurementFormatter.basalAreaDensityFactor(areaUnit))
-        let volume = viewModel.volStat.scaledPerArea(by: factor)
+        // Volume is the same shape of quantity — m³ per ACRE — so it takes a
+        // factor of its own too, and the same one scales its band.
+        let volume = viewModel.volStat.scaledPerArea(
+            by: MeasurementFormatter.volumeDensityFactor(areaUnit))
 
         let cells = [
             FieldLogSummary.Cell(label: "TREES",
@@ -501,7 +511,8 @@ public enum FieldLogSummaryBuilder {
                                  value: empty ? "—" : String(format: "%.0f", tpa.mean)),
             FieldLogSummary.Cell(label: areaUnit.densityLabel("VOLUME").uppercased(),
                                  value: empty || pending ? "—"
-                                     : String(format: "%.1f m³", volume.mean))]
+                                     : String(format: "%.1f %@", volume.mean,
+                                              MeasurementFormatter.volumeNumeratorUnit(areaUnit)))]
 
         var computed: [FieldLogSummary.Row] = []
         if !empty {
@@ -520,7 +531,8 @@ public enum FieldLogSummaryBuilder {
                       value: pending ? volumePendingText
                           : confidenceText(volume.mean, volume.ci95HalfWidth,
                                            decimals: 1,
-                                           unit: " " + areaUnit.densityLabel("m³")))]
+                                           unit: " " + MeasurementFormatter
+                                               .volumeDensityUnit(areaUnit)))]
         }
 
         // Species counts summed over the plots that were averaged, so the mix

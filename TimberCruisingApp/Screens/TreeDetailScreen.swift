@@ -1254,17 +1254,21 @@ enum TreeComputed {
     /// Total stem volume from the species' own equation.
     ///
     /// PRESENTED EXACTLY AS THE STAND SUMMARY PRESENTS IT, and for the same
-    /// reasons. That screen shows cubic metres and nothing else — no board
+    /// reasons. That screen shows a cubic volume and nothing else — no board
     /// feet, on any unit system — and where the active country's stem-volume
     /// standard has no coefficients in the app it refuses the number outright
-    /// and says so. Both rules are kept here. A per-tree volume is three
-    /// orders of magnitude smaller than a per-hectare one, so it carries three
-    /// decimals where that screen carries one; the quantity and the unit are
-    /// the same.
+    /// and says so. Both rules are kept here.
+    ///
+    /// A STEM'S VOLUME IS A VOLUME, NOT A DENSITY, so it reads in the cruiser's
+    /// own cubic unit — m³ metric, ft³ imperial — with no per-area suffix to
+    /// carry. Same rule the basal-area row above follows, and the same reason:
+    /// integrating a stem in cubic metres and printing the answer as cubic feet
+    /// would misread it by 35.3×. Three decimals metric, two imperial: one
+    /// stem is ~0.3 m³ / ~10 ft³, so both carry the same significant figures.
     ///
     /// A species with no equation configured reads "—". The plot totals let a
     /// missing equation contribute 0, which is right for a sum and wrong for
-    /// one stem: 0 m³ on a tree row is a claim about that tree.
+    /// one stem: a zero on a tree row is a claim about that tree.
     ///
     /// The equation is passed in rather than looked up here: this row is read
     /// on every render of the form, and `equation(forSpecies:)` is two Core
@@ -1280,9 +1284,14 @@ enum TreeComputed {
               let heightM, heightM > 1.3,
               let equation
         else { return TreeFormWords.none }
-        let m3 = equation.totalVolumeM3(dbhCm: Float(dbhCm), heightM: Float(heightM))
+        let m3 = Double(equation.totalVolumeM3(dbhCm: Float(dbhCm), heightM: Float(heightM)))
         guard m3 > 0 else { return TreeFormWords.none }
-        return String(format: "%.3f m³", m3)
+        switch settings.unitSystem {
+        case .metric:
+            return String(format: "%.3f m³", m3)
+        case .imperial:
+            return String(format: "%.2f ft³", Units.cubicMetersToCubicFeet(m3))
+        }
     }
 
     /// The engine equation configured for a species, or nil when the code is

@@ -39,9 +39,10 @@
 // The cover page's "Units" line is drawn from the same value as the tables, so
 // the declaration and the body cannot disagree.
 //
-// Per-area densities (TPA, volume) scale their denominator by the hectare
-// factor. Basal area scales BOTH halves — the engine reports m² per acre, so
-// an imperial report converts the numerator to ft² as well. Diameters and
+// A tree count scales its denominator by the hectare factor and nothing else —
+// a tree is a tree in any system. Basal area and volume scale BOTH halves: the
+// engine reports m² and m³ per ACRE, so an imperial report converts those
+// numerators to ft² and ft³ as well. Diameters and
 // heights convert to inches and feet, header and cells together. Species codes
 // are resolved to common names through the same localisation. Absent a
 // localisation, the report falls back to the historical US per-acre output.
@@ -154,6 +155,23 @@ public struct PDFLocalization: Sendable {
     public func baf(fromStored ft2PerAcre: Double) -> Double {
         isMetric ? Units.baPerAcreToBaPerHa(ft2PerAcre) : ft2PerAcre
     }
+
+    // MARK: - Volume
+
+    /// Volume arrives as CUBIC METRES per ACRE, and had the same half-converted
+    /// fraction basal area had: an imperial report scaled the denominator and
+    /// printed "m³/ac", 35.3× away from the cubic feet per acre the page is
+    /// read in — on the one line a landowner is paid on. The numerator follows
+    /// the AREA unit, as the basal-area pair above it does, so the two rows of
+    /// the same table cannot declare different systems.
+    public var volumeUnit: String { isMetric ? "m³" : "ft³" }
+
+    public var volumeDensityFactor: Double {
+        isMetric ? densityFactor : Units.cubicMetersToCubicFeet(1.0)
+    }
+
+    /// The whole label: "m³/ha" or "ft³/ac".
+    public var volumeDensityLabel: String { volumeUnit + areaSuffix }
 }
 
 public struct PDFReportInputs {
@@ -374,8 +392,11 @@ public enum PDFReportBuilder {
             ("Basal area",
              inputs.baStand.scaledPerArea(by: loc.basalAreaDensityFactor),
              loc.basalAreaDensityLabel),
+            // And volume gets its own for the same reason — m³ per acre is
+            // half a metric fraction, and both halves turn together.
             ("Gross volume",
-             inputs.volStand.scaledPerArea(by: loc.densityFactor), "m³\(loc.areaSuffix)")
+             inputs.volStand.scaledPerArea(by: loc.volumeDensityFactor),
+             loc.volumeDensityLabel)
         ]
         drawTableRow(cells: ["Measure", "Unit", "Average",
                               "± 95% range", "Plots"],
@@ -486,9 +507,9 @@ public enum PDFReportBuilder {
             kv("Quadratic mean DBH",
                "\(String(format: "%.2f", loc.diameter(fromCm: Double(s.qmdCm)))) \(loc.diameterUnit)")
             kv("Gross volume",
-               "\(String(format: "%.4f", Double(s.grossVolumePerAcreM3) * loc.densityFactor)) m³\(loc.areaSuffix)")
+               "\(String(format: "%.4f", Double(s.grossVolumePerAcreM3) * loc.volumeDensityFactor)) \(loc.volumeDensityLabel)")
             kv("Merchantable volume",
-               "\(String(format: "%.4f", Double(s.merchVolumePerAcreM3) * loc.densityFactor)) m³\(loc.areaSuffix)")
+               "\(String(format: "%.4f", Double(s.merchVolumePerAcreM3) * loc.volumeDensityFactor)) \(loc.volumeDensityLabel)")
         } else {
             drawBody("(no stats available)",
                      at: CGPoint(x: frame.minX, y: y),
@@ -502,7 +523,7 @@ public enum PDFReportBuilder {
                     width: frame.width, in: ctx); y -= 18
         drawTableRow(cells: ["Species", "n", "Trees\(loc.areaSuffix)",
                               "Basal \(loc.basalAreaUnit)\(loc.areaSuffix)",
-                              "Volume m³\(loc.areaSuffix)"],
+                              "Volume \(loc.volumeDensityLabel)"],
                      bold: true, at: CGPoint(x: frame.minX, y: y),
                      colWidths: [80, 50, 90, 110, 110], in: ctx); y -= 16
         if let s = inputs.plotStatsByPlot[plot.id] {
@@ -513,7 +534,7 @@ public enum PDFReportBuilder {
                     loc.speciesName(code), "\(ss.count)",
                     String(format: "%.2f", Double(ss.tpa) * loc.densityFactor),
                     String(format: "%.4f", Double(ss.baPerAcreM2) * loc.basalAreaDensityFactor),
-                    String(format: "%.4f", Double(ss.grossVolumePerAcreM3) * loc.densityFactor)
+                    String(format: "%.4f", Double(ss.grossVolumePerAcreM3) * loc.volumeDensityFactor)
                 ], bold: false, at: CGPoint(x: frame.minX, y: y),
                    colWidths: [80, 50, 90, 110, 110], in: ctx); y -= 16
             }

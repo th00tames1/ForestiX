@@ -249,6 +249,44 @@ object MeasurementFormatter {
     fun basalAreaDensityUnit(unit: AreaUnit): String =
         unit.densityLabel(basalAreaNumeratorUnit(unit))
 
+    // MARK: - Volume per unit land area
+
+    /// A stand's stem volume per unit land area, in the numerator the cruiser's
+    /// basis is written with.
+    ///
+    /// The inventory engine reports volume as CUBIC METRES PER ACRE — the acre
+    /// is the canonical stored basis, the cubic metre is the storage rule.
+    /// Screens converted only the DENOMINATOR and printed the numerator as a
+    /// literal "m³", so an imperial cruise read "225.0 m³/ac": a unit no cruise
+    /// sheet uses, and 35.3x away from the ft³/ac that stand actually holds.
+    /// The same fault basal area had, one row lower on the same card.
+    ///
+    /// THE NUMERATOR FOLLOWS THE AREA UNIT, exactly as [basalAreaNumeratorUnit]
+    /// resolved it. [VolumeUnit] is a separate country-driven setting, and
+    /// hanging the numerator on it would let a US cruiser who flipped Units to
+    /// metric read "ft³/ha", or a metric country cruising per acre read
+    /// "m³/ac" beside the "ft²/ac" the basal-area row above it prints. One
+    /// setting turns both halves of both fractions, or the card contradicts
+    /// itself.
+    fun volumeDensity(m3PerAcre: Double, unit: AreaUnit): Double =
+        m3PerAcre * volumeDensityFactor(unit)
+
+    /// The same conversion as a bare multiplier, for the confidence-interval
+    /// rows: a mean and its half-width have to be scaled by ONE number or the
+    /// band stops belonging to the value it brackets.
+    fun volumeDensityFactor(unit: AreaUnit): Double =
+        if (unit == AreaUnit.HECTARE) Units.ACRES_PER_HECTARE
+        else Units.cubicMetersToCubicFeet(1.0)
+
+    /// The numerator alone — "m³" or "ft³" — for rows that already carry the
+    /// "/ha" / "/ac" suffix in their heading.
+    fun volumeNumeratorUnit(unit: AreaUnit): String =
+        if (unit == AreaUnit.HECTARE) "m³" else "ft³"
+
+    /// The whole label: "m³/ha" or "ft³/ac".
+    fun volumeDensityUnit(unit: AreaUnit): String =
+        unit.densityLabel(volumeNumeratorUnit(unit))
+
     // MARK: - Plot geometry (the sampling ring itself)
 
     /// The AREA INSIDE ONE PLOT, in the unit that convention sizes plots with:

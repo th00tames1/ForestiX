@@ -191,7 +191,6 @@ fun PlotSummaryScreen(
             // acre; scale + relabel at display only (mirrors StandSummaryScreen).
             val areaUnit = settings.unitSystem.areaUnit
             val f = areaUnit.perAcreDensityFactor
-            val suffix = areaUnit.densitySuffix
             val abbr = areaUnit.abbreviation
 
             // MARK: - Stats
@@ -211,10 +210,22 @@ fun PlotSummaryScreen(
                 // one a cruiser compares against the inch diameters above it.
                 StatRow("Quadratic mean diameter",
                     MeasurementFormatter.diameter(stats.qmdCm.toDouble(), settings.unitSystem))
+                // Volume turns on the same rule as the basal-area row above
+                // it: the engine reports m³ per ACRE, so an imperial cruise
+                // converts the numerator too. Scaling only the denominator
+                // printed "m³/ac" — 35.3x away from the cubic feet per acre
+                // the sheet is written in, and the one figure on this card a
+                // landowner is paid on.
                 StatRow("Gross volume / $abbr",
-                    String.format(Locale.US, "%.1f m³$suffix", stats.grossVolumePerAcreM3 * f))
+                    String.format(Locale.US, "%.1f %s",
+                        MeasurementFormatter.volumeDensity(
+                            stats.grossVolumePerAcreM3.toDouble(), areaUnit),
+                        MeasurementFormatter.volumeDensityUnit(areaUnit)))
                 StatRow("Merchantable volume / $abbr",
-                    String.format(Locale.US, "%.1f m³$suffix", stats.merchVolumePerAcreM3 * f))
+                    String.format(Locale.US, "%.1f %s",
+                        MeasurementFormatter.volumeDensity(
+                            stats.merchVolumePerAcreM3.toDouble(), areaUnit),
+                        MeasurementFormatter.volumeDensityUnit(areaUnit)))
             }
 
             // MARK: - Species breakdown
@@ -397,7 +408,10 @@ private fun SpeciesRow(code: String, stat: PlotStats.SpeciesStat, areaUnit: Area
                 style = type.dataSmall, color = colors.textSecondary)
             Spacer(Modifier.weight(1f))
             Text(
-                String.format(Locale.US, "%.1f m³$suffix", stat.grossVolumePerAcreM3 * f),
+                String.format(Locale.US, "%.1f %s",
+                    MeasurementFormatter.volumeDensity(
+                        stat.grossVolumePerAcreM3.toDouble(), areaUnit),
+                    MeasurementFormatter.volumeDensityUnit(areaUnit)),
                 style = type.dataSmall, color = colors.textSecondary)
         }
     }

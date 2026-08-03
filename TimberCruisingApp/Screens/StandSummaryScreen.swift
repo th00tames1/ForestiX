@@ -61,10 +61,19 @@ public struct StandSummaryScreen: View {
                                 (plot: $0.plot,
                                  value: MeasurementFormatter.basalAreaDensity(
                                     m2PerAcre: Double($0.stats.baPerAcreM2), in: areaUnit)) })
-            statCardSection(title: "Gross volume", unit: areaUnit.densityLabel("m³"),
-                            stat: viewModel.volStat.scaledPerArea(by: densityFactor),
+            // And volume gets its own for the same reason: the engine reports
+            // m³ per ACRE. The mean, the ± range and every per-plot dot go
+            // through the one factor, or the band and the scatter stop
+            // belonging to the average drawn over them.
+            statCardSection(title: "Gross volume",
+                            unit: MeasurementFormatter.volumeDensityUnit(areaUnit),
+                            stat: viewModel.volStat.scaledPerArea(
+                                by: MeasurementFormatter.volumeDensityFactor(areaUnit)),
                             perPlot: viewModel.perPlotStats.map {
-                                (plot: $0.plot, value: Double($0.stats.grossVolumePerAcreM3) * densityFactor) },
+                                (plot: $0.plot,
+                                 value: MeasurementFormatter.volumeDensity(
+                                    m3PerAcre: Double($0.stats.grossVolumePerAcreM3),
+                                    in: areaUnit)) },
                             pending: volumePending)
             perPlotTableSection
         }
@@ -199,7 +208,10 @@ public struct StandSummaryScreen: View {
                                     MeasurementFormatter.basalAreaDensity(
                                         m2PerAcre: Double(row.stats.baPerAcreM2), in: areaUnit)))
                             .frame(maxWidth: .infinity, alignment: .trailing)
-                        Text(String(format: "%.1f", Double(row.stats.grossVolumePerAcreM3) * densityFactor))
+                        Text(String(format: "%.1f",
+                                    MeasurementFormatter.volumeDensity(
+                                        m3PerAcre: Double(row.stats.grossVolumePerAcreM3),
+                                        in: areaUnit)))
                             .frame(maxWidth: .infinity, alignment: .trailing)
                     }
                     .font(.caption.monospacedDigit())

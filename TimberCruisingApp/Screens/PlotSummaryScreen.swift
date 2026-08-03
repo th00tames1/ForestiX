@@ -143,14 +143,23 @@ public struct PlotSummaryScreen: View {
             statRow("Quadratic mean diameter",
                     MeasurementFormatter.diameter(cm: Double(viewModel.stats.qmdCm),
                                                   in: unitSystem))
+            // Volume turns on the same rule as the basal-area row above it:
+            // the engine reports m³ per ACRE, so an imperial cruise converts
+            // the numerator too. Scaling only the denominator printed "m³/ac"
+            // — 35.3× away from the cubic feet per acre the sheet is written
+            // in, and the one figure on this card a landowner is paid on.
             statRow("Gross volume / \(areaUnit.abbreviation)",
                     String(format: "%.1f %@",
-                           Double(viewModel.stats.grossVolumePerAcreM3) * densityFactor,
-                           areaUnit.densityLabel("m³")))
+                           MeasurementFormatter.volumeDensity(
+                               m3PerAcre: Double(viewModel.stats.grossVolumePerAcreM3),
+                               in: areaUnit),
+                           MeasurementFormatter.volumeDensityUnit(areaUnit)))
             statRow("Merchantable volume / \(areaUnit.abbreviation)",
                     String(format: "%.1f %@",
-                           Double(viewModel.stats.merchVolumePerAcreM3) * densityFactor,
-                           areaUnit.densityLabel("m³")))
+                           MeasurementFormatter.volumeDensity(
+                               m3PerAcre: Double(viewModel.stats.merchVolumePerAcreM3),
+                               in: areaUnit),
+                           MeasurementFormatter.volumeDensityUnit(areaUnit)))
         }
     }
 
@@ -193,8 +202,10 @@ public struct PlotSummaryScreen: View {
                                         MeasurementFormatter.basalAreaDensityUnit(areaUnit)))
                             Spacer()
                             Text(String(format: "%.1f %@",
-                                        Double(stat.grossVolumePerAcreM3) * densityFactor,
-                                        areaUnit.densityLabel("m³")))
+                                        MeasurementFormatter.volumeDensity(
+                                            m3PerAcre: Double(stat.grossVolumePerAcreM3),
+                                            in: areaUnit),
+                                        MeasurementFormatter.volumeDensityUnit(areaUnit)))
                         }
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)

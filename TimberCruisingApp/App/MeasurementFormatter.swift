@@ -291,6 +291,49 @@ public enum MeasurementFormatter {
         unit.densityLabel(basalAreaNumeratorUnit(unit))
     }
 
+    // MARK: - Volume per unit land area
+
+    /// A stand's stem volume per unit land area, in the numerator the cruiser's
+    /// basis is written with.
+    ///
+    /// The inventory engine reports volume as CUBIC METRES PER ACRE — the acre
+    /// is the canonical stored basis, the cubic metre is the storage rule.
+    /// Screens converted only the DENOMINATOR and printed the numerator as a
+    /// literal "m³", so an imperial cruise read "225.0 m³/ac": a unit no cruise
+    /// sheet uses, and 35.3× away from the ft³/ac that stand actually holds.
+    /// The same fault basal area had, one row lower on the same card.
+    ///
+    /// THE NUMERATOR FOLLOWS THE AREA UNIT, exactly as `basalAreaNumeratorUnit`
+    /// resolved it. `VolumeUnit` is a separate country-driven setting, and
+    /// hanging the numerator on it would let a US cruiser who flipped Units to
+    /// metric read "ft³/ha", or a metric country cruising per acre read
+    /// "m³/ac" beside the "ft²/ac" the basal-area row above it prints. One
+    /// setting turns both halves of both fractions, or the card contradicts
+    /// itself.
+    public static func volumeDensity(m3PerAcre: Double, in unit: AreaUnit) -> Double {
+        m3PerAcre * volumeDensityFactor(unit)
+    }
+
+    /// The same conversion as a bare multiplier, for the confidence-interval
+    /// rows: a mean and its half-width have to be scaled by ONE number or the
+    /// band stops belonging to the value it brackets.
+    public static func volumeDensityFactor(_ unit: AreaUnit) -> Double {
+        unit == .hectare
+            ? Units.acresPerHectare
+            : Units.cubicMetersToCubicFeet(1.0)
+    }
+
+    /// The numerator alone — "m³" or "ft³" — for rows that already carry the
+    /// "/ha" / "/ac" suffix in their heading.
+    public static func volumeNumeratorUnit(_ unit: AreaUnit) -> String {
+        unit == .hectare ? "m³" : "ft³"
+    }
+
+    /// The whole label: "m³/ha" or "ft³/ac".
+    public static func volumeDensityUnit(_ unit: AreaUnit) -> String {
+        unit.densityLabel(volumeNumeratorUnit(unit))
+    }
+
     // MARK: - Plot geometry (the sampling ring itself)
 
     /// The AREA INSIDE ONE PLOT, in the unit that convention sizes plots with:

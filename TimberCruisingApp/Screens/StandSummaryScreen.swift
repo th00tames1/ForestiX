@@ -46,10 +46,21 @@ public struct StandSummaryScreen: View {
                             stat: viewModel.tpaStat.scaledPerArea(by: densityFactor),
                             perPlot: viewModel.perPlotStats.map {
                                 (plot: $0.plot, value: Double($0.stats.tpa) * densityFactor) })
-            statCardSection(title: "Basal area", unit: areaUnit.densityLabel("m²"),
-                            stat: viewModel.baStat.scaledPerArea(by: densityFactor),
+            // Basal area gets a factor of its OWN: the engine reports m² per
+            // ACRE, so an imperial cruise converts the numerator too. Scaling
+            // only the denominator printed "m²/ac" — a unit no cruise sheet
+            // uses, and 10.76× away from the ft²/ac the quick-measure card
+            // shows for the same stand. The card's mean and its ± range are
+            // scaled by the same number, or the band stops bracketing the
+            // value it belongs to.
+            statCardSection(title: "Basal area",
+                            unit: MeasurementFormatter.basalAreaDensityUnit(areaUnit),
+                            stat: viewModel.baStat.scaledPerArea(
+                                by: MeasurementFormatter.basalAreaDensityFactor(areaUnit)),
                             perPlot: viewModel.perPlotStats.map {
-                                (plot: $0.plot, value: Double($0.stats.baPerAcreM2) * densityFactor) })
+                                (plot: $0.plot,
+                                 value: MeasurementFormatter.basalAreaDensity(
+                                    m2PerAcre: Double($0.stats.baPerAcreM2), in: areaUnit)) })
             statCardSection(title: "Gross volume", unit: areaUnit.densityLabel("m³"),
                             stat: viewModel.volStat.scaledPerArea(by: densityFactor),
                             perPlot: viewModel.perPlotStats.map {
@@ -184,7 +195,9 @@ public struct StandSummaryScreen: View {
                             .frame(maxWidth: .infinity, alignment: .trailing)
                         Text(String(format: "%.1f", Double(row.stats.tpa) * densityFactor))
                             .frame(maxWidth: .infinity, alignment: .trailing)
-                        Text(String(format: "%.2f", Double(row.stats.baPerAcreM2) * densityFactor))
+                        Text(String(format: "%.2f",
+                                    MeasurementFormatter.basalAreaDensity(
+                                        m2PerAcre: Double(row.stats.baPerAcreM2), in: areaUnit)))
                             .frame(maxWidth: .infinity, alignment: .trailing)
                         Text(String(format: "%.1f", Double(row.stats.grossVolumePerAcreM3) * densityFactor))
                             .frame(maxWidth: .infinity, alignment: .trailing)

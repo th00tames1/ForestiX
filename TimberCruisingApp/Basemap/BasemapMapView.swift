@@ -204,13 +204,22 @@ public struct BasemapArea: Equatable, Identifiable {
     /// Drawn heavier, with its corners marked — the cruiser has to be able
     /// to tell which of several outlines their next action applies to.
     public let selected: Bool
+    /// Whether a SELECTED area marks its outer-ring vertices. On for the
+    /// shapes a cruiser drags corner by corner; off for a circle, whose
+    /// ring is 128 densified points — marked, it reads as a beaded rim
+    /// rather than an outline, and every dot is a corner the cruiser cannot
+    /// grab. An explicit flag rather than a vertex-count threshold, so a
+    /// genuinely 30-corner hand-drawn stand keeps its corners.
+    public let drawsCorners: Bool
 
     public init(id: String,
                 rings: [[CoordinateConversions.LatLon]],
-                selected: Bool = false) {
+                selected: Bool = false,
+                drawsCorners: Bool = true) {
         self.id = id
         self.rings = rings
         self.selected = selected
+        self.drawsCorners = drawsCorners
     }
 }
 
@@ -1178,7 +1187,8 @@ public struct BasemapMapView: View {
             context.stroke(outlinePath, with: .color(style.areaStroke),
                            style: StrokeStyle(lineWidth: width,
                                               lineCap: .round, lineJoin: .round))
-            guard area.selected, let outer = area.rings.first else { continue }
+            guard area.selected, area.drawsCorners,
+                  let outer = area.rings.first else { continue }
             for corner in outer {
                 let pt = screenPoint(latitude: corner.latitude,
                                      longitude: corner.longitude,

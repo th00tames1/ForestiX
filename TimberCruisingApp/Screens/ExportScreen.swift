@@ -9,6 +9,7 @@ import Models
 public struct ExportScreen: View {
 
     @EnvironmentObject private var environment: AppEnvironment
+    @EnvironmentObject private var settings: AppSettings
     @StateObject private var viewModel: ExportViewModel
 
     public init(project: Project) {
@@ -102,7 +103,14 @@ public struct ExportScreen: View {
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
-        .task { viewModel.configure(with: environment) }
+        // Keyed on the unit system so a cruiser who flips Units while this
+        // screen is up re-configures the view model before they tap Export —
+        // the report follows the toggle, and configuring only once would have
+        // frozen it at whatever was set when the screen appeared.
+        .task(id: settings.unitSystem) {
+            viewModel.configure(with: environment,
+                                unitSystem: settings.unitSystem)
+        }
         #if os(iOS)
         .sheet(item: Binding(
             get: { viewModel.shareURL.map(ShareURL.init) },

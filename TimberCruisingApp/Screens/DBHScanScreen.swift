@@ -1100,7 +1100,7 @@ public struct DBHScanScreen: View {
             units: settings.unitSystem.rawValue)
         viewModel.rawCaptureGPS = Self.currentGPS()
         // Manual entry is typed in whatever the active unit system is.
-        viewModel.manualEntryUnits = settings.unitSystem
+        viewModel.unitSystem = settings.unitSystem
         storageLow = viewModel.rawCaptureEnabled && RawCaptureStore.isStorageLow()
     }
 
@@ -1765,15 +1765,24 @@ public struct DBHScanScreen: View {
         return (dx * dx + dz * dz).squareRoot() - info.radiusM
     }
 
-    /// Dark-glass boundary pill under the mini-map: "Border 1.3 m"
-    /// while inside within 2 m of the ring, "Outside plot" (warn tint)
-    /// while outside within 2 m. Hidden otherwise. (12 semibold on
-    /// black 0.55 — Android parity.)
+    /// Dark-glass boundary pill under the mini-map: "Border 1.3 m" / "Border
+    /// 4.3 ft" while inside within 2 m of the ring, "Outside plot" (warn tint)
+    /// while outside within 2 m. Hidden otherwise. (12 semibold on black 0.55
+    /// — Android parity.)
+    ///
+    /// The READING follows the cruiser's units; the 2 m APPEARANCE THRESHOLD
+    /// (`boundarySignedM` gate above) deliberately does not. That distance is
+    /// a physical property of the plot edge — the band inside which a stem is
+    /// borderline and has to be called in or out — not a readout, and making
+    /// it 6 ft in the US would mean two cruisers on the same plot got the
+    /// prompt on different trees. One band, one plot, whatever the phone is
+    /// set to.
     private func borderChip(_ signedM: Double) -> some View {
         let outside = signedM >= 0
         return Text(outside
                     ? "Outside plot"
-                    : String(format: "Border %.1f m", -signedM))
+                    : "Border " + MeasurementFormatter.plotLength(
+                        m: -signedM, in: settings.unitSystem))
             .font(.system(size: 12, weight: .semibold))
             .foregroundStyle(outside
                              ? ForestixPalette.confidenceWarn
@@ -2068,7 +2077,13 @@ public struct DBHScanScreen: View {
         case .accepted:     return "Saved."
         case .rejected:     return viewModel.result?.rejectionReason
                                  ?? "Scan rejected. Try again."
-        case .manualEntry:  return "Enter diameter manually in cm."
+        // The banner names the SAME unit the field below it is placeheld with
+        // (:2357) and the same one `submitManualEntry` converts from. It used
+        // to say "cm" over a box marked "Diameter in inches", and a cruiser
+        // who obeyed the banner and typed 34 stored an 86 cm tree.
+        case .manualEntry:
+            return "Enter diameter manually in "
+                + (settings.unitSystem == .metric ? "cm" : "inches") + "."
         }
     }
 
@@ -2367,7 +2382,7 @@ public struct DBHScanScreen: View {
                 // The field prompts in the ACTIVE unit system; the view model
                 // converts inches → cm on submit (it used to store the typed
                 // inches straight into diameterCm, a 2.54x corruption).
-                viewModel.manualEntryUnits = settings.unitSystem
+                viewModel.unitSystem = settings.unitSystem
                 viewModel.submitManualEntry()
             }
                 .buttonStyle(.forestixProminent)

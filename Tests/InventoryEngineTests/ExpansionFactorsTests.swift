@@ -12,11 +12,12 @@ final class ExpansionFactorsTests: XCTestCase {
     }
 
     func testVariableRadiusEF() {
-        // BAF 20, DBH 40 cm: BA = π·0.4²/4 = 0.12566 m². EF = 20/0.12566 ≈ 159.15.
+        // BAF is ft²/ac, so the tree's basal area enters in ft² too:
+        // DBH 40 cm = 1.35263 ft². EF = 20/1.35263 ≈ 14.79 trees/acre.
         XCTAssertEqual(
             ExpansionFactors.variableRadius(baf: 20, dbhCm: 40),
-            159.155,
-            accuracy: 0.05
+            14.786,
+            accuracy: 0.01
         )
     }
 
@@ -37,10 +38,10 @@ final class ExpansionFactorsTests: XCTestCase {
     }
 
     func testPerAcreBAFSumsWeightedByEF() {
-        // 3 identical trees DBH 30, BAF 20. BA = 0.07068; EF = 20/0.07068 ≈ 282.94.
-        // Σ attr·EF where attr = 1 → 3 · 282.94 ≈ 848.83.
+        // 3 identical trees DBH 30 = 0.76086 ft², BAF 20 ⇒ EF = 26.286 each.
+        // Σ attr·EF where attr = 1 → 3 · 26.286 ≈ 78.86 trees/acre.
         let trees = (0..<3).map { _ in makeTree(dbhCm: 30) }
         let tpa = ExpansionFactors.perAcreBAF(trees: trees, baf: 20) { _ in Float(1) }
-        XCTAssertEqual(tpa, 848.83, accuracy: 0.5)
+        XCTAssertEqual(tpa, 78.86, accuracy: 0.05)
     }
 }

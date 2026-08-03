@@ -116,13 +116,17 @@ extension MeasurePhotoPage {
             return "DBH " + MeasurementFormatter.diameter(cm: entry.value, in: unitSystem)
         case .height:
             return "Height " + MeasurementFormatter.height(m: entry.value, in: unitSystem)
+        // Crown and plot follow `unitSystem` like the two above them — this
+        // caption sits under a photo the cruiser opened from a card that was
+        // already reading inches and feet.
         case .crown:
-            return String(format: "%.1f × %.1f m",
-                          entry.value, entry.secondaryValue ?? 0)
+            return MeasurementFormatter.crownSpread(
+                entry.value, entry.secondaryValue ?? 0, in: unitSystem)
         case .distance:
             return MeasurementFormatter.distance(m: entry.value, in: unitSystem)
         case .samplingPlot:
-            return String(format: "%.1f m radius", entry.value)
+            return MeasurementFormatter.plotLength(m: entry.value, in: unitSystem)
+                + " radius"
         }
     }
 
@@ -135,7 +139,9 @@ extension MeasurePhotoPage {
         case .height:
             return MeasurementFormatter.heightSigma(m: sigma, in: unitSystem)
         case .crown, .distance, .samplingPlot:
-            return String(format: "±%.2f m", sigma)
+            // Same unit as the value it sits beside — these three are plain
+            // lengths in metres, which is what `UncertaintyBand` takes.
+            return UncertaintyBand.text(metres: sigma, in: unitSystem)
         }
     }
 

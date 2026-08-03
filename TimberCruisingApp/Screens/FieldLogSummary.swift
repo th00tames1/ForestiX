@@ -389,10 +389,18 @@ public enum FieldLogSummaryBuilder {
         let cells = [
             FieldLogSummary.Cell(label: "TREES",
                                  value: empty ? "—" : "\(stats.liveTreeCount)"),
+            // Same rule the quick-measure card above already follows: the
+            // numerator switches with the basis. The engine hands over m² per
+            // ACRE, so scaling only the denominator printed "m²/ac" for an
+            // imperial cruise — the one card in this file that disagreed with
+            // the one beside it.
             FieldLogSummary.Cell(label: areaUnit.densityLabel("BASAL").uppercased(),
                                  value: empty ? "—"
-                                     : String(format: "%.1f m²",
-                                              Double(stats.baPerAcreM2) * factor)),
+                                     : String(format: "%.1f %@",
+                                              MeasurementFormatter.basalAreaDensity(
+                                                m2PerAcre: Double(stats.baPerAcreM2),
+                                                in: areaUnit),
+                                              MeasurementFormatter.basalAreaNumeratorUnit(areaUnit))),
             FieldLogSummary.Cell(label: treesPerAreaLabel(areaUnit),
                                  value: empty ? "—"
                                      : String(format: "%.0f", Double(stats.tpa) * factor)),
@@ -406,8 +414,10 @@ public enum FieldLogSummaryBuilder {
             computed = [
                 .init(label: "Live trees", value: "\(stats.liveTreeCount)"),
                 .init(label: "Basal area",
-                      value: String(format: "%.2f %@", Double(stats.baPerAcreM2) * factor,
-                                    areaUnit.densityLabel("m²"))),
+                      value: String(format: "%.2f %@",
+                                    MeasurementFormatter.basalAreaDensity(
+                                        m2PerAcre: Double(stats.baPerAcreM2), in: areaUnit),
+                                    MeasurementFormatter.basalAreaDensityUnit(areaUnit))),
                 .init(label: "Trees",
                       value: String(format: "%.1f %@", Double(stats.tpa) * factor,
                                     areaUnit.densitySuffix)),
@@ -471,14 +481,22 @@ public enum FieldLogSummaryBuilder {
         let empty = plots.isEmpty
         let pending = settings.country.volumeStandard.isPending
         let tpa = viewModel.tpaStat.scaledPerArea(by: factor)
-        let ba = viewModel.baStat.scaledPerArea(by: factor)
+        // Basal area alone needs a factor of its own: the engine's figure is
+        // m² per ACRE, so an imperial cruise has to convert the numerator too
+        // (m² → ft²), where a tree count only has a denominator to convert.
+        // Mean and half-width are scaled by the SAME number, or the band stops
+        // bracketing the value it belongs to.
+        let ba = viewModel.baStat.scaledPerArea(
+            by: MeasurementFormatter.basalAreaDensityFactor(areaUnit))
         let volume = viewModel.volStat.scaledPerArea(by: factor)
 
         let cells = [
             FieldLogSummary.Cell(label: "TREES",
                                  value: empty ? "—" : "\(viewModel.totalLiveTreeCount)"),
             FieldLogSummary.Cell(label: areaUnit.densityLabel("BASAL").uppercased(),
-                                 value: empty ? "—" : String(format: "%.1f m²", ba.mean)),
+                                 value: empty ? "—"
+                                     : String(format: "%.1f %@", ba.mean,
+                                              MeasurementFormatter.basalAreaNumeratorUnit(areaUnit))),
             FieldLogSummary.Cell(label: treesPerAreaLabel(areaUnit),
                                  value: empty ? "—" : String(format: "%.0f", tpa.mean)),
             FieldLogSummary.Cell(label: areaUnit.densityLabel("VOLUME").uppercased(),
@@ -495,7 +513,9 @@ public enum FieldLogSummaryBuilder {
                                             decimals: 1, unit: areaUnit.densitySuffix)),
                 .init(label: "Basal area",
                       value: confidenceText(ba.mean, ba.ci95HalfWidth,
-                                            decimals: 2, unit: " " + areaUnit.densityLabel("m²"))),
+                                            decimals: 2,
+                                            unit: " " + MeasurementFormatter
+                                                .basalAreaDensityUnit(areaUnit))),
                 .init(label: "Gross volume",
                       value: pending ? volumePendingText
                           : confidenceText(volume.mean, volume.ci95HalfWidth,
@@ -571,7 +591,14 @@ public enum FieldLogSummaryBuilder {
                           areaUnit.fromAcres(Double(acres)), areaUnit.abbreviation)
         case .variableRadius:
             guard let baf = design.baf else { return "Variable-radius" }
-            return String(format: "Variable-radius · BAF %.0f", Double(baf))
+            // The stored BAF is ft²/ac (see `CruiseDesign.baf`); a metric
+            // cruiser reads the same prism as m²/ha. `areaUnit` is already the
+            // cruiser's own basis, so it is what decides which. Bare, the
+            // number could be either and the two are 4.36× apart.
+            let system: UnitSystem = areaUnit == .hectare ? .metric : .imperial
+            return String(format: "Variable-radius · BAF %.0f %@",
+                          MeasurementFormatter.bafDisplay(stored: Double(baf), in: system),
+                          MeasurementFormatter.bafUnit(system))
         }
     }
 

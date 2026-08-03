@@ -73,6 +73,11 @@ extension MapHomeScreen {
     /// it is about to become. The area being edited drops out: its stored
     /// shape is exactly what the draft is replacing, and drawing both would
     /// show the cruiser two answers to one question.
+    ///
+    /// `drawsCorners` is off for a circle at BOTH construction sites below.
+    /// The renderer marks every outer-ring vertex of a selected area, and a
+    /// circle has 128 of them — left on, a selected circle is a beaded rim
+    /// rather than an outline.
     var areaOverlays: [BasemapArea] {
         var out: [BasemapArea] = areas.compactMap { stratum in
             guard stratum.id != editingAreaID,
@@ -81,12 +86,15 @@ extension MapHomeScreen {
             else { return nil }
             return BasemapArea(id: stratum.id.uuidString,
                                rings: rings,
-                               selected: stratum.id == selectedAreaID)
+                               selected: stratum.id == selectedAreaID,
+                               drawsCorners: GeoJSONImporter
+                                   .parseCircle(from: stratum.polygonGeoJSON) == nil)
         }
         if let areaDraft, areaDraft.vertices.count >= 3 {
             out.append(BasemapArea(id: Self.areaDraftOverlayID,
                                    rings: [areaDraft.closedRing],
-                                   selected: true))
+                                   selected: true,
+                                   drawsCorners: areaDraft.circle == nil))
         }
         return out
     }
@@ -199,9 +207,50 @@ extension MapHomeScreen {
             selectedAreaID = nil
             areaDraft = BoundaryDraft.rectangle(corner: a, opposite: b)
         }
+        syncAreaRadiusText()
+    }
+
+    /// "Draw a circle" from the same callout, and the press point means the
+    /// same thing it means for the rectangle: the CENTRE of what appears.
+    ///
+    /// The opening radius is read off the VISIBLE viewport for the reason
+    /// `beginAreaDraw` gives above — a fixed 50 m circle is a dot at zoom 12
+    /// and off-screen at zoom 20. One horizontal probe at the same quarter
+    /// of the short side the rectangle uses, so the two tools start out the
+    /// same size on screen.
+    func beginCircleDraw(at coordinate: CoordinateConversions.LatLon) {
+        let size = mapViewportSize
+        guard size.width > 0, size.height > 0 else { return }
+        let centre = BasemapMapView.screenPoint(latitude: coordinate.latitude,
+                                                longitude: coordinate.longitude,
+                                                camera: camera,
+                                                viewportSize: size)
+        let half = min(size.width, size.height) * 0.25
+        let edge = BasemapMapView.coordinate(
+            at: CGPoint(x: centre.x + half, y: centre.y),
+            camera: camera, viewportSize: size)
+        let radius = abs(CoordinateConversions.toENU(point: edge, origin: coordinate).east)
+        editingAreaID = nil
+        areaDraftName = defaultAreaName
+        areaDraftUndo = []
+        areaSaveRefusal = nil
+        areaRadiusHandleAngle = 0
+        withAnimation(.easeOut(duration: 0.18)) {
+            selectedPinID = nil
+            selectedAreaID = nil
+            areaDraft = BoundaryDraft.circle(centre: coordinate, radiusMeters: radius)
+        }
+        syncAreaRadiusText()
     }
 
     /// EDIT — the same in-place editor, seeded with the stored outline.
+    ///
+    /// A stratum saved as a CIRCLE re-opens as a circle. Without the note
+    /// `parseCircle` reads it would come back as the 128-corner polygon it
+    /// is stored as, which is not an outline anybody can edit. An area with
+    /// no note, or one that cannot be read, opens as a polygon — every
+    /// stratum drawn before circles existed, and the behaviour this screen
+    /// has always had.
     func beginAreaEdit(_ stratum: Stratum) {
         guard let rings = try? CruiseSetupSheet.parseRings(from: stratum.polygonGeoJSON),
               let outer = rings.first, outer.count >= 4
@@ -213,9 +262,17 @@ extension MapHomeScreen {
         areaDraftName = stratum.name
         areaDraftUndo = []
         areaSaveRefusal = nil
+        areaRadiusHandleAngle = 0
+        let stored = GeoJSONImporter.parseCircle(from: stratum.polygonGeoJSON)
         withAnimation(.easeOut(duration: 0.18)) {
-            areaDraft = BoundaryDraft(closedRing: outer)
+            if let stored {
+                areaDraft = BoundaryDraft.circle(centre: stored.centre,
+                                                 radiusMeters: stored.radiusMeters)
+            } else {
+                areaDraft = BoundaryDraft(closedRing: outer)
+            }
         }
+        syncAreaRadiusText()
     }
 
     /// "Area 1", "Area 2", … — one past the highest number already spoken
@@ -230,7 +287,7 @@ extension MapHomeScreen {
 
     func pushAreaUndo() {
         guard let areaDraft else { return }
-        areaDraftUndo.append(areaDraft.vertices)
+        areaDraftUndo.append(areaDraft)
         // A field session drags a lot; the stack is for mistakes, not for
         // history, and an unbounded one is just a leak.
         if areaDraftUndo.count > 30 { areaDraftUndo.removeFirst() }
@@ -238,8 +295,9 @@ extension MapHomeScreen {
 
     func undoAreaDraft() {
         guard let previous = areaDraftUndo.popLast() else { return }
-        areaDraft = BoundaryDraft(vertices: previous)
+        areaDraft = previous
         areaSaveRefusal = nil
+        syncAreaRadiusText()
     }
 
     func cancelAreaDraft() {
@@ -251,6 +309,73 @@ extension MapHomeScreen {
         areaSaveRefusal = nil
         areaDraggingCorner = nil
         areaInsertedFromEdge = nil
+        areaDraggingCircle = false
+        areaDraftRadiusText = ""
+    }
+
+    /// Write the draft's radius back into the field, in the cruiser's own
+    /// unit. Called whenever the SHAPE moved the radius — a handle drag, an
+    /// undo, opening a draft — so the two stay one number.
+    ///
+    /// The other direction is `applyTypedAreaRadius()`, and the two would
+    /// chase each other without the tolerance it applies; see there.
+    func syncAreaRadiusText() {
+        guard let circle = areaDraft?.circle else {
+            areaDraftRadiusText = ""
+            return
+        }
+        areaDraftRadiusText = MeasurementFormatter.entryText(
+            MeasurementFormatter.areaRadiusDisplay(m: circle.radiusMeters,
+                                                   in: settings.unitSystem),
+            fractionDigits: 1)
+    }
+
+    /// Take what the cruiser typed and resize the circle with it. The text
+    /// is in THEIR unit — metres or feet — and the draft is metric, which
+    /// is the whole reason this goes through `MeasurementFormatter` rather
+    /// than through a `Double(...)` at the field.
+    ///
+    /// A HALF-TYPED FIELD IS NOT A MISTAKE. Empty, "5.", "-" and the like
+    /// leave the shape alone rather than refusing: the cruiser is still
+    /// typing, and a circle that collapses between two keystrokes is a
+    /// circle they have to redraw.
+    ///
+    /// The tolerance is what keeps this from fighting a drag. A drag writes
+    /// the field through `syncAreaRadiusText`, rounded to a tenth, and this
+    /// would otherwise read that back and snap the radius onto it every
+    /// frame. Half a tenth of a display unit is below what the field can
+    /// express, so a typed change always clears it and a rounding never does.
+    func applyTypedAreaRadius() {
+        // THROUGH `TruthInput`, LIKE EVERY OTHER TYPED MEASUREMENT. Parsing
+        // with `Double(_:)` looked equivalent and is not: a European or Korean
+        // keypad emits "," for the decimal point, `Double("50,5")` is nil, and
+        // this returned without a radius change and without a word — while the
+        // identical field one screen over, in Cruise setup, accepted the same
+        // keystrokes. The conversion was never the problem; the parsing was.
+        guard let circle = areaDraft?.circle,
+              let metres = TruthInput.parsePositiveBase(areaDraftRadiusText,
+                                                        unit: areaRadiusEntryUnit)
+        else { return }
+        let typed = MeasurementFormatter.areaRadiusDisplay(m: metres,
+                                                           in: settings.unitSystem)
+        let current = MeasurementFormatter.areaRadiusDisplay(m: circle.radiusMeters,
+                                                             in: settings.unitSystem)
+        guard abs(typed - current) >= 0.05 else { return }
+        pushAreaUndo()
+        areaDraft?.setRadius(metres)
+        // THE DRAFT MAY HAVE REFUSED THE NUMBER. `BoundaryDraft` clamps at
+        // `minimumRadiusMeters`, so a typed 1 m becomes a 2 m circle — and
+        // without reading the radius back the field kept saying 1 while the
+        // shape and the draft bar said 2, and every further keystroke cleared
+        // the tolerance again and re-applied the clamp. The field states what
+        // the circle IS.
+        syncAreaRadiusText()
+    }
+
+    /// The unit the radius box is typed in — the cruiser's own, from the same
+    /// helper every other distance entry in the app asks.
+    var areaRadiusEntryUnit: TruthInput.Unit {
+        TruthInput.defaultUnit(.distance, imperial: settings.unitSystem == .imperial)
     }
 
     func deleteAreaCorner(_ index: Int) {
@@ -310,7 +435,8 @@ extension MapHomeScreen {
                 projectId: stored.projectId,
                 name: name,
                 areaAcres: Float(draft.areaAcres),
-                polygonGeoJSON: GeoJSONImporter.serialise(rings: [ring]))
+                polygonGeoJSON: GeoJSONImporter.serialise(rings: [ring],
+                                                          circle: draft.circle))
         } else {
             guard let project = currentProject ?? autoCreateProject() else {
                 areaSaveRefusal = "Couldn't save the area: there is no project to put it in."
@@ -321,7 +447,8 @@ extension MapHomeScreen {
                 projectId: project.id,
                 name: name,
                 areaAcres: Float(draft.areaAcres),
-                polygonGeoJSON: GeoJSONImporter.serialise(rings: [ring]))
+                polygonGeoJSON: GeoJSONImporter.serialise(rings: [ring],
+                                                          circle: draft.circle))
         }
         let isEdit = editingAreaID != nil
         do {
@@ -369,6 +496,7 @@ extension MapHomeScreen {
         editingAreaID = nil
         areaDraftUndo = []
         areaSaveRefusal = relayFailure
+        areaDraftRadiusText = ""
         withAnimation(.easeOut(duration: 0.18)) { areaDraft = nil }
         reloadAreas()
         reloadCruise()
@@ -682,7 +810,15 @@ extension MapHomeScreen {
     var mapObjectLayer: some View {
         GeometryReader { geo in
             ZStack {
-                if let areaDraft {
+                if let areaDraft, let circle = areaDraft.circle {
+                    // TWO handles, and the corner loops are not merely
+                    // empty — they are not entered. A circle's ring has 128
+                    // vertices, and building a handle view for each would
+                    // put 128 drag targets over the map for a shape that
+                    // has no corners to drag.
+                    areaCentreHandle(coordinate: circle.centre, size: geo.size)
+                    areaRadiusHandle(circle: circle, size: geo.size)
+                } else if let areaDraft {
                     ForEach(Array(areaDraft.edgeMidpoints.enumerated()), id: \.offset) { index, coord in
                         areaMidpointHandle(edge: index, coordinate: coord, size: geo.size)
                     }
@@ -769,6 +905,84 @@ extension MapHomeScreen {
             }
     }
 
+    // MARK: - Circle handles
+
+    /// THE CENTRE — drag it and the whole circle travels, radius unchanged.
+    /// No long-press: a circle has nothing a delete could take away that
+    /// Cancel does not take better.
+    @ViewBuilder
+    private func areaCentreHandle(coordinate: CoordinateConversions.LatLon,
+                                  size: CGSize) -> some View {
+        Circle()
+            .fill(ForestixPalette.cruiseAccent)
+            .overlay(Circle().stroke(.white, lineWidth: 3))
+            .frame(width: Self.handleDiameter, height: Self.handleDiameter)
+            .frame(width: Self.handleTarget, height: Self.handleTarget)
+            .contentShape(Circle())
+            .gesture(areaCircleDrag(size: size, isCentre: true))
+            .position(screenPoint(coordinate, size: size))
+            .accessibilityLabel("Circle centre")
+            .accessibilityIdentifier("mapHome.area.circleCentre")
+    }
+
+    /// THE RING HANDLE — drag it out or in to set the radius.
+    ///
+    /// It sits at whatever bearing the finger last pulled it to
+    /// (`areaRadiusHandleAngle`), not pinned due east. Pinned, a cruiser
+    /// dragging north-west watches the handle snap sideways while the
+    /// radius follows their distance, which reads as broken.
+    @ViewBuilder
+    private func areaRadiusHandle(circle: BoundaryDraft.Circle,
+                                  size: CGSize) -> some View {
+        let on = CoordinateConversions.toLatLon(
+            enu: .init(east: circle.radiusMeters * cos(areaRadiusHandleAngle),
+                       north: circle.radiusMeters * sin(areaRadiusHandleAngle)),
+            origin: circle.centre)
+        Circle()
+            .fill(.white)
+            .overlay(Circle().stroke(ForestixPalette.cruiseAccent, lineWidth: 3))
+            .frame(width: Self.handleDiameter, height: Self.handleDiameter)
+            .frame(width: Self.handleTarget, height: Self.handleTarget)
+            .contentShape(Circle())
+            .gesture(areaCircleDrag(size: size, isCentre: false))
+            .position(screenPoint(on, size: size))
+            .accessibilityLabel("Circle radius")
+            .accessibilityIdentifier("mapHome.area.circleRadius")
+    }
+
+    /// Both circle drags, which differ only in what they do with the point
+    /// under the finger: the centre moves to it, the ring measures to it.
+    /// One undo entry per gesture, captured before the first millimetre —
+    /// the rule `areaCornerDrag` established.
+    private func areaCircleDrag(size: CGSize, isCentre: Bool) -> some Gesture {
+        DragGesture(minimumDistance: 6,
+                    coordinateSpace: .named(Self.areaCoordinateSpace))
+            .onChanged { value in
+                guard areaDraft?.circle != nil else { return }
+                if !areaDraggingCircle {
+                    pushAreaUndo()
+                    areaDraggingCircle = true
+                }
+                let at = BasemapMapView.coordinate(at: value.location,
+                                                   camera: camera,
+                                                   viewportSize: size)
+                if isCentre {
+                    areaDraft?.moveCentre(to: at)
+                } else {
+                    guard let centre = areaDraft?.circle?.centre else { return }
+                    let enu = CoordinateConversions.toENU(point: at, origin: centre)
+                    let reach = (enu.east * enu.east + enu.north * enu.north).squareRoot()
+                    // A finger exactly on the centre has no bearing to
+                    // speak of; leave the handle where it was rather than
+                    // letting it flick to due east and back.
+                    if reach > 0 { areaRadiusHandleAngle = atan2(enu.north, enu.east) }
+                    areaDraft?.setRadius(reach)
+                }
+                syncAreaRadiusText()
+            }
+            .onEnded { _ in areaDraggingCircle = false }
+    }
+
     @ViewBuilder
     private func areaMidpointHandle(edge index: Int,
                                     coordinate: CoordinateConversions.LatLon,
@@ -847,6 +1061,15 @@ extension MapHomeScreen {
                 beginAreaDraw(at: at)
             }
             .accessibilityIdentifier("mapHome.planMenu.area")
+            // Siblings in the same menu, from the same press, so the press
+            // point means the same thing to both: the centre of what
+            // appears.
+            calloutButton("Draw a circle", prominent: false) {
+                let at = coordinate
+                dismissPlanMenu()
+                beginCircleDraw(at: at)
+            }
+            .accessibilityIdentifier("mapHome.planMenu.circle")
             calloutButton("Cancel", prominent: false) { dismissPlanMenu() }
                 .accessibilityIdentifier("mapHome.planMenu.cancel")
         }
@@ -955,7 +1178,7 @@ extension MapHomeScreen {
     /// the shape is still under the thumb that caused it.
     var areaDraftBar: some View {
         VStack(spacing: ForestixSpace.sm) {
-            Text("Drag a corner to move it. Drag the small handle on an edge to add a corner. Press and hold a corner to delete it.")
+            Text(areaDraftHelpText)
                 .font(ForestixType.caption)
                 .foregroundStyle(ForestixPalette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -987,13 +1210,37 @@ extension MapHomeScreen {
                 areaRefusal(areaSaveRefusal)
             }
 
-            TextField("Area name", text: $areaDraftName)
-                .textFieldStyle(.roundedBorder)
-                .foregroundStyle(ForestixPalette.textPrimary)
-                #if os(iOS)
-                .textInputAutocapitalization(.words)
-                #endif
-                .accessibilityIdentifier("mapHome.area.name")
+            HStack(spacing: ForestixSpace.sm) {
+                TextField("Area name", text: $areaDraftName)
+                    .textFieldStyle(.roundedBorder)
+                    .foregroundStyle(ForestixPalette.textPrimary)
+                    #if os(iOS)
+                    .textInputAutocapitalization(.words)
+                    #endif
+                    .accessibilityIdentifier("mapHome.area.name")
+                // TYPED RADIUS, in the cruiser's own unit. A gloved thumb
+                // cannot land an exact 50 m on a dragged handle, and "a
+                // 50 m radius block" is how the job is given out — so the
+                // number is enterable, not only draggable.
+                if areaDraft?.circle != nil {
+                    HStack(spacing: 4) {
+                        TextField("Radius", text: $areaDraftRadiusText)
+                            .textFieldStyle(.roundedBorder)
+                            .foregroundStyle(ForestixPalette.textPrimary)
+                            .frame(width: 76)
+                            #if os(iOS)
+                            .keyboardType(.decimalPad)
+                            #endif
+                            .onChange(of: areaDraftRadiusText) { _, _ in
+                                applyTypedAreaRadius()
+                            }
+                            .accessibilityIdentifier("mapHome.area.radius")
+                        Text(MeasurementFormatter.areaRadiusUnit(settings.unitSystem))
+                            .font(ForestixType.caption)
+                            .foregroundStyle(ForestixPalette.textSecondary)
+                    }
+                }
+            }
 
             HStack(spacing: ForestixSpace.sm) {
                 Button("Cancel") { cancelAreaDraft() }
@@ -1030,7 +1277,23 @@ extension MapHomeScreen {
                       unit.fromAcres(areaDraft.areaAcres), unit.abbreviation)
     }
 
+    /// The gesture vocabulary this draft actually has. A circle offers no
+    /// corner gestures, and naming gestures that silently do nothing is
+    /// worse than naming none.
+    private var areaDraftHelpText: String {
+        areaDraft?.circle != nil
+            ? "Drag the centre to move the circle. Drag the ring handle to set the radius."
+            : "Drag a corner to move it. Drag the small handle on an edge to add a corner. Press and hold a corner to delete it."
+    }
+
+    /// The second line under the live area: what the cruiser is holding.
+    /// For a polygon that is its corner count; for a circle the corner
+    /// count is 128 and means nothing, so it is the radius instead.
     private var areaDraftCornerText: String {
+        if let circle = areaDraft?.circle {
+            return "Radius " + MeasurementFormatter.areaRadius(m: circle.radiusMeters,
+                                                               in: settings.unitSystem)
+        }
         let count = areaDraft?.vertices.count ?? 0
         return count == 1 ? "1 corner" : "\(count) corners"
     }

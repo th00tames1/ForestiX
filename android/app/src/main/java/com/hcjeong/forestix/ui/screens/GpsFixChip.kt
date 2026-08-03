@@ -62,6 +62,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.platform.LocalContext
+import com.hcjeong.forestix.LocalAppEnvironment
+import com.hcjeong.forestix.common.MeasurementFormatter
+import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.positioning.CLLocationSnapshot
 import com.hcjeong.forestix.positioning.LocationService
 import com.hcjeong.forestix.ui.screens.cruise.PLOT_FIX_LOST_AGE_MS
@@ -112,6 +115,12 @@ fun GpsFixChip(
     val type = Forestix.type
     val context = LocalContext.current
     val location = remember { LocationService.shared(context) }
+    // The Z row is an ELEVATION, and elevation is the one length in this app
+    // the cruiser also TYPES — into the plot sheet, which has always asked for
+    // it in their own unit. With the chip stuck in metres the two disagreed
+    // about one piece of ground, and copying the chip's figure into the sheet
+    // stored a 3.28x error.
+    val settings by LocalAppEnvironment.current.settings.state.collectAsStateWithLifecycle()
 
     if (acquiresService) {
         val launcher = rememberLauncherForActivityResult(
@@ -158,7 +167,10 @@ fun GpsFixChip(
             .background(colors.surface)
             .border(1.dp, colors.divider, ForestixRadius.control)
             .padding(horizontal = 11.dp, vertical = 7.dp)
-            .semantics { contentDescription = gpsAccessibilityText(snap, ageMs, state) },
+            .semantics {
+                contentDescription =
+                    gpsAccessibilityText(snap, ageMs, state, settings.unitSystem)
+            },
     ) {
         if (snap != null) {
             Row(
@@ -178,7 +190,17 @@ fun GpsFixChip(
             ) {
                 GpsCoordRow(
                     "Z",
-                    snap.altitudeM?.let { String.format(Locale.US, "%.0f m", it) } ?: "—",
+                    // WHOLE units, both systems — `elevationDisplay` is the
+                    // same conversion PlotDetailSheet reads and writes its
+                    // elevation field with, so the chip and the sheet now name
+                    // one number.
+                    snap.altitudeM?.let {
+                        String.format(
+                            Locale.US, "%.0f %s",
+                            MeasurementFormatter.elevationDisplay(it, settings.unitSystem),
+                            MeasurementFormatter.heightUnit(settings.unitSystem),
+                        )
+                    } ?: "—",
                 )
                 // The age only appears once it MATTERS. A live fix is the
                 // normal case and does not need a number ticking beside it;
@@ -262,10 +284,18 @@ private fun gpsAccessibilityText(
     snap: CLLocationSnapshot?,
     ageMs: Long?,
     state: GpsFixState,
+    unitSystem: UnitSystem,
 ): String {
     if (snap == null) return "No GPS fix"
     var out = String.format(Locale.US, "GPS fix %.5f, %.5f", snap.latitude, snap.longitude)
-    snap.altitudeM?.let { out += String.format(Locale.US, ", altitude %.0f metres", it) }
+    // The ear gets the same number the eye does, spelled out.
+    snap.altitudeM?.let {
+        out += String.format(
+            Locale.US, ", altitude %.0f %s",
+            MeasurementFormatter.elevationDisplay(it, unitSystem),
+            if (unitSystem == UnitSystem.METRIC) "metres" else "feet",
+        )
+    }
     if (state != GpsFixState.LIVE && ageMs != null) {
         val sec = ageMs / 1_000
         out += if (sec < 60) ", $sec seconds old" else ", ${sec / 60} minutes old"

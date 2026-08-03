@@ -91,6 +91,8 @@ import androidx.navigation.NavController
 import com.hcjeong.forestix.AppEnvironment
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.common.ForestixLogger
+import com.hcjeong.forestix.common.MeasurementFormatter
+import com.hcjeong.forestix.common.UncertaintyBand
 import com.hcjeong.forestix.data.cruise.PlannedPlot
 import com.hcjeong.forestix.data.cruise.Plot
 import com.hcjeong.forestix.data.cruise.PlotCenterResult
@@ -132,6 +134,10 @@ fun RecordCentreSheet(
     val colors = Forestix.colors
     val type = Forestix.type
     val scope = rememberCoroutineScope()
+    // Everything on this sheet that names a distance — the range row, the
+    // accuracy, the fix spread — is something the cruiser paces or judges, so
+    // all of it follows their Units setting.
+    val settings by env.settings.state.collectAsStateWithLifecycle()
 
     // Own PRIVATE 1 Hz location client — deliberately NOT
     // LocationService.shared: the 60 s averaging window clearBuffer()s on
@@ -233,13 +239,21 @@ fun RecordCentreSheet(
         val b = GeoMath.bearingDeg(
             fromLat = f.latitude, fromLon = f.longitude,
             toLat = planned.plannedLat, toLon = planned.plannedLon)
-        String.format(Locale.US, "%.0f m · bearing %.0f°", d, (b + 360.0).mod(360.0))
+        // Bearing is degrees in both systems — a compass does not change with
+        // the Units toggle. The range is a walking instruction and does.
+        String.format(
+            Locale.US, "%s · bearing %.0f°",
+            MeasurementFormatter.navDistance(d, settings.unitSystem),
+            (b + 360.0).mod(360.0))
     } ?: "no GPS fix"
+    // How well the centre is located — a ± band, so through the one place
+    // bands are rounded, in the same unit as the range above it.
     val accuracyText = when {
-        readout != null -> String.format(Locale.US, "±%.1f m", readout.medianHAccuracyM)
+        readout != null ->
+            UncertaintyBand.text(readout.medianHAccuracyM.toDouble(), settings.unitSystem)
         snap != null && snap.horizontalAccuracyM > 0 ->
-            String.format(Locale.US, "±%.1f m", snap.horizontalAccuracyM)
-        else -> "±— m"
+            UncertaintyBand.text(snap.horizontalAccuracyM, settings.unitSystem)
+        else -> "±— " + MeasurementFormatter.heightUnit(settings.unitSystem)
     }
     // (`liveTier` went with the chip — field report F9. `GPSAveraging.classify`
     // and `classifySingleFix` are untouched; the grade is still computed and
@@ -264,7 +278,8 @@ fun RecordCentreSheet(
             // subscript, on the sheet the A/B/C/D position grade was already
             // pulled from for being unreadable.
             "${final.nSamples} fixes · centre locked\n" +
-                String.format(Locale.US, "fixes spread ±%.1f m", final.sampleStdXyM)
+                "fixes spread " +
+                UncertaintyBand.text(final.sampleStdXyM.toDouble(), settings.unitSystem)
         else ->
             "$sampleCount fixes · needs 30 good ones\n" +
                 "median converges over $AVERAGING_WINDOW_S s"

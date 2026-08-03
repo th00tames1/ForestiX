@@ -11,6 +11,7 @@
 // previews and unit tests.
 
 import SwiftUI
+import Common
 import Models
 import Basemap
 #if canImport(MapKit)
@@ -35,6 +36,18 @@ public struct StratumDrawScreen: View {
     /// fallback.
     @AppStorage(AppSettings.Keys.mapType)
     private var mapTypeRaw: String = BasemapType.default.rawValue
+
+    /// Read the same way and for the same reason as `mapTypeRaw` above: this
+    /// screen has no `AppSettings` in its environment. The area readout is the
+    /// only thing a cruiser has to tell them whether the block they just drew
+    /// is the size they meant, and hardcoded to acres it left a metric cruiser
+    /// converting in their head to size a stand.
+    @AppStorage(AppSettings.Keys.unitSystem)
+    private var unitSystemRaw: String = UnitSystem.imperial.rawValue
+
+    private var areaUnit: AreaUnit {
+        AppSettings.unitSystem(fromRaw: unitSystemRaw).areaUnit
+    }
 
     public init(project: Project) {
         _viewModel = StateObject(wrappedValue:
@@ -147,7 +160,9 @@ public struct StratumDrawScreen: View {
                     Text(viewModel.vertexCountLabel)
                         .font(.subheadline.bold())
                     if viewModel.areaAcres > 0 {
-                        Text(String(format: "Area: %.3f acres", viewModel.areaAcres))
+                        Text(String(format: "Area: %.3f %@",
+                                    areaUnit.fromAcres(viewModel.areaAcres),
+                                    areaUnit.abbreviation))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

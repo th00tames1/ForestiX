@@ -62,6 +62,9 @@ import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.ar.ArCameraView
 import com.hcjeong.forestix.ar.ArController
 import com.hcjeong.forestix.ar.ArSessionHub
+import com.hcjeong.forestix.common.MeasurementFormatter
+import com.hcjeong.forestix.common.TruthInput
+import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.data.cruise.Project
 import com.hcjeong.forestix.sensors.ArDepthFrame
 import com.hcjeong.forestix.sensors.DBHEstimator
@@ -117,8 +120,14 @@ class CalibrationViewModel(
     private val _cylinder = MutableStateFlow<CylinderState>(CylinderState.Idle)
     val cylinder: StateFlow<CylinderState> = _cylinder.asStateFlow()
 
-    val newMeasuredCm = MutableStateFlow("")
-    val newTrueCm = MutableStateFlow("")
+    /// The two round-post widths as TYPED — in whatever unit the screen's
+    /// boxes are labelled with, which is the cruiser's, not necessarily
+    /// centimetres. `addCylinderSample(unit)` is the only reader and it
+    /// converts. The stored `Sample` stays cm, because the fitted alpha is
+    /// added in centimetres to every diameter this phone measures
+    /// (`DBHEstimator`), so an inch-scale alpha would bias every tree.
+    val newMeasuredText = MutableStateFlow("")
+    val newTrueText = MutableStateFlow("")
 
     private var collectedPoints = ArrayList<Vec3d>()
     private val targetWallFrames = 30
@@ -222,15 +231,22 @@ class CalibrationViewModel(
 
     // MARK: - Cylinder procedure
 
-    fun addCylinderSample() {
-        val measured = newMeasuredCm.value.toDoubleOrNull()
-        val trueV = newTrueCm.value.toDoubleOrNull()
-        if (measured == null || trueV == null || measured <= 0 || trueV <= 0) return
+    /// `unit` is the unit the two boxes are LABELLED in — cm or inches. Both
+    /// widths are converted to the stored centimetre base here, in one place,
+    /// because the fit's offset alpha is applied in centimetres to every
+    /// diameter the phone measures for the project (`sensors/DBHEstimator`):
+    /// a fit taken on inch-scale numbers lands as a ~2.5x understated cm
+    /// offset on every tree, and nothing downstream would say so. Beta is a
+    /// ratio and survives an inch/inch fit either way.
+    fun addCylinderSample(unit: TruthInput.Unit = TruthInput.Unit.CM) {
+        val measured = TruthInput.parsePositiveBase(newMeasuredText.value, unit)
+        val trueV = TruthInput.parsePositiveBase(newTrueText.value, unit)
+        if (measured == null || trueV == null) return
         val samples = currentCylinderSamples() +
             CylinderCalibration.Sample(dbhMeasuredCm = measured, dbhTrueCm = trueV)
         _cylinder.value = CylinderState.Collecting(samples = samples)
-        newMeasuredCm.value = ""
-        newTrueCm.value = ""
+        newMeasuredText.value = ""
+        newTrueText.value = ""
     }
 
     fun computeCylinderCalibration() {
@@ -243,8 +259,8 @@ class CalibrationViewModel(
 
     fun resetCylinder() {
         _cylinder.value = CylinderState.Idle
-        newMeasuredCm.value = ""
-        newTrueCm.value = ""
+        newMeasuredText.value = ""
+        newTrueText.value = ""
     }
 
     private fun currentCylinderSamples(): List<CylinderCalibration.Sample> =
@@ -320,8 +336,8 @@ fun CalibrationScreen(nav: NavController, projectId: String? = null) {
 
     val wall by viewModel.wall.collectAsStateWithLifecycle()
     val cylinder by viewModel.cylinder.collectAsStateWithLifecycle()
-    val newMeasuredCm by viewModel.newMeasuredCm.collectAsStateWithLifecycle()
-    val newTrueCm by viewModel.newTrueCm.collectAsStateWithLifecycle()
+    val newMeasuredText by viewModel.newMeasuredText.collectAsStateWithLifecycle()
+    val newTrueText by viewModel.newTrueText.collectAsStateWithLifecycle()
 
     // Depth-frame pump — the Android analogue of the iOS latestDepthFrame
     // subscription. Runs only while a wall scan is live; if the device
@@ -431,10 +447,11 @@ fun CalibrationScreen(nav: NavController, projectId: String? = null) {
 
             when (selectedProcedure) {
                 CalibrationViewModel.Procedure.WALL ->
-                    WallSection(wall, controller, viewModel, settings.developerMode)
+                    WallSection(wall, controller, viewModel, settings.developerMode,
+                        settings.unitSystem)
                 CalibrationViewModel.Procedure.CYLINDER ->
-                    CylinderSection(cylinder, newMeasuredCm, newTrueCm, viewModel,
-                        settings.developerMode)
+                    CylinderSection(cylinder, newMeasuredText, newTrueText, viewModel,
+                        settings.developerMode, settings.unitSystem)
             }
 
             // MARK: - Apply
@@ -528,13 +545,18 @@ private fun WallSection(
     controller: ArController,
     viewModel: CalibrationViewModel,
     developerMode: Boolean,
+    unitSystem: UnitSystem,
 ) {
     val colors = Forestix.colors
     val type = Forestix.type
     CalSectionHeader("Wall scan")
     Text(
+        // The standing distance follows the cruiser's units like every other
+        // instruction on the scan screens; the range itself is the depth
+        // camera's and does not move.
         "Shows the app how steady this phone's distance readings are. Point it at a " +
-            "flat wall 1–2 m away and hold still until the bar fills.",
+            "flat wall " + MeasurementFormatter.guidanceRange(1.0, 2.0, unitSystem) +
+            " away and hold still until the bar fills.",
         style = type.caption,
         color = colors.textSecondary,
     )
@@ -602,13 +624,21 @@ private fun WallSection(
 @Composable
 private fun CylinderSection(
     cylinder: CalibrationViewModel.CylinderState,
-    newMeasuredCm: String,
-    newTrueCm: String,
+    newMeasuredText: String,
+    newTrueText: String,
     viewModel: CalibrationViewModel,
     developerMode: Boolean,
+    unitSystem: UnitSystem,
 ) {
     val colors = Forestix.colors
     val type = Forestix.type
+    // The unit a round-post width is TYPED in. Both boxes and both read-back
+    // columns carry it, and `addCylinderSample(unit)` converts with it — the
+    // fitted alpha is added in CENTIMETRES to every diameter this phone
+    // measures, so a fit taken on inch-scale numbers biases the whole project
+    // and nothing downstream says so.
+    val postUnit = TruthInput.defaultUnit(
+        TruthInput.Quantity.DIAMETER, imperial = unitSystem == UnitSystem.IMPERIAL)
     CalSectionHeader("Round-post scan")
     Text(
         "Corrects the widths this phone measures. Scan round posts you have already " +
@@ -622,22 +652,22 @@ private fun CylinderSection(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         OutlinedTextField(
-            value = newMeasuredCm,
-            onValueChange = { viewModel.newMeasuredCm.value = it },
-            label = { Text("Scanned (cm)") },
+            value = newMeasuredText,
+            onValueChange = { viewModel.newMeasuredText.value = it },
+            label = { Text("Scanned (${postUnit.raw})") },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
             singleLine = true,
             modifier = Modifier.weight(1f),
         )
         OutlinedTextField(
-            value = newTrueCm,
-            onValueChange = { viewModel.newTrueCm.value = it },
-            label = { Text("By hand (cm)") },
+            value = newTrueText,
+            onValueChange = { viewModel.newTrueText.value = it },
+            label = { Text("By hand (${postUnit.raw})") },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
             singleLine = true,
             modifier = Modifier.weight(1f),
         )
-        ForestixProminentButton(label = "Add") { viewModel.addCylinderSample() }
+        ForestixProminentButton(label = "Add") { viewModel.addCylinderSample(postUnit) }
     }
 
     when (cylinder) {
@@ -645,7 +675,7 @@ private fun CylinderSection(
             Text("No posts entered yet.", style = type.body, color = colors.textPrimary)
         }
         is CalibrationViewModel.CylinderState.Collecting -> {
-            SampleList(cylinder.samples)
+            SampleList(cylinder.samples, unitSystem)
             // iOS renders this as a plain Form button.
             TextButton(
                 onClick = { viewModel.computeCylinderCalibration() },
@@ -653,16 +683,22 @@ private fun CylinderSection(
             ) { Text("Work out the correction") }
         }
         is CalibrationViewModel.CylinderState.Computed -> {
-            SampleList(cylinder.samples)
+            SampleList(cylinder.samples, unitSystem)
             // α / β / R² are the fitted coefficients — nothing a cruiser can act
             // on, and R² is a grade rather than a quantity. What a cruiser needs
-            // is how close the CORRECTED width now lands to the hand measurement,
-            // in centimetres. Display only: the fit, its thresholds and what gets
+            // is how close the CORRECTED width now lands to the hand
+            // measurement, IN THE UNIT THEY MEASURED IN — the one number that
+            // tells them how good the correction is is useless in a unit they
+            // did not type. Display only: the fit, its thresholds and what gets
             // stored are untouched.
             Text(
                 "Correction worked out from ${cylinder.samples.size} posts. Corrected widths " +
                     "land within " +
-                    String.format(Locale.US, "%.1f cm", meanAbsResidualCm(cylinder)) +
+                    String.format(
+                        Locale.US, "%.1f %s",
+                        TruthInput.fromBase(meanAbsResidualCm(cylinder), postUnit),
+                        postUnit.raw,
+                    ) +
                     " of your hand measurements on average.",
                 style = type.body,
                 color = colors.textPrimary,
@@ -694,19 +730,24 @@ private fun meanAbsResidualCm(state: CalibrationViewModel.CylinderState.Computed
 }
 
 @Composable
-private fun SampleList(samples: List<CylinderCalibration.Sample>) {
+private fun SampleList(
+    samples: List<CylinderCalibration.Sample>,
+    unitSystem: UnitSystem,
+) {
     val colors = Forestix.colors
     val type = Forestix.type
     Column(verticalArrangement = Arrangement.spacedBy(ForestixSpace.xxs)) {
         for (s in samples) {
+            // Read back in the unit they were typed in — a post entered as
+            // 12 in must not reappear as "30.5 cm" on the same screen.
             Row(Modifier.fillMaxWidth()) {
                 Text(
-                    String.format(Locale.US, "scanned %.1f cm", s.dbhMeasuredCm),
+                    "scanned " + MeasurementFormatter.diameter(s.dbhMeasuredCm, unitSystem),
                     style = type.dataSmall,
                     color = colors.textPrimary)
                 Spacer(Modifier.weight(1f))
                 Text(
-                    String.format(Locale.US, "by hand %.1f cm", s.dbhTrueCm),
+                    "by hand " + MeasurementFormatter.diameter(s.dbhTrueCm, unitSystem),
                     style = type.dataSmall,
                     color = colors.textPrimary)
             }

@@ -14,6 +14,8 @@
 package com.hcjeong.forestix.sensors
 
 import com.hcjeong.forestix.ar.Vec3
+import com.hcjeong.forestix.common.MeasurementFormatter
+import com.hcjeong.forestix.common.UnitSystem
 import java.util.Locale
 import kotlin.math.PI
 import kotlin.math.abs
@@ -190,6 +192,13 @@ data class DbhScanInput(
     val tapY: Double,
     val guideAxis: GuideAxis,
     val projectCalibration: ProjectCalibration,
+    /// The unit the RECOVERY INSTRUCTIONS are worded in. A failed scan's reason
+    /// is the only thing telling the cruiser what to do differently, and "stand
+    /// 0.5-3 m from the trunk" is not an instruction a cruiser who paces in
+    /// feet can act on. Carried here rather than fixed up in the screen because
+    /// the reason is built where the check fails. Same field, same purpose, as
+    /// `HeightScanInput.unitSystem`. iOS `DBHScanInput.unitSystem` 1:1.
+    val unitSystem: UnitSystem = UnitSystem.METRIC,
 )
 
 object DBHEstimator {
@@ -228,6 +237,14 @@ object DBHEstimator {
     const val ESTIMATOR_EPOCH = 4
 
     val PLAUSIBLE_DIAMETER_CM = 2.5..300.0
+
+    /// How far the phone may be from the trunk for the tap's depth sample to
+    /// be usable, in METRES. A property of the depth camera, not a preference:
+    /// closer than half a metre the sensor has nothing to triangulate, further
+    /// than three the per-pixel depth noise swamps a stem's curvature. Named so
+    /// the guard and the recovery sentence read it from one place. iOS
+    /// `DBHEstimator.usableTapDepthM` 1:1.
+    val USABLE_TAP_DEPTH_M = 0.5f..3.0f
 
     /// How far behind the near face the middle-half depth median sits, as a
     /// fraction of the radius: 1 - sqrt(15)/4. iOS `medianDepthOffsetFactor`.
@@ -326,11 +343,23 @@ object DBHEstimator {
 
         val dTap = medianDepth(input.tapX, input.tapY, lastFrame, radius = 2)
             ?: return red("The crosshair isn't on anything the depth camera can see — aim at the trunk and capture again.")
-        if (dTap !in 0.5f..3.0f)
+        if (dTap !in USABLE_TAP_DEPTH_M)
             // The instruction IS the whole message; the "tap depth … out of
             // range" half echoed the depth sample under the crosshair, which
-            // a cruiser cannot act on. The 0.5–3 m gate above is unchanged.
-            return red("Stand 0.5–3 m from the trunk and capture again.")
+            // a cruiser cannot act on.
+            //
+            // THE GATE IS UNCHANGED and stays metric — it is the depth
+            // camera's usable range, not a preference. Only the wording
+            // follows the cruiser's units, and it is built from the same
+            // constant the guard tests, so the sentence cannot come to quote a
+            // range the check no longer applies.
+            return red(
+                "Stand " + MeasurementFormatter.guidanceRange(
+                    USABLE_TAP_DEPTH_M.start.toDouble(),
+                    USABLE_TAP_DEPTH_M.endInclusive.toDouble(),
+                    input.unitSystem,
+                ) + " from the trunk and capture again.",
+            )
         if (confidenceAt(input.tapX, input.tapY, lastFrame) < 1)
             return red("Trunk surface not reliably seen; try a cleaner stem area")
 

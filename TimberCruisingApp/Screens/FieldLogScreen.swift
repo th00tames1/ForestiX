@@ -1988,14 +1988,18 @@ private struct FieldLogRow: View {
             return MeasurementFormatter.diameter(cm: entry.value, in: unitSystem)
         case .height:
             return MeasurementFormatter.height(m: entry.value, in: unitSystem)
+        // Crown and plot follow `unitSystem` like the rows above them. Left
+        // metric they put "4.2 × 5.1 m" and "11.3 m radius" in the same column
+        // as "13.6 in" and "92.7 ft", with nothing to say which row is which.
         case .crown:
-            return String(format: "%.1f × %.1f m",
-                          entry.value, entry.secondaryValue ?? 0)
+            return MeasurementFormatter.crownSpread(
+                entry.value, entry.secondaryValue ?? 0, in: unitSystem)
         case .distance:
             return MeasurementFormatter.distance(m: entry.value, in: unitSystem)
         case .samplingPlot:
             let area = entry.secondaryValue ?? (.pi * entry.value * entry.value)
-            return String(format: "%.1f m radius · %.1f m²", entry.value, area)
+            return MeasurementFormatter.samplingPlotSummary(
+                radiusM: entry.value, areaM2: area, in: unitSystem)
         }
     }
 
@@ -3158,14 +3162,18 @@ private struct FieldLogDetailForm: View {
             return MeasurementFormatter.diameter(cm: entry.value, in: unitSystem)
         case .height:
             return MeasurementFormatter.height(m: entry.value, in: unitSystem)
+        // Crown and plot follow `unitSystem` like the rows above them. Left
+        // metric they put "4.2 × 5.1 m" and "11.3 m radius" in the same column
+        // as "13.6 in" and "92.7 ft", with nothing to say which row is which.
         case .crown:
-            return String(format: "%.1f × %.1f m",
-                          entry.value, entry.secondaryValue ?? 0)
+            return MeasurementFormatter.crownSpread(
+                entry.value, entry.secondaryValue ?? 0, in: unitSystem)
         case .distance:
             return MeasurementFormatter.distance(m: entry.value, in: unitSystem)
         case .samplingPlot:
             let area = entry.secondaryValue ?? (.pi * entry.value * entry.value)
-            return String(format: "%.1f m radius · %.1f m²", entry.value, area)
+            return MeasurementFormatter.samplingPlotSummary(
+                radiusM: entry.value, areaM2: area, in: unitSystem)
         }
     }
 
@@ -3175,7 +3183,11 @@ private struct FieldLogDetailForm: View {
         case .dbh:    return MeasurementFormatter.diameterSigma(mm: s, in: unitSystem)
         case .height: return MeasurementFormatter.heightSigma(m: s, in: unitSystem)
         case .crown, .distance, .samplingPlot:
-            return String(format: "±%.2f m", s)
+            // A band beside a converted value has to be in the same unit as
+            // the value, or it understates the error by 3.28×. These three are
+            // plain lengths in metres, which is exactly what `UncertaintyBand`
+            // takes — the one rounding rule for every ± in the app.
+            return UncertaintyBand.text(metres: s, in: unitSystem)
         }
     }
 

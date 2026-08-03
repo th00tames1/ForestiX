@@ -59,6 +59,7 @@ import com.hcjeong.forestix.data.cruise.HeightDiameterFit
 import com.hcjeong.forestix.data.cruise.PlannedPlot
 import com.hcjeong.forestix.data.cruise.Plot
 import com.hcjeong.forestix.data.cruise.Project
+import com.hcjeong.forestix.data.cruise.UnitSystem
 import com.hcjeong.forestix.data.cruise.SpeciesConfig
 import com.hcjeong.forestix.data.cruise.Stratum
 import com.hcjeong.forestix.data.cruise.Tree
@@ -125,8 +126,20 @@ class ExportViewModel(val project: Project) {
 
     private var appEnv: AppEnvironment? = null
 
-    fun configure(environment: AppEnvironment) {
+    /// The unit system the REPORT is written in — the cruiser's live Units
+    /// setting, not `project.units`.
+    ///
+    /// `project.units` is stamped when the project is created and never written
+    /// again. Every screen reads the live toggle, so a cruiser who flipped
+    /// Units saw "28.4 m²/ha" on the phone and got "11.49 m²/ac" in the report
+    /// for the same plot — numbers 2.47x apart, with the cover page still
+    /// naming the system they had left behind. Defaults to the project's own
+    /// stamp so an unconfigured view model keeps the historical output.
+    private var displayUnits: UnitSystem = project.units
+
+    fun configure(environment: AppEnvironment, displayUnits: UnitSystem) {
         appEnv = environment
+        this.displayUnits = displayUnits
     }
 
     // MARK: - Phase 1 entry points (plan-only)
@@ -183,7 +196,9 @@ class ExportViewModel(val project: Project) {
             val ds = RepositoryExportDataSource.load(project = project, env = env)
             val result = withContext(Dispatchers.IO) {
                 val bundle = ExportBundleBuilder.build(ds)
-                FullCruiseExporter.writeToCache(context, bundle) { done, total, label ->
+                FullCruiseExporter.writeToCache(
+                    context, bundle, displayUnits,
+                ) { done, total, label ->
                     _progress.value = if (total == 0) 1.0 else done.toDouble() / total
                     _progressLabel.value = label
                 }
@@ -224,7 +239,7 @@ class ExportViewModel(val project: Project) {
             val ds = RepositoryExportDataSource.load(project = project, env = env)
             val result = withContext(Dispatchers.IO) {
                 val bundle = ExportBundleBuilder.build(ds)
-                FullCruiseExporter.writeToCache(context, bundle, progress = null)
+                FullCruiseExporter.writeToCache(context, bundle, displayUnits, progress = null)
             }
             _lastSessionFolder.value = result.folder
             result.artefacts.firstOrNull { it.kind == kind }?.let { art ->
@@ -353,7 +368,22 @@ private fun ExportContent(nav: NavController, project: Project) {
     val type = Forestix.type
     val viewModel = remember(project.id) { ExportViewModel(project) }
 
-    LaunchedEffect(Unit) { viewModel.configure(env) }
+    val settings by env.settings.state.collectAsStateWithLifecycle()
+
+    // Keyed on the unit system so a cruiser who flips Units while this screen
+    // is up re-configures the view model before they tap Export — the report
+    // follows the toggle, and configuring only once would have frozen it at
+    // whatever was set when the screen appeared.
+    LaunchedEffect(settings.unitSystem) {
+        viewModel.configure(
+            env,
+            if (settings.unitSystem == com.hcjeong.forestix.common.UnitSystem.METRIC) {
+                UnitSystem.METRIC
+            } else {
+                UnitSystem.IMPERIAL
+            },
+        )
+    }
 
     val exportedFiles by viewModel.exportedFiles.collectAsStateWithLifecycle()
     val lastSessionFolder by viewModel.lastSessionFolder.collectAsStateWithLifecycle()

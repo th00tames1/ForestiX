@@ -182,7 +182,16 @@ data class CruiseDesign(
     val projectId: UUID,
     var plotType: PlotType,
     var plotAreaAcres: Float?,          // required if fixedArea
-    var baf: Float?,                    // required if variableRadius
+    /// Basal-area factor, required if `VARIABLE_RADIUS`, ALWAYS IN ft²/ac.
+    ///
+    /// The one field in this model that is not metric, and deliberately so:
+    /// it is the number etched on the prism, the US convention is what every
+    /// project on disk was typed under (the setup sheet has always defaulted
+    /// to 20), and re-basing it would silently re-read every stored design.
+    /// The setup sheet converts a metric cruiser's m²/ha on the way in and
+    /// back out; `ExpansionFactors.variableRadius` divides it by a basal area
+    /// in ft². Change one of those three and you must change all three.
+    var baf: Float?,
     var samplingScheme: SamplingScheme,
     var gridSpacingMeters: Float?,      // required if systematicGrid
     var heightSubsampleRule: HeightSubsampleRule = HeightSubsampleRule.EveryKth(k = 5),

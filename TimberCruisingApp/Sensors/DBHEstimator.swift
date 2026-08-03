@@ -129,19 +129,28 @@ public struct DBHScanInput: Sendable {
     /// Optional sidecar that persists the cleaned point set to PLY when
     /// the caller opts in (REQ-DBH-007). Returns the file path or nil.
     public let rawPointsWriter: (@Sendable ([SIMD2<Double>]) -> String?)?
+    /// The unit the RECOVERY INSTRUCTIONS are worded in. A failed scan's
+    /// reason is the only thing telling the cruiser what to do differently,
+    /// and "stand 0.5–3 m from the trunk" is not an instruction a cruiser who
+    /// paces in feet can act on. Carried here rather than fixed up in the
+    /// screen because the reason is built where the check fails. Same field,
+    /// same purpose, as `HeightScanInput.unitSystem`.
+    public let unitSystem: UnitSystem
 
     public init(
         frames: [ARDepthFrame],
         tapPixel: SIMD2<Double>,
         guideAxis: GuideAxis,
         projectCalibration: ProjectCalibration,
-        rawPointsWriter: (@Sendable ([SIMD2<Double>]) -> String?)? = nil
+        rawPointsWriter: (@Sendable ([SIMD2<Double>]) -> String?)? = nil,
+        unitSystem: UnitSystem = .metric
     ) {
         self.frames = frames
         self.tapPixel = tapPixel
         self.guideAxis = guideAxis
         self.projectCalibration = projectCalibration
         self.rawPointsWriter = rawPointsWriter
+        self.unitSystem = unitSystem
     }
 }
 
@@ -165,6 +174,15 @@ public enum DBHEstimator {
     /// across the whole depth axis at arm's length computes tens of metres and is
     /// still rejected. The floor stays at 2.5 cm.
     public static let plausibleDiameterCm: ClosedRange<Double> = 2.5...300.0
+
+    /// How far the phone may be from the trunk for the tap's depth sample to
+    /// be usable, in METRES. A property of the depth camera, not a preference:
+    /// closer than half a metre the sensor has nothing to triangulate, further
+    /// than three the per-pixel depth noise swamps a stem's curvature. Named
+    /// so the guard and the recovery sentence read it from one place.
+    /// `Float` because the depth map is — `medianDepth` returns one, and a
+    /// Double range here would only add a conversion at the guard.
+    public static let usableTapDepthM: ClosedRange<Float> = 0.5...3.0
 
     /// §7.9 tier thresholds, named once so the cruiser-facing confidence
     /// explainer can QUOTE the numbers the checks apply instead of carrying a
@@ -214,14 +232,23 @@ public enum DBHEstimator {
                 reason: "The crosshair isn't on anything the depth camera can see — aim at the trunk and capture again.",
                 method: .lidarPartialArcSingleView)
         }
-        guard (0.5...3.0).contains(dTap) else {
+        guard usableTapDepthM.contains(dTap) else {
             return redResult(
                 // The first clause was already the whole instruction; the
                 // "tap depth … out of range" half echoed the internal
                 // depth-map sample at the crosshair pixel and told the
-                // cruiser nothing they could act on. The RANGE is
-                // unchanged — it still reports the 0.5–3 m gate above.
-                reason: "Stand 0.5–3 m from the trunk and capture again.",
+                // cruiser nothing they could act on.
+                //
+                // THE GATE IS UNCHANGED and stays metric — it is the depth
+                // camera's usable range, not a preference. Only the wording
+                // follows the cruiser's units, and it is built from the same
+                // constant the guard tests, so the sentence cannot come to
+                // quote a range the check no longer applies.
+                reason: "Stand "
+                        + GuidanceDistance.range(fromMetres: Double(usableTapDepthM.lowerBound),
+                                                 toMetres: Double(usableTapDepthM.upperBound),
+                                                 in: input.unitSystem)
+                        + " from the trunk and capture again.",
                 method: .lidarPartialArcSingleView)
         }
         guard confidenceAt(pixel: input.tapPixel, frame: lastFrame) >= 1 else {

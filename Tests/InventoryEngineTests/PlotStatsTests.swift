@@ -137,15 +137,16 @@ final class PlotStatsTests: XCTestCase {
         // BAF = 1, two trees DBH 30 and 40.
         // tree1 BA = 0.070686 m² ⇒ EF = 1/0.070686 ≈ 14.147
         // tree2 BA = 0.125664 m² ⇒ EF ≈ 7.958
-        // TPA ≈ 22.105. BA/ac = n·BAF = 2·1 = 2.
+        // TPA ≈ 2.054 — one tree per its own ft² of basal area, at BAF 1.
+        // BA/ac = n·BAF = 2 ft²/ac, reported in m²/acre as 0.18581.
         let trees = [tree(num: 1, dbhCm: 30), tree(num: 2, dbhCm: 40)]
         let r = PlotStatsCalculator.compute(
             plot: makePlot(plotAreaAcres: 0.1),  // unused for BAF
             cruiseDesign: bafDesign(baf: 1.0),
             trees: trees, species: ["DF": species()],
             volumeEquations: ["DF": sh()])
-        XCTAssertEqual(r.tpa, 22.105, accuracy: 0.01)
-        XCTAssertEqual(r.baPerAcreM2, 2.0, accuracy: 1e-4)
+        XCTAssertEqual(r.tpa, 2.0536, accuracy: 0.001)
+        XCTAssertEqual(r.baPerAcreM2, 0.18581, accuracy: 1e-4)
     }
 
     // MARK: - Species breakdown

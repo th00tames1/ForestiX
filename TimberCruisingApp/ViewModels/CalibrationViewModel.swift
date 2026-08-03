@@ -5,6 +5,7 @@
 
 import Foundation
 import Combine
+import Common
 import Models
 import Sensors
 
@@ -32,8 +33,14 @@ public final class CalibrationViewModel: ObservableObject {
 
     @Published public private(set) var wall: WallState = .idle
     @Published public private(set) var cylinder: CylinderState = .idle
-    @Published public var newMeasuredCm: String = ""
-    @Published public var newTrueCm: String = ""
+    /// The two round-post widths as TYPED — in whatever unit the screen's
+    /// boxes are labelled with, which is the cruiser's, not necessarily
+    /// centimetres. `addCylinderSample(unit:)` is the only reader and it
+    /// converts. The stored `Sample` stays cm, because the fitted α is added
+    /// in centimetres to every diameter this phone measures
+    /// (`DBHEstimator`), so an inch-scale α would bias every tree.
+    @Published public var newMeasuredText: String = ""
+    @Published public var newTrueText: String = ""
 
     public let session: ARKitSessionManager
     private var depthSubscription: AnyCancellable?
@@ -178,16 +185,22 @@ public final class CalibrationViewModel: ObservableObject {
 
     // MARK: - Cylinder procedure
 
-    public func addCylinderSample() {
-        guard let measured = Double(newMeasuredCm),
-              let trueV    = Double(newTrueCm),
-              measured > 0, trueV > 0
+    /// `unit` is the unit the two boxes are LABELLED in — cm or inches. Both
+    /// widths are converted to the stored centimetre base here, in one place,
+    /// because the fit's offset α is applied in centimetres to every diameter
+    /// the phone measures for the project (`Sensors/DBHEstimator`): a fit
+    /// taken on inch-scale numbers lands as a ~2.5× understated cm offset on
+    /// every tree, and nothing downstream would say so. β is a ratio and
+    /// survives an inch/inch fit either way.
+    public func addCylinderSample(unit: TruthInput.Unit = .cm) {
+        guard let measured = TruthInput.parsePositiveBase(newMeasuredText, unit: unit),
+              let trueV    = TruthInput.parsePositiveBase(newTrueText, unit: unit)
         else { return }
         var samples = currentCylinderSamples
         samples.append(.init(dbhMeasuredCm: measured, dbhTrueCm: trueV))
         cylinder = .collecting(samples: samples)
-        newMeasuredCm = ""
-        newTrueCm = ""
+        newMeasuredText = ""
+        newTrueText = ""
     }
 
     public func computeCylinderCalibration() {
@@ -202,8 +215,8 @@ public final class CalibrationViewModel: ObservableObject {
 
     public func resetCylinder() {
         cylinder = .idle
-        newMeasuredCm = ""
-        newTrueCm = ""
+        newMeasuredText = ""
+        newTrueText = ""
     }
 
     private var currentCylinderSamples: [CylinderCalibration.Sample] {

@@ -1301,15 +1301,18 @@ public final class DBHScanViewModel: ObservableObject {
         state = .manualEntry
     }
 
-    /// Unit system the manual-entry field is being typed in. The screen keeps
-    /// this in sync with AppSettings — under imperial the field prompts for
-    /// INCHES, and the typed number used to be stored straight into
-    /// `diameterCm`, corrupting every manual imperial entry by 2.54x.
-    public var manualEntryUnits: UnitSystem = .metric
+    /// The cruiser's unit system, kept in sync with AppSettings by the screen.
+    /// Two uses, and they must be the same value: the manual-entry field
+    /// prompts for INCHES under imperial (the typed number used to be stored
+    /// straight into `diameterCm`, a 2.54x corruption), and the estimator
+    /// words its recovery instructions in these units, so a cruiser who paces
+    /// in feet is not told to stand "0.5-3 m" from the trunk. Mirrors
+    /// `HeightScanViewModel.unitSystem`.
+    public var unitSystem: UnitSystem = .metric
 
     public func submitManualEntry() {
         guard let typed = TruthInput.parsePositive(manualDbhCm) else { return }
-        let cm = manualEntryUnits == .imperial ? Units.inchesToCm(typed) : typed
+        let cm = unitSystem == .imperial ? Units.inchesToCm(typed) : typed
         guard cm > 0 else { return }
         resultCapturedManually = false
         result = DBHResult(
@@ -1364,7 +1367,8 @@ public final class DBHScanViewModel: ObservableObject {
                     tapPixel: burstTap,
                     guideAxis: votedGuideAxis(),
                     projectCalibration: calibration,
-                    rawPointsWriter: rawPointsWriter)
+                    rawPointsWriter: rawPointsWriter,
+                    unitSystem: unitSystem)
                 switch dbhMeasurementMethod {
                 case .chord:               outcome = DBHEstimator.chordEstimate(input: input)
                 case .partialArcCircleFit: outcome = DBHEstimator.estimate(input: input)

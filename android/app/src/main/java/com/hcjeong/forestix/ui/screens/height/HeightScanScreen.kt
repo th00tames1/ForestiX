@@ -1674,7 +1674,13 @@ fun HeightScanScreen(
         // crown aim instructions live on the crosshair label).
         if (!hidingChromeForCapture) MeasureTopChrome(
             instruction = when {
-                manualOpen -> "Enter height manually in metres."
+                // The banner names the SAME unit the field below it is
+                // placeheld with (:1734) and the same one the submit path
+                // converts from. It used to say "metres" over a box marked
+                // "Height in feet": a cruiser who obeyed the banner and typed
+                // 28 stored 8.5 m, and a typed height carries no σ to flag it.
+                manualOpen -> "Enter height manually in " +
+                    (if (settings.unitSystem == UnitSystem.METRIC) "metres" else "feet") + "."
                 // Walk-off integrity beats stage guidance: "walk back" is
                 // useless advice while the camera has no idea where it is,
                 // and the anchor being gone ends the measurement outright.
@@ -1693,7 +1699,15 @@ fun HeightScanScreen(
                 // Locked spec: while no gated hit exists the "+" is
                 // inert and this exact copy explains why.
                 stage == Stage.ANCHOR && !anchorAimOk ->
-                    "Move closer — stand within 4 m of the trunk, then tap +."
+                    // The gate stays the metric <= 4 m the hit test applies —
+                    // it is a property of how far a plane can be reliably
+                    // anchored, not a preference. The SENTENCE follows the
+                    // cruiser's units, and reads the same constant the gate
+                    // does.
+                    "Move closer — stand within " +
+                        MeasurementFormatter.guidanceDistance(
+                            ANCHOR_MAX_M.toDouble(), settings.unitSystem) +
+                        " of the trunk, then tap +."
                 stage == Stage.ANCHOR -> "Aim at the trunk at eye level, then tap +."
                 stage == Stage.WALKING -> "Walk back, then tap + to continue."
                 stage == Stage.AIM_BASE -> "Aim at where the trunk meets the ground, then tap +."
@@ -1926,11 +1940,20 @@ fun HeightScanScreen(
 
             // Crown line once measured (iOS crownSection — the capture
             // prompts live in the top banner + crosshair label now).
+            val crownWidth = crownW
+            val crownHeight = crownH
             if (stage == Stage.COMPUTED && crownStep == CrownStep.DONE &&
-                crownW != null && crownH != null
+                crownWidth != null && crownHeight != null
             ) {
                 Text(
-                    String.format(Locale.US, "Crown %.2f m wide · %.2f m tall", crownW, crownH),
+                    // The height this crown hangs on is printed in the
+                    // cruiser's unit one panel up; a crown left in metres
+                    // beside it is the same screen quoting two systems.
+                    "Crown " +
+                        MeasurementFormatter.crownSpan(crownWidth, settings.unitSystem) +
+                        " wide · " +
+                        MeasurementFormatter.crownSpan(crownHeight, settings.unitSystem) +
+                        " tall",
                     style = type.data,
                     color = Color.White,
                 )

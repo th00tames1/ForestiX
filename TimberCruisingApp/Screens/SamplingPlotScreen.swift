@@ -236,6 +236,20 @@ public struct SamplingPlotScreen: View {
 
     // MARK: - Top controls (radius slider)
 
+    /// What the SLIDER drags — the radius in the cruiser's own unit. The state
+    /// behind it stays metres, because that is what the AR ring, the
+    /// inside/outside test and the stored plot are all in; only the dial's
+    /// scale changes, so an imperial thumb lands on whole and half FEET
+    /// instead of on whichever foot value happens to sit on a half-metre stop.
+    /// A one-way format here would be a bug: this control writes.
+    private var radiusInDisplayUnit: Binding<Double> {
+        Binding(
+            get: { MeasurementFormatter.plotRadiusDisplay(m: self.radiusM,
+                                                          in: self.settings.unitSystem) },
+            set: { self.radiusM = MeasurementFormatter.plotRadiusMetres(
+                display: $0, in: self.settings.unitSystem) })
+    }
+
     private var topControls: some View {
         VStack(spacing: 8) {
             HStack {
@@ -244,11 +258,15 @@ public struct SamplingPlotScreen: View {
                     .tracking(1.2)
                     .foregroundStyle(.white.opacity(0.85))
                 Spacer()
-                Text(String(format: "%.1f m", radiusM))
+                // The same ring the map draws — so the same label the map's
+                // plot banner and mini-map put on it.
+                Text(plotLengthLabel(radiusM, settings.unitSystem))
                     .font(ForestixType.data)
                     .foregroundStyle(.white)
             }
-            Slider(value: $radiusM, in: 1.0...30.0, step: 0.5)
+            Slider(value: radiusInDisplayUnit,
+                   in: MeasurementFormatter.plotRadiusSliderRange(settings.unitSystem),
+                   step: MeasurementFormatter.plotRadiusSliderStep(settings.unitSystem))
                 .tint(ForestixPalette.confidenceWarn)
                 .accessibilityIdentifier("samplingPlot.radius")
         }
@@ -311,10 +329,15 @@ public struct SamplingPlotScreen: View {
             : ForestixPalette.confidenceOk
     }
 
+    /// Both halves in the cruiser's unit: the distance to the centre is a
+    /// measurement (so `distance`), the plot area is sized the way plots are
+    /// sized in each convention (so `plotArea` — m² metric, acres US).
     private var distanceLine: String {
         guard let d = distanceFromCenterM else { return "—" }
-        return String(format: "Centre: %.2f m · area: %.1f m²",
-                      d, .pi * radiusM * radiusM)
+        let system = settings.unitSystem
+        return "Centre: \(MeasurementFormatter.distance(m: d, in: system))"
+            + " · area: "
+            + MeasurementFormatter.plotArea(m2: .pi * radiusM * radiusM, in: system)
     }
 
     // MARK: - Center crosshair

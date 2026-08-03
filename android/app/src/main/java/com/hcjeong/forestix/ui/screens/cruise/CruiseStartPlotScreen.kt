@@ -55,6 +55,7 @@ import com.hcjeong.forestix.ar.ArCameraView
 import com.hcjeong.forestix.ar.ArSceneMarker
 import com.hcjeong.forestix.ar.ArSessionHub
 import com.hcjeong.forestix.common.ForestixLogger
+import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.Units
 import com.hcjeong.forestix.data.cruise.Plot
 import com.hcjeong.forestix.data.cruise.PositionSource
@@ -126,6 +127,13 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String, editPlotId: Str
     val plot = ArSessionHub.activePlot
     val radiusM = ArSessionHub.plotRadiusM
     val placed = plot != null
+    // The ring, the slider and the area line all read the cruiser's units.
+    // The stored radius stays METRES — that is what the AR ring, the
+    // inside/outside test and the saved plot are in; only the dial's scale
+    // and the readouts change. (SamplingPlotScreen is the twin of this card;
+    // fixing one does not fix the other.)
+    val settings by env.settings.state.collectAsStateWithLifecycle()
+    val unitSystem = settings.unitSystem
     // ARCore stopped correcting the plot's anchor pose, so the hub hid the
     // ring — everything this screen says about the plot comes from that same
     // pose and goes unknown with it (sampling-tool parity).
@@ -384,13 +392,26 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String, editPlotId: Str
                     style = Forestix.type.sectionHead.copy(letterSpacing = 1.2.sp),
                     color = Color.White.copy(alpha = 0.85f),
                 )
-                Text(String.format(Locale.US, "%.1f m", radiusM), style = Forestix.type.data, color = Color.White)
+                Text(
+                    // The same ring the cruise map draws, so the same label
+                    // its plot banner and mini-map put on it.
+                    MeasurementFormatter.plotLength(radiusM, unitSystem),
+                    style = Forestix.type.data,
+                    color = Color.White,
+                )
             }
             Slider(
-                value = radiusM.toFloat(),
-                onValueChange = { ArSessionHub.setPlotRadius(it.toDouble()) },
-                valueRange = 1f..30f,
-                steps = 57,
+                // Drags in the cruiser's unit and converts back on the way in,
+                // so an imperial thumb lands on whole and half FEET instead of
+                // on whichever foot value happens to sit on a half-metre stop.
+                // A one-way format here would be a bug: this control writes.
+                value = MeasurementFormatter.plotRadiusDisplay(radiusM, unitSystem).toFloat(),
+                onValueChange = {
+                    ArSessionHub.setPlotRadius(
+                        MeasurementFormatter.plotRadiusMetres(it.toDouble(), unitSystem))
+                },
+                valueRange = MeasurementFormatter.plotRadiusSliderRange(unitSystem),
+                steps = MeasurementFormatter.plotRadiusSliderSteps(unitSystem),
                 colors = SliderDefaults.colors(
                     thumbColor = colors.confidenceWarn,
                     activeTrackColor = colors.confidenceWarn,
@@ -429,8 +450,13 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String, editPlotId: Str
                 },
             )
             Text(
+                // Both halves in the cruiser's unit — the distance to the
+                // centre is a measurement, the plot area is sized the way
+                // plots are sized in each convention.
                 distanceFromCenter?.let {
-                    String.format(Locale.US, "Centre: %.2f m · area: %.1f m²", it, Units.circleAreaM2(radiusM))
+                    "Centre: " + MeasurementFormatter.distance(it, unitSystem) +
+                        " · area: " +
+                        MeasurementFormatter.plotArea(Units.circleAreaM2(radiusM), unitSystem)
                 } ?: "—",
                 style = Forestix.type.dataSmall,
                 color = Color.White.copy(alpha = 0.85f),

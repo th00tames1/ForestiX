@@ -152,6 +152,7 @@ import com.hcjeong.forestix.common.CoordinateInput
 import com.hcjeong.forestix.common.areaUnit
 import com.hcjeong.forestix.common.MeasuredTimeInput
 import com.hcjeong.forestix.common.MeasurementFormatter
+import com.hcjeong.forestix.common.UncertaintyBand
 import com.hcjeong.forestix.common.RegionalSpecies
 import com.hcjeong.forestix.common.TruthInput
 import com.hcjeong.forestix.common.UnitSystem
@@ -1873,11 +1874,14 @@ private fun speciesName(row: FieldLogRowModel): String? =
 private fun looseValue(e: QuickMeasureEntry, system: UnitSystem): String = when (e.kind) {
     MeasureKind.DBH -> MeasurementFormatter.diameter(e.value, system)
     MeasureKind.HEIGHT -> MeasurementFormatter.height(e.value, system)
-    MeasureKind.CROWN -> String.format(Locale.US, "%.1f × %.1f m", e.value, e.secondaryValue ?: 0.0)
+    // Crown and plot follow `system` like the rows above them. Left metric
+    // they put "4.2 × 5.1 m" and "11.3 m radius" in the same column as
+    // "13.6 in" and "92.7 ft", with nothing to say which row is which.
+    MeasureKind.CROWN -> MeasurementFormatter.crownSpread(e.value, e.secondaryValue ?: 0.0, system)
     MeasureKind.DISTANCE -> MeasurementFormatter.distance(e.value, system)
     MeasureKind.SAMPLING_PLOT -> {
         val area = e.secondaryValue ?: (PI * e.value * e.value)
-        String.format(Locale.US, "%.1f m radius · %.1f m²", e.value, area)
+        MeasurementFormatter.samplingPlotSummary(e.value, area, system)
     }
 }
 
@@ -1887,7 +1891,9 @@ private fun sigmaText(e: QuickMeasureEntry, system: UnitSystem): String? {
     return when (e.kind) {
         MeasureKind.DBH -> MeasurementFormatter.diameterSigma(s, system)
         MeasureKind.HEIGHT -> MeasurementFormatter.heightSigma(s, system)
-        else -> String.format(Locale.US, "±%.2f m", s)
+        // Same unit as the value it sits beside — crown, distance and plot are
+        // plain lengths in metres, which is what [UncertaintyBand] takes.
+        else -> UncertaintyBand.text(s, system)
     }
 }
 

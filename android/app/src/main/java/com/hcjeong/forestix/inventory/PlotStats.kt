@@ -100,11 +100,20 @@ object PlotStatsCalculator {
             val ba = basalAreaM2(dbhCm = tree.dbhCm)
             sumDbhSq += tree.dbhCm * tree.dbhCm
 
-            // Per-tree expansion factor.
+            // Per-tree expansion factor. On a prism plot it is BAF / BA, and
+            // BOTH SIDES ARE SQUARE FEET: `CruiseDesign.baf` is ft²/ac (the
+            // number on the prism), `ba` above is square metres. Dividing the
+            // two directly is a silent 10.76× on TPA, basal area and volume —
+            // see the unit note at the top of BasalAreaMath.kt — so the divide
+            // goes through `basalAreaFt2`, the same helper
+            // `ExpansionFactors.variableRadius` uses.
             val ef: Float = if (isFixed) {
                 fixedEF
             } else {
-                cruiseDesign.baf?.let { if (ba > 0f) it / ba else 0f } ?: 0f
+                cruiseDesign.baf?.let {
+                    val baFt2 = basalAreaFt2(dbhCm = tree.dbhCm)
+                    if (baFt2 > 0f) it / baFt2 else 0f
+                } ?: 0f
             }
 
             totalTPA += ef

@@ -134,6 +134,14 @@ data class MapAreaOverlay(
     /// Drawn heavier, with its corners marked — the cruiser has to be able
     /// to tell which of several outlines their next action applies to.
     val selected: Boolean = false,
+    /// Whether a SELECTED area marks its outer-ring vertices. On for the
+    /// shapes a cruiser drags corner by corner; off for a circle, whose ring
+    /// is 128 densified points — marked, it reads as a beaded rim rather
+    /// than an outline, and every dot is a corner the cruiser cannot grab.
+    /// An explicit flag rather than a vertex-count threshold, so a genuinely
+    /// 30-corner hand-drawn stand keeps its corners. iOS
+    /// `BasemapArea.drawsCorners`.
+    val drawsCorners: Boolean = true,
 )
 
 /// An open polyline (v3 cruise mock `.guide`) — the dashed you-dot → plot
@@ -871,7 +879,7 @@ fun MapView(
                     )
                     drawPath(path, color = casing, style = Stroke(width = width + 2.5.dp.toPx()))
                     drawPath(path, color = areaTint, style = Stroke(width = width))
-                    if (!area.selected) continue
+                    if (!area.selected || !area.drawsCorners) continue
                     for (corner in rings[0]) {
                         val pt = screenPoint(corner)
                         drawCircle(color = areaTint, radius = 3.5.dp.toPx(), center = pt)

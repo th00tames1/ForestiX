@@ -126,6 +126,8 @@ import com.hcjeong.forestix.basemap.MapView
 import com.hcjeong.forestix.basemap.rememberMapCameraState
 import com.hcjeong.forestix.common.ForestixLogger
 import com.hcjeong.forestix.common.MeasurementFormatter
+import com.hcjeong.forestix.common.UncertaintyBand
+import com.hcjeong.forestix.common.Units
 import com.hcjeong.forestix.common.RegionalSpecies
 import com.hcjeong.forestix.common.TruthInput
 import com.hcjeong.forestix.common.UnitSystem
@@ -167,6 +169,7 @@ import com.hcjeong.forestix.ui.screens.cruise.MapAreaState
 import com.hcjeong.forestix.ui.screens.cruise.MapPlanCallout
 import com.hcjeong.forestix.ui.screens.cruise.areaOverlays
 import com.hcjeong.forestix.ui.screens.cruise.beginAreaDraw
+import com.hcjeong.forestix.ui.screens.cruise.beginCircleDraw
 import com.hcjeong.forestix.ui.screens.cruise.deleteArea
 import com.hcjeong.forestix.ui.screens.cruise.handleOverlayTap
 import com.hcjeong.forestix.ui.screens.cruise.saveAreaDraft
@@ -336,9 +339,11 @@ fun MapHomeScreen(nav: NavController) {
     // (header "MEASURE · TREE N", no "(NEXT)"); null = plain chooser on the
     // next free number. Cleared whenever the chooser dismisses.
     var chooserTreeOverride by remember { mutableStateOf<Int?>(null) }
-    // Far-GPS confirmation before the scoped chooser: (tree, whole metres)
-    // when the current fix sits > 30 m from the tapped tree's pin.
-    var farTreeConfirm by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    // Far-GPS confirmation before the scoped chooser: (tree, distance in
+    // METRES) when the current fix sits past the far-tree threshold. The
+    // distance is carried raw and rounded at the point of display, because how
+    // it rounds depends on the unit it is shown in.
+    var farTreeConfirm by remember { mutableStateOf<Pair<Int, Double>?>(null) }
     var mapSettingsOpen by remember { mutableStateOf(false) }
     // "Draw an area" — the boundary editor, raised full-screen over the
     // home. Not a nav destination: it is a modal edit of one map object,
@@ -579,13 +584,14 @@ fun MapHomeScreen(nav: NavController) {
         // draft's drag handles. Children of the map's own Box, so their
         // offsets and the map's projection are the same space.
         if (areaState.draft != null) {
-            MapAreaHandles(areaState, camera)
+            MapAreaHandles(areaState, camera, settings)
         } else {
             MapPlanCallout(
                 cruise = cruise,
                 camera = camera,
                 inCruiseMode = isCruise,
                 onDrawArea = { at -> beginAreaDraw(areaState, camera, at) },
+                onDrawCircle = { at -> beginCircleDraw(areaState, camera, settings, at) },
             )
             MapAreaCallout(
                 state = areaState,
@@ -694,7 +700,7 @@ fun MapHomeScreen(nav: NavController) {
             // Rides the guide line's midpoint and states a distance measured
             // from the cruiser — same evidence, same gate, so chip and line
             // appear and disappear together.
-            CruiseDistanceOverlay(cruise, camera, usableFix)
+            CruiseDistanceOverlay(cruise, camera, usableFix, settings.unitSystem)
         }
 
         // MARK: - Bottom: action cluster ①, or peek card ② when a pin is up.
@@ -792,8 +798,10 @@ fun MapHomeScreen(nav: NavController) {
                                         pin.coordinate.latitude, pin.coordinate.longitude,
                                     )
                                 }
-                                if (distM != null && distM > 30.0) {
-                                    farTreeConfirm = tree to distM.roundToInt()
+                                if (distM != null &&
+                                    distM > farTreeWarnDistanceM(settings.unitSystem)
+                                ) {
+                                    farTreeConfirm = tree to distM
                                 } else {
                                     chooserTreeOverride = tree
                                     chooserOpen = true
@@ -855,12 +863,16 @@ fun MapHomeScreen(nav: NavController) {
             entries.firstOrNull { it.treeNumber == tree && it.treeName != null }?.treeName,
             tree,
         )
+        // The distance is what the cruiser is being asked to judge, so it is
+        // quoted in the unit they are working in — a pacing number, so through
+        // `navDistance` rather than the measurement formatter.
+        val farTreeRange = MeasurementFormatter.navDistance(metres, settings.unitSystem)
         AlertDialog(
             onDismissRequest = { farTreeConfirm = null },
-            title = { Text("$farTreeTitle is $metres m away") },
+            title = { Text("$farTreeTitle is $farTreeRange away") },
             text = {
                 Text(
-                    "Your current GPS position is about $metres m from this " +
+                    "Your current GPS position is about $farTreeRange from this " +
                         "tree's pin. Measure it anyway?",
                 )
             },
@@ -2243,10 +2255,17 @@ private fun MetaCell(label: String, value: String) {
 // MARK: - Quick-entry edit sheet (map-peek spec item 2) ------------------------
 
 /// Compact editor raised from the quick peek's "Edit this tree": the measured
-/// value (native cm/m), species code, and note for ONE reading, plus a
-/// destructive Delete behind an AlertDialog confirm (removes the row + its
-/// photo via the history store). Measurement math is untouched — only the
-/// stored value and labels change.
+/// value, species code, and note for ONE reading, plus a destructive Delete
+/// behind an AlertDialog confirm (removes the row + its photo via the history
+/// store). Measurement math is untouched — only the stored value and labels
+/// change.
+///
+/// THE VALUE BOX IS IN THE CRUISER'S UNITS, both directions, through
+/// [TruthInput.Unit] — the same route TreeDetailScreen takes. It used to show
+/// the stored metric number beside a hardcoded "cm"/"m" chip while the peek
+/// two taps away read "13.6 in": correcting that tree to "14" meaning inches
+/// wrote a 14 cm stem. Storage is unchanged — a diameter is still cm and
+/// everything else still metres.
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun QuickEntryEditSheet(
@@ -2257,15 +2276,29 @@ private fun QuickEntryEditSheet(
 ) {
     val colors = Forestix.colors
     val type = Forestix.type
-    // The text the value field opens with: the stored reading at the SAME
-    // precision the row above it prints — one decimal for a diameter or a
-    // height, two for a distance — so the peek and its editor never show one
-    // reading as two numbers. iOS builds the identical string. `save` compares
-    // the field against this STRING, which is what tells an untouched form
-    // from a retyped one.
+    val settings by LocalAppEnvironment.current.settings.state
+        .collectAsStateWithLifecycle()
+    // The unit this reading is TYPED in — the cruiser's own, from the helper
+    // every other typed measurement in the app goes through. A diameter is
+    // cm/in; a height, a crown span, a distance and a plot radius are all
+    // lengths in m/ft.
+    val imperial = settings.unitSystem == UnitSystem.IMPERIAL
+    val valueUnit = TruthInput.defaultUnit(
+        if (entry.kind == MeasureKind.DBH) TruthInput.Quantity.DIAMETER
+        else TruthInput.Quantity.DISTANCE,
+        imperial = imperial,
+    )
+    // The text the value field opens with: the stored reading in the cruiser's
+    // unit at the SAME precision the row above it prints — one decimal for a
+    // diameter or a height, two for a distance — so the peek and its editor
+    // never show one reading as two numbers. iOS builds the identical string.
+    // `save` compares the field against this STRING, which is what tells an
+    // untouched form from a retyped one.
     val valuePrefill = MeasurementFormatter.entryText(
-        entry.value, if (entry.kind == MeasureKind.DISTANCE) 2 else 1)
-    var valueField by remember(entry.id) { mutableStateOf(valuePrefill) }
+        TruthInput.fromBase(entry.value, valueUnit),
+        if (entry.kind == MeasureKind.DISTANCE) 2 else 1,
+    )
+    var valueField by remember(entry.id, valueUnit) { mutableStateOf(valuePrefill) }
     // False when the cruiser has typed something that is not a usable reading.
     // Save is held off and the field says why, rather than the sheet quietly
     // keeping the old number and closing.
@@ -2295,8 +2328,7 @@ private fun QuickEntryEditSheet(
                     fontWeight = FontWeight.ExtraBold, letterSpacing = 1.0.sp),
                 color = colors.textTertiary,
             )
-            // Measured value — edited in native units (cm for DBH, m else),
-            // matching storage; the display unit system doesn't apply here.
+            // Measured value — in the cruiser's unit, same as the peek row.
             Row(verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
                     value = valueField,
@@ -2307,7 +2339,9 @@ private fun QuickEntryEditSheet(
                     modifier = Modifier.weight(1f),
                 )
                 Spacer(Modifier.width(8.dp))
-                Text(entry.valueUnit, style = type.body, color = colors.textSecondary)
+                // `entry.valueUnit` is the STORAGE unit and always metric; the
+                // chip has to name the unit the box is actually in.
+                Text(valueUnit.raw, style = type.body, color = colors.textSecondary)
             }
             if (!valueEntryValid) {
                 // Diameter and height reuse the field log's sentences word for
@@ -2372,9 +2406,14 @@ private fun QuickEntryEditSheet(
                 // pressing Save rounded the reading AND demoted it to a hand
                 // entry with no sigma. Comparing the strings is the only test
                 // an untouched form passes.
+                //
+                // The typed number is converted back to the app's metric base
+                // before it is stored — `parsePositiveBase`, not
+                // `parsePositive`. Storing the raw text is what wrote a 14 cm
+                // stem when the cruiser typed 14 inches.
                 val base =
                     if (valueField == valuePrefill) entry
-                    else TruthInput.parsePositive(valueField)
+                    else TruthInput.parsePositiveBase(valueField, valueUnit)
                         ?.let { entry.typedValue(it) } ?: entry
                 onSave(
                     base.copy(
@@ -2419,6 +2458,20 @@ private fun QuickEntryEditSheet(
     }
 }
 
+/// Peek "Measure this tree" beyond this distance from the pin asks for
+/// confirmation first — measuring a tree you're not standing at is usually a
+/// mis-tap on the wrong pin.
+///
+/// A ROUND number in each system rather than one fixed distance. This is not a
+/// physical trigger like the plot-boundary band — there is nothing about 30 m
+/// that makes a tap wrong — it is a judgement call the cruiser is being asked
+/// to make, and 30 m quoted to a US cruiser fires at 98 ft, which is neither a
+/// number they would have chosen nor one they can reason about. 100 ft is. The
+/// two are 1.6 % apart, so no tap changes verdict for any reason a cruiser
+/// would notice. iOS applies the identical rule.
+private fun farTreeWarnDistanceM(system: UnitSystem): Double =
+    if (system == UnitSystem.METRIC) 30.0 else Units.feetToMeters(100.0)
+
 // MARK: - Formatting (mirrors FieldLogScreen's row switches) -------------------
 
 private fun rowLabel(e: QuickMeasureEntry) = when (e.kind) {
@@ -2432,12 +2485,16 @@ private fun rowLabel(e: QuickMeasureEntry) = when (e.kind) {
 private fun valueText(e: QuickMeasureEntry, system: UnitSystem): String = when (e.kind) {
     MeasureKind.DBH -> MeasurementFormatter.diameter(e.value, system)
     MeasureKind.HEIGHT -> MeasurementFormatter.height(e.value, system)
-    MeasureKind.CROWN -> String.format(Locale.US, "%.1f × %.1f m", e.value, e.secondaryValue ?: 0.0)
+    // Crown and plot follow `system` like the two rows above them. Left
+    // metric, one card read "13.6 in", "92.7 ft", then "4.2 × 5.1 m" and
+    // "11.3 m radius" — two unit systems stacked four rows apart with nothing
+    // saying which row is which.
+    MeasureKind.CROWN -> MeasurementFormatter.crownSpread(e.value, e.secondaryValue ?: 0.0, system)
     // Unit-aware shared formatter (metric keeps the <1 m cm branch).
     MeasureKind.DISTANCE -> MeasurementFormatter.distance(e.value, system)
     MeasureKind.SAMPLING_PLOT -> {
         val area = e.secondaryValue ?: (PI * e.value * e.value)
-        String.format(Locale.US, "%.1f m radius · %.0f m²", e.value, area)
+        MeasurementFormatter.samplingPlotSummary(e.value, area, system)
     }
 }
 
@@ -2447,7 +2504,11 @@ private fun sigmaText(e: QuickMeasureEntry, system: UnitSystem): String? {
     return when (e.kind) {
         MeasureKind.DBH -> MeasurementFormatter.diameterSigma(s, system)
         MeasureKind.HEIGHT -> MeasurementFormatter.heightSigma(s, system)
-        else -> String.format(Locale.US, "±%.2f m", s)
+        // A band beside a converted value has to be in the same unit as the
+        // value, or it understates the error by 3.28x. Crown, distance and
+        // plot are plain lengths in metres, which is exactly what
+        // [UncertaintyBand] takes — the one rounding rule for every ± here.
+        else -> UncertaintyBand.text(s, system)
     }
 }
 

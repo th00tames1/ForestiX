@@ -51,9 +51,14 @@ private func plotUnitSuffix(_ system: UnitSystem) -> String {
 
 /// A plot length for a cruiser to read at arm's length: one decimal, the
 /// active unit ("7.2 m" / "23.6 ft").
+///
+/// Forwards to `MeasurementFormatter.plotLength` so this map-layer name and
+/// the one the AR slider, the scan screens' border pill and the quick-measure
+/// list use are literally the same rounding. They used to be two `%.1f`s that
+/// happened to agree, which is how the peek and the banner came to print one
+/// ring two ways.
 func plotLengthLabel(_ metres: Double, _ system: UnitSystem) -> String {
-    String(format: "%.1f %@",
-           lengthInDisplayUnit(metres, system), plotUnitSuffix(system))
+    MeasurementFormatter.plotLength(m: metres, in: system)
 }
 
 // MARK: - Framing a new plot

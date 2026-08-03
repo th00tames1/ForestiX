@@ -21,12 +21,23 @@ public struct PlotSummaryScreen: View {
     /// previews and tests are unchanged.
     private let areaUnit: AreaUnit
 
+    /// The LINEAR half of the same setting — what the diameter and the height
+    /// band on this screen are read in. `areaUnit` alone was not enough: it
+    /// governs the denominator of the density rows and nothing else, so the
+    /// quadratic mean diameter sat in the middle of a unit-aware block still
+    /// printing centimetres, and the height curve's ± stayed in metres on a
+    /// screen whose heights are feet. Defaults alongside `areaUnit` so
+    /// previews and tests are unchanged.
+    private let unitSystem: UnitSystem
+
     @State private var confirmingDelete = false
 
     public init(viewModel: @autoclosure @escaping () -> PlotSummaryViewModel,
-                areaUnit: AreaUnit = .acre) {
+                areaUnit: AreaUnit = .acre,
+                unitSystem: UnitSystem = .imperial) {
         _viewModel = StateObject(wrappedValue: viewModel())
         self.areaUnit = areaUnit
+        self.unitSystem = unitSystem
     }
 
     /// Per-acre → display-basis multiplier (1.0 US acres, 2.47105 hectares).
@@ -116,12 +127,22 @@ public struct PlotSummaryScreen: View {
             statRow("Live trees", "\(viewModel.stats.liveTreeCount)")
             statRow("Trees / \(areaUnit.abbreviation)",
                     String(format: "%.1f", Double(viewModel.stats.tpa) * densityFactor))
+            // Basal area converts its NUMERATOR with the basis, not only its
+            // suffix — the engine reports m² per ACRE, so scaling just the
+            // denominator left an imperial cruise reading "11.49 m²/ac", a
+            // unit no cruise sheet uses and 10.76× away from the ft²/ac the
+            // quick-measure card shows for the same stand.
             statRow("Basal area / \(areaUnit.abbreviation)",
                     String(format: "%.2f %@",
-                           Double(viewModel.stats.baPerAcreM2) * densityFactor,
-                           areaUnit.densityLabel("m²")))
+                           MeasurementFormatter.basalAreaDensity(
+                               m2PerAcre: Double(viewModel.stats.baPerAcreM2),
+                               in: areaUnit),
+                           MeasurementFormatter.basalAreaDensityUnit(areaUnit)))
+            // The one row in this block that used to stay metric — and the one
+            // a cruiser compares against the inch diameters on the trees above.
             statRow("Quadratic mean diameter",
-                    String(format: "%.1f cm", viewModel.stats.qmdCm))
+                    MeasurementFormatter.diameter(cm: Double(viewModel.stats.qmdCm),
+                                                  in: unitSystem))
             statRow("Gross volume / \(areaUnit.abbreviation)",
                     String(format: "%.1f %@",
                            Double(viewModel.stats.grossVolumePerAcreM3) * densityFactor,
@@ -166,8 +187,10 @@ public struct PlotSummaryScreen: View {
                                         areaUnit.densitySuffix))
                             Spacer()
                             Text(String(format: "%.2f %@",
-                                        Double(stat.baPerAcreM2) * densityFactor,
-                                        areaUnit.densityLabel("m²")))
+                                        MeasurementFormatter.basalAreaDensity(
+                                            m2PerAcre: Double(stat.baPerAcreM2),
+                                            in: areaUnit),
+                                        MeasurementFormatter.basalAreaDensityUnit(areaUnit)))
                             Spacer()
                             Text(String(format: "%.1f %@",
                                         Double(stat.grossVolumePerAcreM3) * densityFactor,
@@ -201,8 +224,14 @@ public struct PlotSummaryScreen: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(RegionalSpecies.name(forCode: code))
                             .font(.body.bold())
-                        Text(String(format: "Height curve from %d trees, typically within ±%.1f m",
-                                    fit.nObs, fit.rmse))
+                        // The ± is the ONLY thing this screen says about how
+                        // far an imputed height can be out. Read as feet on an
+                        // imperial cruise it understated the curve's error by
+                        // 3.28×, so it goes through the same band the per-tree
+                        // report uses.
+                        Text("Height curve from \(fit.nObs) trees, typically within "
+                             + MeasurementFormatter.heightSigma(m: Double(fit.rmse),
+                                                                in: unitSystem))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)

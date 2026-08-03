@@ -25,9 +25,13 @@
 
 package com.hcjeong.forestix.geo
 
+import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sin
+import kotlin.math.sqrt
 
 /// WHERE THE COORDINATES CAME FROM — a survey, or a fingertip.
 ///
@@ -80,7 +84,25 @@ enum class BoundaryDraftError(val message: String) {
 /// screen's undo stack a list of drafts rather than a replay log, and it
 /// removes any chance of a gesture mutating a shape another gesture is
 /// mid-way through reading.
-data class BoundaryDraft(val vertices: List<CoordinateConversions.LatLon>) {
+/// `circle` is set only while the draft is a CIRCLE, and then `vertices`
+/// holds the densified ring `circle()` builds rather than corners anybody
+/// dragged. Keeping the ring as the one truth is the whole design:
+/// `closedRing`, `areaAcres`, `validationFailure` and everything downstream
+/// of them — plot layout, the exporters, the statistics, both stored schemas
+/// — see an ordinary polygon and learn nothing about circles.
+data class BoundaryDraft(
+    val vertices: List<CoordinateConversions.LatLon>,
+    val circle: Circle? = null,
+) {
+
+    /// The centre and ground radius a circular draft is regenerated from.
+    /// It rides alongside the ring so a saved circle can be re-OPENED as a
+    /// circle; it is never what anything measures. iOS
+    /// `BoundaryDraft.Circle`.
+    data class Circle(
+        val centre: CoordinateConversions.LatLon,
+        val radiusMeters: Double,
+    )
 
     /// The ring a store holds: wound counter-clockwise (RFC 7946 §3.1.6)
     /// and closed. Shared by `toGeometry` and by the area a cruise is laid
@@ -93,13 +115,39 @@ data class BoundaryDraft(val vertices: List<CoordinateConversions.LatLon>) {
             return wound + wound.first()
         }
 
+    // MARK: - The circle
+
+    /// Drag the centre handle: the whole circle travels, the radius does
+    /// not change. Returns `this` for a polygon draft, which has no centre
+    /// to move.
+    fun movingCentre(to: CoordinateConversions.LatLon): BoundaryDraft {
+        val c = circle ?: return this
+        return circle(to, c.radiusMeters)
+    }
+
+    /// Drag the ring handle, or type into the radius field. Clamped to
+    /// MIN_RADIUS_METERS rather than refused, because the thumb that
+    /// overshoots inwards is still mid-gesture and a shape that vanishes
+    /// under the finger cannot be dragged back out.
+    fun withRadius(radiusMeters: Double): BoundaryDraft {
+        val c = circle ?: return this
+        return circle(c.centre, radiusMeters)
+    }
+
     // MARK: - Editing
 
     /// Move one corner. An out-of-range index is ignored rather than
     /// thrown on: a drag can outlive the vertex it started on when an undo
     /// lands mid-gesture, and losing the shape to a crash is the outcome
     /// this whole screen exists to avoid.
+    ///
+    /// A CIRCLE has no corners to move — see `movingCentre` and
+    /// `withRadius`. Guarded here as well as in the host so no future
+    /// caller can leave the ring and the circle it claims to be describing
+    /// saying different things: `copy()` would otherwise carry the stale
+    /// `circle` forward onto a ring that no longer matches it.
     fun moving(index: Int, to: CoordinateConversions.LatLon): BoundaryDraft {
+        if (circle != null) return this
         if (index !in vertices.indices) return this
         return copy(vertices = vertices.toMutableList().also { it[index] = to })
     }
@@ -108,8 +156,13 @@ data class BoundaryDraft(val vertices: List<CoordinateConversions.LatLon>) {
     /// between `vertices[i]` and `vertices[i + 1]` (wrapping at the end).
     /// Computed in ENU so the handle sits where the eye expects it on the
     /// projected map, not where naive lon/lat averaging would put it.
+    ///
+    /// Empty for a circle. A circle's edges are not a cruiser's to split,
+    /// and offering 128 handles that add a corner to a shape which cannot
+    /// hold one is worse than offering none.
     val edgeMidpoints: List<CoordinateConversions.LatLon>
         get() {
+            if (circle != null) return emptyList()
             if (vertices.size < 2) return emptyList()
             val origin = vertices.first()
             return vertices.indices.map { i ->
@@ -133,6 +186,7 @@ data class BoundaryDraft(val vertices: List<CoordinateConversions.LatLon>) {
         index: Int,
         at: CoordinateConversions.LatLon,
     ): Pair<BoundaryDraft, Int> {
+        if (circle != null) return this to -1
         if (index !in vertices.indices) return this to -1
         val inserted = index + 1
         val next = vertices.toMutableList().also { it.add(inserted, at) }
@@ -144,6 +198,7 @@ data class BoundaryDraft(val vertices: List<CoordinateConversions.LatLon>) {
     /// line is the one a gloved thumb makes by accident, and it would
     /// silently destroy the shape.
     fun removing(index: Int): BoundaryDraft? {
+        if (circle != null) return null
         if (index !in vertices.indices || vertices.size <= 3) return null
         return copy(vertices = vertices.toMutableList().also { it.removeAt(index) })
     }
@@ -199,8 +254,15 @@ data class BoundaryDraft(val vertices: List<CoordinateConversions.LatLon>) {
     /// cross product of two metre vectors, i.e. an area, and 1e-6 m² is far
     /// below anything a fingertip can express and far above the rounding of
     /// a degree-to-metre conversion.
+    ///
+    /// SKIPPED ENTIRELY FOR A CIRCLE, and that is a requirement rather than
+    /// an optimisation. A convex ring cannot cross itself, so the answer is
+    /// known; the loop below is O(n²) and `validationFailure` is read on
+    /// every frame of a drag, which at 128 vertices is some 8,000 segment
+    /// tests per frame under the thumb.
     val isSelfIntersecting: Boolean
         get() {
+            if (circle != null) return false
             if (vertices.size < 4) return false
             val origin = vertices.first()
             val p = vertices.map { CoordinateConversions.toENU(it, origin) }
@@ -263,6 +325,23 @@ data class BoundaryDraft(val vertices: List<CoordinateConversions.LatLon>) {
         /// real stand and far above float noise at cruise latitudes.
         const val MIN_AREA_SQUARE_METERS: Double = 1.0
 
+        /// How many segments a circle is drawn with. 128 is fine enough
+        /// that the ring reads as a curve at any zoom a cruiser frames a
+        /// stand at, and small enough that the stored geometry stays a few
+        /// kilobytes.
+        ///
+        /// It is also part of the PERSISTED shape, so it is a constant and
+        /// not a tuning knob: iOS uses the same 128 so the two platforms
+        /// write the same bytes for the same circle.
+        const val CIRCLE_SEGMENTS: Int = 128
+
+        /// Below this a circle is not a stand. MIN_AREA_SQUARE_METERS would
+        /// refuse far smaller (π·2² is 12.6 m²), but the radius is what the
+        /// cruiser is holding, so the clamp is stated in the radius and the
+        /// area refusal stays unreachable for a circle — one mistake must
+        /// not be able to produce two different sentences.
+        const val MIN_RADIUS_METERS: Double = 2.0
+
         private const val EPSILON: Double = 1e-6
 
         /// Re-open a ring that was stored closed (first == last). The one
@@ -303,6 +382,52 @@ data class BoundaryDraft(val vertices: List<CoordinateConversions.LatLon>) {
                     CoordinateConversions.LatLon(maxLat, minLon),
                 )
             )
+        }
+
+        /// A circle, as the ring it will be stored as.
+        ///
+        /// THE RADIUS IS INFLATED BEFORE THE RING IS BUILT. An inscribed
+        /// n-gon under-measures its circle by (2π/n)²/6 — about 0.04 % at
+        /// n = 128 — so a ring built at `radiusMeters` would enclose
+        /// slightly less ground than the πr² the cruiser was shown, and the
+        /// app would then hold two different areas for one circle. Building
+        /// at r' = r·√((2π/n)/sin(2π/n)) makes the ring's own shoelace area
+        /// equal πr² exactly, which matters because that shoelace is what
+        /// `Stratum.areaAcres` stores and StandStatistics expands the whole
+        /// cruise by.
+        ///
+        /// Wound counter-clockwise (angle increasing on an east/north
+        /// plane), so it obeys RFC 7946 §3.1.6 before anything touches it —
+        /// the same promise `rectangle` makes.
+        ///
+        /// The ENU plane is anchored on the CENTRE, which puts vertex 0 at
+        /// the centre's own latitude; `signedAreaSquareMeters` re-anchors on
+        /// vertex 0 and therefore reads back the identical plane, so the
+        /// area above is exact and not merely close.
+        fun circle(
+            centre: CoordinateConversions.LatLon,
+            radiusMeters: Double,
+        ): BoundaryDraft {
+            val r = max(radiusMeters, MIN_RADIUS_METERS)
+            return BoundaryDraft(densifiedRing(centre, r), Circle(centre, r))
+        }
+
+        private fun densifiedRing(
+            centre: CoordinateConversions.LatLon,
+            r: Double,
+        ): List<CoordinateConversions.LatLon> {
+            val step = 2 * PI / CIRCLE_SEGMENTS
+            val ringRadius = r * sqrt(step / sin(step))
+            return (0 until CIRCLE_SEGMENTS).map { k ->
+                val theta = step * k
+                CoordinateConversions.toLatLon(
+                    CoordinateConversions.ENU(
+                        east = ringRadius * cos(theta),
+                        north = ringRadius * sin(theta),
+                    ),
+                    centre,
+                )
+            }
         }
 
         /// Segment intersection including touching — a corner sitting

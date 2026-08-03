@@ -63,6 +63,27 @@ public struct BoundaryDraft: Equatable, Sendable {
     /// Corners in ring order, NOT closed (first != last).
     public private(set) var vertices: [CoordinateConversions.LatLon]
 
+    /// Set only while the draft is a CIRCLE, and then `vertices` holds the
+    /// densified ring below rather than corners anybody dragged. Keeping
+    /// the ring as the one truth is the whole design: `closedRing`,
+    /// `areaAcres`, `validationFailure` and everything downstream of them —
+    /// plot layout, the exporters, the statistics, both stored schemas —
+    /// see an ordinary polygon and learn nothing about circles.
+    public private(set) var circle: Circle?
+
+    /// The centre and ground radius a circular draft is regenerated from.
+    /// It rides alongside the ring so a saved circle can be re-OPENED as a
+    /// circle; it is never what anything measures.
+    public struct Circle: Equatable, Sendable {
+        public var centre: CoordinateConversions.LatLon
+        public var radiusMeters: Double
+
+        public init(centre: CoordinateConversions.LatLon, radiusMeters: Double) {
+            self.centre = centre
+            self.radiusMeters = radiusMeters
+        }
+    }
+
     public init(vertices: [CoordinateConversions.LatLon]) {
         self.vertices = vertices
     }
@@ -113,15 +134,96 @@ public struct BoundaryDraft: Equatable, Sendable {
         ])
     }
 
+    // MARK: - The circle
+
+    /// How many segments a circle is drawn with. 128 is fine enough that
+    /// the ring reads as a curve at any zoom a cruiser frames a stand at,
+    /// and small enough that the stored geometry stays a few kilobytes.
+    ///
+    /// It is also part of the PERSISTED shape, so it is a constant and not
+    /// a tuning knob: Android uses the same 128 so the two platforms write
+    /// the same bytes for the same circle.
+    public static let circleSegments = 128
+
+    /// Below this a circle is not a stand. `minimumAreaSquareMeters` would
+    /// refuse far smaller (π·2² is 12.6 m²), but the radius is what the
+    /// cruiser is holding, so the clamp is stated in the radius and the
+    /// area refusal stays unreachable for a circle — one mistake must not
+    /// be able to produce two different sentences.
+    public static let minimumRadiusMeters: Double = 2.0
+
+    /// A circle, as the ring it will be stored as.
+    ///
+    /// THE RADIUS IS INFLATED BEFORE THE RING IS BUILT. An inscribed
+    /// n-gon under-measures its circle by (2π/n)²/6 — about 0.04 % at
+    /// n = 128 — so a ring built at `radiusMeters` would enclose slightly
+    /// less ground than the πr² the cruiser was shown, and the app would
+    /// then hold two different areas for one circle. Building at
+    /// r' = r·√((2π/n)/sin(2π/n)) makes the ring's own shoelace area equal
+    /// πr² exactly, which matters because that shoelace is what
+    /// `Stratum.areaAcres` stores and `StandStatistics` expands the whole
+    /// cruise by.
+    ///
+    /// Wound counter-clockwise (angle increasing on an east/north plane),
+    /// so it obeys RFC 7946 §3.1.6 before anything touches it — the same
+    /// promise `rectangle(corner:opposite:)` makes.
+    ///
+    /// The ENU plane is anchored on the CENTRE, which puts vertex 0 at the
+    /// centre's own latitude; `signedAreaSquareMeters` re-anchors on vertex
+    /// 0 and therefore reads back the identical plane, so the area above is
+    /// exact and not merely close.
+    public static func circle(centre: CoordinateConversions.LatLon,
+                              radiusMeters: Double) -> BoundaryDraft {
+        let r = Swift.max(radiusMeters, minimumRadiusMeters)
+        var draft = BoundaryDraft(vertices: densifiedRing(centre: centre, radiusMeters: r))
+        draft.circle = Circle(centre: centre, radiusMeters: r)
+        return draft
+    }
+
+    private static func densifiedRing(centre: CoordinateConversions.LatLon,
+                                      radiusMeters r: Double) -> [CoordinateConversions.LatLon] {
+        let n = circleSegments
+        let step = 2 * Double.pi / Double(n)
+        let ringRadius = r * (step / sin(step)).squareRoot()
+        return (0..<n).map { k in
+            let theta = step * Double(k)
+            return CoordinateConversions.toLatLon(
+                enu: CoordinateConversions.ENU(east: ringRadius * cos(theta),
+                                               north: ringRadius * sin(theta)),
+                origin: centre)
+        }
+    }
+
+    /// Drag the centre handle: the whole circle travels, the radius does not
+    /// change. A no-op on a polygon draft, which has no centre to move.
+    public mutating func moveCentre(to coordinate: CoordinateConversions.LatLon) {
+        guard let circle else { return }
+        self = Self.circle(centre: coordinate, radiusMeters: circle.radiusMeters)
+    }
+
+    /// Drag the ring handle, or type into the radius field. Clamped to
+    /// `minimumRadiusMeters` rather than refused, because the thumb that
+    /// overshoots inwards is still mid-gesture and a shape that vanishes
+    /// under the finger cannot be dragged back out.
+    public mutating func setRadius(_ radiusMeters: Double) {
+        guard let circle else { return }
+        self = Self.circle(centre: circle.centre, radiusMeters: radiusMeters)
+    }
+
     // MARK: - Editing
 
     /// Move one corner. Out-of-range indices are ignored rather than
     /// trapped: a drag can outlive the vertex it started on when an undo
     /// lands mid-gesture, and losing the shape to a crash is the outcome
     /// this whole screen exists to avoid.
+    ///
+    /// A CIRCLE has no corners to move — see `moveCentre(to:)` and
+    /// `setRadius(_:)`. Guarded here as well as in the host so no future
+    /// caller can leave the ring and the circle it claims to be describing
+    /// saying different things.
     public mutating func move(vertexAt index: Int,
                               to coordinate: CoordinateConversions.LatLon) {
-        guard vertices.indices.contains(index) else { return }
+        guard circle == nil, vertices.indices.contains(index) else { return }
         vertices[index] = coordinate
     }
 
@@ -129,7 +231,12 @@ public struct BoundaryDraft: Equatable, Sendable {
     /// between `vertices[i]` and `vertices[i + 1]` (wrapping at the end).
     /// Computed in ENU so the handle sits where the eye expects it on the
     /// projected map, not where naive lon/lat averaging would put it.
+    ///
+    /// Empty for a circle. A circle's edges are not a cruiser's to split,
+    /// and offering 128 handles that add a corner to a shape which cannot
+    /// hold one is worse than offering none.
     public var edgeMidpoints: [CoordinateConversions.LatLon] {
+        guard circle == nil else { return [] }
         guard vertices.count >= 2, let origin = vertices.first else { return [] }
         return vertices.indices.map { i in
             let a = CoordinateConversions.toENU(point: vertices[i], origin: origin)
@@ -148,7 +255,7 @@ public struct BoundaryDraft: Equatable, Sendable {
     @discardableResult
     public mutating func insertVertex(onEdgeAt index: Int,
                                       at coordinate: CoordinateConversions.LatLon) -> Int? {
-        guard vertices.indices.contains(index) else { return nil }
+        guard circle == nil, vertices.indices.contains(index) else { return nil }
         let inserted = index + 1
         vertices.insert(coordinate, at: inserted)
         return inserted
@@ -159,7 +266,8 @@ public struct BoundaryDraft: Equatable, Sendable {
     /// accident, and it would silently destroy the shape.
     @discardableResult
     public mutating func removeVertex(at index: Int) -> Bool {
-        guard vertices.indices.contains(index), vertices.count > 3 else { return false }
+        guard circle == nil,
+              vertices.indices.contains(index), vertices.count > 3 else { return false }
         vertices.remove(at: index)
         return true
     }
@@ -214,7 +322,14 @@ public struct BoundaryDraft: Equatable, Sendable {
     /// cross product of two metre vectors, i.e. an area, and 1e-6 m² is
     /// far below anything a fingertip can express and far above the
     /// rounding of a degree-to-metre conversion.
+    ///
+    /// SKIPPED ENTIRELY FOR A CIRCLE, and that is a requirement rather than
+    /// an optimisation. A convex ring cannot cross itself, so the answer is
+    /// known; the loop below is O(n²) and `validationFailure` is read on
+    /// every frame of a drag, which at 128 vertices is some 8,000 segment
+    /// tests per frame under the thumb.
     public var isSelfIntersecting: Bool {
+        guard circle == nil else { return false }
         guard vertices.count >= 4, let origin = vertices.first else { return false }
         let p = vertices.map { CoordinateConversions.toENU(point: $0, origin: origin) }
         let n = p.count

@@ -46,6 +46,19 @@ public struct RecordCentreSheet: View {
     @EnvironmentObject private var environment: AppEnvironment
     @Environment(\.dismiss) private var dismiss
 
+    /// Read from the key rather than through an injected `AppSettings`: this
+    /// sheet is presented from the cruise map without one, and an
+    /// `@EnvironmentObject` that is not there is a crash, not a fallback.
+    /// Everything on this sheet that names a distance — the range row, the
+    /// accuracy, the fix spread — is something the cruiser paces or judges, so
+    /// all of it follows their Units setting.
+    @AppStorage(AppSettings.Keys.unitSystem)
+    private var unitSystemRaw: String = UnitSystem.imperial.rawValue
+
+    private var unitSystem: UnitSystem {
+        AppSettings.unitSystem(fromRaw: unitSystemRaw)
+    }
+
     public let plannedPlot: PlannedPlot
     public let project: Project
     public var onSaved: (Plot) -> Void
@@ -342,18 +355,23 @@ public struct RecordCentreSheet: View {
         let b = GeoMath.bearingDeg(
             fromLat: fix.latitude, fromLon: fix.longitude,
             toLat: plannedPlot.plannedLat, toLon: plannedPlot.plannedLon)
-        return String(format: "%.0f m · bearing %.0f°", d,
+        // Bearing is degrees in both systems — a compass does not change with
+        // the Units toggle. The range is a walking instruction and does.
+        return String(format: "%@ · bearing %.0f°",
+                      MeasurementFormatter.navDistance(m: d, in: unitSystem),
                       (b + 360).truncatingRemainder(dividingBy: 360))
     }
 
+    /// How well the centre is located — a ± band, so through the one place
+    /// bands are rounded, in the same unit as the range above it.
     private var accuracyText: String {
         if let r = liveResult {
-            return String(format: "±%.1f m", r.medianHAccuracyM)
+            return UncertaintyBand.text(metres: Double(r.medianHAccuracyM), in: unitSystem)
         }
         if let s = viewModel.latestSample {
-            return String(format: "±%.1f m", s.horizontalAccuracyM)
+            return UncertaintyBand.text(metres: s.horizontalAccuracyM, in: unitSystem)
         }
-        return "±— m"
+        return "±— " + MeasurementFormatter.heightUnit(unitSystem)
     }
 
     // (`liveTier` went with the chip — field report F9. `GPSAveraging.classify`
@@ -380,8 +398,8 @@ public struct RecordCentreSheet: View {
             // an algebraic subscript is not something a cruiser can read,
             // say or act on. Same number, named for what it measures —
             // how far apart the individual GPS fixes landed.
-            return "\(r.nSamples) fixes · centre locked\nfixes spread ±"
-                + String(format: "%.1f m", r.sampleStdXyM)
+            return "\(r.nSamples) fixes · centre locked\nfixes spread "
+                + UncertaintyBand.text(metres: Double(r.sampleStdXyM), in: unitSystem)
         default:
             return "\(sampleCount) fixes · needs 30 good ones\nmedian converges over \(windowS) s"
         }

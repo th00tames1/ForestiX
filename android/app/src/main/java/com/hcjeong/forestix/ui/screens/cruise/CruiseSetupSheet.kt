@@ -75,6 +75,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hcjeong.forestix.AppEnvironment
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.common.AreaUnit
+import com.hcjeong.forestix.common.MeasurementFormatter
+import com.hcjeong.forestix.common.TruthInput
+import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.common.Units
 import com.hcjeong.forestix.common.areaUnit
 import com.hcjeong.forestix.data.cruise.CruiseDesign
@@ -131,26 +134,60 @@ fun CruiseSetupSheet(
 ) {
     val env = LocalAppEnvironment.current
     val settings by env.settings.state.collectAsStateWithLifecycle()
-    val areaUnit = settings.unitSystem.areaUnit
+    val unitSystem = settings.unitSystem
+    val areaUnit = unitSystem.areaUnit
     val colors = Forestix.colors
     val type = Forestix.type
     val scope = rememberCoroutineScope()
 
+    // EVERY NUMERIC FIELD ON THIS SHEET IS TYPED AND READ IN THE CRUISER'S
+    // OWN UNIT. Radius and spacing are lengths — `lengthUnit` is what labels
+    // them and what converts them, in both directions — and the BAF is the
+    // prism factor, ft²/ac or m²/ha. What is STORED never changes: a radius
+    // becomes `plotAreaAcres`, spacing becomes `gridSpacingMeters`, and the
+    // BAF stays ft²/ac (see `CruiseDesign.baf`). These three text fields are
+    // the only place the conversion happens, so a prefill written without
+    // going through it will be a raw metre value sitting under a "ft" label —
+    // which is how a US cruiser laid a 37-metre plot meaning 37 feet.
+    val lengthUnit = TruthInput.defaultUnit(
+        TruthInput.Quantity.DISTANCE, imperial = unitSystem == UnitSystem.IMPERIAL)
+    // A stored metre value written into one of those boxes, at the precision
+    // the box has always shown.
+    fun entryText(metres: Double, fractionDigits: Int = 1): String =
+        MeasurementFormatter.entryText(
+            TruthInput.fromBase(metres, lengthUnit), fractionDigits)
+    // The round default grid pitch in the cruiser's unit: the 150 m this sheet
+    // has always offered, or 500 ft — near enough the same ground (152.4 m)
+    // that the plan comes out the same size, and a number a cruiser pacing in
+    // chains can actually aim at.
+    val defaultSpacingMetres =
+        if (unitSystem == UnitSystem.IMPERIAL) Units.feetToMeters(500.0) else 150.0
+
     // Defaults from the existing design model (CruiseDesign record when
     // present; otherwise the long-standing 0.1 ac / BAF 20 / 150 m grid /
     // 10-count defaults the old screen shipped with). Metric countries start
-    // from a round 10 m radius instead of the odd metre value 0.1 ac maps to.
+    // from a round 10 m radius instead of the odd metre value 0.1 ac maps to;
+    // an imperial cruiser gets the 0.1 ac radius written in feet, which is the
+    // box's unit.
     var fixedRadius by remember { mutableStateOf(true) }
     var radiusText by remember {
         mutableStateOf(
-            if (areaUnit == AreaUnit.HECTARE) "10.0"
-            else String.format(Locale.US, "%.1f", radiusMFromAcres(0.1)),
+            if (areaUnit == AreaUnit.HECTARE) entryText(10.0)
+            else entryText(radiusMFromAcres(0.1)),
         )
     }
-    var bafText by remember { mutableStateOf("20") }
+    var bafText by remember {
+        mutableStateOf(
+            MeasurementFormatter.entryText(
+                MeasurementFormatter.bafDisplay(
+                    MeasurementFormatter.defaultBAFStored(unitSystem), unitSystem),
+                0,
+            ),
+        )
+    }
     var bySpacing by remember { mutableStateOf(true) }
     var countText by remember { mutableStateOf("10") }
-    var spacingText by remember { mutableStateOf("150") }
+    var spacingText by remember { mutableStateOf(entryText(defaultSpacingMetres, 0)) }
     var strataCount by remember { mutableIntStateOf(0) }
     var generating by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -173,16 +210,22 @@ fun CruiseSetupSheet(
         } catch (_: Exception) {
             null
         } ?: return@LaunchedEffect
+        // Each stored value goes back into the box in the unit that box is
+        // labelled in. Storage is untouched: the design still holds acres,
+        // metres and ft²/ac.
         fixedRadius = design.plotType == PlotType.FIXED_AREA
         design.plotAreaAcres?.let {
-            radiusText = String.format(Locale.US, "%.1f", radiusMFromAcres(it.toDouble()))
+            radiusText = entryText(radiusMFromAcres(it.toDouble()))
         }
-        design.baf?.let { bafText = String.format(Locale.US, "%.0f", it) }
+        design.baf?.let {
+            bafText = MeasurementFormatter.entryText(
+                MeasurementFormatter.bafDisplay(it.toDouble(), unitSystem), 0)
+        }
         when (design.samplingScheme) {
             SamplingScheme.SYSTEMATIC_GRID -> {
                 bySpacing = true
                 design.gridSpacingMeters?.let {
-                    spacingText = String.format(Locale.US, "%.0f", it)
+                    spacingText = entryText(it.toDouble(), 0)
                 }
             }
             SamplingScheme.STRATIFIED_RANDOM -> bySpacing = false
@@ -198,16 +241,26 @@ fun CruiseSetupSheet(
     /// the writes rather than in front of a plan that might not generate.
     fun generate(confirmedDiscard: Boolean = false) {
         if (generating) return
-        val radiusM = radiusText.toDoubleOrNull() ?: 0.0
-        val baf = bafText.toDoubleOrNull() ?: 0.0
+        // Radius and spacing come out of their boxes in the cruiser's unit and
+        // are converted to METRES here, once, so everything below this point —
+        // the generator, the design record, the refusals — is in the base it
+        // has always been in.
+        val radiusM = TruthInput.parsePositiveBase(radiusText, lengthUnit) ?: 0.0
+        val baf = MeasurementFormatter.bafStored(
+            TruthInput.parsePositive(bafText) ?: 0.0, unitSystem)
         val count = countText.toIntOrNull() ?: 0
-        val spacing = spacingText.toDoubleOrNull() ?: 0.0
+        val spacing = TruthInput.parsePositiveBase(spacingText, lengthUnit) ?: 0.0
+        // The refusals name the unit the box is labelled in — a cruiser told
+        // to type "a positive number of metres" into a box marked "ft" has
+        // been given the wrong instruction twice over.
+        val lengthWord = if (lengthUnit == TruthInput.Unit.FEET) "feet" else "metres"
         if (fixedRadius && radiusM <= 0) {
-            error = "Plot radius must be a positive number of metres."
+            error = "Plot radius must be a positive number of $lengthWord."
             return
         }
         if (!fixedRadius && baf <= 0) {
-            error = "Basal area factor must be a positive number."
+            error = "Basal area factor must be a positive number of " +
+                MeasurementFormatter.bafUnit(unitSystem) + "."
             return
         }
         if (!bySpacing && count <= 0) {
@@ -215,7 +268,7 @@ fun CruiseSetupSheet(
             return
         }
         if (bySpacing && spacing <= 0) {
-            error = "Grid spacing must be a positive number of metres."
+            error = "Grid spacing must be a positive number of $lengthWord."
             return
         }
         generating = true
@@ -231,6 +284,7 @@ fun CruiseSetupSheet(
                     bySpacing = bySpacing,
                     count = count,
                     spacingM = spacing,
+                    defaultSpacingM = defaultSpacingMetres,
                     mapCentre = mapCentre,
                     area = area,
                     confirmedDiscard = confirmedDiscard,
@@ -286,14 +340,25 @@ fun CruiseSetupSheet(
             NumericRow(
                 value = if (fixedRadius) radiusText else bafText,
                 onValueChange = { if (fixedRadius) radiusText = it else bafText = it },
-                unit = if (fixedRadius) "m radius" else "BAF",
+                // The BAF row states its dimension. "BAF" alone is the same box
+                // for a US cruiser typing 20 ft²/ac and a metric one typing
+                // 4 m²/ha, and nothing downstream can tell the two apart
+                // afterwards.
+                unit = if (fixedRadius) {
+                    "${lengthUnit.raw} radius"
+                } else {
+                    MeasurementFormatter.bafUnit(unitSystem)
+                },
                 caption = if (fixedRadius) {
-                    radiusText.toDoubleOrNull()?.takeIf { it > 0 }?.let { r ->
+                    // The box holds the radius in the cruiser's unit, so it is
+                    // converted to metres FIRST — read as metres it reported an
+                    // 11-acre plot for a 37 ft one.
+                    TruthInput.parsePositiveBase(radiusText, lengthUnit)?.let { r ->
                         val ac = acresFromRadiusM(r)
                         // Metric countries read hectares only; the US keeps the
                         // dual ha · ac readout it has always shown.
                         if (areaUnit == AreaUnit.HECTARE) {
-                            String.format(Locale.US, "≈ %.3f ha", ac * 0.404685642)
+                            String.format(Locale.US, "≈ %.3f ha", AreaUnit.HECTARE.fromAcres(ac))
                         } else {
                             String.format(Locale.US, "≈ %.2f ha · %.2f ac",
                                 ac * 0.404685642, ac)
@@ -316,7 +381,7 @@ fun CruiseSetupSheet(
             NumericRow(
                 value = if (bySpacing) spacingText else countText,
                 onValueChange = { if (bySpacing) spacingText = it else countText = it },
-                unit = if (bySpacing) "m" else "plots",
+                unit = if (bySpacing) lengthUnit.raw else "plots",
                 caption = if (bySpacing) {
                     "Distance between plot centres"
                 } else {
@@ -622,6 +687,11 @@ private suspend fun generateCruisePlan(
     bySpacing: Boolean,
     count: Int,
     spacingM: Double,
+    /// The fallback pitch for the no-boundary grid when the cruiser chose a
+    /// COUNT and never named a spacing — 150 m, or the round 500 ft an
+    /// imperial cruiser's sheet offers. Passed in rather than hardcoded here
+    /// so the two agree; the value is metres either way.
+    defaultSpacingM: Double,
     mapCentre: CoordinateConversions.LatLon,
     area: Stratum?,
     confirmedDiscard: Boolean = false,
@@ -677,7 +747,7 @@ private suspend fun generateCruisePlan(
             projectId = project.id,
             anchor = mapCentre,
             count = if (bySpacing) 12 else count,
-            spacingM = if (bySpacing) spacingM else 150.0,
+            spacingM = if (bySpacing) spacingM else defaultSpacingM,
             startingPlotNumber = startNumber,
         )
     } else {

@@ -81,6 +81,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
+import com.hcjeong.forestix.common.areaUnit
 import com.hcjeong.forestix.basemap.TileCache
 import com.hcjeong.forestix.basemap.TileFetcher
 import com.hcjeong.forestix.data.cruise.Project
@@ -257,7 +258,17 @@ private fun StratumDrawContent(nav: NavController, project: Project) {
                             color = colors.textPrimary)
                         if (areaAcres > 0) {
                             Text(
-                                String.format(Locale.US, "Area: %.3f acres", areaAcres),
+                                // The one thing telling a cruiser whether the
+                                // block they just drew is the size they meant.
+                                // Hardcoded to acres it left a metric cruiser
+                                // converting in their head to size a stand;
+                                // the sibling boundary editor has always read
+                                // the unit system here.
+                                String.format(
+                                    Locale.US, "Area: %.3f %s",
+                                    settings.unitSystem.areaUnit.fromAcres(areaAcres),
+                                    settings.unitSystem.areaUnit.abbreviation,
+                                ),
                                 style = type.caption, color = colors.textSecondary)
                         }
                     }

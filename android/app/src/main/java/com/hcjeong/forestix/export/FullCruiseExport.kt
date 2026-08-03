@@ -17,6 +17,7 @@ package com.hcjeong.forestix.export
 import android.content.Context
 import android.net.Uri
 import androidx.core.content.FileProvider
+import com.hcjeong.forestix.data.cruise.UnitSystem
 import com.hcjeong.forestix.data.cruise.hasCentre
 import java.io.File
 import java.text.SimpleDateFormat
@@ -60,6 +61,13 @@ object FullCruiseExporter {
     fun write(
         bundle: ExportBundle,
         into: File,
+        /// The unit system the PDF REPORT is written in — the cruiser's live
+        /// Units setting, not the stamp `project.units` took at creation. A
+        /// report that does not say what the cruiser is looking at is not a
+        /// deliverable; see `PDFReportInputs.displayUnits`. Defaults to the
+        /// project's own stamp so a caller that has no settings to hand (tests,
+        /// the CSV-only paths) keeps the historical output.
+        displayUnits: UnitSystem = bundle.project.units,
         progress: ((Int, Int, String) -> Unit)? = null,
     ): FullCruiseExportResult {
 
@@ -99,7 +107,7 @@ object FullCruiseExporter {
 
         for ((i, step) in steps.withIndex()) {
             progress?.invoke(i, total, step.first)
-            writeOne(step.second, folder, bundle)?.let { artefacts.add(it) }
+            writeOne(step.second, folder, bundle, displayUnits)?.let { artefacts.add(it) }
         }
         progress?.invoke(total, total, "Done")
         return FullCruiseExportResult(folder = folder, artefacts = artefacts)
@@ -110,8 +118,10 @@ object FullCruiseExporter {
     fun writeToCache(
         context: Context,
         bundle: ExportBundle,
+        displayUnits: UnitSystem = bundle.project.units,
         progress: ((Int, Int, String) -> Unit)? = null,
-    ): FullCruiseExportResult = write(bundle, into = context.cacheDir, progress = progress)
+    ): FullCruiseExportResult =
+        write(bundle, into = context.cacheDir, displayUnits = displayUnits, progress = progress)
 
     /// Content URI for sharing one artefact through the manifest
     /// FileProvider (same authority QuickMeasureHistory.writeExport uses).
@@ -124,6 +134,7 @@ object FullCruiseExporter {
         kind: ExportArtefact.Kind,
         folder: File,
         bundle: ExportBundle,
+        displayUnits: UnitSystem,
     ): ExportArtefact? = when (kind) {
         ExportArtefact.Kind.CSV_TREES -> {
             val csv = CSVExporter.treesCSV(trees = bundle.trees)
@@ -206,7 +217,8 @@ object FullCruiseExporter {
                 tpaStand = bundle.tpaStand,
                 baStand = bundle.baStand,
                 volStand = bundle.volStand,
-                generatedAt = bundle.generatedAt)
+                generatedAt = bundle.generatedAt,
+                displayUnits = displayUnits)
             val url = File(folder, "report.pdf")
             PDFReportBuilder.write(inputs, to = url)
             ExportArtefact(url = url, displayName = "PDF report", kind = kind)

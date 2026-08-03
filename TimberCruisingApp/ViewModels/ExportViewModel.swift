@@ -38,10 +38,28 @@ public final class ExportViewModel: ObservableObject {
     public let project: Project
     private var appEnv: AppEnvironment?
 
+    /// The unit system the REPORT is written in — the cruiser's live Settings
+    /// toggle, not `project.units`.
+    ///
+    /// `project.units` is stamped once when the project is created and never
+    /// written again. Every screen reads the live toggle, so a cruiser who
+    /// flipped Units saw "28.4 m²/ha" on the phone and got "11.49 m²/ac" in
+    /// the report for the same plot — numbers 2.47× apart, with the cover page
+    /// still naming the system they had left behind. A report that does not
+    /// say what the cruiser is looking at is not a deliverable. The doc note
+    /// on `UnitSystem.areaUnit` states the same precedence: the manual toggle
+    /// wins.
+    ///
+    /// Defaults to imperial to match `PDFLocalization.imperial`, so a caller
+    /// that never configures gets the historical output rather than a surprise.
+    public private(set) var unitSystem: UnitSystem = .imperial
+
     public init(project: Project) { self.project = project }
 
-    public func configure(with environment: AppEnvironment) {
+    public func configure(with environment: AppEnvironment,
+                          unitSystem: UnitSystem) {
         self.appEnv = environment
+        self.unitSystem = unitSystem
     }
 
     // MARK: - Phase 1 entry points (plan-only)
@@ -106,7 +124,7 @@ public final class ExportViewModel: ObservableObject {
                     bundle: bundle,
                     into: base,
                     localization: PDFLocalization.forProject(
-                        units: project.units,
+                        units: unitSystem,
                         species: bundle.species,
                         trees: bundle.trees),
                     progress: { [weak self] done, total, label in
@@ -150,7 +168,7 @@ public final class ExportViewModel: ObservableObject {
             let result = try FullCruiseExporter.write(
                 bundle: bundle, into: base,
                 localization: PDFLocalization.forProject(
-                    units: project.units,
+                    units: unitSystem,
                     species: bundle.species,
                     trees: bundle.trees),
                 progress: nil)
@@ -282,9 +300,13 @@ extension PDFLocalization {
     /// Build the PDF report's display localisation for an export bundle.
     /// `AreaUnit` and `RegionalSpecies` live in this (UI) layer, above the
     /// Export module, so the resolved area basis and species-name lookup are
-    /// computed here and handed down as plain data. The area basis follows the
-    /// project's own unit system (metric → per hectare, imperial → per acre),
-    /// which mirrors the country the project was created under.
+    /// computed here and handed down as plain data.
+    ///
+    /// `units` is the cruiser's LIVE Units setting, not `project.units`. The
+    /// stamp on the project records the system the cruise was created under
+    /// and is never written again; the report has to say what the cruiser is
+    /// looking at, and the cover page's declared system comes from this same
+    /// value as the body, so the two cannot disagree.
     static func forProject(units: UnitSystem,
                            species: [SpeciesConfig],
                            trees: [Tree]) -> PDFLocalization {

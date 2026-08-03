@@ -1259,8 +1259,13 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 // Surface the red sub-sample's reason when we have one — it
                 // says WHY the trunk couldn't be read.
                 result = firstRed
+                // The distance in the hint follows the cruiser's units — it
+                // is an instruction, and one worded in a unit they do not pace
+                // in is not one. The capture gate itself is unchanged.
                 failure = if (firstRed == null)
-                    "Couldn't read the trunk consistently. Hold steadier, 1–3 m away, and retry."
+                    "Couldn't read the trunk consistently. Hold steadier, " +
+                        MeasurementFormatter.guidanceRange(1.0, 3.0, settings.unitSystem) +
+                        " away, and retry."
                 else null
                 stage = if (firstRed != null) Stage.RESULT else Stage.AIMING
             } else {
@@ -1381,8 +1386,13 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             if (agg != null) captureHeldPhoto() else discardHeldPhoto()
             if (agg == null) {
                 result = firstRed
+                // The distance in the hint follows the cruiser's units — it
+                // is an instruction, and one worded in a unit they do not pace
+                // in is not one. The capture gate itself is unchanged.
                 failure = if (firstRed == null)
-                    "Couldn't read the trunk consistently. Hold steadier, 1–3 m away, and retry."
+                    "Couldn't read the trunk consistently. Hold steadier, " +
+                        MeasurementFormatter.guidanceRange(1.0, 3.0, settings.unitSystem) +
+                        " away, and retry."
                 else null
                 stage = if (firstRed != null) Stage.RESULT else Stage.AIMING
             } else {
@@ -1982,13 +1992,22 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
 
         // D. Border chip — small dark-glass pill directly UNDER the
         // mini-map card (22 top + 116 card + 6 gap), only within 2.0 m of
-        // the plot boundary: live "Border 1.3 m" inside (white) /
-        // "Outside plot" (warn) outside. iOS borderChip 1:1.
+        // the plot boundary: live "Border 1.3 m" / "Border 4.3 ft" inside
+        // (white) / "Outside plot" (warn) outside. iOS borderChip 1:1.
+        //
+        // The READING follows the cruiser's units; the 2.0 m APPEARANCE
+        // THRESHOLD (the gate in the poll above) deliberately does not. That
+        // distance is a physical property of the plot edge — the band inside
+        // which a stem is borderline and has to be called in or out — not a
+        // readout, and making it 6 ft in the US would mean two cruisers on the
+        // same plot got the prompt on different trees. One band, one plot,
+        // whatever the phone is set to.
         borderChip?.let { (inside, toBoundary) ->
             if (!hidingChromeForCapture) {
                 Text(
                     if (inside) {
-                        String.format(Locale.US, "Border %.1f m", toBoundary)
+                        "Border " + MeasurementFormatter.plotLength(
+                            toBoundary, settings.unitSystem)
                     } else {
                         "Outside plot"
                     },
@@ -2352,7 +2371,13 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         // GPS-badge / mini-map row).
         if (!depthBlocked && !hidingChromeForCapture) MeasureTopChrome(
             instruction = when {
-                manualOpen -> "Enter diameter manually in cm."
+                // The banner names the SAME unit the field below it is
+                // placeheld with (:2476) and the same one the submit path
+                // converts from. It used to say "cm" over a box marked
+                // "Diameter in inches", and a cruiser who obeyed the banner
+                // and typed 34 stored an 86 cm tree.
+                manualOpen -> "Enter diameter manually in " +
+                    (if (settings.unitSystem == UnitSystem.METRIC) "cm" else "inches") + "."
                 stage == Stage.AIMING -> when {
                     // FIELD REPORT 15, the stuck case: depth delivery has
                     // stopped outright and has been down long enough to

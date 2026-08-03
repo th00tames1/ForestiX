@@ -36,6 +36,7 @@ import Geo
 public struct CruiseSetupSheet: View {
 
     @EnvironmentObject private var environment: AppEnvironment
+    @EnvironmentObject private var settings: AppSettings
     @Environment(\.dismiss) private var dismiss
 
     private enum LayoutMode: String, CaseIterable, Identifiable {
@@ -73,6 +74,21 @@ public struct CruiseSetupSheet: View {
     // Defaults from the existing design model (CruiseDesign record when
     // present; otherwise the long-standing 0.1 ac / BAF 20 / 150 m
     // grid / 10-per-stratum defaults the old screen shipped with).
+    //
+    // EVERY NUMERIC FIELD ON THIS SHEET IS TYPED AND READ IN THE CRUISER'S
+    // OWN UNIT. Radius and spacing are lengths — `lengthUnit` below is what
+    // labels them and what converts them, in both directions — and the BAF is
+    // the prism factor, ft²/ac or m²/ha. What is STORED never changes: a
+    // radius becomes `plotAreaAcres`, spacing becomes `gridSpacingMeters`,
+    // and the BAF stays ft²/ac (see `CruiseDesign.baf`). These three text
+    // fields are the only place the conversion happens, so a prefill written
+    // without going through `applyInitialDefaults` will be a raw metre value
+    // sitting under a "ft" label — which is how a US cruiser laid a 37-metre
+    // plot meaning 37 feet.
+    //
+    // The initial values below are placeholders in the METRIC base and are
+    // rewritten in the cruiser's unit by `applyInitialDefaults` on appear;
+    // `settings` is not readable from a property initialiser.
     @State private var plotType: PlotType = .fixedArea
     @State private var radiusText = CruiseSetupSheet.defaultRadiusText
     @State private var bafText = "20"
@@ -109,6 +125,31 @@ public struct CruiseSetupSheet: View {
         .pi * radius * radius / Units.squareMetersPerAcre
     }
 
+    /// The length unit the radius and spacing boxes are typed in — metres or
+    /// feet, from the cruiser's Units setting. `TruthInput.Unit` rather than a
+    /// bare string because it carries the label AND both conversions, so the
+    /// row's caption, the parse and the prefill cannot disagree about which
+    /// unit the box is in.
+    private var lengthUnit: TruthInput.Unit {
+        TruthInput.defaultUnit(.distance, imperial: settings.unitSystem == .imperial)
+    }
+
+    /// A stored metre value written into one of those boxes, at the precision
+    /// the box has always shown.
+    private func entryText(metres: Double, fractionDigits: Int = 1) -> String {
+        MeasurementFormatter.entryText(
+            TruthInput.fromBase(metres, unit: lengthUnit),
+            fractionDigits: fractionDigits)
+    }
+
+    /// The round default grid pitch in the cruiser's unit: the 150 m this
+    /// sheet has always offered, or 500 ft — near enough the same ground
+    /// (152.4 m) that the plan comes out the same size, and a number a cruiser
+    /// pacing in chains can actually aim at.
+    private var defaultSpacingMetres: Double {
+        settings.unitSystem == .imperial ? Units.feetToMeters(500) : 150
+    }
+
     public var body: some View {
         NavigationStack {
             ScrollView {
@@ -138,7 +179,13 @@ public struct CruiseSetupSheet: View {
                     fieldHeader("Plot size")
                     numericRow(
                         value: plotType == .fixedArea ? $radiusText : $bafText,
-                        unit: plotType == .fixedArea ? "m radius" : "BAF",
+                        // The BAF row states its dimension. "BAF" alone is the
+                        // same box for a US cruiser typing 20 ft²/ac and a
+                        // metric one typing 4 m²/ha, and nothing downstream can
+                        // tell the two apart afterwards.
+                        unit: plotType == .fixedArea
+                            ? "\(lengthUnit.rawValue) radius"
+                            : MeasurementFormatter.bafUnit(settings.unitSystem),
                         caption: plotType == .fixedArea
                             ? sizeCaptionFixed
                             : "Prism basal-area factor",
@@ -156,7 +203,7 @@ public struct CruiseSetupSheet: View {
                     fieldHeader(layoutMode == .count ? "Plots" : "Spacing")
                     numericRow(
                         value: layoutMode == .count ? $countText : $spacingText,
-                        unit: layoutMode == .count ? "plots" : "m",
+                        unit: layoutMode == .count ? "plots" : lengthUnit.rawValue,
                         caption: layoutMode == .count
                             ? "How many plot centres to lay out"
                             : "Distance between plot centres",
@@ -258,11 +305,19 @@ public struct CruiseSetupSheet: View {
             .padding(.bottom, 6)
     }
 
+    /// The area the typed radius comes to. The box holds the radius in the
+    /// cruiser's unit, so it is converted to metres FIRST — read as metres it
+    /// reported an 11-acre plot for a 37 ft one.
     private var sizeCaptionFixed: String {
-        if let r = Double(radiusText), r > 0 {
-            return String(format: "≈ %.2f ha · %.2f ac",
-                          Self.acres(fromRadiusM: r) * 0.404685642,
-                          Self.acres(fromRadiusM: r))
+        if let r = TruthInput.parsePositiveBase(radiusText, unit: lengthUnit) {
+            let ac = Self.acres(fromRadiusM: r)
+            let unit = settings.unitSystem.areaUnit
+            // Metric reads hectares only; the US keeps the dual ha · ac
+            // readout this sheet has always shown. (Android parity.)
+            return unit == .hectare
+                ? String(format: "≈ %.3f ha", unit.fromAcres(ac))
+                : String(format: "≈ %.2f ha · %.2f ac",
+                         AreaUnit.hectare.fromAcres(ac), ac)
         }
         return "Circular fixed-area plot"
     }
@@ -373,48 +428,78 @@ public struct CruiseSetupSheet: View {
     }
 
     /// One-time initial defaults: prefill from the last saved design if one
-    /// exists, otherwise fall back to a round default plot size — the imperial
-    /// 0.1-acre default (already baked into `radiusText`) for the US, or a
-    /// round metric 0.05 ha for metric-country projects.
+    /// exists, otherwise fall back to a round default plot size — 0.1 acre for
+    /// the US, a round 0.05 ha for a metric cruiser — and a round grid pitch
+    /// and BAF in the same system. Every one of them is written through the
+    /// display conversion, because the boxes are labelled in that system.
+    ///
+    /// Runs on appear rather than in the property initialisers because that is
+    /// the first moment `settings` exists.
     private func applyInitialDefaults() {
         guard !loadedExisting else { return }
-        let appliedStoredRadius = prefillFromExistingDesign()
-        if !appliedStoredRadius && project.units == .metric {
-            radiusText = String(format: "%.1f",
-                                Self.radiusM(fromSquareMeters: 500))  // 0.05 ha
+        let stored = prefillFromExistingDesign()
+        if !stored.radius {
+            let metres = settings.unitSystem == .imperial
+                ? Self.radiusM(fromAcres: 0.1)
+                : Self.radiusM(fromSquareMeters: 500)  // 0.05 ha
+            radiusText = entryText(metres: metres)
+        }
+        if !stored.baf {
+            bafText = MeasurementFormatter.entryText(
+                MeasurementFormatter.bafDisplay(
+                    stored: MeasurementFormatter.defaultBAFStored(settings.unitSystem),
+                    in: settings.unitSystem),
+                fractionDigits: 0)
+        }
+        if !stored.spacing {
+            spacingText = entryText(metres: defaultSpacingMetres, fractionDigits: 0)
         }
     }
 
-    /// Re-opening setup shows what was generated last time — same
-    /// prefill behaviour the old screen's refresh() had. Returns true when a
-    /// saved plot size was applied to `radiusText`.
+    /// Which of the saved design's fields this prefill actually filled — the
+    /// rest fall back to a round default in `applyInitialDefaults`.
+    private struct Prefilled {
+        var radius = false
+        var baf = false
+        var spacing = false
+    }
+
+    /// Re-opening setup shows what was generated last time — same prefill
+    /// behaviour the old screen's refresh() had, with each stored value put
+    /// back in the unit its box is labelled in. Storage is untouched: the
+    /// design still holds acres, metres and ft²/ac.
     @discardableResult
-    private func prefillFromExistingDesign() -> Bool {
-        guard !loadedExisting else { return false }
+    private func prefillFromExistingDesign() -> Prefilled {
+        var filled = Prefilled()
+        guard !loadedExisting else { return filled }
         loadedExisting = true
         guard let design = (try? environment.cruiseDesignRepository
-            .forProject(project.id))?.first else { return false }
+            .forProject(project.id))?.first else { return filled }
         plotType = design.plotType
-        var appliedStoredRadius = false
         if let a = design.plotAreaAcres {
-            radiusText = String(format: "%.1f", Self.radiusM(fromAcres: Double(a)))
-            appliedStoredRadius = true
+            radiusText = entryText(metres: Self.radiusM(fromAcres: Double(a)))
+            filled.radius = true
         }
         if let b = design.baf {
-            bafText = String(format: "%.0f", b)
+            bafText = MeasurementFormatter.entryText(
+                MeasurementFormatter.bafDisplay(stored: Double(b),
+                                                in: settings.unitSystem),
+                fractionDigits: 0)
+            filled.baf = true
         }
         switch design.samplingScheme {
         case .systematicGrid:
             layoutMode = .spacing
             if let g = design.gridSpacingMeters {
-                spacingText = String(format: "%.0f", g)
+                spacingText = entryText(metres: Double(g), fractionDigits: 0)
+                filled.spacing = true
             }
         case .stratifiedRandom:
             layoutMode = .count
         case .manual:
             break
         }
-        return appliedStoredRadius
+        return filled
     }
 
     // MARK: Generation (the existing engine)
@@ -426,17 +511,27 @@ public struct CruiseSetupSheet: View {
     /// and it keeps the question in front of the writes rather than in
     /// front of a plan that might not even generate.
     private func generate(confirmedDiscard: Bool = false) {
-        // Validate the three visible fields.
-        let radiusM = Double(radiusText) ?? 0
-        let baf = Double(bafText) ?? 0
+        // Validate the three visible fields. Radius and spacing come out of
+        // their boxes in the cruiser's unit and are converted to METRES here,
+        // once, so everything below this point — the generator, the design
+        // record, the refusals — is in the base it has always been in.
+        let radiusM = TruthInput.parsePositiveBase(radiusText, unit: lengthUnit) ?? 0
+        let baf = MeasurementFormatter.bafStored(
+            display: TruthInput.parsePositive(bafText) ?? 0,
+            in: settings.unitSystem)
         let count = Int(countText) ?? 0
-        let spacing = Double(spacingText) ?? 0
+        let spacing = TruthInput.parsePositiveBase(spacingText, unit: lengthUnit) ?? 0
+        // The refusals name the unit the box is labelled in — a cruiser told
+        // to type "a positive number of metres" into a box marked "ft" has
+        // been given the wrong instruction twice over.
+        let lengthWord = lengthUnit == .feet ? "feet" : "metres"
         if plotType == .fixedArea && radiusM <= 0 {
-            errorMessage = "Plot radius must be a positive number of metres."
+            errorMessage = "Plot radius must be a positive number of \(lengthWord)."
             return
         }
         if plotType == .variableRadius && baf <= 0 {
-            errorMessage = "Basal area factor must be a positive number."
+            errorMessage = "Basal area factor must be a positive number of "
+                + MeasurementFormatter.bafUnit(settings.unitSystem) + "."
             return
         }
         if layoutMode == .count && count <= 0 {
@@ -444,7 +539,7 @@ public struct CruiseSetupSheet: View {
             return
         }
         if layoutMode == .spacing && spacing <= 0 {
-            errorMessage = "Grid spacing must be a positive number of metres."
+            errorMessage = "Grid spacing must be a positive number of \(lengthWord)."
             return
         }
 
@@ -514,7 +609,7 @@ public struct CruiseSetupSheet: View {
                     projectId: project.id,
                     anchor: mapCentre,
                     count: layoutMode == .count ? count : 12,
-                    spacingM: layoutMode == .spacing ? spacing : 150,
+                    spacingM: layoutMode == .spacing ? spacing : defaultSpacingMetres,
                     startingPlotNumber: startNumber)
             } else {
                 let inputs: [SamplingGenerator.StratumInput] = try strata.map {

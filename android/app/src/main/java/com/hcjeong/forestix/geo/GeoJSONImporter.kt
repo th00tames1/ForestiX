@@ -270,10 +270,30 @@ object GeoJSONImporter {
 
     // MARK: - Serialisation
 
+    /// The member a circular stratum carries so it can be re-OPENED as a
+    /// circle instead of as the 128-corner polygon it is stored as.
+    ///
+    /// A foreign member inside a geometry object, which RFC 7946 §6.1
+    /// permits and every reader ignores — the same trick and the same
+    /// justification `forestix:source` already uses on a drawn boundary.
+    /// The namespace prefix is what keeps it from ever colliding with a
+    /// real GeoJSON key, and the name sorts between "coordinates" and
+    /// "type" so the builder below emits it exactly where iOS's
+    /// `.sortedKeys` puts it.
+    const val CIRCLE_MEMBER_KEY: String = "forestix:circle"
+
     /// Canonical Polygon GeoJSON string for persistence on `Stratum.polygonGeoJSON`.
-    /// Compact, sorted keys ("coordinates" < "type"), matching iOS
-    /// JSONSerialization with `.sortedKeys`.
-    fun serialise(rings: List<List<CoordinateConversions.LatLon>>): String {
+    /// Compact, sorted keys ("coordinates" < "forestix:circle" < "type"),
+    /// matching iOS JSONSerialization with `.sortedKeys`.
+    ///
+    /// `circle` is provenance only: the ring passed in is already the
+    /// densified circle, and everything that reads this string back —
+    /// `parseRings`, plot layout, both exporters — sees nothing but a
+    /// Polygon.
+    fun serialise(
+        rings: List<List<CoordinateConversions.LatLon>>,
+        circle: BoundaryDraft.Circle? = null,
+    ): String {
         val sb = StringBuilder()
         sb.append("{\"coordinates\":[")
         rings.forEachIndexed { ri, ring ->
@@ -289,12 +309,60 @@ object GeoJSONImporter {
             }
             sb.append(']')
         }
-        sb.append("],\"type\":\"Polygon\"}")
+        sb.append(']')
+        if (circle != null) {
+            // Through `jsonNumber` like every other number in here — iOS
+            // writes these with NSNumber's integral-without-a-point rule,
+            // and a bare toString() would diverge on a round radius.
+            sb.append(",\"").append(CIRCLE_MEMBER_KEY).append("\":{\"lat\":")
+                .append(jsonNumber(circle.centre.latitude))
+                .append(",\"lon\":")
+                .append(jsonNumber(circle.centre.longitude))
+                .append(",\"radiusM\":")
+                .append(jsonNumber(circle.radiusMeters))
+                .append('}')
+        }
+        sb.append(",\"type\":\"Polygon\"}")
         return sb.toString()
+    }
+
+    /// The circle a stored stratum was drawn as, or null for every polygon
+    /// ever saved before circles existed.
+    ///
+    /// NEVER THROWS. A note that cannot be read must degrade to "this is a
+    /// polygon" — which is the behaviour of every build before this one —
+    /// and never to a refused edit: the ring is intact either way, and
+    /// losing the ability to reshape a stand because a provenance hint went
+    /// bad would be the app punishing the cruiser for its own bookkeeping.
+    fun parseCircle(geojson: String): BoundaryDraft.Circle? {
+        val note = try {
+            (Json.parseToJsonElement(geojson) as? JsonObject)
+                ?.get(CIRCLE_MEMBER_KEY) as? JsonObject
+        } catch (_: SerializationException) {
+            null
+        } catch (_: IllegalArgumentException) {
+            null
+        } ?: return null
+        val lat = (note["lat"] as? JsonPrimitive)?.doubleOrNull ?: return null
+        val lon = (note["lon"] as? JsonPrimitive)?.doubleOrNull ?: return null
+        val radius = (note["radiusM"] as? JsonPrimitive)?.doubleOrNull ?: return null
+        if (!lat.isFinite() || !lon.isFinite() || !radius.isFinite() || radius <= 0) return null
+        return BoundaryDraft.Circle(CoordinateConversions.LatLon(lat, lon), radius)
     }
 
     /// NSNumber-style JSON number: integral doubles without a decimal point,
     /// otherwise shortest round-trip `Double.toString()` form.
+    ///
+    /// THE INTEGRAL RULE MATCHES APPLE; THE FRACTIONAL ONE DOES NOT, and
+    /// that is worth knowing before someone spends a day on it.
+    /// `JSONSerialization` renders a fractional double at 17 significant
+    /// digits with trailing zeros trimmed, so it writes 44.6 as
+    /// `44.600000000000001` and 0.1 as `0.10000000000000001`, where this
+    /// writes `44.6` and `0.1`. The two files therefore describe the same
+    /// coordinates to the last representable bit but are not the same
+    /// bytes. That has been true of every ring this function has ever
+    /// written; what IS identical across the platforms, and what the
+    /// readers actually depend on, is the key ORDER and the structure.
     private fun jsonNumber(v: Double): String {
         if (v == v.toLong().toDouble() && abs(v) < 1e15) return v.toLong().toString()
         return v.toString()

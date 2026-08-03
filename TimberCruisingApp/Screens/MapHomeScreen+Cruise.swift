@@ -742,6 +742,9 @@ extension MapHomeScreen {
                         },
                         onGenerated: { reloadCruise() })
                     .environmentObject(environment)
+                    // The sheet's radius / spacing / BAF boxes are labelled,
+                    // parsed and prefilled in the cruiser's units.
+                    .environmentObject(settings)
                 }
             }
             // SITE DESCRIPTION (plot peek → "Add details") — slope, aspect,
@@ -1713,6 +1716,20 @@ extension MapHomeScreen {
         // computes per acre, so scale for display.
         let areaUnit = settings.unitSystem.areaUnit
         let densityFactor = areaUnit.perAcreDensityFactor
+        // Built here rather than inline: the header line and the four stat
+        // cells together put the SwiftUI type-checker past its budget, and a
+        // string that is composed before the body reads the same either way.
+        let radiusLine = plotLengthLabel(plotRadiusM(plot), settings.unitSystem)
+            + " radius · "
+            + Self.cruisePeekTimeFormatter.string(from: plot.startedAt)
+        let basalAreaValue = String(
+            format: "%.1f",
+            MeasurementFormatter.basalAreaDensity(
+                m2PerAcre: Double(stats.baPerAcreM2), in: areaUnit))
+        let meanDbhValue = MeasurementFormatter.entryText(
+            MeasurementFormatter.diameterValue(cm: Double(stats.qmdCm),
+                                               in: settings.unitSystem),
+            fractionDigits: 1)
         return VStack(spacing: 0) {
             RoundedRectangle(cornerRadius: 2)
                 .fill(ForestixPalette.divider)
@@ -1725,9 +1742,10 @@ extension MapHomeScreen {
                     .foregroundStyle(ForestixPalette.textPrimary)
                 statusChip(closed: isClosed)
                 Spacer(minLength: 4)
-                Text(String(format: "%.1f m radius · %@",
-                            plotRadiusM(plot),
-                            Self.cruisePeekTimeFormatter.string(from: plot.startedAt)))
+                // Same ring, same label as the plot banner and the plot menu —
+                // one plot cannot have one radius where you tap it and another
+                // where the banner shows it.
+                Text(radiusLine)
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(ForestixPalette.textTertiary)
                     .lineLimit(1)
@@ -1742,14 +1760,22 @@ extension MapHomeScreen {
                 // app; basal area is kept forestry vocabulary, so it is
                 // spelled, not renamed. TPA also silently became TPH with
                 // the units setting — the label now names the unit outright.
+                // Basal area converts its NUMERATOR with the basis, not just
+                // its suffix: the engine reports m²/acre, so an imperial cruise
+                // that scaled only the denominator printed "m²/ac" — a unit no
+                // cruise sheet uses and 10.76× off the ft²/ac the same app
+                // shows for the same stand elsewhere. Mean DBH is a diameter
+                // like the ones on the trees above it and follows the same
+                // formatter they do.
                 statCell("TREES", "\(stats.liveTreeCount)", nil, divided: true)
-                statCell("BASAL AREA", String(format: "%.1f", Double(stats.baPerAcreM2) * densityFactor),
-                         areaUnit.densityLabel("m²"), divided: true)
+                statCell("BASAL AREA", basalAreaValue,
+                         MeasurementFormatter.basalAreaDensityUnit(areaUnit), divided: true)
                 statCell(areaUnit == .hectare ? "TREES/HA" : "TREES/AC",
                          String(format: "%.0f", Double(stats.tpa) * densityFactor),
                          areaUnit.densitySuffix, divided: true)
-                statCell("MEAN DBH", String(format: "%.1f", stats.qmdCm),
-                         "cm", divided: false)
+                statCell("MEAN DBH", meanDbhValue,
+                         MeasurementFormatter.diameterUnit(settings.unitSystem),
+                         divided: false)
             }
             .background(
                 RoundedRectangle(cornerRadius: ForestixRadius.card,
@@ -2595,7 +2621,7 @@ extension MapHomeScreen {
                     y: min(max((a.y + b.y) / 2, 130), geo.size.height - 130))
                 let metres = CoordinateConversions.haversineMeters(guide.from,
                                                                    guide.to)
-                Text(Self.distanceLabel(metres))
+                Text(Self.distanceLabel(metres, settings.unitSystem))
                     .font(.system(size: 11, weight: .heavy, design: .monospaced))
                     .foregroundStyle(ForestixPalette.textPrimary)
                     .padding(.horizontal, 11)
@@ -2605,7 +2631,8 @@ extension MapHomeScreen {
                                               lineWidth: 1))
                     .shadow(color: Color.black.opacity(0.18), radius: 4, y: 2)
                     .position(mid)
-                    .accessibilityLabel("Distance to plot \(Self.distanceLabel(metres))")
+                    .accessibilityLabel("Distance to plot "
+                        + Self.distanceLabel(metres, settings.unitSystem))
                     .accessibilityIdentifier("cruiseMap.navChip")
             }
         }
@@ -2615,9 +2642,12 @@ extension MapHomeScreen {
         .allowsHitTesting(false)
     }
 
-    static func distanceLabel(_ metres: Double) -> String {
-        metres < 995 ? String(format: "%.0f m", metres)
-                     : String(format: "%.1f km", metres / 1000)
+    /// How far the cruiser still has to walk. A PACING instruction, so it goes
+    /// through `navDistance` rather than `distance` — and through the unit
+    /// system, because a cruiser who paces in feet cannot use "142 m" for
+    /// anything without doing arithmetic on a hillside.
+    static func distanceLabel(_ metres: Double, _ system: UnitSystem) -> String {
+        MeasurementFormatter.navDistance(m: metres, in: system)
     }
 
     /// Arrival = within 5 m of the navigated plot: one haptic pulse
@@ -2894,7 +2924,11 @@ extension MapHomeScreen {
         let b = GeoMath.bearingDeg(
             fromLat: fix.latitude, fromLon: fix.longitude,
             toLat: planned.plannedLat, toLon: planned.plannedLon)
-        return String(format: "%.0f m · bearing %.0f°", d,
+        // The bearing is degrees in both systems — a compass does not change
+        // with the Units toggle. The RANGE does: this row is what the cruiser
+        // paces off, so it is rendered in their unit.
+        return String(format: "%@ · bearing %.0f°",
+                      MeasurementFormatter.navDistance(m: d, in: settings.unitSystem),
                       (b + 360).truncatingRemainder(dividingBy: 360))
     }
 
@@ -3098,8 +3132,11 @@ extension MapHomeScreen {
                 let result = try FullCruiseExporter.write(
                     bundle: bundle,
                     into: base,
+                    // The LIVE Units setting, not the stamp taken when the
+                    // project was created — the report says what the cruiser
+                    // is looking at.
                     localization: PDFLocalization.forProject(
-                        units: project.units,
+                        units: settings.unitSystem,
                         species: bundle.species,
                         trees: bundle.trees),
                     progress: { done, total, label in
@@ -3347,7 +3384,8 @@ extension MapHomeScreen {
                     speciesRepo: environment.speciesRepository,
                     volRepo: environment.volumeEquationRepository,
                     hdFitRepo: environment.hdFitRepository),
-                    areaUnit: settings.unitSystem.areaUnit)
+                    areaUnit: settings.unitSystem.areaUnit,
+                    unitSystem: settings.unitSystem)
             }
         case .treeDetails(let id):
             if let tree = treesByPlot.values.joined()

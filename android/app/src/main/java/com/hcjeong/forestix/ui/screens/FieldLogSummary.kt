@@ -39,6 +39,7 @@ package com.hcjeong.forestix.ui.screens
 import com.hcjeong.forestix.AppEnvironment
 import com.hcjeong.forestix.common.AreaUnit
 import com.hcjeong.forestix.common.MeasurementFormatter
+import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.common.Units
 import com.hcjeong.forestix.common.areaUnit
 import com.hcjeong.forestix.data.MeasureKind
@@ -403,10 +404,18 @@ object FieldLogSummaryBuilder {
         val cells = listOf(
             FieldLogSummary.Cell(
                 "TREES", if (empty) "—" else stats.liveTreeCount.toString()),
+            // Same rule the quick-measure card above already follows: the
+            // numerator switches with the basis. The engine hands over m² per
+            // ACRE, so scaling only the denominator printed "m²/ac" for an
+            // imperial cruise — the one card in this file that disagreed with
+            // the one beside it.
             FieldLogSummary.Cell(
                 areaUnit.densityLabel("BASAL").uppercase(Locale.US),
                 if (empty) "—" else String.format(
-                    Locale.US, "%.1f m²", stats.baPerAcreM2.toDouble() * factor)),
+                    Locale.US, "%.1f %s",
+                    MeasurementFormatter.basalAreaDensity(
+                        stats.baPerAcreM2.toDouble(), areaUnit),
+                    MeasurementFormatter.basalAreaNumeratorUnit(areaUnit))),
             FieldLogSummary.Cell(
                 treesPerAreaLabel(areaUnit),
                 if (empty) "—" else String.format(
@@ -422,8 +431,10 @@ object FieldLogSummaryBuilder {
             FieldLogSummary.Row(
                 "Basal area",
                 String.format(
-                    Locale.US, "%.2f %s", stats.baPerAcreM2.toDouble() * factor,
-                    areaUnit.densityLabel("m²"))),
+                    Locale.US, "%.2f %s",
+                    MeasurementFormatter.basalAreaDensity(
+                        stats.baPerAcreM2.toDouble(), areaUnit),
+                    MeasurementFormatter.basalAreaDensityUnit(areaUnit))),
             FieldLogSummary.Row(
                 "Trees",
                 String.format(
@@ -490,14 +501,22 @@ object FieldLogSummaryBuilder {
         val pending = settings.country.volumeStandardPending
         val liveTrees = viewModel.totalLiveTreeCount.value
         val tpa = viewModel.tpaStat.value.scaledPerArea(factor)
-        val ba = viewModel.baStat.value.scaledPerArea(factor)
+        // Basal area alone needs a factor of its own: the engine's figure is
+        // m² per ACRE, so an imperial cruise has to convert the numerator too
+        // (m² -> ft²), where a tree count only has a denominator to convert.
+        // Mean and half-width are scaled by the SAME number, or the band stops
+        // bracketing the value it belongs to.
+        val ba = viewModel.baStat.value.scaledPerArea(
+            MeasurementFormatter.basalAreaDensityFactor(areaUnit))
         val volume = viewModel.volStat.value.scaledPerArea(factor)
 
         val cells = listOf(
             FieldLogSummary.Cell("TREES", if (empty) "—" else liveTrees.toString()),
             FieldLogSummary.Cell(
                 areaUnit.densityLabel("BASAL").uppercase(Locale.US),
-                if (empty) "—" else String.format(Locale.US, "%.1f m²", ba.mean)),
+                if (empty) "—" else String.format(
+                    Locale.US, "%.1f %s", ba.mean,
+                    MeasurementFormatter.basalAreaNumeratorUnit(areaUnit))),
             FieldLogSummary.Cell(
                 treesPerAreaLabel(areaUnit),
                 if (empty) "—" else String.format(Locale.US, "%.0f", tpa.mean)),
@@ -515,7 +534,8 @@ object FieldLogSummaryBuilder {
             FieldLogSummary.Row(
                 "Basal area",
                 confidenceText(
-                    ba.mean, ba.ci95HalfWidth, 2, " " + areaUnit.densityLabel("m²"))),
+                    ba.mean, ba.ci95HalfWidth, 2,
+                    " " + MeasurementFormatter.basalAreaDensityUnit(areaUnit))),
             FieldLogSummary.Row(
                 "Gross volume",
                 if (pending) VOLUME_PENDING else confidenceText(
@@ -608,7 +628,17 @@ object FieldLogSummaryBuilder {
                     areaUnit.fromAcres(it.toDouble()), areaUnit.abbreviation)
             } ?: "Fixed-area"
             PlotType.VARIABLE_RADIUS -> design.baf?.let {
-                String.format(Locale.US, "Variable-radius · BAF %.0f", it.toDouble())
+                // The stored BAF is ft²/ac (see `CruiseDesign.baf`); a metric
+                // cruiser reads the same prism as m²/ha. `areaUnit` is already
+                // the cruiser's own basis, so it is what decides which. Bare,
+                // the number could be either and the two are 4.36x apart.
+                val system =
+                    if (areaUnit == AreaUnit.HECTARE) UnitSystem.METRIC
+                    else UnitSystem.IMPERIAL
+                String.format(
+                    Locale.US, "Variable-radius · BAF %.0f %s",
+                    MeasurementFormatter.bafDisplay(it.toDouble(), system),
+                    MeasurementFormatter.bafUnit(system))
             } ?: "Variable-radius"
         }
 

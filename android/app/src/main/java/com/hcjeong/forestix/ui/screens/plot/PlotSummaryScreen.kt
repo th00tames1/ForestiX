@@ -45,6 +45,7 @@ import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.common.AreaUnit
 import com.hcjeong.forestix.common.RegionalSpecies
+import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.areaUnit
 import com.hcjeong.forestix.inventory.PlotStats
 import com.hcjeong.forestix.ui.screens.ForestixScaffold
@@ -197,10 +198,19 @@ fun PlotSummaryScreen(
             FormSection(header = "Plot stats") {
                 StatRow("Live trees", "${stats.liveTreeCount}")
                 StatRow("Trees / $abbr", String.format(Locale.US, "%.1f", stats.tpa * f))
+                // Basal area converts its NUMERATOR with the basis, not only
+                // its suffix — the engine reports m² per ACRE, so scaling just
+                // the denominator left an imperial cruise reading "11.49
+                // m²/ac", a unit no cruise sheet uses and 10.76x away from the
+                // ft²/ac the quick-measure card shows for the same stand.
                 StatRow("Basal area / $abbr",
-                    String.format(Locale.US, "%.2f m²$suffix", stats.baPerAcreM2 * f))
+                    String.format(Locale.US, "%.2f %s",
+                        MeasurementFormatter.basalAreaDensity(stats.baPerAcreM2.toDouble(), areaUnit),
+                        MeasurementFormatter.basalAreaDensityUnit(areaUnit)))
+                // The one row in this block that used to stay metric — and the
+                // one a cruiser compares against the inch diameters above it.
                 StatRow("Quadratic mean diameter",
-                    String.format(Locale.US, "%.1f cm", stats.qmdCm))
+                    MeasurementFormatter.diameter(stats.qmdCm.toDouble(), settings.unitSystem))
                 StatRow("Gross volume / $abbr",
                     String.format(Locale.US, "%.1f m³$suffix", stats.grossVolumePerAcreM3 * f))
                 StatRow("Merchantable volume / $abbr",
@@ -232,10 +242,14 @@ fun PlotSummaryScreen(
                             // RMSE label ("a=1.234 b=0.567 n=42 RMSE=1.20m") —
                             // nothing a cruiser can act on. The fit itself is
                             // unchanged and still ships whole in the export.
+                            // The ± is the ONLY thing this screen says about
+                            // how far an imputed height can be out. Read as
+                            // feet on an imperial cruise it understated the
+                            // curve's error by 3.28x, so it goes through the
+                            // same band the per-tree report uses.
                             Text(
-                                String.format(Locale.US,
-                                    "Height curve from %d trees, typically within ±%.1f m",
-                                    fit.nObs, fit.rmse),
+                                "Height curve from ${fit.nObs} trees, typically within " +
+                                    MeasurementFormatter.heightSigma(fit.rmse.toDouble(), settings.unitSystem),
                                 style = type.dataSmall,
                                 color = colors.textSecondary)
                         }
@@ -377,7 +391,9 @@ private fun SpeciesRow(code: String, stat: PlotStats.SpeciesStat, areaUnit: Area
                 style = type.dataSmall, color = colors.textSecondary)
             Spacer(Modifier.weight(1f))
             Text(
-                String.format(Locale.US, "%.2f m²$suffix", stat.baPerAcreM2 * f),
+                String.format(Locale.US, "%.2f %s",
+                    MeasurementFormatter.basalAreaDensity(stat.baPerAcreM2.toDouble(), areaUnit),
+                    MeasurementFormatter.basalAreaDensityUnit(areaUnit)),
                 style = type.dataSmall, color = colors.textSecondary)
             Spacer(Modifier.weight(1f))
             Text(

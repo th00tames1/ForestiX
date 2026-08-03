@@ -979,7 +979,15 @@ public struct HeightScanScreen: View {
         case .idle, .anchorSet:
             return anchorWithinGate
                 ? "Aim at the trunk at eye level, then tap +."
-                : "Move closer — stand within 4 m of the trunk, then tap +."
+                // The gate stays the metric ≤ 4 m the view model applies — it
+                // is a property of how far a plane can be reliably anchored,
+                // not a preference. The SENTENCE follows the cruiser's units,
+                // and reads the same constant the gate does.
+                : "Move closer — stand within "
+                    + MeasurementFormatter.guidanceDistance(
+                        m: Double(HeightScanViewModel.anchorMaxRangeM),
+                        in: settings.unitSystem)
+                    + " of the trunk, then tap +."
         case .walking:            return "Walk back, then tap + to continue."
         case .aimTopArmed:        return "Aim at the treetop, then tap +."
         case .aimTopCaptured:     return "Top captured."
@@ -988,7 +996,14 @@ public struct HeightScanScreen: View {
         case .accepted:           return "Saved."
         case .rejected:           return viewModel.result?.rejectionReason
                                        ?? "Rejected."
-        case .manualEntry:        return "Enter height manually in metres."
+        // The banner names the SAME unit the field below it is placeheld with
+        // (:1383) and the same one `submitManualEntry` converts from. It used
+        // to say "metres" over a box marked "Height in feet": a cruiser who
+        // obeyed the banner and typed 28 stored 8.5 m, and a typed height
+        // carries no σ to flag it.
+        case .manualEntry:
+            return "Enter height manually in "
+                + (settings.unitSystem == .metric ? "metres" : "feet") + "."
         }
     }
 
@@ -1025,7 +1040,14 @@ public struct HeightScanScreen: View {
                 .foregroundStyle(ForestixPalette.confidenceWarn)
         case .done:
             if let w = crownWidthM, let h = crownHeightM {
-                Text(String(format: "Crown %.2f m wide · %.2f m tall", w, h))
+                // The height this crown hangs on is printed in the cruiser's
+                // unit one panel up; a crown left in metres beside it is the
+                // same screen quoting two systems.
+                Text("Crown "
+                     + MeasurementFormatter.crownSpan(m: w, in: settings.unitSystem)
+                     + " wide · "
+                     + MeasurementFormatter.crownSpan(m: h, in: settings.unitSystem)
+                     + " tall")
                     .font(ForestixType.data)
                     .foregroundStyle(.white)
             }

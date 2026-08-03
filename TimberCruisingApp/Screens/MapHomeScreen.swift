@@ -331,9 +331,27 @@ public struct MapHomeScreen: View {
     /// and press-and-hold planning is suppressed.
     @State var areaDraft: BoundaryDraft?
     /// Full-shape undo, pushed BEFORE each gesture rather than after, so a
-    /// dragged corner undoes to where the drag started.
-    @State var areaDraftUndo: [[CoordinateConversions.LatLon]] = []
+    /// dragged corner undoes to where the drag started. WHOLE DRAFTS, not
+    /// vertex lists: a circle's undo has to put back the circle, and a
+    /// stack of bare corners would restore its ring as a 128-corner polygon
+    /// the cruiser can neither resize nor move. Android's stack has always
+    /// held drafts for the same reason it is easy there — the type is
+    /// immutable.
+    @State var areaDraftUndo: [BoundaryDraft] = []
     @State var areaDraftName: String = ""
+    /// The radius field's text while a CIRCLE is being drawn, in the
+    /// cruiser's own unit (m or ft). Its own state rather than a formatting
+    /// of the draft, because a half-typed "5" must survive the keystroke
+    /// that is about to make it "50".
+    @State var areaDraftRadiusText: String = ""
+    /// Where on the ring the radius handle is sitting, as a bearing in
+    /// radians anticlockwise from east. It follows the finger during a drag
+    /// (see `areaRadiusDrag`) so the handle never snaps sideways away from
+    /// a thumb pulling at an angle; due east at rest.
+    @State var areaRadiusHandleAngle: Double = 0
+    /// True between the first movement of a centre / radius drag and its
+    /// end — one undo entry per gesture, as with `areaDraggingCorner`.
+    @State var areaDraggingCircle = false
     /// The stored area the draft is replacing. nil = the draft is new.
     @State var editingAreaID: UUID?
     /// The corner a drag is currently moving, so a gesture that outlives a
@@ -459,17 +477,29 @@ public struct MapHomeScreen: View {
         var id: String { rowID }
     }
 
-    /// Payload for the far-GPS confirmation alert.
+    /// Payload for the far-GPS confirmation alert. The distance is carried in
+    /// METRES and rounded at the point of display, because how it rounds
+    /// depends on the unit it is shown in.
     private struct FarTreeWarning: Identifiable {
         let treeNumber: Int
-        let distanceM: Int
+        let distanceM: Double
         var id: Int { treeNumber }
     }
 
     /// Peek "Measure this tree" beyond this distance from the pin asks
     /// for confirmation first — measuring a tree you're not standing at
     /// is usually a mis-tap on the wrong pin.
-    private static let farTreeWarnDistanceM: Double = 30
+    ///
+    /// A ROUND number in each system rather than one fixed distance. This is
+    /// not a physical trigger like the plot-boundary band — there is nothing
+    /// about 30 m that makes a tap wrong — it is a judgement call the cruiser
+    /// is being asked to make, and 30 m quoted to a US cruiser fires at 98 ft,
+    /// which is neither a number they would have chosen nor one they can
+    /// reason about. 100 ft is. The two are 1.6 % apart, so no tap changes
+    /// verdict for any reason a cruiser would notice.
+    private static func farTreeWarnDistanceM(_ system: UnitSystem) -> Double {
+        system == .metric ? 30 : Units.feetToMeters(100)
+    }
 
     public var body: some View {
         NavigationStack {
@@ -603,6 +633,8 @@ public struct MapHomeScreen: View {
             // (value / species / note + confirmed delete).
             .sheet(item: $editingEntry) { entry in
                 QuickEntryEditSheet(entry: entry, history: history)
+                    // The value box is read and typed in the cruiser's units.
+                    .environmentObject(settings)
             }
             // "Good" / "Fair" / "Check" with no stated criteria is a mood,
             // not a grade. The chip on the peek opens the same explainer the
@@ -637,8 +669,16 @@ public struct MapHomeScreen: View {
             .modifier(PlotSaveRefusalAlert(message: $plotSaveRefusal))
             // The alert names the tree the way every other surface does —
             // the cruiser's name when it has one, else "Tree #n".
+            // The distance is what the cruiser is being asked to judge, so it
+            // is quoted in the unit they are working in — a pacing number, so
+            // through `navDistance` rather than the measurement formatter.
             .alert(farTreeWarning.map {
-                       "\(TreeLabel.title(name: farTreeName($0.treeNumber), number: $0.treeNumber)) is \($0.distanceM) m away"
+                       TreeLabel.title(name: farTreeName($0.treeNumber),
+                                       number: $0.treeNumber)
+                           + " is "
+                           + MeasurementFormatter.navDistance(m: $0.distanceM,
+                                                              in: settings.unitSystem)
+                           + " away"
                    } ?? "",
                    isPresented: Binding(
                        get: { farTreeWarning != nil },
@@ -650,7 +690,10 @@ public struct MapHomeScreen: View {
                 .keyboardShortcut(.defaultAction)
                 Button("Cancel", role: .cancel) {}
             } message: { warning in
-                Text("Your current GPS position is about \(warning.distanceM) m from this tree's pin. Measure it anyway?")
+                Text("Your current GPS position is about "
+                     + MeasurementFormatter.navDistance(m: warning.distanceM,
+                                                        in: settings.unitSystem)
+                     + " from this tree's pin. Measure it anyway?")
             }
             .sheet(isPresented: $presentingLayers) {
                 MapSettingsSheet(visibleRegion: visibleRegion,
@@ -1460,15 +1503,20 @@ public struct MapHomeScreen: View {
                 value = MeasurementFormatter.diameter(cm: entry.value, in: system)
             case .height:
                 value = MeasurementFormatter.height(m: entry.value, in: system)
+            // Crown and plot go through the same `system` the four rows above
+            // them do. Left metric, this one card read "13.6 in", "92.7 ft",
+            // then "4.2 × 5.1 m" and "11.3 m radius" — two unit systems
+            // stacked four rows apart with nothing saying which row is which.
             case .crown:
-                value = String(format: "%.1f × %.1f m",
-                               entry.value, entry.secondaryValue ?? 0)
+                value = MeasurementFormatter.crownSpread(
+                    entry.value, entry.secondaryValue ?? 0, in: system)
             case .distance:
                 value = MeasurementFormatter.distance(m: entry.value, in: system)
             case .samplingPlot:
                 let area = entry.secondaryValue
                     ?? (.pi * entry.value * entry.value)
-                value = String(format: "%.1f m radius · %.0f m²", entry.value, area)
+                value = MeasurementFormatter.samplingPlotSummary(
+                    radiusM: entry.value, areaM2: area, in: system)
             }
             let explainerKind: TierExplainer.Kind?
             switch kind {
@@ -1629,10 +1677,9 @@ public struct MapHomeScreen: View {
                                              longitude: fix.longitude),
                 CoordinateConversions.LatLon(latitude: pin.latitude,
                                              longitude: pin.longitude))
-            if distanceM > Self.farTreeWarnDistanceM {
-                farTreeWarning = FarTreeWarning(
-                    treeNumber: tree,
-                    distanceM: Int(distanceM.rounded()))
+            if distanceM > Self.farTreeWarnDistanceM(settings.unitSystem) {
+                farTreeWarning = FarTreeWarning(treeNumber: tree,
+                                                distanceM: distanceM)
                 return
             }
         }
@@ -2093,25 +2140,37 @@ private struct MeasurePhotoThumbnail: View {
 // MARK: - Quick entry edit sheet (map peek → "Edit this tree")
 
 /// Compact editor for one QuickMeasureEntry reached from the quick peek.
-/// Edits the measured value (native unit — cm for DBH, m otherwise), the
-/// species code and the note, then persists via QuickMeasureHistory
-/// `update`. A confirmed destructive Delete removes the entry AND its
-/// photo (through `delete`, which calls MeasurePhotoStore). The measure
-/// math is untouched — only the primary value the cruiser typed changes.
+/// Edits the measured value, the species code and the note, then persists via
+/// QuickMeasureHistory `update`. A confirmed destructive Delete removes the
+/// entry AND its photo (through `delete`, which calls MeasurePhotoStore). The
+/// measure math is untouched — only the primary value the cruiser typed
+/// changes.
+///
+/// THE VALUE BOX IS IN THE CRUISER'S UNITS, both directions, through
+/// `TruthInput.Unit` — the same route `TreeDetailScreen` takes. It used to
+/// show the stored metric number beside a hardcoded "cm"/"m" chip while the
+/// peek two taps away read "13.6 in": correcting that tree to "14" meaning
+/// inches wrote a 14 cm stem. Storage is unchanged — a diameter is still cm
+/// and everything else still metres.
 private struct QuickEntryEditSheet: View {
     let entry: QuickMeasureEntry
     @ObservedObject var history: QuickMeasureHistory
+    @EnvironmentObject private var settings: AppSettings
     @Environment(\.dismiss) private var dismiss
 
     @State private var valueText: String
     @State private var speciesText: String
     @State private var noteText: String
     @State private var confirmingDelete = false
+    /// The value field is seeded on appear, not in `init`: the prefill has to
+    /// be in the cruiser's unit and `settings` does not exist yet at init.
+    /// Once seeded it is the cruiser's text and nothing re-writes it.
+    @State private var seededValue = false
 
     init(entry: QuickMeasureEntry, history: QuickMeasureHistory) {
         self.entry = entry
         _history = ObservedObject(wrappedValue: history)
-        _valueText = State(initialValue: Self.prefillText(entry))
+        _valueText = State(initialValue: "")
         _speciesText = State(initialValue: entry.speciesCode ?? "")
         _noteText = State(initialValue: entry.note ?? "")
     }
@@ -2124,7 +2183,7 @@ private struct QuickEntryEditSheet: View {
                 .foregroundStyle(ForestixPalette.textTertiary)
                 .padding(.top, ForestixSpace.md)
 
-            // Measured value — native unit (cm for DBH, m otherwise).
+            // Measured value — in the cruiser's unit, same as the peek row.
             fieldLabel(kindTitle.uppercased())
             HStack(spacing: ForestixSpace.xs) {
                 TextField("0.0", text: $valueText)
@@ -2137,7 +2196,9 @@ private struct QuickEntryEditSheet: View {
                     .frame(minHeight: 44)
                     .background(fieldBackground)
                     .accessibilityIdentifier("mapHome.editSheet.value")
-                Text(entry.valueUnit)
+                // `entry.valueUnit` is the STORAGE unit and always metric;
+                // the chip has to name the unit the box is actually in.
+                Text(valueUnit.rawValue)
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(ForestixPalette.textSecondary)
                     .frame(width: 32, alignment: .leading)
@@ -2230,6 +2291,11 @@ private struct QuickEntryEditSheet: View {
         .presentationDetents([.height(430)])
         .presentationDragIndicator(.visible)
         .presentationBackground(ForestixPalette.surface)
+        .onAppear {
+            guard !seededValue else { return }
+            seededValue = true
+            valueText = valuePrefill
+        }
         .alert("Delete this reading?", isPresented: $confirmingDelete) {
             Button("Delete", role: .destructive) {
                 history.delete(id: entry.id)
@@ -2267,9 +2333,14 @@ private struct QuickEntryEditSheet: View {
         // the sheet and pressing Save rounded the reading AND demoted it to a
         // hand entry with no σ. Comparing the strings is the only test that
         // an untouched form passes.
+        //
+        // The typed number is converted back to the app's metric base before
+        // it is stored — `parsePositiveBase`, not `parsePositive`. Storing the
+        // raw text is what wrote a 14 cm stem when the cruiser typed 14 inches.
         let base = valueText == valuePrefill
             ? entry
-            : (TruthInput.parsePositive(valueText).map { entry.typedValue($0) } ?? entry)
+            : (TruthInput.parsePositiveBase(valueText, unit: valueUnit)
+                .map { entry.typedValue($0) } ?? entry)
         // Only the two fields this sheet edits are named. Rebuilding the whole
         // entry from an argument list here is what dropped `positionSource`
         // off the end and re-labelled a typed coordinate a device fix — see
@@ -2312,24 +2383,45 @@ private struct QuickEntryEditSheet: View {
             .fill(ForestixPalette.surfaceRaised)
     }
 
-    /// The text the value field opens with: the stored reading at the SAME
-    /// precision the row above it prints — one decimal for a diameter or a
-    /// height, two for a distance — so the peek and its editor never show one
-    /// reading as two numbers. Android builds the identical string.
-    private static func prefillText(_ entry: QuickMeasureEntry) -> String {
-        MeasurementFormatter.entryText(entry.value,
-                                       fractionDigits: entry.kind == .distance ? 2 : 1)
+    /// The unit this reading is TYPED in — the cruiser's own, from the helper
+    /// every other typed measurement in the app goes through. A diameter is
+    /// cm/in; a height, a crown span, a distance and a plot radius are all
+    /// lengths in m/ft. Storage never moves: the conversion happens on the way
+    /// out (`valuePrefill`) and on the way back in (`save`).
+    private var valueUnit: TruthInput.Unit {
+        let imperial = settings.unitSystem == .imperial
+        switch entry.kind {
+        case .dbh:
+            return TruthInput.defaultUnit(.diameter, imperial: imperial)
+        case .height, .crown, .distance, .samplingPlot:
+            return TruthInput.defaultUnit(.distance, imperial: imperial)
+        }
     }
 
-    /// What the field was prefilled with. `save()` compares the current text
-    /// against this STRING, not against the number it parses to.
-    private var valuePrefill: String { Self.prefillText(entry) }
+    /// The text the value field opens with: the stored reading in the
+    /// cruiser's unit at the SAME precision the row above it prints — one
+    /// decimal for a diameter or a height, two for a distance — so the peek
+    /// and its editor never show one reading as two numbers. Android builds
+    /// the identical string.
+    ///
+    /// `save()` compares the current text against this STRING, not against the
+    /// number it parses to, so an untouched form writes nothing back.
+    private var valuePrefill: String {
+        MeasurementFormatter.entryText(
+            TruthInput.fromBase(entry.value, unit: valueUnit),
+            fractionDigits: entry.kind == .distance ? 2 : 1)
+    }
 
     /// False when the cruiser has typed something that is not a usable
     /// reading. Save is held off and the field says why, rather than the
     /// sheet quietly keeping the old number and closing.
+    ///
+    /// The single frame before `onAppear` seeds the field is not a refusal —
+    /// an empty box the cruiser has not touched must not flash a warning at
+    /// them on the way in.
     private var valueEntryValid: Bool {
-        valueText == valuePrefill || TruthInput.parsePositive(valueText) != nil
+        !seededValue || valueText == valuePrefill
+            || TruthInput.parsePositive(valueText) != nil
     }
 
     /// The refusal for this reading's kind. Diameter and height reuse the

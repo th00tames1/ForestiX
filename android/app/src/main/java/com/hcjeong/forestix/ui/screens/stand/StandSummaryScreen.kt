@@ -48,6 +48,7 @@ import com.hcjeong.forestix.ui.screens.ForestixScaffold
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.common.AreaUnit
+import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.areaUnit
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import java.util.Locale
@@ -133,10 +134,21 @@ fun StandSummaryScreen(nav: NavController, projectId: UUID) {
                 title = "Trees / ${areaUnit.abbreviation}", unit = areaUnit.densitySuffix,
                 stat = tpaStat.scaledPerArea(densityFactor), vm = vm,
                 perPlot = perPlotStats.map { Pair(it.plot, it.stats.tpa.toDouble() * densityFactor) })
+            // Basal area gets a factor of its OWN: the engine reports m² per
+            // ACRE, so an imperial cruise converts the numerator too. Scaling
+            // only the denominator printed "m²/ac" — a unit no cruise sheet
+            // uses, and 10.76x away from the ft²/ac the quick-measure card
+            // shows for the same stand. The card's mean and its ± range are
+            // scaled by the same number, or the band stops bracketing the
+            // value it belongs to.
+            val baFactor = MeasurementFormatter.basalAreaDensityFactor(areaUnit)
             StatCardSection(
-                title = "Basal area", unit = areaUnit.densityLabel("m²"),
-                stat = baStat.scaledPerArea(densityFactor), vm = vm,
-                perPlot = perPlotStats.map { Pair(it.plot, it.stats.baPerAcreM2.toDouble() * densityFactor) })
+                title = "Basal area",
+                unit = MeasurementFormatter.basalAreaDensityUnit(areaUnit),
+                stat = baStat.scaledPerArea(baFactor), vm = vm,
+                perPlot = perPlotStats.map {
+                    Pair(it.plot, it.stats.baPerAcreM2.toDouble() * baFactor)
+                })
             // Volume unit branches on the country: metric countries render m³
             // (the engine's native unit); the US keeps m³ here as it does today.
             // Korea is a scaffold — its official NIFoS coefficients are pending,
@@ -355,7 +367,15 @@ private fun PerPlotTableSection(
                         Text("${row.plot.plotNumber}", style = type.dataSmall, color = colors.textPrimary, modifier = Modifier.width(28.dp))
                         Text("${row.stats.liveTreeCount}", style = type.dataSmall, color = colors.textPrimary, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
                         Text(String.format(Locale.US, "%.1f", row.stats.tpa * f), style = type.dataSmall, color = colors.textPrimary, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
-                        Text(String.format(Locale.US, "%.2f", row.stats.baPerAcreM2 * f), style = type.dataSmall, color = colors.textPrimary, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
+                        Text(
+                            String.format(
+                                Locale.US, "%.2f",
+                                MeasurementFormatter.basalAreaDensity(
+                                    row.stats.baPerAcreM2.toDouble(), areaUnit),
+                            ),
+                            style = type.dataSmall, color = colors.textPrimary,
+                            textAlign = TextAlign.End, modifier = Modifier.weight(1f),
+                        )
                         Text(String.format(Locale.US, "%.1f", row.stats.grossVolumePerAcreM3 * f), style = type.dataSmall, color = colors.textPrimary, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
                     }
                 }

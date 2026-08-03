@@ -114,6 +114,8 @@ import com.hcjeong.forestix.basemap.MapPolylineOverlay
 import com.hcjeong.forestix.common.AreaUnit
 import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.RegionalSpecies
+import com.hcjeong.forestix.common.UnitSystem
+import com.hcjeong.forestix.common.areaUnit
 import com.hcjeong.forestix.data.SettingsSnapshot
 import com.hcjeong.forestix.data.cruise.BreastHeightConvention
 import com.hcjeong.forestix.data.cruise.CruiseDesign
@@ -847,6 +849,9 @@ internal fun BoxScope.CruiseDistanceOverlay(
     state: CruiseModeState,
     camera: MapCameraState,
     fix: CLLocationSnapshot?,
+    /// The chip states a distance the cruiser is about to walk, so it is
+    /// rendered in the unit they pace in.
+    unitSystem: UnitSystem,
 ) {
     val navTarget = state.navTarget() ?: return
     val navFix = fix ?: return
@@ -859,7 +864,7 @@ internal fun BoxScope.CruiseDistanceOverlay(
             latitude = navTarget.plannedLat, longitude = navTarget.plannedLon))
     if (a != null && b != null) {
         DistanceChip(
-            navDistanceLabel(navDistanceM),
+            navDistanceLabel(navDistanceM, unitSystem),
             modifier = Modifier
                 .offset {
                     IntOffset(
@@ -876,7 +881,7 @@ internal fun BoxScope.CruiseDistanceOverlay(
         )
     } else {
         DistanceChip(
-            navDistanceLabel(navDistanceM),
+            navDistanceLabel(navDistanceM, unitSystem),
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .statusBarsPadding()
@@ -988,6 +993,7 @@ internal fun CruiseModeBottomContent(
                 planned = peekPlanned,
                 fix = fix,
                 navigating = state.navTargetId == peekPlanned.id,
+                unitSystem = settings.unitSystem,
                 modifier = Modifier
                     .padding(horizontal = 12.dp)
                     .padding(bottom = 20.dp),
@@ -1654,13 +1660,14 @@ private fun cruiseMarkers(
 // MARK: - Chrome pieces -------------------------------------------------------
 
 /// Mock `.distchip` — the floating live distance readout while the dashed
-/// guide line is up ("142 m"; kilometres past ~1 km, iOS parity).
-private fun navDistanceLabel(metres: Double): String =
-    if (metres < 995) {
-        String.format(Locale.US, "%.0f m", metres)
-    } else {
-        String.format(Locale.US, "%.1f km", metres / 1000.0)
-    }
+/// guide line is up.
+///
+/// How far the cruiser still has to WALK, so it goes through `navDistance`
+/// rather than `distance` — and through the unit system, because a cruiser who
+/// paces in feet cannot use "142 m" for anything without doing arithmetic on a
+/// hillside. iOS `distanceLabel` prints the identical string.
+private fun navDistanceLabel(metres: Double, system: UnitSystem): String =
+    MeasurementFormatter.navDistance(metres, system)
 
 @Composable
 private fun DistanceChip(text: String, modifier: Modifier = Modifier) {
@@ -1696,6 +1703,9 @@ private fun PlannedPeekCard(
     fix: CLLocationSnapshot?,
     navigating: Boolean,
     starting: Boolean,
+    /// The range row is a walking instruction, so it is stated in the unit the
+    /// cruiser paces in.
+    unitSystem: UnitSystem,
     modifier: Modifier = Modifier,
     onStartNow: () -> Unit,
     onToggleNavigate: () -> Unit,
@@ -1777,8 +1787,13 @@ private fun PlannedPeekCard(
                     val b = GeoMath.bearingDeg(
                         fromLat = rangeFix.latitude, fromLon = rangeFix.longitude,
                         toLat = planned.plannedLat, toLon = planned.plannedLon)
+                    // The bearing is degrees in both systems — a compass does
+                    // not change with the Units toggle. The RANGE does: this
+                    // row is what the cruiser paces off.
                     String.format(
-                        Locale.US, "%.0f m · bearing %.0f°", d, (b + 360.0).mod(360.0))
+                        Locale.US, "%s · bearing %.0f°",
+                        MeasurementFormatter.navDistance(d, unitSystem),
+                        (b + 360.0).mod(360.0))
                 } else {
                     "no GPS fix"
                 },
@@ -2144,6 +2159,17 @@ private fun PlotPeekCard(
     val shape = RoundedCornerShape(14.dp)
     val closed = plot.closedAt != null
     var confirmDelete by remember(plot.id) { mutableStateOf(false) }
+    // Which units this card renders in, by the rule the whole cruise surface
+    // follows (`CruiseModeState.unitSystem`): the PROJECT's, because a cruise
+    // is run in the units it was set up in, falling back to the app setting
+    // while there is no project. Stated once here so the radius, the basal
+    // area and the mean DBH cannot each pick a different answer.
+    val settings by env.settings.state.collectAsStateWithLifecycle()
+    val unitSystem = when (project?.units) {
+        com.hcjeong.forestix.data.cruise.UnitSystem.METRIC -> UnitSystem.METRIC
+        com.hcjeong.forestix.data.cruise.UnitSystem.IMPERIAL -> UnitSystem.IMPERIAL
+        null -> settings.unitSystem
+    }
 
     // Live stats via the SAME inventory engine PlotTallyScreen uses.
     var stats by remember(plot.id, trees.size) { mutableStateOf(PlotStats.empty) }
@@ -2237,11 +2263,12 @@ private fun PlotPeekCard(
             )
             Spacer(Modifier.weight(1f))
             Text(
-                String.format(
-                    Locale.US, "%.1f m radius · %s",
-                    plotRadiusMetres(plot),
+                // Same ring, same label as the plot banner and the plot menu —
+                // one plot cannot have one radius where you tap it and another
+                // where the banner shows it.
+                MeasurementFormatter.plotLength(plotRadiusMetres(plot), unitSystem) +
+                    " radius · " +
                     SimpleDateFormat("HH:mm", Locale.US).format(Date(plot.startedAt)),
-                ),
                 style = type.dataSmall.copy(fontSize = 11.sp),
                 color = colors.textTertiary,
                 maxLines = 1,
@@ -2252,8 +2279,8 @@ private fun PlotPeekCard(
         // MEAN DBH — spelled out, not the BA / TPA / QMD initialisms. Per-area basis
         // follows the project's units (US per acre, metric per hectare); the
         // engine computes per acre, so scale + relabel at display only.
-        val metric = project?.units == com.hcjeong.forestix.data.cruise.UnitSystem.METRIC
-        val areaUnit = if (metric) AreaUnit.HECTARE else AreaUnit.ACRE
+        val metric = unitSystem == UnitSystem.METRIC
+        val areaUnit = unitSystem.areaUnit
         val densityF = areaUnit.perAcreDensityFactor
         val densitySuffix = areaUnit.densitySuffix
         Row(
@@ -2264,18 +2291,32 @@ private fun PlotPeekCard(
         ) {
             StatsCell("TREES", "${stats.liveTreeCount}", null, Modifier.weight(1f))
             StatsDivider()
+            // Basal area converts its NUMERATOR with the basis, not just its
+            // suffix: the engine reports m²/acre, so an imperial cruise that
+            // scaled only the denominator printed "m²/ac" — a unit no cruise
+            // sheet uses and 10.76x off the ft²/ac the same app shows for the
+            // same stand elsewhere.
             StatsCell(
-                "BASAL AREA", String.format(Locale.US, "%.1f", stats.baPerAcreM2 * densityF),
-                "m²$densitySuffix", Modifier.weight(1f))
+                "BASAL AREA",
+                String.format(
+                    Locale.US, "%.1f",
+                    MeasurementFormatter.basalAreaDensity(
+                        stats.baPerAcreM2.toDouble(), areaUnit)),
+                MeasurementFormatter.basalAreaDensityUnit(areaUnit), Modifier.weight(1f))
             StatsDivider()
             StatsCell(
                 if (metric) "TREES/HA" else "TREES/AC",
                 String.format(Locale.US, "%.0f", stats.tpa * densityF),
                 densitySuffix, Modifier.weight(1f))
             StatsDivider()
+            // Mean DBH is a diameter like the ones on the trees above it and
+            // follows the same formatter they do.
             StatsCell(
-                "MEAN DBH", String.format(Locale.US, "%.1f", stats.qmdCm),
-                "cm", Modifier.weight(1f))
+                "MEAN DBH",
+                MeasurementFormatter.entryText(
+                    MeasurementFormatter.diameterValue(
+                        stats.qmdCm.toDouble(), unitSystem), 1),
+                MeasurementFormatter.diameterUnit(unitSystem), Modifier.weight(1f))
         }
         // B. PLOT SAMPLE HEIGHTS — list-row into the sample heights sheet
         // (iOS plotPeek row 1:1), shown for open AND closed plots. The
@@ -2835,8 +2876,16 @@ private fun TreePeekCard(
         val dist = tree.distanceFromCenterM
         if (bearing != null && dist != null) {
             Text(
+                // The distance decides whether a borderline stem belongs to
+                // the plot, so it is stated in the cruiser's own unit through
+                // the same helper the plot banner uses. iOS already did this
+                // (MapHomeScreen+Plot's "… from centre"); this row was the one
+                // place the two platforms disagreed. The BEARING stays degrees
+                // — a compass does not change with the Units toggle.
                 String.format(
-                    Locale.US, "Bearing %.0f° · %.1f m from centre — auto", bearing, dist),
+                    Locale.US, "Bearing %.0f° · %s from centre — auto",
+                    bearing,
+                    MeasurementFormatter.plotLength(dist.toDouble(), unitSystem)),
                 style = type.dataSmall.copy(fontSize = 10.5.sp),
                 color = colors.textTertiary,
                 modifier = Modifier.padding(top = 8.dp),
@@ -3229,7 +3278,20 @@ private fun ExportAllBlock(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val viewModel = remember(project.id) { ExportViewModel(project) }
-    LaunchedEffect(viewModel) { viewModel.configure(env) }
+    val exportSettings by env.settings.state.collectAsStateWithLifecycle()
+    // Keyed on the unit system so a cruiser who flips Units while this sheet is
+    // up re-configures the view model before they tap Export — the report says
+    // what the cruiser is looking at, not what the project was stamped with.
+    LaunchedEffect(viewModel, exportSettings.unitSystem) {
+        viewModel.configure(
+            env,
+            if (exportSettings.unitSystem == UnitSystem.METRIC) {
+                com.hcjeong.forestix.data.cruise.UnitSystem.METRIC
+            } else {
+                com.hcjeong.forestix.data.cruise.UnitSystem.IMPERIAL
+            },
+        )
+    }
 
     val isExporting by viewModel.isExporting.collectAsStateWithLifecycle()
     val progress by viewModel.progress.collectAsStateWithLifecycle()

@@ -49,5 +49,17 @@ object Units {
     fun cubicMetersToCubicFeet(m3: Double) =
         m3 * (1.0 / METERS_PER_FOOT) * (1.0 / METERS_PER_FOOT) * (1.0 / METERS_PER_FOOT)
 
+    /// Per-area basal area m²/ha ↔ ft²/ac (1 m²/ha = 4.356 ft²/ac), derived
+    /// from the two constants above rather than written out, so the acre and
+    /// the foot are defined in exactly one place each. iOS twin:
+    /// `Units.baPerHaToBaPerAcre` / `baPerAcreToBaPerHa`.
+    ///
+    /// A BAF is a basal area per unit land area and converts through these.
+    fun baPerHaToBaPerAcre(m2PerHa: Double) =
+        m2PerHa * (squareMetersToSquareFeet(1.0) / ACRES_PER_HECTARE)
+
+    fun baPerAcreToBaPerHa(ft2PerAc: Double) =
+        ft2PerAc * (ACRES_PER_HECTARE / squareMetersToSquareFeet(1.0))
+
     fun circleAreaM2(radiusM: Double) = PI * radiusM * radiusM
 }

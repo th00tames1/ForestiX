@@ -36,6 +36,8 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.pdf.PdfDocument
 import com.hcjeong.forestix.common.AreaUnit
+import com.hcjeong.forestix.common.MeasurementFormatter
+import com.hcjeong.forestix.common.Units
 import com.hcjeong.forestix.common.RegionalSpecies
 import com.hcjeong.forestix.data.cruise.BreastHeightConvention
 import com.hcjeong.forestix.data.cruise.CruiseDesign
@@ -76,6 +78,19 @@ data class PDFReportInputs(
     val baStand: StandStat,
     val volStand: StandStat,
     val generatedAt: Long,
+    /// The unit system the REPORT is written in — the cruiser's live Units
+    /// setting, not `project.units`.
+    ///
+    /// `project.units` is stamped once when the project is created and never
+    /// written again. Every screen reads the live toggle, so a cruiser who
+    /// flipped Units saw "28.4 m²/ha" on the phone and got "11.49 m²/ac" in the
+    /// report for the same plot — numbers 2.47x apart, with the cover page
+    /// still naming the system they had left behind. A report that does not say
+    /// what the cruiser is looking at is not a deliverable.
+    ///
+    /// Defaults to imperial so a caller that never sets it gets the historical
+    /// per-acre output rather than a surprise. iOS `PDFLocalization` 1:1.
+    val displayUnits: UnitSystem = UnitSystem.IMPERIAL,
 )
 
 sealed class PDFReportBuilderError(message: String) : Exception(message) {
@@ -166,10 +181,15 @@ object PDFReportBuilder {
             drawKeyValue(canvas, k, v, frame.left, y, frame.width())
             y += 22f
         }
-        val areaUnit = areaUnitFor(inputs.project)
+        val areaUnit = areaUnitFor(inputs)
         val df = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)  // local time zone
         kv("Owner",             inputs.project.owner)
-        kv("Units",             unitsLabel(inputs.project.units))
+        // WHAT THE BODY IS ACTUALLY IN, not the stamp taken when the project
+        // was created. `project.units` is written once and never again; the
+        // display system is the cruiser's live setting, and it is what every
+        // number under this line is rendered with. The cover cannot be allowed
+        // to declare one system while the tables use the other.
+        kv("Units",             unitsLabel(inputs.displayUnits))
         kv("Generated",         df.format(Date(inputs.generatedAt)))
         kv("# plots (closed)",  "${inputs.plots.count { it.closedAt != null }}")
         kv("# plots (total)",   "${inputs.plots.size}")
@@ -191,7 +211,8 @@ object PDFReportBuilder {
             for ((code, ba) in top3) {
                 val name = inputs.species.firstOrNull { it.code == code }?.commonName ?: code
                 drawBody(canvas,
-                    "$code — $name: ${String.format(Locale.US, "%.3f", ba * areaUnit.perAcreDensityFactor)} ${areaUnit.densityLabel("m²")}",
+                    "$code — $name: ${String.format(Locale.US, "%.3f", ba * basalAreaFactor(areaUnit))} " +
+                        MeasurementFormatter.basalAreaDensityUnit(areaUnit),
                     frame.left + 12f, y, frame.width())
                 y += 18f
             }
@@ -207,7 +228,7 @@ object PDFReportBuilder {
 
         // Per-area basis follows the project's units (US acre, metric hectare).
         // Engine stats are per acre; scale + relabel at display only.
-        val areaUnit = areaUnitFor(inputs.project)
+        val areaUnit = areaUnitFor(inputs)
         val f = areaUnit.perAcreDensityFactor
         val suffix = areaUnit.densitySuffix
         val areaWord = if (areaUnit == AreaUnit.HECTARE) "hectare" else "acre"
@@ -215,10 +236,14 @@ object PDFReportBuilder {
         // Stratified stats table — three metrics × (mean, SE, CI95, df).
         drawHeading(canvas, "Stand statistics", frame.left, y, frame.width())
         y += 22f
-        val baStandScaled = inputs.baStand.scaledPerArea(f)
+        // Basal area gets its OWN factor: the engine's figure is m² per acre,
+        // so the numerator converts too. Mean and 95 % half-width are scaled by
+        // the same number, or the range stops bracketing the average.
+        val baUnit = basalAreaUnit(areaUnit)
+        val baStandScaled = inputs.baStand.scaledPerArea(basalAreaFactor(areaUnit))
         val metricRows = listOf(
             Triple("Trees per $areaWord", inputs.tpaStand.scaledPerArea(f), "trees$suffix"),
-            Triple("Basal area",          baStandScaled,                    "m²$suffix"),
+            Triple("Basal area",          baStandScaled,                    "$baUnit$suffix"),
             Triple("Gross volume",        inputs.volStand.scaledPerArea(f),  "m³$suffix"),
         )
         // The standard-error and Satterthwaite effective-degrees-of-freedom
@@ -241,7 +266,7 @@ object PDFReportBuilder {
 
         // Basal area by stratum bar chart.
         y += 30f
-        drawHeading(canvas, "Basal area by stratum (m²$suffix)", frame.left, y, frame.width())
+        drawHeading(canvas, "Basal area by stratum ($baUnit$suffix)", frame.left, y, frame.width())
         y += 18f
         val strataBars = baStandScaled.byStratum.entries
             .sortedBy { it.key }
@@ -274,7 +299,7 @@ object PDFReportBuilder {
             y += 18f
         }
         // Per-area basis follows the project's units (US acre, metric hectare).
-        val areaUnit = areaUnitFor(inputs.project)
+        val areaUnit = areaUnitFor(inputs)
         val f = areaUnit.perAcreDensityFactor
         val suffix = areaUnit.densitySuffix
         val areaWord = if (areaUnit == AreaUnit.HECTARE) "hectare" else "acre"
@@ -301,8 +326,11 @@ object PDFReportBuilder {
         // being unactionable — in the document handed to the client. Both
         // fields are UNCHANGED on the Plot and in the CSV export; they are
         // simply not printed here. What is left is the accuracy, as a quantity.
-        kv("GPS accuracy",  String.format(Locale.US, "±%.2f m, averaged over %d fixes",
-                                plot.gpsMedianHAccuracyM, plot.gpsNSamples))
+        // The only statement in the report of how well the plot was located —
+        // in the same unit as everything else the reader has in front of them.
+        kv("GPS accuracy",  String.format(Locale.US, "±%.2f %s, averaged over %d fixes",
+                                lengthFromMetres(inputs, plot.gpsMedianHAccuracyM.toDouble()),
+                                lengthUnit(inputs), plot.gpsNSamples))
         kv("Plot area",     "${String.format(Locale.US, "%.3f", areaUnit.fromAcres(plot.plotAreaAcres.toDouble()))} ${areaUnit.abbreviation}")
         kv("Slope/Aspect",  "${String.format(Locale.US, "%.1f", plot.slopeDeg)}° / ${String.format(Locale.US, "%.0f", plot.aspectDeg)}°")
         kv("Started",       df.format(Date(plot.startedAt)))
@@ -316,8 +344,12 @@ object PDFReportBuilder {
         if (s != null) {
             kv("Live trees",          "${s.liveTreeCount}")
             kv("Trees per $areaWord", String.format(Locale.US, "%.2f trees$suffix", s.tpa * f))
-            kv("Basal area",          String.format(Locale.US, "%.4f m²$suffix", s.baPerAcreM2 * f))
-            kv("Quadratic mean DBH",  String.format(Locale.US, "%.2f cm", s.qmdCm))
+            kv("Basal area",          String.format(Locale.US, "%.4f %s$suffix",
+                                          s.baPerAcreM2 * basalAreaFactor(areaUnit),
+                                          basalAreaUnit(areaUnit)))
+            kv("Quadratic mean DBH",  String.format(Locale.US, "%.2f %s",
+                                          diameterFromCm(inputs, s.qmdCm.toDouble()),
+                                          diameterUnit(inputs)))
             kv("Gross volume",        String.format(Locale.US, "%.4f m³$suffix", s.grossVolumePerAcreM3 * f))
             kv("Merchantable volume", String.format(Locale.US, "%.4f m³$suffix", s.merchVolumePerAcreM3 * f))
         } else {
@@ -331,7 +363,8 @@ object PDFReportBuilder {
         y += 18f
         val colWidths = listOf(80f, 50f, 90f, 110f, 110f)
         drawTableRow(canvas,
-            listOf("Species", "n", "Trees$suffix", "Basal m²$suffix", "Volume m³$suffix"),
+            listOf("Species", "n", "Trees$suffix",
+                "Basal ${basalAreaUnit(areaUnit)}$suffix", "Volume m³$suffix"),
             bold = true, frame.left, y, colWidths)
         y += 16f
         if (s != null) {
@@ -341,7 +374,7 @@ object PDFReportBuilder {
                 drawTableRow(canvas, listOf(
                     speciesLabel(inputs, code), "${ss.count}",
                     String.format(Locale.US, "%.2f", ss.tpa * f),
-                    String.format(Locale.US, "%.4f", ss.baPerAcreM2 * f),
+                    String.format(Locale.US, "%.4f", ss.baPerAcreM2 * basalAreaFactor(areaUnit)),
                     String.format(Locale.US, "%.4f", ss.grossVolumePerAcreM3 * f),
                 ), bold = false, frame.left, y, colWidths)
                 y += 16f
@@ -358,16 +391,32 @@ object PDFReportBuilder {
             drawKeyValue(canvas, k, v, frame.left, y, frame.width())
             y += 18f
         }
-        val areaUnit = areaUnitFor(inputs.project)
+        val areaUnit = areaUnitFor(inputs)
         kv("Plot type",         plotTypeLabel(inputs.design.plotType))
         kv("Plot area",         inputs.design.plotAreaAcres?.let {
                                     if (areaUnit == AreaUnit.HECTARE)
                                         String.format(Locale.US, "%.3f ha", areaUnit.fromAcres(it.toDouble()))
                                     else "$it ac"
                                 } ?: "—")
-        kv("Basal area factor", inputs.design.baf?.let { "$it" } ?: "—")
+        // The stored BAF is ft²/ac (see `CruiseDesign.baf`), and the row now
+        // says so. Printed bare, a "20" on a client report is a number the
+        // reader cannot check the stand table against.
+        // STORED IN ft²/ac, PRINTED IN THE READER'S OWN. A metric prism is a
+        // round 4 m²/ha, which is 17.424215 stored — interpolating the raw
+        // Float put exactly that on a client report. It converts and it
+        // rounds, like every other number on this page.
+        kv("Basal area factor", inputs.design.baf?.let {
+            String.format(Locale.US, "%.4g %s",
+                bafFromStored(inputs, it.toDouble()), bafLabel(inputs))
+        } ?: "—")
         kv("Sampling scheme",   samplingSchemeLabel(inputs.design.samplingScheme))
-        kv("Grid spacing",      inputs.design.gridSpacingMeters?.let { "$it m" } ?: "—")
+        // Stored in metres; printed in the reader's unit, like the plot area
+        // directly above it. Left bare it was the one row on this page that
+        // stayed metric on an imperial report.
+        kv("Grid spacing",      inputs.design.gridSpacingMeters?.let {
+            String.format(Locale.US, "%.1f %s",
+                lengthFromMetres(inputs, it.toDouble()), lengthUnit(inputs))
+        } ?: "—")
         kv("Height subsample",  describeSubsample(inputs.design.heightSubsampleRule))
         kv("Breast height",     breastHeightLabel(inputs.project.breastHeightConvention))
         kv("Slope correction",  if (inputs.project.slopeCorrection) "on" else "off")
@@ -390,8 +439,13 @@ object PDFReportBuilder {
         drawHeading(canvas, "Species list (${inputs.species.size})", frame.left, y, frame.width())
         y += 18f
         val colWidths = listOf(50f, 150f, 110f, 110f, 75f)
+        // Both dimensions are stored in centimetres and both are printed in
+        // the reader's unit — header and cells move together, so the column
+        // can never be labelled one way and filled the other.
+        val dia = diameterUnit(inputs)
         drawTableRow(canvas,
-            listOf("Code", "Common name", "Volume equation", "Merch. top dia. (cm)", "Stump (cm)"),
+            listOf("Code", "Common name", "Volume equation",
+                   "Merch. top dia. ($dia)", "Stump ($dia)"),
             bold = true, frame.left, y, colWidths)
         y += 16f
         for (sp in inputs.species.sortedBy { it.code }.take(20)) {
@@ -399,8 +453,10 @@ object PDFReportBuilder {
                 sp.code,
                 sp.commonName,
                 sp.volumeEquationId,
-                String.format(Locale.US, "%.1f", sp.merchTopDibCm),
-                String.format(Locale.US, "%.1f", sp.stumpHeightCm),
+                String.format(Locale.US, "%.1f",
+                    diameterFromCm(inputs, sp.merchTopDibCm.toDouble())),
+                String.format(Locale.US, "%.1f",
+                    diameterFromCm(inputs, sp.stumpHeightCm.toDouble())),
             ), bold = false, frame.left, y, colWidths)
             y += 16f
         }
@@ -418,7 +474,14 @@ object PDFReportBuilder {
         drawTitle(canvas, "Appendix — tree-level (page $page/$totalPages)",
             frame.left, frame.top + 50f, frame.width())
         var y = frame.top + 90f
-        val headers = listOf("Plot", "Tree", "Species", "DBH cm", "Height m", "Status", "Quality", "Flags")
+        // The two measurement columns are headed AND filled in the reader's
+        // unit. Headed "DBH cm" over raw centimetres on a report whose cover
+        // declared the cruise Imperial, the landowner had to know to divide by
+        // 2.54 and nothing in the document said so.
+        val headers = listOf(
+            "Plot", "Tree", "Species",
+            "DBH ${diameterUnit(inputs)}", "Height ${lengthUnit(inputs)}",
+            "Status", "Quality", "Flags")
         val widths = listOf(40f, 40f, 55f, 50f, 55f, 60f, 50f, 90f)
         drawTableRow(canvas, headers, bold = true, frame.left, y, widths)
         y += 16f
@@ -439,10 +502,12 @@ object PDFReportBuilder {
             )
             drawTableRow(canvas, listOf(
                 pno, "${t.treeNumber}", speciesLabel(inputs, t.speciesCode),
-                String.format(Locale.US, "%.1f", t.dbhCm),
+                String.format(Locale.US, "%.1f", diameterFromCm(inputs, t.dbhCm.toDouble())),
                 // Two decimals, matching every on-screen height readout —
                 // the appendix is what the client checks the app against.
-                t.heightM?.let { String.format(Locale.US, "%.2f", it) } ?: "—",
+                t.heightM?.let {
+                    String.format(Locale.US, "%.2f", lengthFromMetres(inputs, it.toDouble()))
+                } ?: "—",
                 statusLabel(t.status),
                 qualityLabel(t.dbhConfidence),
                 flagBits.joinToString(", "),
@@ -559,19 +624,65 @@ object PDFReportBuilder {
 
     // MARK: - Localization helpers
 
-    /// The per-area basis the report renders in. Derived from the project's
-    /// stamped unit system (metric projects → hectares, imperial → acres),
-    /// which is itself set from the country at project creation. Keeps the US
-    /// path on ACRE so imperial output stays byte-identical to prior releases.
-    private fun areaUnitFor(project: Project): AreaUnit =
-        if (project.units == UnitSystem.METRIC) AreaUnit.HECTARE else AreaUnit.ACRE
+    /// The per-area basis the report renders in, from the DISPLAY unit system
+    /// the caller passed (metric → hectares, imperial → acres) rather than the
+    /// project's creation-time stamp.
+    private fun areaUnitFor(inputs: PDFReportInputs): AreaUnit =
+        if (inputs.displayUnits == UnitSystem.METRIC) AreaUnit.HECTARE else AreaUnit.ACRE
+
+    // MARK: Linear units (the other half of the same setting)
+
+    /// The report used to convert only the DENOMINATOR of its densities and
+    /// leave every LENGTH in the engine's metric base, so a cover page that
+    /// declared the cruise Imperial was followed by a tree appendix headed
+    /// "DBH cm" / "Height m" with raw centimetres and metres in the cells. The
+    /// landowner had to know to divide by 2.54, and nothing in the document
+    /// said so. These turn the linear half of the same setting, so the
+    /// declaration on the cover and every number under it agree.
+    ///
+    /// The STORED values are untouched — the CSVs beside this PDF still carry
+    /// cm and m, which is where a pipeline joins on them.
+
+    private fun diameterUnit(inputs: PDFReportInputs): String =
+        if (inputs.displayUnits == UnitSystem.METRIC) "cm" else "in"
+
+    private fun lengthUnit(inputs: PDFReportInputs): String =
+        if (inputs.displayUnits == UnitSystem.METRIC) "m" else "ft"
+
+    private fun diameterFromCm(inputs: PDFReportInputs, cm: Double): Double =
+        if (inputs.displayUnits == UnitSystem.METRIC) cm else Units.cmToInches(cm)
+
+    /// A BASAL AREA FACTOR IS THE ONE STORED NUMBER THAT IS NOT METRIC. It is
+    /// what is etched on the prism, and every project on disk was typed under
+    /// the US convention, so `CruiseDesign.baf` is ft²/ac wherever it appears.
+    /// A metric cruiser's prism is a round 4 m²/ha, which is 17.424215 stored
+    /// — and the report interpolated that Float straight into the page.
+    private fun bafLabel(inputs: PDFReportInputs): String =
+        if (inputs.displayUnits == UnitSystem.METRIC) "m²/ha" else "ft²/ac"
+
+    private fun bafFromStored(inputs: PDFReportInputs, ft2PerAcre: Double): Double =
+        if (inputs.displayUnits == UnitSystem.METRIC) Units.baPerAcreToBaPerHa(ft2PerAcre)
+        else ft2PerAcre
+
+    private fun lengthFromMetres(inputs: PDFReportInputs, m: Double): Double =
+        if (inputs.displayUnits == UnitSystem.METRIC) m else Units.metersToFeet(m)
+
+    /// Basal area arrives as SQUARE METRES per ACRE. Both halves of that
+    /// fraction convert or neither is right: an imperial report that scaled
+    /// only the denominator printed "m²/ac", a unit no cruise sheet uses and
+    /// 10.76x away from the ft²/ac the app shows for the same stand.
+    private fun basalAreaUnit(unit: AreaUnit): String =
+        MeasurementFormatter.basalAreaNumeratorUnit(unit)
+
+    private fun basalAreaFactor(unit: AreaUnit): Double =
+        MeasurementFormatter.basalAreaDensityFactor(unit)
 
     /// Resolve a species code to a common name for metric reports (their
     /// country-prefixed codes like "FI-PISY" are opaque). The US report keeps
     /// the bare FIA code it has always printed so its bytes don't change.
     /// Prefers the project's own SpeciesConfig name, then the shared resolver.
     private fun speciesLabel(inputs: PDFReportInputs, code: String): String {
-        if (inputs.project.units != UnitSystem.METRIC) return code
+        if (inputs.displayUnits != UnitSystem.METRIC) return code
         inputs.species.firstOrNull { it.code == code }?.commonName
             ?.takeIf { it.isNotBlank() }?.let { return it }
         return RegionalSpecies.nameForCode(code)

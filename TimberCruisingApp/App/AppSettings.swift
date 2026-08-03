@@ -81,11 +81,21 @@ public final class AppSettings: ObservableObject {
 
     // MARK: - Published properties
 
+    /// The stored setting decoded from its raw string.
+    ///
+    /// Exposed because a handful of screens are pushed from contexts that do
+    /// NOT carry an `AppSettings` in their environment — `StratumDrawScreen`
+    /// off the cruise-setup sheet, `RecordCentreSheet` and the offset flow it
+    /// pushes — and an `@EnvironmentObject` that is not there is a crash, not
+    /// a fallback. Those read the key with `@AppStorage` and decode here, so
+    /// they cannot end up with a different default from everyone else. Same
+    /// shape as `Country.fromRaw` / `BasemapType.fromRaw`.
+    public static func unitSystem(fromRaw raw: String?) -> UnitSystem {
+        raw.flatMap(UnitSystem.init(rawValue:)) ?? .imperial
+    }
+
     public var unitSystem: UnitSystem {
-        get {
-            let raw = defaults.string(forKey: Keys.unitSystem) ?? UnitSystem.imperial.rawValue
-            return UnitSystem(rawValue: raw) ?? .imperial
-        }
+        get { AppSettings.unitSystem(fromRaw: defaults.string(forKey: Keys.unitSystem)) }
         set {
             defaults.set(newValue.rawValue, forKey: Keys.unitSystem)
             objectWillChange.send()

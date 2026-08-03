@@ -1767,6 +1767,12 @@ public enum DBHEstimator {
     ///      near face — `silhouetteDiameterCm`
     /// 4 — the auto path joined the bracket on the tangent form, and the
     /// guide strip stopped truncating at 0.15 m.
+    /// 5 — Android's ADJUST bracket stopped keeping two arithmetics behind one
+    ///     pair of handles. iOS reads the same as it did at 4; the number is
+    ///     shared because the epoch describes a GENERATION of the estimators
+    ///     and two corpora that disagree on it must not be pooled — and this
+    ///     study pools iOS and Android. Epoch 5 is the first generation in
+    ///     which both handsets read a bracket the same way.
     ///
     /// THE NUMBER IS THE CONTRACT, and it was nearly broken. Epoch 3 shipped
     /// on 7/30 with the BRACKET on the tangent inversion and the auto path
@@ -1779,7 +1785,7 @@ public enum DBHEstimator {
     ///
     /// Bump this whenever a change moves a stored diameter. It is what the
     /// recompute decides on and what an analysis splits the corpus by.
-    public static let estimatorEpoch = 4
+    public static let estimatorEpoch = 5
 
     /// How far the guide-strip walk lets the surface recede before it calls
     /// the stem finished, in metres.

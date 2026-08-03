@@ -234,7 +234,14 @@ object DBHEstimator {
     /// re-deriving.
     ///
     /// iOS `DBHEstimator.estimatorEpoch` parity — the two MUST move together.
-    const val ESTIMATOR_EPOCH = 4
+    /// 5 — Android's ADJUST bracket stopped keeping two arithmetics behind
+    ///     one pair of handles. iOS reads the same as it did at 4; the
+    ///     number is shared because the epoch describes a GENERATION of the
+    ///     estimators and two corpora that disagree on it must not be
+    ///     pooled — and this study pools iOS and Android. Epoch 5 is the
+    ///     first generation in which both handsets read a bracket the same
+    ///     way.
+    const val ESTIMATOR_EPOCH = 5
 
     val PLAUSIBLE_DIAMETER_CM = 2.5..300.0
 

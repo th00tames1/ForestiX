@@ -365,7 +365,6 @@ fun HeightScanScreen(
     // exactly while that is true; see rememberPlotPinCentreOffer.
     val pinCentreOffer = rememberPlotPinCentreOffer(controller)
     // Scan metadata (species / damage / note) attached on Accept — iOS
-    // ScanMetadataSheet(kind: .height); no stem position for heights.
     // Seeded from the chooser's species control when it was used, so the
     // details chip already reads the species the cruiser picked at the tree.
     var metaSpecies by remember { mutableStateOf(pendingLock?.speciesCode) }
@@ -2028,15 +2027,12 @@ fun HeightScanScreen(
             }
         }
 
-        // Metadata editor (species / damage / note — no stem position for
-        // heights, iOS kind .height parity).
+        // Metadata editor (species / damage / note).
         if (showMetadata) {
             ScanMetadataSheet(
                 speciesCode = metaSpecies, onSpeciesCode = { metaSpecies = it },
-                position = null, onPosition = {},
                 damageCodes = metaDamage, onDamageCodes = { metaDamage = it },
                 note = metaNote, onNote = { metaNote = it },
-                showPosition = false,
                 onDismiss = { showMetadata = false },
             )
         }

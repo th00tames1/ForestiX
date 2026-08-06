@@ -86,7 +86,6 @@ public struct DBHScanScreen: View {
     }
 
     @State private var metaSpecies: String?
-    @State private var metaPosition: QuickMeasureEntry.StemPosition? = .dbh
     @State private var metaDamage: [String] = []
     @State private var metaNote: String = ""
     @State private var presentingMetadata = false
@@ -922,7 +921,13 @@ public struct DBHScanScreen: View {
                         LocationService.lastGlobalFix)
                     let meta = ScanMetadata(
                         speciesCode: metaSpecies,
-                        position: metaPosition,
+                        // Always breast height, and no longer a question the
+                        // cruiser is asked. The column stays on the record and
+                        // in every export; it is now stamped rather than
+                        // picked, which is what a diameter scan has always
+                        // actually done — the guide puts the phone at 1.37 m
+                        // and the chord identity assumes the reading is there.
+                        position: .dbh,
                         damageCodes: metaDamage,
                         note: metaNote,
                         photoPath: photo,
@@ -980,7 +985,6 @@ public struct DBHScanScreen: View {
                     if let saved = tallyTreeTitle {
                         viewModel.retake()
                         metaSpecies = nil
-                        metaPosition = .dbh
                         metaDamage = []
                         metaNote = ""
                         withAnimation(.easeOut(duration: 0.18)) {
@@ -993,9 +997,7 @@ public struct DBHScanScreen: View {
         }
         .sheet(isPresented: $presentingMetadata) {
             ScanMetadataSheet(
-                kind: .diameter,
                 speciesCode: $metaSpecies,
-                position: $metaPosition,
                 damageCodes: $metaDamage,
                 note: $metaNote)
         }
@@ -2285,6 +2287,17 @@ public struct DBHScanScreen: View {
                 // (`TreeComputed.basalAreaText` → `InventoryEngine`), and the
                 // same square unit rule, so this and the tree form cannot
                 // disagree. Reads "—" until there is a usable diameter.
+                //
+                // NAMED, not just printed. Unlabelled, the panel read
+                // "33.7 cm  0.089 m²" and left the second figure to be
+                // guessed from its unit — and ft² is a unit a cruiser also
+                // sees on the BAF and on per-acre totals, so the guess is not
+                // a safe one. The tree form's row carries the words "Basal
+                // area"; this one carries "BA" because it sits on a line the
+                // diameter has to stay large on.
+                Text("BA")
+                    .font(ForestixType.caption)
+                    .foregroundStyle(.white.opacity(0.55))
                 Text(TreeComputed.basalAreaText(dbhCm: Double(r.diameterCm),
                                                 in: settings.unitSystem))
                     .font(ForestixType.data)
@@ -2358,10 +2371,8 @@ public struct DBHScanScreen: View {
 
     private var metadataChipLabel: String {
         // Shared with the height scan (FIELD REPORT 7) — one label rule for
-        // one chip, on both screens. The diameter scan is the one that also
-        // carries stem position, so it passes it.
+        // one chip, on both screens, and now the same three things on both.
         ScanMetadataChip.label(speciesCode: metaSpecies,
-                               position: metaPosition,
                                damageCodes: metaDamage,
                                note: metaNote)
     }

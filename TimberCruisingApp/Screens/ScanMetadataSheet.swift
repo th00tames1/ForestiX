@@ -1,5 +1,14 @@
-// Post-scan metadata sheet — attaches species + position + damage
-// + note to a freshly-fitted scan before the cruiser hits Accept.
+// Post-scan metadata sheet — attaches species + damage + note to a
+// freshly-fitted scan before the cruiser hits Accept.
+//
+// NO STEM POSITION. This sheet used to carry a butt / DBH / upper / stump
+// picker, and it was the last place in the app that asked a cruiser to make
+// that call — the tree form and the field log's record sheet both dropped it
+// (TreeDetailScreen, FIELD REPORT F8). A row removed from two screens and
+// left live on a third is not removed; it just moved somewhere harder to
+// find. The FIELD SURVIVES on `ScanMetadata` and in every export, stamped
+// `.dbh`, which is the height the guide puts the cruiser at and the height
+// the diameter identity assumes.
 //
 // Pragmatic compromise: the ideal in-scene UX is to long-press
 // the world-anchored AR cylinder/sphere to edit, keeping the cruiser
@@ -24,18 +33,11 @@ import Models
 public enum ScanMetadataChip {
 
     public static func label(speciesCode: String?,
-                             position: QuickMeasureEntry.StemPosition? = nil,
                              damageCodes: [String] = [],
                              note: String = "") -> String {
         var bits: [String] = []
         if let s = speciesCode, !s.isEmpty {
             bits.append(RegionalSpecies.name(forCode: s))
-        }
-        // `.dbh` is the default the diameter scan starts on, so it is not
-        // something the cruiser attached — only a deliberate move off it
-        // (butt, upper stem, stump) is worth a word here.
-        if let p = position, p != .dbh {
-            bits.append(p.displayName)
         }
         if !damageCodes.isEmpty {
             bits.append(damageCodes.count == 1
@@ -52,37 +54,33 @@ public enum ScanMetadataChip {
 
 public struct ScanMetadataSheet: View {
 
-    @EnvironmentObject private var settings: AppSettings
+    // No `@EnvironmentObject var settings` any more. The only thing this sheet
+    // read from settings was the unit the position footer spelled breast
+    // height in, and an @EnvironmentObject that nothing reads is not free: it
+    // is a hard requirement on every caller's environment, and a caller that
+    // forgets it crashes at render rather than failing to compile.
     @Environment(\.dismiss) private var dismiss
 
-    /// What scan kind we're attaching metadata to.
-    public enum Kind { case diameter, height }
-    public let kind: Kind
-
     @Binding public var speciesCode: String?
-    @Binding public var position: QuickMeasureEntry.StemPosition?
     @Binding public var damageCodes: [String]
     @Binding public var note: String
 
-    public init(kind: Kind,
-                speciesCode: Binding<String?>,
-                position: Binding<QuickMeasureEntry.StemPosition?>,
+    public init(speciesCode: Binding<String?>,
                 damageCodes: Binding<[String]>,
                 note: Binding<String>) {
-        self.kind = kind
         self._speciesCode = speciesCode
-        self._position = position
         self._damageCodes = damageCodes
         self._note = note
     }
 
+    /// The same three sections on both scans. The sheet used to take a `Kind`
+    /// so the diameter scan could show one extra section the height scan did
+    /// not; with stem position gone there is nothing left for the two kinds to
+    /// disagree about, so there is nothing left to tell them apart by.
     public var body: some View {
         NavigationStack {
             Form {
                 speciesSection
-                if kind == .diameter {
-                    positionSection
-                }
                 damageSection
                 noteSection
             }
@@ -103,37 +101,6 @@ public struct ScanMetadataSheet: View {
     private var speciesSection: some View {
         Section(header: Text("SPECIES").font(ForestixType.sectionHead)) {
             SpeciesPickerField(speciesCode: $speciesCode)
-        }
-    }
-
-    // MARK: - Position
-
-    /// Breast height in the cruiser's own unit.
-    ///
-    /// The two are the SAME HEIGHT, not a conversion of one another: 4.5 ft is
-    /// the US definition and 1.37 m is that height written in metres. Both are
-    /// spelled out rather than computed, because a formatter would render the
-    /// imperial side as "4.49 ft" and invite the reader to think the app had
-    /// rounded a metric standard into an imperial one.
-    private var breastHeightWord: String {
-        settings.unitSystem == .metric ? "1.37 m" : "4.5 ft"
-    }
-
-    private var positionSection: some View {
-        Section(
-            header: Text("POSITION").font(ForestixType.sectionHead),
-            footer: Text("Default DBH = \(breastHeightWord). Mark butt / upper / stump if you measured elsewhere.")
-        ) {
-            Picker("Where on the stem",
-                   selection: Binding(
-                    get: { position ?? .dbh },
-                    set: { position = $0 })
-            ) {
-                ForEach(QuickMeasureEntry.StemPosition.allCases, id: \.self) { p in
-                    Text(p.displayName).tag(p)
-                }
-            }
-            .pickerStyle(.segmented)
         }
     }
 

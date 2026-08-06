@@ -585,9 +585,7 @@ public struct HeightScanScreen: View {
         }
         .sheet(isPresented: $presentingMetadata) {
             ScanMetadataSheet(
-                kind: .height,
                 speciesCode: $metaSpecies,
-                position: .constant(nil),
                 damageCodes: $metaDamage,
                 note: $metaNote)
         }

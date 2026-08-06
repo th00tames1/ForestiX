@@ -291,7 +291,6 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // Seeded from the chooser's species control when it was used, so the
     // details chip already reads the species the cruiser picked at the tree.
     var metaSpecies by remember { mutableStateOf(pendingLock?.speciesCode) }
-    var metaPosition by remember { mutableStateOf<StemPosition?>(StemPosition.DBH) }
     var metaDamage by remember { mutableStateOf<List<String>>(emptyList()) }
     var metaNote by remember { mutableStateOf("") }
     var showMetadata by remember { mutableStateOf(false) }
@@ -1590,7 +1589,6 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 result = null
                 failure = null
                 metaSpecies = null
-                metaPosition = StemPosition.DBH
                 metaDamage = emptyList()
                 metaNote = ""
                 stage = Stage.AIMING
@@ -1629,7 +1627,13 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                             ?: env.history.treeName(pendingTree, targetPlotID),
                         plotID = targetPlotID,
                         speciesCode = metaSpecies,
-                        position = metaPosition ?: StemPosition.DBH,
+                        // Always breast height, and no longer a question the
+                        // cruiser is asked. The column stays on the record and
+                        // in every export; it is now stamped rather than
+                        // picked, which is what a diameter scan has always
+                        // actually done — the guide puts the phone at 1.37 m
+                        // and the chord identity assumes the reading is there.
+                        position = StemPosition.DBH,
                         damageCodes = metaDamage,
                         note = metaNote.ifBlank { null },
                         latitude = fix?.latitude,
@@ -2539,9 +2543,21 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                             // reading — release the bundle id so the accept
                             // can't mark an unrelated capture as accepted.
                             lastRawCaptureId = null
-                            // iOS submitManualEntry goes straight to
-                            // .accepted — record and continue.
-                            acceptResult(r)
+                            // SHOW THE READING, DO NOT RECORD IT. iOS
+                            // `submitManualEntry` sets `.accepted` — a state
+                            // that draws the result panel and waits for the
+                            // cruiser's Accept — and this used to call
+                            // `acceptResult` instead, which files the tree on
+                            // the spot. Two things followed from that, both
+                            // wrong: a typed reading never showed its own
+                            // panel, so the basal area beside the diameter
+                            // was on screen for a scanned stem and not for a
+                            // taped one; and the Details chip lives on that
+                            // panel, so a typed reading could never be given
+                            // a species, a damage tag or a note. Accept is
+                            // one tap away, on the same button a scanned
+                            // reading uses.
+                            stage = Stage.RESULT
                         }
                     }
                 }
@@ -2585,6 +2601,20 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         // on its record sheet and in the plot total are one
                         // number. A diameter that is not a usable stem has
                         // none, and the line reads the form's em dash.
+                        //
+                        // NAMED, not just printed. Unlabelled, the panel read
+                        // "33.7 cm  0.089 m²" and left the second figure to
+                        // be guessed from its unit — and ft² is a unit a
+                        // cruiser also sees on the BAF and on per-acre
+                        // totals, so the guess is not a safe one. The tree
+                        // form's row carries the words "Basal area"; this one
+                        // carries "BA" because it sits on a line the diameter
+                        // has to stay large on.
+                        Text(
+                            "BA",
+                            style = Forestix.type.caption,
+                            color = Color.White.copy(alpha = 0.55f),
+                        )
                         Text(
                             treeBasalAreaText(r.diameterCm, settings.unitSystem)
                                 ?: TreeFormWords.EMPTY,
@@ -2705,11 +2735,10 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             }
         }
 
-        // Metadata editor (species / position / damage / note).
+        // Metadata editor (species / damage / note).
         if (showMetadata) {
             ScanMetadataSheet(
                 speciesCode = metaSpecies, onSpeciesCode = { metaSpecies = it },
-                position = metaPosition, onPosition = { metaPosition = it },
                 damageCodes = metaDamage, onDamageCodes = { metaDamage = it },
                 note = metaNote, onNote = { metaNote = it },
                 onDismiss = { showMetadata = false },

@@ -1,9 +1,17 @@
-// Post-scan metadata sheet — attaches species + position + damage + note
-// to a freshly-fitted scan before the cruiser hits Accept. Port of the iOS
+// Post-scan metadata sheet — attaches species + damage + note to a
+// freshly-fitted scan before the cruiser hits Accept. Port of the iOS
 // ScanMetadataSheet (Screens/ScanMetadataSheet.swift): same presentation
 // (bottom sheet titled "Reading details" with a Done affordance), same
 // fields, same damage-code vocabulary, so the recorded QuickMeasureEntry
 // rows join across platforms.
+//
+// NO STEM POSITION. This sheet used to carry a butt / DBH / upper / stump
+// segmented control, and it was the last place in the app that asked a
+// cruiser to make that call — the tree form and the field log's record sheet
+// both dropped it. A row removed from two screens and left live on a third is
+// not removed; it just moved somewhere harder to find. The FIELD SURVIVES on
+// the entry and in every export, stamped DBH, which is the height the guide
+// puts the cruiser at and the height the diameter identity assumes.
 
 package com.hcjeong.forestix.ui.screens
 
@@ -32,9 +40,6 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -60,8 +65,6 @@ import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.common.CountrySpecies
 import com.hcjeong.forestix.common.Region
 import com.hcjeong.forestix.common.RegionalSpecies
-import com.hcjeong.forestix.common.UnitSystem
-import com.hcjeong.forestix.data.StemPosition
 import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixRadius
@@ -78,26 +81,14 @@ val ScanDamageOptions = listOf("sweep", "fork", "broken-top", "rot", "scar", "le
 fun ScanMetadataSheet(
     speciesCode: String?,
     onSpeciesCode: (String?) -> Unit,
-    position: StemPosition?,
-    onPosition: (StemPosition?) -> Unit,
     damageCodes: List<String>,
     onDamageCodes: (List<String>) -> Unit,
     note: String,
     onNote: (String) -> Unit,
-    showPosition: Boolean = true,
     onDismiss: () -> Unit,
 ) {
     val type = Forestix.type
     val colors = Forestix.colors
-    // Breast height in the cruiser's own unit.
-    //
-    // The two are the SAME HEIGHT, not a conversion of one another: 4.5 ft is
-    // the US definition and 1.37 m is that height written in metres. Both are
-    // spelled out rather than computed, because a formatter would render the
-    // imperial side as "4.49 ft" and invite the reader to think the app had
-    // rounded a metric standard into an imperial one.
-    val settings by LocalAppEnvironment.current.settings.state.collectAsStateWithLifecycle()
-    val breastHeightWord = if (settings.unitSystem == UnitSystem.METRIC) "1.37 m" else "4.5 ft"
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -136,31 +127,7 @@ fun ScanMetadataSheet(
                 )
             }
 
-            // POSITION -----------------------------------------------------
-            if (showPosition) {
-                MetadataSection(
-                    header = "POSITION",
-                    footer = "Default DBH = $breastHeightWord. Mark butt / upper / stump " +
-                        "if you measured elsewhere.",
-                ) {
-                    // Single-choice segmented control, default DBH, never
-                    // deselectable (tap-again keeps the selection) — iOS
-                    // `.segmented` Picker parity.
-                    val current = position ?: StemPosition.DBH
-                    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                        StemPosition.entries.forEachIndexed { index, p ->
-                            SegmentedButton(
-                                selected = current == p,
-                                onClick = { onPosition(p) },
-                                shape = SegmentedButtonDefaults.itemShape(
-                                    index = index,
-                                    count = StemPosition.entries.size,
-                                ),
-                            ) { Text(p.displayName, style = type.caption, maxLines = 1) }
-                        }
-                    }
-                }
-            }
+            // NO POSITION SECTION — see the file header.
 
             // DAMAGE -------------------------------------------------------
             MetadataSection(

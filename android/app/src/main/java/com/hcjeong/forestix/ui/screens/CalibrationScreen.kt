@@ -18,6 +18,8 @@
 
 package com.hcjeong.forestix.ui.screens
 
+import com.hcjeong.forestix.data.cruise.DBHCalibration
+
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -401,10 +403,12 @@ fun CalibrationScreen(nav: NavController, projectId: String? = null) {
                 // and "not corrected" would hide a scan the cruiser remembers
                 // doing, so the stale case gets its own sentence and names the
                 // one action that fixes it.
-                val widthsCorrected =
-                    p.dbhCorrectionAlpha != 0f || p.dbhCorrectionBeta != 1f
-                val widthsStale = widthsCorrected &&
-                    p.dbhCalibrationEpoch != DBHEstimator.ESTIMATOR_EPOCH
+                // Through `DBHCalibration.state` rather than re-derived here.
+                // This screen's copy of the test was the correct one and the
+                // PDF's was not, which is the whole argument for one copy.
+                val widthState = DBHCalibration.state(p)
+                val widthsCorrected = widthState != DBHCalibration.State.NONE
+                val widthsStale = widthState == DBHCalibration.State.IGNORED_STALE
                 Text(
                     if (widthsStale) {
                         "Your round-post scan was made with an earlier version of the " +

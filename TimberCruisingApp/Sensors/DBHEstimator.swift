@@ -1785,7 +1785,14 @@ public enum DBHEstimator {
     ///
     /// Bump this whenever a change moves a stored diameter. It is what the
     /// recompute decides on and what an analysis splits the corpus by.
-    public static let estimatorEpoch = 5
+    ///
+    /// THE NUMBER NOW LIVES IN `Models.DBHCalibration.currentEpoch`, and this
+    /// keeps its name because a dozen call sites read it. It had to move down
+    /// a module: `Export` cannot see `Sensors`, so the PDF report could not
+    /// ask this question and answered it with a predicate of its own that had
+    /// no epoch term in it at all — telling a landowner a calibration was
+    /// applied while this file was refusing to apply it.
+    public static let estimatorEpoch = DBHCalibration.currentEpoch
 
     /// How far the guide-strip walk lets the surface recede before it calls
     /// the stem finished, in metres.

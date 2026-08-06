@@ -150,8 +150,13 @@ public struct CalibrationScreen: View {
                 // saying "not corrected" would hide a scan the cruiser
                 // remembers doing — so the stale case gets its own sentence
                 // and asks for the one action that fixes it.
-                let calibrated = p.dbhCorrectionAlpha != 0 || p.dbhCorrectionBeta != 1
-                let stale = calibrated && p.dbhCalibrationEpoch != DBHEstimator.estimatorEpoch
+                //
+                // Through `DBHCalibration.state` rather than re-derived here.
+                // This screen's copy of the test was the correct one and the
+                // PDF's was not, which is the whole argument for there being
+                // one copy.
+                let stale = DBHCalibration.state(of: p) == .ignoredStale
+                let calibrated = DBHCalibration.state(of: p) != .none
                 Text(stale
                      ? "Your round-post scan was made with an earlier version of the width measurement and no longer applies, so it is being ignored. Run the round-post scan again to correct widths on this project."
                      : calibrated

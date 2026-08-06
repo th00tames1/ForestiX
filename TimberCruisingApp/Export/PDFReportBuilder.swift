@@ -588,16 +588,22 @@ public enum PDFReportBuilder {
         // Four device internals — a sensor bias, a raw σ, two Greek
         // correction coefficients and the visual-odometry drift term —
         // in four lines of a document a landowner reads. None of it is
-        // interpretable outside the codebase; the numbers still travel
-        // in the CSV, which is where an auditor would look for them.
+        // interpretable outside the codebase, so the line says what the
+        // calibration is DOING rather than what it is.
         // "cylinder" is the shape the maths fits, and the app stopped saying
         // it out loud everywhere else — the Calibration screen's tab, header
         // and helper text all say "round post". A client's PDF must not be
         // the one document still using the internal name.
+        //
+        // THREE STATES, through the shared test. This line used to read the
+        // coefficients and nothing else, so a project whose scan the estimator
+        // was REFUSING as stale still had "calibration applied" printed here —
+        // a claim about the numbers in this very report that was not true of
+        // them. `DBHCalibration.state` is the same test the Calibration screen
+        // shows the cruiser, so the screen and the client's copy cannot say
+        // different things about one project.
         kv("Device calibration",
-           inputs.project.dbhCorrectionAlpha == 0 && inputs.project.dbhCorrectionBeta == 1
-               ? "Not calibrated on this device"
-               : "Wall and round-post calibration applied")
+           DBHCalibration.state(of: inputs.project).reportPhrase)
 
         y -= 12
         drawHeading("Species list (\(inputs.species.count))",

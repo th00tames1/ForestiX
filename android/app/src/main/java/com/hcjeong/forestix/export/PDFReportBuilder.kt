@@ -29,6 +29,8 @@
 
 package com.hcjeong.forestix.export
 
+import com.hcjeong.forestix.data.cruise.DBHCalibration
+
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -435,14 +437,18 @@ object PDFReportBuilder {
         y += 18f
         // The four device internals that used to print here — a sensor bias, a
         // raw σ, the two Greek correction coefficients and the visual-odometry
-        // drift term — are interpretable by neither a cruiser nor a client.
-        // Every one of them still ships in full in the CSV export.
-        kv("Device calibration", if (inputs.project.lidarBiasMm != 0f ||
-                                     inputs.project.dbhCorrectionBeta != 1f) {
-                                     "Wall and round-post calibration applied"
-                                 } else {
-                                     "Not calibrated on this device"
-                                 })
+        // drift term — are interpretable by neither a cruiser nor a client, so
+        // the line says what the calibration is DOING rather than what it is.
+        //
+        // THREE STATES, through the shared test. This line used to key on
+        // `lidarBiasMm` — the WALL scan's depth offset, not the round-post
+        // scan's width coefficients — and carried no epoch term, so it printed
+        // "applied" both for a project with only a wall scan and for one whose
+        // coefficients the estimator was REFUSING as stale. `DBHCalibration
+        // .state` is the same test the Calibration screen shows the cruiser,
+        // so the screen and the client's copy cannot say different things
+        // about one project.
+        kv("Device calibration", DBHCalibration.state(inputs.project).reportPhrase)
 
         y += 12f
         drawHeading(canvas, "Species list (${inputs.species.size})", frame.left, y, frame.width())

@@ -13,6 +13,8 @@
 
 package com.hcjeong.forestix.sensors
 
+import com.hcjeong.forestix.data.cruise.DBHCalibration
+
 import com.hcjeong.forestix.ar.Vec3
 import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.UnitSystem
@@ -241,7 +243,12 @@ object DBHEstimator {
     ///     pooled — and this study pools iOS and Android. Epoch 5 is the
     ///     first generation in which both handsets read a bracket the same
     ///     way.
-    const val ESTIMATOR_EPOCH = 5
+    /// THE NUMBER NOW LIVES IN `DBHCalibration.CURRENT_EPOCH`, and this keeps
+    /// its name because a dozen call sites read it. It moved beside the
+    /// Project model for the reason iOS had to move it: the PDF report needed
+    /// the same answer and could not reach the estimator to get it, so it
+    /// answered with a predicate of its own that had no epoch term at all.
+    const val ESTIMATOR_EPOCH = DBHCalibration.CURRENT_EPOCH
 
     val PLAUSIBLE_DIAMETER_CM = 2.5..300.0
 

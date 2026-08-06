@@ -188,7 +188,7 @@ let package = Package(
         .testTarget(
             name: "UISnapshotTests",
             dependencies: [
-                "UI",
+                "UI", "Persistence",
                 .product(name: "SnapshotTesting", package: "swift-snapshot-testing")
             ],
             path: "Tests/UISnapshotTests"

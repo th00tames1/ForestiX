@@ -99,8 +99,17 @@ final class DBHEstimatorTests: XCTestCase {
         }
         XCTAssertEqual(result.confidence, .red)
         XCTAssertNotNil(result.rejectionReason)
-        XCTAssertTrue(result.rejectionReason!.contains("tap depth"),
-            "reason should mention tap depth — got \(result.rejectionReason!)")
+        // The sentence is built from `usableTapDepthM` itself and follows the
+        // cruiser's unit system, so it is asserted by the NUMBERS IT QUOTES
+        // rather than by a phrase. It used to say "tap depth", which is not
+        // language a cruiser standing at a stem can act on; commit 4cb8e6f
+        // rewrote 89 such strings and left every threshold untouched. Pinning
+        // the wording again would only re-break the next time it improves —
+        // pinning the band keeps the message honest about the gate.
+        let reason = result.rejectionReason!
+        XCTAssertTrue(
+            reason.contains("0.5") && reason.contains("3"),
+            "the distance rejection must quote its own usable band — got \(reason)")
     }
 
     // MARK: - Done Criterion 3 (yellow tier on 30–45° arcs)
@@ -148,7 +157,14 @@ final class DBHEstimatorTests: XCTestCase {
             calibration: ProjectCalibration(
                 depthNoiseMm: 1.0,
                 dbhCorrectionAlpha: alpha,
-                dbhCorrectionBeta: beta))
+                dbhCorrectionBeta: beta,
+                // AT THE CURRENT EPOCH, or the coefficients are refused before
+                // they are ever applied and this asserts nothing. Omitting it
+                // defaults to 0 — "never calibrated" — which is exactly the
+                // case the staleness guard exists to catch, so the test was
+                // measuring the guard while claiming to measure the
+                // correction. See `testPipelineRefusesAStaleCalibration`.
+                dbhCalibrationEpoch: DBHEstimator.estimatorEpoch))
         guard let r0 = DBHEstimator.estimate(input: identity),
               let r1 = DBHEstimator.estimate(input: calibrated)
         else { return XCTFail("Expected both estimates to succeed") }
@@ -157,6 +173,40 @@ final class DBHEstimatorTests: XCTestCase {
             alpha + beta * r0.diameterCm,
             accuracy: 1e-3,
             "Calibrated DBH must equal alpha + beta · raw DBH")
+    }
+
+    /// The other half of the contract: coefficients fitted against a DIFFERENT
+    /// estimator are refused, and the raw diameter is published instead.
+    ///
+    /// This is the behaviour that silently replaced the one above, and nothing
+    /// asserted it — the only evidence it existed was that the test above went
+    /// red. A guard whose whole job is to stay quiet needs a test that says so
+    /// out loud, or the next person to see this red deletes the guard.
+    func testPipelineRefusesAStaleCalibration() {
+        let alpha: Float = 0.2, beta: Float = 0.98
+        let raw = makeInput(
+            rTrue: 0.15, arcDeg: 120,
+            frames: 10, samplesPerFrame: 200,
+            noise: 0.0, seed: 1,
+            calibration: ProjectCalibration(
+                depthNoiseMm: 1.0,
+                dbhCorrectionAlpha: 0,
+                dbhCorrectionBeta: 1))
+        let stale = makeInput(
+            rTrue: 0.15, arcDeg: 120,
+            frames: 10, samplesPerFrame: 200,
+            noise: 0.0, seed: 1,
+            calibration: ProjectCalibration(
+                depthNoiseMm: 1.0,
+                dbhCorrectionAlpha: alpha,
+                dbhCorrectionBeta: beta,
+                dbhCalibrationEpoch: DBHEstimator.estimatorEpoch - 1))
+        guard let r0 = DBHEstimator.estimate(input: raw),
+              let rStale = DBHEstimator.estimate(input: stale)
+        else { return XCTFail("Expected both estimates to succeed") }
+        XCTAssertEqual(
+            rStale.diameterCm, r0.diameterCm, accuracy: 1e-4,
+            "A calibration fitted against another epoch must not be applied")
     }
 
     // MARK: - Synthetic ARDepthFrame fixture

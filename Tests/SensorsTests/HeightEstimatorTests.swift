@@ -172,8 +172,15 @@ final class HeightEstimatorTests: XCTestCase {
         let r = HeightEstimator.estimate(input: input(
             dh: 15, alphaTopDeg: 50, alphaBaseDeg: -3, tracking: false))
         XCTAssertEqual(r.confidence, .red)
-        XCTAssertTrue(r.rejectionReason?.contains("tracking") ?? false,
-                      "reason = \(r.rejectionReason ?? "nil")")
+        // Not the word "tracking" — that was developer language, and commit
+        // 4cb8e6f rewrote it into something a cruiser can act on ("The camera
+        // lost its place while you walked back — measure this tree again,
+        // moving more slowly") without touching the predicate that produces
+        // it. What matters here is that a reason is GIVEN for a red that the
+        // geometry alone does not explain, and that it names the recovery.
+        let reason = try XCTUnwrap(r.rejectionReason)
+        XCTAssertTrue(reason.lowercased().contains("again"),
+                      "a tracking red must tell the cruiser what to do — got \(reason)")
         XCTAssertGreaterThan(try XCTUnwrap(r.sigmaHm), 0)
         XCTAssertTrue(HeightEstimator.canAccept(r))
     }

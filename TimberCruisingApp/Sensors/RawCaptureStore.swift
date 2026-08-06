@@ -132,14 +132,35 @@ public struct RawCaptureManifest: Codable, Sendable {
         public var beta: Double
         public var depthNoiseMm: Double
         public var vioDriftFraction: Double
+        /// WHICH ESTIMATOR alpha/beta were fitted against, carried so a replay
+        /// can put them back exactly as the capture had them.
+        ///
+        /// It was missing, and the omission silently disarmed the coefficients
+        /// on every replay: `ProjectCalibration.dbhCalibrationEpoch` defaults
+        /// to 0, 0 never equals a live epoch, so `appliedToRawCm` judged every
+        /// rebuilt calibration stale and returned the RAW diameter. For a
+        /// calibrated project that made `DBHEpochRecompute` write uncalibrated
+        /// widths back over calibrated ones — and the difference,
+        /// `alpha + (beta-1)·raw`, is about a percent, the same size as a
+        /// genuine epoch shift, so the review screen showed a plausible
+        /// correction and nothing marked it as a loss.
+        ///
+        /// OPTIONAL, defaulting to 0 on read. Bundles written before this key
+        /// existed keep exactly today's conservative behaviour — their
+        /// coefficients stay refused — rather than being retro-fitted with an
+        /// epoch nobody recorded.
+        public var dbhCalibrationEpoch: Int?
         enum CodingKeys: String, CodingKey {
             case alpha, beta
             case depthNoiseMm = "depth_noise_mm"
             case vioDriftFraction = "vio_drift_fraction"
+            case dbhCalibrationEpoch = "dbh_calibration_epoch"
         }
-        public init(alpha: Double, beta: Double, depthNoiseMm: Double, vioDriftFraction: Double) {
+        public init(alpha: Double, beta: Double, depthNoiseMm: Double,
+                    vioDriftFraction: Double, dbhCalibrationEpoch: Int? = nil) {
             self.alpha = alpha; self.beta = beta
             self.depthNoiseMm = depthNoiseMm; self.vioDriftFraction = vioDriftFraction
+            self.dbhCalibrationEpoch = dbhCalibrationEpoch
         }
     }
 

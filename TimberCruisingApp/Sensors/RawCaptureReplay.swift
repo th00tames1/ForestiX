@@ -596,6 +596,11 @@ public enum RawCaptureReplay {
             depthNoiseMm: Float(c.depthNoiseMm),
             dbhCorrectionAlpha: Float(c.alpha),
             dbhCorrectionBeta: Float(c.beta),
+            // 0 for a bundle written before the key existed, which leaves its
+            // coefficients refused — the same answer that build gave. Omitting
+            // this argument is what made EVERY replay epoch 0, so a calibrated
+            // project's replay silently dropped its correction.
+            dbhCalibrationEpoch: c.dbhCalibrationEpoch ?? 0,
             vioDriftFraction: Float(c.vioDriftFraction))
         // depthDiscontinuityM is not a persisted/project-tunable field
         // (always the 0.04 m default on both platforms), so the default
@@ -994,7 +999,8 @@ public enum RawCaptureRecorder {
                     alpha: Double(calibration.dbhCorrectionAlpha),
                     beta: Double(calibration.dbhCorrectionBeta),
                     depthNoiseMm: Double(calibration.depthNoiseMm),
-                    vioDriftFraction: Double(calibration.vioDriftFraction))),
+                    vioDriftFraction: Double(calibration.vioDriftFraction),
+                    dbhCalibrationEpoch: calibration.dbhCalibrationEpoch)),
             resultLive: resultLive,
             truth: .init(value: nil, enteredAt: nil),
             gps: gps.map { .init(lat: $0.lat, lon: $0.lon, accM: $0.accM) },

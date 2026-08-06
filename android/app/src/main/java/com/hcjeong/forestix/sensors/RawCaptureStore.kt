@@ -844,6 +844,20 @@ object RawCaptureStore {
             put("beta", cal.dbhCorrectionBeta.toDouble())
             put("depth_noise_mm", cal.depthNoiseMm.toDouble())
             put("vio_drift_fraction", cal.vioDriftFraction.toDouble())
+            // WHICH ESTIMATOR alpha/beta were fitted against, carried so a
+            // replay can put them back exactly as the capture had them.
+            //
+            // It was missing, and the omission silently disarmed the
+            // coefficients on every replay: the rebuilt ProjectCalibration
+            // defaulted to epoch 0, 0 never equals a live epoch, so
+            // appliedToRawCm judged it stale and returned the RAW diameter.
+            // For a calibrated project that made the epoch recompute write
+            // uncalibrated widths back over calibrated ones — and the
+            // difference, alpha + (beta-1)*raw, is about a percent, the same
+            // size as a genuine epoch shift, so the review screen showed a
+            // plausible correction and nothing marked it as a loss.
+            // iOS RawCaptureManifest.Calibration parity, same key spelling.
+            put("dbh_calibration_epoch", cal.dbhCalibrationEpoch)
         })
     }
 

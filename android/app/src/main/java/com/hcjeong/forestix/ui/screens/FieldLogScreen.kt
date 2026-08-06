@@ -2045,7 +2045,15 @@ internal fun FieldLogDetailSheet(
                     earliest?.hasHandSetTime == true),
                 onTap = { earliest?.let { editingTimeOf = it.id } },
             )
-            TreeFormRow(label = TreeFormWords.TREE, value = row.treeLabel)
+            // `row.title`, NOT `row.treeLabel` — the same string the cruise
+            // tree's form puts in this row (`tree.displayTitle`, which is
+            // `TreeLabel.title`). `treeLabel` is the FIELD LOG LIST's column,
+            // where the heading already says what the list is about and "#12"
+            // is enough; on a form, the two surfaces printed "Tree #12" and
+            // "#12" for the same stem, which is the complaint this form was
+            // unified to answer. It is also what the heading two rows above
+            // this one has always used.
+            TreeFormRow(label = TreeFormWords.TREE, value = row.title)
             // A quick reading records no tally status: it is a measurement,
             // not a stem on a cruise sheet.
             TreeFormRow(label = TreeFormWords.STATUS, value = null)

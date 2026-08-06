@@ -120,6 +120,39 @@ class TreeDetailViewModel(tree: Tree, private val treeRepo: TreeRepository) {
         }
     }
 
+    /// Writes the measured time STRAIGHT TO THE RECORD, the way iOS's
+    /// `saveTime()` does and the way the field log's record sheet already did
+    /// on this platform.
+    ///
+    /// This used to set the `measuredAt` mirror and mark the form dirty. The
+    /// row then showed the corrected time immediately — so it read as saved —
+    /// while nothing had been written, and a cruiser who backed out without
+    /// pressing "Save changes" lost the correction with no sign it had gone.
+    /// A row that answers a tap by displaying the new value has told the
+    /// cruiser it is stored; the only honest way to keep that promise is to
+    /// store it.
+    ///
+    /// The row is re-read first rather than copied from the open snapshot: the
+    /// Plot row re-parents through `TreeMover`, so the tree in hand may be one
+    /// write behind.
+    suspend fun setMeasuredTime(epochMs: Long) {
+        try {
+            val fresh = treeRepo.read(_tree.value.id, includeDeleted = true) ?: run {
+                _errorMessage.value = "This tree is no longer in the cruise."
+                return
+            }
+            fresh.createdAt = epochMs
+            fresh.updatedAt = System.currentTimeMillis()
+            _tree.value = treeRepo.update(fresh)
+            // `save()` copies the form's mirror back over `createdAt`, so a
+            // stale mirror would put the old instant back on the next Save.
+            measuredAt.value = epochMs
+            _errorMessage.value = null
+        } catch (e: Exception) {
+            _errorMessage.value = "Save failed: ${e.message ?: e}"
+        }
+    }
+
     suspend fun softDelete() {
         try {
             treeRepo.delete(_tree.value.id)

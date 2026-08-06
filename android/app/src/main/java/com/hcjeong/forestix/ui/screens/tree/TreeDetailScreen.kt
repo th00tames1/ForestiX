@@ -610,9 +610,10 @@ private fun TreeDetailContent(nav: NavController, viewModel: TreeDetailViewModel
             sourceText = null,
             footer = TreeFormWords.TIME_FOOTER,
             onDismiss = { settingTime = false },
-            onSave = {
-                viewModel.measuredAt.value = it
-                viewModel.markDirty()
+            onSave = { picked ->
+                // Written on the spot, not on the next "Save changes" — see
+                // `TreeDetailViewModel.setMeasuredTime`.
+                scope.launch { viewModel.setMeasuredTime(picked) }
                 settingTime = false
             },
         )

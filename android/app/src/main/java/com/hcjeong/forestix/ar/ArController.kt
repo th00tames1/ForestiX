@@ -136,6 +136,13 @@ class ArController {
     /// off the crosshair — the height-anchor sphere then renders visibly off
     /// the aim and d_h (→ H) is computed from that wrong point. iOS never
     /// consumes feature-point hits (mesh raycast → estimated planes only).
+    /// How far a GROUND tap may land, in metres. The cruiser is standing at
+    /// the tree they are measuring — the DBH band itself is 0.5–3 m and the
+    /// foot of the trunk sits a little further down the ray than the bark
+    /// does — so six metres is generous for the act and nowhere near the
+    /// tens of metres a grazed ground plane returns.
+    private val GROUND_TAP_MAX_M = 6f
+
     fun screenCenterHit(): Vec3? = screenHit(viewWidthPx / 2f, viewHeightPx / 2f)
 
     /// The same hit, at an arbitrary screen point — what a TAP lands on.
@@ -145,47 +152,14 @@ class ArController {
     /// policy, the dev-HUD readout and the null contract are one body of code
     /// rather than two that drift. iOS `ARCenterRaycaster.hit(at:)` is the
     /// same split for the same reason.
-    /// What a surface the cruiser POINTED AT is expected to be, which decides
-    /// the order candidate hits are accepted in. iOS
-    /// `ARCenterRaycaster.SurfaceIntent` 1:1.
-    ///
-    /// It is not a preference. A ray through a screen point usually meets both
-    /// a vertical and a horizontal candidate — the trunk in front and the
-    /// ground under it — and whichever is taken first wins. Asking in the
-    /// wrong order does not fail; it silently returns the other surface, at a
-    /// completely different distance.
-    enum class SurfaceIntent {
-        /// The trunk face, or anything the crosshair is on. Nearest surface.
-        UPRIGHT,
-
-        /// The ground. A tap at the foot of a stem is a ray that grazes the
-        /// bark all the way down, so taking the nearest surface hands back a
-        /// point on the TRUNK and the breast-height guide goes up to chest
-        /// height with it. Prefer a horizontal-ish plane, then fall back.
-        GROUND,
-    }
-
-    fun screenHit(x: Float, y: Float, intent: SurfaceIntent = SurfaceIntent.UPRIGHT): Vec3? {
+    fun screenHit(x: Float, y: Float): Vec3? {
         if (!ready()) { lastCenterHitInfo = null; return null }
         val f = frame ?: return null
         val hits = try { f.hitTest(x, y) } catch (_: Throwable) { return null }
         // LiDAR mode: nearest SURFACE hit (depth-image points + planes).
-        // AR mode (no Depth API): estimated-plane hits first, then anything —
-        // the dev-only caliper/motion arms need some distance to work with.
-        // GROUND asks for a horizontal plane first — ARCore tags a Plane with
-        // its type, so "the ground" is answerable rather than guessed at. It
-        // still falls through to the ordinary policy, because a cruiser can
-        // legitimately tap ground that ARCore has only seen as depth.
-        val groundFirst = if (intent == SurfaceIntent.GROUND) {
-            hits.firstOrNull {
-                val t = it.trackable
-                t is Plane && (t.type == Plane.Type.HORIZONTAL_UPWARD_FACING ||
-                               t.type == Plane.Type.HORIZONTAL_DOWNWARD_FACING)
-            }
-        } else null
-        val hit = groundFirst
-            ?: if (preferDepth) hits.firstOrNull { it.trackable is DepthPoint || it.trackable is Plane }
-               else hits.firstOrNull { it.trackable is Plane } ?: hits.firstOrNull()
+        // AR mode (no Depth API): estimated-plane hits first, then anything.
+        val hit = if (preferDepth) hits.firstOrNull { it.trackable is DepthPoint || it.trackable is Plane }
+        else hits.firstOrNull { it.trackable is Plane } ?: hits.firstOrNull()
         lastCenterHitInfo = hit?.let {
             val kind = when (it.trackable) {
                 is DepthPoint -> "depth"
@@ -198,6 +172,71 @@ class ArController {
         hit ?: return null
         val t = hit.hitPose.translation
         return Vec3(t[0], t[1], t[2])
+    }
+
+    /// GROUND raycast at an arbitrary screen point — what the breast-height
+    /// guide's tap lands on.
+    ///
+    /// SHAPED LIKE `screenCenterAnchorHit`, deliberately, because it has the
+    /// same failure to avoid and that one already learned it in the field.
+    /// A tap near the foot of a stem sends a ray down at a shallow angle, and
+    /// the plain surface filter in `screenHit` happily returns the ray's
+    /// intersection with ARCore's detected ground plane TENS OF METRES OUT —
+    /// field round 8 measured 12.78 / 31.11 / 44.33 m as the pitch wobbled a
+    /// few degrees. Planting a breast-height guide out there is the same
+    /// defect wearing a different hat.
+    ///
+    /// So, the same three rules, plus the one this case needs:
+    ///   • nothing past `maxDistM` — the foot of the tree the cruiser is
+    ///     standing at, not a hillside behind it;
+    ///   • a DepthPoint within the gate wins outright, as it does there;
+    ///   • sparse Point hits never place anything;
+    ///   • and a Plane must be HORIZONTAL. That is the rule this raycast adds
+    ///     and the anchor one cannot use: the anchor wants the trunk, so it
+    ///     asks only that the plane FACE the ray — which a trunk face and a
+    ///     floor both do. Ground is the one that has to be told apart from
+    ///     bark, and ARCore tags plane type, so it is answerable rather than
+    ///     guessed at.
+    ///
+    /// `lastCenterHitInfo` reports what was accepted or why the tap did
+    /// nothing, so a dev-mode field run can see it. iOS
+    /// `ARCenterRaycaster.hit(at:intent:.ground)` is the same policy.
+    fun screenGroundHit(x: Float, y: Float, maxDistM: Float = GROUND_TAP_MAX_M): Vec3? {
+        if (!ready()) { lastCenterHitInfo = null; return null }
+        val f = frame ?: return null
+        val hits = try { f.hitTest(x, y) } catch (_: Throwable) { return null }
+        var rejected: String? = null
+        for (h in hits) {
+            val d = h.distance
+            when (val trackable = h.trackable) {
+                is DepthPoint -> {
+                    if (d <= maxDistM) {
+                        lastCenterHitInfo = String.format(Locale.US, "ground depth %.2fm", d)
+                        val t = h.hitPose.translation
+                        return Vec3(t[0], t[1], t[2])
+                    }
+                    if (rejected == null) rejected = String.format(Locale.US, "depth %.1fm too far", d)
+                }
+                is Plane -> {
+                    if (d > maxDistM) {
+                        if (rejected == null) rejected = String.format(Locale.US, "plane %.1fm too far", d)
+                        continue
+                    }
+                    val horizontal = trackable.type == Plane.Type.HORIZONTAL_UPWARD_FACING ||
+                        trackable.type == Plane.Type.HORIZONTAL_DOWNWARD_FACING
+                    if (!horizontal) {
+                        if (rejected == null) rejected = String.format(Locale.US, "plane %.1fm not ground", d)
+                        continue
+                    }
+                    lastCenterHitInfo = String.format(Locale.US, "ground plane %.2fm", d)
+                    val t = h.hitPose.translation
+                    return Vec3(t[0], t[1], t[2])
+                }
+                else -> { /* sparse Point / other: never places the guide */ }
+            }
+        }
+        lastCenterHitInfo = rejected
+        return null
     }
 
     /// Height-anchor raycast (locked spec, field round 8). At eye level the

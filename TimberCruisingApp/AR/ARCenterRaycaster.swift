@@ -230,18 +230,37 @@ public final class ARCenterRaycaster: ObservableObject {
         if preferLiDARMesh, let mesh = meshRaycastHit(at: screenPoint, in: view) {
             return mesh
         }
+        // GROUND ALSO GETS A DISTANCE GATE, for the reason field round 8
+        // documented on the other platform and the height anchor already
+        // guards against: a tap near the foot of a stem sends a ray down at a
+        // shallow angle, and a horizontal estimated plane accepted at any
+        // range is the ray's intersection with the ground TENS OF METRES OUT
+        // (12.78 / 31.11 / 44.33 m were measured, as the pitch wobbled a few
+        // degrees). Planting a breast-height guide out there is the same
+        // defect wearing a different hat. Six metres is generous for a
+        // cruiser standing at the tree — the DBH band itself is 0.5–3 m — and
+        // nowhere near what a grazed plane returns.
         let order: [ARRaycastQuery.TargetAlignment] = intent == .ground
             ? [.horizontal, .any]
             : [.vertical, .horizontal, .any]
+        let camera = cameraWorldPosition
         for alignment in order {
-            if let hit = view.raycast(from: screenPoint,
-                                      allowing: .estimatedPlane,
-                                      alignment: alignment).first {
-                return worldTranslation(from: hit)
+            for hit in view.raycast(from: screenPoint,
+                                    allowing: .estimatedPlane,
+                                    alignment: alignment) {
+                let p = worldTranslation(from: hit)
+                if intent == .ground, let camera {
+                    guard simd_distance(p, camera) <= Self.groundTapMaxM else { continue }
+                }
+                return p
             }
         }
         return nil
     }
+
+    /// How far a GROUND tap may land, in metres. See `hit(at:intent:)`.
+    /// Android `ArController.GROUND_TAP_MAX_M` 1:1.
+    static let groundTapMaxM: Float = 6
 
     /// Unit world-space ray direction through a screen point, via the exact
     /// camera intrinsics ARKit would use (no manual unprojection). The two

@@ -396,6 +396,18 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             delay(50)
         }
     }
+    /// THE SAME MOTION AS iOS, which interpolates the horizon's travel over
+    /// 80 ms. A Compose Canvas has no implicit animation, so the line stepped
+    /// in 50 ms jumps against a line that glided — same geometry, visibly
+    /// different instrument, on a screen whose whole point is that a cruiser
+    /// reads it the same on either phone. `tween` at the same 80 ms, and the
+    /// pitch is animated rather than the pixel offset so the level band and
+    /// the colour change with the line instead of ahead of it.
+    val smoothedPitchDeg by animateFloatAsState(
+        targetValue = cameraPitchDeg ?: 0f,
+        animationSpec = tween(durationMillis = 80, easing = LinearEasing),
+        label = "horizonPitch",
+    )
     /// Where the ring's centre lands on screen, so the value pill can sit
     /// beside it rather than in the middle of the rim.
     var bhLabelPos by remember { mutableStateOf<Offset?>(null) }
@@ -1956,8 +1968,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     .fillMaxSize()
                     .pointerInput(bhGuideOn) {
                         detectTapGestures { p ->
-                            val hit = controller.screenHit(
-                                p.x, p.y, ArController.SurfaceIntent.GROUND)
+                            val hit = controller.screenGroundHit(p.x, p.y)
                             bhFailure = if (hit != null && bhGuide.place(hit)) null
                                         else PLOT_GROUND_NOT_SEEN
                         }
@@ -2212,8 +2223,8 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 // tracking, i.e. the DBH pose. The line says nothing instead:
                 // it holds its last known travel and goes grey, so "level" is
                 // only ever claimed by a pose that exists.
-                val deg = cameraPitchDeg
-                val known = deg != null
+                val known = cameraPitchDeg != null
+                val deg: Float? = if (known) smoothedPitchDeg else null
                 val travel = kotlin.math.min(
                     GUIDE_LINE_MAX_TRAVEL_DP.dp.toPx(),
                     kotlin.math.abs(deg ?: 0f) * GUIDE_LINE_DP_PER_DEGREE.dp.toPx(),

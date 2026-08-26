@@ -266,6 +266,14 @@ public struct HeightScanScreen: View {
     enum CrownStep { case none, left, right, top, bottom, done }
 
     @State private var crownStep: CrownStep = .none
+    // CROWN CORNERS, HELD AGAINST THE ANCHOR — as OFFSETS, never as bare
+    // world points, because `computeCrown` DIFFERENCES them and the result is
+    // stored as a crown measurement. The four taps are seconds apart and a
+    // world re-fit between any two leaves those two in different frames, so
+    // the recorded width is wrong by however far ARKit moved the world.
+    // Against the anchor the subtraction is (a+dL) − (a+dR) = dL − dR: the
+    // anchor cancels and the re-fit cancels with it. Android got this in
+    // commit 8339eaf; this side was missed.
     @State private var crownLeft: SIMD3<Float>?
     @State private var crownRight: SIMD3<Float>?
     @State private var crownTop: SIMD3<Float>?
@@ -1532,25 +1540,34 @@ public struct HeightScanScreen: View {
         activePlot.link(cruisePlotID: plotID)
     }
 
+    /// The corners are stored as OFFSETS from the anchor, so drawing them
+    /// means re-adding the anchor as it is NOW — the same rebasing the aim
+    /// spheres take. Absent anchor, absent markers: the honest vanish the
+    /// rest of this screen already uses.
+    private func crownAt(_ offset: SIMD3<Float>?) -> SIMD3<Float>? {
+        guard let offset, let a = viewModel.anchorPointWorld else { return nil }
+        return a + offset
+    }
+
     private var crownMarkers: [ARSceneMarker] {
         // Stable ids so these aren't torn down + rebuilt on every frame.
         var out: [ARSceneMarker] = []
-        if let p = crownLeft {
+        if let p = crownAt(crownLeft) {
             out.append(ARSceneMarker(id: Self.crownLeftId, worldPosition: p, shape: .sphere(radiusM: 0.05),
                                      colorRGBA: SIMD4<Float>(1, 0.85, 0, 1),
                                      scalesWithDistance: true))
         }
-        if let p = crownRight {
+        if let p = crownAt(crownRight) {
             out.append(ARSceneMarker(id: Self.crownRightId, worldPosition: p, shape: .sphere(radiusM: 0.05),
                                      colorRGBA: SIMD4<Float>(1, 0.85, 0, 1),
                                      scalesWithDistance: true))
         }
-        if let p = crownTop {
+        if let p = crownAt(crownTop) {
             out.append(ARSceneMarker(id: Self.crownTopId, worldPosition: p, shape: .sphere(radiusM: 0.05),
                                      colorRGBA: SIMD4<Float>(0.2, 0.7, 1, 1),
                                      scalesWithDistance: true))
         }
-        if let p = crownBottom {
+        if let p = crownAt(crownBottom) {
             out.append(ARSceneMarker(id: Self.crownBottomId, worldPosition: p, shape: .sphere(radiusM: 0.05),
                                      colorRGBA: SIMD4<Float>(0.2, 0.7, 1, 1),
                                      scalesWithDistance: true))
@@ -1562,20 +1579,40 @@ public struct HeightScanScreen: View {
     /// the raycast (sky / foliage). This is the height session's measured
     /// walk-off distance d_h — that's what makes the crown real-scale
     /// rather than a guessed fixed distance.
+    /// THE MEASURED d_h, not the live walking hint.
+    ///
+    /// `viewModel.dhMeters` is refreshed by `updateLiveHint`, which stops at
+    /// `.walking` — so by the time a crown is being tapped it holds whatever
+    /// the distance was BEFORE the base tap locked the standing pose, and the
+    /// crown is scaled off a stale number. The result's own `dH` is the
+    /// distance the height was actually computed from, which is the one the
+    /// crown should project against. Android uses `result?.dH` for this.
     private var crownProjectionDistance: Float {
-        viewModel.dhMeters > 0.5 ? viewModel.dhMeters : 8.0
+        if let dh = viewModel.result?.dHm, dh > 0.5 { return dh }
+        return viewModel.dhMeters > 0.5 ? viewModel.dhMeters : 8.0
     }
 
     private func crownCapture() {
         raycaster.preferLiDARMesh = settings.measurementSource == .lidar
-        guard let hit = raycaster.screenCenterHit()
-                ?? raycaster.forwardPointAtHorizontalDistance(crownProjectionDistance)
+        // THE FORWARD PROJECTION ONLY, like Android.
+        //
+        // This used to try `screenCenterHit()` first and fall back to the
+        // projection, which means the four corners of ONE crown could come
+        // from two different constructions — a raycast hit on whatever the
+        // crosshair happened to find for two of them, a geometric projection
+        // for the others — and then be differenced against each other. At
+        // 10–30 m a raycast falls back to planes or sparse points, which is
+        // exactly why Android's `captureCrown` carries a comment refusing to
+        // use one. Two provenances in one subtraction is not a measurement.
+        guard let hit = raycaster.forwardPointAtHorizontalDistance(crownProjectionDistance),
+              let anchor = viewModel.anchorPointWorld
         else { return }
+        let d = hit - anchor
         switch crownStep {
-        case .left:   crownLeft = hit;   crownStep = .right
-        case .right:  crownRight = hit;  crownStep = .top
-        case .top:    crownTop = hit;    crownStep = .bottom
-        case .bottom: crownBottom = hit; computeCrown()
+        case .left:   crownLeft = d;   crownStep = .right
+        case .right:  crownRight = d;  crownStep = .top
+        case .top:    crownTop = d;    crownStep = .bottom
+        case .bottom: crownBottom = d; computeCrown()
         case .none, .done: break
         }
     }

@@ -27,6 +27,13 @@ public final class HeightScanViewModel: ObservableObject {
         case anchorSet
         case walking
         case aimTopArmed
+        /// UNUSED. Nothing assigns this — the top tap goes straight to
+        /// `.computed` via `compute()`. Kept because it is part of the §4.4
+        /// state list the spec names and removing it would silently change
+        /// what a `switch` over this enum is exhaustive against, but it must
+        /// not be relied on to mean "the top has been captured": for years it
+        /// made two poll guards look like they covered the post-capture
+        /// window when they covered nothing at all.
         case aimTopCaptured
         case aimBaseArmed
         case computed
@@ -189,7 +196,11 @@ public final class HeightScanViewModel: ObservableObject {
 
     // MARK: - Captured state
 
-    private var anchorPointWorld: SIMD3<Float>?
+    /// The trunk anchor as the session reports it NOW — re-read on the
+    /// tracked-anchor poll, so it follows a world re-fit. Readable from the
+    /// screen because the crown corners are stored as OFFSETS from it and
+    /// have to be re-added to it to be drawn; see `crownAt`.
+    public private(set) var anchorPointWorld: SIMD3<Float>?
     private var alphaTopRad: Float?
     private var alphaBaseRad: Float?
 
@@ -487,8 +498,20 @@ public final class HeightScanViewModel: ObservableObject {
     /// measurement (`trackingDroppedDuringWalk`, which the result panel
     /// repeats at the moment the cruiser decides whether to keep the number).
     private func observeWalkIntegrity() {
+        // EVERY STATE THAT STILL DRAWS A MARKER, not just the aiming ones.
+        //
+        // `.computed` and `.rejected` were missing and `.aimTopCaptured` is a
+        // DEAD case — nothing in this file ever assigns it — so in practice
+        // the poll stopped the instant `compute()` ran. The camera stays on
+        // screen for the whole result panel and the entire four-tap crown
+        // flow, and the crown corners are now stored as offsets from
+        // `anchorPointWorld`: a frozen anchor there means live offsets added
+        // to a stale origin, which is the drift this was all fixed for,
+        // reappearing in the one stretch where the cruiser is looking
+        // straight at the spheres. Android got the same extension.
         switch state {
-        case .walking, .aimBaseArmed, .aimTopArmed, .aimTopCaptured: break
+        case .walking, .aimBaseArmed, .aimTopArmed, .aimTopCaptured,
+             .computed, .rejected: break
         default: return
         }
         if let id = trunkAnchorID, !anchorLost {
@@ -639,6 +662,9 @@ public final class HeightScanViewModel: ObservableObject {
         // `t_ms` says "nothing was seen here", which is true; a sample says
         // "the camera was here", which is not.
         guard trackingLive else { return }
+        // Deliberately NOT widened like `observeWalkIntegrity`: this trail is
+        // the record of the WALK the replay re-derives d_h from, and it ends
+        // when the measurement does.
         switch state {
         case .walking, .aimBaseArmed, .aimTopArmed, .aimTopCaptured: break
         default: return

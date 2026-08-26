@@ -287,8 +287,11 @@ fun HeightScanScreen(
     var standingLocked by remember { mutableStateOf<Vec3?>(null) }
     var alphaBase by remember { mutableStateOf<Float?>(null) }
     var alphaTop by remember { mutableStateOf<Float?>(null) }
-    var topMarker by remember { mutableStateOf<Vec3?>(null) }
-    var baseMarker by remember { mutableStateOf<Vec3?>(null) }
+    /// Where each aim tap landed RELATIVE TO THE TRUNK ANCHOR. Stored as an
+    /// offset rather than a world point so the sphere rides ARCore's world-
+    /// frame corrections along with the anchor — see `markers()`.
+    var topOffset by remember { mutableStateOf<Vec3?>(null) }
+    var baseOffset by remember { mutableStateOf<Vec3?>(null) }
     /// How far the camera moved between the base sighting and the top
     /// sighting. Null until a height has been computed. See the AIM_TOP
     /// handler for why this is a measurement fact and not a nicety.
@@ -694,10 +697,43 @@ fun HeightScanScreen(
         // (FIELD REPORT 2, ArSessionHub.markerDistanceScale).
         val out = mutableListOf<ArSceneMarker>()
         anchorPt?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(AIM_MARKER_RADIUS_M), floatArrayOf(1f, 0.30f, 0.30f, 1f), scalesWithDistance = true)) }
-        // Tree top (yellow) + base (green) spheres, each on the aim ray it
-        // was sighted along (see the AIM_BASE / AIM_TOP handlers).
-        topMarker?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(AIM_MARKER_RADIUS_M), floatArrayOf(1f, 0.85f, 0.15f, 1f), scalesWithDistance = true)) }
-        baseMarker?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(AIM_MARKER_RADIUS_M), floatArrayOf(0.25f, 0.85f, 0.35f, 1f), scalesWithDistance = true)) }
+        // Tree top (yellow) + base (green) spheres — drawn at the LIVE anchor
+        // plus the offset each aim tap measured, never at a bare world
+        // coordinate the app is holding on its own.
+        //
+        // THE SPHERE THAT RAN AWAY WHILE THE PHONE STOOD STILL. Each aim tap
+        // stored `forwardPointAtHorizontalDistance(dh)` — a world coordinate
+        // read off the camera pose at that instant — and the marker was drawn
+        // at it for the rest of the walk. ARCore does not leave the world
+        // frame where it found it: as it relocalizes and refines, it moves
+        // the camera and every Anchor together, and a bare coordinate the app
+        // is holding is the one thing that does NOT come along. The tree, the
+        // trunk sphere and the camera all shift; the aim sphere stays behind,
+        // and from inside the app that reads as a sphere sliding off a
+        // stationary tree. `anchorPt` was already re-read from the Anchor on
+        // the poll above for exactly this reason; these two markers were the
+        // ones still opting out of it.
+        //
+        // AS AN OFFSET, not as the trunk-axis formula. Deriving the sphere
+        // from (anchor.x, standing.y + dh·tanα, anchor.z) is what iOS does
+        // and what this screen used to do — and it was replaced deliberately,
+        // because it puts the sphere on the trunk axis rather than under the
+        // crosshair the cruiser actually sighted along (see the AIM_BASE
+        // handler). Storing where the aim ray landed RELATIVE TO THE ANCHOR
+        // keeps that placement exactly and still rides every correction
+        // ARCore applies to the anchor. Frozen absolute → live relative; the
+        // sighting itself is untouched.
+        //
+        // Nothing here feeds a measurement. `alphaBase`/`alphaTop` are what
+        // the tangent uses and they are read straight from the camera at the
+        // tap; these two spheres are drawn and nothing else.
+        fun atAnchor(offset: Vec3?): Vec3? {
+            val d = offset ?: return null
+            val a = anchorPt ?: return null
+            return Vec3(a.x + d.x, a.y + d.y, a.z + d.z)
+        }
+        atAnchor(topOffset)?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(AIM_MARKER_RADIUS_M), floatArrayOf(1f, 0.85f, 0.15f, 1f), scalesWithDistance = true)) }
+        atAnchor(baseOffset)?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(AIM_MARKER_RADIUS_M), floatArrayOf(0.25f, 0.85f, 0.35f, 1f), scalesWithDistance = true)) }
         // Crown L/R yellow matches iOS exactly (1, 0.85, 0, 1); crown T/B cyan.
         val yellow = floatArrayOf(1f, 0.85f, 0f, 1f); val cyan = floatArrayOf(0.2f, 0.7f, 1f, 1f)
         cL?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.05f), yellow, scalesWithDistance = true)) }
@@ -983,8 +1019,11 @@ fun HeightScanScreen(
                 // and for the same reason: no fresh hit-test, because at
                 // 10–30 m those fall back to planes and land nowhere near
                 // the aim.
-                baseMarker = controller.forwardPointAtHorizontalDistance(dh)
+                val basePt = controller.forwardPointAtHorizontalDistance(dh)
                     ?: Vec3(anchor.x, s.y + dh * kotlin.math.tan(a), anchor.z)
+                // Held against THIS anchor pose, so a later correction to the
+                // anchor carries the sphere with it — see `markers()`.
+                baseOffset = Vec3(basePt.x - anchor.x, basePt.y - anchor.y, basePt.z - anchor.z)
                 stage = Stage.AIM_TOP
             }
             Stage.AIM_TOP -> {
@@ -1016,8 +1055,10 @@ fun HeightScanScreen(
                 }
                 val dh = kotlin.math.sqrt((standing.x - anchor.x) * (standing.x - anchor.x) + (standing.z - anchor.z) * (standing.z - anchor.z))
                 // On the aim ray — see the AIM_BASE handler for why.
-                topMarker = controller.forwardPointAtHorizontalDistance(dh)
+                val topPt = controller.forwardPointAtHorizontalDistance(dh)
                     ?: Vec3(anchor.x, standing.y + dh * kotlin.math.tan(aTop), anchor.z)
+                // Held against THIS anchor pose — see the AIM_BASE handler.
+                topOffset = Vec3(topPt.x - anchor.x, topPt.y - anchor.y, topPt.z - anchor.z)
                 // HOW FAR THE INSTRUMENT MOVED between the two sightings.
                 //
                 // The §7.2 tangent formula assumes both angles were taken
@@ -1082,7 +1123,7 @@ fun HeightScanScreen(
         // it would put the OLD aim on the NEW height.
         discardHeldPhoto()
         stage = Stage.ANCHOR; anchorPt = null; standingLocked = null
-        alphaBase = null; alphaTop = null; topMarker = null; baseMarker = null
+        alphaBase = null; alphaTop = null; topOffset = null; baseOffset = null
         aimDriftM = null
         dhLive = 0f; anchorInitialDistM = null; standingAtAnchor = null
         walkedLive = 0f; anchorAimOk = false

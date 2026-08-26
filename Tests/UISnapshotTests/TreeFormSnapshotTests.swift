@@ -22,6 +22,21 @@ final class TreeFormSnapshotTests: XCTestCase {
     override func setUp() {
         super.setUp()
         isRecording = ProcessInfo.processInfo.environment["RECORD_SNAPSHOTS"] == "1"
+        // PIN THE ZONE, not just the clock.
+        //
+        // The Time row prints a formatted instant, and a formatter reads
+        // `TimeZone.current`. Pinning `createdAt` alone made the image stable
+        // on one machine and nowhere else: the same fixed epoch rendered
+        // "1:26 AM" on the host that recorded it and "5:26 PM" on the next
+        // run, sixteen hours apart, and the diff said the form had changed
+        // when nothing about it had. A snapshot that depends on where the
+        // machine thinks it is tests the machine.
+        NSTimeZone.default = TimeZone(identifier: "UTC") ?? .gmt
+    }
+
+    override func tearDown() {
+        NSTimeZone.resetSystemTimeZone()
+        super.tearDown()
     }
 
     /// An iPhone 13 that is as tall as the form is long. The four sections do

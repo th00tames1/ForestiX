@@ -167,7 +167,7 @@ Tap **Add Tree** → `AddTreeFlowScreen`:
    To invoke the DBH scan:
    - Tap **Scan DBH** → opens `DBHScanScreen`.
    - Align the fixed horizontal guide line at 1.37 m (spec §13 TL;DR
-     4 — the line never moves; the cruiser moves the phone).
+     4 — the ring marks the measured row; the line through it is a level indicator that rides the phone's pitch).
    - 4–6 s capture: algorithm collects depth pixels on the guide row,
      back-projects them to world space, runs RANSAC + Taubin circle
      fit on each frame, weighted-average across frames.

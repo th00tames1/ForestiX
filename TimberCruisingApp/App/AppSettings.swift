@@ -257,12 +257,17 @@ public final class AppSettings: ObservableObject {
         set { defaults.set(newValue, forKey: Keys.rawCaptureEnabled); objectWillChange.send() }
     }
 
-    /// BREAST-HEIGHT GUIDE (developer-mode) — draws a marker from the tree
-    /// base up to `Units.breastHeightM` on the Diameter scan so the cruiser
-    /// can see where breast height crosses the stem instead of judging it.
-    /// Gated by BOTH this flag AND `developerMode`; `defaults.bool` so a
-    /// cruiser who has never seen the row gets it OFF. It is a GUIDE: it
-    /// writes nothing, changes no recorded diameter and reaches no export.
+    /// BREAST-HEIGHT GUIDE — draws a marker from the tree base up to
+    /// `Units.breastHeightM` on the Diameter scan so the cruiser can see
+    /// where breast height crosses the stem instead of judging it. The base
+    /// is placed by tapping the ground at the foot of the trunk.
+    ///
+    /// THIS KEY ALONE gates it. It used to require `developerMode` as well,
+    /// which put the only answer the app offers to "how does the phone know
+    /// it read the stem at breast height?" behind a switch a cruiser has no
+    /// reason to find. `defaults.bool`, so someone who has never seen the row
+    /// still gets it OFF. It is a GUIDE: it writes nothing, changes no
+    /// recorded diameter and reaches no export.
     /// The Android sibling reads the same `tc.breastHeightGuide` key.
     /// AUTO reads the stem's edges out of a segmentation mask instead of
     /// walking the depth map.

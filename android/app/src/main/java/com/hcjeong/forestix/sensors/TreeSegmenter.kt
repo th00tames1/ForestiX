@@ -251,23 +251,36 @@ object TreeSegDecode {
     ): StemExtent? {
         if (viewWidthPx <= 1f || viewHeightPx <= 1f) return null
         if (depthWidth <= 0 || depthHeight <= 0 || samples <= 8) return null
-        val y = (rowFraction * viewHeightPx).toFloat()
-        var first = -1; var last = -1; var hits = 0
-        for (i in 0 until samples) {
-            val f = i.toDouble() / (samples - 1)
-            val p = viewToDepth((f * viewWidthPx).toFloat(), y) ?: continue
-            val u = p.first / depthWidth
-            val v = p.second / depthHeight
-            if (u < 0 || u > 1 || v < 0 || v > 1) continue
-            if (mask.filled(u, v)) {
-                if (first < 0) first = i
-                last = i
-                hits++
+        // A BAND OF VIEW ROWS, MEDIANED — not one line. The depth walk takes
+        // 21 rows and a median for a reason, and a mask is no less patchy than
+        // a depth map: measured on a real capture, one line through a hole in
+        // the mask reported a span a fifth narrower than the band did. Rows
+        // that cross no stem do not vote. iOS `extentAcrossView` 1:1.
+        val lefts = ArrayList<Int>(); val rights = ArrayList<Int>()
+        var hits = 0
+        for (row in -2..2) {
+            val y = ((rowFraction + row * 0.02) * viewHeightPx).toFloat()
+            if (y < 0f || y > viewHeightPx) continue
+            var first = -1; var last = -1
+            for (i in 0 until samples) {
+                val f = i.toDouble() / (samples - 1)
+                val p = viewToDepth((f * viewWidthPx).toFloat(), y) ?: continue
+                val u = p.first / depthWidth
+                val v = p.second / depthHeight
+                if (u < 0 || u > 1 || v < 0 || v > 1) continue
+                if (mask.filled(u, v)) {
+                    if (first < 0) first = i
+                    last = i
+                    hits++
+                }
             }
+            if (first >= 0 && last > first) { lefts.add(first); rights.add(last) }
         }
-        if (first < 0 || last <= first || hits < 3) return null
-        val lf = first.toDouble() / (samples - 1)
-        val rf = last.toDouble() / (samples - 1)
+        if (lefts.size < 3 || hits < 3) return null
+        lefts.sort(); rights.sort()
+        val lf = lefts[lefts.size / 2].toDouble() / (samples - 1)
+        val rf = rights[rights.size / 2].toDouble() / (samples - 1)
+        if (rf <= lf) return null
         // A span that reaches both edges of the screen is not a stem, it is a
         // mask that has swallowed the frame.
         if (rf - lf >= 0.95) return null

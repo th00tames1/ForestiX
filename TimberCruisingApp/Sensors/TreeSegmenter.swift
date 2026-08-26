@@ -321,23 +321,37 @@ public enum TreeSegDecode {
     ) -> StemExtent? {
         guard viewSize.width > 1, viewSize.height > 1,
               depthWidth > 0, depthHeight > 0, samples > 8 else { return nil }
-        let y = rowFraction * Double(viewSize.height)
-        var first = -1, last = -1, hits = 0
-        for i in 0..<samples {
-            let f = Double(i) / Double(samples - 1)
-            let p = mapping.viewToDepth(x: f * Double(viewSize.width), y: y)
-            let u = p.x / Double(depthWidth)
-            let v = p.y / Double(depthHeight)
-            guard u >= 0, u <= 1, v >= 0, v <= 1 else { continue }
-            if mask.filled(imageU: u, imageV: v) {
-                if first < 0 { first = i }
-                last = i
-                hits += 1
+        // A BAND OF VIEW ROWS, MEDIANED — not one line.
+        //
+        // The depth walk takes 21 rows and a median for a reason, and a mask
+        // is no less patchy than a depth map: measured on a real capture, one
+        // line through a hole in the mask reported a span a fifth narrower
+        // than the band did. Rows that cross no stem do not vote.
+        var lefts: [Int] = [], rights: [Int] = []
+        var hits = 0
+        for row in -2...2 {
+            let y = (rowFraction + Double(row) * 0.02) * Double(viewSize.height)
+            guard y >= 0, y <= Double(viewSize.height) else { continue }
+            var first = -1, last = -1
+            for i in 0..<samples {
+                let f = Double(i) / Double(samples - 1)
+                let p = mapping.viewToDepth(x: f * Double(viewSize.width), y: y)
+                let u = p.x / Double(depthWidth)
+                let v = p.y / Double(depthHeight)
+                guard u >= 0, u <= 1, v >= 0, v <= 1 else { continue }
+                if mask.filled(imageU: u, imageV: v) {
+                    if first < 0 { first = i }
+                    last = i
+                    hits += 1
+                }
             }
+            if first >= 0, last > first { lefts.append(first); rights.append(last) }
         }
-        guard first >= 0, last > first, hits >= 3 else { return nil }
-        let lf = Double(first) / Double(samples - 1)
-        let rf = Double(last) / Double(samples - 1)
+        guard lefts.count >= 3, hits >= 3 else { return nil }
+        lefts.sort(); rights.sort()
+        let lf = Double(lefts[lefts.count / 2]) / Double(samples - 1)
+        let rf = Double(rights[rights.count / 2]) / Double(samples - 1)
+        guard rf > lf else { return nil }
         // A span that reaches both edges of the screen is not a stem, it is a
         // mask that has swallowed the frame — refuse rather than record a
         // diameter the size of the viewport.

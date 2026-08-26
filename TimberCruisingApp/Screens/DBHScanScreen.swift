@@ -128,6 +128,16 @@ public struct DBHScanScreen: View {
     /// Per-screen, because the base belongs to the tree in front of the
     /// camera. It never touches `viewModel`, the stage machine or the
     /// shutter; the capture path below is identical with it on or off.
+    /// Live camera tilt, driving the horizon line. @State and polled rather
+    /// than read straight off the raycaster at draw time: `cameraPitchDeg` is
+    /// a plain computed property, so nothing would ever tell SwiftUI to
+    /// redraw and the line would sit still however the phone moved.
+    ///
+    /// 20 Hz — the rate the breast-height label is already projected at, and
+    /// fast enough that the line reads as attached to the world rather than
+    /// as catching up with it. Each tick is one 4x4 matrix read.
+    @State private var cameraPitchDeg: Double?
+
     @StateObject private var bhGuide = BreastHeightGuide()
     /// Where the guide's "1.37 m" pill sits, in AR-VIEW coordinates. nil
     /// whenever the ring is behind the camera or nothing is drawn.
@@ -402,6 +412,26 @@ public struct DBHScanScreen: View {
                              + cylinderMarkers,
                          raycaster: raycaster)
                 .ignoresSafeArea()
+                // TAP THE GROUND AT THE FOOT OF THE TREE. The guide's base
+                // used to be placed by lining the CROSSHAIR up on the ground
+                // and pressing a button — two hands and an aim, for a mark
+                // whose whole job is to be roughly at the foot of the trunk
+                // the cruiser is already standing in front of. Pointing at it
+                // is the gesture the act actually is.
+                //
+                // The button stays. It is the one that also CLEARS the base,
+                // it is what a cruiser who has already learned it will reach
+                // for, and a tap that misses the ground needs somewhere to
+                // fail that is not silence.
+                //
+                // Only while the guide is on and nothing has been placed, so
+                // this can never eat a tap meant for the chrome above it: the
+                // AR view is the bottom layer of this ZStack, so every panel,
+                // banner and control still takes its own taps first.
+                .onTapGesture { point in
+                    guard bhGuideEnabled, bhGuide.stage != .placed else { return }
+                    placeBreastHeightBase(at: point)
+                }
 
             GeometryReader { geo in
                 ZStack {
@@ -419,7 +449,7 @@ public struct DBHScanScreen: View {
                         .onChange(of: geo.size) { _, new in
                             viewModel.viewSize = new
                         }
-                    guideLine(height: geo.size.height)
+                    guideLine(size: geo.size)
                     fitChord(in: geo.size)
                     // Crosshair ring is now positioned by GeometryReader
                     // at exactly (centerX, midY) so the guide line
@@ -677,6 +707,14 @@ public struct DBHScanScreen: View {
             while !Task.isCancelled {
                 boundarySignedM = liveBoundarySignedM()
                 try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+        }
+        // THE HORIZON'S FEED. Runs whatever the guide is doing — the line is
+        // drawn on every scan, not only when the breast-height guide is on.
+        .task {
+            while !Task.isCancelled {
+                cameraPitchDeg = raycaster.cameraPitchDeg
+                try? await Task.sleep(nanoseconds: 50_000_000)
             }
         }
         // FIELD REPORT 14 — the plot's tracked centre, refreshed off the
@@ -1148,21 +1186,63 @@ public struct DBHScanScreen: View {
         return out
     }
 
-    private func guideLine(height: CGFloat) -> some View {
-        // Dual-stroke line for sun-glare readability: a thin dark halo
-        // under a bright white line. On either a bright sky or dark
-        // foliage background, at least one of the two strokes has
-        // enough contrast to stay visible.
-        ZStack {
+    /// Degrees of tilt per point of travel. 40 pt at 10° off level puts the
+    /// line clear of the ring's rim without it leaving the screen at the
+    /// angles a cruiser actually reaches while aiming at a trunk.
+    private static let guideLinePointsPerDegree: CGFloat = 4
+    /// How far it may travel. Past this the line has said all it can say —
+    /// "not level, and by a lot" — and a line pinned to the top of the frame
+    /// reads as broken rather than as informative.
+    private static let guideLineMaxTravel: CGFloat = 90
+    /// Inside this band the phone counts as level and the line goes green.
+    /// 1.5° at 1.5 m is 4 cm of height across the stem: below what the chord
+    /// median can resolve, so calling it level is not a rounding-down.
+    private static let guideLineLevelBandDeg: Double = 1.5
+
+    /// THE HORIZON, AND HOW FAR THE PHONE IS OFF IT.
+    ///
+    /// This line used to run the full width of the screen and never move —
+    /// the spec said so in as many words — because it marked the depth row
+    /// the estimator reads, which is the middle one. That is a true thing to
+    /// draw and a useless one to look at: it is in the same place whatever
+    /// the cruiser does, so it can never tell them they are aiming uphill.
+    ///
+    /// THE RING ALREADY MARKS THE MEASURED POINT. The crosshair sits at the
+    /// centre of the frame, which is where the centre row is, so nothing is
+    /// lost by giving this line the other job — and a stem read off a tilted
+    /// phone is read across a slanted chord, which is exactly the error the
+    /// cruiser could not see before.
+    ///
+    /// It is the RING'S WIDTH now, not the screen's: a horizon that runs edge
+    /// to edge reads as chrome, and one that fits the ring reads as part of
+    /// the instrument the cruiser is already looking through. Level and it
+    /// sits in the ring, dead centre, and turns green. Off level and it
+    /// climbs out — the direction it moves is the direction the phone is
+    /// pointing, so bringing it back to the middle is the correction.
+    private func guideLine(size: CGSize) -> some View {
+        let deg = cameraPitchDeg ?? 0
+        let travel = min(Self.guideLineMaxTravel,
+                         CGFloat(abs(deg)) * Self.guideLinePointsPerDegree)
+        // Aiming UP moves the horizon DOWN the screen, which is where the
+        // horizon actually goes when you raise a camera.
+        let offset = deg > 0 ? travel : -travel
+        let level = abs(deg) <= Self.guideLineLevelBandDeg
+        let width = Self.crosshairOuterRadius * 2
+        return ZStack {
+            // Dual-stroke line for sun-glare readability: a thin dark halo
+            // under a bright line. On either a bright sky or dark foliage
+            // background, at least one of the two strokes has enough
+            // contrast to stay visible.
             Rectangle()
                 .fill(Color.black.opacity(0.55))
-                .frame(height: 3)
+                .frame(width: width, height: 3)
             Rectangle()
-                .fill(Color.white.opacity(0.9))
-                .frame(height: 1.5)
+                .fill(level ? ForestixPalette.confidenceOk : Color.white.opacity(0.9))
+                .frame(width: width, height: 1.5)
         }
-        .frame(height: 3)
-        .position(x: UIScreenWidth() / 2, y: height / 2)
+        .frame(width: width, height: 3)
+        .position(x: size.width / 2, y: size.height / 2 + offset)
+        .animation(.linear(duration: 0.08), value: offset)
         .accessibilityIdentifier("dbhScan.guideLine")
     }
 
@@ -1419,10 +1499,18 @@ public struct DBHScanScreen: View {
 
     // MARK: - Breast-height guide
 
-    /// The gate, and the ONLY place it is decided: developer mode AND the
-    /// guide's own toggle. Neither key is ever read alone.
+    /// The gate, and the ONLY place it is decided: the guide's own toggle.
+    ///
+    /// IT USED TO REQUIRE DEVELOPER MODE TOO, which put a cruiser-facing
+    /// answer to "how does the phone know it read the stem at breast height?"
+    /// behind a switch a cruiser has no reason to find. The guide draws and
+    /// nothing else — it never writes a measurement, never gates the shutter,
+    /// never reaches an export — so there was never a safety argument for the
+    /// second key, only the caution of a feature that had not been in the
+    /// field yet. It has been. Off by default still, so nothing changes for
+    /// anyone who does not ask for it.
     private var bhGuideEnabled: Bool {
-        settings.developerMode && settings.breastHeightGuide
+        settings.breastHeightGuide
     }
 
     /// Whether any of the guide is on screen right now — the gate plus the
@@ -1564,16 +1652,23 @@ public struct DBHScanScreen: View {
         }
     }
 
-    /// Anchor the guide at the ground under the crosshair.
+    /// Anchor the guide at the ground — where the cruiser TAPPED, or under
+    /// the crosshair when `at` is nil (the button's path).
     ///
-    /// `screenCenterHit()` and deliberately NOT `screenCenterAnchorHit` — this
-    /// ray is aimed DOWN at the ground, and the gated variant exists
-    /// precisely to refuse ground planes. A miss refuses in the words every
-    /// other crosshair-to-ground placement in the app uses, rather than
-    /// planting a base in mid-air off a forward-ray fallback.
-    private func placeBreastHeightBase() {
+    /// `hit(at:)` / `screenCenterHit()` and deliberately NOT
+    /// `screenCenterAnchorHit` — this ray is aimed DOWN at the ground, and
+    /// the gated variant exists precisely to refuse ground planes. A miss
+    /// refuses in the words every other ground placement in the app uses,
+    /// rather than planting a base in mid-air off a forward-ray fallback.
+    private func placeBreastHeightBase(at point: CGPoint? = nil) {
         raycaster.preferLiDARMesh = settings.measurementSource == .lidar
-        guard let hit = raycaster.screenCenterHit() else {
+        // `.ground`, because a tap at the foot of a stem sends a ray that
+        // grazes the bark on the way down and the default vertical-first
+        // order would hand back the trunk face — a base at chest height,
+        // carrying the whole guide up with it.
+        let found = point.map { raycaster.hit(at: $0, intent: .ground) }
+            ?? raycaster.screenCenterHit()
+        guard let hit = found else {
             bhFailure = MeasurementCopy.plotGroundNotSeen
             return
         }

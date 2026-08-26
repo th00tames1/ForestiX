@@ -136,12 +136,19 @@ class ArController {
     /// off the crosshair — the height-anchor sphere then renders visibly off
     /// the aim and d_h (→ H) is computed from that wrong point. iOS never
     /// consumes feature-point hits (mesh raycast → estimated planes only).
-    fun screenCenterHit(): Vec3? {
+    fun screenCenterHit(): Vec3? = screenHit(viewWidthPx / 2f, viewHeightPx / 2f)
+
+    /// The same hit, at an arbitrary screen point — what a TAP lands on.
+    ///
+    /// `screenCenterHit` is this with the crosshair's coordinates, so the two
+    /// cannot disagree about what counts as a surface: the DepthPoint/Plane
+    /// policy, the dev-HUD readout and the null contract are one body of code
+    /// rather than two that drift. iOS `ARCenterRaycaster.hit(at:)` is the
+    /// same split for the same reason.
+    fun screenHit(x: Float, y: Float): Vec3? {
         if (!ready()) { lastCenterHitInfo = null; return null }
         val f = frame ?: return null
-        val cx = viewWidthPx / 2f
-        val cy = viewHeightPx / 2f
-        val hits = try { f.hitTest(cx, cy) } catch (_: Throwable) { return null }
+        val hits = try { f.hitTest(x, y) } catch (_: Throwable) { return null }
         // LiDAR mode: nearest SURFACE hit (depth-image points + planes).
         // AR mode (no Depth API): estimated-plane hits first, then anything —
         // the dev-only caliper/motion arms need some distance to work with.

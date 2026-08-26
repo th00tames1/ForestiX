@@ -318,6 +318,37 @@ fun SettingsScreen(nav: NavController) {
                         }
                     }
                 }
+
+                // Breast-height guide — answers "how does the phone know it is
+                // reading the stem AT breast height?" by putting breast height
+                // in the world where the cruiser can see it: a marker on the
+                // ground, a riser, and a ring at 1.37 m to bring around the
+                // trunk.
+                //
+                // IT LIVED IN THE DEVELOPER BLOCK, which is the wrong shelf
+                // for the only answer the app offers to a question every
+                // cruiser has. It is a Display setting because that is all it
+                // is — drawn on the Diameter scan, never read by the
+                // estimator, never stored, never exported. Still off by
+                // default. iOS SettingsScreen 1:1.
+                FormDivider()
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text("Breast-height guide", style = type.body, color = colors.textPrimary)
+                        Text(
+                            "Tap the ground at the foot of the tree on the Diameter scan and " +
+                                "the app draws a line up to 1.37 m (4.5 ft) with a ring at the " +
+                                "top, so you can see where breast height crosses the trunk. " +
+                                "Guide only — it never changes the recorded diameter. " +
+                                "Off by default.",
+                            style = type.caption, color = colors.textSecondary,
+                        )
+                    }
+                    Switch(
+                        checked = settings.breastHeightGuide,
+                        onCheckedChange = { env.settings.setBreastHeightGuide(it) },
+                    )
+                }
             }
 
             // MARK: - 2b. Measuring
@@ -614,28 +645,6 @@ fun SettingsScreen(nav: NavController) {
                         Text(
                             "NOT RECORDING — measurements are not being stored for replay.",
                             style = type.caption, color = colors.confidenceWarn,
-                        )
-                    }
-                    // Breast-height guide — answers "how does the phone know
-                    // it is reading the stem AT breast height?" by putting
-                    // breast height in the world where the cruiser can see it.
-                    // Drawing only: it is never read by the estimator, never
-                    // stored, and never exported.
-                    FormDivider()
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Text("Breast-height guide", style = type.body, color = colors.textPrimary)
-                            Text(
-                                "Draw a 1.37 m (4.5 ft) marker up from the tree base on the " +
-                                    "Diameter scan so the diameter is read at breast height. " +
-                                    "Guide only — it never changes the recorded diameter. " +
-                                    "Off by default.",
-                                style = type.caption, color = colors.textSecondary,
-                            )
-                        }
-                        Switch(
-                            checked = settings.breastHeightGuide,
-                            onCheckedChange = { env.settings.setBreastHeightGuide(it) },
                         )
                     }
                     // Readable bundles + the ones that exist on disk but whose

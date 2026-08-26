@@ -205,16 +205,35 @@ public final class ARCenterRaycaster: ObservableObject {
         return origin + forward * scale
     }
 
+    /// What a surface the cruiser POINTED AT is expected to be, which decides
+    /// the order estimated planes are tried in.
+    ///
+    /// It is not a preference. A ray through a screen point usually meets both
+    /// a vertical and a horizontal candidate — the trunk in front and the
+    /// ground under it — and whichever is asked for first wins. Asking in the
+    /// wrong order does not fail; it silently returns the other surface, at a
+    /// completely different distance.
+    public enum SurfaceIntent {
+        /// The trunk face. Vertical first — the AR-caliper edge taps.
+        case upright
+        /// The ground. HORIZONTAL FIRST: a tap at the foot of a stem is a ray
+        /// that grazes the bark on its way down, so vertical-first hands back
+        /// a point on the trunk and a base placed at chest height would carry
+        /// the whole breast-height guide up with it.
+        case ground
+    }
+
     /// Raycast at an ARBITRARY screen point (generalises screenCenterHit).
-    /// Used by the AR-caliper DBH path to get the distance to the trunk at
-    /// the midpoint of the two edge taps. Tries vertical estimated plane
-    /// (the trunk surface) first, then horizontal, then any.
-    public func hit(at screenPoint: CGPoint) -> SIMD3<Float>? {
+    public func hit(at screenPoint: CGPoint,
+                    intent: SurfaceIntent = .upright) -> SIMD3<Float>? {
         guard let view = arview else { return nil }
         if preferLiDARMesh, let mesh = meshRaycastHit(at: screenPoint, in: view) {
             return mesh
         }
-        for alignment in [ARRaycastQuery.TargetAlignment.vertical, .horizontal, .any] {
+        let order: [ARRaycastQuery.TargetAlignment] = intent == .ground
+            ? [.horizontal, .any]
+            : [.vertical, .horizontal, .any]
+        for alignment in order {
             if let hit = view.raycast(from: screenPoint,
                                       allowing: .estimatedPlane,
                                       alignment: alignment).first {
@@ -695,8 +714,10 @@ public final class ARCenterRaycaster: ObservableObject {
     public init() {}
     public func screenCenterHit() -> SIMD3<Float>? { nil }
     public func screenCenterAnchorHit(maxDistM: Float) -> SIMD3<Float>? { nil }
+    public enum SurfaceIntent { case upright, ground }
     public func forwardPointAtHorizontalDistance(_ d: Float) -> SIMD3<Float>? { nil }
-    public func hit(at screenPoint: CGPoint) -> SIMD3<Float>? { nil }
+    public func hit(at screenPoint: CGPoint,
+                    intent: SurfaceIntent = .upright) -> SIMD3<Float>? { nil }
     public func rayDirection(at screenPoint: CGPoint) -> SIMD3<Float>? { nil }
     public func projectToScreen(_ world: SIMD3<Float>) -> CGPoint? { nil }
     public var cameraWorldPosition: SIMD3<Float>? { nil }

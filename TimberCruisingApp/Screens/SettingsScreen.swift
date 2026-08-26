@@ -313,6 +313,29 @@ public struct SettingsScreen: View {
             }
             .pickerStyle(.segmented)
             .accessibilityIdentifier("settings.appearance")
+
+            // BREAST-HEIGHT GUIDE — answers "how does the phone know it read
+            // the stem AT breast height?" by putting breast height in the
+            // world where the cruiser can see it: a marker on the ground, a
+            // riser, and a ring at 1.37 m to bring around the trunk.
+            //
+            // IT LIVED IN THE DEVELOPER BLOCK, which is the wrong shelf for
+            // the only answer the app offers to a question every cruiser has.
+            // It is a Display setting because that is all it is — drawn on
+            // the Diameter scan, never written to a measurement, never in an
+            // export. Still off by default.
+            Toggle(isOn: Binding(
+                get: { settings.breastHeightGuide },
+                set: { settings.breastHeightGuide = $0 })
+            ) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Breast-height guide")
+                    Text("Tap the ground at the foot of the tree on the Diameter scan and the app draws a line up to 1.37 m (4.5 ft) with a ring at the top, so you can see where breast height crosses the trunk. Guide only — it never changes the recorded diameter. Off by default.")
+                        .font(ForestixType.caption)
+                        .foregroundStyle(ForestixPalette.textSecondary)
+                }
+            }
+            .accessibilityIdentifier("settings.breastHeightGuide")
         }
     }
 
@@ -509,23 +532,6 @@ public struct SettingsScreen: View {
                     }
                 }
                 .accessibilityIdentifier("settings.rawCaptures")
-
-                // BREAST-HEIGHT GUIDE — answers "how does the phone know it
-                // read the stem AT breast height?" by putting breast height
-                // in the world where the cruiser can see it. Drawn only, on
-                // the Diameter scan, off by default.
-                Toggle(isOn: Binding(
-                    get: { settings.breastHeightGuide },
-                    set: { settings.breastHeightGuide = $0 })
-                ) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Breast-height guide")
-                        Text("Draw a 1.37 m (4.5 ft) marker up from the tree base on the Diameter scan so the diameter is read at breast height. Guide only — it never changes the recorded diameter. Off by default.")
-                            .font(ForestixType.caption)
-                            .foregroundStyle(ForestixPalette.textSecondary)
-                    }
-                }
-                .accessibilityIdentifier("settings.breastHeightGuide")
 
                 // GROUND-TRUTH RECOVERY. A truth typed for a CAPTURE (on a
                 // scan screen before the truth moved onto the reading, or in

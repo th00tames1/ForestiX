@@ -13,6 +13,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -137,6 +138,22 @@ import kotlinx.coroutines.launch
 import java.util.Locale
 
 private enum class Stage { AIMING, CAPTURING, RESULT }
+
+/// THE HORIZON LINE'S TRAVEL. iOS `guideLinePointsPerDegree` /
+/// `guideLineMaxTravel` / `guideLineLevelBandDeg` 1:1 — the two platforms draw
+/// the same instrument, so a cruiser who learns the line on one phone reads it
+/// the same on the other.
+///
+/// 4 dp per degree puts 10° off level clear of the ring's rim without the line
+/// leaving the screen at the angles a cruiser actually reaches at a trunk.
+private const val GUIDE_LINE_DP_PER_DEGREE = 4f
+/// Past this the line has said all it can say — "not level, and by a lot" —
+/// and a line pinned to the top of the frame reads as broken, not informative.
+private const val GUIDE_LINE_MAX_TRAVEL_DP = 90f
+/// Inside this band the phone counts as level and the line goes green. 1.5° at
+/// 1.5 m is 4 cm of height across the stem: below what the chord median can
+/// resolve, so calling it level is not a rounding-down.
+private const val GUIDE_LINE_LEVEL_BAND_DEG = 1.5f
 
 /// Sub-measurements per hold-steady capture; the 3 closest to the median
 /// are kept (2 largest deviations trimmed) and averaged.
@@ -352,11 +369,25 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // there instead of near there. It is chrome and nothing else — it never
     // reaches the estimator, the stored reading or an export.
     //
-    // The two flags are ONE gate. The toggle is never read on its own, so a
-    // key left true by a developer session cannot draw anything once
-    // developer mode goes off.
-    val bhGuideOn = settings.developerMode && settings.breastHeightGuide
+    // ONE KEY, the guide's own. It used to require developer mode as well,
+    // which put the only answer the app offers to "how does the phone know it
+    // read the stem AT breast height?" behind a switch a cruiser has no
+    // reason to find. The guide draws and nothing else — it never writes a
+    // measurement, never gates the shutter, never reaches an export — so
+    // there was never a safety argument for the second key. Off by default
+    // still. iOS `bhGuideEnabled` 1:1.
+    val bhGuideOn = settings.breastHeightGuide
     val bhGuide = remember { BreastHeightGuide(controller) }
+    /// Live camera tilt, driving the horizon line. 20 Hz — fast enough that
+    /// the line reads as attached to the world rather than as catching up
+    /// with it, and each tick is one pose read. iOS `cameraPitchDeg` 1:1.
+    var cameraPitchDeg by remember { mutableStateOf<Float?>(null) }
+    LaunchedEffect(depthBlocked) {
+        while (!depthBlocked) {
+            cameraPitchDeg = controller.cameraPitchDeg()
+            delay(50)
+        }
+    }
     /// Where the ring's centre lands on screen, so the value pill can sit
     /// beside it rather than in the middle of the rim.
     var bhLabelPos by remember { mutableStateOf<Offset?>(null) }
@@ -1830,6 +1861,31 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             plotOverlay = ArSessionHub.PlotOverlay.SUBDUED,
         )
 
+        // TAP THE GROUND AT THE FOOT OF THE TREE. The base used to be placed
+        // by lining the CROSSHAIR up on the ground and pressing a button —
+        // two hands and an aim, for a mark whose whole job is to be roughly
+        // at the foot of the trunk the cruiser is already standing in front
+        // of. Pointing at it is the gesture the act actually is.
+        //
+        // The button stays: it is the one that also CLEARS the base, and a
+        // tap that misses the ground needs somewhere to fail that is not
+        // silence. Only while the guide is on and nothing is placed, and the
+        // AR view is the bottom layer here, so every panel and control above
+        // it still takes its own taps first. iOS DBHScanScreen 1:1.
+        if (!depthBlocked && bhGuideOn && bhGuide.stage != BreastHeightGuide.Stage.PLACED) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .pointerInput(bhGuideOn) {
+                        detectTapGestures { p ->
+                            val hit = controller.screenHit(p.x, p.y)
+                            bhFailure = if (hit != null && bhGuide.place(hit)) null
+                                        else PLOT_GROUND_NOT_SEEN
+                        }
+                    },
+            )
+        }
+
         // ADJUST-mode drag catcher. Early in the Box so the rail / status
         // panel (later children) still win their own touches.
         //
@@ -2048,15 +2104,46 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         if (stage != Stage.RESULT && !depthBlocked) {
             Canvas(Modifier.fillMaxSize()) {
                 val cy = size.height / 2f
-                // Horizontal guide line (dual stroke for sun-glare contrast).
+                // THE HORIZON, AND HOW FAR THE PHONE IS OFF IT.
+                //
+                // This line used to run the full width of the screen and
+                // never move — the spec said so in as many words — because it
+                // marked the depth row the estimator reads, which is the
+                // middle one. That is a true thing to draw and a useless one
+                // to look at: it is in the same place whatever the cruiser
+                // does, so it can never tell them they are aiming uphill.
+                //
+                // THE RING ALREADY MARKS THE MEASURED POINT. The crosshair
+                // sits at the centre of the frame, which is where the centre
+                // row is, so nothing is lost by giving this line the other
+                // job — and a stem read off a tilted phone is read across a
+                // slanted chord, which is exactly the error the cruiser could
+                // not see before.
+                //
+                // The RING'S WIDTH, not the screen's: a horizon that runs
+                // edge to edge reads as chrome, one that fits the ring reads
+                // as part of the instrument. Level and it sits in the ring,
+                // dead centre, and turns green. iOS `guideLine` 1:1 — same
+                // gain, same clamp, same level band, same dual stroke.
+                val deg = cameraPitchDeg ?: 0f
+                val travel = kotlin.math.min(
+                    GUIDE_LINE_MAX_TRAVEL_DP.dp.toPx(),
+                    kotlin.math.abs(deg) * GUIDE_LINE_DP_PER_DEGREE.dp.toPx(),
+                )
+                // Aiming UP moves the horizon DOWN the screen, which is where
+                // the horizon actually goes when you raise a camera.
+                val hy = cy + if (deg > 0f) travel else -travel
+                val level = kotlin.math.abs(deg) <= GUIDE_LINE_LEVEL_BAND_DEG
+                val halfW = 36.dp.toPx()   // the 72 dp ring's outer radius
+                val cx = size.width / 2f
                 drawLine(
                     Color.Black.copy(alpha = 0.55f),
-                    Offset(0f, cy), Offset(size.width, cy),
+                    Offset(cx - halfW, hy), Offset(cx + halfW, hy),
                     strokeWidth = 3.dp.toPx(),
                 )
                 drawLine(
-                    Color.White.copy(alpha = 0.9f),
-                    Offset(0f, cy), Offset(size.width, cy),
+                    if (level) colors.confidenceOk else Color.White.copy(alpha = 0.9f),
+                    Offset(cx - halfW, hy), Offset(cx + halfW, hy),
                     strokeWidth = 1.5.dp.toPx(),
                 )
                 // Live fit-width chord spanning the strip edges the

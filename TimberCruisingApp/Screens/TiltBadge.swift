@@ -106,14 +106,21 @@ private final class TiltMonitor: ObservableObject {
             to: queue
         ) { [weak self] data, _ in
             guard let self, let d = data else { return }
-            // Pitch from gravity vector — same convention as
-            // IMUHelpers.pitchFromGravity. Returns radians; convert
-            // to degrees for display.
+            // Pitch from the gravity vector, in the SAME sign convention as
+            // `IMUHelpers.pitchFromGravity` — which is what this comment
+            // always claimed and the arithmetic did not do.
+            //
+            // It was `atan2(-g.z, …)` against IMUHelpers' `atan2(+g.z, …)`,
+            // so the badge read the opposite sign to the height pipeline and,
+            // once the guide line became an artificial horizon, the opposite
+            // sign to the line drawn 22 pt below it. Aiming up showed "−5°"
+            // over a horizon that had moved down. Two instruments on one
+            // screen, a thumb apart, disagreeing about which way is up.
+            //
+            // Display only — the ±3° band is symmetric, so nothing but the
+            // printed sign changes, and the height pipeline never read this.
             let g = d.gravity
-            // pitch = atan2(-g.z, sqrt(g.x² + g.y²)) is the
-            // device's nose-up/down angle. Use the same sign
-            // convention the height pipeline uses.
-            let pitch = atan2(-g.z, (g.x * g.x + g.y * g.y).squareRoot())
+            let pitch = atan2(g.z, (g.x * g.x + g.y * g.y).squareRoot())
             let degrees = pitch * 180 / .pi
             Task { @MainActor [weak self] in
                 self?.pitchDeg = degrees

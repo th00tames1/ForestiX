@@ -613,6 +613,16 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // as captureMode "manual" vs "auto" on Accept.
     var resultFromAdjust by remember { mutableStateOf(false) }
 
+    /// ...and whether it was the MODEL that placed that bracket.
+    ///
+    /// `resultFromAdjust` cannot carry this: it is a Bool, and a model-placed
+    /// bracket IS a bracket, so a segmentation reading stamped itself "manual"
+    /// and became indistinguishable in the export from a thumb-placed one. The
+    /// whole argument for routing segmentation through the bracket was that a
+    /// corpus could be split on it later, and that is only true if the record
+    /// says which. iOS `resultCaptureMode` 1:1.
+    var resultFromSegmentation by remember { mutableStateOf(false) }
+
     // User-selected per-frame chord algorithm (silhouette = iOS-identical).
     val chordAlgorithm = ChordAlgorithm.fromRaw(settings.dbhChordAlgorithm)
 
@@ -1304,6 +1314,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         stage = Stage.CAPTURING
         failure = null
         resultFromAdjust = false
+        resultFromSegmentation = false
         lastCaptureFailure = null
         truthSaveFailure = null
         scope.launch {
@@ -1411,6 +1422,10 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         stage = Stage.CAPTURING
         failure = null
         resultFromAdjust = true
+        // Latched WITH the bracket, at the tap, for the same reason the
+        // handle fractions are: the feed keeps running during the burst and
+        // the flag has to describe the capture, not the tick it is read on.
+        resultFromSegmentation = segmentationDroveTheBracket
         lastCaptureFailure = null
         truthSaveFailure = null
         val lockedLeftFrac = adjustLeftFrac
@@ -1678,6 +1693,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         fix = fix,
                         captureMode = when {
                             r.method == DBHMethod.MANUAL_VISUAL -> "typed"
+                            resultFromSegmentation -> "segmented"
                             resultFromAdjust -> "manual"
                             else -> "auto"
                         },
@@ -1762,6 +1778,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         // bucket the algorithm comparison draws from.
                         captureMode = when {
                             r.method == DBHMethod.MANUAL_VISUAL -> "typed"
+                            resultFromSegmentation -> "segmented"
                             resultFromAdjust -> "manual"
                             else -> "auto"
                         },
@@ -2735,6 +2752,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                             )
                             result = r
                             resultFromAdjust = false
+                            resultFromSegmentation = false
                             failure = null
                             manualOpen = false
                             // A typed diameter is NOT any recorded burst's

@@ -237,6 +237,88 @@ public final class DBHScanViewModel: ObservableObject {
     /// ("manual" vs "auto").
     @Published public private(set) var resultCapturedManually: Bool = false
 
+    // MARK: - Segmentation-driven edges
+
+    /// THE MODEL'S ANSWER, or nil while it has none.
+    ///
+    /// Published so the screen can say the bracket is not the cruiser's — a
+    /// bracket that moves on its own and is not marked as automatic is a
+    /// bracket the cruiser will trust as their own placement.
+    @Published public private(set) var segmentedExtent: StemExtent?
+    /// Why segmentation is not answering, for the screen to print once.
+    @Published public private(set) var segmenterAvailability: SegmenterAvailability = .noModel
+    /// Turned on by the screen from `AppSettings.dbhAutoSegmentation`.
+    @Published public var segmentationEnabled = false {
+        didSet {
+            if !segmentationEnabled { segmentedExtent = nil }
+            if segmentationEnabled { startSegmentationFeed() }
+        }
+    }
+
+    #if canImport(OnnxRuntimeBindings)
+    /// Built on first use, not at init: loading an 11 MB graph costs a beat
+    /// the cruiser would feel if it happened while the screen was appearing,
+    /// and most sessions never turn this on.
+    private var segmenter: TreeSegmenter?
+    private var segmentationTask: Task<Void, Never>?
+
+    /// ONE INFERENCE AT A TIME, on a background priority, at a rate the AR
+    /// session can absorb.
+    ///
+    /// 8 Hz, not per frame. The network is tens of milliseconds and ARKit is
+    /// delivering at 60 — chasing every frame would spend the whole device on
+    /// a bracket that only has to keep up with a cruiser's hands. The feed
+    /// also holds no ARFrame: the pixel buffer is read, used, and dropped
+    /// inside one tick, because ARKit recycles that pool and a retained
+    /// buffer starves the session.
+    private func startSegmentationFeed() {
+        guard segmentationTask == nil else { return }
+        segmentationTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                let on = await MainActor.run { self.segmentationEnabled }
+                guard on else {
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    continue
+                }
+                if self.segmenter == nil {
+                    let made = TreeSegmenter()
+                    self.segmenter = made
+                    await MainActor.run { self.segmenterAvailability = made.availability }
+                }
+                let buffer = await MainActor.run { self.session.currentCameraPixelBuffer() }
+                if let buffer, let seg = self.segmenter, seg.availability.isReady {
+                    let extent = seg.segment(pixelBuffer: buffer)
+                    await MainActor.run { self.applySegmented(extent) }
+                }
+                try? await Task.sleep(nanoseconds: 125_000_000)
+            }
+        }
+    }
+
+    /// The mask's two edges become the bracket's two handles.
+    ///
+    /// WRITING THE BRACKET rather than adding a second width path is the
+    /// whole design. `bracketChordEstimate` is shipped, field-checked and
+    /// already the thing a cruiser's thumbs drive; the model is just another
+    /// way of placing the same two handles, so the capture, the depth
+    /// geometry, the middle-half sampling and the tier all stay exactly as
+    /// they are. Nothing new measures anything.
+    ///
+    /// Ignored while the cruiser is in ADJUST: they have taken hold of the
+    /// bracket, and a bracket that fights a thumb is worse than no bracket.
+    private func applySegmented(_ extent: StemExtent?) {
+        segmentedExtent = extent
+        guard let extent, !edgeAdjustActive else { return }
+        edgeBracketLeftFraction = extent.leftFraction
+        edgeBracketRightFraction = extent.rightFraction
+    }
+    #else
+    private func startSegmentationFeed() {
+        segmenterAvailability = .unsupportedPlatform
+    }
+    #endif
+
     /// Guide axis latched on the first ADJUST preview tick and held for the
     /// whole session. `pickGuideAxis` votes per frame on the wider
     /// silhouette chord, which can flip row↔col on the cluttered scenes
@@ -267,6 +349,13 @@ public final class DBHScanViewModel: ObservableObject {
     /// Bracket state latched at the moment the capture "+" started the
     /// burst, so dragging a handle (or leaving ADJUST) mid-burst can't
     /// change what the in-flight capture measures.
+    /// Whether the two handles about to be latched were placed by the model
+    /// rather than by the cruiser. Segmentation only writes them while ADJUST
+    /// is off, so the two can never both be true of one capture.
+    var segmentationDroveTheBracket: Bool {
+        segmentationEnabled && segmentedExtent != nil && !edgeAdjustActive
+    }
+
     private var burstUsedBracket = false
     private var burstBracketLeft: Double = 0
     private var burstBracketRight: Double = 0
@@ -1162,7 +1251,16 @@ public final class DBHScanViewModel: ObservableObject {
         // stores depth-space fractions + axis (the same schema Android
         // writes), so latching here means the recorded bundle replays
         // through exactly the code that produced the live number.
-        burstUsedBracket = edgeAdjustActive
+        //
+        // A SEGMENTED CAPTURE IS A BRACKET CAPTURE. When the model is placing
+        // the handles the reading must go down the same path a thumb's
+        // placement goes down — same depth geometry, same middle-half
+        // sampling, same tier — because it IS the same measurement, made
+        // between two edges someone else chose. It also means the recorded
+        // bundle replays through the code that produced the live number, and
+        // that the entry is stamped "manual" rather than quietly filed as an
+        // automatic depth-walk reading it is not.
+        burstUsedBracket = edgeAdjustActive || segmentationDroveTheBracket
         burstBracketLeft = edgeBracketLeftFraction
         burstBracketRight = edgeBracketRightFraction
         // VOTE THE AXIS HERE, on the frame the cruiser is aimed at right now.

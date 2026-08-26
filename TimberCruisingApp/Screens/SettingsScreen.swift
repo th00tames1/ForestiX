@@ -72,6 +72,7 @@ public struct SettingsScreen: View {
             regionAndUnitsSection
             displaySection
             measuringSection
+            segmentationSection
             calibrationSection
             dataBackupSection
             // Basemap tiles is ordinary field setup, not developer tooling —
@@ -336,6 +337,30 @@ public struct SettingsScreen: View {
                 }
             }
             .accessibilityIdentifier("settings.breastHeightGuide")
+        }
+    }
+
+    // MARK: - Automatic stem edges
+    // Its own section rather than a line in Measuring: this is the one
+    // setting on the screen that changes what a diameter is measured
+    // between, and it should not be read past on the way to something else.
+    private var segmentationSection: some View {
+        Section(
+            header: Text("Automatic stem edges"),
+            footer: Text("Off by default, and not yet checked against tape. When it is on, an on-device model finds the trunk in the camera image and places the measuring bracket on its edges for you; you can still take hold of the bracket and it will stand aside. Readings taken this way are recorded as bracket captures, so they can be told apart later.")
+        ) {
+            Toggle(isOn: Binding(
+                get: { settings.dbhAutoSegmentation },
+                set: { settings.dbhAutoSegmentation = $0 })
+            ) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Find the stem automatically")
+                    Text("Uses the camera as well as the depth sensor. Falls back to the depth edge-finder whenever the model has no answer, and on any build that does not carry the model.")
+                        .font(ForestixType.caption)
+                        .foregroundStyle(ForestixPalette.textSecondary)
+                }
+            }
+            .accessibilityIdentifier("settings.dbhAutoSegmentation")
         }
     }
 

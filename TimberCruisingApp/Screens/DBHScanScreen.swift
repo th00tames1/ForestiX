@@ -883,9 +883,13 @@ public struct DBHScanScreen: View {
         .onChange(of: settings.developerMode) { _, _ in
             configureRawCapture()
             syncBreastHeightGuide()
+            viewModel.segmentationEnabled = settings.dbhAutoSegmentation
         }
         .onChange(of: settings.breastHeightGuide) { _, _ in
             syncBreastHeightGuide()
+        }
+        .onChange(of: settings.dbhAutoSegmentation) { _, on in
+            viewModel.segmentationEnabled = on
         }
         .onChange(of: settings.dbhMeasurementMethod) { _, m in
             viewModel.dbhMeasurementMethod = m
@@ -1265,7 +1269,20 @@ public struct DBHScanScreen: View {
     /// In ADJUST mode the chord bar tracks the handles exactly instead.
     @ViewBuilder
     private func fitChord(in size: CGSize) -> some View {
-        if viewModel.edgeAdjustActive {
+        if viewModel.segmentationDroveTheBracket, adjustOverlayVisible {
+            // THE MODEL'S BRACKET, drawn exactly like the cruiser's. It is
+            // the same two handles going into the same estimate, so drawing
+            // it some other way would suggest a second kind of measurement
+            // that does not exist. What tells them apart is the caption
+            // under the ring, not the geometry.
+            let lo = min(viewModel.edgeBracketLeftFraction,
+                         viewModel.edgeBracketRightFraction)
+            let hi = max(viewModel.edgeBracketLeftFraction,
+                         viewModel.edgeBracketRightFraction)
+            chordBar(x0: size.width * CGFloat(lo),
+                     x1: size.width * CGFloat(hi),
+                     in: size)
+        } else if viewModel.edgeAdjustActive {
             if adjustOverlayVisible {
                 let lo = min(viewModel.edgeBracketLeftFraction,
                              viewModel.edgeBracketRightFraction)
@@ -1354,7 +1371,8 @@ public struct DBHScanScreen: View {
     /// estimate runs (plus `.capturing`, so the frozen bracket stays
     /// visible through the burst).
     private var adjustOverlayVisible: Bool {
-        guard viewModel.edgeAdjustActive else { return false }
+        guard viewModel.edgeAdjustActive || viewModel.segmentationDroveTheBracket
+        else { return false }
         switch viewModel.state {
         case .idle, .aligning, .armed, .capturing, .rejected: return true
         default: return false

@@ -686,6 +686,23 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
     /// that can only be verified on a device, by hashing an encode of the
     /// live buffer against an encode of the propagated copy. Run that
     /// comparison and this is the one function to change.
+    /// The live camera buffer itself, for on-device inference.
+    ///
+    /// `currentCameraImageJPEG` encodes; this does not. A segmenter runs on
+    /// the raw YCbCr plane several times a second, and paying a JPEG round
+    /// trip per inference would cost more than the network does.
+    ///
+    /// SAME REFUSAL as every other reader here: a pre-run frame's captured
+    /// image is a photograph of wherever the cruiser was standing before the
+    /// pause, so `hasLiveFrame` gates it.
+    ///
+    /// The caller must not hold this past the frame — ARKit recycles the
+    /// buffer pool, and a retained one starves the session.
+    public func currentCameraPixelBuffer() -> CVPixelBuffer? {
+        guard hasLiveFrame else { return nil }
+        return session.currentFrame?.capturedImage
+    }
+
     public func currentCameraImageJPEG(quality: Double = 0.8) -> Data? {
         // Same rule as the anchor reads: a pre-run frame's captured image is
         // a photograph of wherever the cruiser was standing before the
@@ -959,6 +976,7 @@ public final class ARKitSessionManager: ObservableObject {
     public func worldAnchorPosition(id: UUID) -> SIMD3<Float>? { nil }
     public func worldAnchorExists(id: UUID) -> Bool { false }
     public func trackedWorldAnchorPosition(id: UUID) -> SIMD3<Float>? { nil }
+    public func currentCameraPixelBuffer() -> CVPixelBuffer? { nil }
     public func currentCameraImageJPEG(quality: Double = 0.8) -> Data? { nil }
     public var trackingStayedNormal: Bool { false }
     public func beginTrackingWatch() {}

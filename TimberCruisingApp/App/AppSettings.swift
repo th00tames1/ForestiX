@@ -52,6 +52,7 @@ public final class AppSettings: ObservableObject {
         public static let developerMode           = "tc.developerMode"
         public static let rawCaptureEnabled       = "tc.rawCaptureEnabled"
         public static let breastHeightGuide       = "tc.breastHeightGuide"
+        public static let dbhAutoSegmentation    = "tc.dbhAutoSegmentation"
         public static let appearance              = "tc.appearance"
         // RETIRED: "tc.dbhMethodSource" (depth / AR-motion / AR-caliper
         // picker). The AR arms are gone — they recorded no raw captures —
@@ -263,6 +264,22 @@ public final class AppSettings: ObservableObject {
     /// cruiser who has never seen the row gets it OFF. It is a GUIDE: it
     /// writes nothing, changes no recorded diameter and reaches no export.
     /// The Android sibling reads the same `tc.breastHeightGuide` key.
+    /// AUTO reads the stem's edges out of a segmentation mask instead of
+    /// walking the depth map.
+    ///
+    /// OFF BY DEFAULT, and it must stay that way until it has been checked
+    /// against tape. It changes what the instrument measures — not the chord
+    /// identity, which is untouched, but the two pixels the identity is
+    /// applied between — and this project's numbers are the paper's numbers.
+    /// A reading it produced is recorded as a bracket capture, which is what
+    /// it is: the model placing the bracket instead of a thumb.
+    ///
+    /// The Android sibling reads the same `tc.dbhAutoSegmentation` key.
+    public var dbhAutoSegmentation: Bool {
+        get { defaults.bool(forKey: Keys.dbhAutoSegmentation) }
+        set { defaults.set(newValue, forKey: Keys.dbhAutoSegmentation); objectWillChange.send() }
+    }
+
     public var breastHeightGuide: Bool {
         get { defaults.bool(forKey: Keys.breastHeightGuide) }
         set { defaults.set(newValue, forKey: Keys.breastHeightGuide); objectWillChange.send() }

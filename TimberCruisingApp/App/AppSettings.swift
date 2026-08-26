@@ -269,15 +269,21 @@ public final class AppSettings: ObservableObject {
     /// still gets it OFF. It is a GUIDE: it writes nothing, changes no
     /// recorded diameter and reaches no export.
     /// The Android sibling reads the same `tc.breastHeightGuide` key.
-    /// AUTO reads the stem's edges out of a segmentation mask instead of
-    /// walking the depth map.
+
+    /// AUTOMATIC STEM EDGES — reads the stem's edges out of a segmentation
+    /// mask instead of walking the depth map.
     ///
-    /// OFF BY DEFAULT, and it must stay that way until it has been checked
-    /// against tape. It changes what the instrument measures — not the chord
-    /// identity, which is untouched, but the two pixels the identity is
-    /// applied between — and this project's numbers are the paper's numbers.
-    /// A reading it produced is recorded as a bracket capture, which is what
-    /// it is: the model placing the bracket instead of a thumb.
+    /// DEVELOPER MODE AND THIS KEY, never either alone. It went behind the
+    /// developer gate once it had been measured: against 60 real captures it
+    /// finds a trunk in 40 % of frames, and where it does the edges span about
+    /// 0.21 of the screen against the cruiser's own bracket at 0.36 — the mask
+    /// has holes mid-stem and bleeds into the bank behind the tree. It changes
+    /// what the instrument measures — not the chord identity, which is
+    /// untouched, but the two pixels the identity is applied between — and
+    /// this project's numbers are the paper's numbers.
+    ///
+    /// A reading it produced is recorded as "segmented", distinct from a
+    /// thumb-placed "manual", so a corpus can be split on it later.
     ///
     /// The Android sibling reads the same `tc.dbhAutoSegmentation` key.
     public var dbhAutoSegmentation: Bool {

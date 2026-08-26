@@ -339,11 +339,6 @@ public struct SettingsScreen: View {
         }
     }
 
-    // MARK: - Automatic stem edges
-    // Its own section rather than a line in Measuring: this is the one
-    // setting on the screen that changes what a diameter is measured
-    // between, and it should not be read past on the way to something else.
-
     // MARK: - 2b. Measuring
     // FIELD REPORT F10 — the cruise tally chains diameter → height by
     // default. Cruisers who only want diameters turn it off here. Strings

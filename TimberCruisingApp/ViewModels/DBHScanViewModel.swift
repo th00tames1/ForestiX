@@ -259,8 +259,17 @@ public final class DBHScanViewModel: ObservableObject {
     /// Turned on by the screen from `AppSettings.dbhAutoSegmentation`.
     @Published public var segmentationEnabled = false {
         didSet {
-            if !segmentationEnabled { segmentedExtent = nil }
+            guard segmentationEnabled != oldValue else { return }
+            // OFF MEANS STOP, not "keep spinning and fail the guard".
+            //
+            // This used to clear the extent and nothing else, so turning the
+            // setting off — or turning developer mode off, which closes the
+            // same gate — left the detached loop running for the life of the
+            // view model, waking eight times a second to fail a guard, with
+            // the 11 MB graph still resident. The commit that added the gate
+            // claimed the feed stopped on the same tick. It did not.
             if segmentationEnabled { startSegmentationFeed() }
+            else { stopSegmentationFeed() }
         }
     }
 
@@ -270,6 +279,15 @@ public final class DBHScanViewModel: ObservableObject {
     /// and most sessions never turn this on.
     private var segmenter: TreeSegmenter?
     private var segmentationTask: Task<Void, Never>?
+
+    /// Consecutive frames the model has failed to find a stem on.
+    private var segmentationMisses = 0
+
+    /// How many in a row before the bracket is handed back to the auto walk.
+    /// Eight ticks at 8 Hz is one second of nothing — long enough to ride out
+    /// the ordinary gaps in a 40 %-hit-rate model, short enough that a cruiser
+    /// who swings off the tree is not left holding a stale bracket.
+    private static let segmentationMissesBeforeRelease = 8
 
     /// ONE INFERENCE AT A TIME, OFF THE MAIN ACTOR, at a rate the AR session
     /// can absorb.
@@ -311,6 +329,12 @@ public final class DBHScanViewModel: ObservableObject {
     /// Everything the tick needs off the actor, gathered on it in one hop.
     private struct SegmentationTick {
         let segmenter: TreeSegmenter
+        /// A COPY. `currentCameraPixelBuffer()` says in as many words that the
+        /// caller must not hold its buffer past the frame — ARKit recycles the
+        /// pool and a retained one starves the session — and this struct is
+        /// handed across an actor hop to a detached task that then spends tens
+        /// of milliseconds in ONNX with it. Copying costs one frame's worth of
+        /// memcpy on the actor and hands the pool's buffer straight back.
         let buffer: CVPixelBuffer
         let viewSize: CGSize
         let mapping: DepthViewMapping
@@ -326,7 +350,8 @@ public final class DBHScanViewModel: ObservableObject {
             segmenterAvailability = made.availability
         }
         guard let segmenter, segmenter.availability.isReady,
-              let buffer = session.currentCameraPixelBuffer(),
+              let live = session.currentCameraPixelBuffer(),
+              let buffer = Self.copyPixelBuffer(live),
               let frame = session.latestDepthFrame,
               let mapping = frame.viewMapping,
               viewSize.width > 1, viewSize.height > 1
@@ -334,6 +359,44 @@ public final class DBHScanViewModel: ObservableObject {
         return SegmentationTick(segmenter: segmenter, buffer: buffer,
                                 viewSize: viewSize, mapping: mapping,
                                 depthWidth: frame.width, depthHeight: frame.height)
+    }
+
+    /// A deep copy of one camera frame, so nothing of ARKit's outlives the
+    /// call that vended it. Returns nil rather than risking a partial copy.
+    private nonisolated static func copyPixelBuffer(_ src: CVPixelBuffer) -> CVPixelBuffer? {
+        let w = CVPixelBufferGetWidth(src)
+        let h = CVPixelBufferGetHeight(src)
+        let fmt = CVPixelBufferGetPixelFormatType(src)
+        var out: CVPixelBuffer?
+        let attrs: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary]
+        guard CVPixelBufferCreate(kCFAllocatorDefault, w, h, fmt,
+                                  attrs as CFDictionary, &out) == kCVReturnSuccess,
+              let dst = out else { return nil }
+        CVPixelBufferLockBaseAddress(src, .readOnly)
+        CVPixelBufferLockBaseAddress(dst, [])
+        defer {
+            CVPixelBufferUnlockBaseAddress(dst, [])
+            CVPixelBufferUnlockBaseAddress(src, .readOnly)
+        }
+        let planes = max(1, CVPixelBufferGetPlaneCount(src))
+        if CVPixelBufferGetPlaneCount(src) == 0 {
+            guard let s = CVPixelBufferGetBaseAddress(src),
+                  let d = CVPixelBufferGetBaseAddress(dst) else { return nil }
+            memcpy(d, s, CVPixelBufferGetDataSize(src))
+            return dst
+        }
+        for i in 0..<planes {
+            guard let s = CVPixelBufferGetBaseAddressOfPlane(src, i),
+                  let d = CVPixelBufferGetBaseAddressOfPlane(dst, i) else { return nil }
+            let rows = CVPixelBufferGetHeightOfPlane(src, i)
+            let sBpr = CVPixelBufferGetBytesPerRowOfPlane(src, i)
+            let dBpr = CVPixelBufferGetBytesPerRowOfPlane(dst, i)
+            let bpr = min(sBpr, dBpr)
+            for r in 0..<rows {
+                memcpy(d.advanced(by: r * dBpr), s.advanced(by: r * sBpr), bpr)
+            }
+        }
+        return dst
     }
 
     /// The mask's two edges become the bracket's two handles.
@@ -358,7 +421,25 @@ public final class DBHScanViewModel: ObservableObject {
                                            depthWidth: depthWidth,
                                            depthHeight: depthHeight)
         }
-        segmentedExtent = extent
+        // A MISS DOES NOT DROP THE BRACKET.
+        //
+        // The model answers on about 40 % of frames, and `segmentedExtent`
+        // used to be assigned unconditionally — so it went nil on every miss,
+        // `segmentationDroveTheBracket` went false with it, and the screen
+        // flipped between the bracket path and the auto depth walk several
+        // times a second. Two different measurement methods taking turns
+        // inside one capture is not a method. A miss now HOLDS the last
+        // placement for a beat; only a run of them lets go, and then the auto
+        // path takes over cleanly and stays.
+        if let extent {
+            segmentedExtent = extent
+            segmentationMisses = 0
+        } else {
+            segmentationMisses += 1
+            if segmentationMisses >= Self.segmentationMissesBeforeRelease {
+                segmentedExtent = nil
+            }
+        }
         guard let extent, !edgeAdjustActive else { return }
         edgeBracketLeftFraction = extent.leftFraction
         edgeBracketRightFraction = extent.rightFraction
@@ -372,6 +453,7 @@ public final class DBHScanViewModel: ObservableObject {
         segmentationTask = nil
         segmenter = nil
         segmentedExtent = nil
+        segmentationMisses = 0
     }
     #else
     private func startSegmentationFeed() {

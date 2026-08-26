@@ -551,7 +551,6 @@ fun SettingsScreen(nav: NavController) {
                             onCheckedChange = { env.settings.setDbhAutoSegmentation(it) },
                         )
                     }
-                    FormDivider()
                     // DBH algorithm — depth-method diameter fit. Moved in from
                     // its own former section; developer-only, since normal
                     // users get the single blessed path (iOS gates it the same).

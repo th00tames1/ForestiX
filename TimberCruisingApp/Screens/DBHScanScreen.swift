@@ -412,26 +412,32 @@ public struct DBHScanScreen: View {
                              + cylinderMarkers,
                          raycaster: raycaster)
                 .ignoresSafeArea()
-                // TAP THE GROUND AT THE FOOT OF THE TREE. The guide's base
-                // used to be placed by lining the CROSSHAIR up on the ground
-                // and pressing a button — two hands and an aim, for a mark
-                // whose whole job is to be roughly at the foot of the trunk
-                // the cruiser is already standing in front of. Pointing at it
-                // is the gesture the act actually is.
-                //
-                // The button stays. It is the one that also CLEARS the base,
-                // it is what a cruiser who has already learned it will reach
-                // for, and a tap that misses the ground needs somewhere to
-                // fail that is not silence.
-                //
-                // Only while the guide is on and nothing has been placed, so
-                // this can never eat a tap meant for the chrome above it: the
-                // AR view is the bottom layer of this ZStack, so every panel,
-                // banner and control still takes its own taps first.
-                .onTapGesture { point in
-                    guard bhGuideEnabled, bhGuide.stage != .placed else { return }
-                    placeBreastHeightBase(at: point)
-                }
+
+            // TAP THE GROUND AT THE FOOT OF THE TREE.
+            //
+            // A LAYER, not a gesture on the AR view. `.onTapGesture` on
+            // `ARCameraView` never fired: the AR view is the bottom child of
+            // this ZStack and the chrome `GeometryReader` directly above it is
+            // full-bleed with a hit-testable `Color.clear` at its root, so the
+            // touch was consumed before it ever reached the camera. The
+            // comment that used to sit here had it exactly backwards — being
+            // the bottom layer is the reason the tap died, not the reason it
+            // was safe. This sits ABOVE the AR view and BELOW every panel,
+            // banner and control, so it can only ever see a touch that nothing
+            // above it wanted, which is what "tap the ground" means.
+            //
+            // Only while the guide is armed, nothing is placed, and the screen
+            // is still AIMING — the same states the guide's own chrome is
+            // drawn in. Without the stage gate a tap on a frozen result frame
+            // would plant a world anchor in a scene the cruiser has stopped
+            // measuring.
+            if bhGuideEnabled, bhGuide.stage != .placed, bhGuideChromeVisible {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .ignoresSafeArea()
+                    .onTapGesture { point in placeBreastHeightBase(at: point) }
+                    .accessibilityIdentifier("dbhScan.breastHeightTapLayer")
+            }
 
             GeometryReader { geo in
                 ZStack {
@@ -449,7 +455,18 @@ public struct DBHScanScreen: View {
                         .onChange(of: geo.size) { _, new in
                             viewModel.viewSize = new
                         }
+                        // IT MEASURES, IT DOES NOT TOUCH. A `Color` — clear
+                        // included — is hit-testable across its whole frame,
+                        // and this one is full-bleed, so it silently swallowed
+                        // every touch on the AR region. That is why the
+                        // breast-height ground tap did nothing. This sentinel
+                        // exists only to report `geo.size`; it has no gesture
+                        // and never wanted a touch.
+                        .allowsHitTesting(false)
                     guideLine(size: geo.size)
+                        // Chrome. `chordBar` already opts out for the same
+                        // reason — a drawn line is not a control.
+                        .allowsHitTesting(false)
                     fitChord(in: geo.size)
                     // Crosshair ring is now positioned by GeometryReader
                     // at exactly (centerX, midY) so the guide line
@@ -828,6 +845,11 @@ public struct DBHScanScreen: View {
             }
             configureRawCapture()
             syncBreastHeightGuide()
+            // ON APPEAR, not only on a settings change. Seeding this from an
+            // `onChange` alone meant the toggle did nothing for a cruiser who
+            // set it in Settings and then walked to the scan: the only screen
+            // that could fire the change was the one they had already left.
+            viewModel.segmentationEnabled = settings.dbhAutoSegmentation
             viewModel.onAppear()
         }
         // The wireframe's off-switch — see `showsScanMesh`. Latched, never
@@ -846,6 +868,7 @@ public struct DBHScanScreen: View {
             // without dropping it would leave a base pinned in the shared
             // world map with nobody holding its id.
             bhGuide.disable(using: viewModel.session)
+            viewModel.stopSegmentationFeed()
             bhFailure = nil
             bhLabelPoint = nil
             viewModel.onDisappear()
@@ -883,7 +906,6 @@ public struct DBHScanScreen: View {
         .onChange(of: settings.developerMode) { _, _ in
             configureRawCapture()
             syncBreastHeightGuide()
-            viewModel.segmentationEnabled = settings.dbhAutoSegmentation
         }
         .onChange(of: settings.breastHeightGuide) { _, _ in
             syncBreastHeightGuide()
@@ -982,7 +1004,7 @@ public struct DBHScanScreen: View {
                         // bucket the algorithm comparison draws from.
                         captureMode: r.method == .manualVisual
                             ? "typed"
-                            : (viewModel.resultCapturedManually ? "manual" : "auto"),
+                            : viewModel.resultCaptureMode,
                         // The tape value rides WITH the reading. Read before
                         // `applyTypedTruth` runs, because that call clears the
                         // field once the value is durable on the bundle.
@@ -1224,13 +1246,19 @@ public struct DBHScanScreen: View {
     /// climbs out — the direction it moves is the direction the phone is
     /// pointing, so bringing it back to the middle is the correction.
     private func guideLine(size: CGSize) -> some View {
+        // NO PITCH IS NOT LEVEL. `cameraPitchDeg` is nil with no ARKit frame,
+        // and folding that to 0 would put the line dead centre and turn it
+        // green at the moment the phone has no idea where it is pointing.
+        // The line holds still and goes dim instead: "level" is only ever
+        // claimed by a pose that exists.
+        let known = cameraPitchDeg != nil
         let deg = cameraPitchDeg ?? 0
         let travel = min(Self.guideLineMaxTravel,
                          CGFloat(abs(deg)) * Self.guideLinePointsPerDegree)
         // Aiming UP moves the horizon DOWN the screen, which is where the
         // horizon actually goes when you raise a camera.
         let offset = deg > 0 ? travel : -travel
-        let level = abs(deg) <= Self.guideLineLevelBandDeg
+        let level = known && abs(deg) <= Self.guideLineLevelBandDeg
         let width = Self.crosshairOuterRadius * 2
         return ZStack {
             // Dual-stroke line for sun-glare readability: a thin dark halo
@@ -1241,7 +1269,8 @@ public struct DBHScanScreen: View {
                 .fill(Color.black.opacity(0.55))
                 .frame(width: width, height: 3)
             Rectangle()
-                .fill(level ? ForestixPalette.confidenceOk : Color.white.opacity(0.9))
+                .fill(level ? ForestixPalette.confidenceOk
+                            : Color.white.opacity(known ? 0.9 : 0.35))
                 .frame(width: width, height: 1.5)
         }
         .frame(width: width, height: 3)

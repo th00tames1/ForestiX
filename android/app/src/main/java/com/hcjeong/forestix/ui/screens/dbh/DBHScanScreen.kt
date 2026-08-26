@@ -13,6 +13,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import com.hcjeong.forestix.sensors.TreeSegDecode
 import com.hcjeong.forestix.sensors.TreeSegmenter
 import com.hcjeong.forestix.sensors.TreeSegmenterConfig
 import com.hcjeong.forestix.sensors.SegmenterAvailability
@@ -527,9 +528,23 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         // delivers far faster; a bracket only has to keep up with a cruiser's
         // hands, and the AR session needs the cores more than this does.
         while (seg != null && seg.availability == SegmenterAvailability.READY && !depthBlocked) {
+            // THE MASK COMES BACK IN IMAGE SPACE; the bracket is a fraction
+            // across the SCREEN. `extentAcrossView` walks the view's own
+            // centre line through the frame's view↔depth affine — see the
+            // note there for why measuring the mask's own x is wrong.
+            val depth = controller.acquireDepthFrame()
             val extent = withContext(Dispatchers.Default) {
-                controller.cameraLetterboxCHW(TreeSegmenterConfig.INPUT_SIZE)
+                val mask = controller.cameraLetterboxCHW(TreeSegmenterConfig.INPUT_SIZE)
                     ?.let { (chw, box) -> seg.segment(chw, box) }
+                if (mask == null || depth == null) null
+                else TreeSegDecode.extentAcrossView(
+                    mask = mask,
+                    viewWidthPx = controller.viewWidthPx.toFloat(),
+                    viewHeightPx = controller.viewHeightPx.toFloat(),
+                    depthWidth = depth.width,
+                    depthHeight = depth.height,
+                    viewToDepth = { vx, vy -> depth.viewToDepth(vx, vy) },
+                )
             }
             segmentedExtent = extent
             // Ignored while the cruiser is in ADJUST: they have taken hold of
@@ -1118,12 +1133,19 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // ADJUST live estimate: the handle span (view px → depth px via the
     // frame's own view↔depth affine) + the median depth inside the bracket
     // at the guide row, refreshed on the same cadence as the auto preview.
-    LaunchedEffect(stage, adjustMode, depthBlocked) {
+    LaunchedEffect(stage, adjustMode, segmentationDroveTheBracket, depthBlocked) {
         acquisitionStalled = false
         depthSilent = false
         var lastLockAt = SystemClock.elapsedRealtime()
         var lastFrameAt = SystemClock.elapsedRealtime()
-        while (stage == Stage.AIMING && adjustMode && !depthBlocked) {
+        // `adjustMode || segmentationDroveTheBracket` — a model-placed bracket
+        // is captured through `captureAdjust()`, whose lock gate reads
+        // `adjustPreview`, and this loop is the only thing that ever writes
+        // it. Gated on ADJUST alone, turning segmentation on left the shutter
+        // permanently refusing with "No trunk lock yet" while the ring showed
+        // a perfectly good diameter from the auto path — the setting bricked
+        // the default capture.
+        while (stage == Stage.AIMING && (adjustMode || segmentationDroveTheBracket) && !depthBlocked) {
             controller.acquireDepthFrame()?.let { f ->
                 lastFrameAt = SystemClock.elapsedRealtime()
                 val w = controller.viewWidthPx.toFloat()
@@ -2169,15 +2191,24 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 // as part of the instrument. Level and it sits in the ring,
                 // dead centre, and turns green. iOS `guideLine` 1:1 — same
                 // gain, same clamp, same level band, same dual stroke.
-                val deg = cameraPitchDeg ?: 0f
+                // NO PITCH IS NOT LEVEL. `cameraPitchDeg()` returns null off
+                // TrackingState.TRACKING, and folding that to 0 put the line
+                // dead centre and turned it GREEN at the exact moment the
+                // phone had no idea where it was pointing — and featureless
+                // bark at arm's length is precisely when ARCore drops
+                // tracking, i.e. the DBH pose. The line says nothing instead:
+                // it holds its last known travel and goes grey, so "level" is
+                // only ever claimed by a pose that exists.
+                val deg = cameraPitchDeg
+                val known = deg != null
                 val travel = kotlin.math.min(
                     GUIDE_LINE_MAX_TRAVEL_DP.dp.toPx(),
-                    kotlin.math.abs(deg) * GUIDE_LINE_DP_PER_DEGREE.dp.toPx(),
+                    kotlin.math.abs(deg ?: 0f) * GUIDE_LINE_DP_PER_DEGREE.dp.toPx(),
                 )
                 // Aiming UP moves the horizon DOWN the screen, which is where
                 // the horizon actually goes when you raise a camera.
-                val hy = cy + if (deg > 0f) travel else -travel
-                val level = kotlin.math.abs(deg) <= GUIDE_LINE_LEVEL_BAND_DEG
+                val hy = cy + if ((deg ?: 0f) > 0f) travel else -travel
+                val level = known && kotlin.math.abs(deg!!) <= GUIDE_LINE_LEVEL_BAND_DEG
                 val halfW = 36.dp.toPx()   // the 72 dp ring's outer radius
                 val cx = size.width / 2f
                 drawLine(
@@ -2186,7 +2217,12 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     strokeWidth = 3.dp.toPx(),
                 )
                 drawLine(
-                    if (level) colors.confidenceOk else Color.White.copy(alpha = 0.9f),
+                    when {
+                        level -> colors.confidenceOk
+                        // Pose unknown: drawn, but making no claim.
+                        !known -> Color.White.copy(alpha = 0.35f)
+                        else -> Color.White.copy(alpha = 0.9f)
+                    },
                     Offset(cx - halfW, hy), Offset(cx + halfW, hy),
                     strokeWidth = 1.5.dp.toPx(),
                 )

@@ -200,48 +200,78 @@ object TreeSegDecode {
         return mask
     }
 
-    /// THE TWO EDGES, at the row the estimator is going to read.
-    ///
-    /// A median over a BAND of mask rows rather than the single row, for the
-    /// reason the depth path takes 21: one row can clip a branch or a notch in
-    /// the silhouette, and the diameter is linear in this width. Empty rows do
-    /// not vote.
-    fun extent(
-        mask: ByteArray, mh: Int, mw: Int,
-        centreRow: Int, bandRows: Int, letterbox: Letterbox, score: Float,
-    ): StemExtent? {
-        val lefts = mutableListOf<Int>(); val rights = mutableListOf<Int>()
-        var pixels = 0
-        val lo = maxOf(0, centreRow - bandRows)
-        val hi = minOf(mh - 1, centreRow + bandRows)
-        if (lo > hi) return null
-        for (y in lo..hi) {
-            val base = y * mw
-            var l = -1; var r = -1
-            for (x in 0 until mw) {
-                if (mask[base + x].toInt() == 1) {
-                    if (l < 0) l = x
-                    r = x
-                    pixels++
-                }
-            }
-            if (l >= 0) { lefts.add(l); rights.add(r) }
+    /// THE MASK AS THE NETWORK LEFT IT, on the prototype grid.
+    class StemMask(
+        val cells: ByteArray,
+        val height: Int,
+        val width: Int,
+        val letterbox: Letterbox,
+        val score: Float,
+    ) {
+        /// Is this normalised image point inside the stem?
+        fun filled(imageU: Double, imageV: Double): Boolean {
+            val mx = letterbox.padX + imageU * letterbox.sourceWidth * letterbox.scale
+            val my = letterbox.padY + imageV * letterbox.sourceHeight * letterbox.scale
+            val cell = TreeSegmenterConfig.INPUT_SIZE.toDouble()
+            val px = (mx * width / cell).toInt()
+            val py = (my * height / cell).toInt()
+            if (px < 0 || px >= width || py < 0 || py >= height) return false
+            return cells[py * width + px].toInt() == 1
         }
-        if (lefts.isEmpty() || pixels < TreeSegmenterConfig.MIN_MASK_PIXELS) return null
-        lefts.sort(); rights.sort()
-        val lm = lefts[lefts.size / 2].toDouble()
-        val rm = rights[rights.size / 2].toDouble()
-        val cell = TreeSegmenterConfig.INPUT_SIZE.toDouble() / mw
-        val lf = letterbox.sourceXFraction(lm * cell)
-        // +1 counts the cell itself: a one-cell mask is one cell wide.
-        val rf = letterbox.sourceXFraction((rm + 1) * cell)
-        if (rf <= lf) return null
-        return StemExtent(
-            leftFraction = lf.coerceIn(0.0, 1.0),
-            rightFraction = rf.coerceIn(0.0, 1.0),
-            score = score,
-            maskPixels = pixels,
-        )
+    }
+
+    /// THE TWO EDGES, AS A FRACTION ACROSS THE SCREEN — the only thing the
+    /// bracket means.
+    ///
+    /// THIS IS THE STEP THAT WAS WRONG. The obvious reading of the mask is to
+    /// walk its rows and report where the stem starts and stops along the
+    /// IMAGE's x. That number is worthless here: the camera image is in SENSOR
+    /// orientation — landscape — while the app is held portrait, so the
+    /// image's x runs DOWN the screen. The naive extent reports the stem's
+    /// LENGTH and hands it to the estimator as a width; a stem that fills the
+    /// frame saturates the bracket to the whole screen, and the diameter is
+    /// linear in that span. The image is also aspect-fill CROPPED into the
+    /// view, so even after a rotation the fractions differ by the crop.
+    ///
+    /// Both go away by never working in image space at all. This walks the
+    /// VIEW's own horizontal centre line and asks the mask whether each sample
+    /// is stem, going through `viewToDepth` — the mapping the rest of the app
+    /// already measures brackets with — and then to normalised image
+    /// coordinates, which the depth grid shares by construction. Rotation and
+    /// crop are the mapping's job and it already does them right.
+    fun extentAcrossView(
+        mask: StemMask,
+        viewWidthPx: Float,
+        viewHeightPx: Float,
+        depthWidth: Int,
+        depthHeight: Int,
+        viewToDepth: (Float, Float) -> Pair<Double, Double>?,
+        rowFraction: Double = 0.5,
+        samples: Int = 240,
+    ): StemExtent? {
+        if (viewWidthPx <= 1f || viewHeightPx <= 1f) return null
+        if (depthWidth <= 0 || depthHeight <= 0 || samples <= 8) return null
+        val y = (rowFraction * viewHeightPx).toFloat()
+        var first = -1; var last = -1; var hits = 0
+        for (i in 0 until samples) {
+            val f = i.toDouble() / (samples - 1)
+            val p = viewToDepth((f * viewWidthPx).toFloat(), y) ?: continue
+            val u = p.first / depthWidth
+            val v = p.second / depthHeight
+            if (u < 0 || u > 1 || v < 0 || v > 1) continue
+            if (mask.filled(u, v)) {
+                if (first < 0) first = i
+                last = i
+                hits++
+            }
+        }
+        if (first < 0 || last <= first || hits < 3) return null
+        val lf = first.toDouble() / (samples - 1)
+        val rf = last.toDouble() / (samples - 1)
+        // A span that reaches both edges of the screen is not a stem, it is a
+        // mask that has swallowed the frame.
+        if (rf - lf >= 0.95) return null
+        return StemExtent(lf, rf, mask.score, hits)
     }
 }
 
@@ -286,7 +316,7 @@ class TreeSegmenter(context: Context) {
     /// Segment one letterboxed frame. `chw` must be normalised RGB in CHW at
     /// INPUT_SIZE — see `ArController.cameraLetterboxCHW`, which produces it
     /// straight from the ARCore YUV image without a bitmap round trip.
-    fun segment(chw: FloatArray, box: Letterbox, rowFraction: Double = 0.5): StemExtent? {
+    fun segment(chw: FloatArray, box: Letterbox): TreeSegDecode.StemMask? {
         val s = session ?: return null
         val e = env ?: return null
         if (availability != SegmenterAvailability.READY) return null
@@ -299,12 +329,10 @@ class TreeSegmenter(context: Context) {
                     var proto: FloatArray? = null; var protoShape: IntArray? = null
                     for (i in 0 until outputs.size()) {
                         val v = outputs.get(i).value
-                        when (v) {
-                            is Array<*> -> {
-                                val flat = flatten(v) ?: continue
-                                if (flat.second.size == 3) { det = flat.first; detShape = flat.second }
-                                else if (flat.second.size == 4) { proto = flat.first; protoShape = flat.second }
-                            }
+                        if (v is Array<*>) {
+                            val flat = flatten(v) ?: continue
+                            if (flat.second.size == 3) { det = flat.first; detShape = flat.second }
+                            else if (flat.second.size == 4) { proto = flat.first; protoShape = flat.second }
                         }
                     }
                     val pShape = protoShape ?: return null
@@ -314,14 +342,8 @@ class TreeSegmenter(context: Context) {
                         det ?: return null, detShape ?: return null, nm,
                     )
                     val target = TreeSegDecode.pickTarget(trees, side) ?: return null
-                    val mask = TreeSegDecode.fillMask(target, p, nm, mh, mw, side)
-                    val modelRow = box.modelY(rowFraction)
-                    val protoRow = Math.round(modelRow * mh / side).toInt()
-                    TreeSegDecode.extent(
-                        mask, mh, mw,
-                        centreRow = protoRow.coerceIn(0, mh - 1),
-                        bandRows = 4, letterbox = box, score = target.score,
-                    )
+                    val cells = TreeSegDecode.fillMask(target, p, nm, mh, mw, side)
+                    TreeSegDecode.StemMask(cells, mh, mw, box, target.score)
                 }
             }
         } catch (_: Throwable) {

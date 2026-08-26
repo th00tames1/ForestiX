@@ -252,45 +252,98 @@ public enum TreeSegDecode {
         return mask
     }
 
-    /// THE TWO EDGES, at the row the estimator is going to read.
+    /// THE MASK AS THE NETWORK LEFT IT, on the prototype grid.
     ///
-    /// A median over a BAND of mask rows rather than the single row, for the
-    /// reason the depth path takes 21 rows: one row can clip a branch or a
-    /// notch in the silhouette, and the diameter is linear in this width.
-    /// Rows whose mask is empty do not vote — a band that runs off the top of
-    /// a leaning stem should narrow the sample, not widen the answer.
-    public static func extent(mask: [UInt8], mh: Int, mw: Int,
-                              centreRow: Int, bandRows: Int,
-                              letterbox: Letterbox,
-                              score: Float) -> StemExtent? {
-        var lefts: [Int] = [], rights: [Int] = []
-        var pixels = 0
-        let lo = max(0, centreRow - bandRows), hi = min(mh - 1, centreRow + bandRows)
-        guard lo <= hi else { return nil }
-        for y in lo...hi {
-            let base = y * mw
-            var l = -1, r = -1
-            for x in 0..<mw where mask[base + x] == 1 {
-                if l < 0 { l = x }
-                r = x
-                pixels += 1
-            }
-            if l >= 0 { lefts.append(l); rights.append(r) }
+    /// Handed out rather than reduced to two numbers here, because the two
+    /// numbers the estimator wants are in a coordinate system this file has
+    /// no business guessing at — see `extentAcrossView`.
+    public struct StemMask: Sendable {
+        public let cells: [UInt8]
+        public let height: Int
+        public let width: Int
+        public let letterbox: Letterbox
+        public let score: Float
+
+        public init(cells: [UInt8], height: Int, width: Int,
+                    letterbox: Letterbox, score: Float) {
+            self.cells = cells; self.height = height; self.width = width
+            self.letterbox = letterbox; self.score = score
         }
-        guard !lefts.isEmpty, pixels >= TreeSegmenterConfig.minMaskPixels else { return nil }
-        lefts.sort(); rights.sort()
-        let lm = Double(lefts[lefts.count / 2])
-        let rm = Double(rights[rights.count / 2])
-        // Proto grid to model space, then out through the letterbox. The +1 on
-        // the right edge counts the pixel itself: a one-cell mask is one cell
-        // wide, not zero.
-        let cell = Double(TreeSegmenterConfig.inputSize) / Double(mw)
-        let lf = letterbox.sourceXFraction(modelX: lm * cell)
-        let rf = letterbox.sourceXFraction(modelX: (rm + 1) * cell)
-        guard rf > lf else { return nil }
-        return StemExtent(leftFraction: max(0, min(1, lf)),
-                          rightFraction: max(0, min(1, rf)),
-                          score: score, maskPixels: pixels)
+
+        /// Is this proto cell inside the stem?
+        func filled(imageU: Double, imageV: Double) -> Bool {
+            // Normalised image → model space → proto cell. The letterbox is
+            // what puts the image inside the square the network saw.
+            let mx = letterbox.padX + imageU * Double(letterbox.sourceWidth) * letterbox.scale
+            let my = letterbox.padY + imageV * Double(letterbox.sourceHeight) * letterbox.scale
+            let cell = Double(TreeSegmenterConfig.inputSize)
+            let px = Int(mx * Double(width) / cell)
+            let py = Int(my * Double(height) / cell)
+            guard px >= 0, px < width, py >= 0, py < height else { return false }
+            return cells[py * width + px] == 1
+        }
+    }
+
+    /// THE TWO EDGES, AS A FRACTION ACROSS THE SCREEN — which is the only
+    /// thing the bracket means.
+    ///
+    /// THIS IS THE STEP THAT WAS WRONG. The obvious reading of the mask is to
+    /// walk its rows and report where the stem starts and stops along the
+    /// IMAGE's x. That number is worthless here. The camera image is in
+    /// SENSOR orientation — landscape — while the app is held portrait, so
+    /// the image's x runs DOWN the screen: the naive extent reports the
+    /// stem's LENGTH and hands it to the estimator as a width, and a stem
+    /// that fills the frame saturates the bracket to the full screen. The
+    /// diameter identity is linear in that span, so a 30 cm stem comes out a
+    /// metre and change — inside the plausibility gate, so nothing refuses it.
+    /// The image is also aspect-fill CROPPED into the view, so even after a
+    /// rotation the fractions differ by the crop factor.
+    ///
+    /// Both go away by never working in image space at all. This walks the
+    /// VIEW's own horizontal centre line, sample by sample, and asks the mask
+    /// whether each point is stem — going through `viewToDepth`, the mapping
+    /// the rest of the app already measures brackets with, and then straight
+    /// to normalised image coordinates, which the depth grid shares by
+    /// construction (see `ARKitSessionManager.viewMapping`: "the depth map
+    /// and the captured image share an orientation and an aspect"). Rotation
+    /// and crop are the mapping's job, and it already does it correctly.
+    ///
+    /// Returns nil when the line crosses no stem, or crosses too little of
+    /// one to be a measurement.
+    public static func extentAcrossView(
+        mask: StemMask,
+        viewSize: CGSize,
+        mapping: DepthViewMapping,
+        depthWidth: Int,
+        depthHeight: Int,
+        rowFraction: Double = 0.5,
+        samples: Int = 240
+    ) -> StemExtent? {
+        guard viewSize.width > 1, viewSize.height > 1,
+              depthWidth > 0, depthHeight > 0, samples > 8 else { return nil }
+        let y = rowFraction * Double(viewSize.height)
+        var first = -1, last = -1, hits = 0
+        for i in 0..<samples {
+            let f = Double(i) / Double(samples - 1)
+            let p = mapping.viewToDepth(x: f * Double(viewSize.width), y: y)
+            let u = p.x / Double(depthWidth)
+            let v = p.y / Double(depthHeight)
+            guard u >= 0, u <= 1, v >= 0, v <= 1 else { continue }
+            if mask.filled(imageU: u, imageV: v) {
+                if first < 0 { first = i }
+                last = i
+                hits += 1
+            }
+        }
+        guard first >= 0, last > first, hits >= 3 else { return nil }
+        let lf = Double(first) / Double(samples - 1)
+        let rf = Double(last) / Double(samples - 1)
+        // A span that reaches both edges of the screen is not a stem, it is a
+        // mask that has swallowed the frame — refuse rather than record a
+        // diameter the size of the viewport.
+        guard rf - lf < 0.95 else { return nil }
+        return StemExtent(leftFraction: lf, rightFraction: rf,
+                          score: mask.score, maskPixels: hits)
     }
 }
 
@@ -361,8 +414,7 @@ public final class TreeSegmenter {
     /// down the image (0.5 = the guide row the estimator reads).
     ///
     /// SYNCHRONOUS AND SLOW — tens of milliseconds. Never on the main thread.
-    public func segment(pixelBuffer: CVPixelBuffer,
-                        rowFraction: Double = 0.5) -> StemExtent? {
+    public func segment(pixelBuffer: CVPixelBuffer) -> TreeSegDecode.StemMask? {
         guard let session, availability.isReady else { return nil }
         let side = TreeSegmenterConfig.inputSize
         let srcW = CVPixelBufferGetWidth(pixelBuffer)
@@ -394,18 +446,10 @@ public final class TreeSegmenter {
             let trees = TreeSegDecode.detections(det: det, detShape: detShape,
                                                  maskCoeffCount: nm)
             guard let target = TreeSegDecode.pickTarget(trees, size: side) else { return nil }
-            let mask = TreeSegDecode.fillMask(target, proto: proto, nm: nm, mh: mh, mw: mw,
-                                              modelSize: side)
-            // The guide row, carried into proto space through the same
-            // letterbox the image went in through.
-            let modelRow = box.modelY(sourceYFraction: rowFraction)
-            let protoRow = Int((modelRow * Double(mh) / Double(side)).rounded())
-            // +/- 4 proto rows is ~16 model rows, the same neighbourhood the
-            // depth walk medians over.
-            return TreeSegDecode.extent(mask: mask, mh: mh, mw: mw,
-                                        centreRow: max(0, min(mh - 1, protoRow)),
-                                        bandRows: 4, letterbox: box,
-                                        score: target.score)
+            let cells = TreeSegDecode.fillMask(target, proto: proto, nm: nm, mh: mh, mw: mw,
+                                               modelSize: side)
+            return TreeSegDecode.StemMask(cells: cells, height: mh, width: mw,
+                                          letterbox: box, score: target.score)
         } catch {
             return nil
         }
@@ -417,14 +461,22 @@ public final class TreeSegmenter {
     private func letterboxCHW(_ pb: CVPixelBuffer,
                               box: TreeSegDecode.Letterbox,
                               side: Int) -> [Float]? {
-        let nw = max(1, Int((Double(box.sourceWidth) * box.scale).rounded()))
-        let nh = max(1, Int((Double(box.sourceHeight) * box.scale).rounded()))
+        // THE PADDING HAS TO BE IN THE IMAGE, not pre-filled in the buffer.
+        // `CIContext.render(_:toBitmap:)` fills the whole bounds rect it is
+        // given, so a buffer pre-set to 114-grey comes back with the pad areas
+        // BLACK — a quarter of a 4:3 frame arriving in a distribution the
+        // network never saw, on exactly the frames the bracket is placed from.
+        // Compositing over a constant-colour image puts the grey where the
+        // letterbox wants it and leaves nothing for render to clear.
+        let grey = CIImage(color: CIColor(red: 114.0 / 255, green: 114.0 / 255,
+                                          blue: 114.0 / 255, alpha: 1))
+            .cropped(to: CGRect(x: 0, y: 0, width: side, height: side))
         let ci = CIImage(cvPixelBuffer: pb)
             .transformed(by: CGAffineTransform(scaleX: CGFloat(box.scale),
                                                y: CGFloat(box.scale)))
             .transformed(by: CGAffineTransform(translationX: CGFloat(box.padX),
                                                y: CGFloat(box.padY)))
-        for i in rgba.indices { rgba[i] = (i % 4 == 3) ? 255 : 114 }
+            .composited(over: grey)
         let bytesPerRow = side * 4
         rgba.withUnsafeMutableBytes { raw in
             guard let base = raw.baseAddress else { return }
@@ -435,7 +487,6 @@ public final class TreeSegmenter {
                              format: .RGBA8,
                              colorSpace: CGColorSpaceCreateDeviceRGB())
         }
-        _ = (nw, nh)
         let area = side * side
         var chw = [Float](repeating: 0, count: 3 * area)
         // CoreImage renders bottom-left origin; the network reads top-left.

@@ -237,6 +237,15 @@ public final class DBHScanViewModel: ObservableObject {
     /// ("manual" vs "auto").
     @Published public private(set) var resultCapturedManually: Bool = false
 
+    /// WHICH HAND PLACED THE EDGES — "auto", "manual", or "segmented".
+    ///
+    /// `resultCapturedManually` cannot carry this: it is a Bool, and a
+    /// model-placed bracket is a bracket, so it read "manual" and was
+    /// indistinguishable in the record from a thumb. The whole argument for
+    /// routing segmentation through the bracket was that a corpus could be
+    /// split on it later, and that is only true if the record says which.
+    @Published public private(set) var resultCaptureMode: String = "auto"
+
     // MARK: - Segmentation-driven edges
 
     /// THE MODEL'S ANSWER, or nil while it has none.
@@ -262,38 +271,69 @@ public final class DBHScanViewModel: ObservableObject {
     private var segmenter: TreeSegmenter?
     private var segmentationTask: Task<Void, Never>?
 
-    /// ONE INFERENCE AT A TIME, on a background priority, at a rate the AR
-    /// session can absorb.
+    /// ONE INFERENCE AT A TIME, OFF THE MAIN ACTOR, at a rate the AR session
+    /// can absorb.
     ///
-    /// 8 Hz, not per frame. The network is tens of milliseconds and ARKit is
-    /// delivering at 60 — chasing every frame would spend the whole device on
-    /// a bracket that only has to keep up with a cruiser's hands. The feed
-    /// also holds no ARFrame: the pixel buffer is read, used, and dropped
-    /// inside one tick, because ARKit recycles that pool and a retained
-    /// buffer starves the session.
+    /// `@MainActor` is on this whole class, so a bare `Task {}` inherits it
+    /// and would run fifty to a hundred milliseconds of ONNX on the main
+    /// thread eight times a second, in the middle of a live AR session. It is
+    /// `Task.detached` for that reason, and everything it touches on the way
+    /// in and out is hopped explicitly.
+    ///
+    /// 8 Hz, not per frame. The network is tens of milliseconds and ARKit
+    /// delivers at 60 — chasing every frame would spend the whole device on a
+    /// bracket that only has to keep up with a cruiser's hands. The feed also
+    /// holds no ARFrame: the pixel buffer is read, used and dropped inside one
+    /// tick, because ARKit recycles that pool and a retained buffer starves
+    /// the session.
     private func startSegmentationFeed() {
         guard segmentationTask == nil else { return }
-        segmentationTask = Task { [weak self] in
+        segmentationTask = Task.detached(priority: .utility) { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                let on = await MainActor.run { self.segmentationEnabled }
-                guard on else {
+                let ready = await self.prepareSegmentationTick()
+                guard let ready else {
                     try? await Task.sleep(nanoseconds: 250_000_000)
                     continue
                 }
-                if self.segmenter == nil {
-                    let made = TreeSegmenter()
-                    self.segmenter = made
-                    await MainActor.run { self.segmenterAvailability = made.availability }
-                }
-                let buffer = await MainActor.run { self.session.currentCameraPixelBuffer() }
-                if let buffer, let seg = self.segmenter, seg.availability.isReady {
-                    let extent = seg.segment(pixelBuffer: buffer)
-                    await MainActor.run { self.applySegmented(extent) }
-                }
+                // The only work off the actor, and the only slow part.
+                let mask = ready.segmenter.segment(pixelBuffer: ready.buffer)
+                await self.applySegmented(mask: mask,
+                                         viewSize: ready.viewSize,
+                                         mapping: ready.mapping,
+                                         depthWidth: ready.depthWidth,
+                                         depthHeight: ready.depthHeight)
                 try? await Task.sleep(nanoseconds: 125_000_000)
             }
         }
+    }
+
+    /// Everything the tick needs off the actor, gathered on it in one hop.
+    private struct SegmentationTick {
+        let segmenter: TreeSegmenter
+        let buffer: CVPixelBuffer
+        let viewSize: CGSize
+        let mapping: DepthViewMapping
+        let depthWidth: Int
+        let depthHeight: Int
+    }
+
+    private func prepareSegmentationTick() -> SegmentationTick? {
+        guard segmentationEnabled else { return nil }
+        if segmenter == nil {
+            let made = TreeSegmenter()
+            segmenter = made
+            segmenterAvailability = made.availability
+        }
+        guard let segmenter, segmenter.availability.isReady,
+              let buffer = session.currentCameraPixelBuffer(),
+              let frame = session.latestDepthFrame,
+              let mapping = frame.viewMapping,
+              viewSize.width > 1, viewSize.height > 1
+        else { return nil }
+        return SegmentationTick(segmenter: segmenter, buffer: buffer,
+                                viewSize: viewSize, mapping: mapping,
+                                depthWidth: frame.width, depthHeight: frame.height)
     }
 
     /// The mask's two edges become the bracket's two handles.
@@ -307,16 +347,37 @@ public final class DBHScanViewModel: ObservableObject {
     ///
     /// Ignored while the cruiser is in ADJUST: they have taken hold of the
     /// bracket, and a bracket that fights a thumb is worse than no bracket.
-    private func applySegmented(_ extent: StemExtent?) {
+    private func applySegmented(mask: TreeSegDecode.StemMask?,
+                                viewSize: CGSize,
+                                mapping: DepthViewMapping,
+                                depthWidth: Int,
+                                depthHeight: Int) {
+        let extent = mask.flatMap {
+            TreeSegDecode.extentAcrossView(mask: $0, viewSize: viewSize,
+                                           mapping: mapping,
+                                           depthWidth: depthWidth,
+                                           depthHeight: depthHeight)
+        }
         segmentedExtent = extent
         guard let extent, !edgeAdjustActive else { return }
         edgeBracketLeftFraction = extent.leftFraction
         edgeBracketRightFraction = extent.rightFraction
     }
+
+    /// Stop inferring and give the graph back. Called from `onDisappear` —
+    /// without it the loop and 11 MB outlive the screen for as long as
+    /// anything holds the view model.
+    public func stopSegmentationFeed() {
+        segmentationTask?.cancel()
+        segmentationTask = nil
+        segmenter = nil
+        segmentedExtent = nil
+    }
     #else
     private func startSegmentationFeed() {
         segmenterAvailability = .unsupportedPlatform
     }
+    public func stopSegmentationFeed() { segmentedExtent = nil }
     #endif
 
     /// Guide axis latched on the first ADJUST preview tick and held for the
@@ -357,6 +418,8 @@ public final class DBHScanViewModel: ObservableObject {
     }
 
     private var burstUsedBracket = false
+    /// Latched with the bracket: was it the model that placed it?
+    private var burstUsedSegmentation = false
     private var burstBracketLeft: Double = 0
     private var burstBracketRight: Double = 0
     /// Walk axis for the CURRENT burst only, derived from the mapped
@@ -646,7 +709,7 @@ public final class DBHScanViewModel: ObservableObject {
         // Reading the estimator's median directly would be better still, but
         // `DBHEstimator.medianDepth` is internal to the Sensors module and
         // widening it is a change to the estimator file.
-        let liveFitUsable = !edgeAdjustActive
+        let liveFitUsable = !(edgeAdjustActive || segmentationDroveTheBracket)
             && (previewFit.map { $0.tier != .red } ?? false)
         let stable = centrePixelUsable || liveFitUsable
         // ONLY ON CHANGE. `@Published` fires `objectWillChange` on every
@@ -733,7 +796,12 @@ public final class DBHScanViewModel: ObservableObject {
         // the raw bracket fit is published on every preview tick. The walk
         // axis is voted per frame until the bracket first measures, then
         // latched — see `adjustAxisLatch`.
-        if edgeAdjustActive {
+        // SEGMENTATION TAKES THE BRACKET BRANCH TOO. The capture routes a
+        // model-placed reading through `bracketChordEstimate`, so the number
+        // on screen has to come from the same fit — otherwise the cruiser
+        // reads the auto depth-walk's diameter, taps "+", and a different one
+        // is stored, with nothing saying so.
+        if edgeAdjustActive || segmentationDroveTheBracket {
             // THE HANDLE FRACTIONS GO STRAIGHT IN, against a guide axis
             // latched for the session — restored verbatim from the version
             // the field used and verified.
@@ -1260,7 +1328,8 @@ public final class DBHScanViewModel: ObservableObject {
         // bundle replays through the code that produced the live number, and
         // that the entry is stamped "manual" rather than quietly filed as an
         // automatic depth-walk reading it is not.
-        burstUsedBracket = edgeAdjustActive || segmentationDroveTheBracket
+        burstUsedSegmentation = segmentationDroveTheBracket
+        burstUsedBracket = edgeAdjustActive || burstUsedSegmentation
         burstBracketLeft = edgeBracketLeftFraction
         burstBracketRight = edgeBracketRightFraction
         // VOTE THE AXIS HERE, on the frame the cruiser is aimed at right now.
@@ -1413,6 +1482,7 @@ public final class DBHScanViewModel: ObservableObject {
         let cm = unitSystem == .imperial ? Units.inchesToCm(typed) : typed
         guard cm > 0 else { return }
         resultCapturedManually = false
+        resultCaptureMode = "auto"
         result = DBHResult(
             diameterCm: Float(cm),
             centerXZ: SIMD2(0, 0),
@@ -1497,6 +1567,8 @@ public final class DBHScanViewModel: ObservableObject {
         // it carries the human-readable rejection reason.
         result = outcome ?? samples.first(where: { $0.confidence == .red })
         resultCapturedManually = burstUsedBracket
+        resultCaptureMode = burstUsedSegmentation ? "segmented"
+            : (burstUsedBracket ? "manual" : "auto")
         if let r = result, r.confidence != .red, outcome != nil {
             state = .fitted
         } else {

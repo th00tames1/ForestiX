@@ -443,6 +443,82 @@ class ArController {
     /// JPEG at `quality`. Returns false on any failure (bundle still saves,
     /// just without an rgb_file). Best-effort + fully guarded so a recorder
     /// hiccup can never crash the AR screen.
+    /// THE CAMERA FRAME, LETTERBOXED AND NORMALISED, ready for the segmenter.
+    ///
+    /// Straight from the ARCore YUV planes to the network's input buffer — no
+    /// JPEG, no Bitmap. `captureCameraJpeg` beside this encodes because its
+    /// output is a file a person looks at; this runs several times a second
+    /// and an encode/decode round trip would cost more than the network does.
+    ///
+    /// Nearest-neighbour, because the destination is 640 square and the source
+    /// is a 12-megapixel-class frame: every output pixel is already an average
+    /// of many, and a bilinear read would cost four plane lookups to move an
+    /// edge by less than a mask cell.
+    ///
+    /// 114-grey padding and /255 RGB in CHW — the iOS letterbox exactly, so
+    /// both platforms hand the model the same picture.
+    ///
+    /// The Image is acquired, used and closed inside this call. ARCore has a
+    /// small pool and holding one starves the session.
+    fun cameraLetterboxCHW(size: Int): Pair<FloatArray, com.hcjeong.forestix.sensors.Letterbox>? {
+        val f = frame ?: return null
+        return try {
+            val image = f.acquireCameraImage()
+            try {
+                if (image.format != android.graphics.ImageFormat.YUV_420_888) return null
+                val w = image.width
+                val h = image.height
+                if (w <= 0 || h <= 0) return null
+                val box = com.hcjeong.forestix.sensors.Letterbox(w, h, size)
+                val yP = image.planes[0]; val uP = image.planes[1]; val vP = image.planes[2]
+                val yB = yP.buffer; val uB = uP.buffer; val vB = vP.buffer
+                val yRow = yP.rowStride; val yPix = yP.pixelStride
+                val uRow = uP.rowStride; val uPix = uP.pixelStride
+                val vRow = vP.rowStride; val vPix = vP.pixelStride
+                val area = size * size
+                val out = FloatArray(3 * area)
+                // 114/255, the grey the letterbox pads with.
+                val pad = 114f / 255f
+                java.util.Arrays.fill(out, pad)
+                val nw = kotlin.math.max(1, kotlin.math.round(w * box.scale).toInt())
+                val nh = kotlin.math.max(1, kotlin.math.round(h * box.scale).toInt())
+                val ox = box.padX.toInt()
+                val oy = box.padY.toInt()
+                for (dy in 0 until nh) {
+                    val my = oy + dy
+                    if (my < 0 || my >= size) continue
+                    val sy = (dy * h / nh).coerceIn(0, h - 1)
+                    val outRow = my * size
+                    val yBase = sy * yRow
+                    val cBaseU = (sy / 2) * uRow
+                    val cBaseV = (sy / 2) * vRow
+                    for (dx in 0 until nw) {
+                        val mx = ox + dx
+                        if (mx < 0 || mx >= size) continue
+                        val sx = (dx * w / nw).coerceIn(0, w - 1)
+                        val yv = (yB.get(yBase + sx * yPix).toInt() and 0xFF)
+                        val uv = (uB.get(cBaseU + (sx / 2) * uPix).toInt() and 0xFF) - 128
+                        val vv = (vB.get(cBaseV + (sx / 2) * vPix).toInt() and 0xFF) - 128
+                        // BT.601, the conversion YuvImage uses, so this and the
+                        // reference JPEG describe the same colours.
+                        val r = (yv + 1.402f * vv).coerceIn(0f, 255f)
+                        val g = (yv - 0.344136f * uv - 0.714136f * vv).coerceIn(0f, 255f)
+                        val b = (yv + 1.772f * uv).coerceIn(0f, 255f)
+                        val idx = outRow + mx
+                        out[idx] = r / 255f
+                        out[area + idx] = g / 255f
+                        out[2 * area + idx] = b / 255f
+                    }
+                }
+                out to box
+            } finally {
+                image.close()
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     fun captureCameraJpeg(dest: java.io.File, quality: Int = 80): Boolean {
         val f = frame ?: return false
         return try {

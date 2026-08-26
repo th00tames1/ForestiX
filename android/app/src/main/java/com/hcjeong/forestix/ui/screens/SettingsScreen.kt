@@ -351,6 +351,32 @@ fun SettingsScreen(nav: NavController) {
                 }
             }
 
+            // AUTOMATIC STEM EDGES. Its own section rather than a line in
+            // Measuring: this is the one setting on the screen that changes
+            // what a diameter is measured BETWEEN, and it should not be read
+            // past on the way to something else. iOS SettingsScreen 1:1.
+            FormSection(header = "Automatic stem edges") {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text("Find the stem automatically", style = type.body, color = colors.textPrimary)
+                        Text(
+                            "Off by default, and not yet checked against tape. When it is on, " +
+                                "an on-device model finds the trunk in the camera image and " +
+                                "places the measuring bracket on its edges for you; take hold " +
+                                "of the bracket and it stands aside. Uses the camera as well " +
+                                "as the depth sensor, falls back to the depth edge-finder " +
+                                "whenever it has no answer, and readings taken this way are " +
+                                "recorded as bracket captures so they can be told apart later.",
+                            style = type.caption, color = colors.textSecondary,
+                        )
+                    }
+                    Switch(
+                        checked = settings.dbhAutoSegmentation,
+                        onCheckedChange = { env.settings.setDbhAutoSegmentation(it) },
+                    )
+                }
+            }
+
             // MARK: - 2b. Measuring
             // FIELD REPORT F10 — the cruise tally chains diameter → height by
             // default. Cruisers who only want diameters turn it off here.

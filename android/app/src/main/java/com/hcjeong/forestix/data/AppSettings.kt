@@ -164,6 +164,12 @@ data class SettingsSnapshot(
     /// measurement and appears in no export. Same key as iOS
     /// (`AppSettings.Keys.breastHeightGuide`, "tc.breastHeightGuide").
     val breastHeightGuide: Boolean = false,
+    /// AUTO reads the stem's edges out of a segmentation mask instead of
+    /// walking the depth map. OFF BY DEFAULT and it must stay that way until
+    /// it has been checked against tape: it changes the two pixels the chord
+    /// identity is applied between, and this project's numbers are a paper's
+    /// numbers. iOS reads the same `tc.dbhAutoSegmentation` key.
+    val dbhAutoSegmentation: Boolean = false,
     /// App appearance — "light" (default) or "dark". Same Field
     /// High-Contrast identity in both; ForestixTheme maps this to the
     /// light or dark token set (mirror of iOS tc.appearance).
@@ -221,6 +227,7 @@ class AppSettings(private val context: Context) {
         val developerMode = booleanPreferencesKey("tc.developerMode")
         val rawCaptureEnabled = booleanPreferencesKey("tc.rawCaptureEnabled")
         val breastHeightGuide = booleanPreferencesKey("tc.breastHeightGuide")
+        val dbhAutoSegmentation = booleanPreferencesKey("tc.dbhAutoSegmentation")
         val appearance = stringPreferencesKey("tc.appearance")
         // Unified with the iOS sibling's key (was "tc.cruiseProjectId"); the
         // one-time reset of this transient current-project pointer is
@@ -273,6 +280,7 @@ class AppSettings(private val context: Context) {
             developerMode = p[Keys.developerMode] ?: false,
             rawCaptureEnabled = p[Keys.rawCaptureEnabled] ?: false,
             breastHeightGuide = p[Keys.breastHeightGuide] ?: false,
+            dbhAutoSegmentation = p[Keys.dbhAutoSegmentation] ?: false,
             appearance = p[Keys.appearance] ?: "light",
             cruiseProjectId = p[Keys.cruiseProjectId],
             cruisePlotId = p[Keys.cruisePlotId],
@@ -314,6 +322,11 @@ class AppSettings(private val context: Context) {
     fun setBreastHeightGuide(value: Boolean) = update {
         _state.value = _state.value.copy(breastHeightGuide = value)
         it[Keys.breastHeightGuide] = value
+    }
+
+    fun setDbhAutoSegmentation(value: Boolean) = update {
+        _state.value = _state.value.copy(dbhAutoSegmentation = value)
+        it[Keys.dbhAutoSegmentation] = value
     }
 
     fun setMeasureHeightAfterDiameter(value: Boolean) = update {

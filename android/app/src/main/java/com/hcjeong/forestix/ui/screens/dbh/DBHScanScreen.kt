@@ -13,6 +13,12 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import com.hcjeong.forestix.sensors.TreeSegmenter
+import com.hcjeong.forestix.sensors.TreeSegmenterConfig
+import com.hcjeong.forestix.sensors.SegmenterAvailability
+import com.hcjeong.forestix.sensors.StemExtent
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -500,6 +506,44 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     var adjustRightFrac by remember {
         mutableStateOf(0.5f + clampBracketHalfWidth(settings.dbhBracketHalfWidth))
     }
+
+    // SEGMENTATION-DRIVEN EDGES. The model places the ADJUST bracket's two
+    // handles instead of a thumb; everything downstream — the depth geometry,
+    // the middle-half sampling, the tangent identity, the tier — is the
+    // bracket path exactly as it ships. iOS DBHScanViewModel 1:1.
+    val segmentationOn = settings.dbhAutoSegmentation
+    var segmentedExtent by remember { mutableStateOf<StemExtent?>(null) }
+    var segmenter by remember { mutableStateOf<TreeSegmenter?>(null) }
+    DisposableEffect(Unit) { onDispose { segmenter?.close() } }
+    LaunchedEffect(segmentationOn, depthBlocked) {
+        if (!segmentationOn) { segmentedExtent = null; return@LaunchedEffect }
+        // Built on first use, not at screen entry: loading an 11 MB graph is a
+        // beat the cruiser would feel, and most sessions never turn this on.
+        if (segmenter == null) {
+            segmenter = withContext(Dispatchers.Default) { TreeSegmenter(context) }
+        }
+        val seg = segmenter
+        // 8 Hz, not per frame. The network is tens of milliseconds and ARCore
+        // delivers far faster; a bracket only has to keep up with a cruiser's
+        // hands, and the AR session needs the cores more than this does.
+        while (seg != null && seg.availability == SegmenterAvailability.READY && !depthBlocked) {
+            val extent = withContext(Dispatchers.Default) {
+                controller.cameraLetterboxCHW(TreeSegmenterConfig.INPUT_SIZE)
+                    ?.let { (chw, box) -> seg.segment(chw, box) }
+            }
+            segmentedExtent = extent
+            // Ignored while the cruiser is in ADJUST: they have taken hold of
+            // the bracket, and a bracket that fights a thumb is worse than no
+            // bracket at all.
+            if (extent != null && !adjustMode) {
+                adjustLeftFrac = extent.leftFraction.toFloat()
+                adjustRightFrac = extent.rightFraction.toFloat()
+            }
+            delay(125)
+        }
+    }
+    /// Whether the handles about to be latched were placed by the model.
+    val segmentationDroveTheBracket = segmentationOn && segmentedExtent != null && !adjustMode
     var adjustPreview by remember { mutableStateOf<DBHEstimator.DbhPreview?>(null) }
 
     // ADJUST live-readout settling (field round 10 — the diameter that jumps
@@ -1900,7 +1944,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         // the drag reads the FINGER's distance from centre directly rather
         // than accumulating deltas (which drifted when a drag crossed the
         // centre line).
-        if (adjustMode && stage == Stage.AIMING) {
+        if ((adjustMode || segmentationDroveTheBracket) && stage == Stage.AIMING) {
             Box(
                 Modifier
                     .fillMaxSize()
@@ -2379,7 +2423,14 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         // readouts in the strip directly above.
         if (stage == Stage.AIMING && !depthBlocked && !hidingChromeForCapture && !manualOpen) {
             MeasureShutterBar(
-                onCapture = if (adjustMode) ({ captureAdjust() }) else ({ capture() }),
+                // A SEGMENTED CAPTURE IS A BRACKET CAPTURE — the same two
+                // handles going into the same estimate, so it must go down
+                // the same path and be stamped the same way.
+                onCapture = if (adjustMode || segmentationDroveTheBracket) {
+                    ({ captureAdjust() })
+                } else {
+                    ({ capture() })
+                },
                 left = {
                     MeasureCircleButton(icon = Icons.Filled.Keyboard, caption = "Type") {
                         manualOpen = true; manualText = ""

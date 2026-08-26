@@ -284,7 +284,31 @@ fun HeightScanScreen(
 
     var stage by remember { mutableStateOf(Stage.ANCHOR) }
     var anchorPt by remember { mutableStateOf<Vec3?>(null) }
-    var standingLocked by remember { mutableStateOf<Vec3?>(null) }
+    /// WHERE THE CRUISER STOOD, HELD AGAINST THE ANCHOR.
+    ///
+    /// Stored as an OFFSET from the trunk anchor at the moment of the base
+    /// tap, never as a bare world point — and unlike the aim spheres this one
+    /// reaches H. `d_h` is the horizontal distance between the anchor and this
+    /// point, and it was computed at the TOP tap from an anchor re-read live
+    /// against a standing point frozen at the BASE tap: two coordinates in two
+    /// different world frames whenever ARCore re-fitted between the taps.
+    /// H = d_h·(tan α_top − tan α_base) is directly proportional to d_h, so the
+    /// error went straight into the recorded height.
+    ///
+    /// Expressed against the anchor the subtraction is (a+d) − a = d: the
+    /// anchor cancels and the re-fit cancels with it. Nothing about the intent
+    /// changes — both angles must still come from one spot (§7.2), which is
+    /// why this is locked at the base tap at all, and `aimDriftM` still
+    /// measures how far the cruiser actually moved.
+    var standingOffset by remember { mutableStateOf<Vec3?>(null) }
+
+    /// The locked standing point in the CURRENT world frame. Null whenever the
+    /// anchor is (the honest vanish the rest of this screen already takes).
+    fun standingNow(): Vec3? {
+        val d = standingOffset ?: return null
+        val a = anchorPt ?: return null
+        return Vec3(a.x + d.x, a.y + d.y, a.z + d.z)
+    }
     var alphaBase by remember { mutableStateOf<Float?>(null) }
     var alphaTop by remember { mutableStateOf<Float?>(null) }
     /// Where each aim tap landed RELATIVE TO THE TRUNK ANCHOR. Stored as an
@@ -803,7 +827,7 @@ fun HeightScanScreen(
         val aPose = anchorPose
         val bPoseRaw = basePose
         val tPose = topPose
-        val standing = standingLocked
+        val standing = standingNow()
         if (aPose == null || bPoseRaw == null || tPose == null || standing == null) {
             val missing = listOfNotNull(
                 if (aPose == null) "anchor" else null,
@@ -1021,7 +1045,8 @@ fun HeightScanScreen(
                 if (a == null || s == null) { failure = CAMERA_NOT_READY; return }
                 // Lock the standing pose on the first aim; both angles must
                 // come from the same spot (the §7.2 formula assumes it).
-                failure = null; alphaBase = a; standingLocked = s
+                failure = null; alphaBase = a
+                standingOffset = Vec3(s.x - anchor.x, s.y - anchor.y, s.z - anchor.z)
                 if (rawCaptureArmed) {
                     basePose = controller.currentCameraPose()
                     val (fr, rgb) = captureAim()
@@ -1057,7 +1082,9 @@ fun HeightScanScreen(
                 anchorPt = anchor
                 // Same refusal as the base aim — see it.
                 if (poseJumped) { failure = POSE_JUMPED; return }
-                val standing = standingLocked; val aBase = alphaBase
+                // Rebuilt against the anchor just re-read above, so `standing`
+                // and `anchor` are in ONE world frame — see `standingOffset`.
+                val standing = standingNow(); val aBase = alphaBase
                 if (aTop == null || standing == null || aBase == null) {
                     failure = CAMERA_NOT_READY; return
                 }
@@ -1145,7 +1172,7 @@ fun HeightScanScreen(
         // The held frame captions the measurement being thrown away — keeping
         // it would put the OLD aim on the NEW height.
         discardHeldPhoto()
-        stage = Stage.ANCHOR; anchorPt = null; standingLocked = null
+        stage = Stage.ANCHOR; anchorPt = null; standingOffset = null
         alphaBase = null; alphaTop = null; topOffset = null; baseOffset = null
         aimDriftM = null
         dhLive = 0f; anchorInitialDistM = null; standingAtAnchor = null

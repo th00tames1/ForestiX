@@ -244,7 +244,31 @@ public final class HeightScanViewModel: ObservableObject {
 
     /// Standing pose at aim-top tap — §7.2 uses the same standing point
     /// for both taps, so we lock it on the first tap and reuse it.
-    private var standingPointWorldAtAimTop: SIMD3<Float>?
+    /// WHERE THE CRUISER STOOD, HELD AGAINST THE ANCHOR — as an OFFSET.
+    ///
+    /// This one reaches H, unlike the aim spheres. `d_h` is the horizontal
+    /// distance between the anchor and this point, and it was computed from an
+    /// anchor that IS re-fitted every frame (see `anchorPointWorld`, and the
+    /// note in the tracked-anchor poll that says in as many words that the
+    /// standing point "was locked at the base tap and is never re-fitted")
+    /// against a standing point that is not. Two coordinates, two world
+    /// frames, whenever ARKit relocalized between the base and top sightings —
+    /// and H = d_h·(tan α_top − tan α_base) is directly proportional to d_h,
+    /// so the whole re-fit went into the recorded height.
+    ///
+    /// Against the anchor the subtraction is (a+d) − a = d: the anchor cancels
+    /// and the re-fit cancels with it. The intent is unchanged — both angles
+    /// must still come from one spot (§7.2), which is why it is locked at the
+    /// base tap at all, and `aimDrift` still measures how far the cruiser
+    /// actually moved.
+    private var standingOffsetFromAnchor: SIMD3<Float>?
+
+    /// The locked standing point in the CURRENT world frame.
+    private var standingPointWorldAtAimTop: SIMD3<Float>? {
+        guard let d = standingOffsetFromAnchor,
+              let a = anchorPointWorld else { return nil }
+        return a + d
+    }
 
     /// How far the camera moved between the base sighting and the top
     /// sighting. nil until a height has been computed (or when the pose was
@@ -694,7 +718,7 @@ public final class HeightScanViewModel: ObservableObject {
                                                name: "forestix.heightAnchor")
         alphaTopRad = nil
         alphaBaseRad = nil
-        standingPointWorldAtAimTop = nil
+        standingOffsetFromAnchor = nil
         aimDriftM = nil
         topAimedOffset = nil
         baseAimedOffset = nil
@@ -778,7 +802,7 @@ public final class HeightScanViewModel: ObservableObject {
         guard let median = resilientMedianPitch(tapTime: tapTime) else { return }
         alphaBaseRad = Float(median)
         alphaBaseSampleCount = pitchBuffer.sampleCount(centeredOn: tapTime)
-        standingPointWorldAtAimTop = standingPointWorld
+        standingOffsetFromAnchor = anchorPointWorld.map { standingPointWorld - $0 }
         baseAimedOffset = anchorPointWorld.map { a in
             (aimedAtWorld ?? a) - a
         }
@@ -991,7 +1015,9 @@ public final class HeightScanViewModel: ObservableObject {
                                   standingPointWorld: SIMD3<Float>) {
         guard state == .aimBaseArmed, anchorPointWorld != nil else { return }
         self.alphaBaseRad = alphaBaseRad
-        standingPointWorldAtAimTop = standingPointWorld
+        // Same re-basing as the real base tap — a test hook that stored an
+        // absolute point would be testing a path the app no longer has.
+        standingOffsetFromAnchor = anchorPointWorld.map { standingPointWorld - $0 }
         recordBasePose = session.latestDepthFrame?.cameraPoseWorld ?? matrix_identity_float4x4
         retainBaseAimFrame()
         state = .aimTopArmed
@@ -1024,7 +1050,7 @@ public final class HeightScanViewModel: ObservableObject {
         anchorPoseStaleSince = nil
         alphaTopRad = nil
         alphaBaseRad = nil
-        standingPointWorldAtAimTop = nil
+        standingOffsetFromAnchor = nil
         aimDriftM = nil
         topAimedOffset = nil
         baseAimedOffset = nil

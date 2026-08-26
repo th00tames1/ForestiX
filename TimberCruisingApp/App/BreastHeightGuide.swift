@@ -271,12 +271,19 @@ public final class BreastHeightGuide: ObservableObject {
                           worldPosition: base + SIMD3<Float>(0, h / 2, 0),
                           shape: .cylinder(radiusM: 0.012, heightM: h),
                           colorRGBA: white),
-            // Breast height itself: a flat ring with real thickness (the
-            // sampling plot's rim, not a hairline circle) so it reads as a
-            // band around the trunk from any angle.
+            // Breast height itself: a DOUGHNUT, not the flat rim the plot
+            // boundary uses.
+            //
+            // It was that rim, and the rim is the wrong shape here for the
+            // one reason that matters: this marker sits at 1.37 m, so a
+            // cruiser holding the phone at chest height looks at it almost
+            // exactly edge-on — and a flat disc seen edge-on is a hairline
+            // across the bark, at the moment it has to be read. A tube looks
+            // the same from every direction. 5 cm of tube is the band width
+            // the rim drew at, so nothing about the reading changes.
             ARSceneMarker(id: Self.ringId,
                           worldPosition: base + SIMD3<Float>(0, h, 0),
-                          shape: .ring(radiusM: 0.35, thicknessM: 0.05),
+                          shape: .torus(radiusM: 0.35, tubeM: 0.05),
                           colorRGBA: white),
         ]
     }

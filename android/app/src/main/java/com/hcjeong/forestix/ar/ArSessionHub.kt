@@ -761,6 +761,7 @@ object ArSessionHub {
             is MarkerShape.Sphere -> SphereNode(engine, radius = shape.radiusM, materialInstance = material)
             is MarkerShape.Cylinder -> CylinderNode(engine, radius = shape.radiusM, height = shape.heightM, materialInstance = material)
             is MarkerShape.Ring -> buildRingNode(engine, shape.radiusM, shape.thicknessM, material)
+            is MarkerShape.Torus -> buildTorusNode(engine, shape.radiusM, shape.tubeM, material)
         }
     }
 
@@ -1131,6 +1132,60 @@ internal fun ringVertices(
         ))
     }
     return out
+}
+
+/// A tube of diameter `tubeM` swept around a circle of radius `radiusM`, flat
+/// (the tube's centre-line in the XZ plane) so it goes round a trunk the way
+/// the flat rim did — with a silhouette that does not vanish edge-on. See
+/// [MarkerShape.Torus]. iOS `generateTorus` 1:1 (72 x 10).
+internal fun buildTorusNode(
+    engine: Engine,
+    radiusM: Float,
+    tubeM: Float,
+    material: MaterialInstance,
+): io.github.sceneview.node.GeometryNode {
+    val major = kotlin.math.max(0.01f, radiusM)
+    val minor = kotlin.math.max(0.004f, tubeM / 2f)
+    val majorSeg = 72
+    val minorSeg = 10
+    val verts = ArrayList<io.github.sceneview.geometries.Geometry.Vertex>(majorSeg * minorSeg)
+    for (i in 0 until majorSeg) {
+        val a = i.toFloat() / majorSeg * 2f * Math.PI.toFloat()
+        val ca = kotlin.math.cos(a); val sa = kotlin.math.sin(a)
+        for (j in 0 until minorSeg) {
+            val b = j.toFloat() / minorSeg * 2f * Math.PI.toFloat()
+            val cb = kotlin.math.cos(b); val sb = kotlin.math.sin(b)
+            verts.add(
+                io.github.sceneview.geometries.Geometry.Vertex(
+                    position = dev.romainguy.kotlin.math.Float3(
+                        (major + minor * cb) * ca, minor * sb, (major + minor * cb) * sa),
+                    // NORMALS ARE NOT OPTIONAL — see `ringVertices`: SceneView
+                    // only declares the tangent attribute when a vertex
+                    // carries one, and the lit material shades a normal-less
+                    // mesh black.
+                    normal = dev.romainguy.kotlin.math.Float3(cb * ca, sb, cb * sa),
+                ),
+            )
+        }
+    }
+    val idx = ArrayList<Int>(majorSeg * minorSeg * 6)
+    for (i in 0 until majorSeg) {
+        val ni = (i + 1) % majorSeg
+        for (j in 0 until minorSeg) {
+            val nj = (j + 1) % minorSeg
+            val p0 = i * minorSeg + j
+            val p1 = ni * minorSeg + j
+            val p2 = ni * minorSeg + nj
+            val p3 = i * minorSeg + nj
+            idx.add(p0); idx.add(p1); idx.add(p2)
+            idx.add(p0); idx.add(p2); idx.add(p3)
+        }
+    }
+    val geometry = io.github.sceneview.geometries.Geometry.Builder()
+        .vertices(verts)
+        .indices(idx)
+        .build(engine)
+    return io.github.sceneview.node.GeometryNode(engine, geometry, material)
 }
 
 internal fun buildRingNode(

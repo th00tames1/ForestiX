@@ -145,15 +145,47 @@ class ArController {
     /// policy, the dev-HUD readout and the null contract are one body of code
     /// rather than two that drift. iOS `ARCenterRaycaster.hit(at:)` is the
     /// same split for the same reason.
-    fun screenHit(x: Float, y: Float): Vec3? {
+    /// What a surface the cruiser POINTED AT is expected to be, which decides
+    /// the order candidate hits are accepted in. iOS
+    /// `ARCenterRaycaster.SurfaceIntent` 1:1.
+    ///
+    /// It is not a preference. A ray through a screen point usually meets both
+    /// a vertical and a horizontal candidate — the trunk in front and the
+    /// ground under it — and whichever is taken first wins. Asking in the
+    /// wrong order does not fail; it silently returns the other surface, at a
+    /// completely different distance.
+    enum class SurfaceIntent {
+        /// The trunk face, or anything the crosshair is on. Nearest surface.
+        UPRIGHT,
+
+        /// The ground. A tap at the foot of a stem is a ray that grazes the
+        /// bark all the way down, so taking the nearest surface hands back a
+        /// point on the TRUNK and the breast-height guide goes up to chest
+        /// height with it. Prefer a horizontal-ish plane, then fall back.
+        GROUND,
+    }
+
+    fun screenHit(x: Float, y: Float, intent: SurfaceIntent = SurfaceIntent.UPRIGHT): Vec3? {
         if (!ready()) { lastCenterHitInfo = null; return null }
         val f = frame ?: return null
         val hits = try { f.hitTest(x, y) } catch (_: Throwable) { return null }
         // LiDAR mode: nearest SURFACE hit (depth-image points + planes).
         // AR mode (no Depth API): estimated-plane hits first, then anything —
         // the dev-only caliper/motion arms need some distance to work with.
-        val hit = if (preferDepth) hits.firstOrNull { it.trackable is DepthPoint || it.trackable is Plane }
-        else hits.firstOrNull { it.trackable is Plane } ?: hits.firstOrNull()
+        // GROUND asks for a horizontal plane first — ARCore tags a Plane with
+        // its type, so "the ground" is answerable rather than guessed at. It
+        // still falls through to the ordinary policy, because a cruiser can
+        // legitimately tap ground that ARCore has only seen as depth.
+        val groundFirst = if (intent == SurfaceIntent.GROUND) {
+            hits.firstOrNull {
+                val t = it.trackable
+                t is Plane && (t.type == Plane.Type.HORIZONTAL_UPWARD_FACING ||
+                               t.type == Plane.Type.HORIZONTAL_DOWNWARD_FACING)
+            }
+        } else null
+        val hit = groundFirst
+            ?: if (preferDepth) hits.firstOrNull { it.trackable is DepthPoint || it.trackable is Plane }
+               else hits.firstOrNull { it.trackable is Plane } ?: hits.firstOrNull()
         lastCenterHitInfo = hit?.let {
             val kind = when (it.trackable) {
                 is DepthPoint -> "depth"

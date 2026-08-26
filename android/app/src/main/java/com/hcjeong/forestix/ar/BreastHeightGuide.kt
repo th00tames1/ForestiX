@@ -196,7 +196,7 @@ class BreastHeightGuide(private val controller: ArController) {
             // floor.
             ArSceneMarker(
                 Vec3(base.x, base.y + h, base.z),
-                MarkerShape.Ring(0.35f, 0.05f), white,
+                MarkerShape.Torus(0.35f, 0.05f), white,
             ),
         )
     }

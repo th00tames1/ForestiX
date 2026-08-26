@@ -41,6 +41,17 @@ let package = Package(
         .package(
             url: "https://github.com/pointfreeco/swift-snapshot-testing",
             from: "1.17.0"
+        ),
+        // ON-DEVICE SEGMENTATION. The Auto diameter path can read the stem's
+        // edges out of a YOLO-seg mask instead of walking the depth map; see
+        // Sensors/TreeSegmenter.swift. iOS ONLY — the runtime ships as an
+        // iOS/macCatalyst xcframework, and `Sensors` still has to compile on
+        // a macOS host for the test suites, so the dependency below is
+        // platform-conditioned and every use of it is behind
+        // `#if canImport(OnnxRuntimeBindings)`.
+        .package(
+            url: "https://github.com/microsoft/onnxruntime-swift-package-manager",
+            from: "1.20.0"
         )
     ],
     targets: [
@@ -93,8 +104,22 @@ let package = Package(
 
         .target(
             name: "Sensors",
-            dependencies: ["Common", "Models"],
-            path: "TimberCruisingApp/Sensors"
+            // See the package dependency note: iOS-only, and guarded at every
+            // import so the macOS host build of this target still succeeds.
+            dependencies: ["Common", "Models",
+                .product(name: "onnxruntime",
+                         package: "onnxruntime-swift-package-manager",
+                         condition: .when(platforms: [.iOS]))
+            ],
+            path: "TimberCruisingApp/Sensors",
+            resources: [
+                // The segmentation weights, when a build has them. `.copy` of
+                // the DIRECTORY rather than the file: it is gitignored (see
+                // Models/README.md), so naming the file would make a fresh
+                // clone fail to resolve rather than simply build without the
+                // feature.
+                .copy("Models")
+            ]
         ),
 
         // MARK: - Phase 3

@@ -49,3 +49,11 @@ val/
 !val/paper/*.py
 val/analysis/*.csv
 val/paper/results/
+
+# ON-DEVICE SEGMENTATION WEIGHTS — NOT PUBLISHED.
+# The tree/soot YOLO-seg model is the BSI bark-scorch study's trained weights.
+# That manuscript is unpublished and this repository is public, so the file is
+# carried in the working tree and in the app bundle but never in git. Anyone
+# rebuilding needs a copy dropped at the path below (see TreeSegmenter).
+TimberCruisingApp/Sensors/Models/*.onnx
+android/app/src/main/assets/models/*.onnx

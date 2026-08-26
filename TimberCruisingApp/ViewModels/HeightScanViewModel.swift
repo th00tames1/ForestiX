@@ -273,8 +273,19 @@ public final class HeightScanViewModel: ObservableObject {
     /// supplied one (e.g. from a screen-centre raycast). Purely for
     /// marker visualisation — height math still runs on α_top / α_base
     /// + d_h, which is the spec's authoritative input.
-    private var topAimedWorld: SIMD3<Float>?
-    private var baseAimedWorld: SIMD3<Float>?
+    /// HELD AGAINST THE ANCHOR, as OFFSETS, not as world points.
+    ///
+    /// These were the raycast hit stored at the tap and drawn there forever
+    /// after. ARKit does not leave the world frame where it found it: on a
+    /// relocalization it moves the camera and every ARAnchor together, and a
+    /// bare coordinate the app is holding is the one thing that does not come
+    /// along — so the yellow and green spheres slid off the trunk while the
+    /// red anchor sphere, which IS re-read per frame, stayed on it. Android
+    /// reported the same symptom (commit dbf1545) and got the same fix.
+    ///
+    /// Display only: the height math runs on alpha_top / alpha_base + d_h.
+    private var topAimedOffset: SIMD3<Float>?
+    private var baseAimedOffset: SIMD3<Float>?
 
     /// Last sample count folded into α_top / α_base for diagnostics
     /// (REQ-HGT-004: "sample count logged").
@@ -685,8 +696,8 @@ public final class HeightScanViewModel: ObservableObject {
         alphaBaseRad = nil
         standingPointWorldAtAimTop = nil
         aimDriftM = nil
-        topAimedWorld = nil
-        baseAimedWorld = nil
+        topAimedOffset = nil
+        baseAimedOffset = nil
         anchorFailureReason = nil
         // A fresh trunk starts a fresh integrity record — the previous tree's
         // dropout says nothing about this one.
@@ -768,7 +779,9 @@ public final class HeightScanViewModel: ObservableObject {
         alphaBaseRad = Float(median)
         alphaBaseSampleCount = pitchBuffer.sampleCount(centeredOn: tapTime)
         standingPointWorldAtAimTop = standingPointWorld
-        baseAimedWorld = aimedAtWorld
+        baseAimedOffset = anchorPointWorld.map { a in
+            (aimedAtWorld ?? a) - a
+        }
         recordBasePose = session.latestDepthFrame?.cameraPoseWorld ?? matrix_identity_float4x4
         retainBaseAimFrame()
         state = .aimTopArmed
@@ -785,7 +798,9 @@ public final class HeightScanViewModel: ObservableObject {
         guard let median = resilientMedianPitch(tapTime: tapTime) else { return }
         alphaTopRad = Float(median)
         alphaTopSampleCount = pitchBuffer.sampleCount(centeredOn: tapTime)
-        topAimedWorld = aimedAtWorld
+        topAimedOffset = anchorPointWorld.map { a in
+            (aimedAtWorld ?? a) - a
+        }
         recordTopPose = session.latestDepthFrame?.cameraPoseWorld ?? matrix_identity_float4x4
         retainTopAimFrame()
         compute()
@@ -1011,8 +1026,8 @@ public final class HeightScanViewModel: ObservableObject {
         alphaBaseRad = nil
         standingPointWorldAtAimTop = nil
         aimDriftM = nil
-        topAimedWorld = nil
-        baseAimedWorld = nil
+        topAimedOffset = nil
+        baseAimedOffset = nil
         result = nil
         dhMeters = 0
         walkHintMeters = 0
@@ -1258,7 +1273,7 @@ public final class HeightScanViewModel: ObservableObject {
         // α-derived height (still visible, just less pixel-accurate).
         if let alphaTop = alphaTopRad {
             let position: SIMD3<Float>? = {
-                if let hit = topAimedWorld { return hit }
+                if let d = topAimedOffset, let a = anchorPointWorld { return a + d }
                 if let anchor = anchorPointWorld,
                    let standing = standingPointWorldAtAimTop {
                     let dh = horizontalDistance(from: standing, to: anchor)
@@ -1279,7 +1294,7 @@ public final class HeightScanViewModel: ObservableObject {
 
         if let alphaBase = alphaBaseRad {
             let position: SIMD3<Float>? = {
-                if let hit = baseAimedWorld { return hit }
+                if let d = baseAimedOffset, let a = anchorPointWorld { return a + d }
                 if let anchor = anchorPointWorld,
                    let standing = standingPointWorldAtAimTop {
                     let dh = horizontalDistance(from: standing, to: anchor)

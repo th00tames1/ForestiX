@@ -548,6 +548,10 @@ fun HeightScanScreen(
     }
 
     var crownStep by remember { mutableStateOf(CrownStep.NONE) }
+    // CROWN CORNERS, HELD AGAINST THE ANCHOR. Stored as offsets from the
+    // trunk anchor's pose at the moment of each tap, never as bare world
+    // points — see `captureCrown`. These four feed a RECORDED number, which
+    // is why they matter more than the aim spheres do.
     var cL by remember { mutableStateOf<Vec3?>(null) }
     var cR by remember { mutableStateOf<Vec3?>(null) }
     var cT by remember { mutableStateOf<Vec3?>(null) }
@@ -565,7 +569,14 @@ fun HeightScanScreen(
     // d_h from, so it has to keep following the anchor, not stop at whatever
     // the pose was when the walking stage ended.
     LaunchedEffect(stage) {
-        while (stage == Stage.WALKING || stage == Stage.AIM_BASE || stage == Stage.AIM_TOP) {
+        // EVERY STAGE THAT DRAWS A MARKER, not just the aiming ones. This
+        // used to stop the moment `captureHeight()` set COMPUTED — and
+        // `markers()` keeps being called through the whole result panel and
+        // the entire four-tap crown flow, adding live offsets to an anchor
+        // pose frozen at the top tap. The spheres drifted again, in the one
+        // stretch where the cruiser is looking straight at them.
+        while (stage == Stage.WALKING || stage == Stage.AIM_BASE ||
+               stage == Stage.AIM_TOP || stage == Stage.COMPUTED) {
             // Drift-corrected trunk position. Null = ARCore STOPPED the
             // anchor; latch it so the next tap refuses instead of the sphere
             // quietly disappearing and the math carrying on to a ghost.
@@ -736,10 +747,10 @@ fun HeightScanScreen(
         atAnchor(baseOffset)?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(AIM_MARKER_RADIUS_M), floatArrayOf(0.25f, 0.85f, 0.35f, 1f), scalesWithDistance = true)) }
         // Crown L/R yellow matches iOS exactly (1, 0.85, 0, 1); crown T/B cyan.
         val yellow = floatArrayOf(1f, 0.85f, 0f, 1f); val cyan = floatArrayOf(0.2f, 0.7f, 1f, 1f)
-        cL?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.05f), yellow, scalesWithDistance = true)) }
-        cR?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.05f), yellow, scalesWithDistance = true)) }
-        cT?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.05f), cyan, scalesWithDistance = true)) }
-        cB?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.05f), cyan, scalesWithDistance = true)) }
+        atAnchor(cL)?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.05f), yellow, scalesWithDistance = true)) }
+        atAnchor(cR)?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.05f), yellow, scalesWithDistance = true)) }
+        atAnchor(cT)?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.05f), cyan, scalesWithDistance = true)) }
+        atAnchor(cB)?.let { out.add(ArSceneMarker(it, MarkerShape.Sphere(0.05f), cyan, scalesWithDistance = true)) }
         return out
     }
 
@@ -758,12 +769,24 @@ fun HeightScanScreen(
         // planes/garbage and put the sphere visibly off the crosshair.
         val hit = controller.forwardPointAtHorizontalDistance(crownProjDistance())
         if (hit == null) { failure = CAMERA_NOT_READY; return }
+        // HELD AGAINST THE ANCHOR, like the aim spheres — and here it changes
+        // a NUMBER, not just a marker. The four taps are seconds apart and
+        // `computeCrown` takes DIFFERENCES between them; a world-frame re-fit
+        // between two taps left the two points in different frames, so the
+        // width came out wrong by however far ARCore had moved the world, and
+        // that width is stored as a crown measurement. Expressed against the
+        // anchor the difference is (a+dL)-(a+dR) = dL-dR: the anchor cancels
+        // and the re-fit cancels with it.
+        val anchor = ArSessionHub.heightAnchorWorld()
+        if (anchor == null) { anchorLost = true; failure = ANCHOR_LOST; return }
+        anchorPt = anchor
         failure = null
+        val d = Vec3(hit.x - anchor.x, hit.y - anchor.y, hit.z - anchor.z)
         when (crownStep) {
-            CrownStep.LEFT -> { cL = hit; crownStep = CrownStep.RIGHT }
-            CrownStep.RIGHT -> { cR = hit; crownStep = CrownStep.TOP }
-            CrownStep.TOP -> { cT = hit; crownStep = CrownStep.BOTTOM }
-            CrownStep.BOTTOM -> { cB = hit; computeCrown() }
+            CrownStep.LEFT -> { cL = d; crownStep = CrownStep.RIGHT }
+            CrownStep.RIGHT -> { cR = d; crownStep = CrownStep.TOP }
+            CrownStep.TOP -> { cT = d; crownStep = CrownStep.BOTTOM }
+            CrownStep.BOTTOM -> { cB = d; computeCrown() }
             else -> {}
         }
     }

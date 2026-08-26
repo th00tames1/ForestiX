@@ -227,7 +227,24 @@ public final class ARCenterRaycaster: ObservableObject {
     public func hit(at screenPoint: CGPoint,
                     intent: SurfaceIntent = .upright) -> SIMD3<Float>? {
         guard let view = arview else { return nil }
-        if preferLiDARMesh, let mesh = meshRaycastHit(at: screenPoint, in: view) {
+        let camera = cameraWorldPosition
+
+        /// Inside the gate? `.ground` refuses anything past six metres; every
+        /// other intent is unchanged. Fails OPEN with no camera pose, because
+        /// a raycast that returned a hit without one is a state this cannot
+        /// reason about and refusing would be worse than allowing.
+        func withinGate(_ p: SIMD3<Float>) -> Bool {
+            guard intent == .ground, let camera else { return true }
+            return simd_distance(p, camera) <= Self.groundTapMaxM
+        }
+
+        // THE MESH PATH IS GATED TOO. It used to return unconditionally, and
+        // `preferLiDARMesh` is true on every LiDAR phone in the default depth
+        // mode — so on exactly the hardware this app is built for, the first
+        // thing a ground tap did was take a mesh hit at any range whatsoever
+        // and the six-metre rule below never ran once.
+        if preferLiDARMesh, let mesh = meshRaycastHit(at: screenPoint, in: view),
+           withinGate(mesh) {
             return mesh
         }
         // GROUND ALSO GETS A DISTANCE GATE, for the reason field round 8
@@ -240,22 +257,37 @@ public final class ARCenterRaycaster: ObservableObject {
         // defect wearing a different hat. Six metres is generous for a
         // cruiser standing at the tree — the DBH band itself is 0.5–3 m — and
         // nowhere near what a grazed plane returns.
+        //
+        // AND `.ground` MEANS HORIZONTAL, not "horizontal if one is handy".
+        // The fallback used to widen to `.any` after `.horizontal`, so a tap
+        // at the foot of a stem where ARKit had fitted the TRUNK FACE but no
+        // ground yet planted the base on the bark at the tapped height and
+        // carried the whole 1.37 m assembly up with it — which is the precise
+        // failure `SurfaceIntent` was introduced to prevent, left in as a
+        // fallback. Android refuses it outright (`Plane.Type` must be
+        // HORIZONTAL_*) and says so in `lastCenterHitInfo`; this now matches.
         let order: [ARRaycastQuery.TargetAlignment] = intent == .ground
-            ? [.horizontal, .any]
+            ? [.horizontal]
             : [.vertical, .horizontal, .any]
-        let camera = cameraWorldPosition
         for alignment in order {
             for hit in view.raycast(from: screenPoint,
                                     allowing: .estimatedPlane,
                                     alignment: alignment) {
                 let p = worldTranslation(from: hit)
-                if intent == .ground, let camera {
-                    guard simd_distance(p, camera) <= Self.groundTapMaxM else { continue }
-                }
+                guard withinGate(p) else { continue }
                 return p
             }
         }
         return nil
+    }
+
+    /// The crosshair's own GROUND hit — the "Place base" button and the
+    /// ghost preview, which aim at the same thing the tap does and had been
+    /// left on the ungated `screenCenterHit()` when the tap was fixed.
+    public func screenCenterGroundHit() -> SIMD3<Float>? {
+        guard let view = arview else { return nil }
+        let c = CGPoint(x: view.bounds.midX, y: view.bounds.midY)
+        return hit(at: c, intent: .ground)
     }
 
     /// How far a GROUND tap may land, in metres. See `hit(at:intent:)`.

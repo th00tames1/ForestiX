@@ -137,6 +137,9 @@ public struct DBHScanScreen: View {
     /// fast enough that the line reads as attached to the world rather than
     /// as catching up with it. Each tick is one 4x4 matrix read.
     @State private var cameraPitchDeg: Double?
+    /// The last pitch that came from a real pose, so the horizon can hold
+    /// where it was rather than sliding to level when tracking drops.
+    @State private var lastKnownPitchDeg: Double?
 
     @StateObject private var bhGuide = BreastHeightGuide()
     /// Where the guide's "1.37 m" pill sits, in AR-VIEW coordinates. nil
@@ -463,10 +466,16 @@ public struct DBHScanScreen: View {
                         // exists only to report `geo.size`; it has no gesture
                         // and never wanted a touch.
                         .allowsHitTesting(false)
-                    guideLine(size: geo.size)
-                        // Chrome. `chordBar` already opts out for the same
-                        // reason — a drawn line is not a control.
-                        .allowsHitTesting(false)
+                    // OUT OF THE ACCEPT-TIME PHOTO, with the rest of the
+                    // chrome. See `captureHeldPhoto`: a tilt-dependent line
+                    // baked into an evidentiary image is a line a reviewer
+                    // will read as marking something.
+                    if !hidingChromeForCapture {
+                        guideLine(size: geo.size)
+                            // Chrome. `chordBar` already opts out for the same
+                            // reason — a drawn line is not a control.
+                            .allowsHitTesting(false)
+                    }
                     fitChord(in: geo.size)
                     // Crosshair ring is now positioned by GeometryReader
                     // at exactly (centerX, midY) so the guide line
@@ -731,6 +740,7 @@ public struct DBHScanScreen: View {
         .task {
             while !Task.isCancelled {
                 cameraPitchDeg = raycaster.cameraPitchDeg
+                if let p = raycaster.cameraPitchDeg { lastKnownPitchDeg = p }
                 try? await Task.sleep(nanoseconds: 50_000_000)
             }
         }
@@ -768,7 +778,12 @@ public struct DBHScanScreen: View {
                     // The same source choice the "Pin centre" raycast makes.
                     raycaster.preferLiDARMesh =
                         settings.measurementSource == .lidar
-                    bhGuide.updateGhost(raycaster.screenCenterHit())
+                    // THE GROUND POLICY HERE TOO. The ghost is the preview of
+                    // exactly what the button will place, so a ghost found by
+                    // the ungated raycast promises a base the gated one will
+                    // refuse — or worse, agrees with it and shows a base 30 m
+                    // away as if it were fine.
+                    bhGuide.updateGhost(raycaster.screenCenterGroundHit())
                 case .placed:
                     bhGuide.refresh(using: viewModel.session)
                 }
@@ -1254,8 +1269,14 @@ public struct DBHScanScreen: View {
         // green at the moment the phone has no idea where it is pointing.
         // The line holds still and goes dim instead: "level" is only ever
         // claimed by a pose that exists.
+        // HOLD THE LAST KNOWN TRAVEL — which is what the comment always
+        // claimed and neither platform did. Folding a nil pitch to 0 does not
+        // make the line "hold still": it glides it to DEAD CENTRE, the one
+        // position that means level, at the moment the phone has no idea where
+        // it is pointing. Dimming it was not enough; it was still pointing at
+        // the wrong answer, politely.
         let known = cameraPitchDeg != nil
-        let deg = cameraPitchDeg ?? 0
+        let deg = cameraPitchDeg ?? lastKnownPitchDeg ?? 0
         let travel = min(Self.guideLineMaxTravel,
                          CGFloat(abs(deg)) * Self.guideLinePointsPerDegree)
         // Aiming UP moves the horizon DOWN the screen, which is where the
@@ -1732,7 +1753,11 @@ public struct DBHScanScreen: View {
         // order would hand back the trunk face — a base at chest height,
         // carrying the whole guide up with it.
         let found = point.map { raycaster.hit(at: $0, intent: .ground) }
-            ?? raycaster.screenCenterHit()
+            // The button aims at the same ground the tap does, so it takes
+            // the same policy — six-metre gate, horizontal planes only. It was
+            // left on the ungated call when the tap was fixed, which on
+            // Android made it the ONLY working path and the ungated one.
+            ?? raycaster.screenCenterGroundHit()
         guard let hit = found else {
             bhFailure = MeasurementCopy.plotGroundNotSeen
             return
@@ -2569,9 +2594,17 @@ public struct DBHScanScreen: View {
     /// caller raises it in the same turn the burst lands, and this re-raise is
     /// idempotent — so the frame SwiftUI has committed by the time the
     /// renderer runs carries no panels and no buttons, the result panel
-    /// included. What deliberately stays is the guide line, the fit chord, the
-    /// crosshair and the AR cylinder: those are the measurement, and they are
-    /// the whole evidentiary value of the photo.
+    /// included. What deliberately stays is the FIT CHORD, the CROSSHAIR and
+    /// the AR cylinder: those are the measurement, and they are the whole
+    /// evidentiary value of the photo.
+    ///
+    /// THE GUIDE LINE IS NOT IN THAT LIST ANY MORE. It used to be — it marked
+    /// the depth row the estimator read, so a reviewer could see the row the
+    /// number came from. It is an artificial horizon now: it rides the phone's
+    /// pitch and sits wherever the phone was tilted, which in a stored photo
+    /// is a line across the trunk that looks like it marks something and does
+    /// not. The crosshair ring marks the measured row, and it stays. A photo
+    /// kept as evidence should contain the evidence and nothing dressed as it.
     ///
     /// ONLY THE RENDER BLOCKS. The store hands the filename back as soon as
     /// the picture exists in memory and finishes the JPEG on its own queue,

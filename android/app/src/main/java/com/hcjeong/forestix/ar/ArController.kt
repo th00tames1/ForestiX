@@ -136,6 +136,8 @@ class ArController {
     /// off the crosshair — the height-anchor sphere then renders visibly off
     /// the aim and d_h (→ H) is computed from that wrong point. iOS never
     /// consumes feature-point hits (mesh raycast → estimated planes only).
+    fun screenCenterHit(): Vec3? = screenHit(viewWidthPx / 2f, viewHeightPx / 2f)
+
     /// How far a GROUND tap may land, in metres. The cruiser is standing at
     /// the tree they are measuring — the DBH band itself is 0.5–3 m and the
     /// foot of the trunk sits a little further down the ray than the bark
@@ -143,7 +145,11 @@ class ArController {
     /// tens of metres a grazed ground plane returns.
     private val GROUND_TAP_MAX_M = 6f
 
-    fun screenCenterHit(): Vec3? = screenHit(viewWidthPx / 2f, viewHeightPx / 2f)
+    /// The crosshair's own GROUND hit — the "Place base" button and the ghost
+    /// preview, which aim at the same thing the tap does and were left on the
+    /// ungated `screenCenterHit()` when the tap got its policy.
+    fun screenCenterGroundHit(): Vec3? =
+        screenGroundHit(viewWidthPx / 2f, viewHeightPx / 2f)
 
     /// The same hit, at an arbitrary screen point — what a TAP lands on.
     ///

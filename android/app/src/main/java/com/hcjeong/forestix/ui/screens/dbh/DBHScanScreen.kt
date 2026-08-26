@@ -154,6 +154,14 @@ private enum class Stage { AIMING, CAPTURING, RESULT }
 ///
 /// 4 dp per degree puts 10° off level clear of the ring's rim without the line
 /// leaving the screen at the angles a cruiser actually reaches at a trunk.
+/// How many consecutive frames the model may find nothing before the bracket
+/// is handed back to the auto depth walk. Eight ticks at 8 Hz is one second of
+/// nothing — long enough to ride out the ordinary gaps in a model that answers
+/// on about 40 % of frames, short enough that a cruiser who swings off the
+/// tree is not left holding a stale bracket. iOS
+/// `segmentationMissesBeforeRelease` 1:1.
+private const val SEGMENTATION_MISSES_BEFORE_RELEASE = 8
+
 private const val GUIDE_LINE_DP_PER_DEGREE = 4f
 /// Past this the line has said all it can say — "not level, and by a lot" —
 /// and a line pinned to the top of the frame reads as broken, not informative.
@@ -390,11 +398,23 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     /// the line reads as attached to the world rather than as catching up
     /// with it, and each tick is one pose read. iOS `cameraPitchDeg` 1:1.
     var cameraPitchDeg by remember { mutableStateOf<Float?>(null) }
+    /// The last pitch that came from a real pose, so the horizon holds where
+    /// it was instead of sliding to level when tracking drops.
+    var lastKnownPitchDeg by remember { mutableStateOf<Float?>(null) }
     LaunchedEffect(depthBlocked) {
+        // NULLED ON THE WAY OUT. Keyed to `depthBlocked`, this loop exits when
+        // the block goes up and leaves `cameraPitchDeg` holding its last
+        // value; when the block lifts the overlay renders immediately from
+        // that stale number — confidently white, or green — for up to a whole
+        // poll interval before the first fresh sample lands.
+        if (depthBlocked) { cameraPitchDeg = null; return@LaunchedEffect }
         while (!depthBlocked) {
-            cameraPitchDeg = controller.cameraPitchDeg()
+            val p = controller.cameraPitchDeg()
+            cameraPitchDeg = p
+            if (p != null) lastKnownPitchDeg = p
             delay(50)
         }
+        cameraPitchDeg = null
     }
     /// THE SAME MOTION AS iOS, which interpolates the horizon's travel over
     /// 80 ms. A Compose Canvas has no implicit animation, so the line stepped
@@ -404,7 +424,12 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     /// pitch is animated rather than the pixel offset so the level band and
     /// the colour change with the line instead of ahead of it.
     val smoothedPitchDeg by animateFloatAsState(
-        targetValue = cameraPitchDeg ?: 0f,
+        // HOLD, DO NOT GLIDE TO LEVEL. Animating toward 0f through a null
+        // period walks the line to dead centre — the one row that means level
+        // — and `level` is read off this animated value, so the line turned
+        // GREEN on every tracking re-acquisition: a confident claim of level
+        // produced by having no pose at all. It holds the last real pitch now.
+        targetValue = cameraPitchDeg ?: lastKnownPitchDeg ?: 0f,
         animationSpec = tween(durationMillis = 80, easing = LinearEasing),
         label = "horizonPitch",
     )
@@ -441,7 +466,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 // screenCenterHit, NOT screenCenterAnchorHit: this ray is
                 // aimed DOWN at the ground, and the gated variant exists
                 // specifically to refuse ground planes.
-                BreastHeightGuide.Stage.AIMING -> bhGuide.updateGhost(controller.screenCenterHit())
+                BreastHeightGuide.Stage.AIMING -> bhGuide.updateGhost(controller.screenCenterGroundHit())
                 BreastHeightGuide.Stage.PLACED -> bhGuide.refresh()
                 else -> {}
             }
@@ -533,10 +558,14 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // than the cruiser's own bracket. iOS `segmentationGateOpen` 1:1.
     val segmentationOn = settings.developerMode && settings.dbhAutoSegmentation
     var segmentedExtent by remember { mutableStateOf<StemExtent?>(null) }
+    /// Consecutive frames the model has failed to find a stem on.
+    var segmentationMisses by remember { mutableStateOf(0) }
     var segmenter by remember { mutableStateOf<TreeSegmenter?>(null) }
     DisposableEffect(Unit) { onDispose { segmenter?.close() } }
     LaunchedEffect(segmentationOn, depthBlocked) {
-        if (!segmentationOn) { segmentedExtent = null; return@LaunchedEffect }
+        if (!segmentationOn) {
+            segmentedExtent = null; segmentationMisses = 0; return@LaunchedEffect
+        }
         // Built on first use, not at screen entry: loading an 11 MB graph is a
         // beat the cruiser would feel, and most sessions never turn this on.
         if (segmenter == null) {
@@ -565,7 +594,22 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     viewToDepth = { vx, vy -> depth.viewToDepth(vx, vy) },
                 )
             }
-            segmentedExtent = extent
+            // A MISS DOES NOT DROP THE BRACKET. The model answers on about
+            // 40 % of frames; assigning unconditionally made `segmentedExtent`
+            // nil on every miss, so the screen flipped between the bracket
+            // path and the auto depth walk several times a second. Two
+            // measurement methods taking turns inside one capture is not a
+            // method. Eight misses at 8 Hz — one second of nothing — before
+            // the auto path takes over cleanly. iOS 1:1.
+            if (extent != null) {
+                segmentedExtent = extent
+                segmentationMisses = 0
+            } else {
+                segmentationMisses++
+                if (segmentationMisses >= SEGMENTATION_MISSES_BEFORE_RELEASE) {
+                    segmentedExtent = null
+                }
+            }
             // Ignored while the cruiser is in ADJUST: they have taken hold of
             // the bracket, and a bracket that fights a thumb is worse than no
             // bracket at all.
@@ -1972,23 +2016,39 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         // The button stays: it is the one that also CLEARS the base, and a
         // tap that misses the ground needs somewhere to fail that is not
         // silence. Only while the guide is on and nothing is placed, and the
-        // AR view is the bottom layer here, so every panel and control above
-        // it still takes its own taps first. iOS DBHScanScreen 1:1.
-        // ...and only while the screen is still AIMING. Without the stage gate
-        // a tap on a frozen result frame plants a world anchor in a scene the
-        // cruiser has stopped measuring. iOS gates on `bhGuideChromeVisible`
-        // for the same reason.
-        if (!depthBlocked && bhGuideOn && stage == Stage.AIMING &&
-            bhGuide.stage != BreastHeightGuide.Stage.PLACED) {
+        // THE GROUND TAP, ON EVERY LAYER THAT COULD SWALLOW IT.
+        //
+        // A plain tap Box below the ADJUST catcher does not work here, and
+        // that is not a z-order slip so much as a difference between the two
+        // toolkits. iOS's ADJUST overlay is two 44 pt handles, so a tap
+        // anywhere else falls straight through to the layer beneath. Android's
+        // is `fillMaxSize()` on purpose — the cruiser grabs anywhere and the
+        // NEARER handle moves, which is the behaviour the field asked for —
+        // and Compose hit-tests later siblings first and stops at the first
+        // one that takes the pointer. `dbhEdgeAdjustDefault` is TRUE out of
+        // the box, and both layers are gated on the same `stage == AIMING`, so
+        // in the shipped default the catcher was always there and the ground
+        // tap never fired once. The only route left was the "Place base" pill,
+        // which is the two-handed control the tap was added to replace.
+        //
+        // So the tap is a lambda, and every full-screen layer that can be in
+        // front of the AR view offers it. One place decides whether a tap is
+        // allowed and what it does; the layers only forward.
+        val groundTapArmed = !depthBlocked && bhGuideOn && stage == Stage.AIMING &&
+            bhGuide.stage != BreastHeightGuide.Stage.PLACED
+        val placeBaseAt: (Float, Float) -> Unit = { x, y ->
+            if (groundTapArmed) {
+                val hit = controller.screenGroundHit(x, y)
+                bhFailure = if (hit != null && bhGuide.place(hit)) null
+                            else PLOT_GROUND_NOT_SEEN
+            }
+        }
+        if (groundTapArmed) {
             Box(
                 Modifier
                     .fillMaxSize()
                     .pointerInput(bhGuideOn) {
-                        detectTapGestures { p ->
-                            val hit = controller.screenGroundHit(p.x, p.y)
-                            bhFailure = if (hit != null && bhGuide.place(hit)) null
-                                        else PLOT_GROUND_NOT_SEEN
-                        }
+                        detectTapGestures { p -> placeBaseAt(p.x, p.y) }
                     },
             )
         }
@@ -2011,6 +2071,14 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             Box(
                 Modifier
                     .fillMaxSize()
+                    // The ground tap again, on the layer that would otherwise
+                    // eat it — see `placeBaseAt`. A SEPARATE `pointerInput`,
+                    // so the drag detector below is untouched: a tap never
+                    // crosses touch slop and so never starts a drag, and a
+                    // drag moves and so never ends as a tap.
+                    .pointerInput(groundTapArmed) {
+                        detectTapGestures { p -> placeBaseAt(p.x, p.y) }
+                    }
                     .pointerInput(Unit) {
                         // INDEPENDENT HANDLES. Each one moves on its own.
 
@@ -2240,8 +2308,18 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 // tracking, i.e. the DBH pose. The line says nothing instead:
                 // it holds its last known travel and goes grey, so "level" is
                 // only ever claimed by a pose that exists.
+                // OUT OF THE ACCEPT-TIME PHOTO. A tilt-dependent line baked
+                // into an evidentiary image is a line a reviewer will read as
+                // marking something. The crosshair ring marks the measured
+                // row and stays. iOS gates it on the same flag.
+                val drawHorizon = !hidingChromeForCapture
                 val known = cameraPitchDeg != null
+                // The LINE follows the animation; the CLAIM follows the raw
+                // pose, exactly as iOS does it. Reading `level` off the
+                // animated value made the green arrive ~80 ms late and, worse,
+                // let it be produced by the glide itself.
                 val deg: Float? = if (known) smoothedPitchDeg else null
+                val levelDeg: Float? = cameraPitchDeg
                 val travel = kotlin.math.min(
                     GUIDE_LINE_MAX_TRAVEL_DP.dp.toPx(),
                     kotlin.math.abs(deg ?: 0f) * GUIDE_LINE_DP_PER_DEGREE.dp.toPx(),
@@ -2249,7 +2327,8 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 // Aiming UP moves the horizon DOWN the screen, which is where
                 // the horizon actually goes when you raise a camera.
                 val hy = cy + if ((deg ?: 0f) > 0f) travel else -travel
-                val level = known && kotlin.math.abs(deg!!) <= GUIDE_LINE_LEVEL_BAND_DEG
+                val level = levelDeg != null &&
+                    kotlin.math.abs(levelDeg) <= GUIDE_LINE_LEVEL_BAND_DEG
                 val halfW = 36.dp.toPx()   // the 72 dp ring's outer radius
                 val cx = size.width / 2f
                 drawLine(
@@ -2257,7 +2336,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     Offset(cx - halfW, hy), Offset(cx + halfW, hy),
                     strokeWidth = 3.dp.toPx(),
                 )
-                drawLine(
+                if (drawHorizon) drawLine(
                     when {
                         level -> colors.confidenceOk
                         // Pose unknown: drawn, but making no claim.
@@ -2297,7 +2376,15 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 // handles, a chord bar tracking the handles exactly, and
                 // two white draggable handle lines with grab circles
                 // (dark halos for sun-glare legibility).
-                if (adjustMode) {
+                //
+                // DRAWN FOR THE MODEL'S BRACKET TOO. With segmentation
+                // driving, `adjustMode` is false, so the two edges that
+                // decide the diameter were invisible: the cruiser could not
+                // see where the model had put them, could not tell a good
+                // placement from one that had bled into the bank behind the
+                // tree, and had no reason to reach for the handles. A bracket
+                // that measures and cannot be seen is worse than no bracket.
+                if (adjustMode || segmentationDroveTheBracket) {
                     val lx = size.width * adjustLeftFrac
                     val rx = size.width * adjustRightFrac
                     drawRect(
@@ -2461,7 +2548,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                                     bhGuide.clearBase()
                                     bhFailure = null
                                 } else {
-                                    val hit = controller.screenCenterHit()
+                                    val hit = controller.screenCenterGroundHit()
                                     bhFailure = if (hit != null && bhGuide.place(hit)) {
                                         null
                                     } else {
@@ -2570,7 +2657,13 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     null
                 },
                 valueStrip = {
-                    if (adjustMode) {
+                    // WHAT THE SHUTTER WILL STORE, not what the other loop
+                    // happens to be computing. Gated on `adjustMode` alone,
+                    // a segmentation-driven screen showed the AUTO depth
+                    // walk's diameter while `captureAdjust()` stored the
+                    // BRACKET's — the cruiser reads one number, taps "+", and
+                    // a different one is recorded with nothing saying so.
+                    if (adjustMode || segmentationDroveTheBracket) {
                         // `adjustShown`, not `adjustPreview`: the badge is the
                         // one surface the settling decision applies to. The
                         // LOCK still comes from the fit, so a tick whose number

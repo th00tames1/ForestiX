@@ -80,6 +80,7 @@ import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.ar.ArCameraView
 import com.hcjeong.forestix.ar.ArSceneMarker
 import com.hcjeong.forestix.ar.ArSessionHub
+import com.hcjeong.forestix.ar.ArController
 import com.hcjeong.forestix.ar.BreastHeightGuide
 import com.hcjeong.forestix.ar.MarkerShape
 import com.hcjeong.forestix.ar.Vec3
@@ -512,7 +513,13 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // handles instead of a thumb; everything downstream — the depth geometry,
     // the middle-half sampling, the tangent identity, the tier — is the
     // bracket path exactly as it ships. iOS DBHScanViewModel 1:1.
-    val segmentationOn = settings.dbhAutoSegmentation
+    // THE SEGMENTATION GATE — developer mode AND its own toggle, never either
+    // alone. The breast-height guide came OUT of developer mode because it
+    // only draws; this goes IN for the opposite reason: it decides the two
+    // pixels a diameter is measured between, and against 60 real captures it
+    // found a trunk in 40 % of frames and offered edges about 40 % narrower
+    // than the cruiser's own bracket. iOS `segmentationGateOpen` 1:1.
+    val segmentationOn = settings.developerMode && settings.dbhAutoSegmentation
     var segmentedExtent by remember { mutableStateOf<StemExtent?>(null) }
     var segmenter by remember { mutableStateOf<TreeSegmenter?>(null) }
     DisposableEffect(Unit) { onDispose { segmenter?.close() } }
@@ -1938,13 +1945,19 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         // silence. Only while the guide is on and nothing is placed, and the
         // AR view is the bottom layer here, so every panel and control above
         // it still takes its own taps first. iOS DBHScanScreen 1:1.
-        if (!depthBlocked && bhGuideOn && bhGuide.stage != BreastHeightGuide.Stage.PLACED) {
+        // ...and only while the screen is still AIMING. Without the stage gate
+        // a tap on a frozen result frame plants a world anchor in a scene the
+        // cruiser has stopped measuring. iOS gates on `bhGuideChromeVisible`
+        // for the same reason.
+        if (!depthBlocked && bhGuideOn && stage == Stage.AIMING &&
+            bhGuide.stage != BreastHeightGuide.Stage.PLACED) {
             Box(
                 Modifier
                     .fillMaxSize()
                     .pointerInput(bhGuideOn) {
                         detectTapGestures { p ->
-                            val hit = controller.screenHit(p.x, p.y)
+                            val hit = controller.screenHit(
+                                p.x, p.y, ArController.SurfaceIntent.GROUND)
                             bhFailure = if (hit != null && bhGuide.place(hit)) null
                                         else PLOT_GROUND_NOT_SEEN
                         }

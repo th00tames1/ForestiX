@@ -849,7 +849,7 @@ public struct DBHScanScreen: View {
             // `onChange` alone meant the toggle did nothing for a cruiser who
             // set it in Settings and then walked to the scan: the only screen
             // that could fire the change was the one they had already left.
-            viewModel.segmentationEnabled = settings.dbhAutoSegmentation
+            viewModel.segmentationEnabled = segmentationGateOpen
             viewModel.onAppear()
         }
         // The wireframe's off-switch — see `showsScanMesh`. Latched, never
@@ -906,12 +906,15 @@ public struct DBHScanScreen: View {
         .onChange(of: settings.developerMode) { _, _ in
             configureRawCapture()
             syncBreastHeightGuide()
+            // The segmentation gate has developer mode in it, so turning
+            // developer mode off has to stop the feed the same tick.
+            viewModel.segmentationEnabled = segmentationGateOpen
         }
         .onChange(of: settings.breastHeightGuide) { _, _ in
             syncBreastHeightGuide()
         }
-        .onChange(of: settings.dbhAutoSegmentation) { _, on in
-            viewModel.segmentationEnabled = on
+        .onChange(of: settings.dbhAutoSegmentation) { _, _ in
+            viewModel.segmentationEnabled = segmentationGateOpen
         }
         .onChange(of: settings.dbhMeasurementMethod) { _, m in
             viewModel.dbhMeasurementMethod = m
@@ -1558,6 +1561,21 @@ public struct DBHScanScreen: View {
     /// anyone who does not ask for it.
     private var bhGuideEnabled: Bool {
         settings.breastHeightGuide
+    }
+
+    /// THE SEGMENTATION GATE, and the ONLY place it is decided: developer
+    /// mode AND its own toggle. Neither key is ever read alone.
+    ///
+    /// The breast-height guide came OUT of developer mode because it only
+    /// draws. This one goes IN, for the opposite reason: it decides the two
+    /// pixels a diameter is measured between. Run against 60 real captures it
+    /// finds a trunk in 40 % of frames and, when it does, offers edges that
+    /// span about 0.21 of the screen where the cruiser's own bracket spans
+    /// 0.36 — the mask has holes mid-stem and bleeds into the bank behind. It
+    /// is an experiment until a few stems have been measured with it and a
+    /// tape, and an experiment does not belong on a cruiser's settings screen.
+    private var segmentationGateOpen: Bool {
+        settings.developerMode && settings.dbhAutoSegmentation
     }
 
     /// Whether any of the guide is on screen right now — the gate plus the

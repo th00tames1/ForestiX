@@ -72,7 +72,6 @@ public struct SettingsScreen: View {
             regionAndUnitsSection
             displaySection
             measuringSection
-            segmentationSection
             calibrationSection
             dataBackupSection
             // Basemap tiles is ordinary field setup, not developer tooling —
@@ -344,25 +343,6 @@ public struct SettingsScreen: View {
     // Its own section rather than a line in Measuring: this is the one
     // setting on the screen that changes what a diameter is measured
     // between, and it should not be read past on the way to something else.
-    private var segmentationSection: some View {
-        Section(
-            header: Text("Automatic stem edges"),
-            footer: Text("Off by default, and not yet checked against tape. When it is on, an on-device model finds the trunk in the camera image and places the measuring bracket on its edges for you; you can still take hold of the bracket and it will stand aside. Readings taken this way are recorded as bracket captures, so they can be told apart later.")
-        ) {
-            Toggle(isOn: Binding(
-                get: { settings.dbhAutoSegmentation },
-                set: { settings.dbhAutoSegmentation = $0 })
-            ) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Find the stem automatically")
-                    Text("Uses the camera as well as the depth sensor. Falls back to the depth edge-finder whenever the model has no answer, and on any build that does not carry the model.")
-                        .font(ForestixType.caption)
-                        .foregroundStyle(ForestixPalette.textSecondary)
-                }
-            }
-            .accessibilityIdentifier("settings.dbhAutoSegmentation")
-        }
-    }
 
     // MARK: - 2b. Measuring
     // FIELD REPORT F10 — the cruise tally chains diameter → height by
@@ -460,6 +440,31 @@ public struct SettingsScreen: View {
             .accessibilityIdentifier("settings.developerMode")
 
             if settings.developerMode {
+                // AUTOMATIC STEM EDGES — an on-device segmentation model
+                // placing the measuring bracket.
+                //
+                // IN THE DEVELOPER BLOCK, not out of it. The breast-height
+                // guide came out because it only draws; this one goes in for
+                // the opposite reason — it decides the two pixels a diameter
+                // is measured between. Against 60 real captures it found a
+                // trunk in 40 % of frames, and where it did the edges spanned
+                // about 0.21 of the screen against the cruiser's own 0.36:
+                // the mask has holes mid-stem and bleeds into the background.
+                // An experiment does not belong on a cruiser's settings
+                // screen. The scan gate reads BOTH keys.
+                Toggle(isOn: Binding(
+                    get: { settings.dbhAutoSegmentation },
+                    set: { settings.dbhAutoSegmentation = $0 })
+                ) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Automatic stem edges (experimental)")
+                        Text("NOT A MEASUREMENT YET. Finds the trunk in the camera image and places the bracket on its edges; take hold of the bracket and it stands aside. Falls back to the depth edge-finder whenever it has no answer. Readings taken this way are recorded as \"segmented\".")
+                            .font(ForestixType.caption)
+                            .foregroundStyle(ForestixPalette.textSecondary)
+                    }
+                }
+                .accessibilityIdentifier("settings.dbhAutoSegmentation")
+
                 // DBH algorithm — developer-only; normal users get the single
                 // blessed DBH path. Moved in from its former standalone section.
                 Picker("DBH algorithm",

@@ -2308,11 +2308,37 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 // tracking, i.e. the DBH pose. The line says nothing instead:
                 // it holds its last known travel and goes grey, so "level" is
                 // only ever claimed by a pose that exists.
-                // OUT OF THE ACCEPT-TIME PHOTO. A tilt-dependent line baked
-                // into an evidentiary image is a line a reviewer will read as
-                // marking something. The crosshair ring marks the measured
-                // row and stays. iOS gates it on the same flag.
-                val drawHorizon = !hidingChromeForCapture
+                val cx = size.width / 2f
+
+                // 1. THE ROW THE ESTIMATOR READS. Fixed at mid-screen, never
+                // moves — the original guide line, restored.
+                //
+                // It went away when the line became an artificial horizon, and
+                // that cost something real: the depth row the estimator
+                // samples IS the screen's centre row, and with the only long
+                // line on screen riding the phone's tilt there was nothing
+                // marking it but the crosshair ring. Two jobs, two marks. This
+                // one is deliberately the dimmer — a reference, not a reading
+                // — and it STAYS IN THE ACCEPT PHOTO, because where the number
+                // came from is the whole evidentiary point of that image.
+                drawLine(
+                    Color.Black.copy(alpha = 0.4f),
+                    Offset(0f, cy), Offset(size.width, cy),
+                    strokeWidth = 2.dp.toPx(),
+                )
+                drawLine(
+                    Color.White.copy(alpha = 0.45f),
+                    Offset(0f, cy), Offset(size.width, cy),
+                    strokeWidth = 1.dp.toPx(),
+                )
+
+                // 2. THE ARTIFICIAL HORIZON, overlaid on it. Ring-width, so it
+                // reads as a different instrument from the full-width row
+                // marker underneath.
+                //
+                // OUT OF THE ACCEPT PHOTO, halo included — the halo used to be
+                // drawn outside this gate, so a tilt-dependent mark survived
+                // into the stored image anyway, just in black.
                 val known = cameraPitchDeg != null
                 // The LINE follows the animation; the CLAIM follows the raw
                 // pose, exactly as iOS does it. Reading `level` off the
@@ -2330,22 +2356,24 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 val level = levelDeg != null &&
                     kotlin.math.abs(levelDeg) <= GUIDE_LINE_LEVEL_BAND_DEG
                 val halfW = 36.dp.toPx()   // the 72 dp ring's outer radius
-                val cx = size.width / 2f
-                drawLine(
-                    Color.Black.copy(alpha = 0.55f),
-                    Offset(cx - halfW, hy), Offset(cx + halfW, hy),
-                    strokeWidth = 3.dp.toPx(),
-                )
-                if (drawHorizon) drawLine(
-                    when {
-                        level -> colors.confidenceOk
-                        // Pose unknown: drawn, but making no claim.
-                        !known -> Color.White.copy(alpha = 0.35f)
-                        else -> Color.White.copy(alpha = 0.9f)
-                    },
-                    Offset(cx - halfW, hy), Offset(cx + halfW, hy),
-                    strokeWidth = 1.5.dp.toPx(),
-                )
+                if (!hidingChromeForCapture) {
+                    drawLine(
+                        Color.Black.copy(alpha = 0.55f),
+                        Offset(cx - halfW, hy), Offset(cx + halfW, hy),
+                        strokeWidth = 3.dp.toPx(),
+                    )
+                    drawLine(
+                        when {
+                            level -> colors.confidenceOk
+                            // Pose unknown: drawn, but making no claim.
+                            !known -> Color.White.copy(alpha = 0.35f)
+                            else -> Color.White.copy(alpha = 0.9f)
+                        },
+                        Offset(cx - halfW, hy), Offset(cx + halfW, hy),
+                        strokeWidth = 1.5.dp.toPx(),
+                    )
+                }
+
                 // Live fit-width chord spanning the strip edges the
                 // single-frame fit identified along the guide row — iOS
                 // fitChord parity (fit-derived span + dark-halo side bars).

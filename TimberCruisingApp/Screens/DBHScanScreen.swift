@@ -466,10 +466,13 @@ public struct DBHScanScreen: View {
                         // exists only to report `geo.size`; it has no gesture
                         // and never wanted a touch.
                         .allowsHitTesting(false)
-                    // OUT OF THE ACCEPT-TIME PHOTO, with the rest of the
-                    // chrome. See `captureHeldPhoto`: a tilt-dependent line
-                    // baked into an evidentiary image is a line a reviewer
-                    // will read as marking something.
+                    // THE ROW MARKER STAYS IN THE PHOTO. It marks where the
+                    // number came from, which is the whole evidentiary point.
+                    measuredRowLine(size: geo.size)
+                        .allowsHitTesting(false)
+                    // THE HORIZON DOES NOT. It is tilt, not measurement, and
+                    // a tilt-dependent line baked into a stored image is a
+                    // line a reviewer will read as marking something.
                     if !hidingChromeForCapture {
                         guideLine(size: geo.size)
                             // Chrome. `chordBar` already opts out for the same
@@ -1263,18 +1266,46 @@ public struct DBHScanScreen: View {
     /// sits in the ring, dead centre, and turns green. Off level and it
     /// climbs out — the direction it moves is the direction the phone is
     /// pointing, so bringing it back to the middle is the correction.
+    /// THE ROW THE ESTIMATOR READS. Fixed at mid-screen, never moves.
+    ///
+    /// This is the original guide line, restored. It went away when the line
+    /// became an artificial horizon, and taking it away cost something real:
+    /// the depth row the estimator samples is the screen's centre row, and
+    /// with the only long line on screen now riding the phone's tilt there
+    /// was nothing marking it but the crosshair ring. Two jobs, two marks —
+    /// the quiet full-width line says WHERE THE NUMBER COMES FROM, and the
+    /// short bright one above it says HOW THE PHONE IS HELD.
+    ///
+    /// Deliberately the dimmer of the two. It is a reference, not a reading,
+    /// and the cruiser's eye should go to the horizon and the ring.
+    private func measuredRowLine(size: CGSize) -> some View {
+        ZStack {
+            Rectangle()
+                .fill(Color.black.opacity(0.4))
+                .frame(width: size.width, height: 2)
+            Rectangle()
+                .fill(Color.white.opacity(0.45))
+                .frame(width: size.width, height: 1)
+        }
+        .position(x: size.width / 2, y: size.height / 2)
+        .accessibilityIdentifier("dbhScan.measuredRowLine")
+    }
+
+    /// THE ARTIFICIAL HORIZON, riding the camera's pitch — overlaid on the
+    /// fixed row line, not replacing it.
+    ///
+    /// Ring-width so it reads as a different instrument from the full-width
+    /// row marker underneath, 4 pt per degree to a 90 pt stop, and green
+    /// inside 1.5° of level — which at 1.5 m is 4 cm across the stem, smaller
+    /// than the chord median can resolve, so calling that band level is not a
+    /// rounding-up.
+    ///
+    /// HOLDS THE LAST KNOWN PITCH when the pose is gone. Folding a nil to 0
+    /// does not hold a line still: it glides it to dead centre — the one row
+    /// that means level — at the moment the phone has no idea where it is
+    /// pointing. It dims and stays put instead, and only a real pose is ever
+    /// allowed to claim level.
     private func guideLine(size: CGSize) -> some View {
-        // NO PITCH IS NOT LEVEL. `cameraPitchDeg` is nil with no ARKit frame,
-        // and folding that to 0 would put the line dead centre and turn it
-        // green at the moment the phone has no idea where it is pointing.
-        // The line holds still and goes dim instead: "level" is only ever
-        // claimed by a pose that exists.
-        // HOLD THE LAST KNOWN TRAVEL — which is what the comment always
-        // claimed and neither platform did. Folding a nil pitch to 0 does not
-        // make the line "hold still": it glides it to DEAD CENTRE, the one
-        // position that means level, at the moment the phone has no idea where
-        // it is pointing. Dimming it was not enough; it was still pointing at
-        // the wrong answer, politely.
         let known = cameraPitchDeg != nil
         let deg = cameraPitchDeg ?? lastKnownPitchDeg ?? 0
         let travel = min(Self.guideLineMaxTravel,

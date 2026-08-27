@@ -166,10 +166,11 @@ Tap **Add Tree** → `AddTreeFlowScreen`:
 2. **DBH** — number field + method picker (LiDAR / caliper / manual).
    To invoke the DBH scan:
    - Tap **Scan DBH** → opens `DBHScanScreen`.
-   - Put the crosshair ring on the trunk at 1.37 m — the ring marks the
-     depth row the algorithm reads (spec §13 TL;DR 4). The horizontal line
-     through it is a LEVEL INDICATOR, not a row marker: it rides the phone's
-     pitch and turns green inside 1.5 deg of level.
+   - Align the fixed horizontal guide line with the trunk at 1.37 m — that
+     line and the crosshair ring both mark the depth row the algorithm reads,
+     and the line does not move (spec §13 TL;DR 4). The SHORT bright line
+     riding over it is a level indicator: it follows the phone's pitch and
+     turns green inside 1.5 deg of level.
    - 4–6 s capture: algorithm collects depth pixels on the guide row,
      back-projects them to world space, runs RANSAC + Taubin circle
      fit on each frame, weighted-average across frames.

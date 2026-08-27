@@ -2549,12 +2549,17 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         // 12 dp above the bottom block: the Undo toast (F), then the ADJUST
         // exit pill while the bracket is up.
         val showAutoPill = stage == Stage.AIMING && adjustMode
-        // The guide is placed by a BUTTON, never by a screen tap: the
-        // screen-wide tap catcher was deliberately removed from this screen
-        // so a stray touch can never fire anything, and Height places its
-        // points from the shutter for the same reason. Both shutter flanks
-        // are already Type and Adjust, so the guide's control sits here,
-        // beside the Auto pill.
+        // A BUTTON AND A TAP, since the app author asked for the tap.
+        //
+        // This used to say "placed by a BUTTON, never by a screen tap", and
+        // the reasoning behind that — a screen-wide catcher means a stray
+        // touch can fire something — still holds, so the tap is narrow rather
+        // than absent: it is live only while the guide is armed, the screen is
+        // AIMING and nothing is placed yet, and the one thing it can do is
+        // drop a marker that writes nothing and can be cleared from this same
+        // pill. Both shutter flanks are already Type and Adjust, so the
+        // button stays here beside the Auto pill and remains the way to place
+        // a base without letting go of the phone.
         val showBhGuidePill = bhGuideOn && stage == Stage.AIMING && !depthBlocked
         val aboveBottomBlock: (@Composable () -> Unit)? =
             if (undoToast != null || showAutoPill || showBhGuidePill) {
@@ -2583,6 +2588,28 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                                         PLOT_GROUND_NOT_SEEN
                                     }
                                 }
+                            }
+                            // SAY THAT THE TAP EXISTS. The gesture was built,
+                            // gated and given a raycast policy, and nothing on
+                            // screen ever mentioned it — the only visible
+                            // affordance was a button, so a cruiser presses the
+                            // button and never learns there is a faster way. A
+                            // gesture nobody can discover is not a feature.
+                            // Goes away the moment a base is placed: a hint
+                            // that outlives its moment is clutter.
+                            if (!placed && bhFailure == null) {
+                                Text(
+                                    "or tap the ground at the foot of the tree",
+                                    style = TextStyle(
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Medium,
+                                    ),
+                                    color = Color.White.copy(alpha = 0.85f),
+                                    modifier = Modifier
+                                        .clip(CircleShape)
+                                        .background(Color.Black.copy(alpha = 0.45f))
+                                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                                )
                             }
                         }
                         if (showAutoPill) {

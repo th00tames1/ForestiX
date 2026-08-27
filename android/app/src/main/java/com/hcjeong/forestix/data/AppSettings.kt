@@ -158,10 +158,11 @@ data class SettingsSnapshot(
     /// from the tree base on the Diameter scan so the cruiser can see where
     /// breast height crosses the stem before reading the diameter there.
     ///
-    /// Default OFF, and NEVER read on its own: the effective gate is
-    /// `developerMode && breastHeightGuide`, the same shape the raw-capture
-    /// arm above uses. Purely a drawing — it writes nothing to the
-    /// measurement and appears in no export. Same key as iOS
+    /// Default OFF, and THIS KEY ALONE gates it — it used to require
+    /// `developerMode` as well, which put the only answer the app offers to
+    /// "how does the phone know it read the stem at breast height?" behind a
+    /// switch a cruiser has no reason to find. Purely a drawing: it writes
+    /// nothing to the measurement and appears in no export. Same key as iOS
     /// (`AppSettings.Keys.breastHeightGuide`, "tc.breastHeightGuide").
     val breastHeightGuide: Boolean = false,
     /// AUTO reads the stem's edges out of a segmentation mask instead of

@@ -1758,6 +1758,23 @@ public struct DBHScanScreen: View {
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier("dbhScan.breastHeightBase")
+            // SAY THAT THE TAP EXISTS.
+            //
+            // The gesture was built, gated, given a raycast policy and fixed
+            // twice, and nothing on screen ever mentioned it — the only visible
+            // affordance was a button labelled "Place base", so a cruiser
+            // presses the button and never learns there is a faster way. A
+            // gesture nobody can discover is not a feature. Shown only while
+            // there is nothing placed yet, and it goes away the moment there
+            // is: a hint that outlives its moment is clutter.
+            if bhGuide.stage != .placed, bhFailure == nil {
+                Text("or tap the ground at the foot of the tree")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .padding(.horizontal, 10).padding(.vertical, 4)
+                    .background(Color.black.opacity(0.45), in: Capsule())
+                    .accessibilityIdentifier("dbhScan.breastHeightTapHint")
+            }
             if let failure = bhFailure {
                 Text(failure)
                     .font(ForestixType.caption)

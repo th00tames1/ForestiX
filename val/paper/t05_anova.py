@@ -7,7 +7,7 @@ observations. The primary model is therefore a linear mixed model,
 
     error ~ device * site * size_class,  random intercept for stem,
 
-fitted separately for DBH (inches) and height (feet). Site and size class are
+fitted separately for DBH (centimetres) and height (metres). Site and size class are
 constant within a stem (between-stem); device varies within it. That split is
 the whole point: the random intercept absorbs the stem-level common error, so
 the within-stem contrast (device) is tested against the small residual and the
@@ -17,7 +17,7 @@ in clearly-labelled columns, gets both of those wrong, and in opposite
 directions.
 
 Everything else in this script exists to keep that model honest: estimated
-marginal contrasts in inches and feet rather than p-values alone, assumption
+marginal contrasts in centimetres and metres rather than p-values alone, assumption
 checks on the conditional residuals, a leave-one-stem-out influence pass, and —
 because the constant-variance assumption fails in both measurands — a two-stage
 per-stem analysis with heteroscedasticity-robust standard errors, sign-flip
@@ -50,15 +50,15 @@ N_PERM = 5000
 #
 # core.DBH_CLASSES / HEIGHT_CLASSES have six and five levels. Crossed with two
 # sites and two devices that is 24 (resp. 20) cells, and the real cell counts
-# run down to a single stem (McDunn 32+ in DBH, n = 1; McDunn 140+ ft, n = 1).
+# run down to a single stem (McDunn 80+ cm DBH, n = 1; McDunn 45+ m, n = 1).
 # A three-way interaction over those is not estimable in any useful sense. The
 # classes are therefore collapsed to three per measurand at breaks a cruiser
 # would still recognise, and the collapse is declared in the table caption and
 # in the design block of the table itself.
 # --------------------------------------------------------------------------
 MODEL_CLASSES = {
-    "dbh": [(0, 12, "0-12 in"), (12, 24, "12-24 in"), (24, 1e9, "24+ in")],
-    "height": [(0, 80, "0-80 ft"), (80, 120, "80-120 ft"), (120, 1e9, "120+ ft")],
+    "dbh": [(0, 30, "0-30 cm"), (30, 60, "30-60 cm"), (60, 1e9, "60+ cm")],
+    "height": [(0, 25, "0-25 m"), (25, 35, "25-35 m"), (35, 1e9, "35+ m")],
 }
 
 F_TREAT = "error ~ device * site * sclass"
@@ -829,7 +829,7 @@ for c in ("estimate", "se", "stat", "p_value", "ci_low", "ci_high",
 core.save_table(tab, "t05_anova", caption=(
     "Table 5. Repeated-measures model of measurement error. Linear mixed model "
     "error ~ device x site x size class with a random intercept for stem, fitted "
-    "separately for DBH (in) and height (ft); device is a within-stem factor, site "
+    "separately for DBH (cm) and height (m); device is a within-stem factor, site "
     "and size class are between-stem. Block 1 gives treatment-coded fixed effects "
     "(reference iOS, McDunn, smallest class); block 2 gives estimated marginal "
     "contrasts in the measurand's own units with equal cell weighting; block 3 "
@@ -840,8 +840,8 @@ core.save_table(tab, "t05_anova", caption=(
     "assumption checks on conditional residuals, leave-one-stem-out influence on "
     "the device contrast, distribution-free / heteroscedasticity-robust "
     "alternatives, and a refit excluding stems with a disputed tape reading. Size "
-    "classes were collapsed to three levels per measurand (DBH 0-12 / 12-24 / 24+ "
-    "in; height 0-80 / 80-120 / 120+ ft) because the published six- and five-level "
+    "classes were collapsed to three levels per measurand (DBH 0-30 / 30-60 / 60+ "
+    "cm; height 0-25 / 25-35 / 35+ m) because the published six- and five-level "
     "schemes leave cells of a single stem and make the three-way interaction "
     "inestimable; realised cell counts, and the association between the two "
     "between-stem factors, are given in block 0. Residual variance is not constant "
@@ -924,7 +924,7 @@ for r, measurand in enumerate(("dbh", "height")):
 fig.tight_layout()
 core.save(fig, "fig05_model_diagnostics", caption=(
     "Figure 5. Diagnostics for the repeated-measures models of Table 5; top row "
-    "DBH (in), bottom row height (ft). (A, D) normal Q-Q of the conditional "
+    "DBH (cm), bottom row height (m). (A, D) normal Q-Q of the conditional "
     "residuals with the Shapiro-Wilk statistic. (B, E) conditional residuals "
     "against the reference measurement by device, with Levene's test across the "
     "twelve device x site x size cells and the Spearman correlation between "

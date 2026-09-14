@@ -839,6 +839,9 @@ object RawCaptureStore {
         put("algorithm", algorithm)
         put("units", units)
         put("capture_mode", captureMode)
+        // Where the height sighting angle comes from: the elevation of the
+        // AR camera's forward axis, on both platforms (iOS writes the same).
+        put("height_angle_source", "camera_pose")
         put("calibration", JSONObject().apply {
             put("alpha", cal.dbhCorrectionAlpha.toDouble())
             put("beta", cal.dbhCorrectionBeta.toDouble())

@@ -44,7 +44,7 @@ diameter reference is a tape: an independent instrument measuring
 circumference / pi. The height reference is a laser rangefinder in 3-point
 mode, which inverts the same tangent geometry the app inverts, so a wrong
 tangent assumption moves reference and app together. fig13 measures how much
-that matters — the two handsets' height errors correlate, sharing about 5 ft of
+that matters — the two handsets' height errors correlate, sharing about 1.5 m of
 SD — so height is reported as AGREEMENT with a 3-point laser throughout.
 """
 from __future__ import annotations
@@ -297,9 +297,9 @@ axT.set_ylim(0, 1)
 COLX = (0.000, 0.455, 0.735)
 rows = [
     ("Reference height, median",
-     f"{rnd1(CON['height']['med_McDunn'])} ft", f"{rnd1(CON['height']['med_Starker'])} ft"),
+     f"{rnd1(CON['height']['med_McDunn'])} m", f"{rnd1(CON['height']['med_Starker'])} m"),
     ("Reference diameter, median",
-     f"{rnd1(CON['dbh']['med_McDunn'])} in", f"{rnd1(CON['dbh']['med_Starker'])} in"),
+     f"{rnd1(CON['dbh']['med_McDunn'])} cm", f"{rnd1(CON['dbh']['med_Starker'])} cm"),
     ("Collection day",
      day[("McDunn", "android")][0].strftime("%d %b %Y"),
      day[("Starker", "android")][0].strftime("%d %b %Y")),
@@ -351,18 +351,18 @@ axB.set_ylim(0, 1)
 
 sup_items = [
     ("Agreement with the reference on these two stands",
-     f"diameter bias +{D_IOS['Bias [in | ft]']:.2f} in (95 % CI "
-     f"{D_IOS['Bias 95% CI [in | ft]'].replace('to', 'to')}) iOS, "
-     f"+{D_AND['Bias [in | ft]']:.2f} in ({D_AND['Bias 95% CI [in | ft]']}) Android; "
-     f"height {H_IOS['Bias [in | ft]']:+.1f} ft and {H_AND['Bias [in | ft]']:+.1f} ft"),
+     f"diameter bias +{D_IOS['Bias [cm | m]']:.2f} cm (95 % CI "
+     f"{D_IOS['Bias 95% CI [cm | m]'].replace('to', 'to')}) iOS, "
+     f"+{D_AND['Bias [cm | m]']:.2f} cm ({D_AND['Bias 95% CI [cm | m]']}) Android; "
+     f"height {H_IOS['Bias [cm | m]']:+.1f} m and {H_AND['Bias [cm | m]']:+.1f} m"),
     ("The difference between the two handsets",
-     f"mean iOS − Android {XD.mean_diff:+.2f} in "
+     f"mean iOS − Android {XD.mean_diff:+.2f} cm "
      f"({XD.ci_low:+.2f} to {XD.ci_high:+.2f}); 95 % limits of agreement span "
-     f"{XD.loa_high - XD.loa_low:.1f} in and {XH.loa_high - XH.loa_low:.1f} ft; "
+     f"{XD.loa_high - XD.loa_low:.1f} cm and {XH.loa_high - XH.loa_low:.1f} m; "
      f"{n_class_change} of {len(pdbh)} stems change diameter class"),
     ("The diameter estimator's geometric bias",
-     f"shipped chord identity {est('iOS (LiDAR)', 'shipped chord').bias_pct:+.1f} % "
-     f"(iOS) and {est('Android (ARCore)', 'shipped chord').bias_pct:+.1f} % (Android); "
+     f"chord identity (the pre-epoch-3 form) {est('iOS (LiDAR)', 'chord').bias_pct:+.1f} % "
+     f"(iOS) and {est('Android (ARCore)', 'chord').bias_pct:+.1f} % (Android); "
      f"the exact tangent inversion leaves "
      f"{est('iOS (LiDAR)', 'tangent').bias_pct:+.1f} % and "
      f"{est('Android (ARCore)', 'tangent').bias_pct:+.1f} %"),
@@ -381,7 +381,7 @@ not_items = [
      f"stands, however many stems each holds"),
     ("A stand effect separate from tree size and day",
      f"reference height median {rnd1(CON['height']['med_McDunn'])} vs "
-     f"{rnd1(CON['height']['med_Starker'])} ft (Mann–Whitney p = "
+     f"{rnd1(CON['height']['med_Starker'])} m (Mann–Whitney p = "
      f"{fmt_p(CON['height']['p'])}); stand is 1:1 with collection day. A site "
      f"difference is a site difference, not a stand effect"),
     ("Height ACCURACY, independent of the tangent method",
@@ -389,11 +389,11 @@ not_items = [
      f"handsets' height errors correlate r = {SH_.r:+.3f} (p = {fmt_p(SH_.r_p)}), sharing "
      f"{min(SH_.shared_frac_ios, SH_.shared_frac_android) * 100:.0f}–"
      f"{max(SH_.shared_frac_ios, SH_.shared_frac_android) * 100:.0f} % of error "
-     f"variance, shared SD {SH_.shared_sd:.2f} ft. Height is AGREEMENT, not accuracy"),
+     f"variance, shared SD {SH_.shared_sd:.2f} m. Height is AGREEMENT, not accuracy"),
     ("Out-of-roundness split from instrument scatter",
-     f"bounded, not resolved: shared SD {SD_.shared_sd:.2f} in (bootstrap upper "
-     f"{SD_.shared_sd_ci_high:.2f}) against per-handset {SD_.sd_ios:.2f} in (iOS) and "
-     f"{SD_.sd_android:.2f} in (Android) — stem shape and reference error together "
+     f"bounded, not resolved: shared SD {SD_.shared_sd:.2f} cm (bootstrap upper "
+     f"{SD_.shared_sd_ci_high:.2f}) against per-handset {SD_.sd_ios:.2f} cm (iOS) and "
+     f"{SD_.sd_android:.2f} cm (Android) — stem shape and reference error together "
      f"cap at {min(SD_.shared_frac_ios, SD_.shared_frac_android) * 100:.0f}–"
      f"{max(SD_.shared_frac_ios, SD_.shared_frac_android) * 100:.0f} % of the variance"),
 ]
@@ -470,10 +470,10 @@ and interquartile range of the REFERENCE measurements only — a diameter tape a
 rangefinder in 3-point mode, with the phones absent from this panel — whiskers extend to
 1.5 x IQR, and every stem is plotted beside its box (circles McDunn, triangles Starker;
 colour and marker both encode stand). Starker stems are the taller by a wide margin
-(median {rnd1(CON['height']['med_Starker'])} against {rnd1(CON['height']['med_McDunn'])} ft,
+(median {rnd1(CON['height']['med_Starker'])} against {rnd1(CON['height']['med_McDunn'])} m,
 Mann-Whitney U = {CON['height']['U']:.0f}, p = {CON['height']['p']:.1e}, rank-biserial
 {CON['height']['rbc']:+.2f}) and the thicker by a smaller one
-({rnd1(CON['dbh']['med_Starker'])} against {rnd1(CON['dbh']['med_McDunn'])} in, U =
+({rnd1(CON['dbh']['med_Starker'])} against {rnd1(CON['dbh']['med_McDunn'])} cm, U =
 {CON['dbh']['U']:.0f}, p = {CON['dbh']['p']:.4f}, rank-biserial {CON['dbh']['rbc']:+.2f});
 a rank test is used because the pooled height distribution is bimodal by construction. The
 block beneath lists the four further differences that travel with stand, each read off the
@@ -493,15 +493,15 @@ the app, which the loader drops. A difference between these stands is therefore 
 difference confounded with tree size and collection day, and is never reported as a stand
 effect. (B) What the design can and cannot separate, each line carrying the number it rests
 on. Supported, as estimates with intervals: agreement with the reference on these two
-stands (diameter bias +{D_IOS['Bias [in | ft]']:.2f} in, 95 % CI
-{D_IOS['Bias 95% CI [in | ft]']} on iOS and +{D_AND['Bias [in | ft]']:.2f} in,
-{D_AND['Bias 95% CI [in | ft]']} on Android); the difference between the two handsets (mean
-iOS - Android {XD.mean_diff:+.2f} in, {XD.ci_low:+.2f} to {XD.ci_high:+.2f}, with 95 %
-limits of agreement spanning {XD.loa_high - XD.loa_low:.1f} in and
-{XH.loa_high - XH.loa_low:.1f} ft, and {n_class_change} of {len(pdbh)} stems changing
-diameter class with the handset carried); the shipped chord estimator's geometric bias
-({est('iOS (LiDAR)', 'shipped chord').bias_pct:+.1f} % and
-{est('Android (ARCore)', 'shipped chord').bias_pct:+.1f} %, falling to
+stands (diameter bias +{D_IOS['Bias [cm | m]']:.2f} cm, 95 % CI
+{D_IOS['Bias 95% CI [cm | m]']} on iOS and +{D_AND['Bias [cm | m]']:.2f} cm,
+{D_AND['Bias 95% CI [cm | m]']} on Android); the difference between the two handsets (mean
+iOS - Android {XD.mean_diff:+.2f} cm, {XD.ci_low:+.2f} to {XD.ci_high:+.2f}, with 95 %
+limits of agreement spanning {XD.loa_high - XD.loa_low:.1f} cm and
+{XH.loa_high - XH.loa_low:.1f} m, and {n_class_change} of {len(pdbh)} stems changing
+diameter class with the handset carried); the chord identity's geometric bias
+({est('iOS (LiDAR)', 'chord').bias_pct:+.1f} % and
+{est('Android (ARCore)', 'chord').bias_pct:+.1f} %, falling to
 {est('iOS (LiDAR)', 'tangent').bias_pct:+.1f} % and
 {est('Android (ARCore)', 'tangent').bias_pct:+.1f} % under the exact tangent inversion);
 and the failure of the reported uncertainty channel (a nominal 95 % sigma interval covering
@@ -514,11 +514,11 @@ reasons in panel A; height ACCURACY independent of the tangent method, because t
 reference laser inverts the same geometry the app does and the two handsets' height errors
 correlate r = {SH_.r:+.3f} (p = {SH_.r_p:.1e}), sharing
 {min(SH_.shared_frac_ios, SH_.shared_frac_android) * 100:.0f}-{max(SH_.shared_frac_ios, SH_.shared_frac_android) * 100:.0f} %
-of error variance and {SH_.shared_sd:.2f} ft of shared SD, so height is reported throughout
+of error variance and {SH_.shared_sd:.2f} m of shared SD, so height is reported throughout
 as agreement with a 3-point laser; and any split of stem out-of-roundness from instrument
-scatter finer than the ceiling the design measures, a shared SD of {SD_.shared_sd:.2f} in
-(bootstrap upper {SD_.shared_sd_ci_high:.2f} in) against per-handset totals of
-{SD_.sd_ios:.2f} in (iOS) and {SD_.sd_android:.2f} in (Android), which caps stem shape and
+scatter finer than the ceiling the design measures, a shared SD of {SD_.shared_sd:.2f} cm
+(bootstrap upper {SD_.shared_sd_ci_high:.2f} cm) against per-handset totals of
+{SD_.sd_ios:.2f} cm (iOS) and {SD_.sd_android:.2f} cm (Android), which caps stem shape and
 reference error together at
 {min(SD_.shared_frac_ios, SD_.shared_frac_android) * 100:.0f}-{max(SD_.shared_frac_ios, SD_.shared_frac_android) * 100:.0f} %
 of the diameter error variance and leaves the rest with the instrument. Multiplicity is the
@@ -526,7 +526,7 @@ last line of the panel and applies only to hypothesis tests: the {N_TABLES} resu
 carry {N_P} p-values with no family-wise correction, about {N_FALSE:.0f} of which would
 reach alpha = 0.05 by chance, so the primary results are estimates with intervals - a bias,
 an RMSE, a concordance coefficient, a limit of agreement - and every p-value-driven
-contrast is labelled exploratory where it appears. Diameters in inches, heights in feet.
+contrast is labelled exploratory where it appears. Diameters in centimetres, heights in metres.
 """
 core.save(fig, "fig14_scope", para(caption))
 
@@ -536,19 +536,19 @@ core.save(fig, "fig14_scope", para(caption))
 headline = (
     f"This study describes what ForestiX measured on two stands, not what the app does in "
     f"general: with n = 2 stands whose reference heights differ by a median "
-    f"{rnd1(CON['height']['med_McDunn'])} vs {rnd1(CON['height']['med_Starker'])} ft "
+    f"{rnd1(CON['height']['med_McDunn'])} vs {rnd1(CON['height']['med_Starker'])} m "
     f"(Mann-Whitney p = {CON['height']['p']:.1e}) and which were measured on different "
     f"days, a site difference is not a stand effect, height is agreement with a 3-point "
-    f"laser rather than accuracy (shared error SD {SH_.shared_sd:.2f} ft, r = {SH_.r:+.3f}), "
-    f"and stem out-of-roundness is a bounded limitation, capped at {SD_.shared_sd:.2f} in "
-    f"of shared SD against per-handset {SD_.sd_ios:.2f} / {SD_.sd_android:.2f} in."
+    f"laser rather than accuracy (shared error SD {SH_.shared_sd:.2f} m, r = {SH_.r:+.3f}), "
+    f"and stem out-of-roundness is a bounded limitation, capped at {SD_.shared_sd:.2f} cm "
+    f"of shared SD against per-handset {SD_.sd_ios:.2f} / {SD_.sd_android:.2f} cm."
 )
 
 numbers = "\n".join([
     f"Two stands, not size-matched: reference height median "
-    f"{rnd1(CON['height']['med_McDunn'])} ft (McDunn) vs {rnd1(CON['height']['med_Starker'])} ft "
+    f"{rnd1(CON['height']['med_McDunn'])} m (McDunn) vs {rnd1(CON['height']['med_Starker'])} m "
     f"(Starker), Mann-Whitney U = {CON['height']['U']:.0f}, p = {CON['height']['p']:.1e}; "
-    f"diameter {rnd1(CON['dbh']['med_McDunn'])} vs {rnd1(CON['dbh']['med_Starker'])} in, "
+    f"diameter {rnd1(CON['dbh']['med_McDunn'])} vs {rnd1(CON['dbh']['med_Starker'])} cm, "
     f"p = {CON['dbh']['p']:.4f}",
 
     f"Stand travels with three more things: different collection days "
@@ -558,17 +558,17 @@ numbers = "\n".join([
     f"Starker (gap 0 s) vs by timestamp at McDunn (median gap {gap_med['McDunn']:.0f} s)",
 
     f"Supported - agreement on these two stands: diameter bias "
-    f"+{D_IOS['Bias [in | ft]']:.2f} in ({D_IOS['Bias 95% CI [in | ft]']}) iOS, "
-    f"+{D_AND['Bias [in | ft]']:.2f} in ({D_AND['Bias 95% CI [in | ft]']}) Android",
+    f"+{D_IOS['Bias [cm | m]']:.2f} cm ({D_IOS['Bias 95% CI [cm | m]']}) iOS, "
+    f"+{D_AND['Bias [cm | m]']:.2f} cm ({D_AND['Bias 95% CI [cm | m]']}) Android",
 
-    f"Supported - the handset difference: mean iOS - Android {XD.mean_diff:+.2f} in "
+    f"Supported - the handset difference: mean iOS - Android {XD.mean_diff:+.2f} cm "
     f"({XD.ci_low:+.2f} to {XD.ci_high:+.2f}), limits of agreement spanning "
-    f"{XD.loa_high - XD.loa_low:.1f} in and {XH.loa_high - XH.loa_low:.1f} ft, "
+    f"{XD.loa_high - XD.loa_low:.1f} cm and {XH.loa_high - XH.loa_low:.1f} m, "
     f"{n_class_change}/{len(pdbh)} stems changing diameter class",
 
     f"Supported - the estimator's geometry and the sigma channel: chord identity "
-    f"{est('iOS (LiDAR)', 'shipped chord').bias_pct:+.1f} % / "
-    f"{est('Android (ARCore)', 'shipped chord').bias_pct:+.1f} % vs tangent "
+    f"{est('iOS (LiDAR)', 'chord').bias_pct:+.1f} % / "
+    f"{est('Android (ARCore)', 'chord').bias_pct:+.1f} % vs tangent "
     f"{est('iOS (LiDAR)', 'tangent').bias_pct:+.1f} % / "
     f"{est('Android (ARCore)', 'tangent').bias_pct:+.1f} %; nominal 95 % sigma covers "
     f"{sig('DBH', 'iOS').coverage_pct:.0f} % / {sig('DBH', 'Android').coverage_pct:.0f} % "
@@ -579,12 +579,12 @@ numbers = "\n".join([
     f"r = {SH_.r:+.3f} (p = {SH_.r_p:.1e}), "
     f"{min(SH_.shared_frac_ios, SH_.shared_frac_android) * 100:.0f}-"
     f"{max(SH_.shared_frac_ios, SH_.shared_frac_android) * 100:.0f} % of each handset's "
-    f"error variance shared, shared SD {SH_.shared_sd:.2f} ft - independent instruments "
+    f"error variance shared, shared SD {SH_.shared_sd:.2f} m - independent instruments "
     f"cannot do that, a common tangent assumption can",
 
     f"NOT supported - stem shape as the whole diameter story: shared SD "
-    f"{SD_.shared_sd:.2f} in (bootstrap upper {SD_.shared_sd_ci_high:.2f}) against "
-    f"per-handset {SD_.sd_ios:.2f} in (iOS) and {SD_.sd_android:.2f} in (Android), so stem "
+    f"{SD_.shared_sd:.2f} cm (bootstrap upper {SD_.shared_sd_ci_high:.2f}) against "
+    f"per-handset {SD_.sd_ios:.2f} cm (iOS) and {SD_.sd_android:.2f} cm (Android), so stem "
     f"shape plus reference error cap at "
     f"{min(SD_.shared_frac_ios, SD_.shared_frac_android) * 100:.0f}-"
     f"{max(SD_.shared_frac_ios, SD_.shared_frac_android) * 100:.0f} % of the variance and "
@@ -622,15 +622,15 @@ print(f"  typed records (dropped by the loader): {len(typed_rows)} "
       f"{typed_rows[['plot', 'pair_id', 'kind', 'flags']].to_dict('records')}")
 print(f"\nPANEL B — {N_P} p-values across {N_TABLES} result tables "
       f"(~{N_FALSE:.0f} significant at alpha=0.05 by chance)")
-print(f"  DBH   bias iOS {D_IOS['Bias [in | ft]']:+.2f} in "
-      f"[{D_IOS['Bias 95% CI [in | ft]']}], Android {D_AND['Bias [in | ft]']:+.2f} in "
-      f"[{D_AND['Bias 95% CI [in | ft]']}]")
-print(f"  Hgt   bias iOS {H_IOS['Bias [in | ft]']:+.2f} ft, "
-      f"Android {H_AND['Bias [in | ft]']:+.2f} ft (AGREEMENT with a 3-point laser)")
-print(f"  cross-platform DBH {XD.mean_diff:+.3f} in [{XD.ci_low:+.2f},{XD.ci_high:+.2f}], "
-      f"LoA span {XD.loa_high - XD.loa_low:.2f} in / {XH.loa_high - XH.loa_low:.2f} ft, "
+print(f"  DBH   bias iOS {D_IOS['Bias [cm | m]']:+.2f} cm "
+      f"[{D_IOS['Bias 95% CI [cm | m]']}], Android {D_AND['Bias [cm | m]']:+.2f} cm "
+      f"[{D_AND['Bias 95% CI [cm | m]']}]")
+print(f"  Hgt   bias iOS {H_IOS['Bias [cm | m]']:+.2f} m, "
+      f"Android {H_AND['Bias [cm | m]']:+.2f} m (AGREEMENT with a 3-point laser)")
+print(f"  cross-platform DBH {XD.mean_diff:+.3f} cm [{XD.ci_low:+.2f},{XD.ci_high:+.2f}], "
+      f"LoA span {XD.loa_high - XD.loa_low:.2f} cm / {XH.loa_high - XH.loa_low:.2f} m, "
       f"{n_class_change}/{len(pdbh)} stems change class")
-print(f"  shared DBH r={SD_.r:+.3f} sd={SD_.shared_sd:.2f} in "
-      f"(upper {SD_.shared_sd_ci_high:.2f}) vs {SD_.sd_ios:.2f}/{SD_.sd_android:.2f} in")
-print(f"  shared Hgt r={SH_.r:+.3f} p={SH_.r_p:.2e} sd={SH_.shared_sd:.2f} ft "
+print(f"  shared DBH r={SD_.r:+.3f} sd={SD_.shared_sd:.2f} cm "
+      f"(upper {SD_.shared_sd_ci_high:.2f}) vs {SD_.sd_ios:.2f}/{SD_.sd_android:.2f} cm")
+print(f"  shared Hgt r={SH_.r:+.3f} p={SH_.r_p:.2e} sd={SH_.shared_sd:.2f} m "
       f"({SH_.shared_frac_ios * 100:.0f}/{SH_.shared_frac_android * 100:.0f} % of variance)")

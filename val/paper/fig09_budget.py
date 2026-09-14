@@ -69,9 +69,10 @@ def para(text: str) -> str:
 
 
 # Operational tolerances. Fixed in advance and shared with the cross-platform
-# analysis: a cruiser records DBH to the nearest inch and height to the nearest
-# 5 ft, so an error smaller than one recording increment cannot change the tally.
-TOLERANCE = {"dbh": 1.0, "height": 5.0}
+# analysis: a cruiser records DBH to the nearest centimetre and height to the
+# nearest metre, so an error smaller than one recording increment cannot change
+# the tally.
+TOLERANCE = {"dbh": 1.0, "height": 1.0}          # cm, m
 
 
 # --------------------------------------------------------------------------
@@ -452,7 +453,7 @@ hi_, ha_ = POOLED.loc[("height", "ios")], POOLED.loc[("height", "android")]
 caption = f"""
 Error budget against the tape and laser, decomposed into the parts a developer can
 act on separately. (A, B) Mean squared error of each handset for diameter at breast
-height (in^2, n = {int(di.n)} stems) and total height (ft^2, n = {int(hi_.n)}; one iOS
+height (cm^2, n = {int(di.n)} stems) and total height (m^2, n = {int(hi_.n)}; one iOS
 height was typed rather than measured and its stem cannot enter a paired
 decomposition), split into squared bias, the variance COMMON to both handsets on the
 same stem, and the variance INDEPENDENT to each handset. The common term is estimated
@@ -480,7 +481,7 @@ bootstrap CI {BOOT['dbh']['r'][0]:.2f} to {BOOT['dbh']['r'][1]:.2f}), leaving
 {100*di.frac_indep:.0f} % (iOS) and {100*da.frac_indep:.0f} % (Android) of MSE in the
 instrument - whereas height error is substantially shared (r = {hi_.r_err:.2f},
 {BOOT['height']['r'][0]:.2f} to {BOOT['height']['r'][1]:.2f};
-sigma_c = {np.sqrt(hi_.cov_err):.1f} ft), pointing at the stem and the laser rather
+sigma_c = {np.sqrt(hi_.cov_err):.1f} m), pointing at the stem and the laser rather
 than at either phone. Bias is a small part of the total everywhere
 ({100*di.frac_bias2:.0f} %, {100*da.frac_bias2:.0f} % for DBH;
 {100*hi_.frac_bias2:.0f} %, {100*ha_.frac_bias2:.0f} % for height), so an offset
@@ -503,11 +504,8 @@ core.save(fig, "fig09_budget", para(caption))
 # Table
 # --------------------------------------------------------------------------
 out = table.copy()
-conv = {"in": core.CM_PER_IN, "ft": core.M_PER_FT}
-out["metric_unit"] = out.unit.map({"in": "cm", "ft": "m"})
-out["rmse_metric"] = [r.rmse * conv[r.unit] for r in out.itertuples()]
-out["rmse_affine_cal_metric"] = [r.rmse_affine_cal * conv[r.unit]
-                                 for r in out.itertuples()]
+# `unit` already carries cm or m, the unit the manuscript reports, so there is
+# no second unit block to add.
 out["rmse_pct_of_mean"] = 100.0 * out.rmse / out.mean_reference
 out["rmse_affine_cal_pct_of_mean"] = 100.0 * out.rmse_affine_cal / out.mean_reference
 out["tolerance"] = out.key.map(TOLERANCE)
@@ -519,10 +517,9 @@ cols = ["measurand", "unit", "device", "subset", "n",
         "frac_common", "frac_common_ci_low", "frac_common_ci_high",
         "frac_indep", "frac_indep_ci_low", "frac_indep_ci_high",
         "cov_err", "r_err", "r_err_p",
-        "rmse", "rmse_metric", "rmse_pct_of_mean",
+        "rmse", "rmse_pct_of_mean",
         "rmse_offset_cal", "rmse_affine_cal", "rmse_affine_loo",
-        "rmse_affine_cal_metric", "rmse_affine_cal_pct_of_mean",
-        "metric_unit",
+        "rmse_affine_cal_pct_of_mean",
         "frac_removable_offset", "frac_removable_affine",
         "frac_removable_affine_loo",
         "cal_slope", "cal_intercept",
@@ -554,7 +551,7 @@ in-stand figure. `cal_common_var` and `cal_indep_var` decompose the post-calibra
 floor the same way, and `rmse_common_floor` is what would remain if the instrument
 were made perfect but the stem and the reference stayed as they are. `within_tol_*`
 is the percentage of stems inside one tally-sheet recording increment
-({TOLERANCE['dbh']:g} in for DBH, {TOLERANCE['height']:g} ft for height), before
+({TOLERANCE['dbh']:g} cm for DBH, {TOLERANCE['height']:g} m for height), before
 calibration, after it, and under leave-one-out. Two cautions. Height uses
 {int(hi_.n)} of the 100 stems because a paired decomposition needs both devices on the
 same stem and one iOS height was typed rather than measured. And the affine
@@ -575,7 +572,7 @@ shared error grows with stem size (Spearman rho of |c_hat| on the reference
 height), so the single common variance reported here is a stand-level average of a
 size-dependent quantity. One boundary case to note when reading the by-site rows:
 nothing constrains var_total - common_var to be non-negative, and Android height at
-McDunn very nearly reaches that boundary (indep_var {EDGE.indep_var:.2f} ft^2 against a
+McDunn very nearly reaches that boundary (indep_var {EDGE.indep_var:.2f} m^2 against a
 total variance of {EDGE.var_total:.2f}), so its {100*EDGE.frac_common:.0f} %
 common share should be read as "almost all of it" and not to the digit; a subgroup
 that landed the other side of the boundary would have produced a negative variance

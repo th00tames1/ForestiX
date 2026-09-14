@@ -185,7 +185,7 @@ core.save_table(
     "pct_inside_flat_loa and pct_inside_prop_loa give the observed coverage of the "
     "constant and the regression-based limits against the nominal 95 %. Columns "
     "ending _excl repeat bias, SD and trend with the n_disputed stems whose tape "
-    "reading is disputed removed. Diameters in inches, heights in feet.")
+    "reading is disputed removed. Diameters in centimetres, heights in metres.")
 
 
 # --------------------------------------------------------------------------
@@ -425,24 +425,27 @@ caption = (
                 for k in core.MEASURANDS for dev in core.DEVICES)
     + " - so the limits fan where that slope is significant and run essentially "
     "parallel where it is not. Expressed as a ratio the error carries no "
-    "residual size dependence in any panel (log(phone/reference) regressed on the "
-    "reference, p = "
+    "residual size dependence in "
+    + ("any panel" if all(logratio[(k, dev)]["p"] >= 0.05
+                          for k in core.MEASURANDS for dev in core.DEVICES)
+       else "three of the four panels")
+    + " (log(phone/reference) regressed on the reference, p = "
     + ", ".join(f"{logratio[(k, dev)]['p']:.2f}"
                 for k in core.MEASURANDS for dev in core.DEVICES)
-    + " for A-D), which identifies the trend as one constant percentage - "
+    + " for A-D), which identifies the trend as close to one constant percentage - "
     + ", ".join(f"{logratio[(k, dev)]['pct']:+.1f} %"
                 for k in core.MEASURANDS for dev in core.DEVICES)
     + " for A-D - rather than a size-specific distortion. Two qualifications on "
     "the pooled trends: stand and stem size are confounded, Starker carrying the "
     "larger stems, and with a stand intercept in the model the height trend "
-    f"strengthens to {sitemod[('height','ios')]['trend_slope_site_adj']:+.3f} ft/ft "
+    f"strengthens to {sitemod[('height','ios')]['trend_slope_site_adj']:+.3f} m/m "
     f"({fmt_p(sitemod[('height','ios')]['trend_p_site_adj'])}) in C and "
-    f"{sitemod[('height','android')]['trend_slope_site_adj']:+.3f} ft/ft "
+    f"{sitemod[('height','android')]['trend_slope_site_adj']:+.3f} m/m "
     f"({fmt_p(sitemod[('height','android')]['trend_p_site_adj'])}) in D; and in B "
     "the two stands do not share one slope (stand-by-size interaction "
     f"{fmt_p(sitemod[('dbh','android')]['site_x_size_p'])}: "
-    f"{by_site[('dbh','android','Starker')]['trend_slope']:+.3f} in/in at Starker "
-    f"against {by_site[('dbh','android','McDunn')]['trend_slope']:+.3f} in/in at "
+    f"{by_site[('dbh','android','Starker')]['trend_slope']:+.3f} cm/cm at Starker "
+    f"against {by_site[('dbh','android','McDunn')]['trend_slope']:+.3f} cm/cm at "
     "McDunn), so the Android DBH trend is a property of one stand and not of the "
     "handset. Differences "
     "depart from normality for DBH on both handsets (Shapiro-Wilk "
@@ -453,8 +456,8 @@ caption = (
     + ", ".join(f"{get(k, dev)['pct_inside_flat_loa']:.0f} %"
                 for k in core.MEASURANDS for dev in core.DEVICES)
     + " for A-D against a nominal 95 %. " + sens_lead
-    + " (" + "; ".join(sens_txt) + "). Diameters in inches, "
-    "heights in feet; the two panels of a row share one y-scale so the handsets "
+    + " (" + "; ".join(sens_txt) + "). Diameters in centimetres, "
+    "heights in metres; the two panels of a row share one y-scale so the handsets "
     "are compared and not merely each described.")
 
 core.save(fig, "fig03_bland_altman", caption)

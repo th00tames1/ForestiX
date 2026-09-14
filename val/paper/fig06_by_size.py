@@ -281,19 +281,19 @@ cap = (
     "so classical OLS intervals would be too narrow. No percent-error slope "
     "differs from zero (p = 0.29-0.50). (B, D) RMSE by class in field units, "
     "with the slope of SIGNED error on reference size inset: proportional "
-    "error that is flat in percent still grows in inches and feet, and the "
-    "iOS diameter over-read (+0.088 in per inch, p = 0.031) and iOS height "
-    "under-read (-0.033 ft per foot, p = 0.010) do so significantly. n per "
-    "class is printed under each group; classes with n < 10 (DBH 0-8 in and "
-    "32+ in, n = 6 and 9) are shaded and are indicative only. Height class "
-    "and site are confounded - every stem above 140 ft is at Starker and "
-    "16 of 18 below 50 ft are at McDunn - so a height-class contrast cannot "
-    "be separated from a stand contrast. Diameters in inches against a "
-    "diameter tape, heights in feet against a laser rangefinder in 3-point "
-    "mode; n = 100 stems (99 for iOS height). Excluding the 8 stems with a "
-    "disputed tape value leaves every percent-error slope unchanged in sign "
-    "and still non-significant, and strengthens rather than weakens the "
-    "Android diameter signed slope (p = 0.066 to p = 0.010)."
+    "error that is flat in percent still grows in centimetres and metres, and the "
+    "iOS diameter over-read (+0.032 cm per cm, p = 0.369) and iOS height "
+    "under-read (-0.032 m per metre, p = 0.012) are the two signed trends. n per "
+    "class is printed under each group; the one class with n < 10 (DBH "
+    "0-20 cm, n = 6) is shaded and is indicative only. Height class "
+    "and site are confounded - every stem above 45 m is at Starker and "
+    "14 of 16 below 15 m are at McDunn - so a height-class contrast cannot "
+    "be separated from a stand contrast. Diameters in centimetres against a "
+    "diameter tape, heights in metres against a laser rangefinder in 3-point "
+    "mode; n = 100 stems. Excluding the 6 stems with a disputed tape value "
+    "leaves every percent-error slope unchanged in sign and still "
+    "non-significant, and strengthens rather than weakens the Android "
+    "diameter signed slope."
 )
 core.save(fig, "fig06_by_size", cap)
 
@@ -302,8 +302,8 @@ out.columns = [c for c in out.columns]
 core.save_table(out.round(3), "t06_by_size", (
     "Accuracy by reference size class. Classes are defined on the reference "
     "measurement, not the phone reading. Percent-error CI is a 10 000-draw "
-    "percentile bootstrap of the class mean. RMSE and MAE are in inches (DBH) "
-    "and feet (height). small_n flags classes with fewer than 10 stems, where "
+    "percentile bootstrap of the class mean. RMSE and MAE are in centimetres (DBH) "
+    "and metres (height). small_n flags classes with fewer than 10 stems, where "
     "the class mean is unstable and the CI wide."
 ))
 

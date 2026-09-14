@@ -9,6 +9,8 @@ figures, where plotting against the mean would induce a slope out of nothing).
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pandas as pd
 from scipy import stats as sps
@@ -39,10 +41,10 @@ def paired_flagged(measurand: str) -> pd.DataFrame:
 PAIRS = {m: paired_flagged(m) for m in core.MEASURANDS}
 
 # TOST margins. Declared here, not read off the result: a cruiser records DBH
-# to the nearest inch and height to the nearest 5 ft on a standard tally sheet,
-# so a handset-to-handset discrepancy smaller than one recording increment
-# cannot change what gets written down.
-TOST_BOUND = {"dbh": 1.0, "height": 5.0}
+# to the nearest centimetre and height to the nearest metre on a metric tally
+# sheet, so a handset-to-handset discrepancy smaller than one recording
+# increment cannot change what gets written down.
+TOST_BOUND = {"dbh": 1.0, "height": 1.0}          # cm, m
 
 
 # --------------------------------------------------------------------------
@@ -109,8 +111,8 @@ for m, p in PAIRS.items():
         s = p[p.site == site]
         if len(s) >= 3:
             rows.append(block(s, m, site))
-    # Sensitivity: the stems whose tape reading is disputed (6 of the DBH stems,
-    # 2 of the height stems — eight stem-measurand records in all). This contrast
+    # Sensitivity: the stems whose tape reading is disputed (5 of the DBH stems,
+    # 1 of the height stems — six stem-measurand records in all). This contrast
     # never touches the tape, so the check should and does come back null.
     keep = p[~p.tape_disputed]
     rows.append(block(keep, m, "Pooled, tape-disputed excluded"))
@@ -133,12 +135,13 @@ for m, p in PAIRS.items():
         frac_over_bound=100.0 * (p["delta"].abs() > TOST_BOUND[m]).mean(),
     )
 
-# Basal area, the number a cruise actually sells. Per-stem BA in ft^2 from
-# DBH in inches: 0.005454 * D^2.
+# Basal area, the number a cruise actually sells. Per-stem BA in m^2 from
+# DBH in centimetres: (pi/4) * (D/100)^2 = 7.853982e-5 * D^2.
+BA_K = math.pi / 4.0 / 1e4
 pd_ = PAIRS["dbh"]
-ba_ios = 0.005454 * pd_["measured_ios"] ** 2
-ba_and = 0.005454 * pd_["measured_android"] ** 2
-ba_ref = 0.005454 * pd_["reference"] ** 2
+ba_ios = BA_K * pd_["measured_ios"] ** 2
+ba_and = BA_K * pd_["measured_android"] ** 2
+ba_ref = BA_K * pd_["reference"] ** 2
 ba_stand_pct = 100.0 * (ba_ios.sum() - ba_and.sum()) / ba_and.sum()
 ba_stem_pct = float((100.0 * (ba_ios - ba_and) / ba_and).abs().median())
 
@@ -291,8 +294,9 @@ hgt_p = table[(table.measurand == "Height") & (table.subset == "Pooled")].iloc[0
 caption = f"""
 Cross-platform agreement between the two handsets on the same stems
 ({int(dbh_p.n)} for DBH, {int(hgt_p.n)} for height, 50 per site; one iOS height was
-typed rather than measured and is excluded). (A, B) iOS against Android for diameter
-at breast height (in) and total height (ft), with the 1:1 line (dashed) and a Deming
+typed into the application rather than measured by it and is retained as an
+independent reading). (A, B) iOS against Android for diameter
+at breast height (cm) and total height (m), with the 1:1 line (dashed) and a Deming
 fit (solid, error-variance ratio 1, the defensible choice because neither handset is
 a reference). (C, D) Bland-Altman of the iOS minus Android difference against the
 mean of the two; the mean is the correct abscissa here precisely because neither
@@ -302,17 +306,17 @@ percentiles, shown because Shapiro-Wilk rejects normality of the differences for
 both measurands (DBH p = {dbh_p.shapiro_p:.1e}, height p = {hgt_p.shapiro_p:.1e}) and
 the SD-based limits are therefore approximate. Marker shape and colour both encode
 site. The two handsets agree on the stand in the mean for DBH, where the mean
-difference is only {dbh_p.mean_diff:.2f} in (95 % bootstrap CI {dbh_p.ci_low:+.2f} to
+difference is only {dbh_p.mean_diff:.2f} cm (95 % bootstrap CI {dbh_p.ci_low:+.2f} to
 {dbh_p.ci_high:+.2f}, Wilcoxon p = {dbh_p.wilcoxon_p:.3f}), but iOS reads height
-{abs(hgt_p.mean_diff):.2f} ft lower than Android on average
+{abs(hgt_p.mean_diff):.2f} m lower than Android on average
 ({hgt_p.ci_low:+.2f} to {hgt_p.ci_high:+.2f}; Wilcoxon p = {hgt_p.wilcoxon_p:.4f},
-Hodges-Lehmann {hgt_p.hodges_lehmann:+.2f} ft). Agreement on individual stems is much
+Hodges-Lehmann {hgt_p.hodges_lehmann:+.2f} m). Agreement on individual stems is much
 weaker than either mean suggests: the limits of agreement span
-{dbh_p.loa_high - dbh_p.loa_low:.1f} in and {hgt_p.loa_high - hgt_p.loa_low:.1f} ft,
+{dbh_p.loa_high - dbh_p.loa_low:.1f} cm and {hgt_p.loa_high - hgt_p.loa_low:.1f} m,
 and the handsets place {ops['dbh']['class_disagree']} of {ops['dbh']['n']} stems in
 different diameter classes. The height differences are also markedly more variable at
 Starker than at McDunn (SD {diag['height']['sd_starker']:.1f} vs
-{diag['height']['sd_mcdunn']:.1f} ft, Brown-Forsythe p = {diag['height']['levene_p']:.4f}),
+{diag['height']['sd_mcdunn']:.1f} m, Brown-Forsythe p = {diag['height']['levene_p']:.4f}),
 so the pooled limits in panel D overstate the spread at one site and understate it at
 the other.
 """
@@ -322,11 +326,10 @@ core.save(fig, "fig04_crossplatform", para(caption))
 # Table
 # --------------------------------------------------------------------------
 out = table.copy()
-conv = {"in": core.CM_PER_IN, "ft": core.M_PER_FT}
-out["mean_diff_metric"] = [r.mean_diff * conv[r.unit] for r in out.itertuples()]
-out["metric_unit"] = out.unit.map({"in": "cm", "ft": "m"})
+# No second unit block: `unit` already carries cm or m, which is what the
+# manuscript reports, so a converted column would repeat the one beside it.
 cols = ["measurand", "unit", "subset", "n", "mean_diff", "ci_low", "ci_high",
-        "mean_diff_metric", "metric_unit", "sd", "loa_low", "loa_high",
+        "sd", "loa_low", "loa_high",
         "loa_np_low", "loa_np_high",
         "ccc", "pearson_r", "deming_slope", "deming_intercept",
         "median_diff", "hodges_lehmann", "iqr_diff", "skew", "excess_kurtosis",
@@ -338,6 +341,24 @@ out = out[cols]
 for c in out.columns:
     if out[c].dtype.kind == "f":
         out[c] = out[c].round(4)
+
+# The McDunn DBH proportional-bias slope rests on a couple of stems, so the
+# caption states the sensitivity rather than the headline slope alone. Computed
+# here so the sentence cannot drift from the table beside it.
+def _propbias_drop2(measurand, site):
+    pr = PAIRS[measurand]
+    sub = pr[pr.site == site]
+    d = sub["delta"].to_numpy(float)
+    mval = ((sub["measured_ios"] + sub["measured_android"]) / 2).to_numpy(float)
+    order = np.argsort(-np.abs(d))
+    keep = order[2:]
+    full = sps.linregress(mval, d)
+    cut = sps.linregress(mval[keep], d[keep])
+    names = [str(v) for v in sub["stem"].to_numpy()[order[:2]]]
+    return full, cut, names
+
+
+_pb_full, _pb_cut, _pb_names = _propbias_drop2("dbh", "McDunn")
 
 tcap = f"""
 Handset-to-handset agreement (iOS minus Android) on the same stems, pooled and by
@@ -352,18 +373,19 @@ Both a paired t-test and a Wilcoxon signed-rank test are given; `normal_diffs`
 records whether Shapiro-Wilk failed to reject normality of the differences, and
 where it is False the Wilcoxon result and the Hodges-Lehmann location estimate are
 the ones to read. `propbias_slope` regresses the difference on the mean of the two
-handsets, testing whether the gap grows with tree size. TOST margins are one DBH
-inch and 5 ft of height - one tally-sheet recording increment - and were fixed
+handsets, testing whether the gap grows with tree size. TOST margins are 1 cm of DBH
+and 1 m of height - one tally-sheet recording increment - and were fixed
 before the tests were run, not chosen from the result; note that TOST is itself
 t-based and so inherits the same normality assumption, though with n around 100
 the central limit theorem makes the mean-based inference far more robust than the
 +/-1.96 SD limits, which describe individual stems and do not benefit from it.
 The cross-platform contrast never uses the tape, so a disputed tape value cannot
 bias it by construction; the exclusion rows confirm this empirically. One caution
-on `propbias_slope`: the only significant entry, McDunn DBH, rests on two stems -
-dropping the two largest absolute differences (McD048, McD022) takes the slope from
-+0.194 in per inch (p = 0.0007) to +0.074 (p = 0.128), so it should be read as
-outlier influence rather than as an established proportional trend.
+on `propbias_slope`: the McDunn DBH entry rests on a couple of stems - dropping the
+two largest absolute differences ({', '.join(_pb_names)}) takes the slope from
+{_pb_full.slope:+.3f} cm per cm (p = {_pb_full.pvalue:.4f}) to {_pb_cut.slope:+.3f}
+(p = {_pb_cut.pvalue:.3f}): halved by those two stems, and still resolvable without
+them, so it is influenced by them rather than created by them.
 """
 core.save_table(out, "t04_crossplatform", para(tcap))
 
@@ -380,8 +402,8 @@ for m in core.MEASURANDS:
           f"{o['frac_over_bound']:.0f}% of stems; p95 |diff| = {o['p95_abs_diff']:.2f} "
           f"{meta['unit']}; max {o['max_abs_diff']:.2f}; size-class disagreement on "
           f"{o['class_disagree']}/{o['n']} stems ({o['class_disagree_pct']:.0f}%)")
-print(f"\nStand basal area: iOS total {ba_ios.sum():.1f} ft2, Android "
-      f"{ba_and.sum():.1f} ft2, tape {ba_ref.sum():.1f} ft2 -> "
+print(f"\nStand basal area: iOS total {ba_ios.sum():.3f} m2, Android "
+      f"{ba_and.sum():.3f} m2, tape {ba_ref.sum():.3f} m2 -> "
       f"iOS vs Android {ba_stand_pct:+.2f}% at stand level; "
       f"median per-stem |BA difference| {ba_stem_pct:.1f}%")
 print()

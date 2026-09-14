@@ -31,7 +31,7 @@ their own depth frames with one implementation (axis-matched focal, fractional
 span, median depth over the bracket's middle half), because the recording binary
 changed partway through collection. This script re-extracts that identical
 per-frame sample -- (z, span, focal) -- and swaps ONLY the inversion, so the
-"shipped" row reproduces `core.load()`'s measured column and every other row
+shipped row ("tangent + 0.031754R") reproduces `core.load()`'s measured column and every other row
 differs from it in exactly one thing. The reproduction is checked, not assumed.
 
 `../analysis/sweep2.py` is the source of the candidate ladder and of the 0.031754 R
@@ -63,7 +63,6 @@ sys.path.insert(0, ANALYSIS)
 import sweep2  # noqa: E402  -- for OFFSET_CORE and its self-consistent solver
 
 PT = dt.timezone(dt.timedelta(hours=-7))
-IN = 2.54
 IOS_MERGE = {27: 26}          # build_final.py: iOS 26 + 27 are one stem
 MATCH_WINDOW_S = 120          # build_final.py's capture <-> reading window
 OFFSET = sweep2.OFFSET_CORE   # 1 - sqrt(1 - 1/16) = 0.031754 R
@@ -106,9 +105,9 @@ def overread(k):
 
 
 ESTIMATORS = [
-    ("shipped chord", chord),
+    ("chord", chord),
     ("tangent", tangent),
-    ("tangent + 0.031754R", tangent_offset),
+    ("tangent + 0.031754R (shipped)", tangent_offset),
 ]
 
 
@@ -265,24 +264,24 @@ for _, r in pairs.iterrows():
             unmatched.append((r["pair_id"], dev, "no capture in window"))
             continue
         # Of the retakes inside the window, take the one the manuscript kept:
-        # the one whose chord value IS the stored value.
-        best = min(cands, key=lambda c: abs(capture_value(c["samples"], chord) - stored))
-        got = capture_value(best["samples"], chord)
+        # the one whose shipped-inversion value IS the stored value.
+        best = min(cands, key=lambda c: abs(capture_value(c["samples"], tangent_offset) - stored))
+        got = capture_value(best["samples"], tangent_offset)
         ratios.append(got / stored)
         if abs(got / stored - 1) > 0.005:
-            unmatched.append((r["pair_id"], dev, f"chord/stored = {got/stored:.4f}"))
+            unmatched.append((r["pair_id"], dev, f"shipped/stored = {got/stored:.4f}"))
             continue
         rec = dict(stem=r["pair_id"], site=r["plot"], device=dev,
-                   reference=truth / IN, stored=stored / IN,
+                   reference=truth, stored=stored,
                    k=capture_k(best["samples"]), n_frames=len(best["samples"]),
                    tape_disputed="TAPE-MISMATCH" in flags)
         for name, fn in ESTIMATORS:
-            rec[name] = capture_value(best["samples"], fn) / IN
+            rec[name] = capture_value(best["samples"], fn)
         rows.append(rec)
 
 E = pd.DataFrame(rows)
 print(f"matched and reproduced: {len(E)} of {len(pairs) * 2} device-stem readings")
-print(f"chord/stored ratio: median {np.median(ratios):.5f}, "
+print(f"shipped/stored ratio: median {np.median(ratios):.5f}, "
       f"within 0.5 % on {sum(1 for x in ratios if abs(x-1) < 0.005)}/{len(ratios)}")
 for u in unmatched:
     print("   not used:", u)
@@ -298,7 +297,7 @@ for c in CAPS["ios"][:40] + CAPS["android"][:40]:
 print(f"closed-form vs sweep2 iterative offset solver: max rel diff {worst:.2e}")
 
 # --- verification 2: the observed chord/tangent ratio IS the k formula ---
-obs_ratio = (E["shipped chord"] / E["tangent"]).values
+obs_ratio = (E["chord"] / E["tangent"]).values
 pred_ratio = 1 + overread(E["k"].values)
 resid = np.abs(obs_ratio - pred_ratio)
 print(f"observed d_chord/d_tangent vs formula at median k: "
@@ -317,13 +316,11 @@ def block(sub, name):
     plo, phi = core.bootstrap_ci(pct)
     lo, hi = core.bootstrap_ci(err)
     return dict(n=len(sub),
-                bias_in=err.mean(), bias_ci_low_in=lo, bias_ci_high_in=hi,
+                bias_cm=err.mean(), bias_ci_low_cm=lo, bias_ci_high_cm=hi,
                 bias_pct=pct.mean(), bias_pct_ci_low=plo, bias_pct_ci_high=phi,
-                bias_cm=err.mean() * IN,
                 median_pct=pct.median(),
-                rmse_in=core.rmse(err), mae_in=err.abs().mean(),
-                rmse_cm=core.rmse(err) * IN, mae_cm=err.abs().mean() * IN,
-                ols_slope=s_ols, ols_intercept_in=i_ols, deming_slope=s_dem,
+                rmse_cm=core.rmse(err), mae_cm=err.abs().mean(),
+                ols_slope=s_ols, ols_intercept_cm=i_ols, deming_slope=s_dem,
                 ccc=core.ccc(sub["reference"], sub[name]))
 
 
@@ -349,29 +346,31 @@ Table 11. Diameter estimator geometry, evaluated against the diameter tape on th
 stems whose depth frames could be re-inverted (iOS n = %d, Android n = %d). Every
 row uses the SAME per-frame sample -- axis-matched focal, fractional bracket span,
 median depth over the bracket's middle half -- and differs only in the inversion:
-(i) the shipped chord identity d = w z / (f - w/2), which reproduces the measured
-column analysed elsewhere in this manuscript; (ii) the exact circular-cylinder
+(i) the chord identity d = w z / (f - w/2), the estimator's form before epoch 3;
+(ii) the exact circular-cylinder
 tangent inversion d = 2 z k (k + sqrt(k^2+1)), k = w/2f; (iii) that inversion with
 the median depth walked 0.031754 R forward to the near face, the offset implied by
-medianing a uniform sample over the middle half of a circular face. Bias, RMSE and
-MAE are in inches (cm alongside); bias CIs are seeded percentile bootstraps.
+medianing a uniform sample over the middle half of a circular face -- the shipped
+estimator (epoch 5), which reproduces the measured column analysed elsewhere in
+this manuscript. Bias, RMSE and
+MAE are in centimetres; bias CIs are seeded percentile bootstraps.
 Slopes and CCC are against the tape and describe the SHAPE of what each inversion
 leaves behind. k statistics are per device and identical across the three estimator
 rows of a device. The disputed-tape subset removes the %d DBH stems flagged
-TAPE-MISMATCH; it moves no bias by more than %.2f in and changes no conclusion.
+TAPE-MISMATCH; it moves no bias by more than %.2f cm and changes no conclusion.
 One iOS stem (McD014) is absent because its diameter was an Auto capture with no
 stored bracket and so cannot be re-inverted; the other 199 device-stem readings
-reproduce the manuscript's measured column exactly under the chord row.
+reproduce the manuscript's measured column exactly under the shipped row.
 """ % ((E.device == "ios").sum(), (E.device == "android").sum(),
        E[E.tape_disputed].stem.nunique(),
-       max(abs(T11[T11.subset == "all stems"].set_index(["device", "estimator"]).bias_in
+       max(abs(T11[T11.subset == "all stems"].set_index(["device", "estimator"]).bias_cm
                - T11[T11.subset == "excl. disputed tape"]
-               .set_index(["device", "estimator"]).bias_in))))
+               .set_index(["device", "estimator"]).bias_cm))))
 
 pd.set_option("display.width", 200)
-print(T11[["subset", "device", "estimator", "n", "bias_in", "bias_pct",
-           "bias_pct_ci_low", "bias_pct_ci_high", "median_pct", "rmse_in",
-           "mae_in", "ols_slope", "ols_intercept_in", "deming_slope", "ccc",
+print(T11[["subset", "device", "estimator", "n", "bias_cm", "bias_pct",
+           "bias_pct_ci_low", "bias_pct_ci_high", "median_pct", "rmse_cm",
+           "mae_cm", "ols_slope", "ols_intercept_cm", "deming_slope", "ccc",
            "k_median"]].to_string(index=False))
 
 
@@ -381,18 +380,18 @@ print(T11[["subset", "device", "estimator", "n", "bias_in", "bias_pct",
 SHARE = {}
 for dev in ("ios", "android"):
     sub = E[E.device == dev]
-    b0 = ((sub["shipped chord"] - sub["reference"]) / sub["reference"] * 100).mean()
+    b0 = ((sub["chord"] - sub["reference"]) / sub["reference"] * 100).mean()
     b1 = ((sub["tangent"] - sub["reference"]) / sub["reference"] * 100).mean()
-    b2 = ((sub["tangent + 0.031754R"] - sub["reference"]) / sub["reference"] * 100).mean()
+    b2 = ((sub["tangent + 0.031754R (shipped)"] - sub["reference"]) / sub["reference"] * 100).mean()
     # The shift IS the mean geometric over-read: a check, not a coincidence.
     mean_over = overread(sub.k.values).mean() * 100
     shift = ((1 + b0 / 100) / (1 + b1 / 100) - 1) * 100
-    plo, phi = core.bootstrap_ci((sub["tangent + 0.031754R"] - sub["reference"])
+    plo, phi = core.bootstrap_ci((sub["tangent + 0.031754R (shipped)"] - sub["reference"])
                                  / sub["reference"] * 100)
     SHARE[dev] = dict(chord=b0, tan=b1, tan_off=b2,
                       removed=(b0 - b1) / b0 * 100, residual=b1,
                       mean_over=mean_over, res_lo=plo, res_hi=phi,
-                      dem=core.deming(sub["reference"], sub["tangent + 0.031754R"])[0],
+                      dem=core.deming(sub["reference"], sub["tangent + 0.031754R (shipped)"])[0],
                       over_at_median=overread(sub.k.median()) * 100)
     print(f"{dev}: %bias chord {b0:+.2f} -> tangent {b1:+.2f} "
           f"({(b0-b1)/b0*100:.0f} % of the bias removed) -> +offset {b2:+.2f}"
@@ -507,7 +506,7 @@ for dev in ("ios", "android"):
              ls=styles[dev][0], zorder=6, label=core.DEVICE_LABEL[dev])
 
 axB.set_xticks(POS["ios"] + POS["android"])
-axB.set_xticklabels(["chord\n(shipped)", "tangent", "tangent\n+0.032R"] * 2,
+axB.set_xticklabels(["chord", "tangent", "tangent\n+0.032R\n(shipped)"] * 2,
                     fontsize=7.5)
 axB.set_xlim(-0.55, 5.95)
 axB.set_ylabel("error against diameter tape (%)")
@@ -521,9 +520,10 @@ core.panel_tag(axB, "B")
 
 fig.tight_layout(w_pad=2.4)
 core.save(fig, "fig11_estimator", """
-Figure 11. The shipped diameter inversion is the wrong geometry, and the size of
-the error is set by how wide the stem sits in the frame. (A) Relative over-read of
-the shipped chord identity d = w z / (f - w/2) against the exact circular-cylinder
+Figure 11. The chord identity was the wrong geometry, and the size of its error
+is set by how wide the stem sits in the frame. (A) Relative over-read of
+the chord identity d = w z / (f - w/2), the estimator's form before epoch 3,
+against the exact circular-cylinder
 tangent inversion d = 2 z k (k + sqrt(k^2+1)), plotted from the closed form
 1/[(1-k)(k+sqrt(k^2+1))] - 1 (solid line, left axis) against k = w/2f, the
 silhouette half-width in focal lengths. Histograms (right axis, iOS solid, Android

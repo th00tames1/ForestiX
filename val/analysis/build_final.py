@@ -34,7 +34,7 @@ unrecoverable and it is dropped; anything smaller takes the mean of the two,
 which is symmetric between the devices and never off by more than half a
 disagreement that is already under 4 %.
 """
-import json, glob, os, csv, struct, math, datetime as dt, statistics as st, collections
+import json, glob, os, csv, math, struct, datetime as dt, statistics as st, collections
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 VAL = os.path.dirname(HERE)
@@ -240,6 +240,57 @@ def load_readings(plat):
     return rows
 
 
+SIGMA_ALPHA_RAD = math.radians(0.3)
+
+
+def _fwd_elevation(pose):
+    """Elevation (rad) of a stored camera pose's forward axis above the
+    gravity-aligned horizon: column-major 4x4, camera looks down -Z."""
+    a = [f2(x) for x in (pose or [])]
+    if len(a) != 16 or any(x is None for x in a):
+        return None
+    fx, fy, fz = -a[8], -a[9], -a[10]
+    return math.atan2(fy, math.hypot(fx, fz))
+
+
+def rederived_heights(plat):
+    """Every stored height capture, recomputed from its own camera poses: the
+    elevation of the camera's forward axis at the base and top taps and the
+    stored horizontal baseline through the two-tangent identity, sigma_H by
+    the propagation the app applies, and the tier by its check matrix. Keyed
+    by the value the bundle recorded, which is how the reading it produced
+    is found again."""
+    out = {}
+    for path in sorted(glob.glob(os.path.join(VAL, "raw", plat, "**", "manifest.json"),
+                                 recursive=True)):
+        try:
+            m = json.load(open(path))
+        except Exception:
+            continue
+        if m.get("kind") != "height":
+            continue
+        H = m.get("height") or {}
+        base, top = H.get("base") or {}, H.get("top") or {}
+        d = f2(H.get("d_h_m"))
+        ab, at = _fwd_elevation(base.get("camera_pose")), _fwd_elevation(top.get("camera_pose"))
+        live = f2((m.get("result_live") or {}).get("value"))
+        if None in (d, ab, at, live):
+            continue
+        lam = f2(((m.get("settings") or {}).get("calibration") or {}).get("vio_drift_fraction"))
+        lam = 0.02 if lam is None else lam
+        tt, tb = math.tan(at), math.tan(ab)
+        if tt <= tb or d <= 0:
+            continue
+        h = d * (tt - tb)
+        sig = math.sqrt((tt - tb) ** 2 * (lam * d) ** 2
+                        + d ** 2 / math.cos(at) ** 4 * SIGMA_ALPHA_RAD ** 2
+                        + d ** 2 / math.cos(ab) ** 4 * SIGMA_ALPHA_RAD ** 2)
+        warns = sum([sig / h > 0.05, d > 25.0, abs(at) > math.radians(75.0), d > 30.0])
+        tier = "green" if warns == 0 else ("yellow" if warns == 1 else "red")
+        out[round(live, 3)] = dict(h=h, sigma=sig, tier=tier)
+    return out
+
+
 # Attach the recomputed diameter to its reading, by tree + nearest time.
 DATA = {}
 for plat in ("ios", "android"):
@@ -259,6 +310,17 @@ for plat in ("ios", "android"):
         R[j]["recomputed"] = C[i]["dbh"]
         R[j]["recomputed_frames"] = C[i]["frames"]
         R[j]["recomputed_source"] = C[i]["source"]
+    # Heights: the reading the bundle recorded identifies the bundle, and the
+    # bundle's own camera poses give the height the shipped app computes.
+    P = rederived_heights(plat)
+    for r in R:
+        if r["kind"] == "height" and r["value"] is not None:
+            hit = P.get(round(r["value"], 3))
+            if hit:
+                r["recomputed"] = hit["h"]
+                r["recomputed_sigma"] = hit["sigma"]
+                r["recomputed_conf"] = hit["tier"]
+                r["recomputed_source"] = "raw-pose"
     DATA[plat] = R
 
 
@@ -352,11 +414,14 @@ for plot, label, irec, arec, gap in pairs:
         # cruiser downloading the app today would get. Anything reporting from
         # this table has to be able to say that in one sentence if asked.
         #
-        # HEIGHTS ARE UNTOUCHED — there is no height recomputation, so those
-        # are as-recorded either way, and `*_value_source` says which is which
-        # row by row.
-        iv = (i.get("recomputed") if kind == "dbh" else i["value"]) if i else None
-        av = (a.get("recomputed") if kind == "dbh" else a["value"]) if a else None
+        # HEIGHTS the same way: recomputed from each capture's stored camera
+        # poses (the elevation of the camera's forward axis at the base and
+        # top taps) and horizontal baseline, which is the sighting-angle
+        # source the shipped app uses on both platforms. A reading whose
+        # bundle is missing stays as-recorded, and `*_value_source` says
+        # which is which row by row.
+        iv = (i.get("recomputed") if kind == "dbh" else i.get("recomputed", i["value"])) if i else None
+        av = (a.get("recomputed") if kind == "dbh" else a.get("recomputed", a["value"])) if a else None
 
         # One tape, resolved. See the module docstring for the rule.
         if gt_i is None and gt_a is not None:
@@ -421,15 +486,15 @@ for plot, label, irec, arec, gap in pairs:
             "ios_ratio": f"{iv/truth:.4f}" if iv and truth else "",
             "android_ratio": f"{av/truth:.4f}" if av and truth else "",
             "ios_value_source": ((i.get("recomputed_source", "") if kind == "dbh"
-                                  else "as-recorded") if iv is not None else ""),
+                                  else i.get("recomputed_source", "as-recorded")) if iv is not None else ""),
             "android_value_source": ((a.get("recomputed_source", "") if kind == "dbh"
-                                      else "as-recorded") if av is not None else ""),
+                                      else a.get("recomputed_source", "as-recorded")) if av is not None else ""),
             "ios_value_asrecorded": cell(i["value"] if i else None),
             "android_value_asrecorded": cell(a["value"] if a else None),
-            "ios_sigma": cell(i["sigma"] if i else None),
-            "android_sigma": cell(a["sigma"] if a else None),
-            "ios_confidence": (i["conf"] if i else ""),
-            "android_confidence": (a["conf"] if a else ""),
+            "ios_sigma": cell(i.get("recomputed_sigma", i["sigma"]) if i else None),
+            "android_sigma": cell(a.get("recomputed_sigma", a["sigma"]) if a else None),
+            "ios_confidence": (i.get("recomputed_conf", i["conf"]) if i else ""),
+            "android_confidence": (a.get("recomputed_conf", a["conf"]) if a else ""),
             "ios_capture_mode": (i["mode"] if i else ""),
             "android_capture_mode": (a["mode"] if a else ""),
             "ios_time": (f"{i['t']:%Y-%m-%d %H:%M:%S}" if i else ""),

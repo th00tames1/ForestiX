@@ -405,10 +405,11 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_ASSET_PATHS = "\"Forestix/Preview Content\"";
-				DEVELOPMENT_TEAM = 2PH76TF2YG;
+				DEVELOPMENT_TEAM = 9DZJB5T89F;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Forestix-Info.plist";
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Forestix uses the camera for AR-based DBH measurement, tree height scans, and plot boundary visualisation.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Forestix needs location access to navigate between plots, record plot centers with GPS averaging, and produce exportable track logs.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Forestix uses the microphone only while you hold the mic button during species entry. Audio is processed on-device and never leaves the phone.";
@@ -423,7 +424,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.hcjeong.Forestix;
+				PRODUCT_BUNDLE_IDENTIFIER = "asfl-Forestix";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
@@ -439,10 +440,11 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_ASSET_PATHS = "\"Forestix/Preview Content\"";
-				DEVELOPMENT_TEAM = 2PH76TF2YG;
+				DEVELOPMENT_TEAM = 9DZJB5T89F;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Forestix-Info.plist";
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Forestix uses the camera for AR-based DBH measurement, tree height scans, and plot boundary visualisation.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Forestix needs location access to navigate between plots, record plot centers with GPS averaging, and produce exportable track logs.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Forestix uses the microphone only while you hold the mic button during species entry. Audio is processed on-device and never leaves the phone.";
@@ -457,7 +459,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.hcjeong.Forestix;
+				PRODUCT_BUNDLE_IDENTIFIER = "asfl-Forestix";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;

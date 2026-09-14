@@ -2,8 +2,8 @@
 // iOS (HeightEstimator, spec §7.2): anchor the trunk, walk back (live d_h),
 // then capture the top + base aim angles; H = d_h·(tanα_top − tanα_base)
 // with the identical guard rails, σ_H, and green/yellow/red tiers. α comes
-// from the ARCore camera-forward elevation (the Android analogue of the
-// iOS IMU pitch). Crown is folded in afterwards, reusing the measured d_h.
+// from the ARCore camera-forward elevation (the same elevation iOS reads
+// from its ARKit camera pose). Crown is folded in afterwards, reusing the measured d_h.
 
 package com.hcjeong.forestix.ui.screens.height
 

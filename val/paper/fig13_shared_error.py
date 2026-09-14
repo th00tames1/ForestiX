@@ -47,8 +47,8 @@ The two shared fractions bracket the correlation r (their geometric mean is
 exactly r), which is why one r yields a RANGE of shared fractions.
 
 WHAT IT SETTLES. Stem shape and reference error live entirely inside s. They are
-therefore bounded above by sigma_shared: on diameter that ceiling is about one
-inch of sd against per-handset totals of 2.3 and 1.9 in, so they cannot be the
+therefore bounded above by sigma_shared: on diameter that ceiling is about
+1.8 cm of sd against per-handset totals of 5.4 and 4.4 cm, so they cannot be the
 whole story and the remainder is the instrument. On height the shared component
 is the large one, which is exactly the signature a common method assumption
 leaves and independent instrument error cannot fake.
@@ -59,8 +59,8 @@ Centring removes b[d], so a shared OFFSET — a reference that reads
 systematically small on every stem — contributes nothing to the covariance and
 is invisible here. This decomposition is about scatter, not bias. Bias is
 reported elsewhere; both handsets over-read diameter on these two stands by
-about an inch, and no correlation can tell you whether the tape or the phones
-own that inch.
+about a centimetre, and no correlation can tell you whether the tape or the
+phones own that centimetre.
 
 And the two handsets were carried by two people, who may have stood at different
 azimuths on the same stem. Whatever part of an out-of-round stem's effect changes
@@ -251,7 +251,7 @@ P = {m: table[(table.measurand == core.MEASURANDS[m]["short"])
 # Figure
 #
 # Panels A and B are the scatter, one per measurand because the units differ and
-# a 1:1 line cannot span inches and feet. Panel C is the decomposition for all
+# a 1:1 line cannot span centimetres and metres. Panel C is the decomposition for all
 # four handset x measurand cells on one axis, which is where the contrast that
 # the whole analysis exists to show becomes a single glance.
 # --------------------------------------------------------------------------
@@ -329,7 +329,7 @@ for x, (m, dev) in zip(xpos, cells):
     ind = st[f"indep_sd_{dev}"]
     frac = st[f"shared_frac_{dev}"] * 100
     # Bars are SHARES of each cell's error variance, because that is the one
-    # scale on which inches and feet can sit side by side without inventing a
+    # scale on which centimetres and metres can sit side by side without inventing a
     # comparison. The real-unit SDs are annotated on every segment instead;
     # variances add, standard deviations do not, so the two segment SDs combine
     # in quadrature to the total printed above the bar.
@@ -362,8 +362,8 @@ axc.set_ylabel("Share of error variance (%)\n"
                "(segment labels give that component's SD in real units)")
 axc.axvline(1.6, color=core.PALETTE["muted"], lw=0.8, ls=":", zorder=1)
 # Group labels below the handset ticks: the units differ between the pairs, and
-# a reader must not be invited to compare an inch bar with a foot bar.
-for xc, lab in ((0.45, "Diameter (in)"), (2.75, "Height (ft)")):
+# a reader must not be invited to compare a centimetre bar with a metre bar.
+for xc, lab in ((0.45, "Diameter (cm)"), (2.75, "Height (m)")):
     axc.annotate(lab, xy=(xc, 0), xycoords=("data", "axes fraction"),
                  xytext=(0, -26), textcoords="offset points",
                  ha="center", va="top", fontsize=8.5, fontweight="bold")
@@ -387,33 +387,33 @@ the 1:1 line — the line on which the two handsets make the identical error —
 marker shape and colour both encode site; the ellipse is the 95 % concentration ellipse of
 the joint error distribution, and its shape is the result: round means independent misses,
 elongated along the 1:1 line means shared ones. (C) The same numbers as a share of each
-cell's error variance, with the standard deviation of each component printed in inches or
-feet on the segment and the total above the bar; segment SDs combine in quadrature, not by
+cell's error variance, with the standard deviation of each component printed in centimetres
+or metres on the segment and the total above the bar; segment SDs combine in quadrature, not by
 addition. Diameter and height behave oppositely. On diameter the errors are mostly
 independent — r = {d_.r:.3f} (95 % bootstrap CI {d_.r_ci_low:.2f} to {d_.r_ci_high:.2f},
-p = {d_.r_p:.3f}), a shared SD of {d_.shared_sd:.2f} in against per-handset totals of
-{d_.sd_ios:.2f} in (iOS) and {d_.sd_android:.2f} in (Android), so only
+p = {d_.r_p:.3f}), a shared SD of {d_.shared_sd:.2f} cm against per-handset totals of
+{d_.sd_ios:.2f} cm (iOS) and {d_.sd_android:.2f} cm (Android), so only
 {min(d_.shared_frac_ios, d_.shared_frac_android) * 100:.0f}–{max(d_.shared_frac_ios, d_.shared_frac_android) * 100:.0f} %
 of the variance is shared. Error in the reference reading acts on both handsets
 identically, and so does out-of-roundness wherever the two phones saw the stem from a
 similar azimuth, so both live inside the shared term and
-{d_.shared_sd:.2f} in is a ceiling on their combined
-contribution (bootstrap upper bound {d_.shared_sd_ci_high:.2f} in): the single-azimuth
+{d_.shared_sd:.2f} cm is a ceiling on their combined
+contribution (bootstrap upper bound {d_.shared_sd_ci_high:.2f} cm): the single-azimuth
 silhouette against a tape's mean caliper diameter is a real limitation of the method, but
 it cannot account for the diameter scatter, and roughly three quarters of that variance
 remains with the instrument. Two people carried the two handsets and may have stood at
 different azimuths on the same stem, so whatever part of an out-of-round stem's effect
 changes with viewing angle is not common to the two handsets and falls in the independent
-term; the {d_.shared_sd:.2f} in therefore bounds the part of stem shape and reference error
+term; the {d_.shared_sd:.2f} cm therefore bounds the part of stem shape and reference error
 that acted on both handsets alike, and the instrument share is an upper bound. On height the errors are mostly shared —
 r = {h_.r:.3f} ({h_.r_ci_low:.2f} to {h_.r_ci_high:.2f}, p = {h_.r_p:.1e}), a shared SD of
-{h_.shared_sd:.2f} ft, which is
+{h_.shared_sd:.2f} m, which is
 {min(h_.shared_frac_ios, h_.shared_frac_android) * 100:.0f}–{max(h_.shared_frac_ios, h_.shared_frac_android) * 100:.0f} %
 of each handset's error variance. Independent instrument error cannot produce that; a
 method assumption both handsets inherit can, and the height reference is a laser
 rangefinder in 3-point mode, which inverts the same tangent geometry the app does. Height
 results are therefore reported throughout as AGREEMENT with a 3-point laser rather than as
-accuracy, and the {h_.shared_sd:.2f} ft shared component is reported as a finding rather
+accuracy, and the {h_.shared_sd:.2f} m shared component is reported as a finding rather
 than absorbed into the residual. The decomposition describes scatter about each handset's
 own mean and is blind to any offset common to both, so it neither supports nor rules out a
 shared bias. These are the two stands measured, not a property of the app in general.
@@ -424,15 +424,13 @@ core.save(fig, "fig13_shared_error", para(caption))
 # Table
 # --------------------------------------------------------------------------
 out = table.copy()
-conv = {"in": core.CM_PER_IN, "ft": core.M_PER_FT}
-out["shared_sd_metric"] = [r.shared_sd * conv[r.unit] for r in out.itertuples()]
-out["metric_unit"] = out.unit.map({"in": "cm", "ft": "m"})
+# `unit` already carries cm or m, the unit the manuscript reports, so there is
+# no second unit block to add.
 cols = ["measurand", "unit", "subset", "role", "n",
         "r", "r_ci_low", "r_ci_high", "r_p",
         "spearman_rho", "spearman_p", "r_drop2", "r_drop2_p",
         "concordant_sign_pct", "cov",
         "shared_sd", "shared_sd_ci_low", "shared_sd_ci_high", "shared_sd_drop2",
-        "shared_sd_metric", "metric_unit",
         "sd_ios", "sd_android",
         "shared_frac_ios", "shared_frac_ios_ci_low", "shared_frac_ios_ci_high",
         "shared_frac_android", "shared_frac_android_ci_low",
@@ -478,15 +476,15 @@ exploratory are per-site splits, and they are where this estimator strains: with
 stems a bootstrap draw can put the estimated covariance above one handset's own variance,
 so a `shared_frac` interval can reach past 1.0, which the model does not allow. That is a
 small-subset artefact of estimating a covariance, not evidence of anything, and it is left
-unclipped rather than tidied away. The two sites also differ in tree size (height median 64.1 vs
-139.4 ft), collection day, species recording and stem-pairing method as well as in stand,
+unclipped rather than tidied away. The two sites also differ in tree size (height median 19.5 vs
+42.5 m), collection day, species recording and stem-pairing method as well as in stand,
 so a difference between them is a site difference confounded with tree size and collection
 day and must not be read as a stand effect. The tape-disputed exclusion is a sensitivity
 check on the reference, which is one of the candidates inside the shared term. Every
 variance here is taken about the handset's own mean, so `bias_ios` and `bias_android` are
 carried alongside as context only: an offset common to both handsets contributes nothing
-to a covariance and is invisible to this decomposition. Diameters in inches, heights in
-feet, with the shared SD repeated in cm and m. These are the two stands measured.
+to a covariance and is invisible to this decomposition. Diameters in centimetres, heights
+in metres. These are the two stands measured.
 """
 core.save_table(out, "t13_shared_error", para(tcap))
 

@@ -1,13 +1,16 @@
 // Spec §4.4 HeightScan state machine + §5.3 screen contract. Records the
 // anchor pose (tree base), walks the cruiser out while streaming d_h
-// live, captures α_top and α_base with ±200 ms median pitch (REQ-HGT-004),
-// then hands the tuple to HeightEstimator.
+// live, captures α_top and α_base as the ±200 ms median elevation of the
+// tracked camera pose (REQ-HGT-004), then hands the tuple to
+// HeightEstimator.
 //
-// Cross-platform: on iOS the view model drives a real ARKit session +
-// CMMotionManager; on macOS (for swift test / previews) both are no-op
-// stubs and the state machine is exercised via `preview(state:result:)`
-// + direct injection through `captureTop/captureBase(pitchRad:at:)`
-// overloads that bypass the IMU buffer.
+// Cross-platform: on iOS the view model drives a real ARKit session and
+// samples the sighting angle from its camera pose, the same quantity
+// Android reads from the ARCore pose; on macOS (for swift test /
+// previews) the session is a no-op stub and the state machine is
+// exercised via `preview(state:result:)` + direct injection through
+// `captureTop/captureBase(pitchRad:at:)` overloads that bypass the
+// sample buffer.
 
 import Foundation
 import Combine
@@ -191,6 +194,9 @@ public final class HeightScanViewModel: ObservableObject {
 
     public let session: ARKitSessionManager
     public let pitchBuffer: IMUPitchBuffer
+    /// Retained for construction-site compatibility only: the sighting
+    /// angle is read from the camera pose (`samplePoseElevation`), so this
+    /// service is never started.
     public let motion: IMUMotionService
     public let calibration: ProjectCalibration
 
@@ -409,12 +415,10 @@ public final class HeightScanViewModel: ObservableObject {
         // depth-frame camera pose) + mesh raycasts; no VIO feature
         // stream. Applied with no reset options — anchors survive.
         session.attach(client: arClientID, configuration: .heightScan)
-        motion.start()
         subscribeToDepth()
     }
 
     public func onDisappear() {
-        motion.stop()
         session.detach(client: arClientID)
         depthCancellable?.cancel()
         depthCancellable = nil
@@ -441,6 +445,7 @@ public final class HeightScanViewModel: ObservableObject {
                 // it. Called the other way round the gate was a frame stale.
                 self.observeWalkIntegrity()
                 self.collectPoseSampleIfNeeded(frame)
+                self.samplePoseElevation(frame)
                 guard self.state == .walking else { return }
                 // No usable camera pose (ARKit reports `.notAvailable`): HOLD
                 // the walk readouts rather than recomputing them from a
@@ -674,6 +679,26 @@ public final class HeightScanViewModel: ObservableObject {
         lastPoseSampleTime = frame.timestamp
         let tMs = Int((frame.timestamp - recordAnchorTime) * 1000)
         recordPoseSamples.append((tMs: tMs, pose: frame.cameraPoseWorld))
+    }
+
+    /// The sighting angle (REQ-HGT-004): the elevation of the camera's
+    /// forward axis above the gravity-aligned horizon, read from the tracked
+    /// ARKit pose on every depth frame and pushed into `pitchBuffer`, so the
+    /// base and top taps take a ±200 ms median of it. Android's
+    /// `cameraForwardElevationRad()` is the same quantity from the ARCore
+    /// pose: both platforms aim the ray through the on-screen reticle and
+    /// measure that ray. Sampled only while the pose is tracked, for the
+    /// same reason the walk readout is — an untracked transform is not a
+    /// direction ARKit stands behind.
+    private func samplePoseElevation(_ frame: ARDepthFrame) {
+        guard trackingLive else { return }
+        let c2 = frame.cameraPoseWorld.columns.2
+        let fwd = SIMD3<Float>(-c2.x, -c2.y, -c2.z)
+        let horiz = (fwd.x * fwd.x + fwd.z * fwd.z).squareRoot()
+        let elevation = Double(atan2(fwd.y, horiz))
+        guard elevation.isFinite else { return }
+        pitchBuffer.append(timestamp: ProcessInfo.processInfo.systemUptime,
+                           pitchRad: elevation)
     }
 
     /// Retain the base-aim depth frame + reference RGB for the raw-capture
@@ -987,11 +1012,12 @@ public final class HeightScanViewModel: ObservableObject {
         //
         // THE LIVE POSE IS REQUIRED, not merely nice to have — it used to be
         // optional here, and only here, which is what let a relocalization
-        // between the two sightings through. α_top comes from the IMU and is
-        // gravity-referenced, so unlike Android (whose `cameraForwardElevationRad()`
-        // reads a TRACKING frame or nothing) this tap had nothing that noticed
-        // the world frame being re-fitted — while the base tap next door
-        // refuses for exactly that. And d_h lives in that frame: the standing
+        // between the two sightings through. α_top is the elevation of the
+        // tracked camera pose (the same quantity Android's
+        // `cameraForwardElevationRad()` reads) and is sampled only while
+        // tracking is live, but the tap itself must still refuse when the
+        // pose is gone — the base tap next door already does. And d_h lives
+        // in that frame: the standing
         // point was locked at the base tap and is never re-fitted, so a re-fit
         // in between rescales H by whatever it moved. Same sentence as the base
         // tap and the anchor tap, and the same one Android shows.
@@ -1036,7 +1062,7 @@ public final class HeightScanViewModel: ObservableObject {
         ProcessInfo.processInfo.systemUptime
     }
 
-    /// Test/preview hook: push α_base directly (FIRST), skipping the IMU.
+    /// Test/preview hook: push α_base directly (FIRST), skipping the sample buffer.
     public func captureBaseDirect(alphaBaseRad: Float,
                                   standingPointWorld: SIMD3<Float>) {
         guard state == .aimBaseArmed, anchorPointWorld != nil else { return }

@@ -33,8 +33,8 @@ SITE_MARKER = {"McDunn": "o", "Starker": "^"}
 def cell(sub: pd.DataFrame, measurand: str, device: str, site_label: str) -> dict:
     """One table row: the accuracy block for one (measurand, device, site).
 
-    DBH is in inches and height in feet, so the dimensional columns are headed
-    `[in | ft]` and the `Unit` column says which one applies to that row. One
+    DBH is in centimetres and height in metres, so the dimensional columns are headed
+    `[cm | m]` and the `Unit` column says which one applies to that row. One
     set of columns beats two half-empty sets.
     """
     m = core.MEASURANDS[measurand]
@@ -45,19 +45,19 @@ def cell(sub: pd.DataFrame, measurand: str, device: str, site_label: str) -> dic
         "Site": site_label,
         "Unit": m["unit"],
         "n": s["n"],
-        "Bias [in | ft]": round(s["bias"], 2),
-        "Bias 95% CI [in | ft]": f"{s['bias_ci_low']:+.2f} to {s['bias_ci_high']:+.2f}",
+        "Bias [cm | m]": round(s["bias"], 2),
+        "Bias 95% CI [cm | m]": f"{s['bias_ci_low']:+.2f} to {s['bias_ci_high']:+.2f}",
         "Bias [%]": round(s["pct_bias"], 1),
-        "SD of error [in | ft]": round(s["sd"], 2),
-        "95% LoA [in | ft]": f"{s['loa_low']:+.2f} to {s['loa_high']:+.2f}",
-        "RMSE [in | ft]": round(s["rmse"], 2),
-        "MAE [in | ft]": round(s["mae"], 2),
+        "SD of error [cm | m]": round(s["sd"], 2),
+        "95% LoA [cm | m]": f"{s['loa_low']:+.2f} to {s['loa_high']:+.2f}",
+        "RMSE [cm | m]": round(s["rmse"], 2),
+        "MAE [cm | m]": round(s["mae"], 2),
         "R2": round(s["r2"], 3),
         "CCC": round(s["ccc"], 3),
         "OLS slope [-]": round(s["ols_slope"], 3),
-        "OLS intercept [in | ft]": round(s["ols_intercept"], 2),
+        "OLS intercept [cm | m]": round(s["ols_intercept"], 2),
         "Deming slope [-]": round(s["deming_slope"], 3),
-        "Deming intercept [in | ft]": round(s["deming_intercept"], 2),
+        "Deming intercept [cm | m]": round(s["deming_intercept"], 2),
     }
 
 
@@ -110,17 +110,17 @@ core.save_table(
         "come from ordinary least squares of measured on reference; the Deming "
         "slope and intercept assume error in both variables with a variance ratio "
         "of 1, which is conservative because the reference is the better "
-        "instrument. Diameters in inches, heights in feet; the `Unit` column says "
-        "which applies to each row. Readings the cruiser typed rather than "
-        "measured are excluded. One iOS height capture failed, so iOS height "
-        "n = 99. CAVEAT: the 95 % limits of agreement assume approximately normal "
+        "instrument. Diameters in centimetres, heights in metres; the `Unit` column says "
+        "which applies to each row. One iOS height was typed into the application "
+        "rather than measured by it; it is an independent reading and is retained, "
+        "CAVEAT: the 95 % limits of agreement assume approximately normal "
         "differences, and Shapiro-Wilk rejects normality for "
         + "; ".join(_nonnormal) +
         ". The parametric limits are reported for comparability with the "
         "literature, but for the worst case, iOS DBH, the empirical "
         "2.5-97.5 percentile limits are "
-        f"{_emp[0]:+.2f} to {_emp[1]:+.2f} in against a parametric "
-        f"{_par['loa_low']:+.2f} to {_par['loa_high']:+.2f} in, so the "
+        f"{_emp[0]:+.2f} to {_emp[1]:+.2f} cm against a parametric "
+        f"{_par['loa_low']:+.2f} to {_par['loa_high']:+.2f} cm, so the "
         "parametric interval overstates the downside and understates the "
         "upside. Pooled Deming slopes are not the average of the within-stand "
         "slopes, because the two stands span different parts of the size range."
@@ -129,7 +129,7 @@ core.save_table(
 
 
 # --------------------------------------------------------------------------
-# Sensitivity: the 8 stems with a disputed tape reading
+# Sensitivity: the 6 stems with a disputed tape reading
 # --------------------------------------------------------------------------
 
 clean = df[~df.tape_disputed]
@@ -241,27 +241,63 @@ fig.legend(handles=legend_items, loc="lower center", ncol=4,
 
 fig.tight_layout(rect=(0, 0.045, 1, 1))
 
+# Deming slope with a seeded stem bootstrap, so the sentence in the caption is
+# computed from the data rather than typed beside it. `core.bootstrap_ci` resamples
+# a vector; a slope needs both columns to move together, so the resample is done
+# over stem INDICES here and the slope recomputed inside each draw.
+def _deming_slope_ci(sub, n_boot=2000, seed=17):
+    rng = np.random.default_rng(seed)
+    x = sub.reference.to_numpy(float)
+    y = sub.measured.to_numpy(float)
+    n = len(x)
+    draws = []
+    for _ in range(n_boot):
+        i = rng.integers(0, n, n)
+        s, _i = core.deming(x[i], y[i])
+        if np.isfinite(s):
+            draws.append(s)
+    return (float(np.percentile(draws, 2.5)), float(np.percentile(draws, 97.5)))
+
+
+DEM = {}
+for _meas in MEAS_ORDER:
+    for _dev in core.DEVICES:
+        _sub = df[(df.measurand == _meas) & (df.device == _dev)]
+        _s, _ = core.deming(_sub.reference, _sub.measured)
+        _lo, _hi = _deming_slope_ci(_sub)
+        DEM[(_meas, _dev)] = (_s, _lo, _hi)
+
+
+def _slope_phrase(meas):
+    a = DEM[(meas, "ios")]
+    b = DEM[(meas, "android")]
+    excl = [d for d in (a, b) if not (d[1] <= 1.0 <= d[2])]
+    verdict = ("both excluding 1" if len(excl) == 2
+               else "neither excluding 1" if not excl
+               else "one excluding 1")
+    return (f"slopes {a[0]:.3f} iOS, {b[0]:.3f} Android; bootstrap CIs "
+            f"{a[1]:.3f}-{a[2]:.3f} and {b[1]:.3f}-{b[2]:.3f}, {verdict}")
+
+
 core.save(
     fig, "fig02_accuracy",
     caption=(
         "Figure 2. Calibration of the ForestiX smartphone estimates against the "
-        "field reference. (A, B) diameter at breast height, inches; (C, D) total "
-        "height, feet; left column iPhone (LiDAR), right column Android (ARCore). "
+        "field reference. (A, B) diameter at breast height, centimetres; (C, D) total "
+        "height, metres; left column iPhone (LiDAR), right column Android (ARCore). "
         "Points are individual stems, open circles from the McDunn stand and open "
         "triangles from Starker; the dashed line is 1:1 and the solid line is the "
         "Deming fit (error-in-both-variables, variance ratio 1). Axes share limits "
         "and aspect within a row so the two handsets are directly comparable. "
         "Inset gives n, Lin's concordance correlation coefficient, the Deming "
-        "slope and the mean signed bias. Diameter carries a proportional error on "
-        "both handsets (Deming slopes 1.12 iOS, 1.08 Android; bootstrap CIs "
-        "1.045-1.198 and 1.020-1.134, both excluding 1), so the over-read grows "
-        "with stem size. Height carries no proportional error the sample can "
-        "resolve (slopes 0.978 and 0.992, CIs 0.954-1.002 and 0.958-1.028, both "
-        "including 1); iOS nonetheless reads 2.42 ft low on average (95 % CI "
-        "-3.69 to -1.16 ft), a real shortfall whose form this sample cannot pin "
+        "slope and the mean signed bias. Diameter under the shipped inversion is "
+        f"close to proportional ({_slope_phrase('dbh')}). "
+        "Height carries no proportional error the sample can resolve "
+        f"({_slope_phrase('height')}); iOS nonetheless reads 0.73 m low on average (95 % CI "
+        "-1.11 to -0.36 m), a consistent offset whose form this sample cannot pin "
         "to slope or intercept, while Android shows no resolvable height bias "
-        "(-0.73 ft, 95 % CI -2.13 to +0.62 ft). n = 100 stems per panel "
-        "except iOS height (n = 99, one failed capture); typed readings excluded. "
+        "(-0.22 m, 95 % CI -0.65 to +0.19 m). n = 100 stems per panel "
+        "including the one typed iOS height, which is retained as an independent reading. "
         "The Deming line is fitted to the pooled stands; because the two stands "
         "occupy different parts of the size range, the pooled slope is not the "
         "average of the within-stand slopes (Table 2)."
@@ -344,7 +380,7 @@ for measurand in MEAS_ORDER:
 
 print("\nTABLE t02_accuracy")
 with pd.option_context("display.width", 250, "display.max_columns", 40):
-    print(table[["Measurand", "Device", "Site", "Unit", "n", "Bias [in | ft]",
-                 "Bias [%]", "SD of error [in | ft]", "95% LoA [in | ft]",
-                 "RMSE [in | ft]", "CCC", "Deming slope [-]",
-                 "Deming intercept [in | ft]"]].to_string(index=False))
+    print(table[["Measurand", "Device", "Site", "Unit", "n", "Bias [cm | m]",
+                 "Bias [%]", "SD of error [cm | m]", "95% LoA [cm | m]",
+                 "RMSE [cm | m]", "CCC", "Deming slope [-]",
+                 "Deming intercept [cm | m]"]].to_string(index=False))

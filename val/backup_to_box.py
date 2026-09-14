@@ -11,6 +11,9 @@ finished outputs so nothing has to be re-run to read the result:
                analyses are void
   paper/       core.py, every figure script, the figures themselves (PNG + PDF),
                the result tables, and the deck
+  manuscript/  the drafts and structure documents (repo/paper/manuscript), which
+               are writing rather than analysis but are worked on from the same
+               two machines
   raw/         the depth-frame corpus, ~730 MB — OPTIONAL, and only needed to
                rebuild the table from the frames rather than read it
 
@@ -44,6 +47,14 @@ DEST_REL = os.path.join("work", "Forestix")
 SETS = [
     (os.path.join(HERE, "analysis"), "analysis", "analysis scripts + notes", True),
     (os.path.join(HERE, "paper"), "paper", "figures, results, deck, scripts", True),
+    # The manuscript lives outside val/, because it is writing rather than
+    # analysis, but it travels for the same reason everything else here does:
+    # it is worked on from two machines. The slide decks beside it in
+    # repo/paper/ are deliberately NOT included — they run to hundreds of
+    # megabytes of near-identical revisions, and the ones worth keeping are
+    # already in paper/ from val/paper's own sync.
+    (os.path.join(REPO, "paper", "manuscript"), "manuscript",
+     "manuscript drafts, structure documents, references", True),
     (os.path.join(HERE, "raw"), "raw", "raw depth captures (~730 MB)", False),
 ]
 

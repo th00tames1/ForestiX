@@ -334,8 +334,9 @@ class ArController {
     }
 
     /// Elevation angle (radians) of the camera's forward aim ray above the
-    /// horizon — the Android analogue of the iOS IMU pitch α used by the
-    /// height walk-off tangent. Positive = aiming up. Forward = -zAxis.
+    /// horizon — the sighting angle α the height walk-off tangent uses on
+    /// both platforms (iOS reads the same elevation from its ARKit camera
+    /// pose). Positive = aiming up. Forward = -zAxis.
     fun cameraForwardElevationRad(): Float? {
         val f = trackingFrame() ?: return null
         val z = f.camera.pose.zAxis

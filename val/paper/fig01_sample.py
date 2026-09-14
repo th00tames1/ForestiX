@@ -24,7 +24,6 @@ import core
 plt = core.use_style()
 df = core.load()
 
-CM, M = core.CM_PER_IN, core.M_PER_FT
 SITE_ORDER = core.SITES
 
 # --------------------------------------------------------------------------
@@ -67,17 +66,20 @@ def species_string(sub: pd.DataFrame) -> str:
     return "; ".join(parts)
 
 
-def block(sub: pd.DataFrame, kind: str, prefix: str, conv: float) -> dict:
+def block(sub: pd.DataFrame, kind: str, prefix: str) -> dict:
+    """The reference distribution for one measurand, in its own metric unit.
+
+    There is no second unit block any more. The analysis presents centimetres
+    and metres, so a converted column would repeat the one beside it.
+    """
     v = sub[sub.measurand == kind].reference
     if len(v) == 0:
         return {}
-    imp = dict(n=len(v), min=v.min(), median=v.median(), mean=v.mean(),
-               max=v.max(), sd=v.std(ddof=1))
-    out = {f"{prefix}_n": imp["n"]}
+    stats = dict(n=len(v), min=v.min(), median=v.median(), mean=v.mean(),
+                 max=v.max(), sd=v.std(ddof=1))
+    out = {f"{prefix}_n": stats["n"]}
     for stat in ("min", "median", "mean", "max", "sd"):
-        out[f"{prefix}_{stat}"] = rnd(imp[stat], 1)
-    for stat in ("min", "median", "mean", "max", "sd"):
-        out[f"{prefix}_{stat}_metric"] = rnd(imp[stat] * conv, 2)
+        out[f"{prefix}_{stat}"] = rnd(stats[stat], 1)
     return out
 
 
@@ -87,8 +89,8 @@ for site in SITE_ORDER + ["All"]:
     s_sub = stems if site == "All" else stems[stems.site == site]
     d_sub = disp if site == "All" else disp[disp.site == site]
     row = {"site": site, "n_stems": len(s_sub)}
-    row.update(block(r_sub, "dbh", "dbh_in", CM))
-    row.update(block(r_sub, "height", "ht_ft", M))
+    row.update(block(r_sub, "dbh", "dbh_cm"))
+    row.update(block(r_sub, "height", "ht_m"))
     row["species"] = species_string(s_sub)
     row["disputed_tape_stems"] = d_sub.stem.nunique()
     row["disputed_tape_dbh"] = int((d_sub.measurand == "dbh").sum())
@@ -105,8 +107,8 @@ for site in SITE_ORDER + ["All"]:
 table = pd.DataFrame(rows)
 order = (["site", "n_stems", "species", "disputed_tape_stems",
           "disputed_tape_dbh", "disputed_tape_height"]
-         + [c for c in table.columns if c.startswith("dbh_in")]
-         + [c for c in table.columns if c.startswith("ht_ft")]
+         + [c for c in table.columns if c.startswith("dbh_cm")]
+         + [c for c in table.columns if c.startswith("ht_m")]
          + [c for c in table.columns if c.startswith("n_ios")
             or c.startswith("n_android")])
 table = table[order]
@@ -116,9 +118,8 @@ core.save_table(
     "Table 1. Composition of the validation sample. One row per stand plus a "
     "pooled row; n_stems is the number of stems, each measured once with a "
     "diameter tape (DBH) and once with a laser rangefinder in 3-point mode "
-    "(height). Reference distributions are given in inches and feet as "
-    "recorded on the field sheet, with the same statistics converted to "
-    "centimetres and metres (columns ending _metric). SD is the sample "
+    "(height). Reference distributions are given in centimetres (columns "
+    "dbh_cm_*) and metres (columns ht_m_*). SD is the sample "
     "standard deviation (ddof = 1). Species are the field codes as written; "
     "they were recorded only at Starker, so all 50 McDunn stems appear as "
     "not recorded. disputed_tape counts stem-measurand records flagged "
@@ -132,7 +133,7 @@ core.save_table(
 # --------------------------------------------------------------------------
 keep = ref[~ref.tape_disputed]
 sens = []
-for kind, unit in (("dbh", "in"), ("height", "ft")):
+for kind, unit in (("dbh", "cm"), ("height", "m")):
     a = ref[ref.measurand == kind].reference
     b = keep[keep.measurand == kind].reference
     sens.append(dict(measurand=kind, unit=unit, n_all=len(a), n_kept=len(b),
@@ -163,7 +164,7 @@ print(sens.to_string(index=False))
 from scipy import stats as sps  # noqa: E402
 
 print("\nStand contrast (Mann-Whitney U, two-sided; Shapiro-Wilk on each stand):")
-for kind, unit in (("dbh", "in"), ("height", "ft")):
+for kind, unit in (("dbh", "cm"), ("height", "m")):
     a = ref[(ref.measurand == kind) & (ref.site == "McDunn")].reference
     b = ref[(ref.measurand == kind) & (ref.site == "Starker")].reference
     u = sps.mannwhitneyu(a, b, alternative="two-sided")
@@ -191,13 +192,12 @@ for kind, bins in (("dbh", core.DBH_CLASSES), ("height", core.HEIGHT_CLASSES)):
 # Figure
 # --------------------------------------------------------------------------
 SPEC = {
-    "dbh": dict(bins=np.arange(6, 54, 3), unit="in", metric="cm", conv=CM,
-                label="Diameter at breast height (in)",
-                metric_label="DBH (cm)", classes=core.DBH_CLASSES,
-                fmt="{:.1f}", mfmt="{:.1f}"),
-    "height": dict(bins=np.arange(30, 185, 10), unit="ft", metric="m", conv=M,
-                   label="Total height (ft)", metric_label="Height (m)",
-                   classes=core.HEIGHT_CLASSES, fmt="{:.1f}", mfmt="{:.1f}"),
+    "dbh": dict(bins=np.arange(15, 135, 5), unit="cm",
+                label="Diameter at breast height (cm)",
+                classes=core.DBH_CLASSES, fmt="{:.1f}"),
+    "height": dict(bins=np.arange(9, 57, 3), unit="m",
+                   label="Total height (m)",
+                   classes=core.HEIGHT_CLASSES, fmt="{:.1f}"),
 }
 STYLE = {
     "McDunn": dict(hatch=None, ls="-", marker="o", mfc=core.PALETTE["site"]["McDunn"]),
@@ -241,11 +241,9 @@ for col, (kind, tag) in enumerate((("dbh", "A"), ("height", "B"))):
     ax.yaxis.set_major_locator(plt.MaxNLocator(nbins=6, integer=True))
     core.panel_tag(ax, tag)
 
-    sec = ax.secondary_xaxis("top", functions=(lambda x, c=sp["conv"]: x * c,
-                                               lambda x, c=sp["conv"]: x / c))
-    sec.set_xlabel(sp["metric_label"], fontsize=8, labelpad=2)
-    sec.tick_params(labelsize=7)
-
+    # No second unit axis. The panel is already in the unit the manuscript
+    # reports, and a duplicate scale along the top would say the same thing
+    # twice.
     n_cls = sum(1 for k, n in occ[kind].items() if n > 0)
     ax.text(0.02, 0.98, f"{n_cls} of {len(sp['classes'])} size classes occupied",
             transform=ax.transAxes, ha="left", va="top", fontsize=8,
@@ -269,9 +267,7 @@ for col, (kind, tag) in enumerate((("dbh", "A"), ("height", "B"))):
     for x in (lo, hi):
         axr.plot([x, x], [ybr - 0.11, ybr + 0.11],
                  color=core.PALETTE["reference"], lw=0.9, clip_on=False, zorder=5)
-    span = (f"{sp['fmt'].format(lo)}–{sp['fmt'].format(hi)} {sp['unit']}"
-            f"  ({sp['mfmt'].format(lo * sp['conv'])}–"
-            f"{sp['mfmt'].format(hi * sp['conv'])} {sp['metric']})")
+    span = (f"{sp['fmt'].format(lo)}–{sp['fmt'].format(hi)} {sp['unit']}")
     axr.text((lo + hi) / 2, ybr + 0.24, span, ha="center", va="bottom",
              fontsize=8, color=core.PALETTE["reference"], clip_on=False)
 
@@ -291,7 +287,6 @@ for col, (kind, tag) in enumerate((("dbh", "A"), ("height", "B"))):
 # from the new data and re-wrote the caption from the old prose. Anything a
 # caption asserts about the sample is computed, so the two cannot drift.
 def _median(site, kind):
-    conv = core.MEASURANDS[kind]["conv"]
     sub = df[(df.site == site) & (df.measurand == kind)]
     ref = sub.drop_duplicates(subset="stem")["reference"]
     return ref.median()
@@ -302,17 +297,17 @@ core.save(fig, "fig01_sample",
           "instruments only. (A) Diameter at breast height from a diameter "
           "tape; (B) total height from a laser rangefinder in 3-point mode, "
           "which inverts the same tangent geometry the app does. Histograms "
-          "are stems per bin (3 in and 10 ft bins) by stand — McDunn solid, "
+          "are stems per bin (5 cm and 3 m bins) by stand — McDunn solid, "
           "Starker dashed with hatching. Dotted verticals mark the diameter "
           "and height class boundaries used throughout. The strip below each "
           "histogram plots every individual stem, and the bracket gives the "
-          "full span in imperial with the metric equivalent. The sample "
+          "full span. The sample "
           "occupies all six diameter classes and all five height classes, but "
           "the two stands are not interchangeable: Starker stems are both "
-          f"larger and much taller (median {_median('Starker','dbh'):.1f} in / "
-          f"{_median('Starker','height'):.1f} ft) than McDunn stems "
-          f"({_median('McDunn','dbh'):.1f} in / {_median('McDunn','height'):.1f}"
-          " ft), so a difference between stands is a site difference confounded "
+          f"larger and much taller (median {_median('Starker','dbh'):.1f} cm / "
+          f"{_median('Starker','height'):.1f} m) than McDunn stems "
+          f"({_median('McDunn','dbh'):.1f} cm / {_median('McDunn','height'):.1f}"
+          " m), so a difference between stands is a site difference confounded "
           "with tree size and collection day, never a stand effect. Records "
           "carrying a disputed tape value are plotted here; the two whose two "
           "recorded tape values differ by more than 10 % have no recoverable "
@@ -323,16 +318,11 @@ core.save(fig, "fig01_sample",
 print("\n" + table.to_string(index=False))
 for kind, sp in SPEC.items():
     v = ref[ref.measurand == kind].reference
-    c = sp["conv"]
-    print(f"\n{kind}: {rnd(v.min())}–{rnd(v.max())} {sp['unit']} = "
-          f"{rnd(v.min() * c, 2)}–{rnd(v.max() * c, 2)} {sp['metric']}"
-          f"  median {rnd(v.median())} {sp['unit']} "
-          f"({rnd(v.median() * c, 2)} {sp['metric']})"
+    print(f"\n{kind}: {rnd(v.min())}–{rnd(v.max())} {sp['unit']}"
+          f"  median {rnd(v.median())} {sp['unit']}"
           f"  mean {rnd(v.mean())}  SD {rnd(v.std(ddof=1))}")
     for site in SITE_ORDER:
         s = ref[(ref.measurand == kind) & (ref.site == site)].reference
-        print(f"   {site:8s} {rnd(s.min())}–{rnd(s.max())} {sp['unit']} "
-              f"({rnd(s.min() * c, 2)}–{rnd(s.max() * c, 2)} "
-              f"{sp['metric']})  median {rnd(s.median())} "
-              f"({rnd(s.median() * c, 2)} {sp['metric']})  IQR "
+        print(f"   {site:8s} {rnd(s.min())}–{rnd(s.max())} {sp['unit']}"
+              f"  median {rnd(s.median())} {sp['unit']}  IQR "
               f"{rnd(s.quantile(.25))}–{rnd(s.quantile(.75))}")

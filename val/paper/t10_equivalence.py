@@ -10,8 +10,8 @@ written on the tally sheet or what the volume table returns? That is an
 equivalence question, and it requires the tolerance to be fixed BEFORE the test
 is run rather than read off the result.
 
-THE MARGINS ARE PRE-STATED. Three per measurand, all of them from US timber
-cruising convention, all of them declared in MARGINS below with their one-line
+THE MARGINS ARE PRE-STATED. Three per measurand, all of them from metric
+cruising practice, all of them declared in MARGINS below with their one-line
 justification, none of them chosen after seeing a p-value. Two absolute margins
 (a tight one and an operational one) and one relative margin each.
 
@@ -57,25 +57,26 @@ def para(text: str) -> str:
 #        'pct' -> tested on the per-stem percent difference
 MARGINS = {
     "dbh": [
-        dict(bound=0.5, scale="abs", label="±0.5 in", tier="tight",
-             why="half of the 1-in diameter class a cruiser writes on the tally "
-                 "sheet, so an error inside it cannot move a stem out of the "
-                 "1-in class it was recorded in"),
-        dict(bound=1.0, scale="abs", label="±1.0 in", tier="operational",
-             why="half of the 2-in diameter class used by standard cruise tally "
-                 "forms and volume tables, so the stem stays in its own 2-in class"),
+        dict(bound=1.0, scale="abs", label="±1 cm", tier="tight",
+             why="the recording resolution of a metric diameter tape, so an error "
+                 "inside it cannot change the number the cruiser writes down"),
+        dict(bound=2.5, scale="abs", label="±2.5 cm", tier="operational",
+             why="half a 5 cm diameter class, the class width used by metric "
+                 "cruise tally forms and volume tables, so the stem stays in its "
+                 "own 5 cm class"),
         dict(bound=5.0, scale="pct", label="±5 %", tier="relative",
              why="basal area goes as the square of diameter, so 5 % on DBH is "
                  "about 10 % on basal area, the outer edge of what a cruise-level "
                  "volume estimate absorbs"),
     ],
     "height": [
-        dict(bound=5.0, scale="abs", label="±5 ft", tier="tight",
-             why="one 5-ft increment of a standard total-height tally, and about "
-                 "a third of a 16-ft log, so the recorded height is unchanged"),
-        dict(bound=10.0, scale="abs", label="±10 ft", tier="operational",
-             why="about 10 % of a typical 100-ft dominant and less than one 16-ft "
-                 "log length, the practical field tolerance for total height taken "
+        dict(bound=1.0, scale="abs", label="±1 m", tier="tight",
+             why="one metre of a standard total-height tally, the increment a "
+                 "metric height record is kept to, so the recorded height is "
+                 "unchanged"),
+        dict(bound=2.0, scale="abs", label="±2 m", tier="operational",
+             why="about a twentieth of a 40 m dominant and less than one log "
+                 "length, the practical field tolerance for total height taken "
                  "by clinometer or laser in operational cruising"),
         dict(bound=5.0, scale="pct", label="±5 %", tier="relative",
              why="volume is close to linear in total height, so a 5 % height error "
@@ -291,7 +292,7 @@ conclusion moves. `pct_stems_within` is included to keep two different claims
 apart: equivalence is a statement about the MEAN discrepancy, which is what
 aggregates to a stand total, whereas `pct_stems_within` is the far harsher
 per-stem question of how many individual trees fall inside the same tolerance,
-and it is much lower everywhere. Diameters in inches, heights in feet, percent
+and it is much lower everywhere. Diameters in centimetres, heights in metres, percent
 rows on the per-stem percent difference with the tape reading as denominator.
 """
 core.save_table(out, "t10_equivalence", para(tcap))
@@ -487,6 +488,20 @@ _edge = _disagree.iloc[0] if len(_disagree) else None
 _edge_hi = _edge.ci90_high if _edge is not None else float("nan")
 _edge_boot = _edge.boot_ci90_high if _edge is not None else float("nan")
 _edge_p = _edge.tost_p if _edge is not None else float("nan")
+# WHICH row is the knife-edge case is a property of the data, not of the prose.
+# Naming it by hand is how a caption ends up pointing at a row that moved when
+# the margins changed, so it is read off the result instead.
+_edge_panel = {"dbh": "A", "height": "B"}
+if _edge is not None:
+    _edge_key = str(_edge.measurand).lower()
+    _edge_where = (f"{CONTRASTS.get(_edge.contrast_key, _edge.contrast_key)} "
+                   f"at {_edge.scope} against {_edge.margin} in "
+                   f"({_edge_panel.get(_edge_key, 'A') if _edge.margin_scale == 'abs' else 'C, D'})")
+    _edge_unit = "cm" if _edge_key == "dbh" else "m"
+    if _edge.margin_scale == "pct":
+        _edge_unit = "%"
+else:
+    _edge_where, _edge_unit = "", ""
 
 fcap = f"""
 Figure 10. Equivalence of the ForestiX measurement with the field reference against
@@ -495,9 +510,9 @@ pre-stated timber-cruising tolerances. Each row is the mean difference with the
 side) are equivalent to; shaded bands are the tolerances, dashed edges the tight
 margin and dotted edges the operational one. A row is equivalent at a tolerance
 when its whole interval lies inside that band, and the right-hand column names the
-tightest stated tolerance each row meets. (A) DBH in inches against
+tightest stated tolerance each row meets. (A) DBH in centimetres against
 {MARGINS['dbh'][0]['label']} and {MARGINS['dbh'][1]['label']};
-(B) total height in feet against {MARGINS['height'][0]['label']} and
+(B) total height in metres against {MARGINS['height'][0]['label']} and
 {MARGINS['height'][1]['label']}; (C, D) the same contrasts on the per-stem percent
 difference against {MARGINS['dbh'][2]['label']}. Filled markers pool the two
 stands, open markers are one stand. The first three contrasts are phone minus tape
@@ -506,9 +521,9 @@ t-based and most of these error distributions are right-skewed (Shapiro-Wilk
 rejects normality for {n_nonnormal} of the {n_series} series, iOS DBH worst at
 p < 0.001), so a seeded {N_BOOT:,}-draw percentile bootstrap of the same intervals
 was run alongside; it reproduces {len(out) - len(_disagree)} of the {len(out)}
-verdicts in Table 10. The one exception is visible here: Android at McDunn against
-{MARGINS['dbh'][1]['label']} in (A), where the t interval ends at
-{_edge_hi:+.4f} in and the bootstrap interval at {_edge_boot:+.4f} in, straddling
+verdicts in Table 10. The one exception is visible here: {_edge_where}, where the t
+interval ends at {_edge_hi:+.4f} {_edge_unit} and the bootstrap interval at
+{_edge_boot:+.4f} {_edge_unit}, straddling
 the margin from either side (TOST p = {_edge_p:.4f}). That row is a knife-edge
 case, not a divergence between the methods.
 """
@@ -569,10 +584,10 @@ print("\n--- post-hoc (NOT a pre-stated test): DBH failure is offset, not noise 
 for c in ("ios", "android"):
     v = SERIES[("dbh", c)]["abs"].dropna().to_numpy(float)
     cen = v - v.mean()
-    t = core.tost(cen, 0.5, alpha=ALPHA)
-    print(f"  DBH {c:8s}: observed mean {v.mean():+.3f} in; after removing that "
+    t = core.tost(cen, MARGINS["dbh"][0]["bound"], alpha=ALPHA)
+    print(f"  DBH {c:8s}: observed mean {v.mean():+.3f} cm; after removing that "
           f"constant offset the residual scatter alone gives 90% CI "
-          f"[{t['ci_low']:+.3f}, {t['ci_high']:+.3f}] in, i.e. it would meet "
-          f"±{max(abs(t['ci_low']), abs(t['ci_high'])):.2f} in")
+          f"[{t['ci_low']:+.3f}, {t['ci_high']:+.3f}] cm, i.e. it would meet "
+          f"±{max(abs(t['ci_low']), abs(t['ci_high'])):.2f} cm")
 print(f"\nsingle-handset stems (affects the 'both' row only): "
       f"DBH {SINGLE_DEV['dbh']}, height {SINGLE_DEV['height']}")

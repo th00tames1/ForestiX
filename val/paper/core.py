@@ -6,11 +6,13 @@ ONE LOADER, ONE STYLE, ONE SET OF ESTIMATORS. Every figure and every table in
 house style propagates instead of being re-typed into a dozen scripts and
 drifting.
 
-UNITS. The reference measurements were taken in imperial — a diameter tape in
-inches, a laser in feet — and every number a reader will want to check against
-a field sheet is imperial. Analyses therefore run in inches and feet, with
-metric shown alongside in the summary tables only. Converting the reference to
-metric and back would introduce rounding the field sheet does not have.
+UNITS. The analysis runs in CENTIMETRES AND METRES, which is what the
+manuscript reports. The field sheet itself was recorded in imperial — a
+diameter tape in inches, a laser in feet — but `final_pairs.csv` carries the
+metric values as its base, so nothing here is a round trip through a rounded
+imperial column and no conversion rounding is introduced. The `*_metric`
+columns the loader emits are therefore identical to the primary ones; they are
+kept so downstream code that names them explicitly keeps working.
 
 WHAT THE SAMPLE IS. 100 stems, 50 in each of two stands, each measured by both
 an iPhone (LiDAR) and an Android phone (ARCore depth), against one tape reading
@@ -35,15 +37,21 @@ RESDIR = os.path.join(HERE, "results")
 os.makedirs(FIGDIR, exist_ok=True)
 os.makedirs(RESDIR, exist_ok=True)
 
+# The field sheet's units, kept for reference only. NOTHING IN THE ANALYSIS
+# MULTIPLIES BY THESE ANY MORE — a script that reaches for one is converting
+# away from the unit the manuscript reports, which is the bug they are here to
+# make obvious rather than to enable.
 CM_PER_IN = 2.54
 M_PER_FT = 0.3048
 
-# What each measurand is called, and what it is measured in.
+# What each measurand is called, and what it is measured in. `conv` is the
+# divisor applied to the stored (metric) value to reach the presentation unit;
+# metric IS the presentation unit, so it is 1.0 and the loader is a pass-through.
 MEASURANDS = {
     "dbh": dict(label="Diameter at breast height", short="DBH",
-                unit="in", metric="cm", conv=CM_PER_IN),
+                unit="cm", metric="cm", conv=1.0),
     "height": dict(label="Total height", short="Height",
-                   unit="ft", metric="m", conv=M_PER_FT),
+                   unit="m", metric="m", conv=1.0),
 }
 DEVICES = ["ios", "android"]
 DEVICE_LABEL = {"ios": "iOS (LiDAR)", "android": "Android (ARCore)"}
@@ -53,10 +61,13 @@ SITES = ["McDunn", "Starker"]
 # data because that is what the capture files carry; only the label changes.
 SITE_LABEL = {"McDunn": "McDunn Forest", "Starker": "Starker Forest"}
 
-# Diameter classes a cruiser would recognise. Open-ended at the top because
-# the largest stems are few and a fixed top edge would leave an empty class.
-DBH_CLASSES = [(0, 8), (8, 12), (12, 18), (18, 24), (24, 32), (32, 999)]
-HEIGHT_CLASSES = [(0, 50), (50, 80), (80, 110), (110, 140), (140, 999)]
+# Diameter classes a cruiser would recognise, in CENTIMETRES. Round metric
+# edges, not the arithmetic conversion of the old imperial ones: a class
+# boundary at 20.3 cm is a translation artefact, not a class anybody rules a
+# tally sheet to. Open-ended at the top because the largest stems are few and a
+# fixed top edge would leave an empty class.
+DBH_CLASSES = [(0, 20), (20, 30), (30, 45), (45, 60), (60, 80), (80, 999)]  # cm
+HEIGHT_CLASSES = [(0, 15), (15, 25), (25, 35), (35, 45), (45, 999)]         # m
 
 
 # --------------------------------------------------------------------------
@@ -279,8 +290,8 @@ def summarize(sub: pd.DataFrame) -> dict:
         sd=ba["sd"], loa_low=ba["loa_low"], loa_high=ba["loa_high"],
         rmse=rmse(sub.error), mae=sub.abs_error.mean(),
         # MAPE, in per cent. Reported on the 1:1 panels in place of MAE
-        # because a mean absolute error in inches is read against a sample
-        # that runs 6 to 50 inches: 1.8 in is most of a small stem and
+        # because a mean absolute error in centimetres is read against a sample
+        # that runs 15 to 128 cm: 3.3 cm is most of a small stem and
         # nothing on a large one, so one number cannot be judged without
         # also knowing which trees it came from. The same error as a
         # percentage of each stem's own reference can.

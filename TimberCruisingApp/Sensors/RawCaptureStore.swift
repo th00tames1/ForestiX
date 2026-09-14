@@ -116,14 +116,21 @@ public struct RawCaptureManifest: Codable, Sendable {
         public var units: String            // "metric" | "imperial"
         public var captureMode: String      // "auto" | "manual"
         public var calibration: Calibration
+        /// Where the height sighting angle comes from: "camera_pose", the
+        /// elevation of the AR camera's forward axis, on both platforms.
+        /// Optional so bundles written before the field existed still decode.
+        public var heightAngleSource: String?
         enum CodingKeys: String, CodingKey {
             case algorithm, units
             case captureMode = "capture_mode"
             case calibration
+            case heightAngleSource = "height_angle_source"
         }
-        public init(algorithm: String, units: String, captureMode: String, calibration: Calibration) {
+        public init(algorithm: String, units: String, captureMode: String, calibration: Calibration,
+                    heightAngleSource: String? = "camera_pose") {
             self.algorithm = algorithm; self.units = units
             self.captureMode = captureMode; self.calibration = calibration
+            self.heightAngleSource = heightAngleSource
         }
     }
 

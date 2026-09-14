@@ -36,8 +36,8 @@ CALIBRATION FACTORS. Two, because they answer different questions:
   have delivered 95 % coverage - the fallback available if the per-stem number
   is unsalvageable.
 
-UNITS. sigma arrives from core.load() already converted into the measurand's own
-unit (inches for DBH, feet for height). Panel A plots both measurands on shared
+UNITS. sigma arrives from core.load() in the measurand's own
+unit (centimetres for DBH, metres for height). Panel A plots both measurands on shared
 axes by dividing sigma and |error| by the same per-stem reference; that is a
 per-point rescale, so the 1:1 and 1.96-sigma lines are exactly preserved and no
 point changes side.
@@ -69,7 +69,7 @@ def std_resid(sigma, abs_err):
     """|error| / sigma, with sigma = 0 mapped to +inf rather than dropped.
 
     Dropping the zeros would quietly delete the app's worst claims - a stem for
-    which it reported perfect precision and was wrong by 6.5 in. +inf is the
+    which it reported perfect precision and was wrong by 11.3 cm. +inf is the
     honest value: the median survives it, the mean and the upper quantiles do
     not, and their being infinite is the result, not a nuisance.
     """
@@ -92,7 +92,16 @@ def clopper_pearson(c, n, alpha=0.05):
 
 
 def partial_spearman(x, y, z):
-    """Rank correlation of x and y with the rank of z partialled out."""
+    """Rank correlation of x and y with the rank of z partialled out.
+
+    Rows with a non-finite sigma or error make no ordering claim and are
+    dropped; fewer than 4 finite triples cannot support the partial.
+    """
+    x, y, z = (np.asarray(v, float) for v in (x, y, z))
+    m = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+    if int(m.sum()) < 4:
+        return float("nan"), float("nan")
+    x, y, z = x[m], y[m], z[m]
     rx, ry, rz = (sps.rankdata(v) for v in (x, y, z))
     rxy = sps.pearsonr(rx, ry)[0]
     rxz = sps.pearsonr(rx, rz)[0]
@@ -120,6 +129,14 @@ def cell(sub: pd.DataFrame) -> dict:
     ae = sub.abs_error.values
     er = sub.error.values
     ref = sub.reference.values
+    # A reading the cruiser typed carries no sigma, and one such height is in
+    # the corpus. A plain median over the column then returns NaN and takes the
+    # sigma descriptors and both rank correlations down with it, while coverage
+    # and the standardised residual — which drop the missing row — still report.
+    # The descriptors below therefore use the rows that HAVE a sigma, and
+    # `n_sigma_missing` says how many did not.
+    _has = np.isfinite(sg)
+    sg_ok, ae_ok, ref_ok = sg[_has], ae[_has], ref[_has]
     n = len(sub)
     z = std_resid(sg, ae)
     c = int((ae <= K95 * sg).sum())
@@ -130,10 +147,10 @@ def cell(sub: pd.DataFrame) -> dict:
     fin = np.isfinite(z)
     q95_z_pos = float(np.percentile(z[fin], 95)) if fin.any() else np.nan
 
-    rho, rho_p = sps.spearmanr(sg, ae)
-    rho_lo, rho_hi = spearman_ci(sg, ae)
+    rho, rho_p = sps.spearmanr(sg_ok, ae_ok)
+    rho_lo, rho_hi = spearman_ci(sg_ok, ae_ok)
     prho, prho_p = partial_spearman(sg, ae, ref)
-    rho_size, rho_size_p = sps.spearmanr(sg, ref)
+    rho_size, rho_size_p = sps.spearmanr(sg_ok, ref_ok)
 
     # sigma as a pure PRECISION claim: strip the systematic bias out of the
     # error first, since a sigma need not promise to cover a fixed offset.
@@ -141,9 +158,10 @@ def cell(sub: pd.DataFrame) -> dict:
 
     return dict(
         n=n, n_sigma_zero=int((sg == 0).sum()),
-        median_sigma=float(np.median(sg)),
-        iqr_sigma_low=float(np.percentile(sg, 25)),
-        iqr_sigma_high=float(np.percentile(sg, 75)),
+        median_sigma=float(np.median(sg_ok)) if sg_ok.size else float("nan"),
+        n_sigma_missing=int((~_has).sum()),
+        iqr_sigma_low=float(np.percentile(sg_ok, 25)) if sg_ok.size else float("nan"),
+        iqr_sigma_high=float(np.percentile(sg_ok, 75)) if sg_ok.size else float("nan"),
         median_abs_error=float(np.median(ae)),
         ratio_median_abserr_to_sigma=(float(np.median(ae) / np.median(sg))
                                       if np.median(sg) > 0 else np.inf),
@@ -160,7 +178,7 @@ def cell(sub: pd.DataFrame) -> dict:
         rho_sigma_vs_reference=float(rho_size),
         rho_sigma_vs_reference_p=float(rho_size_p),
         coverage_pct_debiased=100 * coverage(sg, d_centred),
-        median_sigma_over_measured=float(np.median(sg / sub.measured.values)),
+        median_sigma_over_measured=float(np.median(sg_ok / sub.measured.values[_has])) if sg_ok.size else float("nan"),
     )
 
 
@@ -208,7 +226,7 @@ core.save_table(
     tab, "t08_sigma",
     "Table 8. Calibration of the uncertainty the ForestiX app reports to the "
     "cruiser, per measurand and handset. sigma is the app's own reported standard "
-    "uncertainty, in the measurand's unit (inches for DBH, feet for height); "
+    "uncertainty, in the measurand's unit (centimetres for DBH, metres for height); "
     "error is phone minus field reference (diameter tape for DBH, laser "
     "rangefinder in 3-point mode for height). coverage_pct is the percentage of "
     "stems with |error| <= 1.96 sigma against a nominal 95 %, with an exact "
@@ -241,7 +259,7 @@ fig, axes = plt.subplots(1, 2, figsize=(core.FIG_W, core.FIG_H * 0.98))
 axA, axB = axes
 
 # ---- Panel A: reported sigma against realised |error| ----------------------
-# Both are divided by the stem's own reference so inches and feet share axes.
+# Both are divided by the stem's own reference so centimetres and metres share axes.
 # That is a per-point rescale: the 1:1 and 1.96-sigma lines are unchanged and
 # no point crosses them.
 rel = {}
@@ -396,7 +414,7 @@ caption = (
     + f", against the 0.67 a normal error of the claimed size would give. The "
     f"{n_zero_total} open symbols in the left-hand strip are stems for which the "
     "app reported σ = 0 - a claim of perfect precision - and was wrong by up to "
-    f"{df[df.sigma == 0].abs_error.max():.1f} in; they cannot be drawn on a log "
+    f"{df[df.sigma == 0].abs_error.max():.1f} cm; they cannot be drawn on a log "
     "axis and no multiple of zero covers anything, so the coverage-matching "
     "calibration factor for DBH is infinite. (B) Coverage actually achieved "
     "against the coverage σ claims, swept over every nominal level; the dashed "
@@ -428,7 +446,7 @@ caption = (
                 for k in core.MEASURANDS for d in core.DEVICES)
     + ", none significant. Caveat: the reference carries its own error, so "
     "|error| overstates the phone's dispersion slightly and the σ failure reported "
-    "here is, if anything, conservative. Removing the eight stems with a disputed "
+    "here is, if anything, conservative. Removing the six stems with a disputed "
     "tape reading does not change the conclusion (coverage "
     + ", ".join(f"{r['coverage_pct']:.0f}→{r['coverage_pct_excl']:.0f} %"
                 for r in rows) +
@@ -438,8 +456,8 @@ caption = (
     f"({rows[0]['partial_rho_excl']:+.2f}, p = "
     f"{rows[0]['partial_rho_p_excl']:.3f}). "
     "n = 100 stems per series except height/iOS, n = 99, where one reading was "
-    "typed rather than measured and is excluded. Diameters in inches, heights in "
-    "feet.")
+    "typed rather than measured and is excluded. Diameters in centimetres, heights "
+    "in metres.")
 
 core.save(fig, "fig08_sigma", caption)
 

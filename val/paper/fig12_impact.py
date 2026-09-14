@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """What the measurement error COSTS a cruiser.
 
-Inches of bias are not a decision. A cruiser decides on the quantities a cruise
-reports: which 2-inch class a stem falls in, how much basal area the plot
+Centimetres of bias are not a decision. A cruiser decides on the quantities a
+cruise reports: which 5 cm class a stem falls in, how much basal area the plot
 carries, and how much wood that implies. This script translates the per-stem
 error into those three currencies.
 
@@ -22,7 +22,7 @@ THE VOLUME NUMBER IS A PROXY. BA * H is a cylinder. Real volume is roughly
 0.4-0.5 of that. The proxy is used because it is form-factor-free: it carries
 the error propagation of a real volume equation (quadratic in D, linear in H)
 without importing a species- and region-specific equation whose own error we
-have not validated. Percentages from it transfer; the cubic feet do not.
+have not validated. Percentages from it transfer; the cubic metres do not.
 """
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ import core
 plt = core.use_style()
 df = core.load()
 
-BA_K = 0.005454          # basal area, sq ft, from diameter in inches
+BA_K = math.pi / 4.0 / 1e4   # basal area, m^2, from diameter in cm: pi/4*(D/100)^2
 SEED = 17
 N_BOOT = 10000
 
@@ -46,12 +46,12 @@ N_BOOT = 10000
 # --------------------------------------------------------------------------
 
 def dclass(d, width, convention="floor"):
-    """Assign a diameter to a class, in inches.
+    """Assign a diameter to a class, in centimetres.
 
     Two conventions are in use in the field and they do not agree, so both are
-    reported. `floor` bins on the lower edge: the 12-in class is [12, 14).
-    `round` is the common US "2-inch class": the 12-in class is centred on 12
-    and runs [11, 13). Agreement rates depend on where the edges sit relative
+    reported. `floor` bins on the lower edge: the 30 cm class is [30, 35).
+    `round` is midpoint-centred: the 30 cm class is centred on 30 and runs
+    [27.5, 32.5). Agreement rates depend on where the edges sit relative
     to the stems, which is a property of the tally rule and not of the phone,
     so quoting one convention alone would overstate the precision of the claim.
     """
@@ -67,7 +67,7 @@ def wilson(k, n, z=1.96):
     A hit rate out of 100 stems carries about +/-10 points of binomial
     uncertainty, so quoting "46 % agree" bare would imply a precision the
     sample does not have. Wilson rather than the normal approximation because
-    the latter misbehaves as the rate approaches 0 or 1, which the 4-inch
+    the latter misbehaves as the rate approaches 0 or 1, which the 10 cm
     within-one-class rates do.
     """
     if n == 0:
@@ -137,7 +137,7 @@ def total_error(tape_vals, phone_vals, seed=SEED, n_boot=N_BOOT):
 
     The percent error of a SUM has no textbook standard error, and the naive
     move — averaging the per-stem percent errors — answers a different
-    question (it weights a 6-inch stem the same as a 50-inch one, while the
+    question (it weights a 15 cm stem the same as a 128 cm one, while the
     total does not). Resampling stems with replacement and recomputing the
     ratio of sums propagates exactly the quantity plotted. The CI describes
     sampling variability of stems within this stand; it is not a claim about
@@ -185,20 +185,20 @@ def run_all(source, tag):
     # -- class agreement -------------------------------------------------
     for device in core.DEVICES:
         sub = fr["dbh"][fr["dbh"].device == device]
-        for width in (1, 2, 4):
+        for width in (2, 5, 10):
             for convention in ("floor", "round"):
                 a = agreement_block(sub, width, convention)
                 rows.append(dict(sample=tag, block="class_agreement",
                                  device=core.DEVICE_SHORT[device],
-                                 metric=f"{width}-in class",
-                                 class_width_in=width, convention=convention,
+                                 metric=f"{width} cm class",
+                                 class_width_cm=width, convention=convention,
                                  site="both", **a))
 
     # -- plot totals -----------------------------------------------------
     for device in core.DEVICES:
         for metric, use_h, col_t, col_p, unit in (
-                ("basal area", False, "ba_tape", "ba_phone", "sq ft"),
-                ("BA x H proxy", True, "prx_tape", "prx_phone", "cu ft")):
+                ("basal area", False, "ba_tape", "ba_phone", "m2"),
+                ("BA x H proxy", True, "prx_tape", "prx_phone", "m3")):
             st = stem_table(fr, device, use_h)
             for site in core.SITES + ["both"]:
                 s = st if site == "both" else st[st.site == site]
@@ -219,7 +219,7 @@ clean = run_all(df[~df.tape_disputed], "tape-disputed excluded")
 table = pd.concat([full, clean], ignore_index=True)
 
 order = ["sample", "block", "metric", "site", "device", "unit",
-         "class_width_in", "convention", "n",
+         "class_width_cm", "convention", "n",
          "exact_pct", "exact_ci_low", "exact_ci_high",
          "within1_pct", "within1_ci_low", "within1_ci_high",
          "over_pct", "under_pct", "mean_shift",
@@ -234,13 +234,13 @@ core.save_table(
     table, "t12_impact",
     "Operational impact of ForestiX measurement error. Upper block: agreement "
     "between the diameter class assigned from the tape and from each phone, "
-    "for 1-, 2- and 4-inch classes under two tally conventions (floor: the "
-    "12-in class is [12,14); round: the 12-in class is centred on 12). "
+    "for 2, 5 and 10 cm classes under two tally conventions (floor: the "
+    "30 cm class is [30,35); round: the 30 cm class is centred on 30). "
     "'exact_pct' is the share of stems landing in the same class as the tape "
     "(Wilson 95 % interval alongside), 'over_pct'/'under_pct' the share the "
     "phone places in a higher/lower "
-    "class. Lower block: plot-level totals of basal area (0.005454*D^2, sq ft) "
-    "and of the form-factor-free BA x H proxy (cu ft), summed over the stems "
+    "class. Lower block: plot-level totals of basal area (pi/4*D^2, m2) "
+    "and of the form-factor-free BA x H proxy (m3), summed over the stems "
     "of each stand, with the phone-minus-tape error in percent and a "
     "10 000-draw stem bootstrap 95 % CI. 'bias_term_pct' and 'noise_term_pct' "
     "split the basal-area error into 2*sum(D*e)/sum(D^2) and sum(e^2)/sum(D^2); "
@@ -263,9 +263,9 @@ def get(t, **kw):
 fig, axes = plt.subplots(1, 2, figsize=(core.FIG_W * 1.24, core.FIG_H * 0.98),
                          gridspec_kw=dict(width_ratios=[1.0, 1.15], wspace=0.30))
 
-# -- Panel A: 2-inch class confusion, both devices on one diagonal ---------
+# -- Panel A: 5 cm class confusion, both devices on one diagonal ----------
 axA = axes[0]
-W = 2
+W = 5
 dbh = df[df.measurand == "dbh"]
 style = {"ios": dict(marker="o", face=core.PALETTE["ios"], off=-0.32),
          "android": dict(marker="s", face=core.PALETTE["android"], off=+0.32)}
@@ -293,16 +293,16 @@ for off, ls in ((W, ":"), (-W, ":")):
              lw=0.7, ls=ls, zorder=1)
 axA.set_xlim(lo - 1, hi + 1)
 axA.set_ylim(lo - 1, hi + 1)
-axA.set_xlabel("Tape diameter class (in, 2-in classes)")
-axA.set_ylabel("Phone diameter class (in)")
-axA.set_xticks(np.arange(lo, hi + 1, 8))
-axA.set_yticks(np.arange(lo, hi + 1, 8))
+axA.set_xlabel("Tape diameter class (cm, 5 cm classes)")
+axA.set_ylabel("Phone diameter class (cm)")
+axA.set_xticks(np.arange(lo, hi + 1, 20))
+axA.set_yticks(np.arange(lo, hi + 1, 20))
 axA.set_aspect("equal", adjustable="box")
 
 agree_txt = []
 for device in core.DEVICES:
     r = get(table, sample="all stems", block="class_agreement",
-            device=core.DEVICE_SHORT[device], class_width_in=2,
+            device=core.DEVICE_SHORT[device], class_width_cm=W,
             convention="floor").iloc[0]
     agree_txt.append(f"{core.DEVICE_SHORT[device]}: {r.exact_pct:.0f}% exact, "
                      f"{r.within1_pct:.0f}% ±1 class, {r.over_pct:.0f}% high")
@@ -372,12 +372,12 @@ for metric, site in groups:
     rr = get(table, sample="all stems", block="plot_total", metric=metric,
              site=site).sort_values("n")
     r = rr.iloc[-1]
-    unit = "ft²" if metric == "basal area" else "ft³"
-    tick_lab.append(f"{site}\n{r.tape_total:,.0f} {unit}")
+    unit = "m²" if metric == "basal area" else "m³"
+    tick_lab.append(f"{site}\n{r.tape_total:,.1f} {unit}")
 axB.set_xticks(xs)
 axB.set_xticklabels(tick_lab, fontsize=7.4)
 axB.axvline(1.5, color=core.PALETTE["grid"], lw=1.0, zorder=1)
-axB.text(0.5, 147, "Basal area (Σ 0.005454·D²)", ha="center", va="top",
+axB.text(0.5, 147, "Basal area (Σ π·D²/4)", ha="center", va="top",
          fontsize=7.8, fontweight="bold", color=core.PALETTE["reference"])
 axB.text(2.5, 147, "Volume proxy (Σ BA·H)", ha="center", va="top",
          fontsize=7.8, fontweight="bold", color=core.PALETTE["reference"])
@@ -388,7 +388,7 @@ both_ba = {d: get(table, sample="all stems", block="plot_total",
                   metric="basal area", site="both",
                   device=core.DEVICE_SHORT[d]).iloc[0] for d in core.DEVICES}
 rnd = {d: get(table, sample="all stems", block="class_agreement",
-              device=core.DEVICE_SHORT[d], class_width_in=2,
+              device=core.DEVICE_SHORT[d], class_width_cm=W,
               convention="round").iloc[0] for d in core.DEVICES}
 ba_clean = {d: get(table, sample="tape-disputed excluded", block="plot_total",
                    metric="basal area", site="both",
@@ -398,7 +398,7 @@ core.save(
     fig, "fig12_impact",
     "Operational consequences of ForestiX error for a cruise. "
     "(A) Diameter class assigned from the tape versus from each phone, using "
-    "2-inch classes binned on the lower edge; symbol area is proportional to "
+    "5 cm classes binned on the lower edge; symbol area is proportional to "
     "the number of stems, filled symbols sit on the 1:1 diagonal (same class "
     "as the tape), dotted lines mark a one-class miss. Symbols are offset "
     "horizontally by device so overlapping cells stay visible. "
@@ -408,11 +408,11 @@ core.save(
     "10 000-draw stem bootstrap 95 % CIs; annotations give the signed "
     "percentage error of the phone total. The BA x H proxy is a cylinder, not "
     "a volume equation — its percentages transfer to a real equation, its "
-    "cubic feet do not. iOS proxy totals and the tape totals they are "
+    "cubic metres do not. iOS proxy totals and the tape totals they are "
     "compared with exclude one McDunn stem lacking an iOS height (n = 49). "
     f"Basal-area totals over both stands are {both_ba['ios'].pct_error:+.1f} % "
     f"(iOS) and {both_ba['android'].pct_error:+.1f} % (Android); removing the "
-    "eight stems with a disputed tape value moves them to "
+    "six stems with a disputed tape value moves them to "
     f"{ba_clean['ios'].pct_error:+.1f} % and "
     f"{ba_clean['android'].pct_error:+.1f} %. Agreement rates in (A) depend on "
     "where the class edges fall relative to the stems: under the alternative "
@@ -443,7 +443,7 @@ pt2 = get(table, sample="tape-disputed excluded", block="plot_total")
 print(pt2[["metric", "site", "device", "n", "pct_error", "ci_low",
            "ci_high"]].to_string(index=False))
 ca2 = get(table, sample="tape-disputed excluded", block="class_agreement",
-          class_width_in=2, convention="floor")
+          class_width_cm=W, convention="floor")
 print(ca2[["device", "n", "exact_pct", "within1_pct"]].to_string(index=False))
 
 print("\n=== SINGLE-STEM INFLUENCE ON THE STAND BA TOTAL (jackknife) ===")
@@ -461,7 +461,7 @@ for device in core.DEVICES:
         j = int(np.argmax(np.abs(drops - full_pct)))
         print(f"{core.DEVICE_SHORT[device]:8s} {site:8s} full {full_pct:+.2f}%  "
               f"most influential stem {s.iloc[j].stem} "
-              f"(tape {s.iloc[j].d_tape:.1f} in, phone {s.iloc[j].d_phone:.1f} in) "
+              f"(tape {s.iloc[j].d_tape:.1f} cm, phone {s.iloc[j].d_phone:.1f} cm) "
               f"-> without it {drops[j]:+.2f}%")
 
 print("\n=== AMPLIFICATION CHECK ===")

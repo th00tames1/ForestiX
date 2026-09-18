@@ -1,10 +1,9 @@
-// Developer-mode BREAST-HEIGHT GUIDE — where 1.37 m is, drawn in the world.
+// BREAST-HEIGHT GUIDE — the selected height above the ground, drawn in the world.
 //
 // A phone cannot know it is reading the stem AT breast height, and "about
 // chest high" is what a cruiser is otherwise left with. This puts the height
-// on screen: a sphere at the tree base, a white line up from it to
-// `Units.breastHeightM`, and a flat ring at the top the cruiser can bring
-// around the trunk to see exactly where breast height crosses it.
+// on screen: a persistent line from the tapped base to the selected height,
+// with a thin ring at the top and a label projected from the live anchor.
 //
 // IT IS A GUIDE AND NOTHING ELSE. It never writes to a measurement, never
 // gates the shutter, never changes a recorded diameter and never reaches an
@@ -44,13 +43,14 @@ public final class BreastHeightGuide: ObservableObject {
         /// Gate off — nothing exists. No anchor, no markers, no label.
         case off
         /// Guide on, no base placed: the cruiser is aiming at the tree base
-        /// and sees a ghost of the assembly where it would land.
+        /// and sees a small base preview where it would land.
         case aiming
         /// Base anchored; the assembly is drawn at the anchor's live pose.
         case placed
     }
 
     @Published public private(set) var stage: Stage = .off
+    @Published public var height: BreastHeightGuideHeight = .meters130
 
     /// The base point as ARKit is currently correcting it — not the frozen
     /// coordinate the placing raycast returned. nil while nothing is placed
@@ -63,8 +63,8 @@ public final class BreastHeightGuide: ObservableObject {
     /// draws nothing rather than guessing.
     @Published public private(set) var ghostPoint: SIMD3<Float>?
 
-    /// True while a base is placed but its pose is not being corrected, i.e.
-    /// the geometry is hidden. The screen says so in words.
+    /// True once the base pose has gone stale beyond the tracking grace;
+    /// the guide is hidden until tracking recovers.
     @Published public private(set) var trackingLost = false
 
     private var anchorID: UUID?
@@ -80,18 +80,9 @@ public final class BreastHeightGuide: ObservableObject {
 
     // MARK: - Label
 
-    /// "1.37 m" or "4.5 ft" — the breast-height convention in the cruiser's
-    /// own unit.
-    ///
-    /// THE IMPERIAL STRING IS NOT DERIVED FROM THE CONSTANT, on purpose.
-    /// `Units.metersToFeet(Units.breastHeightM)` is 4.4948, which a formatter
-    /// renders "4.49 ft" — and that invites the reader to think the app
-    /// rounded a metric standard into an imperial one. It did not: 4.5 ft is
-    /// the US definition and 1.37 m is that same height written in metres.
-    /// Both are spelled out, which is also what `ScanMetadataSheet`'s
-    /// `breastHeightWord` does for the position footer.
-    public static func label(in system: UnitSystem) -> String {
-        system == .metric ? "1.37 m" : "4.5 ft"
+    /// Label and world geometry always use the same selected height.
+    public func label(in system: UnitSystem) -> String {
+        system == .metric ? height.metricLabel : height.imperialLabel
     }
 
     // MARK: - State
@@ -105,7 +96,7 @@ public final class BreastHeightGuide: ObservableObject {
     }
 
     /// Gate off: forget everything and take the anchor with it. Called when
-    /// the toggle or developer mode goes off and on screen teardown — an
+    /// the toggle goes off and on screen teardown — an
     /// anchor left behind lives in the app-shared session for the rest of the
     /// process with nobody holding its id.
     public func disable(using session: ARKitSessionManager) {
@@ -117,7 +108,7 @@ public final class BreastHeightGuide: ObservableObject {
         poseStaleSince = nil
     }
 
-    /// Drop the base and go back to aiming — the "Clear base" button, and the
+    /// Drop the base and go back to aiming — the "Reset ground" button, and the
     /// tree change in the cruise tally. The Diameter screen is reused across
     /// trees, so a base at tree 7's foot must not still be drawn at tree 8.
     /// No-op while the gate is off, which keeps the tree-change hook from
@@ -138,19 +129,17 @@ public final class BreastHeightGuide: ObservableObject {
         ghostPoint = hit
     }
 
-    /// Anchor the base at a crosshair hit. Returns false when the session
-    /// refuses to make an anchor, so the caller can say the placement failed
-    /// in the words every other crosshair-to-ground placement uses.
+    /// Anchor the base at a hit. Returns false when the session cannot create
+    /// an anchor, leaving the previous guide unchanged.
     @discardableResult
     public func place(hit: SIMD3<Float>,
                       using session: ARKitSessionManager) -> Bool {
-        removeAnchor(using: session)
         guard let id = session.addWorldAnchor(
             at: hit, name: "forestix.breastHeight.base")
         else {
-            basePoint = nil
             return false
         }
+        removeAnchor(using: session)
         anchorID = id
         stage = .placed
         ghostPoint = nil
@@ -203,18 +192,17 @@ public final class BreastHeightGuide: ObservableObject {
         anchorID = nil
     }
 
-    /// Movement below this (1 mm) does not re-publish the base — a marker
-    /// list rebuilt at poll rate would churn the ring mesh for nothing. The
-    /// plot's `poseEpsilonM`, and Android's `POSE_EPSILON_M`.
+    /// Movement below this (1 mm) does not re-publish the base or rebuild
+    /// marker geometry. Matches the plot's `poseEpsilonM`.
     private static let poseEpsilonM: Float = 0.001
 
     // MARK: - Geometry
 
-    /// World point the ring sits at: breast height above the live base.
-    /// The label is drawn at the projection of this, so both are nil
-    /// together and the guide never leaves a floating number behind.
-    public var ringWorldPoint: SIMD3<Float>? {
-        drawPoint.map { $0 + SIMD3<Float>(0, Float(Units.breastHeightM), 0) }
+    /// Selected height above the live base. Ticks and label share this
+    /// projection and disappear together when the anchor is unavailable.
+    public var heightWorldPoint: SIMD3<Float>? {
+        guard stage == .placed, !trackingLost else { return nil }
+        return basePoint.map { height.point(above: $0) }
     }
 
     /// The point the assembly is drawn from — the anchored base once placed,
@@ -236,55 +224,22 @@ public final class BreastHeightGuide: ObservableObject {
         UUID(uuidString: "00B4EA17-0000-0000-0000-000000000002") ?? UUID()
     private static let ringId =
         UUID(uuidString: "00B4EA17-0000-0000-0000-000000000003") ?? UUID()
-
-    /// The three shapes of the guide, or an empty list whenever there is
-    /// nothing honest to draw (gate off, ray missing the ground, tracking
-    /// lost past the grace).
-    ///
-    /// While aiming they are the same three shapes at 0.35 alpha — the ghost
-    /// precedent the sampling screen set for its plot pillar, so the cruiser
-    /// sees where the base will land before committing to it.
+    /// Preview dot while aiming; riser and ring stay for the lifetime of the
+    /// tracked ground anchor. No timer hides an otherwise valid guide.
     public func markers() -> [ARSceneMarker] {
         guard let base = drawPoint else { return [] }
-        let h = Float(Units.breastHeightM)
-        let alpha: Float = stage == .placed ? 1.0 : 0.35
-        let white = SIMD4<Float>(1, 1, 1, alpha)
-        return [
-            // Base — the only piece that may scale with distance. It marks a
-            // place, not a length, so growing it across a stand costs nothing
-            // and keeps it findable.
-            ARSceneMarker(id: Self.baseSphereId,
-                          worldPosition: base,
-                          shape: .sphere(radiusM: 0.06),
-                          colorRGBA: white,
-                          scalesWithDistance: true),
-            // Riser — centred, because a cylinder is centred on its position,
-            // so half the height puts its foot on the base and its cap at
-            // breast height.
-            //
-            // scalesWithDistance is FALSE here and on the ring, and that is
-            // the whole point of the feature: the scaling factor is applied
-            // to every child of a marker's anchor, so a scaled riser draws a
-            // height that is not 1.37 m — the exact error the guide exists to
-            // prevent.
-            ARSceneMarker(id: Self.riserId,
-                          worldPosition: base + SIMD3<Float>(0, h / 2, 0),
-                          shape: .cylinder(radiusM: 0.012, heightM: h),
-                          colorRGBA: white),
-            // Breast height itself: a DOUGHNUT, not the flat rim the plot
-            // boundary uses.
-            //
-            // It was that rim, and the rim is the wrong shape here for the
-            // one reason that matters: this marker sits at 1.37 m, so a
-            // cruiser holding the phone at chest height looks at it almost
-            // exactly edge-on — and a flat disc seen edge-on is a hairline
-            // across the bark, at the moment it has to be read. A tube looks
-            // the same from every direction. 5 cm of tube is the band width
-            // the rim drew at, so nothing about the reading changes.
-            ARSceneMarker(id: Self.ringId,
-                          worldPosition: base + SIMD3<Float>(0, h, 0),
-                          shape: .torus(radiusM: 0.35, tubeM: 0.05),
-                          colorRGBA: white),
-        ]
+        let white = SIMD4<Float>(1, 1, 1, stage == .placed ? 0.9 : 0.45)
+        var markers = [ARSceneMarker(id: Self.baseSphereId, worldPosition: base,
+                                    shape: .sphere(radiusM: 0.015), colorRGBA: white)]
+        if stage == .placed {
+            let h = Float(height.meters)
+            markers.append(ARSceneMarker(id: Self.riserId,
+                worldPosition: base + SIMD3<Float>(0, h / 2, 0),
+                shape: .cylinder(radiusM: 0.004, heightM: h), colorRGBA: white))
+            markers.append(ARSceneMarker(id: Self.ringId,
+                worldPosition: base + SIMD3<Float>(0, h, 0),
+                shape: .torus(radiusM: 0.35, tubeM: 0.01), colorRGBA: white))
+        }
+        return markers
     }
 }

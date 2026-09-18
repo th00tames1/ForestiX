@@ -52,6 +52,7 @@ public final class AppSettings: ObservableObject {
         public static let developerMode           = "tc.developerMode"
         public static let rawCaptureEnabled       = "tc.rawCaptureEnabled"
         public static let breastHeightGuide       = "tc.breastHeightGuide"
+        public static let breastHeightGuideHeight = "tc.breastHeightGuideHeight"
         public static let dbhAutoSegmentation    = "tc.dbhAutoSegmentation"
         public static let appearance              = "tc.appearance"
         // RETIRED: "tc.dbhMethodSource" (depth / AR-motion / AR-caliper
@@ -257,19 +258,6 @@ public final class AppSettings: ObservableObject {
         set { defaults.set(newValue, forKey: Keys.rawCaptureEnabled); objectWillChange.send() }
     }
 
-    /// BREAST-HEIGHT GUIDE — draws a marker from the tree base up to
-    /// `Units.breastHeightM` on the Diameter scan so the cruiser can see
-    /// where breast height crosses the stem instead of judging it. The base
-    /// is placed by tapping the ground at the foot of the trunk.
-    ///
-    /// THIS KEY ALONE gates it. It used to require `developerMode` as well,
-    /// which put the only answer the app offers to "how does the phone know
-    /// it read the stem at breast height?" behind a switch a cruiser has no
-    /// reason to find. `defaults.bool`, so someone who has never seen the row
-    /// still gets it OFF. It is a GUIDE: it writes nothing, changes no
-    /// recorded diameter and reaches no export.
-    /// The Android sibling reads the same `tc.breastHeightGuide` key.
-
     /// AUTOMATIC STEM EDGES — reads the stem's edges out of a segmentation
     /// mask instead of walking the depth map.
     ///
@@ -291,9 +279,21 @@ public final class AppSettings: ObservableObject {
         set { defaults.set(newValue, forKey: Keys.dbhAutoSegmentation); objectWillChange.send() }
     }
 
+    /// Saved guide preference, OFF by default. Operation requires developer
+    /// mode too; disabling developer mode preserves this choice but removes
+    /// the active guide and its anchor. Android uses the same preference key.
     public var breastHeightGuide: Bool {
         get { defaults.bool(forKey: Keys.breastHeightGuide) }
         set { defaults.set(newValue, forKey: Keys.breastHeightGuide); objectWillChange.send() }
+    }
+
+    /// Physical guide height, independent of the display unit preference.
+    public var breastHeightGuideHeight: BreastHeightGuideHeight {
+        get { .fromRaw(defaults.string(forKey: Keys.breastHeightGuideHeight)) }
+        set {
+            defaults.set(newValue.rawValue, forKey: Keys.breastHeightGuideHeight)
+            objectWillChange.send()
+        }
     }
 
     /// App appearance — "light" (default) or "dark". Both are the same

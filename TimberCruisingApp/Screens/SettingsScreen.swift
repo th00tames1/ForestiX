@@ -313,29 +313,6 @@ public struct SettingsScreen: View {
             }
             .pickerStyle(.segmented)
             .accessibilityIdentifier("settings.appearance")
-
-            // BREAST-HEIGHT GUIDE — answers "how does the phone know it read
-            // the stem AT breast height?" by putting breast height in the
-            // world where the cruiser can see it: a marker on the ground, a
-            // riser, and a ring at 1.37 m to bring around the trunk.
-            //
-            // IT LIVED IN THE DEVELOPER BLOCK, which is the wrong shelf for
-            // the only answer the app offers to a question every cruiser has.
-            // It is a Display setting because that is all it is — drawn on
-            // the Diameter scan, never written to a measurement, never in an
-            // export. Still off by default.
-            Toggle(isOn: Binding(
-                get: { settings.breastHeightGuide },
-                set: { settings.breastHeightGuide = $0 })
-            ) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Breast-height guide")
-                    Text("Tap the ground at the foot of the tree on the Diameter scan and the app draws a line up to 1.37 m (4.5 ft) with a ring at the top, so you can see where breast height crosses the trunk. Guide only — it never changes the recorded diameter. Off by default.")
-                        .font(ForestixType.caption)
-                        .foregroundStyle(ForestixPalette.textSecondary)
-                }
-            }
-            .accessibilityIdentifier("settings.breastHeightGuide")
         }
     }
 
@@ -435,13 +412,40 @@ public struct SettingsScreen: View {
             .accessibilityIdentifier("settings.developerMode")
 
             if settings.developerMode {
+                // Both the toggle and height selector are developer-only.
+                // DBHScanScreen also gates operation on developer mode.
+                Toggle(isOn: Binding(
+                    get: { settings.breastHeightGuide },
+                    set: { settings.breastHeightGuide = $0 })
+                ) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Breast-height guide")
+                        Text("Show a height marker above the ground point you select on the Diameter scan.")
+                            .font(ForestixType.caption)
+                            .foregroundStyle(ForestixPalette.textSecondary)
+                    }
+                }
+                .accessibilityIdentifier("settings.breastHeightGuide")
+
+                Picker("Guide height", selection: Binding(
+                    get: { settings.breastHeightGuideHeight },
+                    set: { settings.breastHeightGuideHeight = $0 })
+                ) {
+                    ForEach(BreastHeightGuideHeight.allCases, id: \.self) { height in
+                        Text(height.metricLabel).tag(height)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .accessibilityIdentifier("settings.breastHeightGuideHeight")
+                Text("Vertical height above the selected point.")
+                    .font(ForestixType.caption)
+                    .foregroundStyle(ForestixPalette.textSecondary)
+
                 // AUTOMATIC STEM EDGES — an on-device segmentation model
                 // placing the measuring bracket.
                 //
-                // IN THE DEVELOPER BLOCK, not out of it. The breast-height
-                // guide came out because it only draws; this one goes in for
-                // the opposite reason — it decides the two pixels a diameter
-                // is measured between. Against 60 real captures it found a
+                // Developer-only: it decides the two pixels a diameter is
+                // measured between. Against 60 real captures it found a
                 // trunk in 40 % of frames, and where it did the edges spanned
                 // about 0.21 of the screen against the cruiser's own 0.36:
                 // the mask has holes mid-stem and bleeds into the background.

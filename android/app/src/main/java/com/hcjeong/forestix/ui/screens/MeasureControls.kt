@@ -212,14 +212,17 @@ const val PLOT_PIN_CENTRE_DISMISS = "Not now"
 /// fighting the bottom block for room. Used by the scan screens' "Pin
 /// centre" card; it alone is enough to make the column render, because a
 /// card with nothing to say above it still has to be reachable.
+/// `instructionContent` replaces the text at the same position (e.g. DBH's
+/// animated acquisition cue); other callers keep the standard text banner.
 @Composable
 fun BoxScope.MeasureTopChrome(
     instruction: String?,
     failure: String? = null,
     onDismissFailure: (() -> Unit)? = null,
     below: (@Composable () -> Unit)? = null,
+    instructionContent: (@Composable () -> Unit)? = null,
 ) {
-    if (instruction == null && failure == null && below == null) return
+    if (instruction == null && instructionContent == null && failure == null && below == null) return
     Column(
         modifier = Modifier
             .align(Alignment.TopCenter)
@@ -230,7 +233,9 @@ fun BoxScope.MeasureTopChrome(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        if (instruction != null) {
+        if (instructionContent != null) {
+            instructionContent()
+        } else if (instruction != null) {
             Text(
                 instruction,
                 style = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.Medium),

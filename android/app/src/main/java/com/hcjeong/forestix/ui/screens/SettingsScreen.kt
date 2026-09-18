@@ -70,6 +70,7 @@ import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.backup.BackupViewModel
 import com.hcjeong.forestix.common.Country
+import com.hcjeong.forestix.common.BreastHeightGuideHeight
 import com.hcjeong.forestix.common.ForestixLogger
 import com.hcjeong.forestix.common.Region
 import com.hcjeong.forestix.common.UnitSystem
@@ -318,37 +319,6 @@ fun SettingsScreen(nav: NavController) {
                         }
                     }
                 }
-
-                // Breast-height guide — answers "how does the phone know it is
-                // reading the stem AT breast height?" by putting breast height
-                // in the world where the cruiser can see it: a marker on the
-                // ground, a riser, and a ring at 1.37 m to bring around the
-                // trunk.
-                //
-                // IT LIVED IN THE DEVELOPER BLOCK, which is the wrong shelf
-                // for the only answer the app offers to a question every
-                // cruiser has. It is a Display setting because that is all it
-                // is — drawn on the Diameter scan, never read by the
-                // estimator, never stored, never exported. Still off by
-                // default. iOS SettingsScreen 1:1.
-                FormDivider()
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text("Breast-height guide", style = type.body, color = colors.textPrimary)
-                        Text(
-                            "Tap the ground at the foot of the tree on the Diameter scan and " +
-                                "the app draws a line up to 1.37 m (4.5 ft) with a ring at the " +
-                                "top, so you can see where breast height crosses the trunk. " +
-                                "Guide only — it never changes the recorded diameter. " +
-                                "Off by default.",
-                            style = type.caption, color = colors.textSecondary,
-                        )
-                    }
-                    Switch(
-                        checked = settings.breastHeightGuide,
-                        onCheckedChange = { env.settings.setBreastHeightGuide(it) },
-                    )
-                }
             }
 
             // MARK: - 2b. Measuring
@@ -522,13 +492,46 @@ fun SettingsScreen(nav: NavController) {
                     )
                 }
                 if (settings.developerMode) {
+                    // Both the toggle and height selector are developer-only.
+                    // DBHScanScreen also gates operation on developer mode.
+                    FormDivider()
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text("Breast-height guide", style = type.body, color = colors.textPrimary)
+                            Text(
+                                "Show a height marker above the ground point you select on the Diameter scan.",
+                                style = type.caption, color = colors.textSecondary,
+                            )
+                        }
+                        Switch(
+                            checked = settings.breastHeightGuide,
+                            onCheckedChange = { env.settings.setBreastHeightGuide(it) },
+                        )
+                    }
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Guide height", style = type.body, color = colors.textPrimary)
+                        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                            BreastHeightGuideHeight.entries.forEachIndexed { index, height ->
+                                SegmentedButton(
+                                    selected = settings.breastHeightGuideHeight == height,
+                                    onClick = { env.settings.setBreastHeightGuideHeight(height) },
+                                    shape = SegmentedButtonDefaults.itemShape(
+                                        index = index, count = BreastHeightGuideHeight.entries.size),
+                                ) { Text(height.metricLabel, style = type.caption, maxLines = 1) }
+                            }
+                        }
+                        Text(
+                            "Vertical height above the selected point.",
+                            style = type.caption, color = colors.textSecondary,
+                        )
+                    }
+                    FormDivider()
+
                     // AUTOMATIC STEM EDGES — an on-device segmentation model
                     // placing the measuring bracket.
                     //
-                    // IN THE DEVELOPER BLOCK, not out of it. The breast-height
-                    // guide came out because it only draws; this goes in for
-                    // the opposite reason — it decides the two pixels a
-                    // diameter is measured between. Against 60 real captures
+                    // Developer-only: it decides the two pixels a diameter
+                    // is measured between. Against 60 real captures
                     // it found a trunk in 40 % of frames, and where it did the
                     // edges spanned about 0.21 of the screen against the
                     // cruiser's own 0.36. An experiment does not belong on a

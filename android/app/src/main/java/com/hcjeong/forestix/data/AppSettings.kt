@@ -14,6 +14,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.hcjeong.forestix.common.Country
+import com.hcjeong.forestix.common.BreastHeightGuideHeight
 import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.sensors.LogRule
 import kotlinx.coroutines.CoroutineScope
@@ -154,17 +155,16 @@ data class SettingsSnapshot(
     /// field ground truth. Default OFF; zero cost while off (mirror of iOS
     /// tc.rawCaptureEnabled). Cross-platform schema is identical.
     val rawCaptureEnabled: Boolean = false,
-    /// Breast-height guide (developer mode only) — draws a 1.37 m marker up
+    /// Breast-height guide — draws the selected-height marker up
     /// from the tree base on the Diameter scan so the cruiser can see where
     /// breast height crosses the stem before reading the diameter there.
     ///
-    /// Default OFF, and THIS KEY ALONE gates it — it used to require
-    /// `developerMode` as well, which put the only answer the app offers to
-    /// "how does the phone know it read the stem at breast height?" behind a
-    /// switch a cruiser has no reason to find. Purely a drawing: it writes
-    /// nothing to the measurement and appears in no export. Same key as iOS
+    /// Default OFF. Operation requires developer mode too; disabling it
+    /// preserves this preference but removes the active guide and anchor.
+    /// It changes no measurement and appears in no export. Same key as iOS
     /// (`AppSettings.Keys.breastHeightGuide`, "tc.breastHeightGuide").
     val breastHeightGuide: Boolean = false,
+    val breastHeightGuideHeight: BreastHeightGuideHeight = BreastHeightGuideHeight.METERS_130,
     /// AUTO reads the stem's edges out of a segmentation mask instead of
     /// walking the depth map. OFF BY DEFAULT and it must stay that way until
     /// it has been checked against tape: it changes the two pixels the chord
@@ -228,6 +228,7 @@ class AppSettings(private val context: Context) {
         val developerMode = booleanPreferencesKey("tc.developerMode")
         val rawCaptureEnabled = booleanPreferencesKey("tc.rawCaptureEnabled")
         val breastHeightGuide = booleanPreferencesKey("tc.breastHeightGuide")
+        val breastHeightGuideHeight = stringPreferencesKey("tc.breastHeightGuideHeight")
         val dbhAutoSegmentation = booleanPreferencesKey("tc.dbhAutoSegmentation")
         val appearance = stringPreferencesKey("tc.appearance")
         // Unified with the iOS sibling's key (was "tc.cruiseProjectId"); the
@@ -281,6 +282,7 @@ class AppSettings(private val context: Context) {
             developerMode = p[Keys.developerMode] ?: false,
             rawCaptureEnabled = p[Keys.rawCaptureEnabled] ?: false,
             breastHeightGuide = p[Keys.breastHeightGuide] ?: false,
+            breastHeightGuideHeight = BreastHeightGuideHeight.fromRaw(p[Keys.breastHeightGuideHeight]),
             dbhAutoSegmentation = p[Keys.dbhAutoSegmentation] ?: false,
             appearance = p[Keys.appearance] ?: "light",
             cruiseProjectId = p[Keys.cruiseProjectId],
@@ -323,6 +325,11 @@ class AppSettings(private val context: Context) {
     fun setBreastHeightGuide(value: Boolean) = update {
         _state.value = _state.value.copy(breastHeightGuide = value)
         it[Keys.breastHeightGuide] = value
+    }
+
+    fun setBreastHeightGuideHeight(value: BreastHeightGuideHeight) = update {
+        _state.value = _state.value.copy(breastHeightGuideHeight = value)
+        it[Keys.breastHeightGuideHeight] = value.raw
     }
 
     fun setDbhAutoSegmentation(value: Boolean) = update {

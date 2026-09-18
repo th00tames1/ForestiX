@@ -123,7 +123,7 @@ public struct DBHScanScreen: View {
     /// with every research row.
     @StateObject private var raycaster = ARCenterRaycaster()
 
-    /// BREAST-HEIGHT GUIDE (developer mode + its own Settings toggle) — the
+    /// BREAST-HEIGHT GUIDE (developer mode + Settings toggle) — the
     /// drawn answer to "how do you know that was read at breast height?".
     /// Per-screen, because the base belongs to the tree in front of the
     /// camera. It never touches `viewModel`, the stage machine or the
@@ -142,12 +142,10 @@ public struct DBHScanScreen: View {
     @State private var lastKnownPitchDeg: Double?
 
     @StateObject private var bhGuide = BreastHeightGuide()
-    /// Where the guide's "1.37 m" pill sits, in AR-VIEW coordinates. nil
-    /// whenever the ring is behind the camera or nothing is drawn.
+    /// Projected height in AR-VIEW coordinates. nil whenever the height
+    /// point is behind the camera or nothing is anchored.
     @State private var bhLabelPoint: CGPoint?
-    /// Why the last "Place base" planted nothing — one-shot, cleared by the
-    /// next placement.
-    @State private var bhFailure: String?
+    @State private var bhPlacementFailed = false
 
     /// "Pin centre" offer, waved off for this visit. Not persisted: the
     /// offer is an offer, and a cruiser who is measuring from outside the
@@ -412,7 +410,7 @@ public struct DBHScanScreen: View {
                          debugMeshOverlay: showsScanMesh,
                          sceneMarkers: plotOverlayMarkers
                              + bhGuideMarkers
-                             + cylinderMarkers,
+                             + (bhGroundPlacementActive ? [] : cylinderMarkers),
                          raycaster: raycaster)
                 .ignoresSafeArea()
 
@@ -468,18 +466,20 @@ public struct DBHScanScreen: View {
                         .allowsHitTesting(false)
                     // THE ROW MARKER STAYS IN THE PHOTO. It marks where the
                     // number came from, which is the whole evidentiary point.
-                    measuredRowLine(size: geo.size)
-                        .allowsHitTesting(false)
+                    if !bhGroundPlacementActive {
+                        measuredRowLine(size: geo.size)
+                            .allowsHitTesting(false)
+                    }
                     // THE HORIZON DOES NOT. It is tilt, not measurement, and
                     // a tilt-dependent line baked into a stored image is a
                     // line a reviewer will read as marking something.
-                    if !hidingChromeForCapture {
+                    if !hidingChromeForCapture && !bhGroundPlacementActive {
                         guideLine(size: geo.size)
                             // Chrome. `chordBar` already opts out for the same
                             // reason — a drawn line is not a control.
                             .allowsHitTesting(false)
                     }
-                    fitChord(in: geo.size)
+                    if !bhGroundPlacementActive { fitChord(in: geo.size) }
                     // Crosshair ring is now positioned by GeometryReader
                     // at exactly (centerX, midY) so the guide line
                     // passes through the centre of the ring, not above
@@ -492,16 +492,18 @@ public struct DBHScanScreen: View {
                     // readouts moved to the value strip above the
                     // bottom-centre shutter; only the capture-progress
                     // pill stays under the crosshair (locked).
-                    if !hidingChromeForCapture {
+                    if !hidingChromeForCapture && !bhGroundPlacementActive {
                         TiltBadge()
                             .position(x: geo.size.width / 2,
                                       y: geo.size.height / 2
                                            - Self.crosshairOuterRadius
                                            - 22)
                     }
-                    crosshairRing
-                        .position(x: geo.size.width / 2,
-                                  y: geo.size.height / 2)
+                    if !bhGroundPlacementActive {
+                        crosshairRing
+                            .position(x: geo.size.width / 2,
+                                      y: geo.size.height / 2)
+                    }
                     if !hidingChromeForCapture,
                        viewModel.state == .capturing {
                         captureProgressPill
@@ -510,45 +512,14 @@ public struct DBHScanScreen: View {
                                            + Self.crosshairOuterRadius
                                            + 28)
                     }
-                    // BREAST-HEIGHT GUIDE, 2D half. Both pills ride THIS
-                    // reader and not the body ZStack: it is the full-bleed
-                    // rect the AR view occupies, which is the rect
-                    // `ARView.project` answers in and the rect the placing
-                    // raycast aims through. The body ZStack is inset by the
-                    // safe area — field report 16's second pass measured that
-                    // as ~12 pt in portrait and sideways in landscape.
-                    if bhGuideChromeVisible {
-                        // The prompt takes the Height crosshair's label
-                        // position and its styling, under the ring the
-                        // Diameter screen already has. No second ring is
-                        // added: `crosshairRing` IS this screen's aiming
-                        // instrument.
-                        if let prompt = bhPromptText {
-                            bhPromptPill(prompt)
-                                .position(x: geo.size.width / 2,
-                                          y: geo.size.height / 2
-                                               + Self.bhPromptOffset)
-                        }
-                        // The measurement label, pinned to where breast
-                        // height actually is. Pushed clear of the rim so it
-                        // never sits on the band the cruiser is reading.
-                        if let point = bhLabelPoint {
-                            // `.position` centres a view on the point, so
-                            // nudging the CENTRE 14 pt right of the ring's
-                            // centre put half the pill back over the rim —
-                            // the one place it must not cover, because the rim
-                            // is what the cruiser is lining up on. Anchoring
-                            // the pill's LEADING edge instead puts the whole
-                            // of it clear, which is what Android does with its
-                            // top-left `offset`.
-                            bhValuePill
-                                .position(x: point.x, y: point.y)
-                                .offset(x: Self.bhLabelSideOffset,
-                                        y: -Self.bhLabelRiseOffset)
-                                .fixedSize()
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .allowsHitTesting(false)
-                        }
+                    if bhGuideChromeVisible, bhGuide.stage == .placed,
+                       !bhGuide.trackingLost, let point = bhLabelPoint {
+                        BreastHeightMarker(point: point, size: geo.size,
+                            stemLeft: adjustOverlayVisible
+                                ? geo.size.width * CGFloat(viewModel.edgeBracketLeftFraction) : nil,
+                            stemRight: adjustOverlayVisible
+                                ? geo.size.width * CGFloat(viewModel.edgeBracketRightFraction) : nil,
+                            label: bhGuide.label(in: settings.unitSystem))
                     }
                 }
                 .frame(width: geo.size.width, height: geo.size.height)
@@ -570,7 +541,7 @@ public struct DBHScanScreen: View {
             // ADJUST-mode edge handles. The handles are measurement chrome,
             // but they read as controls in a photo, so the Accept snapshot
             // hides them.
-            if adjustOverlayVisible && !hidingChromeForCapture {
+            if adjustOverlayVisible && !hidingChromeForCapture && !bhGroundPlacementActive {
                 GeometryReader { geo in
                     // Handles only. The rect they are fractions of is
                     // published by the chrome reader above, which exists in
@@ -805,7 +776,7 @@ public struct DBHScanScreen: View {
                 return
             }
             while !Task.isCancelled {
-                bhLabelPoint = bhGuide.ringWorldPoint
+                bhLabelPoint = bhGuide.heightWorldPoint
                     .flatMap { raycaster.projectToScreen($0) }
                 try? await Task.sleep(nanoseconds: 50_000_000)
             }
@@ -887,7 +858,7 @@ public struct DBHScanScreen: View {
             // world map with nobody holding its id.
             bhGuide.disable(using: viewModel.session)
             viewModel.stopSegmentationFeed()
-            bhFailure = nil
+            bhPlacementFailed = false
             bhLabelPoint = nil
             viewModel.onDisappear()
         }
@@ -901,7 +872,7 @@ public struct DBHScanScreen: View {
             // while tree 8 is being measured — at 7's distance and 7's
             // ground. The next tree gets its own base or none.
             bhGuide.clearBase(using: viewModel.session)
-            bhFailure = nil
+            bhPlacementFailed = false
             bhLabelPoint = nil
         }
         // Editing the truth field retires any "couldn't save" state: the text
@@ -929,6 +900,9 @@ public struct DBHScanScreen: View {
             viewModel.segmentationEnabled = segmentationGateOpen
         }
         .onChange(of: settings.breastHeightGuide) { _, _ in
+            syncBreastHeightGuide()
+        }
+        .onChange(of: settings.breastHeightGuideHeight) { _, _ in
             syncBreastHeightGuide()
         }
         .onChange(of: settings.dbhAutoSegmentation) { _, _ in
@@ -1601,26 +1575,22 @@ public struct DBHScanScreen: View {
 
     // MARK: - Breast-height guide
 
-    /// The gate, and the ONLY place it is decided: the guide's own toggle.
-    ///
-    /// IT USED TO REQUIRE DEVELOPER MODE TOO, which put a cruiser-facing
-    /// answer to "how does the phone know it read the stem at breast height?"
-    /// behind a switch a cruiser has no reason to find. The guide draws and
-    /// nothing else — it never writes a measurement, never gates the shutter,
-    /// never reaches an export — so there was never a safety argument for the
-    /// second key, only the caution of a feature that had not been in the
-    /// field yet. It has been. Off by default still, so nothing changes for
-    /// anyone who does not ask for it.
+    /// Both developer mode and the guide toggle are required. A saved ON
+    /// preference cannot expose the guide after developer mode is disabled.
     private var bhGuideEnabled: Bool {
-        settings.breastHeightGuide
+        settings.developerMode && settings.breastHeightGuide
+    }
+
+    /// Ground placement has its own preview dot, not the DBH measuring row.
+    private var bhGroundPlacementActive: Bool {
+        bhGuideChromeVisible && bhGuide.stage == .aiming
     }
 
     /// THE SEGMENTATION GATE, and the ONLY place it is decided: developer
     /// mode AND its own toggle. Neither key is ever read alone.
     ///
-    /// The breast-height guide came OUT of developer mode because it only
-    /// draws. This one goes IN, for the opposite reason: it decides the two
-    /// pixels a diameter is measured between. Run against 60 real captures it
+    /// It decides the two pixels a diameter is measured between.
+    /// Run against 60 real captures it
     /// finds a trunk in 40 % of frames and, when it does, offers edges that
     /// span about 0.21 of the screen where the cruiser's own bracket spans
     /// 0.36 — the mask has holes mid-stem and bleeds into the bank behind. It
@@ -1639,11 +1609,12 @@ public struct DBHScanScreen: View {
     /// Bring the guide's state into line with the gate. Idempotent, so it can
     /// be called from appear and from either toggle changing.
     private func syncBreastHeightGuide() {
+        bhGuide.height = settings.breastHeightGuideHeight
         if bhGuideEnabled {
             bhGuide.arm()
         } else {
             bhGuide.disable(using: viewModel.session)
-            bhFailure = nil
+            bhPlacementFailed = false
             bhLabelPoint = nil
         }
     }
@@ -1655,166 +1626,64 @@ public struct DBHScanScreen: View {
     /// not appear in an export, so it goes away for the frame like every
     /// other non-measurement overlay.
     private var bhGuideMarkers: [ARSceneMarker] {
+        // The placed world guide persists through capture/review. Only the
+        // exported snapshot removes it; placement controls remain aiming-only.
         guard bhGuideActive, !hidingChromeForCapture else { return [] }
         return bhGuide.markers()
     }
 
-    /// Prompt pill CENTRE, measured down from the crosshair centre. Exactly
-    /// the Height screen's `crosshairLabelOffset` — this is the same
-    /// affordance placed the same way, and the two must not drift apart.
-    private static let bhPromptOffset: CGFloat = 40
-
-    /// How far right of the ring's projected centre the value pill sits, so
-    /// it never covers the band the cruiser is reading against the bark.
-    /// True while the screen is still AIMING at a stem — not showing a
-    /// result, not mid-burst.
-    ///
-    /// The guide is an aid to standing in the right place, so once a diameter
-    /// is on screen it has nothing left to say and its pills and its button
-    /// are competing with the result panel for the same corner. Android gates
-    /// its guide chrome on `stage == Stage.AIMING`; this is that same test in
-    /// this screen's own vocabulary, and it is the set `adjustOverlayVisible`
-    /// already treats as "still aiming". The WORLD geometry stays drawn either
-    /// way — the base is still where the cruiser put it.
+    /// Placement controls are disabled throughout capture and result review.
     private var bhGuideChromeVisible: Bool {
         guard bhGuideActive, !hidingChromeForCapture else { return false }
         switch viewModel.state {
-        case .idle, .aligning, .armed, .capturing, .rejected: return true
+        case .idle, .aligning, .armed, .rejected: return true
         default: return false
         }
     }
 
-    private static let bhLabelSideOffset: CGFloat = 14
-
-    /// Half a pill's height, so the label reads LEVEL with the ring rather
-    /// than hanging below it. Android lifts by the same amount.
-    private static let bhLabelRiseOffset: CGFloat = 12
-
-    /// What the guide has to say under the crosshair, or nothing when it has
-    /// nothing to say (a base is placed and being tracked — the world
-    /// geometry speaks for itself).
-    private var bhPromptText: String? {
-        switch bhGuide.stage {
-        case .off:
-            return nil
-        case .aiming:
-            return "Aim at the tree base"
-        case .placed:
-            return bhGuide.trackingLost
-                ? "Tracking lost — the guide is hidden rather than drawn in the wrong place."
-                : nil
-        }
-    }
-
-    /// The Height crosshair's label pill — white on black, so it reads as
-    /// guidance and never as a measurement.
-    private func bhPromptPill(_ text: String) -> some View {
-        Text(text)
-            .font(ForestixType.dataSmall)
-            .foregroundStyle(.white)
-            .multilineTextAlignment(.center)
-            .padding(.horizontal, 8).padding(.vertical, 4)
-            .background(Color.black.opacity(0.65))
-            .cornerRadius(4)
-            .accessibilityIdentifier("dbhScan.breastHeightPrompt")
-    }
-
-    /// "1.37 m" / "4.5 ft" at the ring. BLACK ON WHITE, deliberately the
-    /// inverse of every other pill on this screen: it is read against bark
-    /// and against sky in the same glance, and white-on-black loses the sky.
-    private var bhValuePill: some View {
-        Text(BreastHeightGuide.label(in: settings.unitSystem))
-            .font(ForestixType.dataSmall)
-            .foregroundStyle(.black)
-            .padding(.horizontal, 8).padding(.vertical, 4)
-            .background(Color.white)
-            .cornerRadius(4)
-            .accessibilityIdentifier("dbhScan.breastHeightLabel")
-    }
-
-    /// Place / clear the base — the guide's whole control surface. It sits in
-    /// the block above the shutter, beside the Auto pill: both of the
-    /// shutter's own flanks are Type and Adjust, and the guide must not take
-    /// either. Same dark-glass capsule as `autoPillButton`.
+    /// One control above the shutter. No instructional banner over the tree.
     private var bhGuideButton: some View {
-        VStack(spacing: 6) {
-            Button {
-                if bhGuide.stage == .placed {
-                    bhGuide.clearBase(using: viewModel.session)
-                    bhFailure = nil
-                    bhLabelPoint = nil
-                } else {
-                    placeBreastHeightBase()
-                }
-            } label: {
-                Text(bhGuide.stage == .placed ? "Clear base" : "Place base")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 7)
-                    .background(Color.black.opacity(0.55), in: Capsule())
-                    .overlay(Capsule().stroke(.white.opacity(0.18),
-                                              lineWidth: 0.5))
+        Button {
+            if bhGuide.stage == .placed {
+                bhGuide.clearBase(using: viewModel.session)
+                bhPlacementFailed = false
+                bhLabelPoint = nil
+            } else {
+                placeBreastHeightBase()
             }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("dbhScan.breastHeightBase")
-            // SAY THAT THE TAP EXISTS.
-            //
-            // The gesture was built, gated, given a raycast policy and fixed
-            // twice, and nothing on screen ever mentioned it — the only visible
-            // affordance was a button labelled "Place base", so a cruiser
-            // presses the button and never learns there is a faster way. A
-            // gesture nobody can discover is not a feature. Shown only while
-            // there is nothing placed yet, and it goes away the moment there
-            // is: a hint that outlives its moment is clutter.
-            if bhGuide.stage != .placed, bhFailure == nil {
-                Text("or tap the ground at the foot of the tree")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.85))
-                    .padding(.horizontal, 10).padding(.vertical, 4)
-                    .background(Color.black.opacity(0.45), in: Capsule())
-                    .accessibilityIdentifier("dbhScan.breastHeightTapHint")
-            }
-            if let failure = bhFailure {
-                Text(failure)
-                    .font(ForestixType.caption)
-                    .foregroundStyle(.white)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 10).padding(.vertical, 5)
-                    .background(Color.black.opacity(0.55), in: Capsule())
-            }
+        } label: {
+            Text(bhGuide.stage == .placed ? "Reset ground"
+                 : bhPlacementFailed ? "Retry ground" : "Set ground")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                .background(Color.black.opacity(0.55), in: Capsule())
+                .overlay(Capsule().stroke(.white.opacity(0.18), lineWidth: 0.5))
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("dbhScan.breastHeightBase")
     }
 
-    /// Anchor the guide at the ground — where the cruiser TAPPED, or under
-    /// the crosshair when `at` is nil (the button's path).
-    ///
-    /// `hit(at:)` / `screenCenterHit()` and deliberately NOT
-    /// `screenCenterAnchorHit` — this ray is aimed DOWN at the ground, and
-    /// the gated variant exists precisely to refuse ground planes. A miss
-    /// refuses in the words every other ground placement in the app uses,
-    /// rather than planting a base in mid-air off a forward-ray fallback.
+    /// Use the user's tapped point, or the crosshair for the button. A miss
+    /// leaves the guide unplaced; it never invents a ground coordinate.
     private func placeBreastHeightBase(at point: CGPoint? = nil) {
+        guard bhGuideChromeVisible, bhGuide.stage == .aiming else { return }
         raycaster.preferLiDARMesh = settings.measurementSource == .lidar
-        // `.ground`, because a tap at the foot of a stem sends a ray that
-        // grazes the bark on the way down and the default vertical-first
-        // order would hand back the trunk face — a base at chest height,
-        // carrying the whole guide up with it.
-        let found = point.map { raycaster.hit(at: $0, intent: .ground) }
-            // The button aims at the same ground the tap does, so it takes
-            // the same policy — six-metre gate, horizontal planes only. It was
-            // left on the ungated call when the tap was fixed, which on
-            // Android made it the ONLY working path and the ungated one.
-            ?? raycaster.screenCenterGroundHit()
-        guard let hit = found else {
-            bhFailure = MeasurementCopy.plotGroundNotSeen
+        let hit: SIMD3<Float>?
+        if let point {
+            hit = raycaster.hit(at: point, intent: .ground)
+        } else {
+            hit = raycaster.screenCenterGroundHit()
+        }
+        guard let hit, bhGuide.place(hit: hit, using: viewModel.session) else {
+            bhPlacementFailed = true
             return
         }
-        guard bhGuide.place(hit: hit, using: viewModel.session) else {
-            bhFailure = MeasurementCopy.plotGroundNotSeen
-            return
-        }
-        bhFailure = nil
+        bhPlacementFailed = false
+        HapticFeedback.play(.success)
     }
 
     private var crosshairRing: some View {

@@ -7,6 +7,7 @@
 package com.hcjeong.forestix.ui.screens.dbh
 
 import android.os.SystemClock
+import android.view.HapticFeedbackConstants
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -57,6 +58,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
@@ -197,11 +199,6 @@ private const val PREVIEW_MISS_RESET = 7
 /// wondering why the number won't come up.
 private const val ACQUISITION_STALL_MS = 2_000L
 
-/// The hint itself. Byte-identical to the iOS sibling
-/// (`DBHScanScreen.acquisitionStallHint`).
-private const val ACQUISITION_STALL_HINT =
-    "No depth lock yet — move the phone gently side to side, or change your distance."
-
 /// The tap-depth window `DBHEstimator.livePreview` will produce a lock in.
 /// The screen only READS it — to pick which sentence a refused "+" gets, and
 /// to label the dev HUD's range miss. The estimator stays the single place
@@ -285,6 +282,7 @@ private const val TRUTH_NO_BUNDLE_OWNER = "no-bundle"
 fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     val env = LocalAppEnvironment.current
     val context = LocalContext.current
+    val hapticView = LocalView.current
     // Shared app-scoped AR session (world coordinates survive navigation,
     // and the sampling plot's anchor renders here as a subdued overlay).
     val controller = ArSessionHub.controller
@@ -379,20 +377,15 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     val depthBlocked = !settings.developerMode &&
         (settings.depthUnsupported ||
             (controller.depthSupportKnown && !controller.supportsDepth))
-    // BREAST-HEIGHT GUIDE (developer feature). A reviewer's objection was
+    // BREAST-HEIGHT GUIDE. A reviewer's objection was
     // that a phone cannot know it is reading the stem AT breast height; this
     // draws breast height in the world so the cruiser can put the diameter
     // there instead of near there. It is chrome and nothing else — it never
     // reaches the estimator, the stored reading or an export.
     //
-    // ONE KEY, the guide's own. It used to require developer mode as well,
-    // which put the only answer the app offers to "how does the phone know it
-    // read the stem AT breast height?" behind a switch a cruiser has no
-    // reason to find. The guide draws and nothing else — it never writes a
-    // measurement, never gates the shutter, never reaches an export — so
-    // there was never a safety argument for the second key. Off by default
-    // still. iOS `bhGuideEnabled` 1:1.
-    val bhGuideOn = settings.breastHeightGuide
+    // Both developer mode and the guide toggle are required. A saved ON
+    // preference cannot expose the guide after developer mode is disabled.
+    val bhGuideOn = settings.developerMode && settings.breastHeightGuide
     val bhGuide = remember { BreastHeightGuide(controller) }
     /// Live camera tilt, driving the horizon line. 20 Hz — fast enough that
     /// the line reads as attached to the world rather than as catching up
@@ -433,24 +426,28 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         animationSpec = tween(durationMillis = 80, easing = LinearEasing),
         label = "horizonPitch",
     )
-    /// Where the ring's centre lands on screen, so the value pill can sit
-    /// beside it rather than in the middle of the rim.
+    /// Projected height in AR-view pixels; the ticks and label share it.
     var bhLabelPos by remember { mutableStateOf<Offset?>(null) }
-    /// Why the last "Place base" planted nothing.
-    var bhFailure by remember { mutableStateOf<String?>(null) }
+    var bhPlacementFailed by remember { mutableStateOf(false) }
     // The gate owns the lifecycle in both directions: arming when it comes
     // on, and taking the anchor down with it when it goes off, so a toggle
     // flipped mid-scan leaves nothing anchored behind it.
-    LaunchedEffect(bhGuideOn) {
-        bhFailure = null
-        if (bhGuideOn) bhGuide.arm() else bhGuide.disable()
+    LaunchedEffect(bhGuideOn, settings.breastHeightGuideHeight) {
+        bhPlacementFailed = false
+        bhGuide.height = settings.breastHeightGuideHeight
+        if (bhGuideOn) {
+            bhGuide.arm()
+        } else {
+            bhGuide.disable()
+            bhLabelPos = null
+        }
     }
     // This screen is REUSED across a cruise tally — only the tree number
     // advances — so a base placed at tree 7's foot must not still be standing
     // there while tree 8 is measured.
     LaunchedEffect(cruiseTreeNumber) {
         bhGuide.clearBase()
-        bhFailure = null
+        bhPlacementFailed = false
     }
     DisposableEffect(Unit) {
         onDispose { bhGuide.disable() }
@@ -475,11 +472,11 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     }
     // 20 Hz, deliberately faster than the poll above and deliberately cheap:
     // this is a view x projection multiply against the live frame, not a hit
-    // test. It keeps the pill on the ring while the cruiser walks round the
-    // stem, which is exactly when a 5 Hz label would visibly lag the rim.
+    // test. It keeps the ticks and label on the anchored height while the
+    // cruiser moves the phone; a 5 Hz projection would visibly lag.
     LaunchedEffect(bhGuide.stage) {
         while (bhGuide.stage != BreastHeightGuide.Stage.OFF) {
-            bhLabelPos = bhGuide.ringWorldPoint()
+            bhLabelPos = bhGuide.heightWorldPoint()
                 ?.let { controller.projectToScreen(it) }
                 ?.let { (x, y) -> Offset(x, y) }
             delay(50)
@@ -551,8 +548,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // the middle-half sampling, the tangent identity, the tier — is the
     // bracket path exactly as it ships. iOS DBHScanViewModel 1:1.
     // THE SEGMENTATION GATE — developer mode AND its own toggle, never either
-    // alone. The breast-height guide came OUT of developer mode because it
-    // only draws; this goes IN for the opposite reason: it decides the two
+    // alone. This decides the two
     // pixels a diameter is measured between, and against 60 real captures it
     // found a trunk in 40 % of frames and offered edges about 40 % narrower
     // than the cruiser's own bracket. iOS `segmentationGateOpen` 1:1.
@@ -963,11 +959,13 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
 
     // Live single-frame preview loop while aiming (paused while the ADJUST
     // bracket owns the edges).
-    LaunchedEffect(stage, depthBlocked, adjustMode) {
+    LaunchedEffect(stage, depthBlocked, adjustMode, segmentationDroveTheBracket) {
         // The stall clock belongs to THIS aiming run — a stage change or a
         // mode flip restarts the effect and so restarts the clock.
-        acquisitionStalled = false
-        depthSilent = false
+        if (!adjustMode && !segmentationDroveTheBracket) {
+            acquisitionStalled = false
+            depthSilent = false
+        }
         var lastLockAt = SystemClock.elapsedRealtime()
         var lastFrameAt = SystemClock.elapsedRealtime()
         while (stage == Stage.AIMING && !depthBlocked && !adjustMode) {
@@ -1190,15 +1188,20 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             // ran and the hint could never come up in precisely the state
             // this line was written for.
             val nowMs = SystemClock.elapsedRealtime()
-            depthSilent = nowMs - lastFrameAt >= DEPTH_SILENT_MS
-            if (!depthSilent && preview?.locked == true) lastLockAt = nowMs
+            val autoDepthSilent = nowMs - lastFrameAt >= DEPTH_SILENT_MS
+            if (!autoDepthSilent && preview?.locked == true) lastLockAt = nowMs
             // The refusal describes a "+" that was refused. Once the gate
             // would honour a tap it is no longer true, so it comes down
             // without waiting for a second tap. (iOS clears it from its stall
             // ticker, for the same reason: the frame handler has too many
             // early returns to be trusted with this.)
             if (captureRefusal != null && preview?.locked == true) captureRefusal = null
-            acquisitionStalled = nowMs - lastLockAt >= ACQUISITION_STALL_MS
+            // The bracket capture path owns the guidance while segmentation
+            // supplies its edges; the auto preview must not overwrite it.
+            if (!segmentationDroveTheBracket) {
+                depthSilent = autoDepthSilent
+                acquisitionStalled = nowMs - lastLockAt >= ACQUISITION_STALL_MS
+            }
             delay(150)
         }
     }
@@ -1207,8 +1210,10 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // frame's own view↔depth affine) + the median depth inside the bracket
     // at the guide row, refreshed on the same cadence as the auto preview.
     LaunchedEffect(stage, adjustMode, segmentationDroveTheBracket, depthBlocked) {
-        acquisitionStalled = false
-        depthSilent = false
+        if (adjustMode || segmentationDroveTheBracket) {
+            acquisitionStalled = false
+            depthSilent = false
+        }
         var lastLockAt = SystemClock.elapsedRealtime()
         var lastFrameAt = SystemClock.elapsedRealtime()
         // `adjustMode || segmentationDroveTheBracket` — a model-placed bracket
@@ -1280,6 +1285,23 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             delay(150)
         }
     }
+
+    val useBracketForDepth = adjustMode || segmentationDroveTheBracket
+    val groundPlacementActive = bhGuideOn && bhGuide.stage == BreastHeightGuide.Stage.AIMING &&
+        stage == Stage.AIMING && !manualOpen && !depthBlocked && !hidingChromeForCapture
+    val depthGuidanceActive = stage == Stage.AIMING && !manualOpen && !groundPlacementActive &&
+        !depthBlocked && controller.supportsDepth && !hidingChromeForCapture
+    // Replace the old no-lock banner, not an assertion of absolute accuracy.
+    // A silent depth stream must not inherit the last frame's held lock.
+    val showDepthMotionHint = shouldShowDepthMotionHint(
+        active = depthGuidanceActive,
+        stalled = acquisitionStalled,
+        depthSilent = depthSilent,
+        locked = if (useBracketForDepth) adjustPreview?.locked == true else preview?.locked == true,
+        specificError = if (useBracketForDepth) bracketTwoSurfaces && adjustShown == null
+            else preview?.edgesClipped == true,
+        failure = failure != null || captureRefusal != null,
+    )
 
     // Border chip (D — cruise tally only): live distance to the plot
     // boundary from the AR anchor (|camera→centre| − radius), the sampling
@@ -1950,6 +1972,15 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         }
     }
 
+    fun placeBreastHeightBase(hit: Vec3?) {
+        if (!bhGuideOn || stage != Stage.AIMING || manualOpen || depthBlocked ||
+            bhGuide.stage != BreastHeightGuide.Stage.AIMING) return
+        bhPlacementFailed = hit == null || !bhGuide.place(hit)
+        if (!bhPlacementFailed) {
+            hapticView.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+        }
+    }
+
     val locked = stage == Stage.AIMING && preview?.locked == true
 
     Box(Modifier.fillMaxSize()) {
@@ -1980,9 +2011,11 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         // flipping and that effect running there is a frame where `markers()`
         // still answers with the shapes for a guide the cruiser has just
         // turned off. iOS tests the flag here; this is that test.
-        val bhMarkers = if (!bhGuideOn || hidingChromeForCapture) emptyList()
+        // World guide persists through capture/review, but not export photos.
+        val bhMarkers = if (!bhGuideOn || hidingChromeForCapture || manualOpen) emptyList()
                         else bhGuide.markers()
-        val dbhMarkers = bhMarkers + if (stage == Stage.AIMING || stage == Stage.CAPTURING) {
+        val dbhMarkers = bhMarkers + if (!groundPlacementActive &&
+            (stage == Stage.AIMING || stage == Stage.CAPTURING)) {
             listOfNotNull(cylinderMarker)
         } else {
             emptyList()
@@ -2034,13 +2067,11 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         // So the tap is a lambda, and every full-screen layer that can be in
         // front of the AR view offers it. One place decides whether a tap is
         // allowed and what it does; the layers only forward.
-        val groundTapArmed = !depthBlocked && bhGuideOn && stage == Stage.AIMING &&
+        val groundTapArmed = !depthBlocked && !manualOpen && bhGuideOn && stage == Stage.AIMING &&
             bhGuide.stage != BreastHeightGuide.Stage.PLACED
         val placeBaseAt: (Float, Float) -> Unit = { x, y ->
             if (groundTapArmed) {
-                val hit = controller.screenGroundHit(x, y)
-                bhFailure = if (hit != null && bhGuide.place(hit)) null
-                            else PLOT_GROUND_NOT_SEEN
+                placeBreastHeightBase(controller.screenGroundHit(x, y))
             }
         }
         if (groundTapArmed) {
@@ -2067,7 +2098,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         // the drag reads the FINGER's distance from centre directly rather
         // than accumulating deltas (which drifted when a drag crossed the
         // centre line).
-        if ((adjustMode || segmentationDroveTheBracket) && stage == Stage.AIMING) {
+        if ((adjustMode || segmentationDroveTheBracket) && stage == Stage.AIMING && !groundPlacementActive) {
             Box(
                 Modifier
                     .fillMaxSize()
@@ -2276,7 +2307,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
 
         // Guide line + live fit chord (drawn relative to screen centre).
         // All scanning chrome is suppressed while the depth blocker is up.
-        if (stage != Stage.RESULT && !depthBlocked) {
+        if (stage != Stage.RESULT && !depthBlocked && !groundPlacementActive) {
             Canvas(Modifier.fillMaxSize()) {
                 val cy = size.height / 2f
                 // THE HORIZON, AND HOW FAR THE PHONE IS OFF IT.
@@ -2461,7 +2492,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 label = "captureArc",
             )
             DbhRing(
-                ringLocked || burstRunning,
+                (ringLocked && !showDepthMotionHint) || burstRunning,
                 colors.confidenceOk, colors.confidenceBad,
                 progress = if (burstRunning) arcProgress else null,
                 modifier = Modifier.align(Alignment.Center),
@@ -2471,8 +2502,10 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             // at midY − ringRadius − 22). Both badges are 2D chrome, so
             // the accept snapshot drops them (ring + chord stay).
             if (!hidingChromeForCapture) {
-                Box(Modifier.align(Alignment.Center).offset(y = (-58).dp)) {
-                    TiltBadge(controller)
+                if (!showDepthMotionHint) {
+                    Box(Modifier.align(Alignment.Center).offset(y = (-58).dp)) {
+                        TiltBadge(controller)
+                    }
                 }
                 // Directly under the crosshair: the capture-progress
                 // pill while the burst runs (flips the instant the
@@ -2487,61 +2520,15 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             }
         }
 
-        // BREAST-HEIGHT GUIDE — 2D chrome.
-        //
-        // The prompt rides the SAME crosshair affordance the Height flow
-        // uses: its label pill, at HEIGHT_AIM_LABEL_OFFSET_DP (40) below true
-        // centre. No second ring is drawn — DbhRing above is already the
-        // aiming instrument on this screen, and a second one would compete
-        // with it for the cruiser's eye.
-        if (bhGuideOn && !hidingChromeForCapture && !depthBlocked && stage == Stage.AIMING) {
-            val bhPrompt = bhFailure
-                ?: if (bhGuide.trackingLost) BreastHeightGuide.TRACKING_LOST_HINT
-                else if (bhGuide.stage == BreastHeightGuide.Stage.AIMING) {
-                    BreastHeightGuide.AIM_PROMPT
-                } else {
-                    null
-                }
-            bhPrompt?.let {
-                Text(
-                    it,
-                    style = Forestix.type.dataSmall,
-                    color = Color.White,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier
-                        .align(Alignment.Center)
-                        .offset(y = 40.dp)
-                        .padding(horizontal = 32.dp)
-                        .clip(RoundedCornerShape(4.dp))
-                        .background(Color.Black.copy(alpha = 0.65f))
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                )
-            }
-            // The height itself, at the ring. BLACK ON WHITE so it survives
-            // both bark and a bright sky behind the crown — the two
-            // backgrounds this label is guaranteed to be read against.
-            //
-            // Placed from the root Box, which is fillMaxSize with the AR view
-            // filling the same rect, so these Compose pixels are the
-            // viewWidthPx/viewHeightPx the projection divided by.
-            bhLabelPos?.let { p ->
-                Text(
-                    bhGuide.label(settings.unitSystem),
-                    style = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Bold),
-                    color = Color.Black,
-                    modifier = Modifier
-                        .offset {
-                            // Clear of the rim to the right, and lifted half
-                            // a pill so the text reads level with the ring's
-                            // centre rather than hanging off it.
-                            IntOffset(
-                                Math.round(p.x) + 14.dp.roundToPx(),
-                                Math.round(p.y) - 12.dp.roundToPx(),
-                            )
-                        }
-                        .clip(RoundedCornerShape(4.dp))
-                        .background(Color.White)
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
+        // Ticks follow the projected anchored height; they never consume taps.
+        if (bhGuideOn && !hidingChromeForCapture && !depthBlocked &&
+            stage == Stage.AIMING && !manualOpen &&
+            bhGuide.stage == BreastHeightGuide.Stage.PLACED && !bhGuide.trackingLost) {
+            bhLabelPos?.let { point ->
+                BreastHeightMarker(
+                    point, bhGuide.label(settings.unitSystem),
+                    if (adjustMode || segmentationDroveTheBracket) adjustLeftFrac else null,
+                    if (adjustMode || segmentationDroveTheBracket) adjustRightFrac else null,
                 )
             }
         }
@@ -2560,7 +2547,8 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         // pill. Both shutter flanks are already Type and Adjust, so the
         // button stays here beside the Auto pill and remains the way to place
         // a base without letting go of the phone.
-        val showBhGuidePill = bhGuideOn && stage == Stage.AIMING && !depthBlocked
+        val showBhGuidePill = bhGuideOn && stage == Stage.AIMING && !depthBlocked &&
+            !manualOpen && !hidingChromeForCapture
         val aboveBottomBlock: (@Composable () -> Unit)? =
             if (undoToast != null || showAutoPill || showBhGuidePill) {
                 {
@@ -2575,41 +2563,16 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                             val placed = bhGuide.stage == BreastHeightGuide.Stage.PLACED
                             ScanModePill(
                                 if (placed) BreastHeightGuide.CLEAR_BUTTON
+                                else if (bhPlacementFailed) "Retry ground"
                                 else BreastHeightGuide.PLACE_BUTTON,
                             ) {
                                 if (placed) {
                                     bhGuide.clearBase()
-                                    bhFailure = null
+                                    bhPlacementFailed = false
+                                    bhLabelPos = null
                                 } else {
-                                    val hit = controller.screenCenterGroundHit()
-                                    bhFailure = if (hit != null && bhGuide.place(hit)) {
-                                        null
-                                    } else {
-                                        PLOT_GROUND_NOT_SEEN
-                                    }
+                                    placeBreastHeightBase(controller.screenCenterGroundHit())
                                 }
-                            }
-                            // SAY THAT THE TAP EXISTS. The gesture was built,
-                            // gated and given a raycast policy, and nothing on
-                            // screen ever mentioned it — the only visible
-                            // affordance was a button, so a cruiser presses the
-                            // button and never learns there is a faster way. A
-                            // gesture nobody can discover is not a feature.
-                            // Goes away the moment a base is placed: a hint
-                            // that outlives its moment is clutter.
-                            if (!placed && bhFailure == null) {
-                                Text(
-                                    "or tap the ground at the foot of the tree",
-                                    style = TextStyle(
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Medium,
-                                    ),
-                                    color = Color.White.copy(alpha = 0.85f),
-                                    modifier = Modifier
-                                        .clip(CircleShape)
-                                        .background(Color.Black.copy(alpha = 0.45f))
-                                        .padding(horizontal = 10.dp, vertical = 4.dp),
-                                )
                             }
                         }
                         if (showAutoPill) {
@@ -2737,6 +2700,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         // U1 — stage guidance + failure, top-centre banner (clears the
         // GPS-badge / mini-map row).
         if (!depthBlocked && !hidingChromeForCapture) MeasureTopChrome(
+            instructionContent = if (showDepthMotionHint) ({ DepthMotionHint() }) else null,
             instruction = when {
                 // The banner names the SAME unit the field below it is
                 // placeheld with (:2476) and the same one the submit path
@@ -2746,6 +2710,8 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 manualOpen -> "Enter diameter manually in " +
                     (if (settings.unitSystem == UnitSystem.METRIC) "cm" else "inches") + "."
                 stage == Stage.AIMING -> when {
+                    // The animated icon replaces the no-depth-lock text.
+                    showDepthMotionHint -> null
                     // FIELD REPORT 15, the stuck case: depth delivery has
                     // stopped outright and has been down long enough to
                     // stall. Every line below reads `preview` /
@@ -2756,11 +2722,11 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     // sentence that is still true, so it goes first. (iOS
                     // reaches the same place by clearing the stale strip line
                     // from its stall ticker.)
-                    depthSilent && acquisitionStalled -> ACQUISITION_STALL_HINT
+                    depthSilent && acquisitionStalled -> null
                     // ADJUST keeps the standard aligning/armed copy
                     // (iOS statusText parity): armed as soon as a
                     // bracket fit exists.
-                    adjustMode ->
+                    useBracketForDepth ->
                         // The bracket measured, but not across bark, and it
                         // has been that way for longer than the grace — so the
                         // number has been withheld and the strip has to say
@@ -2776,7 +2742,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         // seconds with no depth behind it. Say what clears
                         // it instead of repeating "hold steady", which is
                         // the one thing that does not.
-                        else if (acquisitionStalled) ACQUISITION_STALL_HINT
+                        else if (acquisitionStalled) null
                         else "Align the guide to the trunk's uphill side; hold steady."
                     locked -> "Hold steady, then tap + to capture."
                     // Border-touch invalidity: the silhouette walk ran off
@@ -2784,7 +2750,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     // fit can lock. Honest guidance instead of a lock. More
                     // specific than the stall hint, so it wins.
                     preview?.edgesClipped == true -> EDGES_CLIPPED_TEXT
-                    acquisitionStalled -> ACQUISITION_STALL_HINT
+                    acquisitionStalled -> null
                     else -> "Align the guide to the trunk's uphill side; hold steady."
                 }
                 // Depth burst: the under-crosshair capture pill carries the
@@ -3208,17 +3174,19 @@ private fun AutoModePill(onClick: () -> Unit) = ScanModePill("Auto", onClick)
 /// cannot drift apart while sitting one above the other.
 @Composable
 private fun ScanModePill(label: String, onClick: () -> Unit) {
-    Text(
-        label,
-        style = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.SemiBold),
-        color = Color.White,
-        modifier = Modifier
-            .clip(CircleShape)
-            .background(Color.Black.copy(alpha = 0.55f))
-            .border(0.5.dp, Color.White.copy(alpha = 0.18f), CircleShape)
-            .clickableNoRipple(onClick)
-            .padding(horizontal = 14.dp, vertical = 7.dp),
-    )
+    Box(Modifier.defaultMinSize(minHeight = 44.dp).clickableNoRipple(onClick),
+        contentAlignment = Alignment.Center) {
+        Text(
+            label,
+            style = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.SemiBold),
+            color = Color.White,
+            modifier = Modifier
+                .clip(CircleShape)
+                .background(Color.Black.copy(alpha = 0.55f))
+                .border(0.5.dp, Color.White.copy(alpha = 0.18f), CircleShape)
+                .padding(horizontal = 14.dp, vertical = 7.dp),
+        )
+    }
 }
 
 @Composable

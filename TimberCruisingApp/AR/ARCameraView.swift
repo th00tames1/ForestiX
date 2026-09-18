@@ -638,7 +638,6 @@ extension ARCameraView {
                   realWorldOcclusion: realWorldOcclusion,
                   sceneMarkers: sceneMarkers,
                   raycaster: raycaster)
-        self.sessionManager = manager as? ARKitSessionManager
     }
 }
 #endif

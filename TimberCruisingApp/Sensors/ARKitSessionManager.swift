@@ -30,6 +30,7 @@
 // compiles to no-ops so the rest of the `Sensors` module stays testable.
 
 import Foundation
+import CoreVideo
 import Combine
 import simd
 

@@ -2,15 +2,14 @@
 // reading the stem AT breast height?".
 //
 // The cruiser puts the crosshair on the ground at the foot of the stem and
-// places a base point. From it a white line rises to BREAST_HEIGHT_M with a
-// flat ring at the top, so where breast height crosses the trunk is a thing
-// on screen rather than a thing estimated by eye.
+// places a base point. A thin riser and height ring persist at its live pose;
+// no timer hides the guide while the cruiser is lining up the measurement.
 //
 // IT IS A GUIDE AND ONLY A GUIDE. Nothing here is read by the estimator,
 // reaches a QuickMeasureEntry, or appears in an export. The diameter capture
 // runs byte for byte the flow it runs with the guide switched off.
 //
-// Twin of iOS AR/BreastHeightGuide.swift: same states, same API names, same
+// Twin of iOS App/BreastHeightGuide.swift: same states, same API names, same
 // shapes, same grace window. Deliberately NOT a singleton like
 // ArSessionHub's plot — one instance per Diameter screen, so a base placed
 // at one tree's foot cannot outlive the screen that placed it.
@@ -26,7 +25,7 @@ import com.google.ar.core.Anchor
 import com.google.ar.core.Pose
 import com.google.ar.core.TrackingState
 import com.hcjeong.forestix.common.UnitSystem
-import com.hcjeong.forestix.common.Units
+import com.hcjeong.forestix.common.BreastHeightGuideHeight
 
 @Stable
 class BreastHeightGuide(private val controller: ArController) {
@@ -35,6 +34,8 @@ class BreastHeightGuide(private val controller: ArController) {
 
     var stage by mutableStateOf(Stage.OFF)
         private set
+
+    var height by mutableStateOf(BreastHeightGuideHeight.METERS_130)
 
     /// The LIVE base point — the anchor's drift-corrected pose, re-read on
     /// every refresh, never the frozen hit coordinate the placement produced.
@@ -64,8 +65,8 @@ class BreastHeightGuide(private val controller: ArController) {
         if (stage == Stage.OFF) stage = Stage.AIMING
     }
 
-    /// Turn the guide off entirely: the toggle going off, developer mode
-    /// going off, or the screen going away. Nothing is left anchored.
+    /// Turn the guide off when its toggle goes off or the screen goes away.
+    /// Nothing is left anchored.
     fun disable() {
         clearAnchor()
         ghostPoint = null
@@ -73,10 +74,11 @@ class BreastHeightGuide(private val controller: ArController) {
         stage = Stage.OFF
     }
 
-    /// Drop the placed base and go back to aiming — the "Clear base" button,
+    /// Drop the placed base and go back to aiming — the "Reset ground" button,
     /// and the tree change in a cruise tally (the Diameter screen is reused
     /// across trees, so tree 7's foot must not still be drawn at tree 8).
     fun clearBase() {
+        ghostPoint = null
         clearAnchor()
         trackingLost = false
         if (stage == Stage.PLACED) stage = Stage.AIMING
@@ -112,7 +114,7 @@ class BreastHeightGuide(private val controller: ArController) {
     /// camera has lost the world, so the camera's own state is part of it.
     /// A routine sub-second dip is ridden out — hiding on the first PAUSED
     /// frame makes the guide blink continuously — and past
-    /// [PLOT_POSE_GRACE_MS] the assembly comes down and the screen says why.
+    /// [PLOT_POSE_GRACE_MS] the guide is hidden until tracking recovers.
     fun refresh() {
         val a = anchor ?: return
         if (a.trackingState == TrackingState.STOPPED) {
@@ -135,70 +137,25 @@ class BreastHeightGuide(private val controller: ArController) {
         if (now - poseStaleSinceMs >= PLOT_POSE_GRACE_MS) trackingLost = true
     }
 
-    /// Where the ring sits — the point the 2D label is projected from.
-    ///
-    /// Null while aiming even though the ghost draws a ring there. The ghost
-    /// says where the base WOULD go; putting a hard "1.37 m" on it would
-    /// claim a height had been established when nothing has been anchored
-    /// yet.
-    fun ringWorldPoint(): Vec3? =
+    /// Selected height above the live base. Ticks and label share this
+    /// projection; no height is shown until a base has been anchored.
+    fun heightWorldPoint(): Vec3? =
         if (stage != Stage.PLACED) null
-        else drawnBase()?.let { Vec3(it.x, it.y + Units.BREAST_HEIGHT_M.toFloat(), it.z) }
+        else drawnBase()?.let { Vec3(it.x, it.y + height.meters.toFloat(), it.z) }
 
-    /// The value pill's text.
-    ///
-    /// The two strings are the SAME HEIGHT, not conversions of one another:
-    /// 4.5 ft is the US definition and 1.37 m is that height written in
-    /// metres. Deriving the imperial side from [Units.BREAST_HEIGHT_M] would
-    /// print "4.49 ft" and invite the reader to think the app had rounded a
-    /// standard. (ScanMetadataSheet spells the identical pair for the same
-    /// reason.)
+    /// Label and world geometry always use the same selected height.
     fun label(system: UnitSystem): String =
-        if (system == UnitSystem.METRIC) "1.37 m" else "4.5 ft"
+        if (system == UnitSystem.METRIC) height.metricLabel else height.imperialLabel
 
-    /// The three world shapes, or none when there is nothing to draw.
-    ///
-    /// FIXED ORDER AND FIXED LENGTH within a state, because
-    /// ArSessionHub.syncMarkers diffs by INDEX: it moves nodes only when
-    /// count, shape, colour and scaling flag all match position for position.
-    /// A list whose order wobbled per poll would destroy and rebuild Filament
-    /// geometry at 5 Hz. Ghost → placed changes the alpha, so that transition
-    /// costs one structural rebuild, which is what already happens when the
-    /// trunk cylinder appears.
+    /// Preview dot while aiming; riser and ring persist at the tracked base.
+    /// Tracking loss still hides them, but elapsed time alone never does.
     fun markers(): List<ArSceneMarker> {
         val base = drawnBase() ?: return emptyList()
-        val placed = stage == Stage.PLACED
-        // 0.35 while aiming — the alpha plotPillarPreviewMarkers uses for the
-        // plot ghost, for the same reason: the cruiser sees where the base
-        // will land before committing to it.
-        val a = if (placed) 1f else GHOST_ALPHA
-        val white = floatArrayOf(1f, 1f, 1f, a)
-        val h = Units.BREAST_HEIGHT_M.toFloat()
-        return listOf(
-            // ONLY the base sphere scales with distance. It marks a place, so
-            // growing it keeps it findable from across a stand. The line and
-            // the ring ARE the measurement — markerDistanceScale scales a
-            // node whole, so a scaled cylinder would draw a height that is
-            // not 1.37 m, which is the exact error this guide exists to
-            // prevent.
-            ArSceneMarker(base, MarkerShape.Sphere(0.06f), white, scalesWithDistance = true),
-            // SceneView's CylinderNode extends ±height/2 about its position,
-            // so a pole standing on the base sits at half its height.
-            ArSceneMarker(
-                Vec3(base.x, base.y + h / 2f, base.z),
-                MarkerShape.Cylinder(0.012f, h), white,
-            ),
-            // Thick annulus, not a hairline circle: the cruiser brings it
-            // round the trunk and reads where it crosses the bark. Built by
-            // buildRingNode, whose vertices carry +Y normals — a hand-built
-            // normal-less annulus renders BLACK under SceneView's lit colour
-            // material (see ringVertices). 0.05 m clears its 0.01 half-width
-            // floor.
-            ArSceneMarker(
-                Vec3(base.x, base.y + h, base.z),
-                MarkerShape.Torus(0.35f, 0.05f), white,
-            ),
-        )
+        if (stage == Stage.PLACED) {
+            return placementMarkers(base, height)
+        }
+        return listOf(ArSceneMarker(base, MarkerShape.Sphere(0.015f),
+            floatArrayOf(1f, 1f, 1f, 0.45f)))
     }
 
     /// The point the assembly is drawn from: the anchor once placed, the aim
@@ -218,14 +175,19 @@ class BreastHeightGuide(private val controller: ArController) {
     }
 
     companion object {
-        private const val GHOST_ALPHA = 0.35f
+        const val PLACE_BUTTON = "Set ground"
+        const val CLEAR_BUTTON = "Reset ground"
 
-        /// Said when the placement ray finds no ground — the words every
-        /// other crosshair-to-ground placement in the app already uses.
-        const val AIM_PROMPT = "Aim at the tree base"
-        const val PLACE_BUTTON = "Place base"
-        const val CLEAR_BUTTON = "Clear base"
-        const val TRACKING_LOST_HINT =
-            "Tracking lost — the guide is hidden rather than drawn in the wrong place."
+        internal fun placementMarkers(base: Vec3, height: BreastHeightGuideHeight): List<ArSceneMarker> {
+            val h = height.meters.toFloat()
+            val white = floatArrayOf(1f, 1f, 1f, 0.9f)
+            return listOf(
+                ArSceneMarker(base, MarkerShape.Sphere(0.015f), white),
+                ArSceneMarker(Vec3(base.x, base.y + h / 2f, base.z),
+                    MarkerShape.Cylinder(0.004f, h), white),
+                ArSceneMarker(Vec3(base.x, base.y + h, base.z),
+                    MarkerShape.Torus(0.35f, 0.01f), white),
+            )
+        }
     }
 }

@@ -10,9 +10,53 @@ Package.resolved
 
 # macOS
 .DS_Store
+__pycache__/
+*.pyc
 
 # Test artifacts
 *.xcresult
 
 # Claude Code worktrees + config
 .claude/
+
+# Manuscripts, literature and internal progress reports.
+#
+# This repository is public. Unpublished drafts and third-party documents
+# do not belong in it — the literature review in particular is someone
+# else's to distribute. Kept on disk, out of git.
+paper/
+*.docx
+*.pdf
+phase*_report.md
+docs/AUDIT_PHASE_*.md
+
+# Private research stays local, INCLUDING analysis and figure-generation code.
+# Already tracked paths need a commit/push guard; ignore rules alone cannot
+# remove or protect files that were previously published.
+/val/
+/research/
+/data/
+/datasets/
+/.codex-backups/
+/docs/ABSTRACT_COVERAGE.md
+/docs/VALIDATION.md
+/tools/validation/audit_v9_artifacts.py
+*.csv
+*.tsv
+*.xlsx
+*.xls
+*.parquet
+*.rds
+*.RData
+*.npz
+*.npy
+*.pkl
+*.pickle
+
+# ON-DEVICE SEGMENTATION WEIGHTS — NOT PUBLISHED.
+# The tree/soot YOLO-seg model is the BSI bark-scorch study's trained weights.
+# That manuscript is unpublished and this repository is public, so the file is
+# carried in the working tree and in the app bundle but never in git. Anyone
+# rebuilding needs a copy dropped at the path below (see TreeSegmenter).
+TimberCruisingApp/Sensors/Models/*.onnx
+android/app/src/main/assets/models/*.onnx

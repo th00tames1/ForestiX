@@ -432,7 +432,7 @@ public struct DBHScanScreen: View {
             // drawn in. Without the stage gate a tap on a frozen result frame
             // would plant a world anchor in a scene the cruiser has stopped
             // measuring.
-            if bhGuideEnabled, bhGuide.stage != .placed, bhGuideChromeVisible {
+            if bhGuide.stage == .aiming, bhGuideChromeVisible {
                 Color.clear
                     .contentShape(Rectangle())
                     .ignoresSafeArea()
@@ -871,7 +871,7 @@ public struct DBHScanScreen: View {
             // base placed at tree 7's foot would otherwise still be drawn
             // while tree 8 is being measured — at 7's distance and 7's
             // ground. The next tree gets its own base or none.
-            bhGuide.clearBase(using: viewModel.session)
+            bhGuide.disable(using: viewModel.session)
             bhPlacementFailed = false
             bhLabelPoint = nil
         }
@@ -894,13 +894,9 @@ public struct DBHScanScreen: View {
         }
         .onChange(of: settings.developerMode) { _, _ in
             configureRawCapture()
-            syncBreastHeightGuide()
             // The segmentation gate has developer mode in it, so turning
             // developer mode off has to stop the feed the same tick.
             viewModel.segmentationEnabled = segmentationGateOpen
-        }
-        .onChange(of: settings.breastHeightGuide) { _, _ in
-            syncBreastHeightGuide()
         }
         .onChange(of: settings.breastHeightGuideHeight) { _, _ in
             syncBreastHeightGuide()
@@ -1575,12 +1571,6 @@ public struct DBHScanScreen: View {
 
     // MARK: - Breast-height guide
 
-    /// Both developer mode and the guide toggle are required. A saved ON
-    /// preference cannot expose the guide after developer mode is disabled.
-    private var bhGuideEnabled: Bool {
-        settings.developerMode && settings.breastHeightGuide
-    }
-
     /// Ground placement has its own preview dot, not the DBH measuring row.
     private var bhGroundPlacementActive: Bool {
         bhGuideChromeVisible && bhGuide.stage == .aiming
@@ -1603,20 +1593,13 @@ public struct DBHScanScreen: View {
     /// Whether any of the guide is on screen right now — the gate plus the
     /// guide having actually been armed.
     private var bhGuideActive: Bool {
-        bhGuideEnabled && bhGuide.stage != .off
+        bhGuide.stage != .off
     }
 
-    /// Bring the guide's state into line with the gate. Idempotent, so it can
-    /// be called from appear and from either toggle changing.
+    /// Apply height without arming the optional placement mode.
     private func syncBreastHeightGuide() {
         bhGuide.height = settings.breastHeightGuideHeight
-        if bhGuideEnabled {
-            bhGuide.arm()
-        } else {
-            bhGuide.disable(using: viewModel.session)
-            bhPlacementFailed = false
-            bhLabelPoint = nil
-        }
+        // Only the Set ground button may arm placement.
     }
 
     /// The guide's world geometry, or nothing.
@@ -1634,37 +1617,58 @@ public struct DBHScanScreen: View {
 
     /// Placement controls are disabled throughout capture and result review.
     private var bhGuideChromeVisible: Bool {
-        guard bhGuideActive, !hidingChromeForCapture else { return false }
+        guard !hidingChromeForCapture else { return false }
         switch viewModel.state {
         case .idle, .aligning, .armed, .rejected: return true
         default: return false
         }
     }
 
-    /// One control above the shutter. No instructional banner over the tree.
+    /// Compact opt-in controls above the shutter; no instructional banner.
     private var bhGuideButton: some View {
-        Button {
-            if bhGuide.stage == .placed {
-                bhGuide.clearBase(using: viewModel.session)
-                bhPlacementFailed = false
-                bhLabelPoint = nil
-            } else {
-                placeBreastHeightBase()
+        HStack(spacing: 8) {
+            Button {
+                if bhGuide.stage == .off {
+                    bhGuide.arm()
+                    bhPlacementFailed = false
+                } else if bhGuide.stage == .placed {
+                    bhGuide.clearBase(using: viewModel.session)
+                    bhPlacementFailed = false
+                    bhLabelPoint = nil
+                } else {
+                    placeBreastHeightBase()
+                }
+            } label: {
+                Text(bhGuide.stage == .placed ? "Reset ground"
+                     : bhGuide.stage == .off ? "Set ground"
+                     : bhPlacementFailed ? "Retry ground" : "Place ground")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7)
+                    .background(Color.black.opacity(0.55), in: Capsule())
+                    .overlay(Capsule().stroke(.white.opacity(0.18), lineWidth: 0.5))
+                    .frame(minHeight: 44)
+                    .contentShape(Rectangle())
             }
-        } label: {
-            Text(bhGuide.stage == .placed ? "Reset ground"
-                 : bhPlacementFailed ? "Retry ground" : "Set ground")
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("dbhScan.breastHeightBase")
+            if bhGuide.stage != .off {
+                Button(bhGuide.stage == .placed ? "Clear ground" : "Cancel") {
+                    bhGuide.disable(using: viewModel.session)
+                    bhPlacementFailed = false
+                    bhLabelPoint = nil
+                }
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 7)
                 .background(Color.black.opacity(0.55), in: Capsule())
-                .overlay(Capsule().stroke(.white.opacity(0.18), lineWidth: 0.5))
                 .frame(minHeight: 44)
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("dbhScan.cancelGround")
+            }
         }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("dbhScan.breastHeightBase")
     }
 
     /// Use the user's tapped point, or the crosshair for the button. A miss

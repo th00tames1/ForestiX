@@ -306,6 +306,24 @@ fun SettingsScreen(nav: NavController) {
             // iOS parity).
             FormSection(header = "Display") {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Guide height", style = type.body, color = colors.textPrimary)
+                    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                        BreastHeightGuideHeight.entries.forEachIndexed { index, height ->
+                            SegmentedButton(
+                                selected = settings.breastHeightGuideHeight == height,
+                                onClick = { env.settings.setBreastHeightGuideHeight(height) },
+                                shape = SegmentedButtonDefaults.itemShape(
+                                    index = index, count = BreastHeightGuideHeight.entries.size),
+                            ) { Text(height.metricLabel, style = type.caption, maxLines = 1) }
+                        }
+                    }
+                    Text(
+                        "Vertical height above the selected point.",
+                        style = type.caption, color = colors.textSecondary,
+                    )
+                }
+                FormDivider()
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("Appearance", style = type.body, color = colors.textPrimary)
                     val appearanceOptions = listOf("light" to "Light", "dark" to "Dark")
                     SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
@@ -492,40 +510,7 @@ fun SettingsScreen(nav: NavController) {
                     )
                 }
                 if (settings.developerMode) {
-                    // Both the toggle and height selector are developer-only.
-                    // DBHScanScreen also gates operation on developer mode.
-                    FormDivider()
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Text("Breast-height guide", style = type.body, color = colors.textPrimary)
-                            Text(
-                                "Show a height marker above the ground point you select on the Diameter scan.",
-                                style = type.caption, color = colors.textSecondary,
-                            )
-                        }
-                        Switch(
-                            checked = settings.breastHeightGuide,
-                            onCheckedChange = { env.settings.setBreastHeightGuide(it) },
-                        )
-                    }
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("Guide height", style = type.body, color = colors.textPrimary)
-                        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                            BreastHeightGuideHeight.entries.forEachIndexed { index, height ->
-                                SegmentedButton(
-                                    selected = settings.breastHeightGuideHeight == height,
-                                    onClick = { env.settings.setBreastHeightGuideHeight(height) },
-                                    shape = SegmentedButtonDefaults.itemShape(
-                                        index = index, count = BreastHeightGuideHeight.entries.size),
-                                ) { Text(height.metricLabel, style = type.caption, maxLines = 1) }
-                            }
-                        }
-                        Text(
-                            "Vertical height above the selected point.",
-                            style = type.caption, color = colors.textSecondary,
-                        )
-                    }
-                    FormDivider()
+
 
                     // AUTOMATIC STEM EDGES — an on-device segmentation model
                     // placing the measuring bracket.

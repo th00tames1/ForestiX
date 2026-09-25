@@ -313,6 +313,20 @@ public struct SettingsScreen: View {
             }
             .pickerStyle(.segmented)
             .accessibilityIdentifier("settings.appearance")
+
+            Picker("Guide height", selection: Binding(
+                get: { settings.breastHeightGuideHeight },
+                set: { settings.breastHeightGuideHeight = $0 })
+            ) {
+                ForEach(BreastHeightGuideHeight.allCases, id: \.self) { height in
+                    Text(height.metricLabel).tag(height)
+                }
+            }
+            .pickerStyle(.segmented)
+            .accessibilityIdentifier("settings.breastHeightGuideHeight")
+            Text("Vertical height above the selected point.")
+                .font(ForestixType.caption)
+                .foregroundStyle(ForestixPalette.textSecondary)
         }
     }
 
@@ -412,34 +426,7 @@ public struct SettingsScreen: View {
             .accessibilityIdentifier("settings.developerMode")
 
             if settings.developerMode {
-                // Both the toggle and height selector are developer-only.
-                // DBHScanScreen also gates operation on developer mode.
-                Toggle(isOn: Binding(
-                    get: { settings.breastHeightGuide },
-                    set: { settings.breastHeightGuide = $0 })
-                ) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Breast-height guide")
-                        Text("Show a height marker above the ground point you select on the Diameter scan.")
-                            .font(ForestixType.caption)
-                            .foregroundStyle(ForestixPalette.textSecondary)
-                    }
-                }
-                .accessibilityIdentifier("settings.breastHeightGuide")
 
-                Picker("Guide height", selection: Binding(
-                    get: { settings.breastHeightGuideHeight },
-                    set: { settings.breastHeightGuideHeight = $0 })
-                ) {
-                    ForEach(BreastHeightGuideHeight.allCases, id: \.self) { height in
-                        Text(height.metricLabel).tag(height)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .accessibilityIdentifier("settings.breastHeightGuideHeight")
-                Text("Vertical height above the selected point.")
-                    .font(ForestixType.caption)
-                    .foregroundStyle(ForestixPalette.textSecondary)
 
                 // AUTOMATIC STEM EDGES — an on-device segmentation model
                 // placing the measuring bracket.

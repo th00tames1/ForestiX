@@ -159,8 +159,8 @@ data class SettingsSnapshot(
     /// from the tree base on the Diameter scan so the cruiser can see where
     /// breast height crosses the stem before reading the diameter there.
     ///
-    /// Default OFF. Operation requires developer mode too; disabling it
-    /// preserves this preference but removes the active guide and anchor.
+    /// Legacy preference retained for compatibility; the scan ignores it.
+    /// Set ground is public and only an explicit button tap arms placement.
     /// It changes no measurement and appears in no export. Same key as iOS
     /// (`AppSettings.Keys.breastHeightGuide`, "tc.breastHeightGuide").
     val breastHeightGuide: Boolean = false,

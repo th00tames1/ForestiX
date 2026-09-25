@@ -6,6 +6,22 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class BreastHeightGuideTest {
+    @Test fun placementIsOptInAndHeightChangesNeverArmIt() {
+        val guide = BreastHeightGuide(ArController())
+        guide.height = BreastHeightGuideHeight.METERS_137
+        guide.updateGhost(Vec3(1f, 2f, 3f))
+        assertEquals(BreastHeightGuide.Stage.OFF, guide.stage)
+        assertNull(guide.ghostPoint)
+        assertFalse(guide.place(Vec3(1f, 2f, 3f)))
+        assertTrue(guide.markers().isEmpty())
+        guide.arm()
+        assertEquals(BreastHeightGuide.Stage.AIMING, guide.stage)
+        guide.disable() // Cancel, clear, or advance to the next tree.
+        guide.height = BreastHeightGuideHeight.METERS_130
+        assertEquals(BreastHeightGuide.Stage.OFF, guide.stage)
+        assertTrue(guide.markers().isEmpty())
+    }
+
     @Test fun defaultsAndSavedChoice() {
         assertEquals(BreastHeightGuideHeight.METERS_130, BreastHeightGuideHeight.fromRaw(null))
         assertEquals(BreastHeightGuideHeight.METERS_130, BreastHeightGuideHeight.fromRaw("invalid"))

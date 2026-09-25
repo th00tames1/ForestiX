@@ -383,9 +383,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // there instead of near there. It is chrome and nothing else — it never
     // reaches the estimator, the stored reading or an export.
     //
-    // Both developer mode and the guide toggle are required. A saved ON
-    // preference cannot expose the guide after developer mode is disabled.
-    val bhGuideOn = settings.developerMode && settings.breastHeightGuide
+    // Public, opt-in per tree: only the Set ground button arms placement.
     val bhGuide = remember { BreastHeightGuide(controller) }
     /// Live camera tilt, driving the horizon line. 20 Hz — fast enough that
     /// the line reads as attached to the world rather than as catching up
@@ -429,24 +427,16 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     /// Projected height in AR-view pixels; the ticks and label share it.
     var bhLabelPos by remember { mutableStateOf<Offset?>(null) }
     var bhPlacementFailed by remember { mutableStateOf(false) }
-    // The gate owns the lifecycle in both directions: arming when it comes
-    // on, and taking the anchor down with it when it goes off, so a toggle
-    // flipped mid-scan leaves nothing anchored behind it.
-    LaunchedEffect(bhGuideOn, settings.breastHeightGuideHeight) {
-        bhPlacementFailed = false
+    // Height preferences never auto-arm placement.
+    LaunchedEffect(settings.breastHeightGuideHeight) {
         bhGuide.height = settings.breastHeightGuideHeight
-        if (bhGuideOn) {
-            bhGuide.arm()
-        } else {
-            bhGuide.disable()
-            bhLabelPos = null
-        }
+        // Only Set ground may arm placement, never a saved setting.
     }
     // This screen is REUSED across a cruise tally — only the tree number
     // advances — so a base placed at tree 7's foot must not still be standing
     // there while tree 8 is measured.
     LaunchedEffect(cruiseTreeNumber) {
-        bhGuide.clearBase()
+        bhGuide.disable()
         bhPlacementFailed = false
     }
     DisposableEffect(Unit) {
@@ -1287,7 +1277,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     }
 
     val useBracketForDepth = adjustMode || segmentationDroveTheBracket
-    val groundPlacementActive = bhGuideOn && bhGuide.stage == BreastHeightGuide.Stage.AIMING &&
+    val groundPlacementActive = bhGuide.stage == BreastHeightGuide.Stage.AIMING &&
         stage == Stage.AIMING && !manualOpen && !depthBlocked && !hidingChromeForCapture
     val depthGuidanceActive = stage == Stage.AIMING && !manualOpen && !groundPlacementActive &&
         !depthBlocked && controller.supportsDepth && !hidingChromeForCapture
@@ -1973,7 +1963,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     }
 
     fun placeBreastHeightBase(hit: Vec3?) {
-        if (!bhGuideOn || stage != Stage.AIMING || manualOpen || depthBlocked ||
+        if (stage != Stage.AIMING || manualOpen || depthBlocked ||
             bhGuide.stage != BreastHeightGuide.Stage.AIMING) return
         bhPlacementFailed = hit == null || !bhGuide.place(hit)
         if (!bhPlacementFailed) {
@@ -2006,13 +1996,8 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         // The guide is dropped for the accept snapshot along with the 2D
         // chrome. That JPEG is exported, and the guide must never appear in
         // an export.
-        // GATED ON THE FLAG ITSELF, not only on the guide's own stage. The
-        // stage is driven to OFF by a LaunchedEffect, so between the toggle
-        // flipping and that effect running there is a frame where `markers()`
-        // still answers with the shapes for a guide the cruiser has just
-        // turned off. iOS tests the flag here; this is that test.
         // World guide persists through capture/review, but not export photos.
-        val bhMarkers = if (!bhGuideOn || hidingChromeForCapture || manualOpen) emptyList()
+        val bhMarkers = if (hidingChromeForCapture || manualOpen) emptyList()
                         else bhGuide.markers()
         val dbhMarkers = bhMarkers + if (!groundPlacementActive &&
             (stage == Stage.AIMING || stage == Stage.CAPTURING)) {
@@ -2067,8 +2052,8 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         // So the tap is a lambda, and every full-screen layer that can be in
         // front of the AR view offers it. One place decides whether a tap is
         // allowed and what it does; the layers only forward.
-        val groundTapArmed = !depthBlocked && !manualOpen && bhGuideOn && stage == Stage.AIMING &&
-            bhGuide.stage != BreastHeightGuide.Stage.PLACED
+        val groundTapArmed = !depthBlocked && !manualOpen && stage == Stage.AIMING &&
+            bhGuide.stage == BreastHeightGuide.Stage.AIMING
         val placeBaseAt: (Float, Float) -> Unit = { x, y ->
             if (groundTapArmed) {
                 placeBreastHeightBase(controller.screenGroundHit(x, y))
@@ -2078,7 +2063,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             Box(
                 Modifier
                     .fillMaxSize()
-                    .pointerInput(bhGuideOn) {
+                    .pointerInput(bhGuide.stage) {
                         detectTapGestures { p -> placeBaseAt(p.x, p.y) }
                     },
             )
@@ -2521,7 +2506,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         }
 
         // Ticks follow the projected anchored height; they never consume taps.
-        if (bhGuideOn && !hidingChromeForCapture && !depthBlocked &&
+        if (!hidingChromeForCapture && !depthBlocked &&
             stage == Stage.AIMING && !manualOpen &&
             bhGuide.stage == BreastHeightGuide.Stage.PLACED && !bhGuide.trackingLost) {
             bhLabelPos?.let { point ->
@@ -2547,7 +2532,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         // pill. Both shutter flanks are already Type and Adjust, so the
         // button stays here beside the Auto pill and remains the way to place
         // a base without letting go of the phone.
-        val showBhGuidePill = bhGuideOn && stage == Stage.AIMING && !depthBlocked &&
+        val showBhGuidePill = stage == Stage.AIMING && !depthBlocked &&
             !manualOpen && !hidingChromeForCapture
         val aboveBottomBlock: (@Composable () -> Unit)? =
             if (undoToast != null || showAutoPill || showBhGuidePill) {
@@ -2560,18 +2545,31 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                             UndoToastPill(savedTitle) { undoTally() }
                         }
                         if (showBhGuidePill) {
-                            val placed = bhGuide.stage == BreastHeightGuide.Stage.PLACED
-                            ScanModePill(
-                                if (placed) BreastHeightGuide.CLEAR_BUTTON
-                                else if (bhPlacementFailed) "Retry ground"
-                                else BreastHeightGuide.PLACE_BUTTON,
-                            ) {
-                                if (placed) {
-                                    bhGuide.clearBase()
-                                    bhPlacementFailed = false
-                                    bhLabelPos = null
-                                } else {
-                                    placeBreastHeightBase(controller.screenCenterGroundHit())
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                val placed = bhGuide.stage == BreastHeightGuide.Stage.PLACED
+                                ScanModePill(
+                                    if (placed) BreastHeightGuide.CLEAR_BUTTON
+                                    else if (bhPlacementFailed) "Retry ground"
+                                    else if (bhGuide.stage == BreastHeightGuide.Stage.OFF) BreastHeightGuide.PLACE_BUTTON
+                                    else "Place ground",
+                                ) {
+                                    if (bhGuide.stage == BreastHeightGuide.Stage.OFF) {
+                                        bhGuide.arm()
+                                        bhPlacementFailed = false
+                                    } else if (placed) {
+                                        bhGuide.clearBase()
+                                        bhPlacementFailed = false
+                                        bhLabelPos = null
+                                    } else {
+                                        placeBreastHeightBase(controller.screenCenterGroundHit())
+                                    }
+                                }
+                                if (bhGuide.stage != BreastHeightGuide.Stage.OFF) {
+                                    ScanModePill(if (placed) "Clear ground" else "Cancel") {
+                                        bhGuide.disable()
+                                        bhPlacementFailed = false
+                                        bhLabelPos = null
+                                    }
                                 }
                             }
                         }

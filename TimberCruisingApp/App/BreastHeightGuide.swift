@@ -134,6 +134,7 @@ public final class BreastHeightGuide: ObservableObject {
     @discardableResult
     public func place(hit: SIMD3<Float>,
                       using session: ARKitSessionManager) -> Bool {
+        guard stage == .aiming else { return false }
         guard let id = session.addWorldAnchor(
             at: hit, name: "forestix.breastHeight.base")
         else {

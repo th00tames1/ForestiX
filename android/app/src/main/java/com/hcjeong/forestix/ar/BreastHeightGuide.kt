@@ -87,6 +87,7 @@ class BreastHeightGuide(private val controller: ArController) {
     /// Anchor the base at a crosshair hit. False when the session cannot take
     /// an anchor, which is the same refusal ArSessionHub.placePlot gives.
     fun place(hit: Vec3): Boolean {
+        if (stage != Stage.AIMING) return false
         val session = controller.session ?: return false
         val created = runCatching {
             session.createAnchor(Pose.makeTranslation(hit.x, hit.y, hit.z))

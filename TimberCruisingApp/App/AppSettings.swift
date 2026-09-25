@@ -279,9 +279,8 @@ public final class AppSettings: ObservableObject {
         set { defaults.set(newValue, forKey: Keys.dbhAutoSegmentation); objectWillChange.send() }
     }
 
-    /// Saved guide preference, OFF by default. Operation requires developer
-    /// mode too; disabling developer mode preserves this choice but removes
-    /// the active guide and its anchor. Android uses the same preference key.
+    /// Legacy preference retained for compatibility. The scan ignores it:
+    /// Set ground is public and only an explicit button tap arms placement.
     public var breastHeightGuide: Bool {
         get { defaults.bool(forKey: Keys.breastHeightGuide) }
         set { defaults.set(newValue, forKey: Keys.breastHeightGuide); objectWillChange.send() }

@@ -454,6 +454,28 @@ public enum DBHEstimator {
     /// collapses the back-projected points to one world-XZ spot and the
     /// diameter reads a few centimetres. We try both axes at the tap and pick
     /// whichever yields the wider XZ chord — the across-the-trunk direction.
+    /// Direction of a horizontal screen segment in sensor-native depth pixels.
+    /// Depth content must never decide screen orientation. Keep this separate
+    /// from legacy replay's content-based fallback.
+    public static func screenHorizontalGuideAxis(
+        frame: ARDepthFrame, tapPixel: SIMD2<Double>
+    ) -> GuideAxis? {
+        guard let m = frame.viewMapping,
+              m.flattened.allSatisfy({ $0.isFinite }),
+              abs(m.a * m.d - m.b * m.c) > 1e-12,
+              tapPixel.x.isFinite, tapPixel.y.isFinite,
+              tapPixel.x >= 0, tapPixel.x < Double(frame.width),
+              tapPixel.y >= 0, tapPixel.y < Double(frame.height) else { return nil }
+        // Screen x maps to (a, c), NOT (a, b) in this row-major affine.
+        let dx = abs(m.a), dy = abs(m.c)
+        let major = max(dx, dy), minor = min(dx, dy)
+        // The estimator walks one grid axis; do not approximate an oblique ray.
+        guard major > 1e-12, minor <= major * 0.001 else { return nil }
+        return dx > dy
+            ? .row(y: min(Int(tapPixel.y.rounded()), frame.height - 1))
+            : .col(x: min(Int(tapPixel.x.rounded()), frame.width - 1))
+    }
+
     public static func pickGuideAxis(
         frame: ARDepthFrame,
         tapPixel: SIMD2<Double>,

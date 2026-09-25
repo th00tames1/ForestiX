@@ -487,6 +487,23 @@ object DBHEstimator {
     /// collapses the back-projected points to a single world XZ spot and the
     /// diameter reads a few cm. We pick whichever axis yields the wider XZ
     /// chord at the centre, which is the across-the-trunk direction.
+    /** Live screen-horizontal direction. Never infer orientation from depth.
+     * Legacy pickGuideAxis remains available for old recordings without mapping. */
+    fun screenHorizontalGuideAxis(frame: ArDepthFrame, tapX: Double, tapY: Double): GuideAxis? {
+        val m = frame.depthFromViewAffine ?: return null
+        if (m.size != 6 || m.any { !it.isFinite() } ||
+            abs(m[0].toDouble() * m[4] - m[1].toDouble() * m[3]) <= 1e-12 ||
+            !tapX.isFinite() || !tapY.isFinite() ||
+            tapX < 0 || tapX >= frame.width || tapY < 0 || tapY >= frame.height) return null
+        // Row-major affine: screen x maps to (a, c), not (a, b).
+        val dx = abs(m[0].toDouble())
+        val dy = abs(m[3].toDouble())
+        val major = max(dx, dy)
+        if (major <= 1e-12 || min(dx, dy) > major * 0.001) return null
+        return if (dx > dy) GuideAxis.Row(Math.round(tapY).toInt().coerceAtMost(frame.height - 1))
+            else GuideAxis.Col(Math.round(tapX).toInt().coerceAtMost(frame.width - 1))
+    }
+
     fun pickGuideAxis(frame: ArDepthFrame, tapX: Double, tapY: Double, cal: ProjectCalibration): GuideAxis {
         val dTap = medianDepth(tapX, tapY, frame, 2) ?: return GuideAxis.Col(Math.round(tapX).toInt())
         fun chordFor(axis: GuideAxis): Double {

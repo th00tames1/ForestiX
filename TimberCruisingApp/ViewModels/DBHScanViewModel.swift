@@ -211,7 +211,6 @@ public final class DBHScanViewModel: ObservableObject {
         // the bracket, and there is no bracket outside this mode.
         didSet {
             if !edgeAdjustActive {
-                adjustAxisLatch = nil
                 resetBracketSettling()
             }
         }
@@ -462,32 +461,7 @@ public final class DBHScanViewModel: ObservableObject {
     public func stopSegmentationFeed() { segmentedExtent = nil }
     #endif
 
-    /// Guide axis latched on the first ADJUST preview tick and held for the
-    /// whole session. `pickGuideAxis` votes per frame on the wider
-    /// silhouette chord, which can flip row↔col on the cluttered scenes
-    /// ADJUST exists for, and a flip changes the extent the handle fractions
-    /// are read against — so the value jumps. One deterministic axis per
-    /// session keeps the bracket stable.
-    ///
-    /// It was removed once, on the argument that a latch taken before the
-    /// cruiser has aimed can fix the WRONG axis for a whole plot. That
-    /// argument still stands and is worth revisiting with a device. It is
-    /// not worth revisiting from a keyboard: the removal shipped alongside
-    /// the mapping rewrite and the pair left the screen blank.
-    ///
-    /// WHAT CHANGED WITH "NO AUTO INTERLUDE" (field report, this round).
-    /// ADJUST used to arm only after the automatic path had produced a fit,
-    /// so the first ADJUST tick — the one that latched — was always taken on
-    /// a frame with a stem in it. The screen now opens on the bracket, so
-    /// the first tick lands while the phone is still coming up off the
-    /// cruiser's side. Latching THAT vote is exactly the failure the
-    /// paragraph above warns about, and it is silent: the wrong axis swaps
-    /// the extent the fractions are read against (256 vs 192 px), which
-    /// scales every diameter of the plot by 4:3 without any visible symptom.
-    /// So the latch now waits for a tick that actually MEASURED something —
-    /// see `handleDepthFrame`. That is the same condition the interlude used
-    /// to guarantee, restored without the interlude.
-    private var adjustAxisLatch: GuideAxis?
+    // No session-wide axis vote: each preview follows the display transform.
 
     /// Bracket state latched at the moment the capture "+" started the
     /// burst, so dragging a handle (or leaving ADJUST) mid-burst can't
@@ -505,9 +479,8 @@ public final class DBHScanViewModel: ObservableObject {
     private var burstBracketLeft: Double = 0
     private var burstBracketRight: Double = 0
     /// Walk axis for the CURRENT burst only, derived from the mapped
-    /// bracket at the moment "+" was tapped. Not a session latch — the
-    /// session-scoped one is `adjustAxisLatch`, and this is deliberately
-    /// separate so a burst measures the axis it was started on.
+    /// screen direction at the moment "+" was tapped. Rotated frames are
+    /// excluded so a burst measures the axis it was started on.
     private var burstBracketAxis: GuideAxis?
     /// Newest depth frame, kept so the tap handler can map the bracket at
     /// the instant of capture.
@@ -803,7 +776,13 @@ public final class DBHScanViewModel: ObservableObject {
         if state == .aligning, stable { state = .armed }
         if state == .armed, !stable    { state = .aligning }
         if state == .capturing {
-            burstBuffer.append(frame)
+            // Do not mix a rotated/unmapped frame into a burst whose axis
+            // is already latched and will be written to the manifest.
+            if let axis = burstBracketAxis,
+               DBHEstimator.screenHorizontalGuideAxis(
+                frame: frame, tapPixel: burstTap) == axis {
+                burstBuffer.append(frame)
+            }
             // Close the current sub-sample once its window elapsed AND it
             // has enough frames for a chord estimate (≥5). Slow depth
             // delivery just stretches the window; the watchdog bounds it.
@@ -856,68 +835,40 @@ public final class DBHScanViewModel: ObservableObject {
         guard now - lastPreviewUpdate >= previewMinIntervalSec else { return }
         lastPreviewUpdate = now
 
-        // Auto-pick the across-the-trunk axis (orientation-robust) instead of
-        // a fixed orientation guess, which on some devices walked the strip
-        // along the trunk and under-read the diameter to a few cm.
-        //
-        // LAZY, because it is not cheap — two strip extractions plus a
-        // back-projection each — and ADJUST, which is now the default path,
-        // needs it only on the tick that latches its axis. Voting it on every
-        // tick and discarding the answer was pure cost on the screen the
-        // cruiser spends the whole plot in. Field report 9.
-        func votedGuideAxis() -> GuideAxis {
-            DBHEstimator.pickGuideAxis(
-                frame: frame,
-                tapPixel: SIMD2(Double(cx), Double(cy)),
-                calibration: calibration)
+        // Derive the on-screen horizontal direction from this frame's affine,
+        // never from the trunk/background depth distribution.
+        guard let screenAxis = DBHEstimator.screenHorizontalGuideAxis(
+            frame: frame, tapPixel: SIMD2(Double(cx), Double(cy))) else {
+            bracketMappingReady = false
+            previewFit = nil
+            previewDbhCm = nil
+            resetBracketSettling()
+            previewStatusIsDiagnostic = false
+            previewStatusText = "Waiting for camera alignment."
+            return
         }
+        bracketMappingReady = true
 
         // ADJUST (edge-bracket) mode bypasses BOTH the automatic
         // edge-finding and the stability/EMA machinery: the live value
         // and the chord bar must track the user's handles exactly, so
         // the raw bracket fit is published on every preview tick. The walk
-        // axis is voted per frame until the bracket first measures, then
-        // latched — see `adjustAxisLatch`.
+        // axis comes from each frame's display transform.
         // SEGMENTATION TAKES THE BRACKET BRANCH TOO. The capture routes a
         // model-placed reading through `bracketChordEstimate`, so the number
         // on screen has to come from the same fit — otherwise the cruiser
         // reads the auto depth-walk's diameter, taps "+", and a different one
         // is stored, with nothing saying so.
         if edgeAdjustActive || segmentationDroveTheBracket {
-            // THE HANDLE FRACTIONS GO STRAIGHT IN, against a guide axis
-            // latched for the session — restored verbatim from the version
-            // the field used and verified.
-            //
-            // A view→depth affine was inserted here on the reasoning that a
-            // screen fraction and a depth fraction cannot be the same
-            // number under an aspect-fill crop. That reasoning produced a
-            // screen with no diameter on it for three builds, and the
-            // cruiser had already measured a stand with the code it
-            // replaced. Field evidence outranks the derivation, so the
-            // derivation goes. The mapping is still computed and recorded in
-            // the raw-capture manifest, where it costs nothing and can
-            // settle the question later against a tape.
-            //
-            // The axis is VOTED per tick until the bracket first measures
-            // something, and latched from that tick onwards. Two reasons for
-            // the delay, both in `adjustAxisLatch`: the screen now opens on
-            // the bracket, so an unconditional latch would fix the axis off
-            // whatever the phone was pointed at while being raised; and a
-            // wrong axis is silent — it rescales the whole plot by 4:3.
-            // Voting until then costs no more than the auto interlude it
-            // replaces, which called `votedGuideAxis()` on every tick for
-            // exactly the same stretch of time; once latched it costs
-            // nothing, which is what field report 9 asked for.
-            let bracketAxis = adjustAxisLatch ?? votedGuideAxis()
+            // Preserve the existing span/depth calculation; only replace the
+            // unsafe content-based axis vote with screen geometry.
+            let bracketAxis = screenAxis
             let fit = DBHEstimator.bracketChordFit(
                 frame: frame,
                 guideAxis: bracketAxis,
                 leftFraction: edgeBracketLeftFraction,
                 rightFraction: edgeBracketRightFraction)
-            // A fit means the walk crossed real depth at the guide line, so
-            // this vote was taken on an aimed frame. Latch it and stop
-            // voting.
-            if adjustAxisLatch == nil, fit != nil { adjustAxisLatch = bracketAxis }
+            // Both preview and capture use screen geometry.
             bracketMappingReady = true
             smoothedPreviewDbhCm = nil
             smoothedCenterWorldXZ = nil
@@ -1038,7 +989,7 @@ public final class DBHScanViewModel: ObservableObject {
         // jitter and the multi-frame median in the burst handles the
         // rest). The legacy partial-arc path keeps its tap-depth hint.
         let fit: DBHEstimator.PreviewFit?
-        let axis = votedGuideAxis()
+        let axis = screenAxis
         switch dbhMeasurementMethod {
         case .chord:
             fit = DBHEstimator.chordPreviewFit(
@@ -1414,30 +1365,14 @@ public final class DBHScanViewModel: ObservableObject {
         burstUsedBracket = edgeAdjustActive || burstUsedSegmentation
         burstBracketLeft = edgeBracketLeftFraction
         burstBracketRight = edgeBracketRightFraction
-        // VOTE THE AXIS HERE, on the frame the cruiser is aimed at right now.
-        //
-        // This used to copy `adjustAxisLatch`, the session-scoped preview
-        // latch, which is the failure its own doc comment warns about: the
-        // latch is taken on the first preview tick that measures anything —
-        // while the phone is still being raised — and then every capture of
-        // the plot inherits it. A wrong axis reads the handle fractions
-        // against the other extent (256 px instead of 192) and multiplies the
-        // diameter by 4:3, silently.
-        //
-        // It reached the field. Across the two validation plots the reading
-        // and the bundle disagreed on 60 of 107 iOS diameters, the reading
-        // running 1.38x high, and recomputing those 60 on the opposite axis
-        // reproduces the reading to a median ratio of 1.0000. The bundle —
-        // which votes per capture, below in `recordDBH` — is the one that
-        // matches the tape.
-        //
-        // So: vote per capture, off `latestFrameForBracket`, and hand that
-        // same axis to the recorder so the two records cannot diverge again.
-        // The preview keeps its latch; it costs one vote per capture here,
-        // not one per tick, which is what field report 9 asked for.
-        burstBracketAxis = latestFrameForBracket.map {
-            DBHEstimator.pickGuideAxis(frame: $0, tapPixel: tapPixel, calibration: calibration)
-        } ?? adjustAxisLatch
+        guard let frame = latestFrameForBracket,
+              let axis = DBHEstimator.screenHorizontalGuideAxis(
+                frame: frame, tapPixel: tapPixel) else {
+            captureRefusalReason = "Waiting for camera alignment."
+            return
+        }
+        // One axis for preview, measurement, and the raw bundle.
+        burstBracketAxis = axis
         burstBuffer.removeAll(keepingCapacity: true)
         burstTap = tapPixel
         subSamples.removeAll(keepingCapacity: true)
@@ -1588,26 +1523,14 @@ public final class DBHScanViewModel: ObservableObject {
         // Retain ONE representative depth frame per sub-sample (≤5 → the
         // depth_0..4.bin bundle layout) for raw-capture replay.
         if rawCaptureEnabled, let rep = frames.first { recordFrames.append(rep) }
-        if let firstFrame = frames.first {
-            // LAZY, for the same reason as the preview tick (field report
-            // 9): `pickGuideAxis` is two strip extractions plus a
-            // back-projection, this runs on the main actor five times per
-            // capture, and the bracket path — ADJUST, the default — already
-            // latched its axis when "+" was tapped and threw this answer
-            // away. Same value wherever it is still used.
-            func votedGuideAxis() -> GuideAxis {
-                DBHEstimator.pickGuideAxis(
-                    frame: firstFrame,
-                    tapPixel: burstTap,
-                    calibration: calibration)
-            }
+        if !frames.isEmpty, let axis = burstBracketAxis {
             // Dispatch: manual bracket (ADJUST captures, latched at tap
             // time) → chord method → original §7.1 partial-arc pipeline.
             let outcome: DBHResult?
             if burstUsedBracket {
                 outcome = DBHEstimator.bracketChordEstimate(
                     frames: frames,
-                    guideAxis: burstBracketAxis ?? votedGuideAxis(),
+                    guideAxis: axis,
                     leftFraction: burstBracketLeft,
                     rightFraction: burstBracketRight,
                     calibration: calibration)
@@ -1615,7 +1538,7 @@ public final class DBHScanViewModel: ObservableObject {
                 let input = DBHScanInput(
                     frames: frames,
                     tapPixel: burstTap,
-                    guideAxis: votedGuideAxis(),
+                    guideAxis: axis,
                     projectCalibration: calibration,
                     rawPointsWriter: rawPointsWriter,
                     unitSystem: unitSystem)

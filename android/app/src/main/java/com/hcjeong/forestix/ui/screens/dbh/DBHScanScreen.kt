@@ -969,7 +969,14 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 val tap = f.viewToDepth(controller.viewWidthPx / 2f, controller.viewHeightPx / 2f)
                 val tapX = tap?.first ?: (f.width / 2.0)
                 val tapY = tap?.second ?: (f.height / 2.0)
-                val axis = DBHEstimator.pickGuideAxis(f, tapX, tapY, calibration)
+                val axis = DBHEstimator.screenHorizontalGuideAxis(f, tapX, tapY)
+                if (axis == null) {
+                    preview = null
+                    smoothedDiaCm = null
+                    cylinderMarker = null
+                    carryWidths.clear()
+                    return@let
+                }
                 val isRowAxis = axis is GuideAxis.Row
                 if (lastAxisRow != isRowAxis) { carryWidths.clear(); lastAxisRow = isRowAxis }
                 // Preview-layer tap-depth seeding (lock stability). The
@@ -1381,6 +1388,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             var recFrames: List<ArDepthFrame>? = null
             var recTapX = 0.0; var recTapY = 0.0; var recAxisRow = false
             var recRgb: ByteArray? = null
+            var captureAxis: GuideAxis? = null
             for (k in 1..SAMPLE_COUNT) {
                 sampleProgress = k
                 // ~0.5 s window per sub-sample (min 5 frames for the chord;
@@ -1399,9 +1407,14 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 val tap = f0.viewToDepth(controller.viewWidthPx / 2f, controller.viewHeightPx / 2f)
                 val tapX = tap?.first ?: (f0.width / 2.0)
                 val tapY = tap?.second ?: (f0.height / 2.0)
-                // Auto-pick the across-the-trunk axis (fixes severe under-read
-                // when the sensor orientation made the strip run along the trunk).
-                val axis = DBHEstimator.pickGuideAxis(f0, tapX, tapY, calibration)
+                // Use screen geometry for both measurement and the raw bundle.
+                // Missing/rotated mappings must not fall back to a content vote.
+                val axis = DBHEstimator.screenHorizontalGuideAxis(f0, tapX, tapY) ?: continue
+                if (captureAxis != null && captureAxis != axis) continue
+                captureAxis = axis
+                frames.removeAll {
+                    DBHEstimator.screenHorizontalGuideAxis(it, tapX, tapY) != axis
+                }
                 // Latch the RAW window BEFORE the 5-frame estimator gate: a
                 // dusk/canopy window that can't be estimated is exactly the
                 // data the corpus needs, and dropping it here is what made

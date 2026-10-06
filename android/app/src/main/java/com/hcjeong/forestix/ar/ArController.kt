@@ -528,21 +528,20 @@ class ArController {
     /// output is a file a person looks at; this runs several times a second
     /// and an encode/decode round trip would cost more than the network does.
     ///
-    /// Nearest-neighbour, because the destination is 640 square and the source
-    /// is a 12-megapixel-class frame: every output pixel is already an average
-    /// of many, and a bilinear read would cost four plane lookups to move an
-    /// edge by less than a mask cell.
-    ///
-    /// 114-grey padding and /255 RGB in CHW — the iOS letterbox exactly, so
-    /// both platforms hand the model the same picture.
-    ///
-    /// The Image is acquired, used and closed inside this call. ARCore has a
-    /// small pool and holding one starves the session.
-    fun cameraLetterboxCHW(size: Int): Pair<FloatArray, com.hcjeong.forestix.sensors.Letterbox>? {
+    /// Captures the camera image immediately; RGB preparation can then run
+    /// on a worker without acquiring a different AR frame.
+    fun acquireCameraLetterboxInput(size: Int): CameraLetterboxInput? {
         val f = frame ?: return null
-        return try {
-            val image = f.acquireCameraImage()
-            try {
+        return try { CameraLetterboxInput(f.acquireCameraImage(),size) } catch (_: Throwable) { null }
+    }
+
+    /** Retains the captured camera image while preprocessing runs off the UI thread. */
+    class CameraLetterboxInput(private val image: android.media.Image,private val size:Int):AutoCloseable {
+        private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
+        override fun close() { if(closed.compareAndSet(false,true))image.close() }
+        fun convert():Pair<FloatArray,com.hcjeong.forestix.sensors.Letterbox>? {
+            if(closed.get() || size<=0)return null
+            return try {
                 if (image.format != android.graphics.ImageFormat.YUV_420_888) return null
                 val w = image.width
                 val h = image.height
@@ -588,14 +587,13 @@ class ArController {
                         out[2 * area + idx] = b / 255f
                     }
                 }
-                out to box
-            } finally {
-                image.close()
-            }
-        } catch (_: Throwable) {
-            null
+                return out to box
+            } catch (_: Throwable) { null }
         }
     }
+
+    fun cameraLetterboxCHW(size: Int): Pair<FloatArray, com.hcjeong.forestix.sensors.Letterbox>? =
+        acquireCameraLetterboxInput(size)?.use { it.convert() }
 
     fun captureCameraJpeg(dest: java.io.File, quality: Int = 80): Boolean {
         val f = frame ?: return false

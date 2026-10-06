@@ -221,7 +221,7 @@ public enum DBHEstimator {
     /// attempted at all (e.g. burst too small). Quality failures return
     /// a `.red` `DBHResult` carrying `rejectionReason`.
     public static func estimate(input: DBHScanInput) -> DBHResult? {
-        guard input.frames.count >= 5 else { return nil }
+        guard input.frames.count == 1 || input.frames.count >= 5 else { return nil }
 
         // Step 2: depth + confidence at tap (last frame, 5×5 median).
         guard let lastFrame = input.frames.last else { return nil }
@@ -1300,15 +1300,19 @@ public enum DBHEstimator {
         else { return nil }
         guard (0.3...5.0).contains(dTap) else { return nil }
 
-        let fx = Double(frame.intrinsics[0, 0])
-        guard fx > 0 else { return nil }
+        let focal: Double
+        switch guideAxis {
+        case .row: focal = Double(frame.intrinsics[0, 0])
+        case .col: focal = Double(frame.intrinsics[1, 1])
+        }
+        guard focal.isFinite, focal > 1 else { return nil }
 
         let centerAlong = tapAlongAxis(tapPixel, axis: guideAxis)
 
         // Walk the guide row plus a stack of neighbour rows. Keep the
         // ones that produced a usable strip (≥ 5 pixels wide).
         var widths: [Int] = []
-        var firstUsableExtent: (left: Int, right: Int)?
+        var guideExtent: (left: Int, right: Int)?
         for offset in -rowSpan...rowSpan {
             let neighbourAxis: GuideAxis
             switch guideAxis {
@@ -1327,54 +1331,28 @@ public enum DBHEstimator {
             let w = r - l + 1
             if w < 5 { continue }
             widths.append(w)
-            if firstUsableExtent == nil, offset == 0 {
-                firstUsableExtent = (l, r)
-            } else if firstUsableExtent == nil {
-                firstUsableExtent = (l, r)
-            }
+            if offset == 0 { guideExtent = (l, r) }
         }
 
         // Need at least a handful of rows agreeing on the width — one
         // row alone could be a branch crossing the guide line.
         guard widths.count >= 5 else { return nil }
-        guard let extent = firstUsableExtent else { return nil }
+        guard let extent = guideExtent else { return nil }
+        let walkLength: Int
+        switch guideAxis { case .row: walkLength = frame.width; case .col: walkLength = frame.height }
+        // A clipped silhouette has no measured pair of boundaries.
+        guard extent.left > 0, extent.right < walkLength - 1 else { return nil }
 
-        // Sort + median. Take the middle row's width.
-        let sortedWidths = widths.sorted()
-        let medianWidth = sortedWidths[sortedWidths.count / 2]
-
-        // Diameter from the silhouette, by the tangent form.
-        //
-        //   k  = w / 2fx                    half-angle, from the pinhole
-        //   K  = k(k + sqrt(k² + 1))        = R / z_near, the tangent solution
-        //   d  = 2 · dTap · K
-        //
-        // WHAT THIS REPLACED, and why. The old line inverted
-        // d = w·dTap/(fx − w/2), which comes from putting the edge at the
-        // widest point of the circle — half a diameter behind the near face
-        // — and calling the depth to THAT the axis distance. IT IS WRONG
-        // ABOUT WHERE THE EDGE IS. It puts the edge at
-        // the widest point of the circle, half a diameter behind the near
-        // face; the edge a camera actually sees is the TANGENT point, which
-        // is nearer and narrower. Every other diameter in this app inverts
-        // the tangent form (`silhouetteDiameterCm`) and this path is the
-        // last one that did not, which is why Auto and ADJUST stopped
-        // agreeing the day the bracket moved over.
-        //
-        // The offset term is ZERO here, and that is the difference between
-        // the two paths rather than an omission. `silhouetteDiameterCm`
-        // carries `medianDepthOffsetFactor` because the bracket medians the
-        // depth across the middle half of a curved face, which sits
-        // 0.031754 R behind the near face. This path has no such spread: the
-        // depth it uses is `dTap`, one reading at the tap, on the near face
-        // the tangent form already wants. Substituting the bracket's offset
-        // here would correct for a spread that is not in the number.
-        let halfWidth = Double(medianWidth) / 2.0
-        guard fx - halfWidth > 1.0 else { return nil }
-        let k = Double(medianWidth) / (2.0 * fx)
-        let kk = k * (k + (k * k + 1).squareRoot())
-        let diameterM = 2.0 * Double(dTap) * kk
-        let diameterCm = diameterM * 100.0
+        // The neighbouring rows grade boundary consistency only. The displayed
+        // guide span and the committed value use this measurement row's actual
+        // boundaries, full-span median and the same correction as Adjust/AI.
+        guard let (diameterCm, sampledDepth) = BoundaryAlignment.fullSpanSample(
+            width: walkLength, left: Double(extent.left), right: Double(extent.right), focal: focal,
+            depthAt: { idx in
+                let (x, y) = pixelCoords(axis: guideAxis, idx: idx)
+                return Double(frame.depth(atX: x, y: y))
+            }) else { return nil }
+        let diameterM = diameterCm / 100.0
         guard plausibleDiameterCm.contains(diameterCm) else { return nil }
 
         // Confidence: width consistency. Tight CoV ⇒ green; otherwise
@@ -1397,7 +1375,7 @@ public enum DBHEstimator {
         let midIdx = (extent.left + extent.right) / 2
         let (mpx, mpy) = pixelCoords(axis: guideAxis, idx: midIdx)
         let pixDepth = Double(frame.depth(atX: mpx, y: mpy))
-        let depthForBackProject = pixDepth > 0 ? pixDepth : Double(dTap)
+        let depthForBackProject = pixDepth.isFinite && pixDepth > 0 ? pixDepth : sampledDepth
         let surfaceXZ = BackProjection.worldXZ(
             x: Double(mpx), y: Double(mpy),
             depth: depthForBackProject,
@@ -1429,11 +1407,11 @@ public enum DBHEstimator {
             stripLeftFraction: leftFrac,
             stripRightFraction: rightFrac,
             tier: tier,
-            inlierCount: medianWidth,
+            inlierCount: extent.right - extent.left + 1,
             arcDeg: 0,
             rmseMm: 0,
             rejectionReason: nil,
-            effectiveTapDepth: Double(dTap))
+            effectiveTapDepth: sampledDepth)
     }
 
     /// Burst-mode chord measurement. Runs `chordPreviewFit` against
@@ -1444,6 +1422,13 @@ public enum DBHEstimator {
     /// `.yellow` when they spread, `.red` only when too few frames
     /// produced a chord at all.
     public static func chordEstimate(input: DBHScanInput) -> DBHResult? {
+        if input.frames.count == 1, let frame = input.frames.first {
+            guard let fit = chordPreviewFit(
+                frame: frame, tapPixel: input.tapPixel, guideAxis: input.guideAxis,
+                discontinuityThresholdM: input.projectCalibration.depthDiscontinuityM)
+            else { return nil }
+            return singleFrameResult(fit, calibration: input.projectCalibration)
+        }
         guard input.frames.count >= 5 else { return nil }
 
         var diameters: [Double] = []
@@ -1522,7 +1507,7 @@ public enum DBHEstimator {
         guideAxis: GuideAxis,
         calibration cal: ProjectCalibration
     ) -> DBHResult? {
-        guard frames.count >= 5 else { return nil }
+        guard frames.count == 1 || frames.count >= 5 else { return nil }
         let tapAlong = tapAlongAxis(tapPixel, axis: guideAxis)
 
         var diameters: [Double] = []
@@ -1561,7 +1546,7 @@ public enum DBHEstimator {
             centersZ.append((minZ + maxZ) / 2)
         }
 
-        guard diameters.count >= TierThresholds.minUsableFrames else {
+        guard diameters.count >= (frames.count == 1 ? 1 : TierThresholds.minUsableFrames) else {
             return redResult(
                 reason: "Not enough usable frames; hold steadier or move closer",
                 method: .lidarChordSilhouette,
@@ -1574,7 +1559,7 @@ public enum DBHEstimator {
         let lo = sortedDia.first ?? mean
         let hi = sortedDia.last ?? mean
         let cov = mean > 0 ? (hi - lo) / mean : 1
-        let tier: ConfidenceTier = cov <= TierThresholds.frameSpreadGreen ? .green : .yellow
+        let tier: ConfidenceTier = frames.count > 1 && cov <= TierThresholds.frameSpreadGreen ? .green : .yellow
 
         let dbhCm = cal.appliedToRawCm(medianRawCm)
 
@@ -1640,6 +1625,12 @@ public enum DBHEstimator {
         viewSize: CGSize
     ) -> (axis: GuideAxis, left: Double, right: Double)? {
         guard let mapping = frame.viewMapping,
+              mapping.flattened.allSatisfy({ $0.isFinite }),
+              abs(mapping.a * mapping.d - mapping.b * mapping.c) > 1e-12,
+              leftFraction.isFinite, rightFraction.isFinite,
+              guideFractionY.isFinite, (0...1).contains(guideFractionY),
+              (0...1).contains(leftFraction), (0...1).contains(rightFraction),
+              viewSize.width.isFinite, viewSize.height.isFinite,
               viewSize.width > 1, viewSize.height > 1,
               frame.width > 0, frame.height > 0 else { return nil }
         let lo = min(leftFraction, rightFraction)
@@ -1649,6 +1640,13 @@ public enum DBHEstimator {
         let pR = mapping.viewToDepth(x: hi * Double(viewSize.width), y: gy)
         let dx = abs(pR.x - pL.x)
         let dy = abs(pR.y - pL.y)
+        guard max(dx, dy) > 1e-12,
+              min(dx, dy) <= max(dx, dy) * 0.001,
+              [pL, pR].allSatisfy({ p in
+                  p.x.isFinite && p.y.isFinite
+                      && p.x >= 0 && p.x <= Double(frame.width)
+                      && p.y >= 0 && p.y <= Double(frame.height)
+              }) else { return nil }
         // The walk axis is whichever depth axis the screen-horizontal
         // bracket covers more of — they sit 90° apart in portrait. Derived
         // per frame from the display transform, which is stable, rather than
@@ -1836,6 +1834,9 @@ public enum DBHEstimator {
     /// it is the same at every size.
     static let guideStripDepthBudgetM: Float = 0.80
 
+    /// Historical middle-half sampler's inversion. Live full-span measurement
+    /// uses `BoundaryAlignment.fullSpanDiameterCm`; do not pair this coefficient
+    /// with a full-span median. Retained for old synthetic/legacy calculations.
     /// A stem's diameter from the width of its silhouette.
     ///
     /// THE EDGES ARE TANGENT POINTS, NOT THE ENDS OF A DIAMETER. Sight lines
@@ -1968,24 +1969,10 @@ public enum DBHEstimator {
         return Double(q3 - q1)
     }
 
-    /// Single-frame DBH estimate constrained by two user-placed edge
-    /// handles instead of the automatic silhouette walk — the DBH
-    /// ADJUST mode's estimator. `leftFraction` / `rightFraction` are
-    /// handle positions normalised 0…1 along the walked axis (the same
-    /// normalisation `PreviewFit.stripLeftFraction` uses, so on-screen
-    /// handles and the published chord agree by construction: the
-    /// screen's view-x fraction maps 1:1 onto the depth map's walk-axis
-    /// extent, exactly like the fit-chord overlay in reverse).
-    ///
-    ///     w = handle span in walk-axis pixels
-    ///     z = median valid depth over the bracket's MIDDLE HALF at the
-    ///         guide row (see `bracketCoreRange` — the ends sit on the
-    ///         silhouette edge and read the background)
-    ///     d = w·z / (f_axis − w/2)
-    ///
-    /// — the same axis-matched pinhole identity the auto chord path
-    /// uses, with the user's bracket supplying the width instead of the
-    /// silhouette edge-finder.
+    /// Diameter from the manual or AI-assisted span in depth-grid coordinates.
+    /// Uses the full-span valid-depth median, the focal component along the
+    /// guide axis, and the cylindrical surface-corrected tangent relation.
+    /// The central-half depth helpers above remain preview-quality probes.
     public static func bracketChordFit(
         frame: ARDepthFrame,
         guideAxis: GuideAxis,
@@ -2001,35 +1988,19 @@ public enum DBHEstimator {
         let widthPx = g.widthPx
         let iLo = g.iLo, iHi = g.iHi
 
-        // Median depth inside the bracket's CENTRAL PORTION at the guide row.
-        // Zero-depth / low-confidence pixels are skipped; a handful of valid
-        // returns is required before the median is trusted.
-        let depths = bracketCoreDepthsSorted(frame: frame,
-                                             guideAxis: guideAxis,
-                                             iLo: iLo, iHi: iHi)
-        guard depths.count >= 3 else { return nil }
-        let z = Double(depths[depths.count / 2])
-        guard (0.3...5.0).contains(z) else { return nil }
-
-        // fx on BOTH axes, which is what the version the field verified
-        // used. Switching a column walk to fy is defensible on paper and is
-        // NOT being done here: this path is being restored to the code that
-        // measured correctly in the stand, and every change to it made from
-        // reasoning alone has been wrong. Revisit with a device and a tape,
-        // not from a reading of the geometry.
-        //
-        // KNOWN CROSS-PLATFORM DIVERGENCE, recorded so the accuracy study
-        // does not discover it in the pooled data: Android's bracket path
-        // (DbhEstimator.bracketChordFit / constrainedEstimate) divides by
-        // the axis-matched focal — fy for a column walk — and its live
-        // ADJUST readout is calibrated, where this one publishes the raw
-        // bracket diameter. Two phones on the same tree therefore show
-        // different live numbers. Settling which is right is a device-and-
-        // tape job on both platforms at once, not a keyboard edit to one.
-        let fx = Double(frame.intrinsics[0, 0])
-        guard fx - widthPx / 2.0 > 1.0 else { return nil }
-        guard let diameterCm = silhouetteDiameterCm(
-            spanPx: widthPx, depthM: z, focalPx: fx) else { return nil }
+        // Both guide-placement modes use full-span median and its paired
+        // cylindrical surface correction (estimator epoch 7).
+        let isColumn: Bool, fixed: Int
+        switch guideAxis { case .row(let y): isColumn = false; fixed = y
+        case .col(let x): isColumn = true; fixed = x }
+        let walkWidth = isColumn ? frame.height : frame.width
+        let walkHeight = isColumn ? frame.width : frame.height
+        guard fixed >= 0, fixed < walkHeight,
+              let (diameterCm,z) = BoundaryAlignment.fullSpanSample(
+                width:walkWidth,left:lo*Double(walkWidth),right:hi*Double(walkWidth),
+                focal:Double(frame.intrinsics[isColumn ? 1:0,isColumn ? 1:0]),
+                depthAt: { x in Double(frame.depth(atX:isColumn ? fixed:x,y:isColumn ? x:fixed)) })
+        else { return nil }
         let diameterM = diameterCm / 100.0
         guard plausibleDiameterCm.contains(diameterCm) else { return nil }
 
@@ -2080,6 +2051,11 @@ public enum DBHEstimator {
         rightFraction: Double,
         calibration cal: ProjectCalibration
     ) -> DBHResult? {
+        if frames.count == 1, let frame = frames.first {
+            guard let fit = bracketChordFit(frame: frame, guideAxis: guideAxis,
+                leftFraction: leftFraction, rightFraction: rightFraction) else { return nil }
+            return singleFrameResult(fit, calibration: cal)
+        }
         guard frames.count >= 5 else { return nil }
 
         var diameters: [Double] = []
@@ -2135,7 +2111,18 @@ public enum DBHEstimator {
             rejectionReason: nil)
     }
 
-    // MARK: - Multi-sample aggregation (trimmed mean)
+    /// Preserve within-frame quality checks; one frame has no temporal spread.
+    private static func singleFrameResult(_ fit: PreviewFit,
+                                          calibration: ProjectCalibration) -> DBHResult {
+        DBHResult(diameterCm: Float(calibration.appliedToRawCm(fit.diameterCm)),
+                  centerXZ: SIMD2<Float>(Float(fit.centerWorldXZ.x), Float(fit.centerWorldXZ.y)),
+                  arcCoverageDeg: Float(fit.arcDeg), rmseMm: Float(fit.rmseMm),
+                  sigmaRmm: 0, nInliers: fit.inlierCount, confidence: fit.tier,
+                  method: .lidarChordSilhouette, rawPointsPath: nil,
+                  rejectionReason: fit.rejectionReason)
+    }
+
+    // MARK: - Historical multi-sample aggregation (trimmed mean)
 
     /// Combine the hold-steady capture's repeated sub-measurements into one
     /// result: keep the 3 samples closest to the median diameter (with 5

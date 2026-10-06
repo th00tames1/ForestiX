@@ -1,15 +1,7 @@
 // swift-tools-version: 6.0
-// TimberCruisingApp — Phase 0 + Phase 1
-// Spec: timber_cruising_app_design.md §8 (Module & File Layout), §9.2 Phase 0 & Phase 1
-//
-// Phase 0: Common, Models, Persistence, InventoryEngine.
-// Phase 1: adds Geo, Basemap, Export, UI.
-//
-// Phase 2+ directories (AR, Positioning, Sensors, and the Phase 2+ screens/
-// viewmodels inside Screens/ and ViewModels/) are present as stub files under
-// TimberCruisingApp/. Stubs are 2-line comments and compile cleanly into the
-// UI target, which is why we do NOT exclude them explicitly — they just carry
-// no code until their phase begins.
+// ForestiX modules and tests. UI and ARKit integration require iOS.
+// For non-UI macOS tests use tools/validation/run_host_tests.py with a full
+// Xcode DEVELOPER_DIR; it omits iOS-only UI and binary package dependencies.
 
 import PackageDescription
 

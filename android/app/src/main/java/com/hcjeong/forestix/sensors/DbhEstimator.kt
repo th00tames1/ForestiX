@@ -264,6 +264,8 @@ object DBHEstimator {
     /// fraction of the radius: 1 - sqrt(15)/4. iOS `medianDepthOffsetFactor`.
     val MEDIAN_DEPTH_OFFSET_FACTOR = 1.0 - sqrt(15.0) / 4.0
 
+    /// Historical middle-half inversion, not the live full-span estimator.
+    /// Live measurement uses BoundaryAlignment.fullSpanDiameterCm instead.
     /// A stem's diameter from the width of its silhouette — iOS
     /// `DBHEstimator.silhouetteDiameterCm` parity, same derivation, same
     /// constants. Keep the two in step.
@@ -352,7 +354,7 @@ object DBHEstimator {
 
     /// Full §7.1 pipeline. Returns null only if the burst is too small.
     fun estimate(input: DbhScanInput): DBHResult? {
-        if (input.frames.size < 5) return null
+        if (input.frames.size != 1 && input.frames.size < 5) return null
         val lastFrame = input.frames.last()
 
         val dTap = medianDepth(input.tapX, input.tapY, lastFrame, radius = 2)
@@ -577,6 +579,9 @@ object DBHEstimator {
         /// translucent cylinder overlay on the SAME fit the bar is drawn
         /// from. Null when unavailable.
         val centerWorld: Vec3? = null,
+        /// Spatial depth statistic used by the full-span silhouette geometry.
+        /// Legacy depth-band fits leave this null and retain their tap depth.
+        val sampledDepthM: Double? = null,
     )
 
     /// Per-frame scan outcome: the chord fit (null when unusable) plus how
@@ -769,7 +774,7 @@ object DBHEstimator {
             is GuideAxis.Row -> frame.fx
             is GuideAxis.Col -> frame.fy
         }
-        if (focal <= 0) return FrameScan(null)
+        if (!focal.isFinite() || focal <= 1) return FrameScan(null)
         val centerAlong = tapAlongAxis(tapX, tapY, axis)
         val widths = ArrayList<Int>()
         var clippedRows = 0
@@ -797,7 +802,7 @@ object DBHEstimator {
             val w = r - l + 1
             if (w < 5) continue
             widths.add(w)
-            if (extentL < 0) { extentL = l; extentR = r }
+            if (offset == 0) { extentL = l; extentR = r }
         }
         val ownWidths = widths.toList()
         // Rolling row quorum: the 5-row requirement may be met across this
@@ -809,37 +814,14 @@ object DBHEstimator {
                 ArrayList(widths).apply { addAll(carryWidths) }
             else -> return FrameScan(null, clippedRows, ownWidths)
         }
-        fitWidths.sort()
-        val medianWidth = fitWidths[fitWidths.size / 2]
-        // Diameter from the silhouette, by the tangent form.
-        //
-        //   k = w / 2f                      half-angle, from the pinhole
-        //   K = k(k + sqrt(k^2 + 1))        = R / z_near, the tangent solution
-        //   d = 2 * dTap * K
-        //
-        // WHAT THIS REPLACED, and why. The old line inverted
-        // d = w*dTap/(f - w/2), which puts the edge at the widest point of
-        // the circle — half a diameter behind the near face — and calls the
-        // depth to THAT the axis distance. It is wrong about where the edge
-        // is: a camera sees the TANGENT point, which is nearer and narrower.
-        // Every other diameter in this app inverts the tangent form, and
-        // this path was the last one that did not, which is why Auto and
-        // ADJUST stopped agreeing the day the bracket moved over.
-        //
-        // The offset term is ZERO here, and that is the difference between
-        // the two paths rather than an omission. `silhouetteDiameterCm`
-        // carries MEDIAN_DEPTH_OFFSET_FACTOR because the bracket medians
-        // depth across the middle half of a curved face, which sits
-        // 0.031754 R behind the near face. This path has no such spread:
-        // `dTap` is one reading at the tap, on the near face the tangent
-        // form already wants.
-        //
-        // Mirrors iOS `DBHEstimator` chordPreviewFit.
-        val halfWidth = medianWidth / 2.0
-        if (focal - halfWidth <= 1.0) return FrameScan(null, clippedRows, ownWidths)
-        val kAuto = medianWidth / (2.0 * focal)
-        val diameterM = 2.0 * dTap.toDouble() * kAuto * (kAuto + sqrt(kAuto * kAuto + 1.0))
-        if (diameterM <= 0.0) return FrameScan(null, clippedRows, ownWidths)
+        if (extentL < 0 || extentR < 0) return FrameScan(null, clippedRows, ownWidths)
+        // Neighbouring rows grade edge consistency only. Read the same actual
+        // measurement-row span shown by the overlay, exactly as Adjust/AI do.
+        val sampled = BoundaryAlignment.fullSpanSample(
+            axisExtent(frame, axis), extentL.toDouble(), extentR.toDouble(), focal,
+        ) { idx -> val (x,y)=pixelCoords(axis,idx);frame.depthAt(x,y).toDouble() }
+            ?: return FrameScan(null, clippedRows, ownWidths)
+        val diameterM = sampled.first / 100.0
         // Width consistency across the row stack — iOS chordPreviewFit's
         // tier input (CoV ≤ 0.10 ⇒ green preview chip).
         val mean = fitWidths.sum().toDouble() / fitWidths.size
@@ -857,7 +839,7 @@ object DBHEstimator {
             val midIdx = (extentL + extentR) / 2
             val (mpx, mpy) = pixelCoords(axis, midIdx)
             val pixDepth = frame.depthAt(mpx, mpy).toDouble()
-            val depthBP = if (pixDepth > 0) pixDepth else dTap.toDouble()
+            val depthBP = if (pixDepth.isFinite() && pixDepth > 0) pixDepth else sampled.second
             val surface = BackProjection.worldXZ(
                 mpx.toDouble(), mpy.toDouble(), depthBP,
                 frame.fx, frame.fy, frame.cx, frame.cy, frame.pose,
@@ -887,8 +869,9 @@ object DBHEstimator {
                 if (extentL >= 0) extentL / extent else 0f,
                 if (extentR >= 0) extentR / extent else 1f,
                 widthCov = cov,
-                widthPx = medianWidth,
+                widthPx = extentR - extentL + 1,
                 centerWorld = centerWorld,
+                sampledDepthM = sampled.second,
             ),
             clippedRows,
             ownWidths,
@@ -927,7 +910,7 @@ object DBHEstimator {
             ConfidenceTier.YELLOW
         }
         return DbhPreview(
-            dia, dTap, locked, 1, chord.leftFrac, chord.rightFrac, tier,
+            dia, (chord.sampledDepthM ?: dTap.toDouble()).toFloat(), locked, 1, chord.leftFrac, chord.rightFrac, tier,
             clippedRows = scan.borderClippedRows, widthPx = chord.widthPx,
             cleanRows = scan.cleanWidths.size, cleanWidths = scan.cleanWidths,
             centerWorld = chord.centerWorld,
@@ -1240,13 +1223,8 @@ object DBHEstimator {
     /// manifest stores: view-independent, byte-identical to the iOS bracket
     /// schema, so replaying a bundle needs neither view size nor guide_y.
     ///
-    /// FOCAL CHOICE: the axis-matched focal (fx for a row walk, fy for a
-    /// column walk), which is what the auto path does and what the Android
-    /// depth grid requires — its texture-registered intrinsics have fx ≠ fy
-    /// whenever the depth aspect differs from the texture aspect. iOS
-    /// divides by fx on both axes and records that divergence in its own
-    /// `bracketChordFit`; settling it is a device-and-tape job on both
-    /// platforms at once.
+    /// Both platforms use the guide-axis focal component and the full-span
+    /// median with the corresponding cylindrical surface correction.
     data class BracketFit(val diameterCm: Double, val spanPx: Int, val depthM: Double)
 
     fun bracketChordFit(
@@ -1258,14 +1236,15 @@ object DBHEstimator {
             is GuideAxis.Col -> frame.fy
         }
         if (focal <= 1.0) return null
-        // Median depth over the bracket's MIDDLE HALF along the guide line —
-        // see bracketCoreRange.
-        val depths = bracketCoreDepthsSorted(frame, guideAxis, g.iLo, g.iHi)
-        if (depths.size < 3) return null
-        val z = depths[depths.size / 2]
-        if (z !in 0.3f..5.0f) return null
-        if (focal - g.widthPx / 2.0 <= 1.0) return null
-        val rawCm = silhouetteDiameterCm(g.widthPx, z.toDouble(), focal) ?: return null
+        // Epoch 7: shared full-span median and paired surface correction.
+        val col = guideAxis is GuideAxis.Col
+        val width = if (col) frame.height else frame.width
+        val height = if (col) frame.width else frame.height
+        val fixed = when (guideAxis) { is GuideAxis.Row -> guideAxis.y; is GuideAxis.Col -> guideAxis.x }
+        if (fixed !in 0 until height) return null
+        val (rawCm,z) = BoundaryAlignment.fullSpanSample(width,g.lo*width,g.hi*width,focal) { x ->
+            frame.depthAt(if(col)fixed else x,if(col)x else fixed).toDouble()
+        } ?: return null
         if (rawCm !in PLAUSIBLE_DIAMETER_CM) return null
         return BracketFit(rawCm, Math.round(g.widthPx).toInt(), z.toDouble())
     }
@@ -1282,6 +1261,17 @@ object DBHEstimator {
         rightFraction: Double,
         cal: ProjectCalibration,
     ): DBHResult? {
+        if (frames.size == 1) {
+            val fit = bracketChordFit(frames.first(), guideAxis, leftFraction, rightFraction)
+                ?: return null
+            return DBHResult(
+                diameterCm = cal.appliedToRawCm(fit.diameterCm).toFloat(),
+                centerX = 0f, centerZ = 0f, arcCoverageDeg = 0f,
+                rmseMm = 0f, sigmaRmm = 0f, nInliers = fit.spanPx,
+                confidence = ConfidenceTier.YELLOW,
+                method = DBHMethod.LIDAR_CHORD_SILHOUETTE, rejectionReason = null,
+            )
+        }
         if (frames.size < 5) return null
         val diameters = ArrayList<Double>(frames.size)
         var spanPxSum = 0
@@ -1322,6 +1312,17 @@ object DBHEstimator {
         frames: List<ArDepthFrame>, tapX: Double, tapY: Double, axis: GuideAxis, cal: ProjectCalibration,
         algorithm: ChordAlgorithm = ChordAlgorithm.SILHOUETTE,
     ): DBHResult? {
+        if (frames.size == 1) {
+            val p = livePreview(frames.first(), tapX, tapY, axis, cal, algorithm)
+                ?: return null
+            if (!p.locked) return redChord("Cannot resolve both trunk edges in this frame", p.nPoints)
+            return DBHResult(
+                diameterCm = p.diameterCm, centerX = 0f, centerZ = 0f,
+                arcCoverageDeg = 0f, rmseMm = 0f, sigmaRmm = 0f,
+                nInliers = p.nPoints, confidence = p.tier,
+                method = DBHMethod.LIDAR_CHORD_SILHOUETTE, rejectionReason = null,
+            )
+        }
         // Min 5 frames to match the iOS chord burst (was 3 — the capture flow
         // already gates at ≥5, so this only aligns the estimator's own floor).
         if (frames.size < 5) return null

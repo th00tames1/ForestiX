@@ -951,25 +951,17 @@ object RawCaptureStore {
     )
 
     private fun deriveBracket(frame0: ArDepthFrame, b: BracketSpec): BracketGeom? {
-        val pL = frame0.viewToDepth(minOf(b.leftViewX, b.rightViewX), b.guideViewY) ?: return null
-        val pR = frame0.viewToDepth(maxOf(b.leftViewX, b.rightViewX), b.guideViewY) ?: return null
-        val dxSpan = abs(pR.first - pL.first)
-        val dySpan = abs(pR.second - pL.second)
-        val midX = (pL.first + pR.first) / 2.0
-        val midY = (pL.second + pR.second) / 2.0
-        return if (dxSpan >= dySpan) {
-            val w = frame0.width.toDouble()
-            BracketGeom(
-                minOf(pL.first, pR.first) / w, maxOf(pL.first, pR.first) / w,
-                GuideAxis.Row(Math.round(midY).toInt()), "row", midX, midY,
-            )
-        } else {
-            val h = frame0.height.toDouble()
-            BracketGeom(
-                minOf(pL.second, pR.second) / h, maxOf(pL.second, pR.second) / h,
-                GuideAxis.Col(Math.round(midX).toInt()), "col", midX, midY,
-            )
-        }
+        val geometry = DBHEstimator.bracketDepthGeometry(
+            frame0, b.leftViewX, b.rightViewX, b.guideViewY,
+        ) ?: return null
+        val row = geometry.axis is GuideAxis.Row
+        val mid = (geometry.leftFraction + geometry.rightFraction) * 0.5
+        val tapX = if (row) mid * frame0.width else (geometry.axis as GuideAxis.Col).x.toDouble()
+        val tapY = if (row) (geometry.axis as GuideAxis.Row).y.toDouble() else mid * frame0.height
+        return BracketGeom(
+            geometry.leftFraction, geometry.rightFraction, geometry.axis,
+            if (row) "row" else "col", tapX, tapY,
+        )
     }
 
     /// Serialize a height aim's depth grid (native u16-mm, little-endian,

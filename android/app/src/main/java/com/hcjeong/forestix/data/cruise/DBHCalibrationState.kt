@@ -40,7 +40,10 @@ object DBHCalibration {
     ///   4 — 2026-07-31  one diameter from an ADJUST bracket, not two
     ///   5 — 2026-08-02  Android bracket rework; both phones read a bracket
     ///                   the same way
-    const val CURRENT_EPOCH = 5
+    ///   6 — 2026-09-26  iOS screen-to-depth bracket mapping; shared generation
+    ///   7 — 2026-10-01  full-span median + paired surface correction
+    ///   8 — 2026-10-06  full-span geometry shared by Adjust, AI and depth Auto
+    const val CURRENT_EPOCH = 8
 
     /// What a project's stored coefficients are actually doing right now.
     enum class State {

@@ -89,6 +89,9 @@ public enum DBHEpochRecompute {
         /// The replay ran and the current estimator REJECTED the fit. A
         /// rejected fit is not a diameter and must not be written as one.
         case replayRejected
+        /// Historical iOS brackets can contain screen fractions without the
+        /// viewport needed to reconstruct their intended depth interval.
+        case bracketCoordinateSpaceUnknown
 
         /// What the console prints. Byte-identical to Android.
         public var text: String {
@@ -109,6 +112,8 @@ public enum DBHEpochRecompute {
                 return "bundle could not be replayed"
             case .replayRejected:
                 return "replayed fit was rejected"
+            case .bracketCoordinateSpaceUnknown:
+                return "original bracket coordinate mapping was not recorded"
             }
         }
 
@@ -124,6 +129,7 @@ public enum DBHEpochRecompute {
             case .ambiguousManyMatch:       return 5
             case .replayFailed:             return 6
             case .replayRejected:           return 7
+            case .bracketCoordinateSpaceUnknown: return 8
             }
         }
     }
@@ -310,6 +316,12 @@ public enum DBHEpochRecompute {
                 skip(matches.isEmpty
                      ? .ambiguousNoneMatches(candidates.count)
                      : .ambiguousManyMatch(matches.count))
+                continue
+            }
+            if match.manifest.platform == "ios",
+               let bracket = match.manifest.dbh?.bracket, bracket.enabled,
+               bracket.coordinateSpace != "depth_axis_fraction_v1" {
+                skip(.bracketCoordinateSpaceUnknown)
                 continue
             }
             guard let result = RawCaptureReplay.rerunDBH(manifest: match.manifest,

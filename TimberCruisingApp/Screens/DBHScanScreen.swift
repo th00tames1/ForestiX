@@ -828,10 +828,9 @@ public struct DBHScanScreen: View {
             // NOT a preference write. Appearing is not a choice — only the
             // Adjust rail button and the Auto pill move
             // `settings.dbhEdgeAdjustDefault`.
-            if settings.dbhEdgeAdjustDefault {
-                seedBracketFromRememberedWidth()
-                viewModel.edgeAdjustActive = true
-            }
+            // Both modes begin with the operator's target-tree guides.
+            seedBracketFromRememberedWidth()
+            viewModel.edgeAdjustActive = true
             configureRawCapture()
             syncBreastHeightGuide()
             // ON APPEAR, not only on a settings change. Seeding this from an
@@ -1549,14 +1548,9 @@ public struct DBHScanScreen: View {
     /// floating just above the status panel while ADJUST is active.
     private var autoPillButton: some View {
         Button {
-            viewModel.edgeAdjustActive = false
-            // Remembered, so a cruiser who prefers the automatic edges is
-            // not handed the bracket again on the next tree. This pill and
-            // the ADJUST rail button are the whole control — the preference
-            // has no Settings row of its own.
-            settings.dbhEdgeAdjustDefault = false
+            viewModel.requestAutoAlignment()
         } label: {
-            Text("Auto")
+            Text(viewModel.autoAlignmentBusy ? "Aligning…" : "Auto")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 14)
@@ -1567,6 +1561,15 @@ public struct DBHScanScreen: View {
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("dbhScan.autoMode")
+        .disabled(viewModel.autoAlignmentBusy)
+        .accessibilityHint(viewModel.autoAlignmentMessage ?? "Align the current stem guides using AI")
+        .overlay(alignment: .top) {
+            if let message = viewModel.autoAlignmentMessage {
+                Text(message).font(.caption2).foregroundStyle(.white)
+                    .padding(6).background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius:6))
+                    .fixedSize(horizontal:false,vertical:true).frame(width:220).offset(y:-48)
+            }
+        }
     }
 
     // MARK: - Breast-height guide
@@ -1587,7 +1590,7 @@ public struct DBHScanScreen: View {
     /// is an experiment until a few stems have been measured with it and a
     /// tape, and an experiment does not belong on a cruiser's settings screen.
     private var segmentationGateOpen: Bool {
-        settings.developerMode && settings.dbhAutoSegmentation
+        false // Auto is an explicit one-shot YOLO26n request.
     }
 
     /// Whether any of the guide is on screen right now — the gate plus the
@@ -1744,7 +1747,7 @@ public struct DBHScanScreen: View {
     /// Flips in the instant the "+" starts the capture, so the cruiser
     /// gets immediate feedback that the burst is running.
     private var captureProgressPill: some View {
-        Text("Capturing \(max(1, viewModel.captureSampleIndex))/\(viewModel.captureSampleTotal) — hold steady.")
+        Text("Capturing…")
             .font(ForestixType.dataSmall)
             .foregroundStyle(.white)
             .padding(.horizontal, 8).padding(.vertical, 4)
@@ -2180,7 +2183,7 @@ public struct DBHScanScreen: View {
             if showsAcquisitionHint { return Self.acquisitionStallHint }
             return "Hold steady, then tap + to capture."
         case .capturing:
-            return "Capturing \(max(1, viewModel.captureSampleIndex))/\(viewModel.captureSampleTotal) — hold steady."
+            return "Capturing…"
         case .fitted:       return "Scan complete. Accept, retake, or add a second view."
         case .accepted:     return "Saved."
         case .rejected:     return viewModel.result?.rejectionReason

@@ -357,8 +357,24 @@ public struct RawCaptureManifest: Codable, Sendable {
             public var enabled: Bool
             public var left: Double
             public var right: Double
-            public init(enabled: Bool, left: Double, right: Double) {
+            /// Absent in historical bundles whose coordinate semantics vary.
+            public var coordinateSpace: String?
+            public var screenFractions: [Double]?
+            public var viewportSize: [Double]?
+            enum CodingKeys: String, CodingKey {
+                case enabled, left, right
+                case coordinateSpace = "coordinate_space"
+                case screenFractions = "screen_fractions"
+                case viewportSize = "viewport_size"
+            }
+            public init(enabled: Bool, left: Double, right: Double,
+                        coordinateSpace: String? = nil,
+                        screenFractions: [Double]? = nil,
+                        viewportSize: [Double]? = nil) {
                 self.enabled = enabled; self.left = left; self.right = right
+                self.coordinateSpace = coordinateSpace
+                self.screenFractions = screenFractions
+                self.viewportSize = viewportSize
             }
         }
     }
@@ -1157,7 +1173,8 @@ public enum RawCaptureFrame {
             confidence: conf,
             intrinsics: frame.intrinsics,
             cameraPoseWorld: frame.cameraPoseWorld,
-            timestamp: frame.timestamp)
+            timestamp: frame.timestamp,
+            viewMapping: frame.viewMapping)
     }
 
     /// Reconstruct a canonical frame from stored depth bytes + metadata.
@@ -1165,6 +1182,9 @@ public enum RawCaptureFrame {
                                    depth: [Float]) -> ARDepthFrame {
         var conf = [UInt8](repeating: 0, count: depth.count)
         for i in 0..<depth.count where validDepth(depth[i]) { conf[i] = 2 }
+        let m = meta.viewToDepth
+        let mapping: DepthViewMapping? = m.count == 6 && m.allSatisfy({ $0.isFinite })
+            ? .init(a: m[0], b: m[1], tx: m[2], c: m[3], d: m[4], ty: m[5]) : nil
         return ARDepthFrame(
             width: meta.width,
             height: meta.height,
@@ -1173,7 +1193,8 @@ public enum RawCaptureFrame {
             intrinsics: RawCaptureMatrix.intrinsics(fx: meta.fx, fy: meta.fy,
                                                     cx: meta.cx, cy: meta.cy),
             cameraPoseWorld: RawCaptureMatrix.pose(meta.cameraPose),
-            timestamp: 0)
+            timestamp: 0,
+            viewMapping: mapping)
     }
 }
 

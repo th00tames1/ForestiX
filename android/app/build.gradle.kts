@@ -114,4 +114,7 @@ dependencies {
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
+
+    // Shared numerical fixtures are also read by the Swift and Python tests.
+    android.sourceSets.getByName("test").resources.srcDir("../../validation/fixtures")
 }

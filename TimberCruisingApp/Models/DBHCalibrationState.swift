@@ -38,7 +38,10 @@ public enum DBHCalibration {
     ///   4 — 2026-07-31  one diameter from an ADJUST bracket, not two
     ///   5 — 2026-08-02  Android bracket rework; both phones read a bracket
     ///                   the same way
-    public static let currentEpoch = 5
+    ///   6 — 2026-09-26  iOS screen handles mapped to depth before sampling
+    ///   7 — 2026-10-01  full-span median + paired surface correction
+    ///   8 — 2026-10-06  full-span geometry shared by Adjust, AI and depth Auto
+    public static let currentEpoch = 8
 
     /// What a project's stored coefficients are actually doing right now.
     public enum State: Equatable, Sendable {

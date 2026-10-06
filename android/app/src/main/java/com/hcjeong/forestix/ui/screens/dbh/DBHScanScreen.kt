@@ -175,7 +175,7 @@ private const val GUIDE_LINE_LEVEL_BAND_DEG = 1.5f
 
 /// Sub-measurements per hold-steady capture; the 3 closest to the median
 /// are kept (2 largest deviations trimmed) and averaged.
-private const val SAMPLE_COUNT = 5
+private const val SAMPLE_COUNT = 1
 
 /// Consecutive bad/absent per-frame fits tolerated while locked before the
 /// HUD drops back to aiming. The display freezes on the last good smoothed
@@ -525,7 +525,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // the bracket is live on the first frame at a known width. The settings
     // snapshot is loaded synchronously in `AppSettings.loadSnapshot`, so
     // these `remember`s see the cruiser's stored width, not the defaults.
-    var adjustMode by remember { mutableStateOf(settings.dbhEdgeAdjustDefault) }
+    var adjustMode by remember { mutableStateOf(true) }
     var adjustLeftFrac by remember {
         mutableStateOf(0.5f - clampBracketHalfWidth(settings.dbhBracketHalfWidth))
     }
@@ -542,7 +542,10 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // pixels a diameter is measured between, and against 60 real captures it
     // found a trunk in 40 % of frames and offered edges about 40 % narrower
     // than the cruiser's own bracket. iOS `segmentationGateOpen` 1:1.
-    val segmentationOn = settings.developerMode && settings.dbhAutoSegmentation
+    val segmentationOn = false // Auto invokes YOLO26n once from the current guides.
+    var autoAlignmentBusy by remember { mutableStateOf(false) }
+    var autoAlignmentMessage by remember { mutableStateOf<String?>(null) }
+    val autoAlignmentScope = rememberCoroutineScope()
     var segmentedExtent by remember { mutableStateOf<StemExtent?>(null) }
     /// Consecutive frames the model has failed to find a stem on.
     var segmentationMisses by remember { mutableStateOf(0) }
@@ -607,7 +610,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         }
     }
     /// Whether the handles about to be latched were placed by the model.
-    val segmentationDroveTheBracket = segmentationOn && segmentedExtent != null && !adjustMode
+    val segmentationDroveTheBracket = segmentedExtent != null && !adjustMode
     var adjustPreview by remember { mutableStateOf<DBHEstimator.DbhPreview?>(null) }
 
     // ADJUST live-readout settling (field round 10 — the diameter that jumps
@@ -1337,10 +1340,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         }
     }
 
-    // Hold-steady capture: SAMPLE_COUNT sub-measurements over a few
-    // seconds; the 3 closest to the median diameter are averaged (so with
-    // 5 samples the 2 largest deviations are trimmed). Mirrors the iOS
-    // DBHScanViewModel multi-sample burst.
+    // Capture one available depth frame; preview remains continuous.
     /// The sentence for a "+" the gate will not honour.
     ///
     /// `livePreview` hands back a preview carrying the tap depth even on the
@@ -1391,14 +1391,13 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             var captureAxis: GuideAxis? = null
             for (k in 1..SAMPLE_COUNT) {
                 sampleProgress = k
-                // ~0.5 s window per sub-sample (min 5 frames for the chord;
-                // the attempt cap bounds a stalled depth stream).
+                // Retry only while depth is unavailable; retain the first frame.
                 val frames = ArrayList<ArDepthFrame>()
                 var attempts = 0
-                while (attempts < 24 && frames.size < 10) {
+                while (attempts < 24 && frames.isEmpty()) {
                     controller.acquireDepthFrame()?.let { frames.add(it) }
                     attempts++
-                    delay(50)
+                    if (frames.isEmpty()) delay(50)
                 }
                 if (frames.isEmpty()) continue
                 val f0 = frames.first()
@@ -1415,19 +1414,15 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 frames.removeAll {
                     DBHEstimator.screenHorizontalGuideAxis(it, tapX, tapY) != axis
                 }
-                // Latch the RAW window BEFORE the 5-frame estimator gate: a
-                // dusk/canopy window that can't be estimated is exactly the
-                // data the corpus needs, and dropping it here is what made
-                // whole captures vanish silently.
+                // Record the acquired frame even when its estimate is rejected.
                 if (recFrames == null && rawCaptureArmed) {
                     recFrames = frames.toList()
                     recTapX = tapX; recTapY = tapY; recAxisRow = axis is GuideAxis.Row
                     recRgb = captureReferenceJpeg()
                 }
-                // The live estimate still needs its 5-frame window.
-                if (frames.size < 5) continue
-                // Chord (silhouette-width) method = median of the SAME per-frame
-                // chord the live preview shows, so preview ≈ recorded value.
+                // Exactly one frame is used for this measurement.
+                if (frames.size != 1) continue
+                // Compute a fresh chord from this frame without preview smoothing.
                 val sub = DBHEstimator.estimateChord(frames, tapX, tapY, axis, calibration, chordAlgorithm)
                     ?: continue
                 if (sub.confidence == ConfidenceTier.RED) {
@@ -1439,11 +1434,11 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             if (rec != null) {
                 recordRawDbh(rec, recTapX, recTapY, recAxisRow, bracket = null, rgb = recRgb)
             } else if (rawCaptureArmed) {
-                lastCaptureFailure = "no depth frames in this burst"
+                lastCaptureFailure = "no depth frame available for this capture"
                 postRawStatus(RawCaptureStatus(
                     RawCaptureStrings.notSaved(lastCaptureFailure), false))
             }
-            val agg = DBHEstimator.aggregateSamples(samples)
+            val agg = samples.firstOrNull()
             // THE SHUTTER — here, at the instant the burst finished and the
             // diameter is computed, with the cruiser still holding the phone
             // on the stem, and BEFORE Stage.RESULT puts the panel up. NOT at
@@ -1470,14 +1465,8 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         }
     }
 
-    // ADJUST capture: the SAME 5-sub-sample burst shape as the auto path —
-    // each sub-sample is a short frame window whose per-frame CONSTRAINED
-    // chords (handle span + median bracket depth) are medianed; the shared
-    // aggregator then trims/averages the sub-samples, so σ comes from the
-    // cross-sample spread exactly like an auto capture (iOS
-    // bracketChordEstimate + aggregateSamples parity). The automatic edge
-    // search never runs. The handle fractions are latched at tap time so a
-    // mid-burst drag can't change what this capture measures.
+    // ADJUST captures one frame with the handle positions latched at tap time.
+    // Its geometry and estimator are shared with raw recording and replay.
     fun captureAdjust() {
         if (stage == Stage.CAPTURING) return
         // Same silence, same fix. `constrainedEstimate` returns null rather
@@ -1509,76 +1498,46 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             var recRgb: ByteArray? = null
             for (k in 1..SAMPLE_COUNT) {
                 sampleProgress = k
-                // Same ~0.5 s window per sub-sample as the auto burst.
+                // Retry missing depth without collecting a temporal window.
                 val frames = ArrayList<ArDepthFrame>()
                 var attempts = 0
-                while (attempts < 24 && frames.size < 10) {
+                while (attempts < 24 && frames.isEmpty()) {
                     controller.acquireDepthFrame()?.let { frames.add(it) }
                     attempts++
-                    delay(50)
+                    if (frames.isEmpty()) delay(50)
                 }
                 if (frames.isEmpty()) continue
                 val vw = controller.viewWidthPx.toFloat()
                 val cy = controller.viewHeightPx / 2f
                 if (vw <= 1f) continue
-                // Latch the raw window BEFORE the estimator's 5-frame gate
-                // (same reasoning as the auto burst) + the reference RGB.
+                // Keep the acquired frame and latched bracket for replay.
                 if (recFrames == null && rawCaptureArmed) {
                     recFrames = frames.toList()
                     recBracket = RawCaptureStore.BracketSpec(
                         lockedLeftFrac * vw, lockedRightFrac * vw, cy)
                     recRgb = captureReferenceJpeg()
                 }
-                if (frames.size < 5) continue
-                val diameters = ArrayList<Double>(frames.size)
-                var spanPxSum = 0
-                for (f in frames) {
-                    val est = DBHEstimator.constrainedEstimate(
-                        f, lockedLeftFrac * vw, lockedRightFrac * vw, cy, calibration,
-                    ) ?: continue
-                    diameters.add(est.diameterCm.toDouble())
-                    spanPxSum += est.nPoints
-                }
-                if (diameters.size < DBHEstimator.TierThresholds.MIN_USABLE_FRAMES) {
-                    if (firstRed == null) {
-                        firstRed = DBHResult(
-                            diameterCm = 0f, centerX = 0f, centerZ = 0f,
-                            arcCoverageDeg = 0f, rmseMm = 0f, sigmaRmm = 0f,
-                            nInliers = diameters.size, confidence = ConfidenceTier.RED,
-                            method = DBHMethod.LIDAR_CHORD_SILHOUETTE,
-                            rejectionReason = "Not enough usable frames; hold steadier or move closer",
-                        )
-                    }
-                    continue
-                }
-                diameters.sort()
-                val medianCm = diameters[diameters.size / 2]
-                // Frame-to-frame agreement grades the sub-sample — the same
-                // rule bracketChordEstimate applies, read from the same
-                // constant so this inline copy cannot drift away from it.
-                val mean = diameters.average()
-                val cov = if (mean > 0) (diameters.last() - diameters.first()) / mean else 1.0
-                subs.add(
-                    DBHResult(
-                        diameterCm = medianCm.toFloat(), centerX = 0f, centerZ = 0f,
-                        arcCoverageDeg = 0f, rmseMm = 0f, sigmaRmm = 0f,
-                        nInliers = spanPxSum,
-                        confidence = if (cov <= DBHEstimator.TierThresholds.FRAME_SPREAD_GREEN)
-                            ConfidenceTier.GREEN else ConfidenceTier.YELLOW,
-                        method = DBHMethod.LIDAR_CHORD_SILHOUETTE, rejectionReason = null,
-                    ),
-                )
+                if (frames.size != 1) continue
+                val geometry = DBHEstimator.bracketDepthGeometry(
+                    frames.first(), lockedLeftFrac * vw, lockedRightFrac * vw, cy,
+                ) ?: continue
+                // Use the same entry point as raw recording and replay.
+                val measured = DBHEstimator.bracketChordEstimate(
+                    frames, geometry.axis, geometry.leftFraction, geometry.rightFraction, calibration,
+                ) ?: continue
+                if (measured.confidence == ConfidenceTier.RED) firstRed = measured
+                else subs.add(measured)
             }
             sampleProgress = 0
             val rf = recFrames; val rb = recBracket
             if (rf != null && rb != null) {
                 recordRawDbh(rf, tapX = 0.0, tapY = 0.0, axisRow = false, bracket = rb, rgb = recRgb)
             } else if (rawCaptureArmed) {
-                lastCaptureFailure = "no depth frames in this burst"
+                lastCaptureFailure = "no depth frame available for this capture"
                 postRawStatus(RawCaptureStatus(
                     RawCaptureStrings.notSaved(lastCaptureFailure), false))
             }
-            val agg = DBHEstimator.aggregateSamples(subs)
+            val agg = subs.firstOrNull()
             // THE SHUTTER — same moment and same rule as the auto burst
             // above: the frame with the bracket still on the stem, taken
             // before the result panel is composed.
@@ -2586,23 +2545,63 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                                 }
                             }
                         }
+                        autoAlignmentMessage?.let { message ->
+                            Text(message, color = Color.White, fontSize = 11.sp,
+                                modifier = Modifier.background(Color.Black.copy(alpha = 0.7f)).padding(6.dp))
+                        }
                         if (showAutoPill) {
                             AutoModePill {
-                                adjustMode = false
-                                adjustPreview = null
-                                // A held ADJUST value belongs to the bracket
-                                // that produced it, and there is no bracket
-                                // outside this mode.
-                                adjustShown = null; adjustHeld = null
-                                adjustHeldAt = 0L; bracketTwoSurfaces = false
-                                // The refusal was about the OTHER path's gate.
-                                captureRefusal = null
-                                // Remembered, so a cruiser who prefers the
-                                // automatic edges is not handed the bracket
-                                // again on the next tree. This pill and the
-                                // Adjust rail button are the whole control —
-                                // the preference has no Settings row.
-                                env.settings.setDbhEdgeAdjustDefault(false)
+                                if (!autoAlignmentBusy) {
+                                    val processingStarted = android.os.SystemClock.elapsedRealtimeNanos()
+                                    val seedLeft = adjustLeftFrac; val seedRight = adjustRightFrac
+                                    val seedWidth = controller.viewWidthPx; val seedHeight = controller.viewHeightPx
+                                    val capturedDepth = controller.acquireDepthFrame()
+                                    val camera = controller.acquireCameraLetterboxInput(640)
+                                    if (capturedDepth == null || camera == null) {
+                                        camera?.close()
+                                        autoAlignmentMessage = "Depth unavailable. Keep the guides and retry."
+                                    } else {
+                                        autoAlignmentBusy = true
+                                        autoAlignmentMessage = "Aligning stem edges…"
+                                        autoAlignmentScope.launch(start=kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+                                            try {
+                                            val outcome = withContext(Dispatchers.Default) {
+                                                runCatching {
+                                                    val prepared = camera.convert() ?: error("Camera input unavailable")
+                                                    com.hcjeong.forestix.sensors.YoloBoundaryAligner.shared(context).align(
+                                                        prepared.first,prepared.second,capturedDepth,
+                                                        seedWidth.toFloat(),seedHeight.toFloat(),
+                                                        seedLeft.toDouble(),seedRight.toDouble())
+                                                }
+                                            }
+                                            val now = controller.acquireDepthFrame()
+                                            val poseStable = now != null &&
+                                                (12..14).sumOf { i -> val d=(now.pose[i]-capturedDepth.pose[i]).toDouble(); d*d } < 0.0004 &&
+                                                (8..10).sumOf { i -> (now.pose[i]*capturedDepth.pose[i]).toDouble() } > 0.9994
+                                            if (!poseStable) {
+                                                autoAlignmentMessage = "Camera moved. Hold steady and tap Auto again."
+                                            } else if (adjustMode && adjustLeftFrac == seedLeft && adjustRightFrac == seedRight && controller.viewWidthPx == seedWidth && controller.viewHeightPx == seedHeight && stage == Stage.AIMING) {
+                                                val extent = outcome.getOrNull()
+                                                if (extent != null) {
+                                                    adjustLeftFrac = extent.leftFraction.toFloat()
+                                                    adjustRightFrac = extent.rightFraction.toFloat()
+                                                    segmentedExtent = extent
+                                                    adjustMode = false
+                                                    adjustPreview = null; adjustShown = null; adjustHeld = null
+                                                    captureRefusal = null
+                                                    autoAlignmentMessage = "AI alignment ready. Check the guides before capture."
+                                                } else {
+                                                    autoAlignmentMessage = "Keep current guides; AI alignment unavailable."
+                                                }
+                                            } else autoAlignmentMessage = "Guides changed. Tap Auto again."
+                                            } finally {
+                                            camera.close()
+                                            autoAlignmentBusy = false
+                                            android.util.Log.i("ForestiXAuto","YOLO26n elapsed ${(android.os.SystemClock.elapsedRealtimeNanos()-processingStarted)/1e6} ms")
+                                          }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -3127,7 +3126,7 @@ private fun DbhRing(locked: Boolean, ok: Color, bad: Color, progress: Float?, mo
 @Composable
 private fun CapturingPill(k: Int) {
     Text(
-        "Capturing $k/$SAMPLE_COUNT — hold steady.",
+        "Capturing…",
         style = Forestix.type.dataSmall,
         color = Color.White,
         modifier = Modifier

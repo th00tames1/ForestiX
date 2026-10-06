@@ -8,6 +8,7 @@
 // Tests drive the state machine directly through the `preview` factory.
 
 import Foundation
+import simd
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -92,9 +93,9 @@ public final class DBHScanViewModel: ObservableObject {
     /// phone held still — see `DBHEstimator.bracketCoreDepthSpreadM` for the
     /// measurement and the cause. The correction is HERE and not in the
     /// estimator because the estimator is frozen and does not need correcting:
-    /// the stored value is a median of five frames and the excursions do not
-    /// reach it. What they reach is the readout the cruiser is watching while
-    /// they place the handles, which publishes the raw per-frame fit.
+    /// capture computes a fresh fit from one latched frame. This hold only
+    /// steadies the live readout while the cruiser places the handles; its
+    /// historical value is never substituted for the captured measurement.
     ///
     /// WHY HOLD RATHER THAN BLANK. A bad tick lands roughly one time in ten at
     /// 10 Hz, so blanking on each one would strobe the number in and out —
@@ -244,6 +245,55 @@ public final class DBHScanViewModel: ObservableObject {
     /// routing segmentation through the bracket was that a corpus could be
     /// split on it later, and that is only true if the record says which.
     @Published public private(set) var resultCaptureMode: String = "auto"
+
+    @Published public private(set) var autoAlignmentBusy = false
+    @Published public private(set) var autoAlignmentMessage: String?
+
+    /// Auto aligns the current operator bracket once. A new request starts
+    /// from a new manual placement; an AI output is never fed back as a seed.
+    public func requestAutoAlignment() {
+        guard !autoAlignmentBusy, edgeAdjustActive else { return }
+        #if canImport(OnnxRuntimeBindings)
+        let processingStarted = ProcessInfo.processInfo.systemUptime
+        guard let live = session.currentCameraPixelBuffer(), let buffer = Self.copyPixelBuffer(live),
+              let frame = session.latestDepthFrame, frame.viewMapping != nil else {
+            autoAlignmentMessage = "Depth unavailable. Keep the guides and retry."; return
+        }
+        let left = edgeBracketLeftFraction, right = edgeBracketRightFraction, size = viewSize
+        autoAlignmentBusy = true; autoAlignmentMessage = "Aligning stem edges…"
+        Task { [weak self] in
+            let outcome: Result<StemExtent?, Error> = await Task.detached(priority:.userInitiated) {
+                Result { try YoloBoundaryAligner.shared().align(buffer:buffer,frame:frame,viewSize:size,leftFraction:left,rightFraction:right) }
+            }.value
+            guard let self else { return }
+            NSLog("ForestiX Auto YOLO26n elapsed %.1f ms", (ProcessInfo.processInfo.systemUptime-processingStarted)*1000)
+            self.autoAlignmentBusy = false
+            guard self.edgeAdjustActive, self.edgeBracketLeftFraction == left,
+                  self.edgeBracketRightFraction == right,
+                  self.state != .capturing, self.state != .accepted else {
+                self.autoAlignmentMessage = "Guides changed. Tap Auto again."; return
+            }
+            guard let current = self.session.latestDepthFrame,
+                  simd_distance(current.cameraPoseWorld.columns.3, frame.cameraPoseWorld.columns.3) < 0.02,
+                  simd_dot(current.cameraPoseWorld.columns.2, frame.cameraPoseWorld.columns.2) > 0.9994,
+                  self.viewSize == size else {
+                self.autoAlignmentMessage = "Camera moved. Hold steady and tap Auto again."; return
+            }
+            switch outcome {
+            case .success(let extent):
+                guard let extent else { self.autoAlignmentMessage = "Keep current guides; stem alignment unavailable."; return }
+                self.segmentedExtent = extent
+                self.edgeBracketLeftFraction = extent.leftFraction
+                self.edgeBracketRightFraction = extent.rightFraction
+                self.edgeAdjustActive = false
+                self.autoAlignmentMessage = "AI alignment ready. Check the guides before capture."
+            case .failure(let error): self.autoAlignmentMessage = error.localizedDescription
+            }
+        }
+        #else
+        autoAlignmentMessage = "AI alignment requires the mobile inference runtime."
+        #endif
+    }
 
     // MARK: - Segmentation-driven edges
 
@@ -470,7 +520,7 @@ public final class DBHScanViewModel: ObservableObject {
     /// rather than by the cruiser. Segmentation only writes them while ADJUST
     /// is off, so the two can never both be true of one capture.
     var segmentationDroveTheBracket: Bool {
-        segmentationEnabled && segmentedExtent != nil && !edgeAdjustActive
+        segmentedExtent != nil && !edgeAdjustActive
     }
 
     private var burstUsedBracket = false
@@ -482,6 +532,9 @@ public final class DBHScanViewModel: ObservableObject {
     /// screen direction at the moment "+" was tapped. Rotated frames are
     /// excluded so a burst measures the axis it was started on.
     private var burstBracketAxis: GuideAxis?
+    private var burstViewSize: CGSize = .zero
+    private var burstScreenLeft: Double = 0
+    private var burstScreenRight: Double = 0
     /// Newest depth frame, kept so the tap handler can map the bracket at
     /// the instant of capture.
     private var latestFrameForBracket: ARDepthFrame?
@@ -489,15 +542,13 @@ public final class DBHScanViewModel: ObservableObject {
     /// The window's interface orientation. `displayTransform` needs it, and
     /// a hard-coded `.portrait` would transpose the mapping on a landscape
     /// device.
+    #if canImport(UIKit) && os(iOS)
     private static func currentInterfaceOrientation() -> UIInterfaceOrientation {
-        #if canImport(UIKit) && os(iOS)
         UIApplication.shared.connectedScenes
             .compactMap { ($0 as? UIWindowScene)?.interfaceOrientation }
             .first ?? .portrait
-        #else
-        .portrait
-        #endif
     }
+    #endif
 
     /// True while the live bracket has a usable view→depth mapping. False
     /// puts a plain-language reason on the status line instead of silently
@@ -524,8 +575,10 @@ public final class DBHScanViewModel: ObservableObject {
         didSet {
             guard viewSize != oldValue,
                   viewSize.width > 1, viewSize.height > 1 else { return }
+            #if canImport(UIKit) && os(iOS)
             session.reportViewport(size: viewSize,
                                    orientation: Self.currentInterfaceOrientation())
+            #endif
         }
     }
 
@@ -565,25 +618,18 @@ public final class DBHScanViewModel: ObservableObject {
     /// Outcome of the most recent capture attempt — the screen renders this
     /// verbatim so a failed write can never look like a saved one.
     @Published public private(set) var lastCaptureOutcome: RawCaptureOutcome?
-    /// Representative depth frames (one per sub-sample) retained across the
-    /// burst for serialization. Only populated while recording is armed.
+    /// The single committed depth frame retained for raw serialization.
+    /// Only populated while recording is armed.
     private var recordFrames: [ARDepthFrame] = []
     /// Reference camera JPEG grabbed at burst start (developer mode only).
     private var recordReferenceJPEG: Data?
 
     // MARK: - Burst state
 
-    /// Hold-steady capture: the burst is now SEVERAL sub-measurements taken
-    /// over a few seconds. Each sub-sample runs the full chord/arc estimate
-    /// over `sampleWindowSec` of frames; the final value keeps the 3
-    /// sub-samples closest to the median and averages them (5 samples →
-    /// the 2 largest deviations are trimmed). 1-based progress is published
-    /// so the screen can show "Capturing k/5 — hold steady".
-    public let captureSampleTotal: Int = 5
-    private let sampleWindowSec: TimeInterval = 0.5
+    /// One depth frame per committed DBH. Live preview remains continuous.
+    public let captureSampleTotal: Int = 1
     @Published public private(set) var captureSampleIndex: Int = 0
     private var subSamples: [DBHResult] = []
-    private var sampleStartTime: TimeInterval = 0
     /// Monotonic id for the current capture — lets the stall watchdog
     /// no-op when its capture has already finished or a new one started.
     private var captureGeneration: Int = 0
@@ -775,22 +821,6 @@ public final class DBHScanViewModel: ObservableObject {
         if crosshairIsStable != stable { crosshairIsStable = stable }
         if state == .aligning, stable { state = .armed }
         if state == .armed, !stable    { state = .aligning }
-        if state == .capturing {
-            // Do not mix a rotated/unmapped frame into a burst whose axis
-            // is already latched and will be written to the manifest.
-            if let axis = burstBracketAxis,
-               DBHEstimator.screenHorizontalGuideAxis(
-                frame: frame, tapPixel: burstTap) == axis {
-                burstBuffer.append(frame)
-            }
-            // Close the current sub-sample once its window elapsed AND it
-            // has enough frames for a chord estimate (≥5). Slow depth
-            // delivery just stretches the window; the watchdog bounds it.
-            let elapsed = ProcessInfo.processInfo.systemUptime - sampleStartTime
-            if elapsed >= sampleWindowSec, burstBuffer.count >= 5 {
-                finishSubSample()
-            }
-        }
 
         // Live preview — expensive work gated by a throttle so it runs
         // at ~10 Hz instead of ARKit's 60 Hz. State-change side effects
@@ -860,14 +890,25 @@ public final class DBHScanViewModel: ObservableObject {
         // reads the auto depth-walk's diameter, taps "+", and a different one
         // is stored, with nothing saying so.
         if edgeAdjustActive || segmentationDroveTheBracket {
-            // Preserve the existing span/depth calculation; only replace the
-            // unsafe content-based axis vote with screen geometry.
-            let bracketAxis = screenAxis
+            // UI handles stay in view space. Estimation, diagnostics and
+            // recording use the same transformed depth-space interval.
+            guard let geometry = DBHEstimator.bracketDepthGeometry(
+                frame: frame, leftFraction: edgeBracketLeftFraction,
+                rightFraction: edgeBracketRightFraction, viewSize: viewSize) else {
+                bracketMappingReady = false
+                previewFit = nil
+                previewDbhCm = nil
+                resetBracketSettling()
+                previewStatusIsDiagnostic = false
+                previewStatusText = "Waiting for camera alignment."
+                return
+            }
+            let bracketAxis = geometry.axis
             let fit = DBHEstimator.bracketChordFit(
                 frame: frame,
                 guideAxis: bracketAxis,
-                leftFraction: edgeBracketLeftFraction,
-                rightFraction: edgeBracketRightFraction)
+                leftFraction: geometry.left,
+                rightFraction: geometry.right)
             // Both preview and capture use screen geometry.
             bracketMappingReady = true
             smoothedPreviewDbhCm = nil
@@ -885,7 +926,9 @@ public final class DBHScanViewModel: ObservableObject {
             previewFit = fit
             previewTier = fit?.tier
             previewDbhCm = settledBracketDiameterCm(
-                frame: frame, axis: bracketAxis, fit: fit, now: now)
+                frame: frame, axis: bracketAxis,
+                leftFraction: geometry.left, rightFraction: geometry.right,
+                fit: fit, now: now)
             // BEFORE the status line, not after: the stall flag decides
             // which of the two sentences the screen is allowed to show, so
             // it has to describe THIS tick when the line is written.
@@ -930,7 +973,7 @@ public final class DBHScanViewModel: ObservableObject {
                 }
                 line = String(
                     format: "no fit · %@ · %.3f–%.3f · grid %dx%d",
-                    ax, edgeBracketLeftFraction, edgeBracketRightFraction,
+                    ax, geometry.left, geometry.right,
                     frame.width, frame.height)
                 isDiagnostic = true
             } else if acquisitionStalled {
@@ -986,8 +1029,7 @@ public final class DBHScanViewModel: ObservableObject {
         // Phase 19 — dispatch on the user's chosen DBH method. The chord
         // method is stateless frame-to-frame (no depth-window anchoring
         // needed: median over ± 10 rows already absorbs intra-frame
-        // jitter and the multi-frame median in the burst handles the
-        // rest). The legacy partial-arc path keeps its tap-depth hint.
+        // variation). The legacy partial-arc path keeps its tap-depth hint.
         let fit: DBHEstimator.PreviewFit?
         let axis = screenAxis
         switch dbhMeasurementMethod {
@@ -1171,6 +1213,8 @@ public final class DBHScanViewModel: ObservableObject {
     private func settledBracketDiameterCm(
         frame: ARDepthFrame,
         axis: GuideAxis,
+        leftFraction: Double,
+        rightFraction: Double,
         fit: DBHEstimator.PreviewFit?,
         now: TimeInterval
     ) -> Double? {
@@ -1185,8 +1229,8 @@ public final class DBHScanViewModel: ObservableObject {
         let spread = DBHEstimator.bracketCoreDepthSpreadM(
             frame: frame,
             guideAxis: axis,
-            leftFraction: edgeBracketLeftFraction,
-            rightFraction: edgeBracketRightFraction)
+            leftFraction: leftFraction,
+            rightFraction: rightFraction)
         // A fit exists but the probe declined to describe it (fewer than three
         // valid depths cannot happen here — the fit needs them too — so this
         // is the bounds refusal). Treat an unmeasurable spread as settled
@@ -1363,18 +1407,35 @@ public final class DBHScanViewModel: ObservableObject {
         // automatic depth-walk reading it is not.
         burstUsedSegmentation = segmentationDroveTheBracket
         burstUsedBracket = edgeAdjustActive || burstUsedSegmentation
-        burstBracketLeft = edgeBracketLeftFraction
-        burstBracketRight = edgeBracketRightFraction
         guard let frame = latestFrameForBracket,
               let axis = DBHEstimator.screenHorizontalGuideAxis(
                 frame: frame, tapPixel: tapPixel) else {
             captureRefusalReason = "Waiting for camera alignment."
             return
         }
-        // One axis for preview, measurement, and the raw bundle.
-        burstBracketAxis = axis
-        burstBuffer.removeAll(keepingCapacity: true)
+        burstViewSize = viewSize
+        burstScreenLeft = edgeBracketLeftFraction
+        burstScreenRight = edgeBracketRightFraction
         burstTap = tapPixel
+        if burstUsedBracket {
+            guard let geometry = DBHEstimator.bracketDepthGeometry(
+                frame: frame, leftFraction: burstScreenLeft,
+                rightFraction: burstScreenRight, viewSize: burstViewSize) else {
+                captureRefusalReason = "Waiting for camera alignment."
+                return
+            }
+            burstBracketAxis = geometry.axis
+            burstBracketLeft = geometry.left
+            burstBracketRight = geometry.right
+            // Replay reconstructs the fixed row/column from tap_px.
+            switch geometry.axis {
+            case .row(let y): burstTap.y = Double(y)
+            case .col(let x): burstTap.x = Double(x)
+            }
+        } else {
+            burstBracketAxis = axis
+        }
+        burstBuffer.removeAll(keepingCapacity: true)
         subSamples.removeAll(keepingCapacity: true)
         // Raw-capture arm: start a fresh representative-frame set and grab
         // the reference camera image at the burst's first moment.
@@ -1383,20 +1444,12 @@ public final class DBHScanViewModel: ObservableObject {
         // A new burst supersedes the previous capture's saved / NOT-saved pill.
         lastCaptureOutcome = nil
         captureSampleIndex = 1
-        sampleStartTime = ProcessInfo.processInfo.systemUptime
         captureGeneration &+= 1
-        let generation = captureGeneration
         state = .capturing
-        // Stall watchdog — if depth frames stop arriving mid-capture the
-        // sub-sample close condition never fires; finalise with whatever
-        // sub-samples were collected instead of hanging in `.capturing`.
-        let deadline = Double(captureSampleTotal) * sampleWindowSec + 2.5
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(deadline * 1_000_000_000))
-            guard let self, self.state == .capturing,
-                  self.captureGeneration == generation else { return }
-            self.finalizeCapture()
-        }
+        // Commit the exact depth frame whose geometry was latched above.
+        // No collection window, repeated acquisition, or temporal averaging.
+        burstBuffer = [frame]
+        finishSubSample()
     }
 
     /// Why the Auto crosshair is not armed, in terms the cruiser can walk on.
@@ -1514,14 +1567,11 @@ public final class DBHScanViewModel: ObservableObject {
         state = .accepted
     }
 
-    /// Close the current sub-sample: run the full chord/arc estimate over
-    /// the window's frames, stash the result, and either open the next
-    /// window or finalise the capture after the last one.
+    /// Estimate and store the latched frame, then finalize this capture.
     private func finishSubSample() {
         let frames = burstBuffer
         burstBuffer.removeAll(keepingCapacity: true)
-        // Retain ONE representative depth frame per sub-sample (≤5 → the
-        // depth_0..4.bin bundle layout) for raw-capture replay.
+        // Replay receives exactly the frame used for the committed result.
         if rawCaptureEnabled, let rep = frames.first { recordFrames.append(rep) }
         if !frames.isEmpty, let axis = burstBracketAxis {
             // Dispatch: manual bracket (ADJUST captures, latched at tap
@@ -1549,25 +1599,17 @@ public final class DBHScanViewModel: ObservableObject {
             }
             if let outcome { subSamples.append(outcome) }
         }
-        if captureSampleIndex >= captureSampleTotal {
-            finalizeCapture()
-        } else {
-            captureSampleIndex += 1
-            sampleStartTime = ProcessInfo.processInfo.systemUptime
-        }
+        finalizeCapture()
     }
 
-    /// Trimmed-mean aggregation over the capture's sub-samples: the 3
-    /// closest to the median diameter are averaged (5 samples → the 2
-    /// largest deviations dropped). Fewer than 3 usable sub-samples means
-    /// the trunk couldn't be read consistently — reject.
+    /// Publish the single-frame result; rejected fits remain rejected.
     private func finalizeCapture() {
         let samples = subSamples
         subSamples.removeAll(keepingCapacity: true)
         burstBuffer.removeAll(keepingCapacity: true)
         captureSampleIndex = 0
         captureGeneration &+= 1
-        let outcome = DBHEstimator.aggregateSamples(samples)
+        let outcome = samples.first.flatMap { $0.confidence == .red ? nil : $0 }
         // On aggregate failure surface a red sub-sample if there was one —
         // it carries the human-readable rejection reason.
         result = outcome ?? samples.first(where: { $0.confidence == .red })
@@ -1617,7 +1659,11 @@ public final class DBHScanViewModel: ObservableObject {
         // One vote, both records.
         let axis = burstBracketAxis
         let bracket = RawCaptureManifest.DBHBundle.Bracket(
-            enabled: burstUsedBracket, left: burstBracketLeft, right: burstBracketRight)
+            enabled: burstUsedBracket, left: burstBracketLeft, right: burstBracketRight,
+            coordinateSpace: burstUsedBracket ? "depth_axis_fraction_v1" : nil,
+            screenFractions: burstUsedBracket ? [burstScreenLeft, burstScreenRight] : nil,
+            viewportSize: burstUsedBracket
+                ? [Double(burstViewSize.width), Double(burstViewSize.height)] : nil)
         let manual = burstUsedBracket
         let ctx = rawCaptureContext
         let jpeg = recordReferenceJPEG

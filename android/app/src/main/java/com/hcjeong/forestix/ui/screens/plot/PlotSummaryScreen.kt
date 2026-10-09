@@ -6,6 +6,8 @@
 
 package com.hcjeong.forestix.ui.screens.plot
 
+import com.hcjeong.forestix.common.finiteNumberFormat
+
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -196,14 +198,14 @@ fun PlotSummaryScreen(
             // MARK: - Stats
             FormSection(header = "Plot stats") {
                 StatRow("Live trees", "${stats.liveTreeCount}")
-                StatRow("Trees / $abbr", String.format(Locale.US, "%.1f", stats.tpa * f))
+                StatRow("Trees / $abbr", finiteNumberFormat(Locale.US, "%.1f", stats.tpa * f))
                 // Basal area converts its NUMERATOR with the basis, not only
                 // its suffix — the engine reports m² per ACRE, so scaling just
                 // the denominator left an imperial cruise reading "11.49
                 // m²/ac", a unit no cruise sheet uses and 10.76x away from the
                 // ft²/ac the quick-measure card shows for the same stand.
                 StatRow("Basal area / $abbr",
-                    String.format(Locale.US, "%.2f %s",
+                    finiteNumberFormat(Locale.US, "%.2f %s",
                         MeasurementFormatter.basalAreaDensity(stats.baPerAcreM2.toDouble(), areaUnit),
                         MeasurementFormatter.basalAreaDensityUnit(areaUnit)))
                 // The one row in this block that used to stay metric — and the
@@ -217,12 +219,12 @@ fun PlotSummaryScreen(
                 // the sheet is written in, and the one figure on this card a
                 // landowner is paid on.
                 StatRow("Gross volume / $abbr",
-                    String.format(Locale.US, "%.1f %s",
+                    finiteNumberFormat(Locale.US, "%.1f %s",
                         MeasurementFormatter.volumeDensity(
                             stats.grossVolumePerAcreM3.toDouble(), areaUnit),
                         MeasurementFormatter.volumeDensityUnit(areaUnit)))
                 StatRow("Merchantable volume / $abbr",
-                    String.format(Locale.US, "%.1f %s",
+                    finiteNumberFormat(Locale.US, "%.1f %s",
                         MeasurementFormatter.volumeDensity(
                             stats.merchVolumePerAcreM3.toDouble(), areaUnit),
                         MeasurementFormatter.volumeDensityUnit(areaUnit)))
@@ -398,17 +400,17 @@ private fun SpeciesRow(code: String, stat: PlotStats.SpeciesStat, areaUnit: Area
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
-                String.format(Locale.US, "%.1f $suffix", stat.tpa * f),
+                finiteNumberFormat(Locale.US, "%.1f $suffix", stat.tpa * f),
                 style = type.dataSmall, color = colors.textSecondary)
             Spacer(Modifier.weight(1f))
             Text(
-                String.format(Locale.US, "%.2f %s",
+                finiteNumberFormat(Locale.US, "%.2f %s",
                     MeasurementFormatter.basalAreaDensity(stat.baPerAcreM2.toDouble(), areaUnit),
                     MeasurementFormatter.basalAreaDensityUnit(areaUnit)),
                 style = type.dataSmall, color = colors.textSecondary)
             Spacer(Modifier.weight(1f))
             Text(
-                String.format(Locale.US, "%.1f %s",
+                finiteNumberFormat(Locale.US, "%.1f %s",
                     MeasurementFormatter.volumeDensity(
                         stat.grossVolumePerAcreM3.toDouble(), areaUnit),
                     MeasurementFormatter.volumeDensityUnit(areaUnit)),

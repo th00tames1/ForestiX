@@ -126,14 +126,14 @@ public struct PlotSummaryScreen: View {
         Section("Plot stats") {
             statRow("Live trees", "\(viewModel.stats.liveTreeCount)")
             statRow("Trees / \(areaUnit.abbreviation)",
-                    String(format: "%.1f", Double(viewModel.stats.tpa) * densityFactor))
+                    finiteNumberFormat("%.1f", Double(viewModel.stats.tpa) * densityFactor))
             // Basal area converts its NUMERATOR with the basis, not only its
             // suffix — the engine reports m² per ACRE, so scaling just the
             // denominator left an imperial cruise reading "11.49 m²/ac", a
             // unit no cruise sheet uses and 10.76× away from the ft²/ac the
             // quick-measure card shows for the same stand.
             statRow("Basal area / \(areaUnit.abbreviation)",
-                    String(format: "%.2f %@",
+                    finiteNumberFormat("%.2f %@",
                            MeasurementFormatter.basalAreaDensity(
                                m2PerAcre: Double(viewModel.stats.baPerAcreM2),
                                in: areaUnit),
@@ -149,13 +149,13 @@ public struct PlotSummaryScreen: View {
             // — 35.3× away from the cubic feet per acre the sheet is written
             // in, and the one figure on this card a landowner is paid on.
             statRow("Gross volume / \(areaUnit.abbreviation)",
-                    String(format: "%.1f %@",
+                    finiteNumberFormat("%.1f %@",
                            MeasurementFormatter.volumeDensity(
                                m3PerAcre: Double(viewModel.stats.grossVolumePerAcreM3),
                                in: areaUnit),
                            MeasurementFormatter.volumeDensityUnit(areaUnit)))
             statRow("Merchantable volume / \(areaUnit.abbreviation)",
-                    String(format: "%.1f %@",
+                    finiteNumberFormat("%.1f %@",
                            MeasurementFormatter.volumeDensity(
                                m3PerAcre: Double(viewModel.stats.merchVolumePerAcreM3),
                                in: areaUnit),
@@ -191,17 +191,17 @@ public struct PlotSummaryScreen: View {
                                 .foregroundStyle(.secondary)
                         }
                         HStack {
-                            Text(String(format: "%.1f %@",
+                            Text(finiteNumberFormat("%.1f %@",
                                         Double(stat.tpa) * densityFactor,
                                         areaUnit.densitySuffix))
                             Spacer()
-                            Text(String(format: "%.2f %@",
+                            Text(finiteNumberFormat("%.2f %@",
                                         MeasurementFormatter.basalAreaDensity(
                                             m2PerAcre: Double(stat.baPerAcreM2),
                                             in: areaUnit),
                                         MeasurementFormatter.basalAreaDensityUnit(areaUnit)))
                             Spacer()
-                            Text(String(format: "%.1f %@",
+                            Text(finiteNumberFormat("%.1f %@",
                                         MeasurementFormatter.volumeDensity(
                                             m3PerAcre: Double(stat.grossVolumePerAcreM3),
                                             in: areaUnit),

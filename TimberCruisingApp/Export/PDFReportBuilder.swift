@@ -337,7 +337,7 @@ public enum PDFReportBuilder {
         let loc = inputs.localization
         let totalAreaAc = inputs.strata.reduce(0) { $0 + $1.areaAcres }
         kv("Total area",
-           "\(String(format: "%.2f", loc.area(fromAcres: Double(totalAreaAc)))) \(loc.areaAbbr)")
+           "\(finiteNumberFormat("%.2f", loc.area(fromAcres: Double(totalAreaAc)))) \(loc.areaAbbr)")
         kv("# strata",          "\(inputs.strata.count)")
         kv("# species",         "\(inputs.species.count)")
         kv("# volume equations","\(Set(inputs.species.map { $0.volumeEquationId }).count)")
@@ -355,7 +355,7 @@ public enum PDFReportBuilder {
         } else {
             for (code, ba) in top3 {
                 let name = inputs.species.first(where: { $0.code == code })?.commonName ?? code
-                drawBody("\(code) — \(name): \(String(format: "%.3f", Double(ba) * loc.basalAreaDensityFactor)) \(loc.basalAreaDensityLabel)",
+                drawBody("\(code) — \(name): \(finiteNumberFormat("%.3f", Double(ba) * loc.basalAreaDensityFactor)) \(loc.basalAreaDensityLabel)",
                          at: CGPoint(x: frame.minX + 12, y: y),
                          width: frame.width, in: ctx)
                 y -= 18
@@ -407,8 +407,8 @@ public enum PDFReportBuilder {
         for (name, stat, unit) in metricRows {
             drawTableRow(cells: [
                 name, unit,
-                String(format: "%.3f", stat.mean),
-                String(format: "%.3f", stat.ci95HalfWidth),
+                finiteNumberFormat("%.3f", stat.mean),
+                finiteNumberFormat("%.3f", stat.ci95HalfWidth),
                 "\(stat.nPlots)"
             ], bold: false, at: CGPoint(x: frame.minX, y: y),
                colWidths: [140, 90, 100, 100, 60], in: ctx)
@@ -475,7 +475,7 @@ public enum PDFReportBuilder {
         // a centre is a FACT about the plot, and the reader of a cruise
         // report should not have to infer it from a punctuation mark.
         kv("Center",        plot.hasCentre
-                            ? String(format: "%.6f, %.6f",
+                            ? finiteNumberFormat("%.6f, %.6f",
                                      plot.centerLat, plot.centerLon)
                             : "not recorded")
         // The A/B/C/D position tier was pulled from every screen because a
@@ -488,9 +488,9 @@ public enum PDFReportBuilder {
         // The only statement in the report of how well the plot was located —
         // in the same unit as everything else the reader has in front of them.
         kv("GPS accuracy",
-           "±\(String(format: "%.2f", loc.length(fromMetres: Double(plot.gpsMedianHAccuracyM)))) \(loc.lengthUnit), averaged over \(plot.gpsNSamples) fixes")
-        kv("Plot area",     "\(String(format: "%.3f", loc.area(fromAcres: Double(plot.plotAreaAcres)))) \(loc.areaAbbr)")
-        kv("Slope/Aspect",  "\(String(format: "%.1f", plot.slopeDeg))° / \(String(format: "%.0f", plot.aspectDeg))°")
+           "±\(finiteNumberFormat("%.2f", loc.length(fromMetres: Double(plot.gpsMedianHAccuracyM)))) \(loc.lengthUnit), averaged over \(plot.gpsNSamples) fixes")
+        kv("Plot area",     "\(finiteNumberFormat("%.3f", loc.area(fromAcres: Double(plot.plotAreaAcres)))) \(loc.areaAbbr)")
+        kv("Slope/Aspect",  "\(finiteNumberFormat("%.1f", plot.slopeDeg))° / \(finiteNumberFormat("%.0f", plot.aspectDeg))°")
         kv("Started",       df.string(from: plot.startedAt))
         kv("Closed",        plot.closedAt.map(df.string(from:)) ?? "—")
         kv("Closed by",     plot.closedBy ?? "—")
@@ -501,15 +501,15 @@ public enum PDFReportBuilder {
         if let s = inputs.plotStatsByPlot[plot.id] {
             kv("Live trees",          "\(s.liveTreeCount)")
             kv("Trees per \(loc.areaWord)",
-               "\(String(format: "%.2f", Double(s.tpa) * loc.densityFactor)) trees\(loc.areaSuffix)")
+               "\(finiteNumberFormat("%.2f", Double(s.tpa) * loc.densityFactor)) trees\(loc.areaSuffix)")
             kv("Basal area",
-               "\(String(format: "%.4f", Double(s.baPerAcreM2) * loc.basalAreaDensityFactor)) \(loc.basalAreaDensityLabel)")
+               "\(finiteNumberFormat("%.4f", Double(s.baPerAcreM2) * loc.basalAreaDensityFactor)) \(loc.basalAreaDensityLabel)")
             kv("Quadratic mean DBH",
-               "\(String(format: "%.2f", loc.diameter(fromCm: Double(s.qmdCm)))) \(loc.diameterUnit)")
+               "\(finiteNumberFormat("%.2f", loc.diameter(fromCm: Double(s.qmdCm)))) \(loc.diameterUnit)")
             kv("Gross volume",
-               "\(String(format: "%.4f", Double(s.grossVolumePerAcreM3) * loc.volumeDensityFactor)) \(loc.volumeDensityLabel)")
+               "\(finiteNumberFormat("%.4f", Double(s.grossVolumePerAcreM3) * loc.volumeDensityFactor)) \(loc.volumeDensityLabel)")
             kv("Merchantable volume",
-               "\(String(format: "%.4f", Double(s.merchVolumePerAcreM3) * loc.volumeDensityFactor)) \(loc.volumeDensityLabel)")
+               "\(finiteNumberFormat("%.4f", Double(s.merchVolumePerAcreM3) * loc.volumeDensityFactor)) \(loc.volumeDensityLabel)")
         } else {
             drawBody("(no stats available)",
                      at: CGPoint(x: frame.minX, y: y),
@@ -532,9 +532,9 @@ public enum PDFReportBuilder {
                 guard let ss = s.bySpecies[code] else { continue }
                 drawTableRow(cells: [
                     loc.speciesName(code), "\(ss.count)",
-                    String(format: "%.2f", Double(ss.tpa) * loc.densityFactor),
-                    String(format: "%.4f", Double(ss.baPerAcreM2) * loc.basalAreaDensityFactor),
-                    String(format: "%.4f", Double(ss.grossVolumePerAcreM3) * loc.volumeDensityFactor)
+                    finiteNumberFormat("%.2f", Double(ss.tpa) * loc.densityFactor),
+                    finiteNumberFormat("%.4f", Double(ss.baPerAcreM2) * loc.basalAreaDensityFactor),
+                    finiteNumberFormat("%.4f", Double(ss.grossVolumePerAcreM3) * loc.volumeDensityFactor)
                 ], bold: false, at: CGPoint(x: frame.minX, y: y),
                    colWidths: [80, 50, 90, 110, 110], in: ctx); y -= 16
             }
@@ -556,7 +556,7 @@ public enum PDFReportBuilder {
         kv("Plot type",         Self.plotTypeWord(inputs.design.plotType))
         kv("Plot area",         inputs.design.plotAreaAcres.map {
             loc.isMetric
-                ? "\(String(format: "%.3f", loc.area(fromAcres: Double($0)))) \(loc.areaAbbr)"
+                ? "\(finiteNumberFormat("%.3f", loc.area(fromAcres: Double($0)))) \(loc.areaAbbr)"
                 : "\($0) ac"
         } ?? "—")
         // The stored BAF is ft²/ac (see `CruiseDesign.baf`), and the row now
@@ -568,14 +568,14 @@ public enum PDFReportBuilder {
         // rounds, like every other number on this page.
         kv("Basal area factor",
            inputs.design.baf.map {
-               String(format: "%.4g %@", loc.baf(fromStored: Double($0)), loc.bafLabel)
+               finiteNumberFormat("%.4g %@", loc.baf(fromStored: Double($0)), loc.bafLabel)
            } ?? "—")
         kv("Sampling scheme",   Self.schemeWord(inputs.design.samplingScheme))
         // Stored in metres; printed in the reader's unit, like the plot area
         // directly above it. Left bare it was the one row on this page that
         // stayed metric on an imperial report.
         kv("Grid spacing",      inputs.design.gridSpacingMeters.map {
-            "\(String(format: "%.1f", loc.length(fromMetres: Double($0)))) \(loc.lengthUnit)"
+            "\(finiteNumberFormat("%.1f", loc.length(fromMetres: Double($0)))) \(loc.lengthUnit)"
         } ?? "—")
         kv("Height subsample",  describeSubsample(inputs.design.heightSubsampleRule))
         kv("Breast height taken", Self.breastHeightWord(inputs.project.breastHeightConvention))
@@ -622,8 +622,8 @@ public enum PDFReportBuilder {
                 sp.code,
                 sp.commonName,
                 sp.volumeEquationId,
-                String(format: "%.1f", loc.diameter(fromCm: Double(sp.merchTopDibCm))),
-                String(format: "%.1f", loc.diameter(fromCm: Double(sp.stumpHeightCm)))
+                finiteNumberFormat("%.1f", loc.diameter(fromCm: Double(sp.merchTopDibCm))),
+                finiteNumberFormat("%.1f", loc.diameter(fromCm: Double(sp.stumpHeightCm)))
             ], bold: false, at: CGPoint(x: frame.minX, y: y),
                colWidths: [50, 150, 105, 120, 70], in: ctx); y -= 16
         }
@@ -671,11 +671,11 @@ public enum PDFReportBuilder {
             ].compactMap { $0 }
             drawTableRow(cells: [
                 pno, "\(t.treeNumber)", loc.speciesName(t.speciesCode),
-                String(format: "%.1f", loc.diameter(fromCm: Double(t.dbhCm))),
+                finiteNumberFormat("%.1f", loc.diameter(fromCm: Double(t.dbhCm))),
                 // Two decimals, matching every on-screen height readout —
                 // the appendix is what the client checks the app against.
                 t.heightM.map {
-                    String(format: "%.2f", loc.length(fromMetres: Double($0)))
+                    finiteNumberFormat("%.2f", loc.length(fromMetres: Double($0)))
                 } ?? "—",
                 Self.statusWord(t.status),
                 Self.qualityWord(t.dbhConfidence),
@@ -845,7 +845,7 @@ public enum PDFReportBuilder {
             ctx.fill(barRect)
 
             // Value label on top.
-            drawText(String(format: "%.2f", v),
+            drawText(finiteNumberFormat("%.2f", v),
                      at: CGPoint(x: x, y: barArea.minY + h + 12),
                      width: barW, fontSize: 8, bold: false, in: ctx)
             // Category label below axis.

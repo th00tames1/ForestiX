@@ -66,7 +66,7 @@ object PlotStatsCalculator {
     /// - trees: all trees on the plot (caller need not pre-filter).
     /// - species: map of speciesCode → config (for merch volume topDIB/stump).
     /// - volumeEquations: map of speciesCode → volume equation. Missing
-    ///   entries ⇒ volume contribution 0 for that species.
+    ///   entries ⇒ unavailable volume for that species and the plot total.
     /// - hdFits: map of speciesCode → H–D fit for imputing missing heights.
     fun compute(
         plot: Plot,
@@ -144,6 +144,12 @@ object PlotStatsCalculator {
                 }
             }
 
+            // Missing or rejected equation means unavailable volume, not zero.
+            if (eq == null) {
+                grossVolPerAcre = Float.NaN
+                totalGrossVolPerAcre = Float.NaN
+                totalMerchVolPerAcre = Float.NaN
+            }
             val bucket = bySpecies.getOrPut(tree.speciesCode) { Bucket() }
             bucket.count += 1
             bucket.tpa += ef

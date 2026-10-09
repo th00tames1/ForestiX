@@ -119,6 +119,13 @@ final class VolumeEquationsTests: XCTestCase {
 
     // MARK: - Factory
 
+    func testPlaceholderRecordsCannotProduceOperationalVolume() {
+        let record = Models.VolumeEquation(id: "bruce-df-pnw", form: "bruce",
+            coefficients: ["b0": -2.6, "b1": 1.8, "b2": 1.1],
+            unitsIn: "cm,m", unitsOut: "m3", sourceCitation: "PLACEHOLDER pending verification")
+        XCTAssertNil(VolumeEquationFactory.make(from: record))
+    }
+
     func testFactoryRecognizesKnownForms() {
         let bruce = Models.VolumeEquation(
             id: "bruce-df",

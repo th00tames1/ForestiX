@@ -126,8 +126,8 @@ public enum StandStatsCalculator {
 
         return StandStat(
             mean: weightedMean,
-            seMean: se,
-            ci95HalfWidth: ci,
+            seMean: weightedMean.isFinite ? se : .nan,
+            ci95HalfWidth: weightedMean.isFinite ? ci : .nan,
             dfSatterthwaite: df,
             nPlots: plotValues.count,
             byStratum: byStratum)

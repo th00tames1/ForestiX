@@ -72,6 +72,20 @@ final class PlotStatsTests: XCTestCase {
 
     // MARK: - Empty
 
+    func testMissingEquationDoesNotBecomeZeroOrPartialVolume() {
+        let r = PlotStatsCalculator.compute(
+            plot: makePlot(plotAreaAcres: 0.1), cruiseDesign: fixedDesign(),
+            trees: [tree(), tree(num: 2, species: "WH")],
+            species: ["DF": species(), "WH": species("WH")],
+            volumeEquations: ["DF": sh()])
+        XCTAssertEqual(r.liveTreeCount, 2)
+        XCTAssertEqual(r.tpa, 20, accuracy: 0.001)
+        XCTAssertTrue(r.grossVolumePerAcreM3.isNaN)
+        XCTAssertTrue(r.merchVolumePerAcreM3.isNaN)
+        XCTAssertTrue(r.bySpecies["WH"]!.grossVolumePerAcreM3.isNaN)
+        XCTAssertGreaterThan(r.bySpecies["DF"]!.grossVolumePerAcreM3, 0)
+    }
+
     func testEmptyPlotReturnsEmpty() {
         let r = PlotStatsCalculator.compute(
             plot: makePlot(plotAreaAcres: 0.1), cruiseDesign: fixedDesign(),

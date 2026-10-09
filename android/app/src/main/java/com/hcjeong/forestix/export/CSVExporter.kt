@@ -311,7 +311,7 @@ object CSVExporter {
         return s
     }
 
-    internal fun format(v: Double, places: Int): String = printfF(v, places)
+    internal fun format(v: Double, places: Int): String = if (v.isFinite()) printfF(v, places) else ""
 
     /// Fixed-decimal formatting with C-printf semantics. Swift's
     /// `String(format: "%.Nf", v)` delegates to printf, which rounds the

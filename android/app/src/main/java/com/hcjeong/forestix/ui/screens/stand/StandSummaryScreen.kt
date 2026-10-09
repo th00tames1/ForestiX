@@ -8,6 +8,8 @@
 
 package com.hcjeong.forestix.ui.screens.stand
 
+import com.hcjeong.forestix.common.finiteNumberFormat
+
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -157,7 +159,7 @@ fun StandSummaryScreen(nav: NavController, projectId: UUID) {
             // Korea is a scaffold — its official NIFoS coefficients are
             // pending, so stand volume shows "—" rather than a fabricated
             // figure.
-            if (settings.country.volumeStandardPending) {
+            if (settings.country.volumeStandardPending || !volStat.mean.isFinite()) {
                 PendingVolumeCard()
             } else {
                 val volFactor = MeasurementFormatter.volumeDensityFactor(areaUnit)
@@ -250,11 +252,11 @@ private fun StatCardSection(
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Row(Modifier.fillMaxWidth()) {
                     Text(
-                        String.format(Locale.US, "%.2f %s", stat.mean, unit),
+                        finiteNumberFormat(Locale.US, "%.2f %s", stat.mean, unit),
                         style = type.dataLarge, color = colors.textPrimary)
                     Spacer(Modifier.weight(1f))
                     Text(
-                        String.format(Locale.US, "± %.2f (95%% confidence)", stat.ci95HalfWidth),
+                        finiteNumberFormat(Locale.US, "± %.2f (95%% confidence)", stat.ci95HalfWidth),
                         style = type.dataSmall, color = colors.textSecondary)
                 }
                 // The standard error and the Satterthwaite effective degrees
@@ -283,7 +285,7 @@ private fun StatCardSection(
                                 style = type.caption, color = colors.textPrimary)
                             Spacer(Modifier.weight(1f))
                             Text(
-                                String.format(
+                                finiteNumberFormat(
                                     Locale.US, "%d plots · average %.2f · spread ±%.2f",
                                     s.nPlots, s.mean, sqrt(max(s.variance, 0.0))),
                                 style = type.dataSmall, color = colors.textSecondary)
@@ -374,9 +376,9 @@ private fun PerPlotTableSection(
                     Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
                         Text("${row.plot.plotNumber}", style = type.dataSmall, color = colors.textPrimary, modifier = Modifier.width(28.dp))
                         Text("${row.stats.liveTreeCount}", style = type.dataSmall, color = colors.textPrimary, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
-                        Text(String.format(Locale.US, "%.1f", row.stats.tpa * f), style = type.dataSmall, color = colors.textPrimary, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
+                        Text(finiteNumberFormat(Locale.US, "%.1f", row.stats.tpa * f), style = type.dataSmall, color = colors.textPrimary, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
                         Text(
-                            String.format(
+                            finiteNumberFormat(
                                 Locale.US, "%.2f",
                                 MeasurementFormatter.basalAreaDensity(
                                     row.stats.baPerAcreM2.toDouble(), areaUnit),
@@ -385,7 +387,7 @@ private fun PerPlotTableSection(
                             textAlign = TextAlign.End, modifier = Modifier.weight(1f),
                         )
                         Text(
-                            String.format(
+                            finiteNumberFormat(
                                 Locale.US, "%.1f",
                                 MeasurementFormatter.volumeDensity(
                                     row.stats.grossVolumePerAcreM3.toDouble(), areaUnit),

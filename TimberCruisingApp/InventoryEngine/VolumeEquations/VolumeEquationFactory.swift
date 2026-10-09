@@ -10,9 +10,12 @@ import Models
 
 public enum VolumeEquationFactory {
 
-    /// Returns nil if the record's `form` is not recognized.
+    /// Placeholder coefficient records cannot produce operational volumes.
+    /// This also catches previously seeded records in existing databases.
+    /// Returns nil for placeholders or an unrecognized form.
     public static func make(from record: Models.VolumeEquation)
     -> (any InventoryEngine.VolumeEquation)? {
+        guard !record.sourceCitation.localizedCaseInsensitiveContains("PLACEHOLDER") else { return nil }
         switch record.form {
         case "bruce":              return BruceDouglasFir(coefficients: record.coefficients)
         case "chambers_foltz":     return ChambersFoltzHemlock(coefficients: record.coefficients)

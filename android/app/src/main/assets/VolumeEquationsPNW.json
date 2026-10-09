@@ -1,5 +1,5 @@
 {
-  "_comment": "Spec §6.2 VolumeEquation records for the PNW starter set. Bruce DF and Chambers-Foltz WH are the canonical coastal-PNW total cubic-volume forms commonly referenced in USFS/BLM cruising literature. The coefficients below are PLACEHOLDERS pending verification against a primary source — see Phase 0 open questions. Callers that need production cruise numbers must replace them before use.",
+  "_comment": "Legacy PNW starter records. All four coefficient sets are PLACEHOLDERS and are refused by VolumeEquationFactory, including existing stored records. The bruce and chambers_foltz identifiers select generic log-power wrappers, not verified published equations. A fixed merchantable fraction is not a taper model. See docs/VOLUME_EQUATIONS.md for release criteria.",
   "equations": [
     {
       "id": "bruce-df-pnw",

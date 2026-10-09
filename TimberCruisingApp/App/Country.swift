@@ -260,7 +260,7 @@ public enum VolumeStandard: String, Sendable {
     /// Read-only label shown in Settings → Country & region. Matches Android.
     public var displayName: String {
         switch self {
-        case .usLogRule:         return "Board-foot log rule (Scribner / Doyle / Int'l ¼″)"
+        case .usLogRule:         return "PNW stem volume — coefficients pending verification"
         case .laasasenaho1982:   return "Laasasenaho (1982) · m³"
         case .germanFormFactor:  return "Form factor  V = g·h·f · m³ (approx.)"
         case .koreaNIFoSPending: return "NIFoS national table — coefficients pending"
@@ -269,5 +269,5 @@ public enum VolumeStandard: String, Sendable {
 
     /// TRUE while a country is selectable but cannot yet compute volume (Korea).
     /// Stand-level volume renders "—" rather than a fabricated number.
-    public var isPending: Bool { self == .koreaNIFoSPending }
+    public var isPending: Bool { self == .koreaNIFoSPending || self == .usLogRule }
 }

@@ -1,24 +1,12 @@
-// Spec §7.7.  Bruce form for Douglas-fir total cubic volume.
-//
-// Form (log-linear Schumacher–Hall, as published by Bruce & DeMars and later
-// Flewelling & McFadden for coastal PNW Douglas-fir):
-//
-//     log10(V_cf) = b0 + b1 · log10(D_in) + b2 · log10(H_ft)
-//     ⇒  V_cf = 10^b0 · D_in^b1 · H_ft^b2
-//
-// The equation is stored in imperial units; this wrapper converts DBH cm → in,
-// H m → ft, V ft³ → m³.
-//
-// ** Coefficient provenance **
-// The canonical Bruce DF coefficients for coastal Douglas-fir total cubic
-// volume (CVTS) are widely cited in USFS/BLM cruising handbooks. Default
-// coefficients loaded from `Resources/VolumeEquationsPNW.json` are placeholders
-// pending verification against a primary source (see open-questions in Phase 0
-// final report). Callers that instantiate this class directly can pass their
-// own coefficient dictionary.
-//
-// Required coefficients: "b0", "b1", "b2".
-// Optional: "merchFraction" (default 0.85).
+// Legacy parameterized imperial log-power wrapper; class name is retained for
+// stored equation identifiers, not a verified implementation of its namesake.
+// log10(V_ft3) = b0 + b1*log10(D_in) + b2*log10(H_ft).
+// This is not the piecewise form-factor equation in Bruce & DeMars (1974).
+// Required b0/b1/b2 and optional fixed merchFraction (default .85) must be
+// validated for form, units, domain, and volume definition before operational use.
+// The fixed fraction ignores top-DIB/stump inputs; it is not a taper model.
+// VolumeEquationFactory refuses the starter records marked PLACEHOLDER.
+// See docs/VOLUME_EQUATIONS.md.
 
 import Foundation
 

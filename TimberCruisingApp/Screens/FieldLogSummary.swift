@@ -258,7 +258,7 @@ public enum FieldLogSummaryBuilder {
         let (divisor, assumed) = QuickPlotStats.resolvedArea(plot: plot,
                                                              entries: entries)
         let mark = assumed ? FieldLogSummary.assumedMark : ""
-        let divisorText = String(format: "%.2f %@",
+        let divisorText = finiteNumberFormat("%.2f %@",
                                  areaUnit.fromAcres(divisor),
                                  areaUnit.abbreviation)
 
@@ -270,7 +270,7 @@ public enum FieldLogSummaryBuilder {
         // (assumed)" below, and a plot whose area came from the ring showed
         // nothing up here at all.
         if !assumed {
-            subtitleParts.append(String(format: "%.2f %@",
+            subtitleParts.append(finiteNumberFormat("%.2f %@",
                                         areaUnit.fromAcres(divisor),
                                         areaUnit.abbreviation))
         }
@@ -287,12 +287,12 @@ public enum FieldLogSummaryBuilder {
                                  value: stats.map { "\($0.treeCount)" } ?? "—"),
             FieldLogSummary.Cell(label: areaUnit.densityLabel("BASAL").uppercased(),
                                  value: stats.map {
-                                     String(format: "%@%.0f %@", mark,
+                                     finiteNumberFormat("%@%.0f %@", mark,
                                             $0.baPerAcre * factor, baUnit)
                                  } ?? "—"),
             FieldLogSummary.Cell(label: treesPerAreaLabel(areaUnit),
                                  value: stats.map {
-                                     String(format: "%@%.0f", mark, $0.tpa * factor)
+                                     finiteNumberFormat("%@%.0f", mark, $0.tpa * factor)
                                  } ?? "—"),
             FieldLogSummary.Cell(label: "MEAN DBH",
                                  value: stats.map {
@@ -305,11 +305,11 @@ public enum FieldLogSummaryBuilder {
             computed = [
                 .init(label: "Trees with a diameter", value: "\(stats.treeCount)"),
                 .init(label: "Basal area",
-                      value: String(format: "%@%.1f %@%@", mark,
+                      value: finiteNumberFormat("%@%.1f %@%@", mark,
                                     stats.baPerAcre * factor,
                                     baUnit, areaUnit.densitySuffix)),
                 .init(label: "Trees",
-                      value: String(format: "%@%.0f %@", mark, stats.tpa * factor,
+                      value: finiteNumberFormat("%@%.0f %@", mark, stats.tpa * factor,
                                     areaUnit.densitySuffix)),
                 .init(label: "Quadratic mean diameter",
                       value: MeasurementFormatter.diameter(cm: stats.qmdCm,
@@ -323,7 +323,7 @@ public enum FieldLogSummaryBuilder {
                 // no heights on it reads "—" rather than 0.
                 .init(label: "Board feet",
                       value: stats.boardFeetPerAcre.map {
-                          String(format: "%@%.0f bf%@", mark, $0 * factor,
+                          finiteNumberFormat("%@%.0f bf%@", mark, $0 * factor,
                                  areaUnit.densitySuffix)
                       } ?? "—")]
         }
@@ -396,17 +396,17 @@ public enum FieldLogSummaryBuilder {
             // the one beside it.
             FieldLogSummary.Cell(label: areaUnit.densityLabel("BASAL").uppercased(),
                                  value: empty ? "—"
-                                     : String(format: "%.1f %@",
+                                     : finiteNumberFormat("%.1f %@",
                                               MeasurementFormatter.basalAreaDensity(
                                                 m2PerAcre: Double(stats.baPerAcreM2),
                                                 in: areaUnit),
                                               MeasurementFormatter.basalAreaNumeratorUnit(areaUnit))),
             FieldLogSummary.Cell(label: treesPerAreaLabel(areaUnit),
                                  value: empty ? "—"
-                                     : String(format: "%.0f", Double(stats.tpa) * factor)),
+                                     : finiteNumberFormat("%.0f", Double(stats.tpa) * factor)),
             FieldLogSummary.Cell(label: areaUnit.densityLabel("VOLUME").uppercased(),
                                  value: empty || pending ? "—"
-                                     : String(format: "%.1f %@",
+                                     : finiteNumberFormat("%.1f %@",
                                               MeasurementFormatter.volumeDensity(
                                                 m3PerAcre: Double(stats.grossVolumePerAcreM3),
                                                 in: areaUnit),
@@ -417,26 +417,26 @@ public enum FieldLogSummaryBuilder {
             computed = [
                 .init(label: "Live trees", value: "\(stats.liveTreeCount)"),
                 .init(label: "Basal area",
-                      value: String(format: "%.2f %@",
+                      value: finiteNumberFormat("%.2f %@",
                                     MeasurementFormatter.basalAreaDensity(
                                         m2PerAcre: Double(stats.baPerAcreM2), in: areaUnit),
                                     MeasurementFormatter.basalAreaDensityUnit(areaUnit))),
                 .init(label: "Trees",
-                      value: String(format: "%.1f %@", Double(stats.tpa) * factor,
+                      value: finiteNumberFormat("%.1f %@", Double(stats.tpa) * factor,
                                     areaUnit.densitySuffix)),
                 .init(label: "Quadratic mean diameter",
                       value: MeasurementFormatter.diameter(cm: Double(stats.qmdCm),
                                                            in: settings.unitSystem)),
                 .init(label: "Gross volume",
                       value: pending ? volumePendingText
-                          : String(format: "%.1f %@",
+                          : finiteNumberFormat("%.1f %@",
                                    MeasurementFormatter.volumeDensity(
                                     m3PerAcre: Double(stats.grossVolumePerAcreM3),
                                     in: areaUnit),
                                    MeasurementFormatter.volumeDensityUnit(areaUnit))),
                 .init(label: "Merchantable volume",
                       value: pending ? volumePendingText
-                          : String(format: "%.1f %@",
+                          : finiteNumberFormat("%.1f %@",
                                    MeasurementFormatter.volumeDensity(
                                     m3PerAcre: Double(stats.merchVolumePerAcreM3),
                                     in: areaUnit),
@@ -505,13 +505,13 @@ public enum FieldLogSummaryBuilder {
                                  value: empty ? "—" : "\(viewModel.totalLiveTreeCount)"),
             FieldLogSummary.Cell(label: areaUnit.densityLabel("BASAL").uppercased(),
                                  value: empty ? "—"
-                                     : String(format: "%.1f %@", ba.mean,
+                                     : finiteNumberFormat("%.1f %@", ba.mean,
                                               MeasurementFormatter.basalAreaNumeratorUnit(areaUnit))),
             FieldLogSummary.Cell(label: treesPerAreaLabel(areaUnit),
-                                 value: empty ? "—" : String(format: "%.0f", tpa.mean)),
+                                 value: empty ? "—" : finiteNumberFormat("%.0f", tpa.mean)),
             FieldLogSummary.Cell(label: areaUnit.densityLabel("VOLUME").uppercased(),
                                  value: empty || pending ? "—"
-                                     : String(format: "%.1f %@", volume.mean,
+                                     : finiteNumberFormat("%.1f %@", volume.mean,
                                               MeasurementFormatter.volumeNumeratorUnit(areaUnit)))]
 
         var computed: [FieldLogSummary.Row] = []
@@ -579,7 +579,7 @@ public enum FieldLogSummaryBuilder {
 
     private static func confidenceText(_ mean: Double, _ halfWidth: Double,
                                        decimals: Int, unit: String) -> String {
-        String(format: "%.\(decimals)f%@ ± %.\(decimals)f (95%% confidence)",
+        finiteNumberFormat("%.\(decimals)f%@ ± %.\(decimals)f (95%% confidence)",
                mean, unit, halfWidth)
     }
 
@@ -599,7 +599,7 @@ public enum FieldLogSummaryBuilder {
         switch design.plotType {
         case .fixedArea:
             guard let acres = design.plotAreaAcres else { return "Fixed-area" }
-            return String(format: "Fixed-area · %.2f %@",
+            return finiteNumberFormat("Fixed-area · %.2f %@",
                           areaUnit.fromAcres(Double(acres)), areaUnit.abbreviation)
         case .variableRadius:
             guard let baf = design.baf else { return "Variable-radius" }
@@ -608,7 +608,7 @@ public enum FieldLogSummaryBuilder {
             // cruiser's own basis, so it is what decides which. Bare, the
             // number could be either and the two are 4.36× apart.
             let system: UnitSystem = areaUnit == .hectare ? .metric : .imperial
-            return String(format: "Variable-radius · BAF %.0f %@",
+            return finiteNumberFormat("Variable-radius · BAF %.0f %@",
                           MeasurementFormatter.bafDisplay(stored: Double(baf), in: system),
                           MeasurementFormatter.bafUnit(system))
         }

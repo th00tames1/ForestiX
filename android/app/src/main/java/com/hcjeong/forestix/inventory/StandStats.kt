@@ -124,8 +124,8 @@ object StandStatsCalculator {
 
         return StandStat(
             mean = weightedMean,
-            seMean = se,
-            ci95HalfWidth = ci,
+            seMean = if (weightedMean.isFinite()) se else Double.NaN,
+            ci95HalfWidth = if (weightedMean.isFinite()) ci else Double.NaN,
             dfSatterthwaite = df,
             nPlots = plotValues.size,
             byStratum = byStratum)

@@ -117,7 +117,7 @@ public struct StandSummaryScreen: View {
         pending: Bool = false
     ) -> some View {
         Section(title) {
-            if pending {
+            if pending || !stat.mean.isFinite {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("—").font(ForestixType.dataLarge)
                     Text("Volume isn't available for this region yet. Every other metric is unaffected.")
@@ -128,10 +128,10 @@ public struct StandSummaryScreen: View {
             } else {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
-                    Text(String(format: "%.2f %@", stat.mean, unit))
+                    Text(finiteNumberFormat("%.2f %@", stat.mean, unit))
                         .font(ForestixType.dataLarge)
                     Spacer()
-                    Text(String(format: "± %.2f (95%% confidence)", stat.ci95HalfWidth))
+                    Text(finiteNumberFormat("± %.2f (95%% confidence)", stat.ci95HalfWidth))
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
@@ -169,7 +169,7 @@ public struct StandSummaryScreen: View {
                                 Text(viewModel.stratumName(forKey: key))
                                     .font(.caption)
                                 Spacer()
-                                Text(String(format: "%d plots · average %.2f · spread ±%.2f",
+                                Text(finiteNumberFormat("%d plots · average %.2f · spread ±%.2f",
                                             s.nPlots, s.mean, sqrt(max(s.variance, 0))))
                                     .font(.caption.monospacedDigit())
                                     .foregroundStyle(.secondary)
@@ -202,13 +202,13 @@ public struct StandSummaryScreen: View {
                             .frame(width: 28, alignment: .leading)
                         Text("\(row.stats.liveTreeCount)")
                             .frame(maxWidth: .infinity, alignment: .trailing)
-                        Text(String(format: "%.1f", Double(row.stats.tpa) * densityFactor))
+                        Text(finiteNumberFormat("%.1f", Double(row.stats.tpa) * densityFactor))
                             .frame(maxWidth: .infinity, alignment: .trailing)
-                        Text(String(format: "%.2f",
+                        Text(finiteNumberFormat("%.2f",
                                     MeasurementFormatter.basalAreaDensity(
                                         m2PerAcre: Double(row.stats.baPerAcreM2), in: areaUnit)))
                             .frame(maxWidth: .infinity, alignment: .trailing)
-                        Text(String(format: "%.1f",
+                        Text(finiteNumberFormat("%.1f",
                                     MeasurementFormatter.volumeDensity(
                                         m3PerAcre: Double(row.stats.grossVolumePerAcreM3),
                                         in: areaUnit)))

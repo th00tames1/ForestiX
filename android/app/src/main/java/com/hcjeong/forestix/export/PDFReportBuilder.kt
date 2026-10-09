@@ -29,6 +29,8 @@
 
 package com.hcjeong.forestix.export
 
+import com.hcjeong.forestix.common.finiteNumberFormat
+
 import com.hcjeong.forestix.data.cruise.DBHCalibration
 
 import android.graphics.Canvas
@@ -196,7 +198,7 @@ object PDFReportBuilder {
         kv("# plots (closed)",  "${inputs.plots.count { it.closedAt != null }}")
         kv("# plots (total)",   "${inputs.plots.size}")
         val totalAreaAc = inputs.strata.fold(0f) { acc, s -> acc + s.areaAcres }
-        kv("Total area",        "${String.format(Locale.US, "%.2f", areaUnit.fromAcres(totalAreaAc.toDouble()))} ${areaUnit.abbreviation}")
+        kv("Total area",        "${finiteNumberFormat(Locale.US, "%.2f", areaUnit.fromAcres(totalAreaAc.toDouble()))} ${areaUnit.abbreviation}")
         kv("# strata",          "${inputs.strata.size}")
         kv("# species",         "${inputs.species.size}")
         kv("# volume equations", "${inputs.species.map { it.volumeEquationId }.toSet().size}")
@@ -213,7 +215,7 @@ object PDFReportBuilder {
             for ((code, ba) in top3) {
                 val name = inputs.species.firstOrNull { it.code == code }?.commonName ?: code
                 drawBody(canvas,
-                    "$code — $name: ${String.format(Locale.US, "%.3f", ba * basalAreaFactor(areaUnit))} " +
+                    "$code — $name: ${finiteNumberFormat(Locale.US, "%.3f", ba * basalAreaFactor(areaUnit))} " +
                         MeasurementFormatter.basalAreaDensityUnit(areaUnit),
                     frame.left + 12f, y, frame.width())
                 y += 18f
@@ -263,8 +265,8 @@ object PDFReportBuilder {
         for ((name, stat, unit) in metricRows) {
             drawTableRow(canvas, listOf(
                 name, unit,
-                String.format(Locale.US, "%.3f", stat.mean),
-                String.format(Locale.US, "%.3f", stat.ci95HalfWidth),
+                finiteNumberFormat(Locale.US, "%.3f", stat.mean),
+                finiteNumberFormat(Locale.US, "%.3f", stat.ci95HalfWidth),
                 "${stat.nPlots}",
             ), bold = false, frame.left, y, colWidths)
             y += 16f
@@ -323,7 +325,7 @@ object PDFReportBuilder {
         // report should not have to infer it from a punctuation mark.
         kv("Center",
             if (plot.hasCentre) {
-                String.format(Locale.US, "%.6f, %.6f", plot.centerLat, plot.centerLon)
+                finiteNumberFormat(Locale.US, "%.6f, %.6f", plot.centerLat, plot.centerLon)
             } else {
                 "not recorded"
             })
@@ -334,11 +336,11 @@ object PDFReportBuilder {
         // simply not printed here. What is left is the accuracy, as a quantity.
         // The only statement in the report of how well the plot was located —
         // in the same unit as everything else the reader has in front of them.
-        kv("GPS accuracy",  String.format(Locale.US, "±%.2f %s, averaged over %d fixes",
+        kv("GPS accuracy",  finiteNumberFormat(Locale.US, "±%.2f %s, averaged over %d fixes",
                                 lengthFromMetres(inputs, plot.gpsMedianHAccuracyM.toDouble()),
                                 lengthUnit(inputs), plot.gpsNSamples))
-        kv("Plot area",     "${String.format(Locale.US, "%.3f", areaUnit.fromAcres(plot.plotAreaAcres.toDouble()))} ${areaUnit.abbreviation}")
-        kv("Slope/Aspect",  "${String.format(Locale.US, "%.1f", plot.slopeDeg)}° / ${String.format(Locale.US, "%.0f", plot.aspectDeg)}°")
+        kv("Plot area",     "${finiteNumberFormat(Locale.US, "%.3f", areaUnit.fromAcres(plot.plotAreaAcres.toDouble()))} ${areaUnit.abbreviation}")
+        kv("Slope/Aspect",  "${finiteNumberFormat(Locale.US, "%.1f", plot.slopeDeg)}° / ${finiteNumberFormat(Locale.US, "%.0f", plot.aspectDeg)}°")
         kv("Started",       df.format(Date(plot.startedAt)))
         kv("Closed",        plot.closedAt?.let { df.format(Date(it)) } ?: "—")
         kv("Closed by",     plot.closedBy ?: "—")
@@ -349,17 +351,17 @@ object PDFReportBuilder {
         val s = inputs.plotStatsByPlot[plot.id]
         if (s != null) {
             kv("Live trees",          "${s.liveTreeCount}")
-            kv("Trees per $areaWord", String.format(Locale.US, "%.2f trees$suffix", s.tpa * f))
-            kv("Basal area",          String.format(Locale.US, "%.4f %s$suffix",
+            kv("Trees per $areaWord", finiteNumberFormat(Locale.US, "%.2f trees$suffix", s.tpa * f))
+            kv("Basal area",          finiteNumberFormat(Locale.US, "%.4f %s$suffix",
                                           s.baPerAcreM2 * basalAreaFactor(areaUnit),
                                           basalAreaUnit(areaUnit)))
-            kv("Quadratic mean DBH",  String.format(Locale.US, "%.2f %s",
+            kv("Quadratic mean DBH",  finiteNumberFormat(Locale.US, "%.2f %s",
                                           diameterFromCm(inputs, s.qmdCm.toDouble()),
                                           diameterUnit(inputs)))
-            kv("Gross volume",        String.format(Locale.US, "%.4f %s$suffix",
+            kv("Gross volume",        finiteNumberFormat(Locale.US, "%.4f %s$suffix",
                                           s.grossVolumePerAcreM3 * volumeFactor(areaUnit),
                                           volumeUnit(areaUnit)))
-            kv("Merchantable volume", String.format(Locale.US, "%.4f %s$suffix",
+            kv("Merchantable volume", finiteNumberFormat(Locale.US, "%.4f %s$suffix",
                                           s.merchVolumePerAcreM3 * volumeFactor(areaUnit),
                                           volumeUnit(areaUnit)))
         } else {
@@ -384,9 +386,9 @@ object PDFReportBuilder {
                 val ss = s.bySpecies[code] ?: continue
                 drawTableRow(canvas, listOf(
                     speciesLabel(inputs, code), "${ss.count}",
-                    String.format(Locale.US, "%.2f", ss.tpa * f),
-                    String.format(Locale.US, "%.4f", ss.baPerAcreM2 * basalAreaFactor(areaUnit)),
-                    String.format(Locale.US, "%.4f", ss.grossVolumePerAcreM3 * volumeFactor(areaUnit)),
+                    finiteNumberFormat(Locale.US, "%.2f", ss.tpa * f),
+                    finiteNumberFormat(Locale.US, "%.4f", ss.baPerAcreM2 * basalAreaFactor(areaUnit)),
+                    finiteNumberFormat(Locale.US, "%.4f", ss.grossVolumePerAcreM3 * volumeFactor(areaUnit)),
                 ), bold = false, frame.left, y, colWidths)
                 y += 16f
             }
@@ -406,7 +408,7 @@ object PDFReportBuilder {
         kv("Plot type",         plotTypeLabel(inputs.design.plotType))
         kv("Plot area",         inputs.design.plotAreaAcres?.let {
                                     if (areaUnit == AreaUnit.HECTARE)
-                                        String.format(Locale.US, "%.3f ha", areaUnit.fromAcres(it.toDouble()))
+                                        finiteNumberFormat(Locale.US, "%.3f ha", areaUnit.fromAcres(it.toDouble()))
                                     else "$it ac"
                                 } ?: "—")
         // The stored BAF is ft²/ac (see `CruiseDesign.baf`), and the row now
@@ -417,7 +419,7 @@ object PDFReportBuilder {
         // Float put exactly that on a client report. It converts and it
         // rounds, like every other number on this page.
         kv("Basal area factor", inputs.design.baf?.let {
-            String.format(Locale.US, "%.4g %s",
+            finiteNumberFormat(Locale.US, "%.4g %s",
                 bafFromStored(inputs, it.toDouble()), bafLabel(inputs))
         } ?: "—")
         kv("Sampling scheme",   samplingSchemeLabel(inputs.design.samplingScheme))
@@ -425,7 +427,7 @@ object PDFReportBuilder {
         // directly above it. Left bare it was the one row on this page that
         // stayed metric on an imperial report.
         kv("Grid spacing",      inputs.design.gridSpacingMeters?.let {
-            String.format(Locale.US, "%.1f %s",
+            finiteNumberFormat(Locale.US, "%.1f %s",
                 lengthFromMetres(inputs, it.toDouble()), lengthUnit(inputs))
         } ?: "—")
         kv("Height subsample",  describeSubsample(inputs.design.heightSubsampleRule))
@@ -468,9 +470,9 @@ object PDFReportBuilder {
                 sp.code,
                 sp.commonName,
                 sp.volumeEquationId,
-                String.format(Locale.US, "%.1f",
+                finiteNumberFormat(Locale.US, "%.1f",
                     diameterFromCm(inputs, sp.merchTopDibCm.toDouble())),
-                String.format(Locale.US, "%.1f",
+                finiteNumberFormat(Locale.US, "%.1f",
                     diameterFromCm(inputs, sp.stumpHeightCm.toDouble())),
             ), bold = false, frame.left, y, colWidths)
             y += 16f
@@ -517,11 +519,11 @@ object PDFReportBuilder {
             )
             drawTableRow(canvas, listOf(
                 pno, "${t.treeNumber}", speciesLabel(inputs, t.speciesCode),
-                String.format(Locale.US, "%.1f", diameterFromCm(inputs, t.dbhCm.toDouble())),
+                finiteNumberFormat(Locale.US, "%.1f", diameterFromCm(inputs, t.dbhCm.toDouble())),
                 // Two decimals, matching every on-screen height readout —
                 // the appendix is what the client checks the app against.
                 t.heightM?.let {
-                    String.format(Locale.US, "%.2f", lengthFromMetres(inputs, it.toDouble()))
+                    finiteNumberFormat(Locale.US, "%.2f", lengthFromMetres(inputs, it.toDouble()))
                 } ?: "—",
                 statusLabel(t.status),
                 qualityLabel(t.dbhConfidence),
@@ -629,7 +631,7 @@ object PDFReportBuilder {
             canvas.drawRect(x, barArea.bottom - h, x + barW, barArea.bottom, fill)
 
             // Value label on top.
-            drawText(canvas, String.format(Locale.US, "%.2f", v),
+            drawText(canvas, finiteNumberFormat(Locale.US, "%.2f", v),
                 x, barArea.bottom - h - 12f, barW, fontSize = 8f, bold = false)
             // Category label below axis.
             drawText(canvas, labels.getOrElse(i) { "" },

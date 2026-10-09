@@ -36,6 +36,8 @@
 
 package com.hcjeong.forestix.ui.screens
 
+import com.hcjeong.forestix.common.finiteNumberFormat
+
 import com.hcjeong.forestix.AppEnvironment
 import com.hcjeong.forestix.common.AreaUnit
 import com.hcjeong.forestix.common.MeasurementFormatter
@@ -268,7 +270,7 @@ object FieldLogSummaryBuilder {
         // Double.equals calls NaN equal to itself where Swift's != does not.
         val (divisor, assumed) = QuickPlotStats.resolvedArea(plot, entries)
         val mark = if (assumed) FieldLogSummary.ASSUMED_MARK else ""
-        val divisorText = String.format(
+        val divisorText = finiteNumberFormat(
             Locale.US, "%.2f %s", areaUnit.fromAcres(divisor), areaUnit.abbreviation)
 
         val subtitleParts = mutableListOf<String>()
@@ -280,7 +282,7 @@ object FieldLogSummaryBuilder {
         // nothing up here at all. Mirrors iOS.
         if (!assumed) {
             subtitleParts.add(
-                String.format(
+                finiteNumberFormat(
                     Locale.US, "%.2f %s",
                     areaUnit.fromAcres(divisor), areaUnit.abbreviation))
         }
@@ -297,13 +299,13 @@ object FieldLogSummaryBuilder {
             FieldLogSummary.Cell(
                 areaUnit.densityLabel("BASAL").uppercase(Locale.US),
                 stats?.let {
-                    String.format(
+                    finiteNumberFormat(
                         Locale.US, "%s%.0f %s", mark, it.baPerAcre * factor, baUnit)
                 } ?: "—"),
             FieldLogSummary.Cell(
                 treesPerAreaLabel(areaUnit),
                 stats?.let {
-                    String.format(Locale.US, "%s%.0f", mark, it.tpa * factor)
+                    finiteNumberFormat(Locale.US, "%s%.0f", mark, it.tpa * factor)
                 } ?: "—"),
             FieldLogSummary.Cell(
                 "MEAN DBH",
@@ -315,12 +317,12 @@ object FieldLogSummaryBuilder {
             FieldLogSummary.Row("Trees with a diameter", stats.treeCount.toString()),
             FieldLogSummary.Row(
                 "Basal area",
-                String.format(
+                finiteNumberFormat(
                     Locale.US, "%s%.1f %s%s", mark, stats.baPerAcre * factor, baUnit,
                     areaUnit.densitySuffix)),
             FieldLogSummary.Row(
                 "Trees",
-                String.format(
+                finiteNumberFormat(
                     Locale.US, "%s%.0f %s", mark, stats.tpa * factor,
                     areaUnit.densitySuffix)),
             FieldLogSummary.Row(
@@ -337,7 +339,7 @@ object FieldLogSummaryBuilder {
             FieldLogSummary.Row(
                 "Board feet",
                 stats.boardFeetPerAcre?.let {
-                    String.format(
+                    finiteNumberFormat(
                         Locale.US, "%s%.0f bf%s", mark, it * factor,
                         areaUnit.densitySuffix)
                 } ?: "—"))
@@ -411,18 +413,18 @@ object FieldLogSummaryBuilder {
             // the one beside it.
             FieldLogSummary.Cell(
                 areaUnit.densityLabel("BASAL").uppercase(Locale.US),
-                if (empty) "—" else String.format(
+                if (empty) "—" else finiteNumberFormat(
                     Locale.US, "%.1f %s",
                     MeasurementFormatter.basalAreaDensity(
                         stats.baPerAcreM2.toDouble(), areaUnit),
                     MeasurementFormatter.basalAreaNumeratorUnit(areaUnit))),
             FieldLogSummary.Cell(
                 treesPerAreaLabel(areaUnit),
-                if (empty) "—" else String.format(
+                if (empty) "—" else finiteNumberFormat(
                     Locale.US, "%.0f", stats.tpa.toDouble() * factor)),
             FieldLogSummary.Cell(
                 areaUnit.densityLabel("VOLUME").uppercase(Locale.US),
-                if (empty || pending) "—" else String.format(
+                if (empty || pending) "—" else finiteNumberFormat(
                     Locale.US, "%.1f %s",
                     MeasurementFormatter.volumeDensity(
                         stats.grossVolumePerAcreM3.toDouble(), areaUnit),
@@ -432,14 +434,14 @@ object FieldLogSummaryBuilder {
             FieldLogSummary.Row("Live trees", stats.liveTreeCount.toString()),
             FieldLogSummary.Row(
                 "Basal area",
-                String.format(
+                finiteNumberFormat(
                     Locale.US, "%.2f %s",
                     MeasurementFormatter.basalAreaDensity(
                         stats.baPerAcreM2.toDouble(), areaUnit),
                     MeasurementFormatter.basalAreaDensityUnit(areaUnit))),
             FieldLogSummary.Row(
                 "Trees",
-                String.format(
+                finiteNumberFormat(
                     Locale.US, "%.1f %s", stats.tpa.toDouble() * factor,
                     areaUnit.densitySuffix)),
             FieldLogSummary.Row(
@@ -447,14 +449,14 @@ object FieldLogSummaryBuilder {
                 MeasurementFormatter.diameter(stats.qmdCm.toDouble(), settings.unitSystem)),
             FieldLogSummary.Row(
                 "Gross volume",
-                if (pending) VOLUME_PENDING else String.format(
+                if (pending) VOLUME_PENDING else finiteNumberFormat(
                     Locale.US, "%.1f %s",
                     MeasurementFormatter.volumeDensity(
                         stats.grossVolumePerAcreM3.toDouble(), areaUnit),
                     MeasurementFormatter.volumeDensityUnit(areaUnit))),
             FieldLogSummary.Row(
                 "Merchantable volume",
-                if (pending) VOLUME_PENDING else String.format(
+                if (pending) VOLUME_PENDING else finiteNumberFormat(
                     Locale.US, "%.1f %s",
                     MeasurementFormatter.volumeDensity(
                         stats.merchVolumePerAcreM3.toDouble(), areaUnit),
@@ -523,16 +525,16 @@ object FieldLogSummaryBuilder {
             FieldLogSummary.Cell("TREES", if (empty) "—" else liveTrees.toString()),
             FieldLogSummary.Cell(
                 areaUnit.densityLabel("BASAL").uppercase(Locale.US),
-                if (empty) "—" else String.format(
+                if (empty) "—" else finiteNumberFormat(
                     Locale.US, "%.1f %s", ba.mean,
                     MeasurementFormatter.basalAreaNumeratorUnit(areaUnit))),
             FieldLogSummary.Cell(
                 treesPerAreaLabel(areaUnit),
-                if (empty) "—" else String.format(Locale.US, "%.0f", tpa.mean)),
+                if (empty) "—" else finiteNumberFormat(Locale.US, "%.0f", tpa.mean)),
             FieldLogSummary.Cell(
                 areaUnit.densityLabel("VOLUME").uppercase(Locale.US),
                 if (empty || pending) "—"
-                else String.format(
+                else finiteNumberFormat(
                     Locale.US, "%.1f %s", volume.mean,
                     MeasurementFormatter.volumeNumeratorUnit(areaUnit))))
 
@@ -596,7 +598,7 @@ object FieldLogSummaryBuilder {
         halfWidth: Double,
         decimals: Int,
         unit: String,
-    ): String = String.format(
+    ): String = finiteNumberFormat(
         Locale.US, "%.${decimals}f%s ± %.${decimals}f (95%% confidence)",
         mean, unit, halfWidth)
 
@@ -634,7 +636,7 @@ object FieldLogSummaryBuilder {
     private fun designPhrase(design: CruiseDesign, areaUnit: AreaUnit): String =
         when (design.plotType) {
             PlotType.FIXED_AREA -> design.plotAreaAcres?.let {
-                String.format(
+                finiteNumberFormat(
                     Locale.US, "Fixed-area · %.2f %s",
                     areaUnit.fromAcres(it.toDouble()), areaUnit.abbreviation)
             } ?: "Fixed-area"
@@ -646,7 +648,7 @@ object FieldLogSummaryBuilder {
                 val system =
                     if (areaUnit == AreaUnit.HECTARE) UnitSystem.METRIC
                     else UnitSystem.IMPERIAL
-                String.format(
+                finiteNumberFormat(
                     Locale.US, "Variable-radius · BAF %.0f %s",
                     MeasurementFormatter.bafDisplay(it.toDouble(), system),
                     MeasurementFormatter.bafUnit(system))

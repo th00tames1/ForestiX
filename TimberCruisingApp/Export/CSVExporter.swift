@@ -276,7 +276,7 @@ public enum CSVExporter {
     }
 
     static func format(_ v: Double, places: Int) -> String {
-        String(format: "%.\(places)f", v)
+        v.isFinite ? String(format: "%.\(places)f", v) : ""
     }
 
     static func optional(_ v: Float?, places: Int) -> String {

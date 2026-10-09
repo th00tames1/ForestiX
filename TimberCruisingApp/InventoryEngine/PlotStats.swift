@@ -49,7 +49,8 @@ public enum PlotStatsCalculator {
     ///   - trees: all trees on the plot (caller need not pre-filter).
     ///   - species: map of speciesCode → config (for merch volume topDIB/stump).
     ///   - volumeEquations: map of speciesCode → volume equation. Missing
-    ///     entries ⇒ volume contribution 0 for that species.
+    ///     entries make that species and total volume unavailable (NaN).
+    ///     Exporters serialize unavailable volume as blank, never zero.
     ///   - hdFits: map of speciesCode → H–D fit for imputing missing heights.
     public static func compute(
         plot: Plot,
@@ -122,6 +123,11 @@ public enum PlotStatsCalculator {
                     merchVolPerAcre = vMerch * ef
                     totalMerchVolPerAcre += merchVolPerAcre
                 }
+            }
+            if volumeEquations[tree.speciesCode] == nil {
+                grossVolPerAcre = .nan
+                totalGrossVolPerAcre = .nan
+                totalMerchVolPerAcre = .nan
             }
 
             var bucket = bySpecies[tree.speciesCode] ?? (0, 0, 0, 0)

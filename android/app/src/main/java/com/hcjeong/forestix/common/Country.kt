@@ -129,13 +129,13 @@ enum class Country(val raw: String) {
     /// True when the country is selectable but its volume coefficients are
     /// not yet bundled — stand volume must render "—", never a fabricated
     /// figure (Korea, pending official NIFoS coefficients).
-    val volumeStandardPending: Boolean get() = this == SOUTH_KOREA
+    val volumeStandardPending: Boolean get() = this == SOUTH_KOREA || this == UNITED_STATES
 
     /// Read-only "Volume standard" row shown in Settings, derived from the
     /// country (and, for the US, the selected region's log rule elsewhere).
     val volumeStandardLabel: String
         get() = when (this) {
-            UNITED_STATES -> "Board-foot log rule (Scribner / Doyle / Int'l ¼″)"
+            UNITED_STATES -> "PNW stem volume — coefficients pending verification"
             FINLAND -> "Laasasenaho (1982) · m³"
             GERMANY -> "Form factor  V = g·h·f · m³ (approx.)"
             SOUTH_KOREA -> "NIFoS national table — coefficients pending"

@@ -35,6 +35,7 @@ class ArController {
 
     @Volatile var frame: Frame? = null
         internal set
+    @Volatile private var heightFrame: Pair<HeightCameraSnapshot, Long>? = null
     @Volatile var session: Session? = null
         internal set
 
@@ -76,6 +77,17 @@ class ArController {
     fun onUpdate(session: Session, frame: Frame) {
         this.session = session
         this.frame = frame
+        val received = System.nanoTime()
+        val camera = frame.camera
+        val pose = camera.pose
+        val t = pose.translation
+        val z = pose.zAxis
+        heightFrame = HeightCameraSnapshot(
+            Vec3(t[0], t[1], t[2]),
+            kotlin.math.atan2(-z[1], sqrt(z[0]*z[0] + z[2]*z[2])),
+            camera.trackingState == TrackingState.TRACKING,
+            FloatArray(16).also { pose.toMatrix(it, 0) },
+        ) to received
         if (frame.camera.trackingState != TrackingState.TRACKING) trackedNormalSinceWatch = false
     }
 
@@ -327,6 +339,22 @@ class ArController {
         return distance(cam, hit).toDouble()
     }
 
+    data class HeightCameraSnapshot(
+        val position: Vec3, val elevationRad: Float,
+        val trackingNormal: Boolean, val poseMatrix: FloatArray,
+    )
+
+    /** A sighting reads one copied AR frame, not separately advancing poses. */
+    fun heightCameraSnapshot(): HeightCameraSnapshot? {
+        val q = heightFrame ?: return null
+        val age = (System.nanoTime() - q.second) / 1e9
+        val s = q.first
+        if (!s.trackingNormal || !com.hcjeong.forestix.common.HeightSampleFreshness.isRecent(age) ||
+            !s.position.x.isFinite() || !s.position.y.isFinite() || !s.position.z.isFinite() ||
+            !s.elevationRad.isFinite()) return null
+        return s
+    }
+
     fun currentCameraPosition(): Vec3? {
         val f = trackingFrame() ?: return null
         val t = f.camera.pose.translation
@@ -498,6 +526,8 @@ class ArController {
                 w, h, depth, conf, fx, fy, cx, cy, pose,
                 fxImg = fxImg, fyImg = fyImg, depthFromViewAffine = depthFromView,
                 rawDepthMm = rawMm,
+                frameTimestampNanos = f.timestamp,
+                depthAgeNanos = (f.androidCameraTimestamp - image.timestamp).coerceAtLeast(0L),
             )
         } finally {
             image.close()
@@ -531,12 +561,24 @@ class ArController {
     /// Captures the camera image immediately; RGB preparation can then run
     /// on a worker without acquiring a different AR frame.
     fun acquireCameraLetterboxInput(size: Int): CameraLetterboxInput? {
-        val f = frame ?: return null
-        return try { CameraLetterboxInput(f.acquireCameraImage(),size) } catch (_: Throwable) { null }
+        val f = trackingFrame() ?: return null
+        val vw = viewWidthPx.toFloat(); val vh = viewHeightPx.toFloat()
+        if (vw <= 1 || vh <= 1) return null
+        val image = try { f.acquireCameraImage() } catch (_: Throwable) { return null }
+        return try {
+            val out = FloatArray(6)
+            f.transformCoordinates2d(Coordinates2d.VIEW, floatArrayOf(0f,0f,vw,0f,0f,vh),
+                Coordinates2d.IMAGE_PIXELS, out)
+            val affine = floatArrayOf((out[2]-out[0])/vw,(out[4]-out[0])/vh,out[0],
+                (out[3]-out[1])/vw,(out[5]-out[1])/vh,out[1])
+            if (!affine.all { it.isFinite() }) { image.close(); null }
+            else CameraLetterboxInput(image,size,affine,f.timestamp)
+        } catch (_: Throwable) { image.close(); null }
     }
 
     /** Retains the captured camera image while preprocessing runs off the UI thread. */
-    class CameraLetterboxInput(private val image: android.media.Image,private val size:Int):AutoCloseable {
+    class CameraLetterboxInput(private val image: android.media.Image,private val size:Int,
+        val imageFromViewAffine:FloatArray,val frameTimestampNanos:Long):AutoCloseable {
         private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
         override fun close() { if(closed.compareAndSet(false,true))image.close() }
         fun convert():Pair<FloatArray,com.hcjeong.forestix.sensors.Letterbox>? {

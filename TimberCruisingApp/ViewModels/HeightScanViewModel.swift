@@ -691,13 +691,14 @@ public final class HeightScanViewModel: ObservableObject {
     /// same reason the walk readout is — an untracked transform is not a
     /// direction ARKit stands behind.
     private func samplePoseElevation(_ frame: ARDepthFrame) {
-        guard trackingLive else { return }
+        guard trackingLive,
+              HeightSampleFreshness.isRecent(ageSeconds: nowForPitchBuffer() - frame.timestamp) else { return }
         let c2 = frame.cameraPoseWorld.columns.2
         let fwd = SIMD3<Float>(-c2.x, -c2.y, -c2.z)
         let horiz = (fwd.x * fwd.x + fwd.z * fwd.z).squareRoot()
         let elevation = Double(atan2(fwd.y, horiz))
         guard elevation.isFinite else { return }
-        pitchBuffer.append(timestamp: ProcessInfo.processInfo.systemUptime,
+        pitchBuffer.append(timestamp: frame.timestamp,
                            pitchRad: elevation)
     }
 
@@ -734,9 +735,15 @@ public final class HeightScanViewModel: ObservableObject {
     private func currentCameraTranslation() -> SIMD3<Float>? {
         guard session.trackingStatus != .notAvailable,
               !session.isRelocalizing else { return nil }
-        if let p = session.currentCameraWorldPosition { return p }
-        if let frame = session.latestDepthFrame {
+        let now = nowForPitchBuffer()
+        if let p = session.currentCameraWorldPosition,
+           let timestamp = session.cameraPositionTimestamp,
+           HeightSampleFreshness.isRecent(ageSeconds: now - timestamp),
+           p.x.isFinite, p.y.isFinite, p.z.isFinite { return p }
+        if let frame = session.latestDepthFrame,
+           HeightSampleFreshness.isRecent(ageSeconds: now - frame.timestamp) {
             let c = frame.cameraPoseWorld.columns.3
+            guard c.x.isFinite, c.y.isFinite, c.z.isFinite else { return nil }
             return SIMD3<Float>(c.x, c.y, c.z)
         }
         return nil
@@ -850,7 +857,10 @@ public final class HeightScanViewModel: ObservableObject {
                             standingPointWorld: SIMD3<Float>,
                             aimedAtWorld: SIMD3<Float>? = nil) {
         guard state == .aimBaseArmed, anchorPointWorld != nil else { return }
-        guard let median = resilientMedianPitch(tapTime: tapTime) else { return }
+        guard let median = resilientMedianPitch(tapTime: tapTime) else {
+            anchorFailureReason = "A recent camera angle is required. Aim again, then tap +."
+            return
+        }
         alphaBaseRad = Float(median)
         alphaBaseSampleCount = pitchBuffer.sampleCount(centeredOn: tapTime)
         standingOffsetFromAnchor = anchorPointWorld.map { standingPointWorld - $0 }
@@ -870,7 +880,10 @@ public final class HeightScanViewModel: ObservableObject {
         guard state == .aimTopArmed, anchorPointWorld != nil,
               alphaBaseRad != nil, standingPointWorldAtAimTop != nil
         else { return }
-        guard let median = resilientMedianPitch(tapTime: tapTime) else { return }
+        guard let median = resilientMedianPitch(tapTime: tapTime) else {
+            anchorFailureReason = "A recent camera angle is required. Aim again, then tap +."
+            return
+        }
         alphaTopRad = Float(median)
         alphaTopSampleCount = pitchBuffer.sampleCount(centeredOn: tapTime)
         topAimedOffset = anchorPointWorld.map { a in
@@ -883,15 +896,13 @@ public final class HeightScanViewModel: ObservableObject {
     }
 
     /// Tries the strict 400 ms window first (matches the spec), then
-    /// falls back to a wider 1200 ms window, then to the most recent
-    /// sample regardless of age. Returns nil only if the buffer is
-    /// completely empty — which means the IMU never delivered anything,
-    /// at which point we genuinely can't compute a height.
+    /// falls back to a wider 1200 ms window, then refuses. Never reuse an
+    /// old angle for a new sighting after tracking has stopped.
     private func resilientMedianPitch(tapTime: TimeInterval) -> Double? {
         if let m = pitchBuffer.medianPitch(centeredOn: tapTime) { return m }
         if let m = pitchBuffer.medianPitch(centeredOn: tapTime,
                                            windowMs: 1200) { return m }
-        return pitchBuffer.mostRecentPitch()
+        return nil
     }
 
     /// Button-handler entry for the Anchor Here tap. The cruiser stands

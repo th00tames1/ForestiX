@@ -33,4 +33,10 @@ final class YoloTrunkMaskTests: XCTestCase {
         XCTAssertNil(YoloAlignmentMask.select(head:head([(0,0.9,0,0,100,640)]),prototypes:prototype(),width:640,height:640))
         XCTAssertNil(YoloAlignmentMask.select(head:[],prototypes:[],width:640,height:640))
     }
+    func testCentralCoverageFallbackSurvivesFastBoxPrefilter() throws {
+        let mask = try XCTUnwrap(YoloAlignmentMask.select(head:head([(0,0.8,288,0,304,640)]),
+            prototypes:prototype(),width:640,height:640))
+        XCTAssertTrue(mask.contains(x:300,y:320))
+        XCTAssertFalse(mask.contains(x:320,y:320))
+    }
 }

@@ -47,10 +47,14 @@ object YoloAlignmentMask {
         val cropWidth=160-cropX-floor(padx+0.1+0.5).toInt();val cropHeight=160-cropY-floor(pady+0.1+0.5).toInt()
         var best:Mask?=null;var bestCentre=false;var bestCoverage=-1.0
         for(d in kept) {
-            val logits=FloatArray(25600)
-            for(c in 0 until 32){val coefficient=head[(5+c)*anchors+d.anchor];for(p in logits.indices)logits[p]+=coefficient*prototypes[c*25600+p]}
             val box=doubleArrayOf(((d.box[0]-px)/resize).coerceIn(0.0,width.toDouble()),((d.box[1]-py)/resize).coerceIn(0.0,height.toDouble()),
                 ((d.box[2]-px)/resize).coerceIn(0.0,width.toDouble()),((d.box[3]-py)/resize).coerceIn(0.0,height.toDouble()))
+            // Exact prefilter: the chosen mask must cover a tested central pixel.
+            val minX=min(width/2,(width*0.45).toInt());val maxX=max(width/2,(width*0.55).toInt()-1)
+            val minY=min(height/2,(height*0.45).toInt());val maxY=max(height/2,(height*0.55).toInt()-1)
+            if(box[2]<=minX || box[0]>maxX || box[3]<=minY || box[1]>maxY)continue
+            val logits=FloatArray(25600)
+            for(c in 0 until 32){val coefficient=head[(5+c)*anchors+d.anchor];for(p in logits.indices)logits[p]+=coefficient*prototypes[c*25600+p]}
             val mask=Mask(d.score,logits,box,width,height,cropX,cropY,cropWidth,cropHeight)
             val centre=mask.contains(width/2,height/2);var count=0;var total=0
             for(y in (height*0.45).toInt() until (height*0.55).toInt())for(x in (width*0.45).toInt() until (width*0.55).toInt()) {

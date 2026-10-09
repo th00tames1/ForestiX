@@ -4,6 +4,13 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class YoloTrunkMaskTest {
+    @Test fun centralCoverageFallbackSurvivesFastBoxPrefilter() {
+        val n=8400;val h=FloatArray(37*n)
+        h[0]=296f;h[n]=320f;h[2*n]=16f;h[3*n]=640f;h[4*n]=0.8f;h[5*n]=1f
+        val p=FloatArray(32*25600);for(i in 0 until 25600)p[i]=1f
+        val mask=YoloAlignmentMask.select(h,p,640,640)!!
+        assertTrue(mask.contains(300,320));assertFalse(mask.contains(320,320))
+    }
     private fun head(vararg boxes:FloatArray):FloatArray {
         val n=8400;val d=FloatArray(37*n)
         for((i,b) in boxes.withIndex()) { d[i]=(b[1]+b[3])/2;d[n+i]=(b[2]+b[4])/2;d[2*n+i]=b[3]-b[1];d[3*n+i]=b[4]-b[2];d[4*n+i]=b[0];d[5*n+i]=1f }

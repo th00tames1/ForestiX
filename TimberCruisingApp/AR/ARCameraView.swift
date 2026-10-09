@@ -260,8 +260,15 @@ public struct ARCameraView: UIViewRepresentable {
         // `scalesWithDistance` — keeps their apparent size readable when
         // the cruiser walks away (height walk-off can be 15–20 m out).
         let coordinator = context.coordinator
+        let manager = sessionManager
         coordinator.updateSub = view.scene.subscribe(to: SceneEvents.Update.self) { [weak view, weak coordinator] _ in
-            guard let view, let coordinator, !coordinator.scalingIds.isEmpty else { return }
+            guard let view, let coordinator else { return }
+            // A resize/rotation or lock change need not trigger a SwiftUI
+            // update. Report the actual AR viewport before new depth arrives.
+            if let orientation = view.window?.windowScene?.interfaceOrientation {
+                manager?.reportViewport(size: view.bounds.size, orientation: orientation)
+            }
+            guard !coordinator.scalingIds.isEmpty else { return }
             let cam = view.cameraTransform.translation
             for id in coordinator.scalingIds {
                 guard let anchor = coordinator.markerAnchors[id] else { continue }

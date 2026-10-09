@@ -3,8 +3,10 @@ import XCTest
 
 final class BreastHeightGuideHeightTests: XCTestCase {
     func testDefaultsAndSavedChoice() {
-        XCTAssertEqual(BreastHeightGuideHeight.fromRaw(nil), .meters130)
-        XCTAssertEqual(BreastHeightGuideHeight.fromRaw("invalid"), .meters130)
+        XCTAssertEqual(BreastHeightGuideHeight.fromRaw(nil), .meters137)
+        XCTAssertEqual(BreastHeightGuideHeight.fromRaw("invalid"), .meters137)
+        XCTAssertEqual(BreastHeightGuideHeight.fromRaw(nil).imperialLabel, "4.5 ft")
+        XCTAssertEqual(BreastHeightGuideHeight.fromRaw("1.30"), .meters130)
         for height in BreastHeightGuideHeight.allCases {
             XCTAssertEqual(BreastHeightGuideHeight.fromRaw(height.rawValue), height)
         }

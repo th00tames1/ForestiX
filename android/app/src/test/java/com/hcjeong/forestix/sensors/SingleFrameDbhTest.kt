@@ -4,6 +4,29 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SingleFrameDbhTest {
+    @Test fun fiveFrameDeveloperWindowMatchesSingleOnStableSurface() {
+        val axis = GuideAxis.Col(128)
+        val cal = ProjectCalibration()
+        val single = DBHEstimator.bracketChordEstimate(listOf(frame()), axis, .35, .65, cal)!!
+        val multi = DBHEstimator.bracketChordEstimate(List(5) { frame() }, axis, .35, .65, cal)!!
+        assertEquals(single.diameterCm, multi.diameterCm, 1e-4f)
+        assertEquals(ConfidenceTier.YELLOW, single.confidence)
+        assertEquals(ConfidenceTier.GREEN, multi.confidence)
+    }
+
+    @Test fun fiveFrameMedianDoesNotUseLastOutlierAsSingleShot() {
+        val axis = GuideAxis.Col(128)
+        val cal = ProjectCalibration()
+        val single = DBHEstimator.bracketChordEstimate(listOf(frame()), axis, .35, .65, cal)!!
+        val multi = DBHEstimator.bracketChordEstimate(
+            listOf(frame(), frame(), frame(), frame(), frame(1.8f)), axis, .35, .65, cal)!!
+        assertEquals(single.diameterCm, multi.diameterCm, 1e-4f)
+    }
+
+    @Test fun incompleteWindowIsNotSilentlyTreatedAsSingleFrame() {
+        assertNull(DBHEstimator.bracketChordEstimate(
+            List(4) { frame() }, GuideAxis.Col(128), .35, .65, ProjectCalibration()))
+    }
     private fun frame(depthValue: Float = 1f) = ArDepthFrame(
         width=256, height=192, depth=FloatArray(256*192) { depthValue },
         confidence=ByteArray(256*192) { 2 },fx=210.0,fy=210.0,cx=128.0,cy=96.0,

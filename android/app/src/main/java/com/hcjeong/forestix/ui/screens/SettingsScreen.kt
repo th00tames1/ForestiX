@@ -481,8 +481,8 @@ fun SettingsScreen(nav: NavController) {
                 }
             }
 
-            // MARK: - 6. Developer & research (GATED — the developer-mode
-            // toggle is the only always-visible row; when on it holds ALL dev /
+            // MARK: - 6. Developer & research (hidden until the map's seven-tap
+            // gesture enables it; when on it holds ALL dev /
             // study tooling: DBH algorithm, research CSV, diagnostic log, and
             // the raw-capture recorder). The destructive Clears live in their
             // own card AFTER this one.
@@ -495,7 +495,7 @@ fun SettingsScreen(nav: NavController) {
             val hasEvents = remember(storeRefresh, settings.developerMode) {
                 settings.developerMode && ForestixLogger.hasEvents()
             }
-            FormSection(header = "Developer & research") {
+            if (settings.developerMode) FormSection(header = "Developer & research") {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text("Developer / research mode", style = type.body, color = colors.textPrimary)
@@ -506,12 +506,24 @@ fun SettingsScreen(nav: NavController) {
                     }
                     Switch(
                         checked = settings.developerMode,
-                        onCheckedChange = { env.settings.setDeveloperMode(it) },
+                        onCheckedChange = { if (!it) env.settings.setDeveloperMode(false) },
                     )
                 }
                 if (settings.developerMode) {
-
-
+                    FormDivider()
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text("Multi-frame DBH capture (5 frames)", style = type.body, color = colors.textPrimary)
+                            Text("Experimental. Off uses one depth frame per measurement; live preview is unchanged.",
+                                style = type.caption, color = colors.textSecondary)
+                        }
+                        Switch(
+                            checked = settings.dbhCaptureMode == com.hcjeong.forestix.common.DBHCaptureMode.MULTI_5,
+                            onCheckedChange = { env.settings.setDbhCaptureMode(
+                                if (it) com.hcjeong.forestix.common.DBHCaptureMode.MULTI_5
+                                else com.hcjeong.forestix.common.DBHCaptureMode.SINGLE) },
+                        )
+                    }
                     // AUTOMATIC STEM EDGES — an on-device segmentation model
                     // placing the measuring bracket.
                     //

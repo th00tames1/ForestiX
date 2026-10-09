@@ -125,6 +125,7 @@ import com.hcjeong.forestix.basemap.MapMarkerShape
 import com.hcjeong.forestix.basemap.MapView
 import com.hcjeong.forestix.basemap.rememberMapCameraState
 import com.hcjeong.forestix.common.ForestixLogger
+import com.hcjeong.forestix.common.DeveloperModeUnlock
 import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.UncertaintyBand
 import com.hcjeong.forestix.common.Units
@@ -220,6 +221,7 @@ fun MapHomeScreen(nav: NavController) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val settings by env.settings.state.collectAsStateWithLifecycle()
+    val developerUnlock = remember { DeveloperModeUnlock() }
     val entries by env.history.entries.collectAsStateWithLifecycle()
 
     // v3.1 merged cruise mode: ONE map, two modes, persisted (tc.mapMode).
@@ -529,6 +531,7 @@ fun MapHomeScreen(nav: NavController) {
             },
             // Tapping the selected pin again deselects it (iOS toggle).
             onMarkerTap = { id ->
+                developerUnlock.reset()
                 if (isCruise) {
                     cruise.selectedId = if (cruise.selectedId == id) null else id
                 } else {
@@ -539,9 +542,11 @@ fun MapHomeScreen(nav: NavController) {
             // menu (M2); a tap inside an area selects the area; a tap on
             // both toggles between them — see `handleOverlayTap`.
             onOverlayTap = { plotId, areaId ->
+                developerUnlock.reset()
                 handleOverlayTap(areaState, cruise, plotId, areaId)
             },
             onMapTap = {
+                developerUnlock.reset()
                 areaState.selectedId = null
                 if (isCruise) cruise.selectedId = null else selectedPinId = null
             },
@@ -555,6 +560,7 @@ fun MapHomeScreen(nav: NavController) {
             // with the mode (see MapPlanCallout); the gesture itself never does.
             // iOS ungates it the same way.
             onMapLongPress = { coordinate ->
+                developerUnlock.reset()
                 // A press while an outline is being dragged belongs to that
                 // outline: raising a planning menu mid-edit would offer to
                 // start something else on top of unsaved work.
@@ -655,8 +661,15 @@ fun MapHomeScreen(nav: NavController) {
                 RoundChromeButton(
                     Icons.Filled.MyLocation,
                     "My location",
-                    enabled = locateSnap != null,
+                    dimmed = locateSnap == null,
                 ) {
+                    if (!settings.developerMode &&
+                        developerUnlock.tap(android.os.SystemClock.elapsedRealtime() / 1000.0)) {
+                        env.settings.setDeveloperMode(true)
+                        android.widget.Toast.makeText(context,
+                            "Developer mode enabled — tools are available in Settings.",
+                            android.widget.Toast.LENGTH_SHORT).show()
+                    }
                     locateSnap?.let {
                         camera.moveTo(
                             CoordinateConversions.LatLon(
@@ -665,9 +678,13 @@ fun MapHomeScreen(nav: NavController) {
                         )
                     }
                 }
-                RoundChromeButton(Icons.Filled.Layers, "Map settings") { mapSettingsOpen = true }
+                RoundChromeButton(Icons.Filled.Layers, "Map settings") {
+                    developerUnlock.reset()
+                    mapSettingsOpen = true
+                }
                 // Settings — rightmost of the top-right group, both modes.
                 RoundChromeButton(Icons.Filled.Settings, "Settings") {
+                    developerUnlock.reset()
                     nav.navigate(Routes.SETTINGS)
                 }
             }
@@ -1242,13 +1259,14 @@ internal fun RoundChromeButton(
     icon: ImageVector,
     contentDescription: String,
     enabled: Boolean = true,
+    dimmed: Boolean = !enabled,
     onClick: () -> Unit,
 ) {
     val colors = Forestix.colors
     Box(
         Modifier
             .size(44.dp)
-            .alpha(if (enabled) 1f else 0.45f)
+            .alpha(if (dimmed) 0.45f else 1f)
             .pressableNoRipple(enabled = enabled, onClick = onClick)
             .clip(CircleShape)
             .background(colors.surfaceRaised)
@@ -2515,4 +2533,3 @@ private fun sigmaText(e: QuickMeasureEntry, system: UnitSystem): String? {
 /// "7 Jul · 09:41" — the mock's peek-card date line.
 private fun dateLine(epochMs: Long): String =
     SimpleDateFormat("d MMM · HH:mm", Locale.US).format(Date(epochMs))
-

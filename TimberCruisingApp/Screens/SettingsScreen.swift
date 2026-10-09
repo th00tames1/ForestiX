@@ -77,7 +77,7 @@ public struct SettingsScreen: View {
             // Basemap tiles is ordinary field setup, not developer tooling —
             // it sits ABOVE the developer group (Android matches).
             advancedSection
-            developerSection
+            if settings.developerMode { developerSection }
             clearDeveloperDataSection
             dangerZoneSection
         }
@@ -404,7 +404,7 @@ public struct SettingsScreen: View {
     }
 
     // MARK: - 6. Developer & research
-    // Gated behind developer mode: the toggle is the only always-visible row.
+    // Hidden until the map's seven-tap gesture enables developer mode.
     // When on, this is the single home for every dev/study tool — the DBH
     // algorithm picker (moved in from its own section), Research CSV, the
     // diagnostic log (gated here too, matching Android), and the raw-capture
@@ -414,7 +414,7 @@ public struct SettingsScreen: View {
         Section {
             Toggle(isOn: Binding(
                 get: { settings.developerMode },
-                set: { settings.developerMode = $0 })
+                set: { if !$0 { settings.developerMode = false } })
             ) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Developer / research mode")
@@ -426,8 +426,13 @@ public struct SettingsScreen: View {
             .accessibilityIdentifier("settings.developerMode")
 
             if settings.developerMode {
-
-
+                Toggle("Multi-frame DBH capture (5 frames)", isOn: Binding(
+                    get: { settings.dbhCaptureMode == .multi5 },
+                    set: { settings.dbhCaptureMode = $0 ? .multi5 : .single }))
+                    .accessibilityIdentifier("settings.dbhMultiFrame")
+                Text("Experimental. Off uses one depth frame per measurement; live preview is unchanged.")
+                    .font(ForestixType.caption)
+                    .foregroundStyle(ForestixPalette.textSecondary)
                 // AUTOMATIC STEM EDGES — an on-device segmentation model
                 // placing the measuring bracket.
                 //

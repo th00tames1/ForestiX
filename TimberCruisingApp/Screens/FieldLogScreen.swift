@@ -386,13 +386,13 @@ public struct FieldLogScreen: View {
                 .environmentObject(settings)
         }
         #if os(iOS)
-        .fullScreenCover(item: $rescan) { request in
+        .portraitFullScreenCover(item: $rescan) { request in
             NavigationStack {
                 rescanCover(request)
                     // Presented from INSIDE the rescan cover, the way the map
                     // home presents its own: a cover raised on the field log
                     // itself would be behind the scan screen it was asked for.
-                    .fullScreenCover(isPresented: $rescanPlotSetup) {
+                    .portraitFullScreenCover(isPresented: $rescanPlotSetup) {
                         rescanPlotSetupCover
                     }
             }
@@ -2574,7 +2574,7 @@ private struct FieldLogDetailForm: View {
                 plotID: outcome.destination.id, treeNumber: number))
         }
         #if os(iOS)
-        .fullScreenCover(item: $photoViewer) { context in
+        .portraitFullScreenCover(item: $photoViewer) { context in
             MeasurePhotoDetailView(context: context)
         }
         #endif

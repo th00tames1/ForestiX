@@ -14,13 +14,15 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import com.hcjeong.forestix.sensors.TreeSegDecode
-import com.hcjeong.forestix.sensors.TreeSegmenter
-import com.hcjeong.forestix.sensors.TreeSegmenterConfig
-import com.hcjeong.forestix.sensors.SegmenterAvailability
+import com.hcjeong.forestix.sensors.LiveStemMask
+import com.hcjeong.forestix.sensors.LiveStemTracker
+import com.hcjeong.forestix.sensors.YoloBoundaryAligner
 import com.hcjeong.forestix.sensors.StemExtent
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -40,6 +42,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.AutoAwesome
+import com.hcjeong.forestix.common.StableGuidanceMessage
 import androidx.compose.material.icons.filled.UnfoldMore
 import androidx.compose.material.icons.outlined.ViewInAr
 import androidx.compose.material3.AlertDialog
@@ -77,6 +81,9 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.ar.ArCameraView
@@ -149,6 +156,16 @@ import java.util.Locale
 
 private enum class Stage { AIMING, CAPTURING, RESULT }
 
+private fun liveAutoFrameCompatible(source: ArDepthFrame?, current: ArDepthFrame?): Boolean {
+    if (source == null || current == null || source.width != current.width || source.height != current.height ||
+        current.depthAgeNanos > 250_000_000L ||
+        source.depthFromViewAffine == null || current.depthFromViewAffine == null ||
+        !source.depthFromViewAffine.contentEquals(current.depthFromViewAffine)) return false
+    val travel = (12..14).sumOf { i -> val d = (current.pose[i] - source.pose[i]).toDouble(); d * d }
+    val facing = (8..10).sumOf { i -> (current.pose[i] * source.pose[i]).toDouble() }
+    return travel < 0.0004 && facing > 0.9994
+}
+
 /// THE HORIZON LINE'S TRAVEL. iOS `guideLinePointsPerDegree` /
 /// `guideLineMaxTravel` / `guideLineLevelBandDeg` 1:1 — the two platforms draw
 /// the same instrument, so a cruiser who learns the line on one phone reads it
@@ -172,10 +189,6 @@ private const val GUIDE_LINE_MAX_TRAVEL_DP = 90f
 /// 1.5 m is 4 cm of height across the stem: below what the chord median can
 /// resolve, so calling it level is not a rounding-down.
 private const val GUIDE_LINE_LEVEL_BAND_DEG = 1.5f
-
-/// Sub-measurements per hold-steady capture; the 3 closest to the median
-/// are kept (2 largest deviations trimmed) and averaged.
-private const val SAMPLE_COUNT = 1
 
 /// Consecutive bad/absent per-frame fits tolerated while locked before the
 /// HUD drops back to aiming. The display freezes on the last good smoothed
@@ -506,6 +519,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
 
     // Frames captured so far in the current burst (drives the progress arc).
     var sampleProgress by remember { mutableStateOf(0) }
+    var captureFrameTotal by remember { mutableStateOf(1) }
 
     // ADJUST edge-bracket mode (manual edge placement, depth method only):
     // two draggable handles bracket the trunk on the guide line; the
@@ -533,84 +547,112 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         mutableStateOf(0.5f + clampBracketHalfWidth(settings.dbhBracketHalfWidth))
     }
 
-    // SEGMENTATION-DRIVEN EDGES. The model places the ADJUST bracket's two
-    // handles instead of a thumb; everything downstream — the depth geometry,
-    // the middle-half sampling, the tangent identity, the tier — is the
-    // bracket path exactly as it ships. iOS DBHScanViewModel 1:1.
-    // THE SEGMENTATION GATE — developer mode AND its own toggle, never either
-    // alone. This decides the two
-    // pixels a diameter is measured between, and against 60 real captures it
-    // found a trunk in 40 % of frames and offered edges about 40 % narrower
-    // than the cruiser's own bracket. iOS `segmentationGateOpen` 1:1.
-    val segmentationOn = false // Auto invokes YOLO26n once from the current guides.
+    // Explicit Auto mode. All inference stays off the main thread, one frame
+    // at a time; the same silhouette drives the mask and the measuring handles.
+    var segmentationOn by remember { mutableStateOf(false) }
     var autoAlignmentBusy by remember { mutableStateOf(false) }
     var autoAlignmentMessage by remember { mutableStateOf<String?>(null) }
-    val autoAlignmentScope = rememberCoroutineScope()
-    var segmentedExtent by remember { mutableStateOf<StemExtent?>(null) }
-    /// Consecutive frames the model has failed to find a stem on.
-    var segmentationMisses by remember { mutableStateOf(0) }
-    var segmenter by remember { mutableStateOf<TreeSegmenter?>(null) }
-    DisposableEffect(Unit) { onDispose { segmenter?.close() } }
-    LaunchedEffect(segmentationOn, depthBlocked) {
-        if (!segmentationOn) {
-            segmentedExtent = null; segmentationMisses = 0; return@LaunchedEffect
+    var displayedAutoMessage by remember { mutableStateOf<String?>(null) }
+    var autoSafetyNotice by remember { mutableStateOf<String?>(null) }
+    var deviceIsHot by remember { mutableStateOf(false) }
+    DisposableEffect(context) {
+        val power = context.getSystemService(android.content.Context.POWER_SERVICE) as? android.os.PowerManager
+        var listener: android.os.PowerManager.OnThermalStatusChangedListener? = null
+        if (android.os.Build.VERSION.SDK_INT >= 29 && power != null) {
+            deviceIsHot = power.currentThermalStatus >= android.os.PowerManager.THERMAL_STATUS_SEVERE
+            listener = android.os.PowerManager.OnThermalStatusChangedListener { status ->
+                deviceIsHot = status >= android.os.PowerManager.THERMAL_STATUS_SEVERE
+            }
+            power.addThermalStatusListener(context.mainExecutor, listener)
         }
-        // Built on first use, not at screen entry: loading an 11 MB graph is a
-        // beat the cruiser would feel, and most sessions never turn this on.
-        if (segmenter == null) {
-            segmenter = withContext(Dispatchers.Default) { TreeSegmenter(context) }
-        }
-        val seg = segmenter
-        // 8 Hz, not per frame. The network is tens of milliseconds and ARCore
-        // delivers far faster; a bracket only has to keep up with a cruiser's
-        // hands, and the AR session needs the cores more than this does.
-        while (seg != null && seg.availability == SegmenterAvailability.READY && !depthBlocked) {
-            // THE MASK COMES BACK IN IMAGE SPACE; the bracket is a fraction
-            // across the SCREEN. `extentAcrossView` walks the view's own
-            // centre line through the frame's view↔depth affine — see the
-            // note there for why measuring the mask's own x is wrong.
-            val depth = controller.acquireDepthFrame()
-            val extent = withContext(Dispatchers.Default) {
-                val mask = controller.cameraLetterboxCHW(TreeSegmenterConfig.INPUT_SIZE)
-                    ?.let { (chw, box) -> seg.segment(chw, box) }
-                if (mask == null || depth == null) null
-                else TreeSegDecode.extentAcrossView(
-                    mask = mask,
-                    viewWidthPx = controller.viewWidthPx.toFloat(),
-                    viewHeightPx = controller.viewHeightPx.toFloat(),
-                    depthWidth = depth.width,
-                    depthHeight = depth.height,
-                    viewToDepth = { vx, vy -> depth.viewToDepth(vx, vy) },
-                )
+        onDispose {
+            if (android.os.Build.VERSION.SDK_INT >= 29 && power != null && listener != null) {
+                power.removeThermalStatusListener(listener)
             }
-            // A MISS DOES NOT DROP THE BRACKET. The model answers on about
-            // 40 % of frames; assigning unconditionally made `segmentedExtent`
-            // nil on every miss, so the screen flipped between the bracket
-            // path and the auto depth walk several times a second. Two
-            // measurement methods taking turns inside one capture is not a
-            // method. Eight misses at 8 Hz — one second of nothing — before
-            // the auto path takes over cleanly. iOS 1:1.
-            if (extent != null) {
-                segmentedExtent = extent
-                segmentationMisses = 0
-            } else {
-                segmentationMisses++
-                if (segmentationMisses >= SEGMENTATION_MISSES_BEFORE_RELEASE) {
-                    segmentedExtent = null
-                }
-            }
-            // Ignored while the cruiser is in ADJUST: they have taken hold of
-            // the bracket, and a bracket that fights a thumb is worse than no
-            // bracket at all.
-            if (extent != null && !adjustMode) {
-                adjustLeftFrac = extent.leftFraction.toFloat()
-                adjustRightFrac = extent.rightFraction.toFloat()
-            }
-            delay(125)
         }
     }
-    /// Whether the handles about to be latched were placed by the model.
-    val segmentationDroveTheBracket = segmentedExtent != null && !adjustMode
+    LaunchedEffect(segmentationOn, adjustMode) {
+        displayedAutoMessage = null
+        if (!segmentationOn || adjustMode) return@LaunchedEffect
+        val filter = StableGuidanceMessage(autoAlignmentMessage, SystemClock.elapsedRealtime() / 1000.0)
+        while (isActive) {
+            displayedAutoMessage = filter.update(autoAlignmentMessage, SystemClock.elapsedRealtime() / 1000.0)
+            kotlinx.coroutines.delay(125)
+        }
+    }
+    var segmentedExtent by remember { mutableStateOf<StemExtent?>(null) }
+    var liveStemMask by remember { mutableStateOf<LiveStemMask?>(null) }
+    var liveAutoFrame by remember { mutableStateOf<ArDepthFrame?>(null) }
+    val liveAutoTracker = remember { LiveStemTracker() }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var resumed by remember(lifecycleOwner) {
+        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
+    }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, _ ->
+            resumed = lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    LaunchedEffect(segmentationOn, adjustMode, depthBlocked, stage, manualOpen, bhGuide.stage, resumed) {
+        if (stage == Stage.CAPTURING || stage == Stage.RESULT) return@LaunchedEffect
+        liveAutoTracker.reset(); segmentedExtent = null; liveStemMask = null; liveAutoFrame = null
+        autoAlignmentBusy = false
+        if (!segmentationOn || adjustMode || depthBlocked || manualOpen ||
+            bhGuide.stage == BreastHeightGuide.Stage.AIMING || !resumed) return@LaunchedEffect
+        while (currentCoroutineContext().isActive) {
+            val started = SystemClock.elapsedRealtime() / 1000.0
+            val seedWidth = controller.viewWidthPx; val seedHeight = controller.viewHeightPx
+            val depth = controller.acquireDepthFrame()
+            val camera = if (depth != null && depth.depthAgeNanos <= 250_000_000L) controller.acquireCameraLetterboxInput(640) else null
+            if (depth == null || camera == null) {
+                segmentedExtent = liveAutoTracker.update(null, started)
+                if (!liveAutoTracker.isFresh(started)) { liveStemMask = null; liveAutoFrame = null }
+                autoAlignmentMessage = "Finding stem…"
+                delay(125); continue
+            }
+            autoAlignmentBusy = true
+            if (camera.frameTimestampNanos != depth.frameTimestampNanos) {
+                camera.close(); autoAlignmentBusy = false; delay(125); continue
+            }
+            val outcome = try {
+                withContext(Dispatchers.Default) {
+                    runCatching {
+                        val prepared = camera.convert() ?: error("Camera input unavailable")
+                        YoloBoundaryAligner.shared(context).track(prepared.first, prepared.second, depth,
+                            seedWidth.toFloat(), seedHeight.toFloat(), camera.imageFromViewAffine)
+                    }
+                }
+            } finally { camera.close(); autoAlignmentBusy = false }
+            currentCoroutineContext().ensureActive()
+            val now = SystemClock.elapsedRealtime() / 1000.0
+            val current = controller.acquireDepthFrame()
+            if (now - started > 0.45 || !liveAutoFrameCompatible(depth, current) ||
+                seedWidth != controller.viewWidthPx || seedHeight != controller.viewHeightPx) {
+                liveAutoTracker.reset(); segmentedExtent = null; liveStemMask = null; liveAutoFrame = null
+                autoAlignmentMessage = "Finding stem…"
+            } else if (outcome.isSuccess) {
+                val observation = outcome.getOrNull()
+                segmentedExtent = liveAutoTracker.update(observation?.extent, started)
+                if (liveAutoTracker.lastGood == started && observation?.mask != null) liveStemMask = observation.mask
+                else if (!liveAutoTracker.isFresh(now)) liveStemMask = null
+                segmentedExtent?.let {
+                    adjustLeftFrac = it.leftFraction.toFloat(); adjustRightFrac = it.rightFraction.toFloat()
+                    if (liveAutoTracker.lastGood == started) liveAutoFrame = depth
+                }
+                autoAlignmentMessage = if (liveAutoTracker.isFresh(now)) null else "Finding stem…"
+            } else {
+                liveAutoTracker.reset(); segmentedExtent = null; liveStemMask = null; liveAutoFrame = null
+                autoAlignmentMessage = outcome.exceptionOrNull()?.message ?: "AI unavailable. Use Adjust."
+                delay(750)
+            }
+            val elapsed = SystemClock.elapsedRealtime() / 1000.0 - started
+            delay(maxOf(20L, ((0.125 - elapsed) * 1000).toLong()))
+        }
+    }
+    // Auto never falls back silently to a different depth-walk measurement.
+    val segmentationDroveTheBracket = segmentationOn && !adjustMode
     var adjustPreview by remember { mutableStateOf<DBHEstimator.DbhPreview?>(null) }
 
     // ADJUST live-readout settling (field round 10 — the diameter that jumps
@@ -953,6 +995,9 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // Live single-frame preview loop while aiming (paused while the ADJUST
     // bracket owns the edges).
     LaunchedEffect(stage, depthBlocked, adjustMode, segmentationDroveTheBracket) {
+        if (segmentationDroveTheBracket) {
+            preview = null; rawDistM = null; cylinderMarker = null
+        }
         // The stall clock belongs to THIS aiming run — a stage change or a
         // mode flip restarts the effect and so restarts the clock.
         if (!adjustMode && !segmentationDroveTheBracket) {
@@ -961,7 +1006,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         }
         var lastLockAt = SystemClock.elapsedRealtime()
         var lastFrameAt = SystemClock.elapsedRealtime()
-        while (stage == Stage.AIMING && !depthBlocked && !adjustMode) {
+        while (stage == Stage.AIMING && !depthBlocked && !adjustMode && !segmentationDroveTheBracket) {
             controller.acquireDepthFrame()?.let { f ->
                 lastFrameAt = SystemClock.elapsedRealtime()
                 // Crosshair → depth pixel through ARCore's own view↔texture
@@ -1228,7 +1273,12 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 lastFrameAt = SystemClock.elapsedRealtime()
                 val w = controller.viewWidthPx.toFloat()
                 val cy = controller.viewHeightPx / 2f
-                adjustPreview = if (w > 1f) {
+                val liveLock = !segmentationOn || (liveAutoTracker.isFresh(SystemClock.elapsedRealtime() / 1000.0) &&
+                    liveAutoFrameCompatible(liveAutoFrame, f))
+                if (segmentationOn && !liveAutoFrameCompatible(liveAutoFrame, f) && liveAutoFrame != null) {
+                    liveAutoTracker.reset(); segmentedExtent = null; liveStemMask = null; liveAutoFrame = null
+                }
+                adjustPreview = if (w > 1f && liveLock) {
                     DBHEstimator.constrainedEstimate(
                         f, adjustLeftFrac * w, adjustRightFrac * w, cy, calibration,
                     )
@@ -1340,7 +1390,33 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         }
     }
 
-    // Capture one available depth frame; preview remains continuous.
+    // One frame normally, or five distinct compatible frames for developer mode.
+    // Do not silently fall back to a single frame when the multi-frame window fails.
+    suspend fun captureDepthFrames(): ArrayList<ArDepthFrame> {
+        val frames = ArrayList<ArDepthFrame>()
+        val deadline = SystemClock.elapsedRealtime() + if (captureFrameTotal == 1) 1200L else 2000L
+        while (frames.size < captureFrameTotal && SystemClock.elapsedRealtime() < deadline) {
+            currentCoroutineContext().ensureActive()
+            val frame = controller.acquireDepthFrame()
+            if (frame != null) {
+                val first = frames.firstOrNull()
+                val last = frames.lastOrNull()
+                val compatible = first == null || (
+                    frame.width == first.width && frame.height == first.height &&
+                    frame.depthFromViewAffine?.contentEquals(first.depthFromViewAffine) == true)
+                val fresh = captureFrameTotal == 1 || (frame.frameTimestampNanos > 0L &&
+                    (last == null || frame.frameTimestampNanos > last.frameTimestampNanos))
+                if (compatible && fresh) {
+                    frames.add(frame)
+                    sampleProgress = frames.size
+                }
+            }
+            if (frames.size < captureFrameTotal) delay(50)
+        }
+        if (frames.size != captureFrameTotal) frames.clear()
+        return frames
+    }
+
     /// The sentence for a "+" the gate will not honour.
     ///
     /// `livePreview` hands back a preview carrying the tap depth even on the
@@ -1374,6 +1450,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             return
         }
         captureRefusal = null
+        captureFrameTotal = settings.dbhCaptureMode.frameCount(settings.developerMode)
         stage = Stage.CAPTURING
         failure = null
         resultFromAdjust = false
@@ -1388,18 +1465,9 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             var recFrames: List<ArDepthFrame>? = null
             var recTapX = 0.0; var recTapY = 0.0; var recAxisRow = false
             var recRgb: ByteArray? = null
-            var captureAxis: GuideAxis? = null
-            for (k in 1..SAMPLE_COUNT) {
-                sampleProgress = k
-                // Retry only while depth is unavailable; retain the first frame.
-                val frames = ArrayList<ArDepthFrame>()
-                var attempts = 0
-                while (attempts < 24 && frames.isEmpty()) {
-                    controller.acquireDepthFrame()?.let { frames.add(it) }
-                    attempts++
-                    if (frames.isEmpty()) delay(50)
-                }
-                if (frames.isEmpty()) continue
+            run measurement@{
+                val frames = captureDepthFrames()
+                if (frames.isEmpty()) return@measurement
                 val f0 = frames.first()
                 // Same crosshair→depth-pixel mapping as the live preview so
                 // the committed burst reads the exact spot the cruiser aimed.
@@ -1408,23 +1476,20 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 val tapY = tap?.second ?: (f0.height / 2.0)
                 // Use screen geometry for both measurement and the raw bundle.
                 // Missing/rotated mappings must not fall back to a content vote.
-                val axis = DBHEstimator.screenHorizontalGuideAxis(f0, tapX, tapY) ?: continue
-                if (captureAxis != null && captureAxis != axis) continue
-                captureAxis = axis
+                val axis = DBHEstimator.screenHorizontalGuideAxis(f0, tapX, tapY) ?: return@measurement
                 frames.removeAll {
                     DBHEstimator.screenHorizontalGuideAxis(it, tapX, tapY) != axis
                 }
+                if (frames.size != captureFrameTotal) return@measurement
                 // Record the acquired frame even when its estimate is rejected.
                 if (recFrames == null && rawCaptureArmed) {
                     recFrames = frames.toList()
                     recTapX = tapX; recTapY = tapY; recAxisRow = axis is GuideAxis.Row
                     recRgb = captureReferenceJpeg()
                 }
-                // Exactly one frame is used for this measurement.
-                if (frames.size != 1) continue
-                // Compute a fresh chord from this frame without preview smoothing.
+                // Single-frame normal path; existing temporal estimator only in developer mode.
                 val sub = DBHEstimator.estimateChord(frames, tapX, tapY, axis, calibration, chordAlgorithm)
-                    ?: continue
+                    ?: return@measurement
                 if (sub.confidence == ConfidenceTier.RED) {
                     if (firstRed == null) firstRed = sub
                 } else samples.add(sub)
@@ -1469,6 +1534,11 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // Its geometry and estimator are shared with raw recording and replay.
     fun captureAdjust() {
         if (stage == Stage.CAPTURING) return
+        if (segmentationOn && (!liveAutoTracker.isFresh(SystemClock.elapsedRealtime() / 1000.0) ||
+            !liveAutoFrameCompatible(liveAutoFrame, controller.acquireDepthFrame()))) {
+            captureRefusal = "No stem lock yet — keep the crosshair on the trunk, or use Adjust."
+            return
+        }
         // Same silence, same fix. `constrainedEstimate` returns null rather
         // than an unlocked preview, so the bracket can only ever report the
         // lock sentence — it has no tap depth to name a direction from.
@@ -1477,6 +1547,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             return
         }
         captureRefusal = null
+        captureFrameTotal = settings.dbhCaptureMode.frameCount(settings.developerMode)
         stage = Stage.CAPTURING
         failure = null
         resultFromAdjust = true
@@ -1496,20 +1567,16 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             var recFrames: List<ArDepthFrame>? = null
             var recBracket: RawCaptureStore.BracketSpec? = null
             var recRgb: ByteArray? = null
-            for (k in 1..SAMPLE_COUNT) {
-                sampleProgress = k
-                // Retry missing depth without collecting a temporal window.
-                val frames = ArrayList<ArDepthFrame>()
-                var attempts = 0
-                while (attempts < 24 && frames.isEmpty()) {
-                    controller.acquireDepthFrame()?.let { frames.add(it) }
-                    attempts++
-                    if (frames.isEmpty()) delay(50)
-                }
-                if (frames.isEmpty()) continue
+            run measurement@{
+                val frames = captureDepthFrames()
+                if (frames.isEmpty()) return@measurement
                 val vw = controller.viewWidthPx.toFloat()
                 val cy = controller.viewHeightPx / 2f
-                if (vw <= 1f) continue
+                if (vw <= 1f) return@measurement
+                if (frames.size != captureFrameTotal) return@measurement
+                val geometry = DBHEstimator.bracketDepthGeometry(
+                    frames.first(), lockedLeftFrac * vw, lockedRightFrac * vw, cy,
+                ) ?: return@measurement
                 // Keep the acquired frame and latched bracket for replay.
                 if (recFrames == null && rawCaptureArmed) {
                     recFrames = frames.toList()
@@ -1517,14 +1584,10 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         lockedLeftFrac * vw, lockedRightFrac * vw, cy)
                     recRgb = captureReferenceJpeg()
                 }
-                if (frames.size != 1) continue
-                val geometry = DBHEstimator.bracketDepthGeometry(
-                    frames.first(), lockedLeftFrac * vw, lockedRightFrac * vw, cy,
-                ) ?: continue
                 // Use the same entry point as raw recording and replay.
                 val measured = DBHEstimator.bracketChordEstimate(
                     frames, geometry.axis, geometry.leftFraction, geometry.rightFraction, calibration,
-                ) ?: continue
+                ) ?: return@measurement
                 if (measured.confidence == ConfidenceTier.RED) firstRed = measured
                 else subs.add(measured)
             }
@@ -1945,6 +2008,45 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
 
     val locked = stage == Stage.AIMING && preview?.locked == true
 
+    // Shared by the right-hand button and the heat-reduction timeout.
+    fun enterAdjustMode() {
+        segmentationOn = false; liveStemMask = null; segmentedExtent = null
+        liveAutoTracker.reset()
+        val half = clampBracketHalfWidth(settings.dbhBracketHalfWidth)
+        adjustLeftFrac = 0.5f - half
+        adjustRightFrac = 0.5f + half
+        env.settings.setDbhEdgeAdjustDefault(true)
+        adjustPreview = null
+        adjustShown = null; adjustHeld = null
+        adjustHeldAt = 0L; bracketTwoSurfaces = false
+        preview = null; rawDistM = null
+        smoothedDiaCm = null; smoothedDistM = null
+        smoothedHitAnchor = null
+        lockStreak = 0; missStreak = 0
+        shownTier = ConfidenceTier.YELLOW; tierStreak = 0
+        cylinderMarker = null
+        carryWidths.clear(); tapJumpStreak = 0
+        captureRefusal = null
+        adjustMode = true
+        autoAlignmentMessage = null
+    }
+
+    LaunchedEffect(adjustMode, segmentationOn) {
+        if (adjustMode || !segmentationOn) return@LaunchedEffect
+        autoSafetyNotice = null
+        val started = SystemClock.elapsedRealtime() / 1000.0
+        while (isActive) {
+            if (com.hcjeong.forestix.common.AutoSafetyPolicy.shouldReturnToAdjust(
+                started, SystemClock.elapsedRealtime() / 1000.0,
+                stage == Stage.AIMING && !hidingChromeForCapture && !manualOpen)) {
+                enterAdjustMode()
+                autoSafetyNotice = com.hcjeong.forestix.common.AutoSafetyPolicy.TIMEOUT_MESSAGE
+                return@LaunchedEffect
+            }
+            kotlinx.coroutines.delay(250)
+        }
+    }
+
     Box(Modifier.fillMaxSize()) {
         // Live trunk-cylinder marker while aiming, and FROZEN THROUGH THE
         // BURST — the preview loop stops at Stage.CAPTURING, so what stays on
@@ -2055,7 +2157,19 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         // the drag reads the FINGER's distance from centre directly rather
         // than accumulating deltas (which drifted when a drag crossed the
         // centre line).
-        if ((adjustMode || segmentationDroveTheBracket) && stage == Stage.AIMING && !groundPlacementActive) {
+        if (stage == Stage.AIMING && segmentationOn && resumed && !depthBlocked &&
+            !manualOpen && !hidingChromeForCapture && !groundPlacementActive) {
+            liveStemMask?.let { mask ->
+                Canvas(Modifier.fillMaxSize()) {
+                    val dx = size.width / mask.width; val dy = size.height / mask.height
+                    for (run in mask.runs) {
+                        drawRect(colors.confidenceOk.copy(alpha = 0.18f),
+                            Offset(run.start * dx, run.row * dy), Size((run.end - run.start) * dx, dy))
+                    }
+                }
+            }
+        }
+        if ((adjustMode || (segmentationDroveTheBracket && segmentedExtent != null)) && stage == Stage.AIMING && !groundPlacementActive) {
             Box(
                 Modifier
                     .fillMaxSize()
@@ -2090,6 +2204,8 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         var draggingLeft = true
                         detectDragGestures(
                             onDragStart = { pos ->
+                                segmentationOn = false; adjustMode = true
+                                liveAutoTracker.reset(); liveStemMask = null; segmentedExtent = null
                                 val w = size.width.toFloat().coerceAtLeast(1f)
                                 draggingLeft =
                                     kotlin.math.abs(pos.x - adjustLeftFrac * w) <=
@@ -2283,9 +2399,9 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 // slanted chord, which is exactly the error the cruiser could
                 // not see before.
                 //
-                // The RING'S WIDTH, not the screen's: a horizon that runs
-                // edge to edge reads as chrome, one that fits the ring reads
-                // as part of the instrument. Level and it sits in the ring,
+                // Twice the ring's width, not the whole screen's. This keeps
+                // the moving horizon distinct from the fixed measurement row.
+                // Level and it sits in the ring,
                 // dead centre, and turns green. iOS `guideLine` 1:1 — same
                 // gain, same clamp, same level band, same dual stroke.
                 // NO PITCH IS NOT LEVEL. `cameraPitchDeg()` returns null off
@@ -2343,7 +2459,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 val hy = cy + if ((deg ?: 0f) > 0f) travel else -travel
                 val level = levelDeg != null &&
                     kotlin.math.abs(levelDeg) <= GUIDE_LINE_LEVEL_BAND_DEG
-                val halfW = 36.dp.toPx()   // the 72 dp ring's outer radius
+                val halfW = 72.dp.toPx()   // twice the 72 dp ring's total width
                 if (!hidingChromeForCapture) {
                     drawLine(
                         Color.Black.copy(alpha = 0.55f),
@@ -2400,7 +2516,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 // placement from one that had bled into the bank behind the
                 // tree, and had no reason to reach for the handles. A bracket
                 // that measures and cannot be seen is worse than no bracket.
-                if (adjustMode || segmentationDroveTheBracket) {
+                if (adjustMode || (segmentationDroveTheBracket && segmentedExtent != null)) {
                     val lx = size.width * adjustLeftFrac
                     val rx = size.width * adjustRightFrac
                     drawRect(
@@ -2444,7 +2560,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             val ringLocked = if (adjustMode) adjustPreview?.locked == true else locked
             val burstRunning = stage == Stage.CAPTURING
             val arcProgress by animateFloatAsState(
-                targetValue = if (burstRunning) maxOf(1, sampleProgress) / SAMPLE_COUNT.toFloat() else 0f,
+                targetValue = if (burstRunning) maxOf(1, sampleProgress) / captureFrameTotal.toFloat() else 0f,
                 animationSpec = tween(durationMillis = 450, easing = LinearEasing),
                 label = "captureArc",
             )
@@ -2490,9 +2606,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             }
         }
 
-        // 12 dp above the bottom block: the Undo toast (F), then the ADJUST
-        // exit pill while the bracket is up.
-        val showAutoPill = stage == Stage.AIMING && adjustMode
+        // Above the bottom block: Undo, stable guidance, then the ground action.
         // A BUTTON AND A TAP, since the app author asked for the tap.
         //
         // This used to say "placed by a BUTTON, never by a screen tap", and
@@ -2501,13 +2615,13 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         // than absent: it is live only while the guide is armed, the screen is
         // AIMING and nothing is placed yet, and the one thing it can do is
         // drop a marker that writes nothing and can be cleared from this same
-        // pill. Both shutter flanks are already Type and Adjust, so the
-        // button stays here beside the Auto pill and remains the way to place
+        // pill. Shutter flanks are Type and Auto/Adjust, so the ground
+        // button stays centred here and remains the way to place
         // a base without letting go of the phone.
         val showBhGuidePill = stage == Stage.AIMING && !depthBlocked &&
             !manualOpen && !hidingChromeForCapture
         val aboveBottomBlock: (@Composable () -> Unit)? =
-            if (undoToast != null || showAutoPill || showBhGuidePill) {
+            if (undoToast != null || showBhGuidePill) {
                 {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
@@ -2517,6 +2631,16 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                             UndoToastPill(savedTitle) { undoTally() }
                         }
                         if (showBhGuidePill) {
+                            // Reserve the same space with or without a message: controls stay put.
+                            Box(Modifier.size(width = 260.dp, height = 44.dp), contentAlignment = Alignment.Center) {
+                                val guidance = if (deviceIsHot) com.hcjeong.forestix.common.AutoSafetyPolicy.HEAT_MESSAGE
+                                    else autoSafetyNotice ?: displayedAutoMessage
+                                guidance?.let { message ->
+                                    Text(message, color = Color.White, fontSize = 11.sp, maxLines = 2,
+                                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                        modifier = Modifier.background(Color.Black.copy(alpha = 0.7f), RoundedCornerShape(6.dp)).padding(6.dp))
+                                }
+                            }
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 val placed = bhGuide.stage == BreastHeightGuide.Stage.PLACED
                                 ScanModePill(
@@ -2524,6 +2648,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                                     else if (bhPlacementFailed) "Retry ground"
                                     else if (bhGuide.stage == BreastHeightGuide.Stage.OFF) BreastHeightGuide.PLACE_BUTTON
                                     else "Place ground",
+                                    highlighted = true,
                                 ) {
                                     if (bhGuide.stage == BreastHeightGuide.Stage.OFF) {
                                         bhGuide.arm()
@@ -2541,65 +2666,6 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                                         bhGuide.disable()
                                         bhPlacementFailed = false
                                         bhLabelPos = null
-                                    }
-                                }
-                            }
-                        }
-                        autoAlignmentMessage?.let { message ->
-                            Text(message, color = Color.White, fontSize = 11.sp,
-                                modifier = Modifier.background(Color.Black.copy(alpha = 0.7f)).padding(6.dp))
-                        }
-                        if (showAutoPill) {
-                            AutoModePill {
-                                if (!autoAlignmentBusy) {
-                                    val processingStarted = android.os.SystemClock.elapsedRealtimeNanos()
-                                    val seedLeft = adjustLeftFrac; val seedRight = adjustRightFrac
-                                    val seedWidth = controller.viewWidthPx; val seedHeight = controller.viewHeightPx
-                                    val capturedDepth = controller.acquireDepthFrame()
-                                    val camera = controller.acquireCameraLetterboxInput(640)
-                                    if (capturedDepth == null || camera == null) {
-                                        camera?.close()
-                                        autoAlignmentMessage = "Depth unavailable. Keep the guides and retry."
-                                    } else {
-                                        autoAlignmentBusy = true
-                                        autoAlignmentMessage = "Aligning stem edges…"
-                                        autoAlignmentScope.launch(start=kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
-                                            try {
-                                            val outcome = withContext(Dispatchers.Default) {
-                                                runCatching {
-                                                    val prepared = camera.convert() ?: error("Camera input unavailable")
-                                                    com.hcjeong.forestix.sensors.YoloBoundaryAligner.shared(context).align(
-                                                        prepared.first,prepared.second,capturedDepth,
-                                                        seedWidth.toFloat(),seedHeight.toFloat(),
-                                                        seedLeft.toDouble(),seedRight.toDouble())
-                                                }
-                                            }
-                                            val now = controller.acquireDepthFrame()
-                                            val poseStable = now != null &&
-                                                (12..14).sumOf { i -> val d=(now.pose[i]-capturedDepth.pose[i]).toDouble(); d*d } < 0.0004 &&
-                                                (8..10).sumOf { i -> (now.pose[i]*capturedDepth.pose[i]).toDouble() } > 0.9994
-                                            if (!poseStable) {
-                                                autoAlignmentMessage = "Camera moved. Hold steady and tap Auto again."
-                                            } else if (adjustMode && adjustLeftFrac == seedLeft && adjustRightFrac == seedRight && controller.viewWidthPx == seedWidth && controller.viewHeightPx == seedHeight && stage == Stage.AIMING) {
-                                                val extent = outcome.getOrNull()
-                                                if (extent != null) {
-                                                    adjustLeftFrac = extent.leftFraction.toFloat()
-                                                    adjustRightFrac = extent.rightFraction.toFloat()
-                                                    segmentedExtent = extent
-                                                    adjustMode = false
-                                                    adjustPreview = null; adjustShown = null; adjustHeld = null
-                                                    captureRefusal = null
-                                                    autoAlignmentMessage = "AI alignment ready. Check the guides before capture."
-                                                } else {
-                                                    autoAlignmentMessage = "Keep current guides; AI alignment unavailable."
-                                                }
-                                            } else autoAlignmentMessage = "Guides changed. Tap Auto again."
-                                            } finally {
-                                            camera.close()
-                                            autoAlignmentBusy = false
-                                            android.util.Log.i("ForestiXAuto","YOLO26n elapsed ${(android.os.SystemClock.elapsedRealtimeNanos()-processingStarted)/1e6} ms")
-                                          }
-                                        }
                                     }
                                 }
                             }
@@ -2638,51 +2704,17 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                             caption = "Adjust",
                             iconRotation = 90f,
                         ) {
-                            // Open the bracket at the width the LAST tree
-                            // was measured at, centred on the crosshair.
-                            //
-                            // FIELD REPORT 4 — this used to seed from the
-                            // automatic fit's edges when it had any. That
-                            // sounded helpful and was not: the automatic
-                            // edges are the thing the cruiser reached for
-                            // ADJUST to get away from, so the bracket opened
-                            // already wrong and asymmetric, and the first
-                            // drag was spent undoing it. A plot is walked at
-                            // roughly one standing distance, so the previous
-                            // tree's width is the better guess — and when it
-                            // is wrong it is wrong symmetrically, which one
-                            // drag fixes. On a fresh install the stored
-                            // width is DEFAULT_BRACKET_HALF_WIDTH, derived
-                            // there from the field corpus rather than picked
-                            // for symmetry. iOS now opens the same way (it
-                            // seeded from the auto fit until this round).
-                            val half = clampBracketHalfWidth(settings.dbhBracketHalfWidth)
-                            adjustLeftFrac = 0.5f - half
-                            adjustRightFrac = 0.5f + half
-                            env.settings.setDbhEdgeAdjustDefault(true)
-                            adjustPreview = null
-                            // Entering ADJUST starts a fresh bracket — nothing
-                            // held from a previous session of it may show
-                            // under the new handles.
-                            adjustShown = null; adjustHeld = null
-                            adjustHeldAt = 0L; bracketTwoSurfaces = false
-                            // Park the auto preview so its chrome (chord,
-                            // badge, cylinder) can't linger under the
-                            // bracket.
-                            preview = null; rawDistM = null
-                            smoothedDiaCm = null; smoothedDistM = null
-                            smoothedHitAnchor = null
-                            lockStreak = 0; missStreak = 0
-                            shownTier = ConfidenceTier.YELLOW; tierStreak = 0
-                            cylinderMarker = null
-                            carryWidths.clear(); tapJumpStreak = 0
-                            // The refusal was about the OTHER path's gate.
-                            captureRefusal = null
-                            adjustMode = true
+                            enterAdjustMode()
                         }
                     }
                 } else {
-                    null
+                    {
+                        MeasureCircleButton(icon = Icons.Filled.AutoAwesome, caption = "Auto") {
+                            liveAutoTracker.reset(); segmentedExtent = null; liveStemMask = null
+                            adjustMode = false; segmentationOn = true
+                            autoAlignmentMessage = "Finding stem…"
+                        }
+                    }
                 },
                 valueStrip = {
                     // WHAT THE SHUTTER WILL STORE, not what the other loop
@@ -2722,6 +2754,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 stage == Stage.AIMING -> when {
                     // The animated icon replaces the no-depth-lock text.
                     showDepthMotionHint -> null
+                    segmentationOn && !adjustMode -> "Keep the trunk in view; tap + when ready, or use Adjust."
                     // FIELD REPORT 15, the stuck case: depth delivery has
                     // stopped outright and has been down long enough to
                     // stall. Every line below reads `preview` /
@@ -2768,7 +2801,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 stage == Stage.CAPTURING -> null
                 result?.confidence == ConfidenceTier.RED ->
                     result?.rejectionReason ?: "Scan rejected. Try again."
-                else -> "Scan complete. Accept, retake, or add a second view."
+                else -> "Scan complete. Accept or retake."
             },
             // A refused "+" gets the same amber surface a failed capture gets.
             // A real failure outranks it, so the refusal can never hide one.
@@ -3174,27 +3207,19 @@ private fun UndoToastPill(treeTitle: String, onUndo: () -> Unit) {
     }
 }
 
-/// "Auto" exit pill shown 12 dp above the status panel while the ADJUST
-/// edge-bracket is up.
+/// Ground is the primary white action; Cancel/Undo retain the dark-glass style.
 @Composable
-private fun AutoModePill(onClick: () -> Unit) = ScanModePill("Auto", onClick)
-
-/// The dark-glass capsule this slot speaks in — black-0.55, white 12 sp
-/// semibold. Shared so the ADJUST exit and the breast-height guide's control
-/// cannot drift apart while sitting one above the other.
-@Composable
-private fun ScanModePill(label: String, onClick: () -> Unit) {
-    Box(Modifier.defaultMinSize(minHeight = 44.dp).clickableNoRipple(onClick),
+private fun ScanModePill(label: String, highlighted: Boolean = false, onClick: () -> Unit) {
+    Box(Modifier.defaultMinSize(minHeight = 44.dp)
+        .clip(CircleShape)
+        .background(if (highlighted) Color.White else Color.Black.copy(alpha = 0.55f))
+        .border(0.5.dp, if (highlighted) Color.Black.copy(alpha = 0.12f) else Color.White.copy(alpha = 0.18f), CircleShape)
+        .clickableNoRipple(onClick).padding(horizontal = 14.dp, vertical = 7.dp),
         contentAlignment = Alignment.Center) {
         Text(
             label,
             style = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.SemiBold),
-            color = Color.White,
-            modifier = Modifier
-                .clip(CircleShape)
-                .background(Color.Black.copy(alpha = 0.55f))
-                .border(0.5.dp, Color.White.copy(alpha = 0.18f), CircleShape)
-                .padding(horizontal = 14.dp, vertical = 7.dp),
+            color = if (highlighted) Color.Black.copy(alpha = 0.88f) else Color.White,
         )
     }
 }

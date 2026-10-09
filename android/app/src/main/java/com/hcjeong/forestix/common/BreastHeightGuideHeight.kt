@@ -11,6 +11,6 @@ enum class BreastHeightGuideHeight(val raw: String, val meters: Double) {
 
     companion object {
         fun fromRaw(raw: String?): BreastHeightGuideHeight =
-            entries.firstOrNull { it.raw == raw } ?: METERS_130
+            entries.firstOrNull { it.raw == raw } ?: METERS_137
     }
 }

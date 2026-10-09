@@ -12,6 +12,7 @@ public final class YoloBoundaryAligner: @unchecked Sendable {
     private static let cacheLock = NSLock()
     nonisolated(unsafe) private static var cached: YoloBoundaryAligner?
     private let imageContext = CIContext()
+    private let inferenceLock = NSLock()
     public static func shared() throws -> YoloBoundaryAligner {
         cacheLock.lock(); defer { cacheLock.unlock() }
         if let cached { return cached }
@@ -29,6 +30,19 @@ public final class YoloBoundaryAligner: @unchecked Sendable {
     }
     public func align(buffer: CVPixelBuffer, frame: ARDepthFrame, viewSize: CGSize,
                       leftFraction: Double, rightFraction: Double) throws -> StemExtent? {
+        try infer(buffer: buffer, frame: frame, viewSize: viewSize,
+                  leftFraction: leftFraction, rightFraction: rightFraction, live: false)?.extent
+    }
+
+    public func track(buffer: CVPixelBuffer, frame: ARDepthFrame,
+                      viewSize: CGSize) throws -> LiveStemObservation? {
+        try infer(buffer: buffer, frame: frame, viewSize: viewSize,
+                  leftFraction: 0.25, rightFraction: 0.75, live: true)
+    }
+
+    private func infer(buffer: CVPixelBuffer, frame: ARDepthFrame, viewSize: CGSize,
+                       leftFraction: Double, rightFraction: Double, live: Bool) throws -> LiveStemObservation? {
+        inferenceLock.lock(); defer { inferenceLock.unlock() }
         guard let map = frame.viewMapping,
               let geometry = DBHEstimator.bracketDepthGeometry(frame:frame,
                 leftFraction:leftFraction,rightFraction:rightFraction,viewSize:viewSize)
@@ -42,7 +56,7 @@ public final class YoloBoundaryAligner: @unchecked Sendable {
         let y: Int
         switch geometry.axis { case .row(let row): y = row; case .col(let column): y = column }
         let depths = (0..<h).flatMap { yy in (0..<w).map { xx in Double(frame.depth(atX:col ? yy:xx,y:col ? xx:yy)) } }
-        let grid = BoundaryAlignment.Grid(width:w,height:h,row:y,depth:depths,left:lo,right:hi,focal:Double(frame.intrinsics[col ? 1:0,col ? 1:0]))
+        var grid = BoundaryAlignment.Grid(width:w,height:h,row:y,depth:depths,left:lo,right:hi,focal:Double(frame.intrinsics[col ? 1:0,col ? 1:0]))
         guard hi > lo, abs((col ? b.y:b.x)-(col ? a.y:a.x)) > 0.000001 else { return nil }
         let rw = CVPixelBufferGetWidth(buffer), rh = CVPixelBufferGetHeight(buffer)
         let turns = [-Double(frame.cameraPoseWorld[1,1]),Double(frame.cameraPoseWorld[0,1]),Double(frame.cameraPoseWorld[1,1]),-Double(frame.cameraPoseWorld[0,1])].enumerated().min(by:{$0.element<$1.element})!.offset
@@ -76,6 +90,25 @@ public final class YoloBoundaryAligner: @unchecked Sendable {
         func raw(_ x: Int,_ y: Int) -> Bool {
             let p = upright(Double(x),Double(y));return mask.contains(x:Int(p.0),y:Int(p.1))
         }
+        // Use the SAME screen→depth→camera transform for the visible mask and
+        // its guide intersection; never rotate a rendered overlay separately.
+        func inView(_ x: Double, _ y: Double) -> Bool {
+            let p = map.viewToDepth(x: x * viewSize.width, y: y * viewSize.height)
+            guard let rgb = LiveStemMask.cameraPoint(depthX: p.x, depthY: p.y,
+                depthWidth: frame.width, depthHeight: frame.height, cameraWidth: rw, cameraHeight: rh,
+                quarterTurns: turns) else { return false }
+            return mask.contains(x: rgb.0, y: rgb.1)
+        }
+        let overlay = live ? LiveStemMask.sample(viewWidth: viewSize.width,
+                                                 viewHeight: viewSize.height, contains: inView) : nil
+        if live {
+            guard let candidate = LiveStemMask.centreExtent(score: mask.score, contains: inView),
+                  let g = DBHEstimator.bracketDepthGeometry(frame: frame,
+                    leftFraction: candidate.leftFraction, rightFraction: candidate.rightFraction, viewSize: viewSize)
+            else { return LiveStemObservation(extent: nil, mask: overlay) }
+            grid = BoundaryAlignment.Grid(width: w, height: h, row: y, depth: depths,
+                left: g.left * Double(w), right: g.right * Double(w), focal: grid.focal)
+        }
         let mw = col ? rh:rw, mh = col ? rw:rh
         let offsetX = col ? oy:ox, offsetY = col ? ox:oy
         func line(_ row: Int) -> [Bool] {
@@ -95,11 +128,17 @@ public final class YoloBoundaryAligner: @unchecked Sendable {
                 }
             };return out
         })
-        guard let result else { return nil }
+        guard let result else { return live ? LiveStemObservation(extent: nil, mask: overlay) : nil }
+        if live {
+            let supported = ["accepted", "below_rgb_resolution"]
+            guard supported.contains(result.leftReason), supported.contains(result.rightReason)
+            else { return LiveStemObservation(extent: nil, mask: overlay) }
+        }
         let aa = col ? a.y:a.x, bb = col ? b.y:b.x
         let p0 = leftFraction+(result.left-aa)/(bb-aa)*(rightFraction-leftFraction)
         let p1 = leftFraction+(result.right-aa)/(bb-aa)*(rightFraction-leftFraction)
-        return StemExtent(leftFraction:min(p0,p1),rightFraction:max(p0,p1),score:mask.score,maskPixels:1)
+        return LiveStemObservation(extent: StemExtent(leftFraction:min(p0,p1),rightFraction:max(p0,p1),
+            score:mask.score,maskPixels:overlay?.runs.reduce(0) { $0 + $1.end - $1.start } ?? 1), mask: overlay)
     }
 }
 private extension Int { func yoloClamped(to range: ClosedRange<Int>) -> Int { Swift.min(range.upperBound,Swift.max(range.lowerBound,self)) } }

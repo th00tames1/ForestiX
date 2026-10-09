@@ -8,7 +8,7 @@ public enum BreastHeightGuideHeight: String, CaseIterable, Sendable {
     case meters137 = "1.37"
 
     public static func fromRaw(_ raw: String?) -> Self {
-        raw.flatMap(Self.init(rawValue:)) ?? .meters130
+        raw.flatMap(Self.init(rawValue:)) ?? .meters137
     }
 
     public var meters: Double {

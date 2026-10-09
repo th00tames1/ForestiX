@@ -23,8 +23,10 @@ class BreastHeightGuideTest {
     }
 
     @Test fun defaultsAndSavedChoice() {
-        assertEquals(BreastHeightGuideHeight.METERS_130, BreastHeightGuideHeight.fromRaw(null))
-        assertEquals(BreastHeightGuideHeight.METERS_130, BreastHeightGuideHeight.fromRaw("invalid"))
+        assertEquals(BreastHeightGuideHeight.METERS_137, BreastHeightGuideHeight.fromRaw(null))
+        assertEquals(BreastHeightGuideHeight.METERS_137, BreastHeightGuideHeight.fromRaw("invalid"))
+        assertEquals("4.5 ft", BreastHeightGuideHeight.fromRaw(null).imperialLabel)
+        assertEquals(BreastHeightGuideHeight.METERS_137, BreastHeightGuide(ArController()).height)
         for (height in BreastHeightGuideHeight.entries) {
             assertEquals(height, BreastHeightGuideHeight.fromRaw(height.raw))
         }
@@ -88,6 +90,7 @@ class BreastHeightGuideTest {
 
     @Test fun displayUnitsChangeOnlyTheLabel() {
         val guide = BreastHeightGuide(ArController())
+        guide.height = BreastHeightGuideHeight.METERS_130
         guide.arm()
         guide.updateGhost(Vec3(1f, -2f, 3f))
         val metricGeometry = guide.markers()

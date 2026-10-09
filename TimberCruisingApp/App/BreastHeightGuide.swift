@@ -50,7 +50,7 @@ public final class BreastHeightGuide: ObservableObject {
     }
 
     @Published public private(set) var stage: Stage = .off
-    @Published public var height: BreastHeightGuideHeight = .meters130
+    @Published public var height: BreastHeightGuideHeight = .meters137
 
     /// The base point as ARKit is currently correcting it — not the frozen
     /// coordinate the placing raycast returned. nil while nothing is placed

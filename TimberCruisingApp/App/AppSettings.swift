@@ -50,6 +50,8 @@ public final class AppSettings: ObservableObject {
         public static let dbhBracketHalfWidth     = "tc.dbhBracketHalfWidth"
         public static let measurementSource       = "tc.measurementSource"
         public static let developerMode           = "tc.developerMode"
+        public static let developerModeUnlocked   = "tc.developerModeUnlocked"
+        public static let dbhCaptureMode          = "tc.dbhCaptureMode"
         public static let rawCaptureEnabled       = "tc.rawCaptureEnabled"
         public static let breastHeightGuide       = "tc.breastHeightGuide"
         public static let breastHeightGuideHeight = "tc.breastHeightGuideHeight"
@@ -241,8 +243,21 @@ public final class AppSettings: ObservableObject {
     /// (depth source, intrinsics, point counts, raw chord, pitch, distance,
     /// σ) on the AR screens and unlocks the validation-experiment tooling.
     public var developerMode: Bool {
-        get { defaults.bool(forKey: Keys.developerMode) }
-        set { defaults.set(newValue, forKey: Keys.developerMode); objectWillChange.send() }
+        get {
+            DeveloperModeUnlock.isEnabled(savedEnabled: defaults.bool(forKey: Keys.developerMode),
+                gestureUnlocked: defaults.bool(forKey: Keys.developerModeUnlocked))
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.developerMode)
+            defaults.set(newValue, forKey: Keys.developerModeUnlocked)
+            objectWillChange.send()
+        }
+    }
+
+    /// Experimental multi-frame capture is never active outside developer mode.
+    public var dbhCaptureMode: DBHCaptureMode {
+        get { DBHCaptureMode.fromRaw(defaults.string(forKey: Keys.dbhCaptureMode)) }
+        set { defaults.set(newValue.rawValue, forKey: Keys.dbhCaptureMode); objectWillChange.send() }
     }
 
     /// RAW-CAPTURE REPLAY (developer-mode research) — when on, every DBH

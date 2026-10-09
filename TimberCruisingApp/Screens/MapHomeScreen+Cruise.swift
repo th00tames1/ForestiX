@@ -666,7 +666,7 @@ extension MapHomeScreen {
     private func cruiseOwnPresentations<Content: View>(over content: Content) -> some View {
         content
         #if os(iOS)
-            .fullScreenCover(isPresented: $presentingPlotSetup,
+            .portraitFullScreenCover(isPresented: $presentingPlotSetup,
                              onDismiss: {
                                  // The map-overlay edit target is scoped to
                                  // ONE setup session; leaving it set would
@@ -677,12 +677,12 @@ extension MapHomeScreen {
             // Cruise tally loop — the DBH cover saves tree after tree and
             // only closes via the floating back; dismissal refreshes the
             // map's pins + tally.
-            .fullScreenCover(isPresented: $presentingCruiseDBH,
+            .portraitFullScreenCover(isPresented: $presentingCruiseDBH,
                              onDismiss: { reloadCruise() }) { cruiseDBHCover }
-            .fullScreenCover(isPresented: $presentingCruiseHeight,
+            .portraitFullScreenCover(isPresented: $presentingCruiseHeight,
                              onDismiss: { reloadCruise() }) { cruiseHeightCover }
             // Tree-peek thumbnail → the app's one full-screen photo viewer.
-            .fullScreenCover(item: $cruisePhotoContext) { context in
+            .portraitFullScreenCover(item: $cruisePhotoContext) { context in
                 MeasurePhotoDetailView(context: context)
             }
         #endif
@@ -1428,11 +1428,11 @@ extension MapHomeScreen {
             } message: {
                 Text("Leave it empty and this tree goes back to \(TreeLabel.title(name: nil, number: chainTreeNumber)).")
             }
-            .fullScreenCover(isPresented: $chainingHeight,
+            .portraitFullScreenCover(isPresented: $chainingHeight,
                              onDismiss: { reloadCruise() }) {
                 cruiseChainedHeightCover
             }
-            .fullScreenCover(isPresented: $chainingPlotSetup,
+            .portraitFullScreenCover(isPresented: $chainingPlotSetup,
                              onDismiss: { reloadCruise() }) { plotSetupCover }
         }
     }
@@ -1464,7 +1464,7 @@ extension MapHomeScreen {
                 })
             .environmentObject(history)
             .environmentObject(settings)
-            .fullScreenCover(isPresented: $heightPlotSetup,
+            .portraitFullScreenCover(isPresented: $heightPlotSetup,
                              onDismiss: { reloadCruise() }) { plotSetupCover }
         }
     }
@@ -1495,7 +1495,7 @@ extension MapHomeScreen {
                 })
             .environmentObject(history)
             .environmentObject(settings)
-            .fullScreenCover(isPresented: $heightPlotSetup,
+            .portraitFullScreenCover(isPresented: $heightPlotSetup,
                              onDismiss: { reloadCruise() }) { plotSetupCover }
         }
     }

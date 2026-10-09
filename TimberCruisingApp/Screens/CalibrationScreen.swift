@@ -37,7 +37,13 @@ public struct CalibrationScreen: View {
     /// snapshot tests with no environment at all, and a missing
     /// `@EnvironmentObject` is a crash, not a fallback.
     @AppStorage(AppSettings.Keys.developerMode)
-    private var developerMode: Bool = false
+    private var developerModeStored: Bool = false
+    @AppStorage(AppSettings.Keys.developerModeUnlocked)
+    private var developerModeUnlocked: Bool = false
+    private var developerMode: Bool {
+        DeveloperModeUnlock.isEnabled(savedEnabled: developerModeStored,
+                                      gestureUnlocked: developerModeUnlocked)
+    }
 
     /// The unit system the round-post boxes are labelled, read and fitted in.
     /// Read from the key for the same reason `developerMode` is: this screen

@@ -59,15 +59,21 @@ public enum YoloAlignmentMask {
         let cropHeight = 160-cropY-Int((pady+0.1).rounded())
         var best: Mask?, bestCentre = false, bestCoverage = -1.0
         for d in kept {
+            let box = [max(0,min(Double(width),(d.box[0]-px)/resize)),
+                       max(0,min(Double(height),(d.box[1]-py)/resize)),
+                       max(0,min(Double(width),(d.box[2]-px)/resize)),
+                       max(0,min(Double(height),(d.box[3]-py)/resize))]
+            // Pixels outside a detection box can never contribute to the
+            // centre/central-10% selection. Skip their expensive mask decode.
+            let minX = min(width/2, Int(Double(width)*0.45)), maxX = max(width/2, Int(Double(width)*0.55)-1)
+            let minY = min(height/2, Int(Double(height)*0.45)), maxY = max(height/2, Int(Double(height)*0.55)-1)
+            guard box[2] > Double(minX), box[0] <= Double(maxX),
+                  box[3] > Double(minY), box[1] <= Double(maxY) else { continue }
             var logits = [Float](repeating:0,count:25600)
             for c in 0..<32 {
                 let coefficient = head[(5+c)*anchors+d.anchor]
                 for p in 0..<25600 { logits[p] += coefficient * prototypes[c*25600+p] }
             }
-            let box = [max(0,min(Double(width),(d.box[0]-px)/resize)),
-                       max(0,min(Double(height),(d.box[1]-py)/resize)),
-                       max(0,min(Double(width),(d.box[2]-px)/resize)),
-                       max(0,min(Double(height),(d.box[3]-py)/resize))]
             let mask = Mask(score:d.score,logits:logits,box:box,width:width,height:height,
                             cropX:cropX,cropY:cropY,cropWidth:cropWidth,cropHeight:cropHeight)
             let centre = mask.contains(x:width/2,y:height/2)

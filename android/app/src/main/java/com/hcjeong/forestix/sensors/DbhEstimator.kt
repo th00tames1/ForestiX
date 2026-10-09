@@ -130,6 +130,9 @@ class ArDepthFrame(
     /// replayed frame is bit-identical to what the estimator consumed live.
     /// Null in normal operation (zero cost with recording off).
     val rawDepthMm: ShortArray? = null,
+    /// Live-only timing; replay fixtures retain the default and are unchanged.
+    val frameTimestampNanos: Long = 0,
+    val depthAgeNanos: Long = 0,
 ) {
     companion object {
         /// Shared u16-mm → (metres, confidence) ingest rule — the SINGLE

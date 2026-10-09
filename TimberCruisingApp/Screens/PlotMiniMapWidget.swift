@@ -310,7 +310,7 @@ public struct PlotMiniMapWidget: View {
             // compiles for macOS under SPM, where a sheet is the
             // equivalent presentation.
             #if os(iOS)
-            .fullScreenCover(isPresented: $showingEnlarged,
+            .portraitFullScreenCover(isPresented: $showingEnlarged,
                              onDismiss: runRequestedEdit) { enlargedView }
             #else
             .sheet(isPresented: $showingEnlarged,

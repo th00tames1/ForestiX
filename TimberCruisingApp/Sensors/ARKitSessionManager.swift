@@ -165,6 +165,8 @@ public struct ARDepthFrame: Sendable {
     /// no safe default: the identity is exactly the wrong answer this field
     /// exists to stop.
     public let viewMapping: DepthViewMapping?
+    /// Live-only stamp; raw replay does not depend on the current app viewport.
+    public let viewportRevision: UInt64?
 
     public init(
         width: Int,
@@ -174,7 +176,8 @@ public struct ARDepthFrame: Sendable {
         intrinsics: simd_float3x3,
         cameraPoseWorld: simd_float4x4,
         timestamp: TimeInterval,
-        viewMapping: DepthViewMapping? = nil
+        viewMapping: DepthViewMapping? = nil,
+        viewportRevision: UInt64? = nil
     ) {
         precondition(depth.count == width * height)
         precondition(confidence.count == width * height)
@@ -186,6 +189,7 @@ public struct ARDepthFrame: Sendable {
         self.cameraPoseWorld = cameraPoseWorld
         self.timestamp = timestamp
         self.viewMapping = viewMapping
+        self.viewportRevision = viewportRevision
     }
 
     @inlinable
@@ -238,6 +242,7 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
     /// "no position" would refuse nearly every honest measurement (it is the
     /// same mistake the estimator's old `.limited` latch made).
     @Published public private(set) var currentCameraWorldPosition: SIMD3<Float>?
+    @Published public private(set) var cameraPositionTimestamp: TimeInterval?
 
     /// ARKit is `.limited(.relocalizing)` — it is RE-FITTING the world frame
     /// onto a scene it has recognised again, so world coordinates move
@@ -376,7 +381,11 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
     /// Starts EMPTY on purpose. Until a real AR view has reported its
     /// bounds there is no honest mapping, and `DepthViewMapping` has no
     /// safe default — see the note on `ARDepthFrame.viewMapping`.
-    private struct Viewport { var size: CGSize; var orientation: UIInterfaceOrientation }
+    private struct Viewport {
+        var size: CGSize
+        var orientation: UIInterfaceOrientation
+        var revision: UInt64 = 0
+    }
     private let viewport = OSAllocatedUnfairLock(
         initialState: Viewport(size: .zero, orientation: .portrait))
 
@@ -384,7 +393,16 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
     public nonisolated func reportViewport(size: CGSize,
                                            orientation: UIInterfaceOrientation) {
         guard size.width > 1, size.height > 1 else { return }
-        viewport.withLock { $0 = Viewport(size: size, orientation: orientation) }
+        viewport.withLock { state in
+            guard state.size != size || state.orientation != orientation else { return }
+            state.size = size; state.orientation = orientation; state.revision &+= 1
+        }
+    }
+
+    public nonisolated var currentViewportRevision: UInt64 { viewport.withLock { $0.revision } }
+    public func invalidateViewport() {
+        viewport.withLock { $0.size = .zero; $0.revision &+= 1 }
+        latestDepthFrame = nil
     }
 
     public override init() {
@@ -762,12 +780,14 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
         let converted = convertDepth
             ? Self.convert(frame: frame,
                            viewportSize: vp.size,
-                           orientation: vp.orientation)
+                           orientation: vp.orientation,
+                           viewportRevision: vp.revision)
             : nil
         let status = Self.mapTrackingState(frame.camera.trackingState)
         let relocalizing = Self.isRelocalizingState(frame.camera.trackingState)
         let t = frame.camera.transform
         let camPos = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
+        let cameraTimestamp = frame.timestamp
         Task { @MainActor [weak self] in
             guard let self else { return }
             if status != .normal {
@@ -777,7 +797,11 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
             self.trackingStatus = status
             if self.isRelocalizing != relocalizing { self.isRelocalizing = relocalizing }
             self.currentCameraWorldPosition = status == .notAvailable ? nil : camPos
-            if let converted { self.latestDepthFrame = converted }
+            self.cameraPositionTimestamp = cameraTimestamp
+            if let converted,
+               converted.viewportRevision == self.currentViewportRevision {
+                self.latestDepthFrame = converted
+            }
         }
     }
 
@@ -853,7 +877,8 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
     private nonisolated static func convert(
         frame: ARFrame,
         viewportSize: CGSize = .zero,
-        orientation: UIInterfaceOrientation = .portrait
+        orientation: UIInterfaceOrientation = .portrait,
+        viewportRevision: UInt64? = nil
     ) -> ARDepthFrame? {
         guard let sceneDepth = frame.sceneDepth ?? frame.smoothedSceneDepth
         else { return nil }
@@ -936,11 +961,13 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
             intrinsics: K,
             cameraPoseWorld: frame.camera.transform,
             timestamp: frame.timestamp,
+            // The transform and this stamp come from one atomic viewport read.
             viewMapping: viewMapping(frame: frame,
                                      viewportSize: viewportSize,
                                      orientation: orientation,
                                      depthWidth: width,
-                                     depthHeight: height)
+                                     depthHeight: height),
+            viewportRevision: viewportRevision
         )
     }
 }
@@ -959,6 +986,7 @@ public final class ARKitSessionManager: ObservableObject {
     @Published public private(set) var latestDepthFrame: ARDepthFrame?
     @Published public private(set) var isRunning = false
     @Published public private(set) var currentCameraWorldPosition: SIMD3<Float>?
+    @Published public private(set) var cameraPositionTimestamp: TimeInterval?
     @Published public private(set) var isRelocalizing = false
 
     public static var supportsLiDAR: Bool { false }

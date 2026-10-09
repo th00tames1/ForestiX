@@ -44,6 +44,9 @@ public final class DBHScanViewModel: ObservableObject {
     /// fire research logging exactly when a new measurement is committed.
     @Published public private(set) var resultGeneration: Int = 0
     @Published public private(set) var crosshairIsStable: Bool = false
+    /// Disabled only by the canned preview factory; live iPad measurements
+    /// require the actual scene lock and a frame from the current viewport.
+    private var usesLiveOrientationSafety = true
     @Published public var manualDbhCm: String = ""
     @Published public private(set) var unsupportedBanner: String?
     /// Cheap single-frame DBH estimate updated in real time while the
@@ -211,6 +214,7 @@ public final class DBHScanViewModel: ObservableObject {
         // The held ADJUST value goes with the latch: it was measured through
         // the bracket, and there is no bracket outside this mode.
         didSet {
+            if edgeAdjustActive && segmentationEnabled { stopSegmentationFeed() }
             if !edgeAdjustActive {
                 resetBracketSettling()
             }
@@ -248,168 +252,148 @@ public final class DBHScanViewModel: ObservableObject {
 
     @Published public private(set) var autoAlignmentBusy = false
     @Published public private(set) var autoAlignmentMessage: String?
-
-    /// Auto aligns the current operator bracket once. A new request starts
-    /// from a new manual placement; an AI output is never fed back as a seed.
-    public func requestAutoAlignment() {
-        guard !autoAlignmentBusy, edgeAdjustActive else { return }
-        #if canImport(OnnxRuntimeBindings)
-        let processingStarted = ProcessInfo.processInfo.systemUptime
-        guard let live = session.currentCameraPixelBuffer(), let buffer = Self.copyPixelBuffer(live),
-              let frame = session.latestDepthFrame, frame.viewMapping != nil else {
-            autoAlignmentMessage = "Depth unavailable. Keep the guides and retry."; return
-        }
-        let left = edgeBracketLeftFraction, right = edgeBracketRightFraction, size = viewSize
-        autoAlignmentBusy = true; autoAlignmentMessage = "Aligning stem edges…"
-        Task { [weak self] in
-            let outcome: Result<StemExtent?, Error> = await Task.detached(priority:.userInitiated) {
-                Result { try YoloBoundaryAligner.shared().align(buffer:buffer,frame:frame,viewSize:size,leftFraction:left,rightFraction:right) }
-            }.value
-            guard let self else { return }
-            NSLog("ForestiX Auto YOLO26n elapsed %.1f ms", (ProcessInfo.processInfo.systemUptime-processingStarted)*1000)
-            self.autoAlignmentBusy = false
-            guard self.edgeAdjustActive, self.edgeBracketLeftFraction == left,
-                  self.edgeBracketRightFraction == right,
-                  self.state != .capturing, self.state != .accepted else {
-                self.autoAlignmentMessage = "Guides changed. Tap Auto again."; return
-            }
-            guard let current = self.session.latestDepthFrame,
-                  simd_distance(current.cameraPoseWorld.columns.3, frame.cameraPoseWorld.columns.3) < 0.02,
-                  simd_dot(current.cameraPoseWorld.columns.2, frame.cameraPoseWorld.columns.2) > 0.9994,
-                  self.viewSize == size else {
-                self.autoAlignmentMessage = "Camera moved. Hold steady and tap Auto again."; return
-            }
-            switch outcome {
-            case .success(let extent):
-                guard let extent else { self.autoAlignmentMessage = "Keep current guides; stem alignment unavailable."; return }
-                self.segmentedExtent = extent
-                self.edgeBracketLeftFraction = extent.leftFraction
-                self.edgeBracketRightFraction = extent.rightFraction
-                self.edgeAdjustActive = false
-                self.autoAlignmentMessage = "AI alignment ready. Check the guides before capture."
-            case .failure(let error): self.autoAlignmentMessage = error.localizedDescription
-            }
-        }
-        #else
-        autoAlignmentMessage = "AI alignment requires the mobile inference runtime."
-        #endif
+    @Published public private(set) var liveStemMask: LiveStemMask?
+    public var autoAlignmentPaused = false {
+        didSet { if autoAlignmentPaused { clearLiveAutoLock() } }
     }
-
-    // MARK: - Segmentation-driven edges
-
-    /// THE MODEL'S ANSWER, or nil while it has none.
-    ///
-    /// Published so the screen can say the bracket is not the cruiser's — a
-    /// bracket that moves on its own and is not marked as automatic is a
-    /// bracket the cruiser will trust as their own placement.
     @Published public private(set) var segmentedExtent: StemExtent?
-    /// Why segmentation is not answering, for the screen to print once.
     @Published public private(set) var segmenterAvailability: SegmenterAvailability = .noModel
-    /// Turned on by the screen from `AppSettings.dbhAutoSegmentation`.
+    /// Auto is explicit and user-facing; developer settings do not gate it.
     @Published public var segmentationEnabled = false {
         didSet {
             guard segmentationEnabled != oldValue else { return }
-            // OFF MEANS STOP, not "keep spinning and fail the guard".
-            //
-            // This used to clear the extent and nothing else, so turning the
-            // setting off — or turning developer mode off, which closes the
-            // same gate — left the detached loop running for the life of the
-            // view model, waking eight times a second to fail a guard, with
-            // the 11 MB graph still resident. The commit that added the gate
-            // claimed the feed stopped on the same tick. It did not.
             if segmentationEnabled { startSegmentationFeed() }
-            else { stopSegmentationFeed() }
+            else { pauseSegmentationFeed(); clearLiveAutoLock() }
         }
+    }
+    private var liveAutoTracker = LiveStemTracker()
+    private var liveAutoFrame: ARDepthFrame?
+    private var liveAutoGeneration: UInt64 = 0
+    #if canImport(OnnxRuntimeBindings)
+    private var segmentationTask: Task<Void, Never>?
+    #endif
+
+    public func requestAutoAlignment() {
+        guard state == .idle || state == .aligning || state == .armed || state == .rejected else { return }
+        edgeAdjustActive = false
+        clearLiveAutoLock()
+        autoAlignmentMessage = "Finding stem…"
+        segmentationEnabled = true
+        startSegmentationFeed()
+    }
+
+    private func clearLiveAutoLock() {
+        liveAutoTracker.reset(); liveAutoFrame = nil
+        liveStemMask = nil; segmentedExtent = nil
+    }
+
+    private var liveAutoHasLock: Bool {
+        liveAutoTracker.isFresh(at: ProcessInfo.processInfo.systemUptime)
     }
 
     #if canImport(OnnxRuntimeBindings)
-    /// Built on first use, not at init: loading an 11 MB graph costs a beat
-    /// the cruiser would feel if it happened while the screen was appearing,
-    /// and most sessions never turn this on.
-    private var segmenter: TreeSegmenter?
-    private var segmentationTask: Task<Void, Never>?
+    private struct SegmentationTick {
+        let buffer: CVPixelBuffer
+        let frame: ARDepthFrame
+        let viewSize: CGSize
+        let generation: UInt64
+        let started: Double
+    }
 
-    /// Consecutive frames the model has failed to find a stem on.
-    private var segmentationMisses = 0
-
-    /// How many in a row before the bracket is handed back to the auto walk.
-    /// Eight ticks at 8 Hz is one second of nothing — long enough to ride out
-    /// the ordinary gaps in a 40 %-hit-rate model, short enough that a cruiser
-    /// who swings off the tree is not left holding a stale bracket.
-    private static let segmentationMissesBeforeRelease = 8
-
-    /// ONE INFERENCE AT A TIME, OFF THE MAIN ACTOR, at a rate the AR session
-    /// can absorb.
-    ///
-    /// `@MainActor` is on this whole class, so a bare `Task {}` inherits it
-    /// and would run fifty to a hundred milliseconds of ONNX on the main
-    /// thread eight times a second, in the middle of a live AR session. It is
-    /// `Task.detached` for that reason, and everything it touches on the way
-    /// in and out is hopped explicitly.
-    ///
-    /// 8 Hz, not per frame. The network is tens of milliseconds and ARKit
-    /// delivers at 60 — chasing every frame would spend the whole device on a
-    /// bracket that only has to keep up with a cruiser's hands. The feed also
-    /// holds no ARFrame: the pixel buffer is read, used and dropped inside one
-    /// tick, because ARKit recycles that pool and a retained buffer starves
-    /// the session.
+    /// A single worker, capped at ~8 Hz. No AR camera buffer is retained.
     private func startSegmentationFeed() {
-        guard segmentationTask == nil else { return }
-        segmentationTask = Task.detached(priority: .utility) { [weak self] in
+        guard segmentationEnabled, segmentationTask == nil else { return }
+        let generation = liveAutoGeneration
+        segmentationTask = Task { [weak self] in
             while !Task.isCancelled {
-                guard let self else { return }
-                let ready = await self.prepareSegmentationTick()
-                guard let ready else {
-                    try? await Task.sleep(nanoseconds: 250_000_000)
+                guard let tick = self?.prepareSegmentationTick(generation: generation) else {
+                    try? await Task.sleep(nanoseconds: 125_000_000)
                     continue
                 }
-                // The only work off the actor, and the only slow part.
-                let mask = ready.segmenter.segment(pixelBuffer: ready.buffer)
-                await self.applySegmented(mask: mask,
-                                         viewSize: ready.viewSize,
-                                         mapping: ready.mapping,
-                                         depthWidth: ready.depthWidth,
-                                         depthHeight: ready.depthHeight)
-                try? await Task.sleep(nanoseconds: 125_000_000)
+                self?.autoAlignmentBusy = true
+                let outcome = await Task.detached(priority: .userInitiated) {
+                    Result { try YoloBoundaryAligner.shared().track(
+                        buffer: tick.buffer, frame: tick.frame, viewSize: tick.viewSize) }
+                }.value
+                guard !Task.isCancelled else { return }
+                self?.applyLiveAuto(outcome, tick: tick)
+                let elapsed = ProcessInfo.processInfo.systemUptime - tick.started
+                let delay = max(0.02, 0.125 - elapsed)
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             }
         }
     }
 
-    /// Everything the tick needs off the actor, gathered on it in one hop.
-    private struct SegmentationTick {
-        let segmenter: TreeSegmenter
-        /// A COPY. `currentCameraPixelBuffer()` says in as many words that the
-        /// caller must not hold its buffer past the frame — ARKit recycles the
-        /// pool and a retained one starves the session — and this struct is
-        /// handed across an actor hop to a detached task that then spends tens
-        /// of milliseconds in ONNX with it. Copying costs one frame's worth of
-        /// memcpy on the actor and hands the pool's buffer straight back.
-        let buffer: CVPixelBuffer
-        let viewSize: CGSize
-        let mapping: DepthViewMapping
-        let depthWidth: Int
-        let depthHeight: Int
-    }
-
-    private func prepareSegmentationTick() -> SegmentationTick? {
-        guard segmentationEnabled else { return nil }
-        if segmenter == nil {
-            let made = TreeSegmenter()
-            segmenter = made
-            segmenterAvailability = made.availability
+    private func prepareSegmentationTick(generation: UInt64) -> SegmentationTick? {
+        guard generation == liveAutoGeneration, segmentationEnabled, !edgeAdjustActive, !autoAlignmentPaused,
+              state == .idle || state == .aligning || state == .armed else { return nil }
+        if let refusal = orientationRefusal(for: session.latestDepthFrame) {
+            clearLiveAutoLock(); autoAlignmentMessage = refusal; return nil
         }
-        guard let segmenter, segmenter.availability.isReady,
-              let live = session.currentCameraPixelBuffer(),
-              let buffer = Self.copyPixelBuffer(live),
-              let frame = session.latestDepthFrame,
-              let mapping = frame.viewMapping,
-              viewSize.width > 1, viewSize.height > 1
-        else { return nil }
-        return SegmentationTick(segmenter: segmenter, buffer: buffer,
-                                viewSize: viewSize, mapping: mapping,
-                                depthWidth: frame.width, depthHeight: frame.height)
+        let now = ProcessInfo.processInfo.systemUptime
+        guard let live = session.currentCameraPixelBuffer(), let buffer = Self.copyPixelBuffer(live),
+              let frame = session.latestDepthFrame, frame.viewMapping != nil,
+              now >= frame.timestamp, now - frame.timestamp <= 0.25,
+              viewSize.width > 1, viewSize.height > 1 else {
+            segmentedExtent = liveAutoTracker.update(nil, at: now)
+            if !liveAutoHasLock { liveStemMask = nil }
+            return nil
+        }
+        return SegmentationTick(buffer: buffer, frame: frame, viewSize: viewSize,
+                                generation: generation, started: now)
     }
 
+    private func applyLiveAuto(_ outcome: Result<LiveStemObservation?, Error>, tick: SegmentationTick) {
+        if tick.generation == liveAutoGeneration { autoAlignmentBusy = false }
+        guard tick.generation == liveAutoGeneration, segmentationEnabled, !edgeAdjustActive, !autoAlignmentPaused,
+              state == .idle || state == .aligning || state == .armed else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - tick.started <= 0.45, orientationRefusal(for: tick.frame) == nil,
+              let current = session.latestDepthFrame, viewSize == tick.viewSize,
+              current.viewMapping == tick.frame.viewMapping,
+              simd_distance(current.cameraPoseWorld.columns.3, tick.frame.cameraPoseWorld.columns.3) < 0.02,
+              simd_dot(current.cameraPoseWorld.columns.2, tick.frame.cameraPoseWorld.columns.2) > 0.9994 else {
+            clearLiveAutoLock(); autoAlignmentMessage = "Finding stem…"; return
+        }
+        switch outcome {
+        case .success(let observation):
+            segmenterAvailability = .ready
+            segmentedExtent = liveAutoTracker.update(observation?.extent, at: tick.started)
+            if liveAutoTracker.lastGood == tick.started, let mask = observation?.mask { liveStemMask = mask }
+            else if !liveAutoHasLock { liveStemMask = nil }
+            if let extent = segmentedExtent {
+                edgeBracketLeftFraction = extent.leftFraction
+                edgeBracketRightFraction = extent.rightFraction
+                if liveAutoTracker.lastGood == tick.started { liveAutoFrame = tick.frame }
+            }
+            autoAlignmentMessage = liveAutoHasLock ? nil : "Finding stem…"
+        case .failure(let error):
+            clearLiveAutoLock()
+            autoAlignmentMessage = error.localizedDescription
+        }
+    }
+    #else
+    private func startSegmentationFeed() {
+        segmenterAvailability = .unsupportedPlatform
+        autoAlignmentMessage = "AI alignment requires the mobile inference runtime."
+    }
+    #endif
+
+    private func pauseSegmentationFeed() {
+        liveAutoGeneration &+= 1
+        #if canImport(OnnxRuntimeBindings)
+        segmentationTask?.cancel(); segmentationTask = nil
+        #endif
+        autoAlignmentBusy = false
+    }
+
+    public func stopSegmentationFeed() {
+        segmentationEnabled = false
+        pauseSegmentationFeed(); clearLiveAutoLock()
+        autoAlignmentMessage = nil
+    }
+
+    #if canImport(OnnxRuntimeBindings)
     /// A deep copy of one camera frame, so nothing of ARKit's outlives the
     /// call that vended it. Returns nil rather than risking a partial copy.
     private nonisolated static func copyPixelBuffer(_ src: CVPixelBuffer) -> CVPixelBuffer? {
@@ -448,67 +432,6 @@ public final class DBHScanViewModel: ObservableObject {
         return dst
     }
 
-    /// The mask's two edges become the bracket's two handles.
-    ///
-    /// WRITING THE BRACKET rather than adding a second width path is the
-    /// whole design. `bracketChordEstimate` is shipped, field-checked and
-    /// already the thing a cruiser's thumbs drive; the model is just another
-    /// way of placing the same two handles, so the capture, the depth
-    /// geometry, the middle-half sampling and the tier all stay exactly as
-    /// they are. Nothing new measures anything.
-    ///
-    /// Ignored while the cruiser is in ADJUST: they have taken hold of the
-    /// bracket, and a bracket that fights a thumb is worse than no bracket.
-    private func applySegmented(mask: TreeSegDecode.StemMask?,
-                                viewSize: CGSize,
-                                mapping: DepthViewMapping,
-                                depthWidth: Int,
-                                depthHeight: Int) {
-        let extent = mask.flatMap {
-            TreeSegDecode.extentAcrossView(mask: $0, viewSize: viewSize,
-                                           mapping: mapping,
-                                           depthWidth: depthWidth,
-                                           depthHeight: depthHeight)
-        }
-        // A MISS DOES NOT DROP THE BRACKET.
-        //
-        // The model answers on about 40 % of frames, and `segmentedExtent`
-        // used to be assigned unconditionally — so it went nil on every miss,
-        // `segmentationDroveTheBracket` went false with it, and the screen
-        // flipped between the bracket path and the auto depth walk several
-        // times a second. Two different measurement methods taking turns
-        // inside one capture is not a method. A miss now HOLDS the last
-        // placement for a beat; only a run of them lets go, and then the auto
-        // path takes over cleanly and stays.
-        if let extent {
-            segmentedExtent = extent
-            segmentationMisses = 0
-        } else {
-            segmentationMisses += 1
-            if segmentationMisses >= Self.segmentationMissesBeforeRelease {
-                segmentedExtent = nil
-            }
-        }
-        guard let extent, !edgeAdjustActive else { return }
-        edgeBracketLeftFraction = extent.leftFraction
-        edgeBracketRightFraction = extent.rightFraction
-    }
-
-    /// Stop inferring and give the graph back. Called from `onDisappear` —
-    /// without it the loop and 11 MB outlive the screen for as long as
-    /// anything holds the view model.
-    public func stopSegmentationFeed() {
-        segmentationTask?.cancel()
-        segmentationTask = nil
-        segmenter = nil
-        segmentedExtent = nil
-        segmentationMisses = 0
-    }
-    #else
-    private func startSegmentationFeed() {
-        segmenterAvailability = .unsupportedPlatform
-    }
-    public func stopSegmentationFeed() { segmentedExtent = nil }
     #endif
 
     // No session-wide axis vote: each preview follows the display transform.
@@ -520,7 +443,7 @@ public final class DBHScanViewModel: ObservableObject {
     /// rather than by the cruiser. Segmentation only writes them while ADJUST
     /// is off, so the two can never both be true of one capture.
     var segmentationDroveTheBracket: Bool {
-        segmentedExtent != nil && !edgeAdjustActive
+        segmentationEnabled && !edgeAdjustActive
     }
 
     private var burstUsedBracket = false
@@ -626,8 +549,9 @@ public final class DBHScanViewModel: ObservableObject {
 
     // MARK: - Burst state
 
-    /// One depth frame per committed DBH. Live preview remains continuous.
-    public let captureSampleTotal: Int = 1
+    /// Single frame by default; only developer mode can request a five-frame window.
+    public var captureMode: DBHCaptureMode = .single
+    @Published public private(set) var captureSampleTotal: Int = 1
     @Published public private(set) var captureSampleIndex: Int = 0
     private var subSamples: [DBHResult] = []
     /// Monotonic id for the current capture — lets the stall watchdog
@@ -725,6 +649,7 @@ public final class DBHScanViewModel: ObservableObject {
     // MARK: - Lifecycle
 
     public func onAppear() {
+        if segmentationEnabled { startSegmentationFeed() }
         // Always start the AR session — even on non-LiDAR devices we want
         // the camera feed to render so the cruiser can see what they're
         // pointing at while entering DBH manually. Attaching is internally
@@ -753,6 +678,8 @@ public final class DBHScanViewModel: ObservableObject {
     }
 
     public func onDisappear() {
+        pauseSegmentationFeed()
+        clearLiveAutoLock()
         depthCancellable?.cancel()
         depthCancellable = nil
         stallTicker?.invalidate()
@@ -776,16 +703,60 @@ public final class DBHScanViewModel: ObservableObject {
 
     private func subscribeToDepth() {
         depthCancellable = session.$latestDepthFrame
-            .compactMap { $0 }
             .sink { [weak self] frame in
-                self?.handleDepthFrame(frame)
+                guard let self else { return }
+                if let frame { self.handleDepthFrame(frame) }
+                else if let refusal = self.orientationRefusal(for: nil) {
+                    self.invalidateOrientationPreview(refusal)
+                }
             }
     }
 
     private func handleDepthFrame(_ frame: ARDepthFrame) {
+        if let refusal = orientationRefusal(for: frame) {
+            if state == .capturing {
+                retake()
+                captureRefusalReason = refusal
+            }
+            invalidateOrientationPreview(refusal)
+            return
+        }
+        if state == .capturing {
+            // Never count the same frame twice or mix viewport geometries.
+            guard captureSampleTotal > 1, let first = burstBuffer.first,
+                  let last = burstBuffer.last,
+                  frame.timestamp > last.timestamp,
+                  frame.width == first.width, frame.height == first.height,
+                  frame.viewMapping == first.viewMapping,
+                  frame.viewportRevision == first.viewportRevision,
+                  DBHEstimator.screenHorizontalGuideAxis(frame: frame, tapPixel: burstTap) == burstBracketAxis
+            else { return }
+            burstBuffer.append(frame)
+            captureSampleIndex = burstBuffer.count
+            if burstBuffer.count == captureSampleTotal { finishSubSample() }
+            return
+        }
         // Kept so the capture tap can map the bracket against the frame the
         // cruiser was actually looking at.
         latestFrameForBracket = frame
+        if segmentationEnabled, !edgeAdjustActive, state != .capturing {
+            if let source = liveAutoFrame,
+               (source.viewMapping != frame.viewMapping ||
+                simd_distance(source.cameraPoseWorld.columns.3, frame.cameraPoseWorld.columns.3) >= 0.02 ||
+                simd_dot(source.cameraPoseWorld.columns.2, frame.cameraPoseWorld.columns.2) <= 0.9994) {
+                clearLiveAutoLock()
+            }
+            if !liveAutoHasLock {
+                if state == .armed { state = .aligning }
+                previewFit = nil; previewDbhCm = nil; previewTier = nil
+                crosshairIsStable = false; isStable = false
+                distanceToStemCenterM = nil; guideRowWorldY = nil
+                resetBracketSettling()
+                liveStemMask = nil; segmentedExtent = nil
+                previewStatusText = "Finding stem…"
+                return
+            }
+        }
         // REQ-DBH-003 crosshair transitions green when the centre pixel
         // carries depth the estimator can work from. The window is
         // `armDepthRangeM` — see the note there for why the spec's literal
@@ -1359,7 +1330,15 @@ public final class DBHScanViewModel: ObservableObject {
     /// coordinate space (caller converts from view coords to depth
     /// coords via the ARKit displayTransform).
     public func tap(at tapPixel: SIMD2<Double>) {
-        if edgeAdjustActive {
+        if segmentationEnabled && !liveAutoHasLock {
+            captureRefusalReason = "No stem lock yet — keep the crosshair on the trunk, or use Adjust."
+            return
+        }
+        if let refusal = orientationRefusal(for: latestFrameForBracket) {
+            captureRefusalReason = refusal
+            return
+        }
+        if edgeAdjustActive || segmentationDroveTheBracket {
             // ADJUST mode: the estimate is user-constrained, so the only
             // gate is that a bracket fit exists on screen. `.aligning`
             // is allowed too — centre-pixel depth stability is an
@@ -1443,13 +1422,25 @@ public final class DBHScanViewModel: ObservableObject {
         recordReferenceJPEG = rawCaptureEnabled ? session.currentCameraImageJPEG() : nil
         // A new burst supersedes the previous capture's saved / NOT-saved pill.
         lastCaptureOutcome = nil
+        captureSampleTotal = captureMode.frameCount(developerMode: developerMode)
         captureSampleIndex = 1
         captureGeneration &+= 1
         state = .capturing
-        // Commit the exact depth frame whose geometry was latched above.
-        // No collection window, repeated acquisition, or temporal averaging.
+        // Normal captures immediately commit the exact latched frame.
+        // Developer captures add four distinct, compatible frames.
         burstBuffer = [frame]
-        finishSubSample()
+        if captureSampleTotal == 1 {
+            finishSubSample()
+        } else {
+            let generation = captureGeneration
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard let self, self.state == .capturing,
+                      self.captureGeneration == generation else { return }
+                self.retake()
+                self.captureRefusalReason = "Not enough fresh depth frames. Hold steady and retry."
+            }
+        }
     }
 
     /// Why the Auto crosshair is not armed, in terms the cruiser can walk on.
@@ -1470,11 +1461,43 @@ public final class DBHScanViewModel: ObservableObject {
     /// Exactly the condition `tap(at:)` requires, kept as one expression so a
     /// refusal banner cannot outlive the state it describes.
     private var canCaptureNow: Bool {
-        let stageOK = edgeAdjustActive
+        guard !segmentationEnabled || liveAutoHasLock else { return false }
+        guard orientationRefusal(for: latestFrameForBracket) == nil else { return false }
+        let stageOK = (edgeAdjustActive || segmentationDroveTheBracket)
             ? (state == .armed || state == .aligning)
             : state == .armed
         guard stageOK, let fit = previewFit, fit.tier != .red else { return false }
         return true
+    }
+
+    private func orientationRefusal(for frame: ARDepthFrame?) -> String? {
+        #if os(iOS)
+        guard usesLiveOrientationSafety else { return nil }
+        let status = PortraitSceneState.shared.captureStatus()
+        if let message = status.message { return message }
+        guard let frame, frame.viewMapping != nil,
+              PortraitCaptureSafety.acceptsFrame(currentRevision: session.currentViewportRevision,
+                                                 frameRevision: frame.viewportRevision) else {
+            return "Waiting for fresh camera alignment."
+        }
+        #endif
+        return nil
+    }
+
+    private func invalidateOrientationPreview(_ refusal: String) {
+        clearLiveAutoLock()
+        latestFrameForBracket = nil
+        if state == .armed { state = .aligning }
+        if crosshairIsStable { crosshairIsStable = false }
+        if previewFit != nil { previewFit = nil }
+        if previewDbhCm != nil { previewDbhCm = nil }
+        if previewTier != nil { previewTier = nil }
+        if distanceToStemCenterM != nil { distanceToStemCenterM = nil }
+        if guideRowWorldY != nil { guideRowWorldY = nil }
+        smoothedPreviewDbhCm = nil; smoothedCenterWorldXZ = nil
+        recentRawDiameters.removeAll(); lastTapDepthHint = nil
+        isStable = false; resetBracketSettling()
+        if previewStatusText != refusal { previewStatusText = refusal }
     }
 
     /// Dismiss the refusal by hand. The banner also clears itself the moment a
@@ -1485,6 +1508,7 @@ public final class DBHScanViewModel: ObservableObject {
     }
 
     public func retake() {
+        clearLiveAutoLock()
         captureRefusalReason = nil
         burstBuffer.removeAll()
         subSamples.removeAll(keepingCapacity: true)
@@ -1567,12 +1591,12 @@ public final class DBHScanViewModel: ObservableObject {
         state = .accepted
     }
 
-    /// Estimate and store the latched frame, then finalize this capture.
+    /// Estimate the latched frame/window with the existing estimator, then finalize.
     private func finishSubSample() {
         let frames = burstBuffer
         burstBuffer.removeAll(keepingCapacity: true)
-        // Replay receives exactly the frame used for the committed result.
-        if rawCaptureEnabled, let rep = frames.first { recordFrames.append(rep) }
+        // Replay receives every frame used, not a representative subset.
+        if rawCaptureEnabled { recordFrames.append(contentsOf: frames) }
         if !frames.isEmpty, let axis = burstBracketAxis {
             // Dispatch: manual bracket (ADJUST captures, latched at tap
             // time) → chord method → original §7.1 partial-arc pipeline.
@@ -1602,7 +1626,7 @@ public final class DBHScanViewModel: ObservableObject {
         finalizeCapture()
     }
 
-    /// Publish the single-frame result; rejected fits remain rejected.
+    /// Publish the estimator result; rejected fits remain rejected.
     private func finalizeCapture() {
         let samples = subSamples
         subSamples.removeAll(keepingCapacity: true)
@@ -1701,6 +1725,7 @@ public extension DBHScanViewModel {
             calibration: ProjectCalibration.identity,
             session: nil,
             rawPointsWriter: nil)
+        vm.usesLiveOrientationSafety = false
         vm.applyPreview(state: state, result: result, unsupported: unsupported)
         return vm
     }

@@ -146,6 +146,9 @@ public struct DBHScanScreen: View {
     /// point is behind the camera or nothing is anchored.
     @State private var bhLabelPoint: CGPoint?
     @State private var bhPlacementFailed = false
+    @State private var displayedAutoMessage: String?
+    @State private var autoSafetyNotice: String?
+    @State private var deviceIsHot = false
 
     /// "Pin centre" offer, waved off for this visit. Not persisted: the
     /// offer is an offer, and a cruiser who is measuring from outside the
@@ -442,6 +445,11 @@ public struct DBHScanScreen: View {
 
             GeometryReader { geo in
                 ZStack {
+                    if isAiming, !hidingChromeForCapture, !bhGroundPlacementActive,
+                       let mask = viewModel.liveStemMask {
+                        liveStemMaskLayer(mask, in: geo.size)
+                            .allowsHitTesting(false)
+                    }
                     // THE VIEWPORT THE BRACKET IS MEASURED AGAINST.
                     //
                     // Reported from here because this reader is
@@ -652,20 +660,18 @@ public struct DBHScanScreen: View {
                 // the live value strip directly above it. RESULT states
                 // drop the shutter and show the status/result panel
                 // exactly as before. The Developer-mode method picker and
-                // the ADJUST Auto pill float 12 pt above whichever block
-                // is present. The undo toast (cruise tally) floats above
+                // Set ground stays centred above it; Auto/Adjust always
+                // occupies the right-hand shutter flank. The undo toast floats above
                 // the bottom controls.
                 VStack(spacing: 12) {
                     Spacer()
                     if let saved = tallyToastLabel {
                         tallyUndoToast(saved)
                     }
-                    if bhGuideChromeVisible {
-                        bhGuideButton
+                    if isAiming {
+                        autoMessageSlot
                     }
-                    if adjustOverlayVisible {
-                        autoPillButton
-                    }
+                    if bhGuideChromeVisible { bhGuideButton }
                     if isAiming {
                         liveValueStrip
                         MeasureShutterRow(
@@ -675,10 +681,12 @@ public struct DBHScanScreen: View {
                                            caption: "Type") {
                                 viewModel.enterManualEntry()
                             },
-                            trailing: showsAdjustRailButton
-                                ? .init(systemImage: "arrow.left.and.right",
-                                        caption: "Adjust") { enterAdjustMode() }
-                                : nil)
+                            trailing: .init(
+                                systemImage: viewModel.edgeAdjustActive ? "sparkles" : "arrow.left.and.right",
+                                caption: viewModel.edgeAdjustActive ? "Auto" : "Adjust") {
+                                    if viewModel.edgeAdjustActive { viewModel.requestAutoAlignment() }
+                                    else { enterAdjustMode() }
+                                })
                     } else if showsResultPanel {
                         bottomPanel
                     }
@@ -792,7 +800,27 @@ public struct DBHScanScreen: View {
                 }
             }
         }
+        .task(id: viewModel.edgeAdjustActive) {
+            guard !viewModel.edgeAdjustActive else { return }
+            autoSafetyNotice = nil
+            let started = ProcessInfo.processInfo.systemUptime
+            while !Task.isCancelled {
+                if AutoSafetyPolicy.shouldReturnToAdjust(startedAt: started,
+                    now: ProcessInfo.processInfo.systemUptime, isAiming: isAiming) {
+                    enterAdjustMode()
+                    autoSafetyNotice = AutoSafetyPolicy.timeoutMessage
+                    return
+                }
+                do { try await Task.sleep(for: .milliseconds(250)) }
+                catch { return }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification)
+            .receive(on: RunLoop.main)) { _ in
+            refreshThermalWarning()
+        }
         .onAppear {
+            refreshThermalWarning()
             hasLeftScreen = false
             // Phase 19 — pull the cruiser's chosen DBH method off
             // AppSettings every time the screen comes back into view
@@ -800,6 +828,7 @@ public struct DBHScanScreen: View {
             // next return without leaving the scan screen.
             viewModel.dbhMeasurementMethod = settings.dbhMeasurementMethod
             viewModel.developerMode = settings.developerMode
+            viewModel.captureMode = settings.dbhCaptureMode
             // ADJUST IS LIVE FROM THE FIRST FRAME when the cruiser's last
             // choice was the bracket. No Auto interlude: they chose Adjust,
             // so they get Adjust, at the width they were already using.
@@ -833,11 +862,8 @@ public struct DBHScanScreen: View {
             viewModel.edgeAdjustActive = true
             configureRawCapture()
             syncBreastHeightGuide()
-            // ON APPEAR, not only on a settings change. Seeding this from an
-            // `onChange` alone meant the toggle did nothing for a cruiser who
-            // set it in Settings and then walked to the scan: the only screen
-            // that could fire the change was the one they had already left.
-            viewModel.segmentationEnabled = segmentationGateOpen
+            // Start manually; Auto is enabled explicitly by its button.
+            viewModel.stopSegmentationFeed()
             viewModel.onAppear()
         }
         // The wireframe's off-switch — see `showsScanMesh`. Latched, never
@@ -892,16 +918,17 @@ public struct DBHScanScreen: View {
             configureRawCapture()
         }
         .onChange(of: settings.developerMode) { _, _ in
+            viewModel.developerMode = settings.developerMode
             configureRawCapture()
-            // The segmentation gate has developer mode in it, so turning
-            // developer mode off has to stop the feed the same tick.
-            viewModel.segmentationEnabled = segmentationGateOpen
+        }
+        .onChange(of: settings.dbhCaptureMode) { _, mode in
+            viewModel.captureMode = mode
         }
         .onChange(of: settings.breastHeightGuideHeight) { _, _ in
             syncBreastHeightGuide()
         }
-        .onChange(of: settings.dbhAutoSegmentation) { _, _ in
-            viewModel.segmentationEnabled = segmentationGateOpen
+        .onChange(of: bhGroundPlacementActive) { _, active in
+            viewModel.autoAlignmentPaused = active
         }
         .onChange(of: settings.dbhMeasurementMethod) { _, m in
             viewModel.dbhMeasurementMethod = m
@@ -1263,7 +1290,7 @@ public struct DBHScanScreen: View {
     /// THE ARTIFICIAL HORIZON, riding the camera's pitch — overlaid on the
     /// fixed row line, not replacing it.
     ///
-    /// Ring-width so it reads as a different instrument from the full-width
+    /// Twice the ring width so it reads as a different instrument from the full-width
     /// row marker underneath, 4 pt per degree to a 90 pt stop, and green
     /// inside 1.5° of level — which at 1.5 m is 4 cm across the stem, smaller
     /// than the chord median can resolve, so calling that band level is not a
@@ -1283,7 +1310,7 @@ public struct DBHScanScreen: View {
         // horizon actually goes when you raise a camera.
         let offset = deg > 0 ? travel : -travel
         let level = known && abs(deg) <= Self.guideLineLevelBandDeg
-        let width = Self.crosshairOuterRadius * 2
+        let width = Self.crosshairOuterRadius * 4
         return ZStack {
             // Dual-stroke line for sun-glare readability: a thin dark halo
             // under a bright line. On either a bright sky or dark foliage
@@ -1424,7 +1451,7 @@ public struct DBHScanScreen: View {
     /// estimate runs (plus `.capturing`, so the frozen bracket stays
     /// visible through the burst).
     private var adjustOverlayVisible: Bool {
-        guard viewModel.edgeAdjustActive || viewModel.segmentationDroveTheBracket
+        guard viewModel.edgeAdjustActive || (viewModel.segmentationDroveTheBracket && viewModel.segmentedExtent != nil)
         else { return false }
         switch viewModel.state {
         case .idle, .aligning, .armed, .capturing, .rejected: return true
@@ -1450,6 +1477,18 @@ public struct DBHScanScreen: View {
             .allowsHitTesting(false)
         adjustHandle(atX: xL, y: y, isLeft: true, viewWidth: size.width)
         adjustHandle(atX: xR, y: y, isLeft: false, viewWidth: size.width)
+    }
+
+    private func liveStemMaskLayer(_ mask: LiveStemMask, in size: CGSize) -> some View {
+        Path { path in
+            let dx = size.width / CGFloat(mask.width), dy = size.height / CGFloat(mask.height)
+            for run in mask.runs {
+                path.addRect(CGRect(x: CGFloat(run.start) * dx, y: CGFloat(run.row) * dy,
+                                    width: CGFloat(run.end - run.start) * dx, height: dy))
+            }
+        }
+        .fill(ForestixPalette.confidenceOk.opacity(0.18))
+        .accessibilityIdentifier("dbhScan.liveStemMask")
     }
 
     /// One draggable edge handle: white 2 pt line with a small grab
@@ -1494,6 +1533,7 @@ public struct DBHScanScreen: View {
                 // still carries over to the next tree, which was the other
                 // half of the request and the part that saves real time.
                 .onChanged { v in
+                    if !viewModel.edgeAdjustActive { viewModel.edgeAdjustActive = true }
                     guard viewWidth > 1 else { return }
                     let frac = min(max(Double(v.location.x / viewWidth),
                                        0.02), 0.98)
@@ -1544,32 +1584,36 @@ public struct DBHScanScreen: View {
         }
     }
 
-    /// Way back to automatic edge-finding — black-scrim capsule pill
-    /// floating just above the status panel while ADJUST is active.
-    private var autoPillButton: some View {
-        Button {
-            viewModel.requestAutoAlignment()
-        } label: {
-            Text(viewModel.autoAlignmentBusy ? "Aligning…" : "Auto")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 7)
-                .background(Color.black.opacity(0.55), in: Capsule())
-                .overlay(Capsule().stroke(.white.opacity(0.18),
-                                          lineWidth: 0.5))
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("dbhScan.autoMode")
-        .disabled(viewModel.autoAlignmentBusy)
-        .accessibilityHint(viewModel.autoAlignmentMessage ?? "Align the current stem guides using AI")
-        .overlay(alignment: .top) {
-            if let message = viewModel.autoAlignmentMessage {
+    /// A fixed slot prevents guidance changes from moving the ground/shutter buttons.
+    private var autoMessageSlot: some View {
+        ZStack {
+            if let message = deviceIsHot ? AutoSafetyPolicy.heatMessage : (autoSafetyNotice ?? displayedAutoMessage) {
                 Text(message).font(.caption2).foregroundStyle(.white)
-                    .padding(6).background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius:6))
-                    .fixedSize(horizontal:false,vertical:true).frame(width:220).offset(y:-48)
+                    .multilineTextAlignment(.center).lineLimit(2)
+                    .padding(6)
+                    .background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 6))
             }
         }
+        .frame(width: 260, height: 44)
+        .allowsHitTesting(false)
+        .task(id: viewModel.edgeAdjustActive) {
+            displayedAutoMessage = nil
+            guard !viewModel.edgeAdjustActive else { return }
+            var filter = StableGuidanceMessage(initial: viewModel.autoAlignmentMessage,
+                                                now: ProcessInfo.processInfo.systemUptime)
+            while !Task.isCancelled {
+                let next = filter.update(viewModel.autoAlignmentMessage,
+                                         now: ProcessInfo.processInfo.systemUptime)
+                if displayedAutoMessage != next { displayedAutoMessage = next }
+                do { try await Task.sleep(for: .milliseconds(125)) }
+                catch { return }
+            }
+        }
+    }
+
+    private func refreshThermalWarning() {
+        let state = ProcessInfo.processInfo.thermalState
+        deviceIsHot = state == .serious || state == .critical
     }
 
     // MARK: - Breast-height guide
@@ -1577,20 +1621,6 @@ public struct DBHScanScreen: View {
     /// Ground placement has its own preview dot, not the DBH measuring row.
     private var bhGroundPlacementActive: Bool {
         bhGuideChromeVisible && bhGuide.stage == .aiming
-    }
-
-    /// THE SEGMENTATION GATE, and the ONLY place it is decided: developer
-    /// mode AND its own toggle. Neither key is ever read alone.
-    ///
-    /// It decides the two pixels a diameter is measured between.
-    /// Run against 60 real captures it
-    /// finds a trunk in 40 % of frames and, when it does, offers edges that
-    /// span about 0.21 of the screen where the cruiser's own bracket spans
-    /// 0.36 — the mask has holes mid-stem and bleeds into the bank behind. It
-    /// is an experiment until a few stems have been measured with it and a
-    /// tape, and an experiment does not belong on a cruiser's settings screen.
-    private var segmentationGateOpen: Bool {
-        false // Auto is an explicit one-shot YOLO26n request.
     }
 
     /// Whether any of the guide is on screen right now — the gate plus the
@@ -1646,12 +1676,13 @@ public struct DBHScanScreen: View {
                      : bhGuide.stage == .off ? "Set ground"
                      : bhPlacementFailed ? "Retry ground" : "Place ground")
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Color.black.opacity(0.88))
                     .padding(.horizontal, 14)
                     .padding(.vertical, 7)
-                    .background(Color.black.opacity(0.55), in: Capsule())
-                    .overlay(Capsule().stroke(.white.opacity(0.18), lineWidth: 0.5))
                     .frame(minHeight: 44)
+                    .background(Color.white, in: Capsule())
+                    .overlay(Capsule().stroke(.black.opacity(0.12), lineWidth: 0.5))
+                    .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -1785,7 +1816,7 @@ public struct DBHScanScreen: View {
                         .accessibilityIdentifier("dbhScan.distanceBadge")
                 }
             }
-        } else if let status = viewModel.previewStatusText {
+        } else if !viewModel.segmentationEnabled, let status = viewModel.previewStatusText {
             // Phase 19 — only the legacy partial-arc method ever sets
             // `previewStatusText` (the chord method returns nil for
             // unmeasurable frames instead of producing a red fit).
@@ -2073,12 +2104,6 @@ public struct DBHScanScreen: View {
         }
     }
 
-    /// True when the ADJUST flank is offered. Hidden while ADJUST is
-    /// already active (the Auto pill is the way back).
-    private var showsAdjustRailButton: Bool {
-        !viewModel.edgeAdjustActive
-    }
-
     /// Open the bracket at the width the LAST tree was measured at, centred
     /// on the crosshair.
     ///
@@ -2168,6 +2193,9 @@ public struct DBHScanScreen: View {
     }
 
     private var statusText: String {
+        if isAiming, viewModel.segmentationEnabled, !viewModel.edgeAdjustActive {
+            return "Keep the trunk in view; tap + when ready, or use Adjust."
+        }
         switch viewModel.state {
         case .idle:         return "Starting camera…"
         case .aligning:
@@ -2184,7 +2212,7 @@ public struct DBHScanScreen: View {
             return "Hold steady, then tap + to capture."
         case .capturing:
             return "Capturing…"
-        case .fitted:       return "Scan complete. Accept, retake, or add a second view."
+        case .fitted:       return "Scan complete. Accept or retake."
         case .accepted:     return "Saved."
         case .rejected:     return viewModel.result?.rejectionReason
                                  ?? "Scan rejected. Try again."

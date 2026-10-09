@@ -35,7 +35,7 @@ class BreastHeightGuide(private val controller: ArController) {
     var stage by mutableStateOf(Stage.OFF)
         private set
 
-    var height by mutableStateOf(BreastHeightGuideHeight.METERS_130)
+    var height by mutableStateOf(BreastHeightGuideHeight.METERS_137)
 
     /// The LIVE base point — the anchor's drift-corrected pose, re-read on
     /// every refresh, never the frozen hit coordinate the placement produced.

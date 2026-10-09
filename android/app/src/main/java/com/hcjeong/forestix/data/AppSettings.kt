@@ -14,6 +14,8 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.hcjeong.forestix.common.Country
+import com.hcjeong.forestix.common.DBHCaptureMode
+import com.hcjeong.forestix.common.DeveloperModeUnlock
 import com.hcjeong.forestix.common.BreastHeightGuideHeight
 import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.sensors.LogRule
@@ -148,6 +150,7 @@ data class SettingsSnapshot(
     /// (depth source, intrinsics, point counts, raw chord, pitch, σ) on the
     /// AR screens and unlocks the validation-experiment tooling.
     val developerMode: Boolean = false,
+    val dbhCaptureMode: DBHCaptureMode = DBHCaptureMode.SINGLE,
     /// Raw-capture recording (developer mode only) — when ON, every DBH
     /// capture burst and Height compute serializes a replay bundle (raw
     /// depth u16 + intrinsics + poses + calibration) under
@@ -164,7 +167,7 @@ data class SettingsSnapshot(
     /// It changes no measurement and appears in no export. Same key as iOS
     /// (`AppSettings.Keys.breastHeightGuide`, "tc.breastHeightGuide").
     val breastHeightGuide: Boolean = false,
-    val breastHeightGuideHeight: BreastHeightGuideHeight = BreastHeightGuideHeight.METERS_130,
+    val breastHeightGuideHeight: BreastHeightGuideHeight = BreastHeightGuideHeight.METERS_137,
     /// AUTO reads the stem's edges out of a segmentation mask instead of
     /// walking the depth map. OFF BY DEFAULT and it must stay that way until
     /// it has been checked against tape: it changes the two pixels the chord
@@ -226,6 +229,8 @@ class AppSettings(private val context: Context) {
         val dbhBracketHalfWidth = floatPreferencesKey("tc.dbhBracketHalfWidth")
         val measureHeightAfterDBH = booleanPreferencesKey("tc.measureHeightAfterDiameter")
         val developerMode = booleanPreferencesKey("tc.developerMode")
+        val developerModeUnlocked = booleanPreferencesKey("tc.developerModeUnlocked")
+        val dbhCaptureMode = stringPreferencesKey("tc.dbhCaptureMode")
         val rawCaptureEnabled = booleanPreferencesKey("tc.rawCaptureEnabled")
         val breastHeightGuide = booleanPreferencesKey("tc.breastHeightGuide")
         val breastHeightGuideHeight = stringPreferencesKey("tc.breastHeightGuideHeight")
@@ -279,7 +284,9 @@ class AppSettings(private val context: Context) {
             // Defaults ON (F10) — `?: true`, so an install that has never
             // touched the toggle chains diameter → height.
             measureHeightAfterDiameter = p[Keys.measureHeightAfterDBH] ?: true,
-            developerMode = p[Keys.developerMode] ?: false,
+            developerMode = DeveloperModeUnlock.isEnabled(p[Keys.developerMode] ?: false,
+                p[Keys.developerModeUnlocked] ?: false),
+            dbhCaptureMode = DBHCaptureMode.fromRaw(p[Keys.dbhCaptureMode]),
             rawCaptureEnabled = p[Keys.rawCaptureEnabled] ?: false,
             breastHeightGuide = p[Keys.breastHeightGuide] ?: false,
             breastHeightGuideHeight = BreastHeightGuideHeight.fromRaw(p[Keys.breastHeightGuideHeight]),
@@ -345,6 +352,12 @@ class AppSettings(private val context: Context) {
     fun setDeveloperMode(value: Boolean) = update {
         _state.value = _state.value.copy(developerMode = value)
         it[Keys.developerMode] = value
+        it[Keys.developerModeUnlocked] = value
+    }
+
+    fun setDbhCaptureMode(value: DBHCaptureMode) = update {
+        _state.value = _state.value.copy(dbhCaptureMode = value)
+        it[Keys.dbhCaptureMode] = value.raw
     }
 
     fun setUnitSystem(value: UnitSystem) = update {

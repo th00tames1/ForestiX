@@ -987,7 +987,7 @@ fun HeightScanScreen(
                 // tapped "+" over and over with the eye-level prompt still on
                 // screen. Same order on both platforms now: missing hit is
                 // inert, missing pose speaks.
-                val standing = controller.currentCameraPosition()
+                val standing = controller.heightCameraSnapshot()?.position
                 val d0 = controller.horizontalDistanceTo(hit)
                 if (standing == null || d0 == null) {
                     failure = CAMERA_NOT_READY
@@ -1027,8 +1027,9 @@ fun HeightScanScreen(
             }
             Stage.WALKING -> { stage = Stage.AIM_BASE }
             Stage.AIM_BASE -> {
-                val a = controller.cameraForwardElevationRad()
-                val s = controller.currentCameraPosition()
+                val sighting = controller.heightCameraSnapshot()
+                val a = sighting?.elevationRad
+                val s = sighting?.position
                 // The anchor's CURRENT pose, not the one remembered from the
                 // anchoring frame — it has been drift-corrected for the whole
                 // walk. Null means ARCore stopped it: there is no trunk to
@@ -1048,7 +1049,7 @@ fun HeightScanScreen(
                 failure = null; alphaBase = a
                 standingOffset = Vec3(s.x - anchor.x, s.y - anchor.y, s.z - anchor.z)
                 if (rawCaptureArmed) {
-                    basePose = controller.currentCameraPose()
+                    basePose = sighting.poseMatrix
                     val (fr, rgb) = captureAim()
                     baseAimFrame = fr; baseAimRgb = rgb
                 }
@@ -1075,7 +1076,8 @@ fun HeightScanScreen(
                 stage = Stage.AIM_TOP
             }
             Stage.AIM_TOP -> {
-                val aTop = controller.cameraForwardElevationRad()
+                val sighting = controller.heightCameraSnapshot()
+                val aTop = sighting?.elevationRad
                 // Same rule as the base aim: the live anchor pose or nothing.
                 val anchor = ArSessionHub.heightAnchorWorld()
                 if (anchor == null) { anchorLost = true; failure = ANCHOR_LOST; return }
@@ -1097,9 +1099,9 @@ fun HeightScanScreen(
                 // round-trip to drift that never touched the angle, and only
                 // in developer mode, which is exactly the configuration the
                 // study data is collected in.
-                val topPosNow = controller.currentCameraPosition()
+                val topPosNow = sighting.position
                 if (rawCaptureArmed) {
-                    topPose = controller.currentCameraPose()
+                    topPose = sighting.poseMatrix
                     val (fr, rgb) = captureAim()
                     topAimFrame = fr; topAimRgb = rgb
                 }
@@ -2179,4 +2181,3 @@ private fun BoxScope.HeightAimCrosshair(label: String) {
             .padding(horizontal = 8.dp, vertical = 4.dp),
     )
 }
-

@@ -118,6 +118,8 @@ public struct MapHomeScreen: View {
     /// toggle never snaps position or zoom.
     @State var camera = MapHomeScreen.fallbackCamera
     @State private var cameraInitialised = false
+    @State private var developerUnlock = DeveloperModeUnlock()
+    @State private var showingDeveloperUnlock = false
     /// True while the camera still sits on the hardcoded fallback — the
     /// first real GPS fix recenters exactly once.
     @State private var awaitingFirstFix = false
@@ -570,7 +572,12 @@ public struct MapHomeScreen: View {
                 startUp()
                 if isCruiseMode { reloadCruise() } else { reloadAreas() }
             }
-            .onDisappear { location.release() }
+            .onDisappear { location.release(); developerUnlock.reset() }
+            .alert("Developer mode enabled", isPresented: $showingDeveloperUnlock) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("Developer tools are now available in Settings.")
+            }
             .onChange(of: location.latestSnapshot) { _, snap in
                 recenterOnFirstFix(snap)
                 if isCruiseMode { checkNavArrival(snap) }
@@ -605,25 +612,25 @@ public struct MapHomeScreen: View {
             }
             #if os(iOS)
             .navigationBarHidden(true)
-            .fullScreenCover(isPresented: $presentingDBHScan,
+            .portraitFullScreenCover(isPresented: $presentingDBHScan,
                              onDismiss: continueChainAfterDBH) { dbhCover }
-            .fullScreenCover(isPresented: $presentingHeightScan,
+            .portraitFullScreenCover(isPresented: $presentingHeightScan,
                              onDismiss: { fullMeasurementChain = false }) { heightCover }
-            .fullScreenCover(isPresented: $presentingDistance) {
+            .portraitFullScreenCover(isPresented: $presentingDistance) {
                 NavigationStack {
                     DistanceMeasureScreen()
                         .environmentObject(history)
                         .environmentObject(settings)
                 }
             }
-            .fullScreenCover(isPresented: $presentingSampling) {
+            .portraitFullScreenCover(isPresented: $presentingSampling) {
                 NavigationStack {
                     SamplingPlotScreen()
                         .environmentObject(history)
                         .environmentObject(settings)
                 }
             }
-            .fullScreenCover(item: $photoViewer) { context in
+            .portraitFullScreenCover(item: $photoViewer) { context in
                 MeasurePhotoDetailView(context: context)
             }
             #endif
@@ -854,11 +861,13 @@ public struct MapHomeScreen: View {
                 areaStroke: ForestixPalette.cruiseAccent,
                 areaFill: ForestixPalette.cruiseAccent.opacity(0.14)),
             onMarkerTap: { id in
+                developerUnlock.reset()
                 withAnimation(.easeOut(duration: 0.18)) {
                     selectedPinID = (selectedPinID == id) ? nil : id
                 }
             },
             onMapTap: {
+                developerUnlock.reset()
                 withAnimation(.easeOut(duration: 0.18)) {
                     selectedPinID = nil
                     selectedAreaID = nil
@@ -867,7 +876,10 @@ public struct MapHomeScreen: View {
             // A tap on the drawn plot's boundary raises its Edit / Remove
             // menu (M2); a tap inside an area selects the area; a tap on
             // both toggles between them — see `handleOverlayTap`.
-            onOverlayTap: { hit in handleOverlayTap(hit) },
+            onOverlayTap: { hit in
+                developerUnlock.reset()
+                handleOverlayTap(hit)
+            },
             // PRESS AND HOLD BELONGS TO THE MAP, not to cruise. It used to
             // be gated to cruise mode on the reasoning that measure mode has
             // no plots and no stand to bound; both halves were wrong. The
@@ -878,6 +890,7 @@ public struct MapHomeScreen: View {
             // narrows with the mode (see `planPin` in the area extension);
             // the gesture itself never does.
             onMapLongPress: { coordinate in
+                developerUnlock.reset()
                 handleMapLongPress(at: coordinate)
             },
             onCameraChange: { _, region in
@@ -1037,6 +1050,11 @@ public struct MapHomeScreen: View {
             // No fix yet: the button dims and the tap is a no-op.
             let locateFix = location.latestSnapshot ?? LocationService.lastGlobalFix
             Button {
+                if !settings.developerMode,
+                   developerUnlock.tap(at: ProcessInfo.processInfo.systemUptime) {
+                    settings.developerMode = true
+                    showingDeveloperUnlock = true
+                }
                 guard let fix = locateFix else { return }
                 withAnimation(.easeOut(duration: 0.3)) {
                     camera = BasemapCamera(latitude: fix.latitude,
@@ -1053,6 +1071,7 @@ public struct MapHomeScreen: View {
             .accessibilityIdentifier("mapHome.locate")
 
             Button {
+                developerUnlock.reset()
                 presentingLayers = true
             } label: {
                 chromeButtonGlyph("square.stack.3d.up")
@@ -1064,6 +1083,7 @@ public struct MapHomeScreen: View {
             // Settings — rightmost of the top-right group, both modes.
             // Reuses the existing SettingsScreen sheet.
             Button {
+                developerUnlock.reset()
                 presentingSettings = true
             } label: {
                 chromeButtonGlyph("gearshape")
@@ -2014,7 +2034,7 @@ public struct MapHomeScreen: View {
                 quickTreeNumber: pendingTreeNumber,
                 initialSpeciesCode: pendingSpeciesCode,
                 onEditPlot: { scanPlotSetup = true })
-            .fullScreenCover(isPresented: $scanPlotSetup) { scanPlotSetupCover }
+            .portraitFullScreenCover(isPresented: $scanPlotSetup) { scanPlotSetupCover }
         }
     }
 
@@ -2086,7 +2106,7 @@ public struct MapHomeScreen: View {
                 onEditPlot: { scanPlotSetup = true })
             .environmentObject(history)
             .environmentObject(settings)
-            .fullScreenCover(isPresented: $scanPlotSetup) { scanPlotSetupCover }
+            .portraitFullScreenCover(isPresented: $scanPlotSetup) { scanPlotSetupCover }
         }
     }
     #endif

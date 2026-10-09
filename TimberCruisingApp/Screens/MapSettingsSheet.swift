@@ -166,7 +166,7 @@ struct MapSettingsSheet: View {
         } message: { _ in
             Text(BoundaryDrawScreen.replacementMessage(for: boundaryModel.boundary))
         }
-        .fullScreenCover(isPresented: $presentingDrawEditor) {
+        .portraitFullScreenCover(isPresented: $presentingDrawEditor) {
             BoundaryDrawScreen(initialCamera: mapCamera)
                 .environmentObject(settings)
         }

@@ -50,14 +50,19 @@ final class BasalAreaMathTests: XCTestCase {
     }
 
     func testTreeFactorBAF() {
-        // BAF 20 (ft²/ac), DBH 40 cm ⇒ BA = 0.12566 m² ⇒ TF = 20 / 0.12566 = 159.15
+        // THE DIVIDE IS IN SQUARE FEET, because that is what a BAF counts.
+        // BAF 20 ft²/ac, DBH 40 cm ⇒ BA = 1.35263 ft² ⇒ TF = 20 / 1.35263 = 14.79
+        // trees/acre. Dividing by the metric area instead gave 159.15 — 10.76×
+        // too many stems, and it reached the tally, the CSV and the client PDF.
         let tree = makeTree(dbhCm: 40)
-        XCTAssertEqual(treeFactorBAF(tree: tree, baf: 20), 159.15, accuracy: 0.05)
+        XCTAssertEqual(treeFactorBAF(tree: tree, baf: 20), 14.786, accuracy: 0.01)
     }
 
     func testBaPerAcreBAF() {
-        // 7 "in" trees, BAF = 20 ⇒ BA/ac = 140.
+        // 7 "in" trees, BAF = 20 ⇒ 140 ft²/ac. RETURNED IN m²/acre, so that
+        // this and `baPerAcre` mean the same thing whichever plot type filled
+        // them: 140 × 0.09290304 = 13.006.
         let trees = (0..<7).map { _ in makeTree(dbhCm: 30) }
-        XCTAssertEqual(baPerAcreBAF(trees: trees, baf: 20), 140)
+        XCTAssertEqual(baPerAcreBAF(trees: trees, baf: 20), 13.006, accuracy: 0.01)
     }
 }

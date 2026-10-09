@@ -58,10 +58,12 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
+import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.ar.ArCameraView
 import com.hcjeong.forestix.ar.ArController
 import com.hcjeong.forestix.ar.ArSessionHub
 import com.hcjeong.forestix.ar.Vec3
+import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.data.cruise.PlotCenterResult
 import com.hcjeong.forestix.positioning.GPSAveraging
 import com.hcjeong.forestix.positioning.LocationService
@@ -346,6 +348,9 @@ fun OffsetFlowScreen(
     val scope = rememberCoroutineScope()
     val colors = Forestix.colors
     val type = Forestix.type
+    // Both distances on this screen are ones the cruiser WALKS, so both follow
+    // their Units setting.
+    val settings by LocalAppEnvironment.current.settings.state.collectAsStateWithLifecycle()
 
     // Shared app-scoped AR session (one ARCore world across the AR screens).
     val controller = ArSessionHub.controller
@@ -460,8 +465,12 @@ fun OffsetFlowScreen(
                 is OffsetFlowViewModel.Step.WalkBack -> {
                     val d = s.distanceFromPlotM
                     Text(
-                        if (d != null) String.format(Locale.US, "%.1f m from plot", d)
-                        else "Finding your position…",
+                        if (d != null) {
+                            MeasurementFormatter.distance(d.toDouble(), settings.unitSystem) +
+                                " from plot"
+                        } else {
+                            "Finding your position…"
+                        },
                         style = type.data,
                         color = Color.White,
                     )
@@ -488,7 +497,8 @@ fun OffsetFlowScreen(
                         val w = r.offsetWalkM
                         if (w != null) {
                             Text(
-                                String.format(Locale.US, "Walk %.1f m", w),
+                                "Walk " + MeasurementFormatter.distance(
+                                    w.toDouble(), settings.unitSystem),
                                 style = type.caption,
                                 color = Color.White.copy(alpha = 0.7f),
                             )

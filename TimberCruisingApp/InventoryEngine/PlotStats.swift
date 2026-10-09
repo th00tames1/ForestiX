@@ -49,7 +49,8 @@ public enum PlotStatsCalculator {
     ///   - trees: all trees on the plot (caller need not pre-filter).
     ///   - species: map of speciesCode → config (for merch volume topDIB/stump).
     ///   - volumeEquations: map of speciesCode → volume equation. Missing
-    ///     entries ⇒ volume contribution 0 for that species.
+    ///     entries make that species and total volume unavailable (NaN).
+    ///     Exporters serialize unavailable volume as blank, never zero.
     ///   - hdFits: map of speciesCode → H–D fit for imputing missing heights.
     public static func compute(
         plot: Plot,
@@ -81,10 +82,19 @@ public enum PlotStatsCalculator {
             let ba = basalAreaM2(dbhCm: tree.dbhCm)
             sumDbhSq += tree.dbhCm * tree.dbhCm
 
-            // Per-tree expansion factor.
+            // Per-tree expansion factor. On a prism plot it is BAF / BA, and
+            // BOTH SIDES ARE SQUARE FEET: `CruiseDesign.baf` is ft²/ac (the
+            // number on the prism), `ba` above is square metres. Dividing the
+            // two directly is a silent 10.76× on TPA, basal area and volume —
+            // see the unit note at the top of BasalAreaMath.swift — so the
+            // divide goes through `basalAreaFt2`, the same helper
+            // `ExpansionFactors.variableRadius` uses.
             let ef: Float = isFixed
                 ? fixedEF
-                : (cruiseDesign.baf.map { ba > 0 ? $0 / ba : 0 } ?? 0)
+                : (cruiseDesign.baf.map { baf -> Float in
+                    let baFt2 = basalAreaFt2(dbhCm: tree.dbhCm)
+                    return baFt2 > 0 ? baf / baFt2 : 0
+                } ?? 0)
 
             totalTPA += ef
             totalBAPerAcre += ba * ef
@@ -113,6 +123,11 @@ public enum PlotStatsCalculator {
                     merchVolPerAcre = vMerch * ef
                     totalMerchVolPerAcre += merchVolPerAcre
                 }
+            }
+            if volumeEquations[tree.speciesCode] == nil {
+                grossVolPerAcre = .nan
+                totalGrossVolPerAcre = .nan
+                totalMerchVolPerAcre = .nan
             }
 
             var bucket = bySpecies[tree.speciesCode] ?? (0, 0, 0, 0)

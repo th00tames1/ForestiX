@@ -8,6 +8,7 @@
 // Tests drive the state machine directly through the `preview` factory.
 
 import Foundation
+import simd
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -43,6 +44,9 @@ public final class DBHScanViewModel: ObservableObject {
     /// fire research logging exactly when a new measurement is committed.
     @Published public private(set) var resultGeneration: Int = 0
     @Published public private(set) var crosshairIsStable: Bool = false
+    /// Disabled only by the canned preview factory; live iPad measurements
+    /// require the actual scene lock and a frame from the current viewport.
+    private var usesLiveOrientationSafety = true
     @Published public var manualDbhCm: String = ""
     @Published public private(set) var unsupportedBanner: String?
     /// Cheap single-frame DBH estimate updated in real time while the
@@ -68,6 +72,136 @@ public final class DBHScanViewModel: ObservableObject {
     /// fit's rejection reason on red. nil while a green/yellow value
     /// is being shown.
     @Published public private(set) var previewStatusText: String?
+    /// True when `previewStatusText` is the developer-mode BENCH DIAGNOSTIC
+    /// (axis / handle fractions / depth grid) rather than advice to the
+    /// cruiser. The screen suppresses the acquisition hint whenever a
+    /// specific advice line is already up — two sentences telling the
+    /// cruiser different things about one failure is worse than one — but a
+    /// diagnostic is not advice, so it must not suppress anything.
+    ///
+    /// Developer mode is NOT bench-only in this repo: the tape-truth field,
+    /// the research CSV row and the typed-truth capture are all gated on it,
+    /// so the accuracy-study cruiser works with it ON in the stand. Letting
+    /// the diagnostic suppress the hint hid field report 15's one sentence
+    /// of guidance from the only operator the study depends on, and made iOS
+    /// print something different from Android for the identical state.
+    @Published public private(set) var previewStatusIsDiagnostic: Bool = false
+
+    // MARK: - ADJUST live-readout settling (field round 10)
+
+    /// True while the ADJUST bracket is spanning more than one surface, so the
+    /// number on screen is the last one taken off bark rather than this tick's.
+    ///
+    /// THE DEFECT THIS ANSWERS is the diameter that jumps by inches with the
+    /// phone held still — see `DBHEstimator.bracketCoreDepthSpreadM` for the
+    /// measurement and the cause. The correction is HERE and not in the
+    /// estimator because the estimator is frozen and does not need correcting:
+    /// capture computes a fresh fit from one latched frame. This hold only
+    /// steadies the live readout while the cruiser places the handles; its
+    /// historical value is never substituted for the captured measurement.
+    ///
+    /// WHY HOLD RATHER THAN BLANK. A bad tick lands roughly one time in ten at
+    /// 10 Hz, so blanking on each one would strobe the number in and out —
+    /// harder to read than the jump it replaces. Holding shows the most recent
+    /// diameter actually measured across bark, which is a real reading and not
+    /// an invented one, and a good tick publishes immediately, so a handle drag
+    /// still tracks the handles exactly as the ADJUST design requires. Only a
+    /// SUSTAINED bad run (`bracketUnsettledGraceSec`) blanks the value, and
+    /// then it says why in a sentence.
+    @Published public private(set) var bracketDepthUnsettled: Bool = false
+
+    /// How long the bracket may keep reading two surfaces before the held
+    /// value stops being current enough to show.
+    ///
+    /// 1.0 s is long enough that the intermittent excursion never reaches it
+    /// (it is one or two ticks) and short enough that a cruiser who has walked
+    /// the bracket off the stem is told so while they are still holding it
+    /// there, rather than reading a stale number.
+    private static let bracketUnsettledGraceSec: TimeInterval = 1.0
+
+    /// Advice for a bracket that is spanning the stem AND what is behind it.
+    /// Byte identical to the Android `BRACKET_TWO_SURFACES` constant.
+    ///
+    /// NOT "widen it", for the same reason as the sibling line below: a wider
+    /// bracket takes in more background and more diameter at once.
+    public static let bracketTwoSurfacesText =
+        "The bracket is reading past the trunk — narrow it onto the bark, or step closer."
+
+    /// Monotonic time the ADJUST bracket last measured a single surface, or nil
+    /// before the first such tick of this aiming session.
+    private var lastSettledBracketAt: TimeInterval?
+    /// The most recent diameter measured across one surface — what the readout
+    /// holds while an excursion passes.
+    private var lastSettledBracketCm: Double?
+    /// True once `acquisitionStallSec` of aiming has gone by without a
+    /// single usable fit. Field report 15: when depth won't resolve, the
+    /// screen said nothing and the cruiser had no way to know that a small
+    /// movement — or standing at a different distance — is what unblocks
+    /// it. The screen turns this into one sentence of guidance; it never
+    /// affects what gets measured.
+    @Published public private(set) var acquisitionStalled: Bool = false
+    /// Uptime of the last preview tick that produced a fit. Seeded when
+    /// aiming begins so the hint waits out the full interval rather than
+    /// flashing up on the first frame.
+    private var lastFitTime: TimeInterval = 0
+    private let acquisitionStallSec: TimeInterval = 2.0
+    /// How long without a preview tick before the line on the value strip is
+    /// treated as describing a frame that no longer exists. Five missed
+    /// preview intervals (the throttle is 0.1 s), so an ordinary hiccup can't
+    /// trip it and a real stop is caught inside one stall interval.
+    private let depthSilentSec: TimeInterval = 0.5
+    /// Drives the stall clock independently of depth delivery.
+    ///
+    /// `updateAcquisitionStall` runs only inside `handleDepthFrame`, so on
+    /// its own it measures "frames that produced no fit" — not "no fit".
+    /// The states the cruiser is actually stuck in include the ones where
+    /// NO frame arrives at all: a session interruption, thermal throttle,
+    /// or a frame whose `sceneDepth` is nil so the manager publishes
+    /// nothing. Those froze `acquisitionStalled` at whatever it last was
+    /// and the hint never came up. Android ticks its stall outside the
+    /// frame block for exactly this reason (DBHScanScreen.kt).
+    private var stallTicker: Timer?
+
+    // MARK: - Auto arm gate
+
+    /// Depth window the Auto crosshair may arm in.
+    ///
+    /// IT IS THE ESTIMATOR'S WINDOW, not a second opinion about it. The gate
+    /// was written in Phase 2 against the partial-arc pipeline, whose own
+    /// tap-depth window was 0.5–3.0 m, and the two matched exactly. Phase 19
+    /// widened the chord estimator to 0.3–5.0 m (`chordPreviewFit` /
+    /// `chordEstimate`, both of which run this capture) and nobody moved the
+    /// gate, so between 3 and 5 m the cruiser got a live diameter in the
+    /// badge, a red crosshair, and a "+" that did nothing — a refusal of
+    /// readings the estimator behind it would have made correctly.
+    ///
+    /// Widening the gate does not widen what the estimator will accept: a
+    /// stem at 5 m subtends few enough pixels that the silhouette walk drops
+    /// the rows (`w < 5`) and the fit fails on its own, and the plausibility
+    /// ceiling is unchanged. This only stops the app refusing before the
+    /// estimator has been asked.
+    public static let armDepthRangeM: ClosedRange<Float> = 0.3...5.0
+
+    /// Why the last "+" did nothing. A capture button that refuses in silence
+    /// is indistinguishable from a broken one — the same defect that was
+    /// fixed on the height anchor tap (`HeightScanViewModel.cameraNotReadyText`).
+    /// Cleared as soon as the condition it describes lifts, so it can never
+    /// outlive its own truth.
+    @Published public private(set) var captureRefusalReason: String?
+
+    /// Tap refusals. Byte identical to the Android `DBHScanScreen.kt`
+    /// constants of the same names.
+    ///
+    /// None of them names the metres of the window: iOS arms over its
+    /// estimator's 0.3–5.0 m and Android over its own 0.4–3.5 m, so a
+    /// sentence quoting a number could not be the same sentence on both. The
+    /// direction to walk is what the cruiser can act on anyway.
+    public static let tooFarText =
+        "Too far from the trunk to read depth — step closer, then tap + again."
+    public static let tooCloseText =
+        "Too close to the trunk to read depth — step back, then tap + again."
+    public static let noTrunkLockText =
+        "No trunk lock yet — hold the crosshair on the bark until a diameter shows, then tap + again."
 
     // MARK: - Manual edge-bracket (ADJUST) mode
 
@@ -77,57 +211,253 @@ public final class DBHScanViewModel: ObservableObject {
     /// only — the screen never enables it for the AR caliper/motion
     /// developer modes.
     @Published public var edgeAdjustActive: Bool = false {
-        didSet { if !edgeAdjustActive { adjustAxisLatch = nil } }
+        // The held ADJUST value goes with the latch: it was measured through
+        // the bracket, and there is no bracket outside this mode.
+        didSet {
+            if edgeAdjustActive && segmentationEnabled { stopSegmentationFeed() }
+            if !edgeAdjustActive {
+                resetBracketSettling()
+            }
+        }
     }
     /// Handle positions as fractions (0…1) of the on-screen walk axis —
     /// the same normalisation `PreviewFit.stripLeftFraction` uses, so
     /// screen x-fraction ↔ depth walk-axis fraction is the existing
     /// view↔depth mapping the fit-chord overlay already relies on.
-    @Published public var edgeBracketLeftFraction: Double = 0.25
-    @Published public var edgeBracketRightFraction: Double = 0.75
+    ///
+    /// These initial values are a PLACEHOLDER, not the first-run bracket:
+    /// `DBHScanScreen.onAppear` seeds both handles from the remembered
+    /// width (`AppSettings.dbhBracketHalfWidth`) before depth is
+    /// subscribed, and that is the number the cruiser sees. They are
+    /// written from the same constant so a unit test or a preview that
+    /// drives the view model directly starts somewhere sane rather than at
+    /// a bracket across half the screen.
+    @Published public var edgeBracketLeftFraction: Double
+        = 0.5 - AppSettings.defaultBracketHalfWidth
+    @Published public var edgeBracketRightFraction: Double
+        = 0.5 + AppSettings.defaultBracketHalfWidth
     /// True when the most recently committed result was captured in
     /// ADJUST mode — recorded as the entry's "capture_mode" tag
     /// ("manual" vs "auto").
     @Published public private(set) var resultCapturedManually: Bool = false
 
-    /// Guide axis latched on the first ADJUST preview tick and held for the
-    /// whole session. `pickGuideAxis` votes per frame on the wider
-    /// silhouette chord, which can flip row↔col on the cluttered scenes
-    /// ADJUST exists for, and a flip changes the extent the handle fractions
-    /// are read against — so the value jumps. One deterministic axis per
-    /// session keeps the bracket stable.
+    /// WHICH HAND PLACED THE EDGES — "auto", "manual", or "segmented".
     ///
-    /// It was removed once, on the argument that a latch taken before the
-    /// cruiser has aimed can fix the WRONG axis for a whole plot. That
-    /// argument still stands and is worth revisiting with a device. It is
-    /// not worth revisiting from a keyboard: the removal shipped alongside
-    /// the mapping rewrite and the pair left the screen blank.
-    private var adjustAxisLatch: GuideAxis?
+    /// `resultCapturedManually` cannot carry this: it is a Bool, and a
+    /// model-placed bracket is a bracket, so it read "manual" and was
+    /// indistinguishable in the record from a thumb. The whole argument for
+    /// routing segmentation through the bracket was that a corpus could be
+    /// split on it later, and that is only true if the record says which.
+    @Published public private(set) var resultCaptureMode: String = "auto"
 
-    /// THE OLD NOTE, kept because the reasoning is sound and only the
-    /// evidence was missing. It used to be set on the first ADJUST
-    /// preview tick and held for the whole session, to stop `pickGuideAxis`
-    /// flipping row↔col between frames and jumping the value. The flip was
-    /// real, but latching was the wrong cure and became a worse bug: the
-    /// axis decides whether the handle span is read against a 256-wide or a
-    /// 192-tall extent, so a latch taken before the cruiser had even aimed
-    /// (the screen now opens straight into ADJUST) could scale every tree in
-    /// a plot by 4:3 — and in the cruise tally the screen is reused across
-    /// trees without the latch ever clearing. `bracketChordFit` now derives
-    /// the walk axis from the MAPPED bracket span itself, which is stable by
-    /// construction because it follows the display transform rather than the
-    /// scene's depth content. Same rule as Android.
-    ///
+    @Published public private(set) var autoAlignmentBusy = false
+    @Published public private(set) var autoAlignmentMessage: String?
+    @Published public private(set) var liveStemMask: LiveStemMask?
+    public var autoAlignmentPaused = false {
+        didSet { if autoAlignmentPaused { clearLiveAutoLock() } }
+    }
+    @Published public private(set) var segmentedExtent: StemExtent?
+    @Published public private(set) var segmenterAvailability: SegmenterAvailability = .noModel
+    /// Auto is explicit and user-facing; developer settings do not gate it.
+    @Published public var segmentationEnabled = false {
+        didSet {
+            guard segmentationEnabled != oldValue else { return }
+            if segmentationEnabled { startSegmentationFeed() }
+            else { pauseSegmentationFeed(); clearLiveAutoLock() }
+        }
+    }
+    private var liveAutoTracker = LiveStemTracker()
+    private var liveAutoFrame: ARDepthFrame?
+    private var liveAutoGeneration: UInt64 = 0
+    #if canImport(OnnxRuntimeBindings)
+    private var segmentationTask: Task<Void, Never>?
+    #endif
+
+    public func requestAutoAlignment() {
+        guard state == .idle || state == .aligning || state == .armed || state == .rejected else { return }
+        edgeAdjustActive = false
+        clearLiveAutoLock()
+        autoAlignmentMessage = "Finding stem…"
+        segmentationEnabled = true
+        startSegmentationFeed()
+    }
+
+    private func clearLiveAutoLock() {
+        liveAutoTracker.reset(); liveAutoFrame = nil
+        liveStemMask = nil; segmentedExtent = nil
+    }
+
+    private var liveAutoHasLock: Bool {
+        liveAutoTracker.isFresh(at: ProcessInfo.processInfo.systemUptime)
+    }
+
+    #if canImport(OnnxRuntimeBindings)
+    private struct SegmentationTick {
+        let buffer: CVPixelBuffer
+        let frame: ARDepthFrame
+        let viewSize: CGSize
+        let generation: UInt64
+        let started: Double
+    }
+
+    /// A single worker, capped at ~8 Hz. No AR camera buffer is retained.
+    private func startSegmentationFeed() {
+        guard segmentationEnabled, segmentationTask == nil else { return }
+        let generation = liveAutoGeneration
+        segmentationTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let tick = self?.prepareSegmentationTick(generation: generation) else {
+                    try? await Task.sleep(nanoseconds: 125_000_000)
+                    continue
+                }
+                self?.autoAlignmentBusy = true
+                let outcome = await Task.detached(priority: .userInitiated) {
+                    Result { try YoloBoundaryAligner.shared().track(
+                        buffer: tick.buffer, frame: tick.frame, viewSize: tick.viewSize) }
+                }.value
+                guard !Task.isCancelled else { return }
+                self?.applyLiveAuto(outcome, tick: tick)
+                let elapsed = ProcessInfo.processInfo.systemUptime - tick.started
+                let delay = max(0.02, 0.125 - elapsed)
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            }
+        }
+    }
+
+    private func prepareSegmentationTick(generation: UInt64) -> SegmentationTick? {
+        guard generation == liveAutoGeneration, segmentationEnabled, !edgeAdjustActive, !autoAlignmentPaused,
+              state == .idle || state == .aligning || state == .armed else { return nil }
+        if let refusal = orientationRefusal(for: session.latestDepthFrame) {
+            clearLiveAutoLock(); autoAlignmentMessage = refusal; return nil
+        }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard let live = session.currentCameraPixelBuffer(), let buffer = Self.copyPixelBuffer(live),
+              let frame = session.latestDepthFrame, frame.viewMapping != nil,
+              now >= frame.timestamp, now - frame.timestamp <= 0.25,
+              viewSize.width > 1, viewSize.height > 1 else {
+            segmentedExtent = liveAutoTracker.update(nil, at: now)
+            if !liveAutoHasLock { liveStemMask = nil }
+            return nil
+        }
+        return SegmentationTick(buffer: buffer, frame: frame, viewSize: viewSize,
+                                generation: generation, started: now)
+    }
+
+    private func applyLiveAuto(_ outcome: Result<LiveStemObservation?, Error>, tick: SegmentationTick) {
+        if tick.generation == liveAutoGeneration { autoAlignmentBusy = false }
+        guard tick.generation == liveAutoGeneration, segmentationEnabled, !edgeAdjustActive, !autoAlignmentPaused,
+              state == .idle || state == .aligning || state == .armed else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - tick.started <= 0.45, orientationRefusal(for: tick.frame) == nil,
+              let current = session.latestDepthFrame, viewSize == tick.viewSize,
+              current.viewMapping == tick.frame.viewMapping,
+              simd_distance(current.cameraPoseWorld.columns.3, tick.frame.cameraPoseWorld.columns.3) < 0.02,
+              simd_dot(current.cameraPoseWorld.columns.2, tick.frame.cameraPoseWorld.columns.2) > 0.9994 else {
+            clearLiveAutoLock(); autoAlignmentMessage = "Finding stem…"; return
+        }
+        switch outcome {
+        case .success(let observation):
+            segmenterAvailability = .ready
+            segmentedExtent = liveAutoTracker.update(observation?.extent, at: tick.started)
+            if liveAutoTracker.lastGood == tick.started, let mask = observation?.mask { liveStemMask = mask }
+            else if !liveAutoHasLock { liveStemMask = nil }
+            if let extent = segmentedExtent {
+                edgeBracketLeftFraction = extent.leftFraction
+                edgeBracketRightFraction = extent.rightFraction
+                if liveAutoTracker.lastGood == tick.started { liveAutoFrame = tick.frame }
+            }
+            autoAlignmentMessage = liveAutoHasLock ? nil : "Finding stem…"
+        case .failure(let error):
+            clearLiveAutoLock()
+            autoAlignmentMessage = error.localizedDescription
+        }
+    }
+    #else
+    private func startSegmentationFeed() {
+        segmenterAvailability = .unsupportedPlatform
+        autoAlignmentMessage = "AI alignment requires the mobile inference runtime."
+    }
+    #endif
+
+    private func pauseSegmentationFeed() {
+        liveAutoGeneration &+= 1
+        #if canImport(OnnxRuntimeBindings)
+        segmentationTask?.cancel(); segmentationTask = nil
+        #endif
+        autoAlignmentBusy = false
+    }
+
+    public func stopSegmentationFeed() {
+        segmentationEnabled = false
+        pauseSegmentationFeed(); clearLiveAutoLock()
+        autoAlignmentMessage = nil
+    }
+
+    #if canImport(OnnxRuntimeBindings)
+    /// A deep copy of one camera frame, so nothing of ARKit's outlives the
+    /// call that vended it. Returns nil rather than risking a partial copy.
+    private nonisolated static func copyPixelBuffer(_ src: CVPixelBuffer) -> CVPixelBuffer? {
+        let w = CVPixelBufferGetWidth(src)
+        let h = CVPixelBufferGetHeight(src)
+        let fmt = CVPixelBufferGetPixelFormatType(src)
+        var out: CVPixelBuffer?
+        let attrs: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary]
+        guard CVPixelBufferCreate(kCFAllocatorDefault, w, h, fmt,
+                                  attrs as CFDictionary, &out) == kCVReturnSuccess,
+              let dst = out else { return nil }
+        CVPixelBufferLockBaseAddress(src, .readOnly)
+        CVPixelBufferLockBaseAddress(dst, [])
+        defer {
+            CVPixelBufferUnlockBaseAddress(dst, [])
+            CVPixelBufferUnlockBaseAddress(src, .readOnly)
+        }
+        let planes = max(1, CVPixelBufferGetPlaneCount(src))
+        if CVPixelBufferGetPlaneCount(src) == 0 {
+            guard let s = CVPixelBufferGetBaseAddress(src),
+                  let d = CVPixelBufferGetBaseAddress(dst) else { return nil }
+            memcpy(d, s, CVPixelBufferGetDataSize(src))
+            return dst
+        }
+        for i in 0..<planes {
+            guard let s = CVPixelBufferGetBaseAddressOfPlane(src, i),
+                  let d = CVPixelBufferGetBaseAddressOfPlane(dst, i) else { return nil }
+            let rows = CVPixelBufferGetHeightOfPlane(src, i)
+            let sBpr = CVPixelBufferGetBytesPerRowOfPlane(src, i)
+            let dBpr = CVPixelBufferGetBytesPerRowOfPlane(dst, i)
+            let bpr = min(sBpr, dBpr)
+            for r in 0..<rows {
+                memcpy(d.advanced(by: r * dBpr), s.advanced(by: r * sBpr), bpr)
+            }
+        }
+        return dst
+    }
+
+    #endif
+
+    // No session-wide axis vote: each preview follows the display transform.
+
     /// Bracket state latched at the moment the capture "+" started the
     /// burst, so dragging a handle (or leaving ADJUST) mid-burst can't
     /// change what the in-flight capture measures.
+    /// Whether the two handles about to be latched were placed by the model
+    /// rather than by the cruiser. Segmentation only writes them while ADJUST
+    /// is off, so the two can never both be true of one capture.
+    var segmentationDroveTheBracket: Bool {
+        segmentationEnabled && !edgeAdjustActive
+    }
+
     private var burstUsedBracket = false
+    /// Latched with the bracket: was it the model that placed it?
+    private var burstUsedSegmentation = false
     private var burstBracketLeft: Double = 0
     private var burstBracketRight: Double = 0
     /// Walk axis for the CURRENT burst only, derived from the mapped
-    /// bracket at the moment "+" was tapped. Not a session latch — see the
-    /// note above.
+    /// screen direction at the moment "+" was tapped. Rotated frames are
+    /// excluded so a burst measures the axis it was started on.
     private var burstBracketAxis: GuideAxis?
+    private var burstViewSize: CGSize = .zero
+    private var burstScreenLeft: Double = 0
+    private var burstScreenRight: Double = 0
     /// Newest depth frame, kept so the tap handler can map the bracket at
     /// the instant of capture.
     private var latestFrameForBracket: ARDepthFrame?
@@ -135,15 +465,13 @@ public final class DBHScanViewModel: ObservableObject {
     /// The window's interface orientation. `displayTransform` needs it, and
     /// a hard-coded `.portrait` would transpose the mapping on a landscape
     /// device.
+    #if canImport(UIKit) && os(iOS)
     private static func currentInterfaceOrientation() -> UIInterfaceOrientation {
-        #if canImport(UIKit) && os(iOS)
         UIApplication.shared.connectedScenes
             .compactMap { ($0 as? UIWindowScene)?.interfaceOrientation }
             .first ?? .portrait
-        #else
-        .portrait
-        #endif
     }
+    #endif
 
     /// True while the live bracket has a usable view→depth mapping. False
     /// puts a plain-language reason on the status line instead of silently
@@ -170,8 +498,10 @@ public final class DBHScanViewModel: ObservableObject {
         didSet {
             guard viewSize != oldValue,
                   viewSize.width > 1, viewSize.height > 1 else { return }
+            #if canImport(UIKit) && os(iOS)
             session.reportViewport(size: viewSize,
                                    orientation: Self.currentInterfaceOrientation())
+            #endif
         }
     }
 
@@ -211,25 +541,19 @@ public final class DBHScanViewModel: ObservableObject {
     /// Outcome of the most recent capture attempt — the screen renders this
     /// verbatim so a failed write can never look like a saved one.
     @Published public private(set) var lastCaptureOutcome: RawCaptureOutcome?
-    /// Representative depth frames (one per sub-sample) retained across the
-    /// burst for serialization. Only populated while recording is armed.
+    /// The single committed depth frame retained for raw serialization.
+    /// Only populated while recording is armed.
     private var recordFrames: [ARDepthFrame] = []
     /// Reference camera JPEG grabbed at burst start (developer mode only).
     private var recordReferenceJPEG: Data?
 
     // MARK: - Burst state
 
-    /// Hold-steady capture: the burst is now SEVERAL sub-measurements taken
-    /// over a few seconds. Each sub-sample runs the full chord/arc estimate
-    /// over `sampleWindowSec` of frames; the final value keeps the 3
-    /// sub-samples closest to the median and averages them (5 samples →
-    /// the 2 largest deviations are trimmed). 1-based progress is published
-    /// so the screen can show "Capturing k/5 — hold steady".
-    public let captureSampleTotal: Int = 5
-    private let sampleWindowSec: TimeInterval = 0.5
+    /// Single frame by default; only developer mode can request a five-frame window.
+    public var captureMode: DBHCaptureMode = .single
+    @Published public private(set) var captureSampleTotal: Int = 1
     @Published public private(set) var captureSampleIndex: Int = 0
     private var subSamples: [DBHResult] = []
-    private var sampleStartTime: TimeInterval = 0
     /// Monotonic id for the current capture — lets the stall watchdog
     /// no-op when its capture has already finished or a new one started.
     private var captureGeneration: Int = 0
@@ -325,6 +649,7 @@ public final class DBHScanViewModel: ObservableObject {
     // MARK: - Lifecycle
 
     public func onAppear() {
+        if segmentationEnabled { startSegmentationFeed() }
         // Always start the AR session — even on non-LiDAR devices we want
         // the camera feed to render so the cruiser can see what they're
         // pointing at while entering DBH manually. Attaching is internally
@@ -334,6 +659,14 @@ public final class DBHScanViewModel: ObservableObject {
         // no reset options, so world anchors survive screen entry.
         session.attach(client: arClientID, configuration: .dbhScan)
         subscribeToDepth()
+
+        // A fresh appearance gets a fresh acquisition clock, so the hint
+        // reflects THIS tree rather than however the last one ended. The
+        // refusal goes with it — it described a tap on the previous screen.
+        captureRefusalReason = nil
+        acquisitionStalled = false
+        lastFitTime = ProcessInfo.processInfo.systemUptime
+        startStallTicker()
 
         let resettable = state == .idle || state == .accepted
             || state == .rejected || state == .manualEntry
@@ -345,8 +678,12 @@ public final class DBHScanViewModel: ObservableObject {
     }
 
     public func onDisappear() {
+        pauseSegmentationFeed()
+        clearLiveAutoLock()
         depthCancellable?.cancel()
         depthCancellable = nil
+        stallTicker?.invalidate()
+        stallTicker = nil
         // Abort any in-flight capture so a watchdog that fires while the
         // screen is backgrounded (scenePhase .inactive keeps the run loop
         // alive) can't commit a phantom partial result. Bumping the
@@ -366,36 +703,95 @@ public final class DBHScanViewModel: ObservableObject {
 
     private func subscribeToDepth() {
         depthCancellable = session.$latestDepthFrame
-            .compactMap { $0 }
             .sink { [weak self] frame in
-                self?.handleDepthFrame(frame)
+                guard let self else { return }
+                if let frame { self.handleDepthFrame(frame) }
+                else if let refusal = self.orientationRefusal(for: nil) {
+                    self.invalidateOrientationPreview(refusal)
+                }
             }
     }
 
     private func handleDepthFrame(_ frame: ARDepthFrame) {
+        if let refusal = orientationRefusal(for: frame) {
+            if state == .capturing {
+                retake()
+                captureRefusalReason = refusal
+            }
+            invalidateOrientationPreview(refusal)
+            return
+        }
+        if state == .capturing {
+            // Never count the same frame twice or mix viewport geometries.
+            guard captureSampleTotal > 1, let first = burstBuffer.first,
+                  let last = burstBuffer.last,
+                  frame.timestamp > last.timestamp,
+                  frame.width == first.width, frame.height == first.height,
+                  frame.viewMapping == first.viewMapping,
+                  frame.viewportRevision == first.viewportRevision,
+                  DBHEstimator.screenHorizontalGuideAxis(frame: frame, tapPixel: burstTap) == burstBracketAxis
+            else { return }
+            burstBuffer.append(frame)
+            captureSampleIndex = burstBuffer.count
+            if burstBuffer.count == captureSampleTotal { finishSubSample() }
+            return
+        }
         // Kept so the capture tap can map the bracket against the frame the
         // cruiser was actually looking at.
         latestFrameForBracket = frame
-        // REQ-DBH-003 crosshair transitions green when center depth
-        // is stable and < 3 m.
+        if segmentationEnabled, !edgeAdjustActive, state != .capturing {
+            if let source = liveAutoFrame,
+               (source.viewMapping != frame.viewMapping ||
+                simd_distance(source.cameraPoseWorld.columns.3, frame.cameraPoseWorld.columns.3) >= 0.02 ||
+                simd_dot(source.cameraPoseWorld.columns.2, frame.cameraPoseWorld.columns.2) <= 0.9994) {
+                clearLiveAutoLock()
+            }
+            if !liveAutoHasLock {
+                if state == .armed { state = .aligning }
+                previewFit = nil; previewDbhCm = nil; previewTier = nil
+                crosshairIsStable = false; isStable = false
+                distanceToStemCenterM = nil; guideRowWorldY = nil
+                resetBracketSettling()
+                liveStemMask = nil; segmentedExtent = nil
+                previewStatusText = "Finding stem…"
+                return
+            }
+        }
+        // REQ-DBH-003 crosshair transitions green when the centre pixel
+        // carries depth the estimator can work from. The window is
+        // `armDepthRangeM` — see the note there for why the spec's literal
+        // "< 3 m" is no longer the estimator's answer and stopped being it
+        // three rounds ago.
         let cx = frame.width / 2
         let cy = frame.height / 2
         let d = frame.depth(atX: cx, y: cy)
         let c = frame.confidence(atX: cx, y: cy)
-        let stable = d > 0.5 && d < 3.0 && c >= 1
-        crosshairIsStable = stable
+        let centrePixelUsable = Self.armDepthRangeM.contains(d) && c >= 1
+        // ...OR the estimator's own verdict, which is the one the capture
+        // actually runs on. This gate samples ONE pixel; `chordPreviewFit`
+        // samples a 5×5 median, so a hole at dead centre held the crosshair
+        // red and the "+" inert while a diameter was already on the badge.
+        //
+        // It cannot arm the app anywhere the estimator would not: `previewFit`
+        // is nil outside the estimator's own window, so this only ever
+        // recovers a frame the estimator has already measured. Auto only —
+        // ADJUST does not arm from the crosshair (its tap accepts `.aligning`)
+        // and its ring keeps meaning what it has always meant.
+        //
+        // Reading the estimator's median directly would be better still, but
+        // `DBHEstimator.medianDepth` is internal to the Sensors module and
+        // widening it is a change to the estimator file.
+        let liveFitUsable = !(edgeAdjustActive || segmentationDroveTheBracket)
+            && (previewFit.map { $0.tier != .red } ?? false)
+        let stable = centrePixelUsable || liveFitUsable
+        // ONLY ON CHANGE. `@Published` fires `objectWillChange` on every
+        // assignment, equal value or not, and this one runs on every depth
+        // frame — so writing it unconditionally re-evaluated the whole scan
+        // screen (AR view included) at the depth frame rate whether or not
+        // anything the cruiser can see had moved. Field report 9.
+        if crosshairIsStable != stable { crosshairIsStable = stable }
         if state == .aligning, stable { state = .armed }
         if state == .armed, !stable    { state = .aligning }
-        if state == .capturing {
-            burstBuffer.append(frame)
-            // Close the current sub-sample once its window elapsed AND it
-            // has enough frames for a chord estimate (≥5). Slow depth
-            // delivery just stretches the window; the watchdog bounds it.
-            let elapsed = ProcessInfo.processInfo.systemUptime - sampleStartTime
-            if elapsed >= sampleWindowSec, burstBuffer.count >= 5 {
-                finishSubSample()
-            }
-        }
 
         // Live preview — expensive work gated by a throttle so it runs
         // at ~10 Hz instead of ARKit's 60 Hz. State-change side effects
@@ -420,10 +816,19 @@ public final class DBHScanViewModel: ObservableObject {
             smoothedCenterWorldXZ = nil
             lastTapDepthHint = nil
             recentRawDiameters.removeAll()
-            previewTier = nil
-            previewStatusText = nil
+            if previewTier != nil { previewTier = nil }
+            if previewStatusText != nil { previewStatusText = nil }
+            if previewStatusIsDiagnostic { previewStatusIsDiagnostic = false }
             isStable = false
             consecutiveRedFrames = 0
+            // A held bracket value belongs to the aiming session that produced
+            // it. Carrying it across a capture or a committed result would put
+            // the previous tree's diameter under the next tree's handles.
+            resetBracketSettling()
+            // Not aiming ⇒ no acquisition to stall. Re-seed the clock so
+            // the hint waits out a full interval when aiming resumes.
+            if acquisitionStalled { acquisitionStalled = false }
+            lastFitTime = ProcessInfo.processInfo.systemUptime
             return
         }
 
@@ -431,40 +836,51 @@ public final class DBHScanViewModel: ObservableObject {
         guard now - lastPreviewUpdate >= previewMinIntervalSec else { return }
         lastPreviewUpdate = now
 
-        // Auto-pick the across-the-trunk axis (orientation-robust) instead of
-        // a fixed orientation guess, which on some devices walked the strip
-        // along the trunk and under-read the diameter to a few cm.
-        let axis = DBHEstimator.pickGuideAxis(
-            frame: frame,
-            tapPixel: SIMD2(Double(cx), Double(cy)),
-            calibration: calibration)
+        // Derive the on-screen horizontal direction from this frame's affine,
+        // never from the trunk/background depth distribution.
+        guard let screenAxis = DBHEstimator.screenHorizontalGuideAxis(
+            frame: frame, tapPixel: SIMD2(Double(cx), Double(cy))) else {
+            bracketMappingReady = false
+            previewFit = nil
+            previewDbhCm = nil
+            resetBracketSettling()
+            previewStatusIsDiagnostic = false
+            previewStatusText = "Waiting for camera alignment."
+            return
+        }
+        bracketMappingReady = true
 
         // ADJUST (edge-bracket) mode bypasses BOTH the automatic
         // edge-finding and the stability/EMA machinery: the live value
         // and the chord bar must track the user's handles exactly, so
-        // the raw bracket fit is published on every preview tick. The
-        // walk axis comes from the mapped bracket span, per frame — see
-        // the note where the old latch used to live.
-        if edgeAdjustActive {
-            // THE HANDLE FRACTIONS GO STRAIGHT IN, against a guide axis
-            // latched for the session — restored verbatim from the version
-            // the field used and verified.
-            //
-            // A view→depth affine was inserted here on the reasoning that a
-            // screen fraction and a depth fraction cannot be the same
-            // number under an aspect-fill crop. That reasoning produced a
-            // screen with no diameter on it for three builds, and the
-            // cruiser had already measured a stand with the code it
-            // replaced. Field evidence outranks the derivation, so the
-            // derivation goes. The mapping is still computed and recorded in
-            // the raw-capture manifest, where it costs nothing and can
-            // settle the question later against a tape.
-            if adjustAxisLatch == nil { adjustAxisLatch = axis }
+        // the raw bracket fit is published on every preview tick. The walk
+        // axis comes from each frame's display transform.
+        // SEGMENTATION TAKES THE BRACKET BRANCH TOO. The capture routes a
+        // model-placed reading through `bracketChordEstimate`, so the number
+        // on screen has to come from the same fit — otherwise the cruiser
+        // reads the auto depth-walk's diameter, taps "+", and a different one
+        // is stored, with nothing saying so.
+        if edgeAdjustActive || segmentationDroveTheBracket {
+            // UI handles stay in view space. Estimation, diagnostics and
+            // recording use the same transformed depth-space interval.
+            guard let geometry = DBHEstimator.bracketDepthGeometry(
+                frame: frame, leftFraction: edgeBracketLeftFraction,
+                rightFraction: edgeBracketRightFraction, viewSize: viewSize) else {
+                bracketMappingReady = false
+                previewFit = nil
+                previewDbhCm = nil
+                resetBracketSettling()
+                previewStatusIsDiagnostic = false
+                previewStatusText = "Waiting for camera alignment."
+                return
+            }
+            let bracketAxis = geometry.axis
             let fit = DBHEstimator.bracketChordFit(
                 frame: frame,
-                guideAxis: adjustAxisLatch ?? axis,
-                leftFraction: edgeBracketLeftFraction,
-                rightFraction: edgeBracketRightFraction)
+                guideAxis: bracketAxis,
+                leftFraction: geometry.left,
+                rightFraction: geometry.right)
+            // Both preview and capture use screen geometry.
             bracketMappingReady = true
             smoothedPreviewDbhCm = nil
             smoothedCenterWorldXZ = nil
@@ -472,32 +888,100 @@ public final class DBHScanViewModel: ObservableObject {
             recentRawDiameters.removeAll()
             isStable = false
             consecutiveRedFrames = 0
+            // `previewFit` IS THE FIT, always and unconditionally — the
+            // settling logic below decides what NUMBER to show and nothing
+            // else. The capture gate, the chord bar and the cylinder overlay
+            // all read this, and gating the capture on a live display tick
+            // would refuse a burst whose stored median is demonstrably
+            // unaffected (rho = −0.11). See `bracketDepthUnsettled`.
             previewFit = fit
-            previewDbhCm = fit?.diameterCm
             previewTier = fit?.tier
+            previewDbhCm = settledBracketDiameterCm(
+                frame: frame, axis: bracketAxis,
+                leftFraction: geometry.left, rightFraction: geometry.right,
+                fit: fit, now: now)
+            // BEFORE the status line, not after: the stall flag decides
+            // which of the two sentences the screen is allowed to show, so
+            // it has to describe THIS tick when the line is written.
+            updateAcquisitionStall(hasFit: fit != nil, now: now)
             // EVERY nil ends with a sentence on screen. Nothing on the
             // bracket path may fail silently again: three builds went out
             // with a blank strip because the only failure this line spoke
             // about was the one the code happened to be looking at.
-            previewStatusText = {
-                if fit != nil { return nil }
-                if developerMode {
-                    let ax: String
-                    switch (adjustAxisLatch ?? axis) {
-                    case .row(let y): ax = "row \(y)"
-                    case .col(let x): ax = "col \(x)"
-                    }
-                    return String(
-                        format: "no fit · %@ · %.3f–%.3f · grid %dx%d",
-                        ax, edgeBracketLeftFraction, edgeBracketRightFraction,
-                        frame.width, frame.height)
+            //
+            // Two kinds of line come out of here and the screen treats them
+            // differently: ADVICE (suppresses the stall hint, because two
+            // remedies for one failure is worse than one) and the developer
+            // DIAGNOSTIC (never suppresses anything — see
+            // `previewStatusIsDiagnostic`).
+            let line: String?
+            let isDiagnostic: Bool
+            if fit != nil {
+                // A fit that measured, but not across bark: the diameter has
+                // been withheld (`previewDbhCm` is nil above) because the
+                // bracket has been spanning two surfaces for longer than the
+                // grace, so the strip must say what happened. While the run is
+                // shorter than the grace the held value is on screen and this
+                // stays silent — a sentence for every one-tick excursion would
+                // flicker exactly as badly as the number used to.
+                line = previewDbhCm == nil ? Self.bracketTwoSurfacesText : nil
+                isDiagnostic = false
+            } else if developerMode {
+                // The bench numbers stay on the strip even once the stall is
+                // up — a long run of nil fits is exactly the failure the
+                // axis/fractions/grid are being read for, so dropping them at
+                // the 2 s mark would blank the diagnostic precisely when it
+                // is wanted. It no longer costs the cruiser the hint: this
+                // line is flagged as a diagnostic, and the banner shows the
+                // stall sentence over the top of it. Developer mode is worn
+                // in the stand here (tape-truth entry, research rows, typed
+                // truth are all gated on it), so "bench only" was never a
+                // safe assumption to hide field guidance behind.
+                let ax: String
+                switch bracketAxis {
+                case .row(let y): ax = "row \(y)"
+                case .col(let x): ax = "col \(x)"
                 }
+                line = String(
+                    format: "no fit · %@ · %.3f–%.3f · grid %dx%d",
+                    ax, geometry.left, geometry.right,
+                    frame.width, frame.height)
+                isDiagnostic = true
+            } else if acquisitionStalled {
+                // FIELD REPORT 15 — hand the line to the banner once the
+                // stall is up.
+                //
+                // ADJUST is the default path, and this branch used to write
+                // a sentence on EVERY nil fit, which the screen reads as
+                // "a specific reason is already showing" and suppresses the
+                // stall hint for. The hint was therefore unreachable in the
+                // mode the cruiser actually works in, and iOS printed
+                // different advice from Android for the identical state.
+                //
+                // After `acquisitionStallSec` of nothing resolving, the
+                // bracket advice below has demonstrably not worked; the
+                // remedy the cruiser found (a gentle sway, or a different
+                // standing distance) is the one worth printing. nil here is
+                // not silence — it is what lets
+                // `DBHScanScreen.acquisitionStallHint` take the banner, the
+                // same sentence Android shows in its adjust branch.
+                line = nil
+                isDiagnostic = false
+            } else {
                 // NOT "widen it". A wider bracket raises the computed
                 // diameter, which pushes it further past the estimator's
-                // 100 cm ceiling — the advice guaranteed the failure it was
-                // trying to clear.
-                return "Can't read depth across the bracket — narrow it onto the trunk, or step closer."
-            }()
+                // plausibility ceiling — the advice guaranteed the failure it
+                // was trying to clear.
+                line = "Can't read depth across the bracket — narrow it onto the trunk, or step closer."
+                isDiagnostic = false
+            }
+            // ON CHANGE ONLY, like `crosshairIsStable` above: this runs at the
+            // preview rate and an equal-value assignment to a `@Published`
+            // still re-evaluates the whole scan screen.
+            if previewStatusText != line { previewStatusText = line }
+            if previewStatusIsDiagnostic != isDiagnostic {
+                previewStatusIsDiagnostic = isDiagnostic
+            }
             let pose = frame.cameraPoseWorld
             guideRowWorldY = pose.columns.3.y
             if let stem = fit?.centerWorldXZ {
@@ -508,15 +992,17 @@ public final class DBHScanViewModel: ObservableObject {
             } else {
                 distanceToStemCenterM = nil
             }
+            // (The stall was updated above, before the status line that
+            // depends on it.)
             return
         }
 
         // Phase 19 — dispatch on the user's chosen DBH method. The chord
         // method is stateless frame-to-frame (no depth-window anchoring
         // needed: median over ± 10 rows already absorbs intra-frame
-        // jitter and the multi-frame median in the burst handles the
-        // rest). The legacy partial-arc path keeps its tap-depth hint.
+        // variation). The legacy partial-arc path keeps its tap-depth hint.
         let fit: DBHEstimator.PreviewFit?
+        let axis = screenAxis
         switch dbhMeasurementMethod {
         case .chord:
             fit = DBHEstimator.chordPreviewFit(
@@ -644,7 +1130,11 @@ public final class DBHScanViewModel: ObservableObject {
         // Cruiser sees the live digit in the badge whenever a fit
         // exists, so "Stabilizing…" is no longer useful — the digit
         // itself shows whether things are settling.
-        previewStatusText = publishable ? nil : fit?.rejectionReason
+        // A rejection reason is ADVICE, so it keeps suppressing the stall
+        // hint; only the bracket path above ever writes a diagnostic.
+        let autoLine = publishable ? nil : fit?.rejectionReason
+        if previewStatusText != autoLine { previewStatusText = autoLine }
+        if previewStatusIsDiagnostic { previewStatusIsDiagnostic = false }
 
         // Phase 18.4 — auto-capture removed. Field testing showed the
         // hands-free trigger fired before the cruiser was committed to
@@ -673,6 +1163,165 @@ public final class DBHScanViewModel: ObservableObject {
         } else {
             distanceToStemCenterM = nil
         }
+
+        updateAcquisitionStall(hasFit: fit != nil, now: now)
+    }
+
+    /// The diameter the ADJUST readout should show for this tick — see
+    /// `bracketDepthUnsettled` for why the raw fit is not always it.
+    ///
+    /// Three outcomes, in order:
+    ///   • no fit at all → nil, and the existing advice lines take over;
+    ///   • the bracket's middle half is ONE surface → publish this tick's raw
+    ///     diameter, immediately, and remember it. This is the ordinary case
+    ///     and it keeps ADJUST's contract that the number tracks the handles
+    ///     with no smoothing and no lag;
+    ///   • the middle half straddles two surfaces → hold the last one-surface
+    ///     diameter, up to `bracketUnsettledGraceSec`, then withhold it.
+    ///
+    /// The spread probe is READ-ONLY and the fit is untouched on every path —
+    /// what is decided here is only which number reaches the screen.
+    private func settledBracketDiameterCm(
+        frame: ARDepthFrame,
+        axis: GuideAxis,
+        leftFraction: Double,
+        rightFraction: Double,
+        fit: DBHEstimator.PreviewFit?,
+        now: TimeInterval
+    ) -> Double? {
+        guard let fit else {
+            // No fit is already a fully-explained state on this path, and it
+            // is not evidence about the bark either way — leave the held value
+            // and its clock alone so a one-frame depth outage mid-drag does
+            // not restart the grace.
+            if bracketDepthUnsettled { bracketDepthUnsettled = false }
+            return nil
+        }
+        let spread = DBHEstimator.bracketCoreDepthSpreadM(
+            frame: frame,
+            guideAxis: axis,
+            leftFraction: leftFraction,
+            rightFraction: rightFraction)
+        // A fit exists but the probe declined to describe it (fewer than three
+        // valid depths cannot happen here — the fit needs them too — so this
+        // is the bounds refusal). Treat an unmeasurable spread as settled
+        // rather than inventing a verdict about it.
+        let settled = spread.map { $0 <= DBHEstimator.bracketCoreDepthSpreadLimitM } ?? true
+        if settled {
+            lastSettledBracketAt = now
+            lastSettledBracketCm = fit.diameterCm
+            if bracketDepthUnsettled { bracketDepthUnsettled = false }
+            return fit.diameterCm
+        }
+        if !bracketDepthUnsettled { bracketDepthUnsettled = true }
+        // Never held anything yet — the very first ticks of a session already
+        // straddling two surfaces. There is nothing honest to show.
+        guard let held = lastSettledBracketCm, let since = lastSettledBracketAt
+        else { return nil }
+        return now - since <= Self.bracketUnsettledGraceSec ? held : nil
+    }
+
+    /// Drop the held ADJUST value and its clock. Called wherever the aiming
+    /// session ends, so a held diameter can never outlive the tree it was
+    /// measured on.
+    private func resetBracketSettling() {
+        lastSettledBracketAt = nil
+        lastSettledBracketCm = nil
+        if bracketDepthUnsettled { bracketDepthUnsettled = false }
+    }
+
+    /// Field report 15 — say so when nothing is resolving.
+    ///
+    /// The stall is measured on the FIT, not on the depth frames: frames keep
+    /// arriving while the cruiser stands at a range the sensor can't read the
+    /// stem at, which is exactly the case that used to leave the screen
+    /// showing the ordinary "align and hold steady" line forever. Published
+    /// only on a change so it can't reintroduce per-tick invalidation.
+    private func updateAcquisitionStall(hasFit: Bool, now: TimeInterval) {
+        if hasFit {
+            lastFitTime = now
+            if acquisitionStalled { acquisitionStalled = false }
+            return
+        }
+        if lastFitTime == 0 { lastFitTime = now }
+        let stalled = now - lastFitTime >= acquisitionStallSec
+        if acquisitionStalled != stalled { acquisitionStalled = stalled }
+    }
+
+    /// The same clock, driven by wall time instead of by depth delivery.
+    ///
+    /// `updateAcquisitionStall` is only ever reached from inside
+    /// `handleDepthFrame`, and then only past the 100 ms preview throttle —
+    /// so without this the hint measured "frames that produced no fit" and
+    /// stayed silent through the cases where no frame arrives at all
+    /// (interruption, thermal throttle, `frame.sceneDepth` nil so the
+    /// manager publishes nothing). Those are states the cruiser is stuck in
+    /// and cannot diagnose, which is the whole point of field report 15.
+    ///
+    /// It can only ever RAISE the flag: `lastFitTime` moves forward solely
+    /// on a real fit, and that path clears the flag itself.
+    private func startStallTicker() {
+        stallTicker?.invalidate()
+        // 0.25 s: four chances per stall interval, negligible next to the
+        // depth path, and coarse enough that it can't become the reason the
+        // screen re-renders.
+        stallTicker = Timer.scheduledTimer(
+            withTimeInterval: 0.25, repeats: true
+        ) { [weak self] _ in
+            Task { @MainActor in self?.tickAcquisitionStall() }
+        }
+    }
+
+    private func tickAcquisitionStall() {
+        // Only while the cruiser is aiming. Every other state clears the
+        // flag and re-seeds the clock on its own, and a tick during a burst
+        // would raise a "no depth lock" hint over a capture that is going
+        // fine. Mirrors the `previewable` set in `handleDepthFrame`.
+        //
+        // The tap refusal is taken down from HERE, not from `handleDepthFrame`:
+        // that method has four early returns (not previewable, the 100 ms
+        // throttle, the ADJUST branch, no frame at all), so a clear written
+        // inside it would be skipped in exactly the states the cruiser sits in
+        // while reading the banner. This ticker runs on wall time and always
+        // sees the current published state.
+        switch state {
+        case .aligning, .armed, .rejected:
+            // No longer true the moment a tap would be honoured.
+            if captureRefusalReason != nil, canCaptureNow { captureRefusalReason = nil }
+        case .idle, .capturing, .fitted, .accepted, .manualEntry:
+            // Left the aiming phase — the refusal describes a tap that no
+            // longer applies to what is on screen.
+            if captureRefusalReason != nil { captureRefusalReason = nil }
+            return
+        }
+        let now = ProcessInfo.processInfo.systemUptime
+        updateAcquisitionStall(hasFit: false, now: now)
+
+        // AND TAKE DOWN THE LINE THE LAST FRAME LEFT BEHIND.
+        //
+        // Raising the flag is not enough to put the hint on screen:
+        // `previewStatusText` is written ONLY from `handleDepthFrame`, and
+        // `DBHScanScreen.showsAcquisitionHint` yields to any advice line
+        // already up. So when depth stops mid-struggle — session
+        // interruption, thermal throttle, nil `sceneDepth` — the bracket's
+        // "narrow it onto the trunk" (or the auto path's rejection reason)
+        // stayed on the strip forever, still describing a frame that no
+        // longer exists, and the banner never got the hint. That stuck state
+        // is the whole reason this ticker exists, and the ticker could not
+        // deliver in it: the hint only came through if the LAST frame before
+        // the stop happened to produce a fit.
+        //
+        // The diagnostic goes with it. Bench numbers frozen from a frame that
+        // stopped arriving read as live and are not — same rule as everywhere
+        // else here: refuse rather than show something that isn't so.
+        //
+        // Only once depth has actually gone quiet. While frames keep coming,
+        // `handleDepthFrame` owns this line and rewrites it at 10 Hz, and
+        // clearing it from a 4 Hz timer would just blink the strip.
+        guard acquisitionStalled, now - lastPreviewUpdate >= depthSilentSec
+        else { return }
+        if previewStatusText != nil { previewStatusText = nil }
+        if previewStatusIsDiagnostic { previewStatusIsDiagnostic = false }
     }
 
     // MARK: - User actions
@@ -681,15 +1330,32 @@ public final class DBHScanViewModel: ObservableObject {
     /// coordinate space (caller converts from view coords to depth
     /// coords via the ARKit displayTransform).
     public func tap(at tapPixel: SIMD2<Double>) {
-        if edgeAdjustActive {
+        if segmentationEnabled && !liveAutoHasLock {
+            captureRefusalReason = "No stem lock yet — keep the crosshair on the trunk, or use Adjust."
+            return
+        }
+        if let refusal = orientationRefusal(for: latestFrameForBracket) {
+            captureRefusalReason = refusal
+            return
+        }
+        if edgeAdjustActive || segmentationDroveTheBracket {
             // ADJUST mode: the estimate is user-constrained, so the only
             // gate is that a bracket fit exists on screen. `.aligning`
             // is allowed too — centre-pixel depth stability is an
             // auto-path concept, and the bracket's own median depth
             // already validated inside `bracketChordFit`.
-            guard state == .armed || state == .aligning else { return }
+            guard state == .armed || state == .aligning else {
+                captureRefusalReason = Self.noTrunkLockText
+                return
+            }
         } else {
-            guard state == .armed else { return }
+            // EVERY REFUSAL SPEAKS. This returned in silence, which is how
+            // "cannot capture from a distance" reached the field with no
+            // message about distance anywhere on the screen.
+            guard state == .armed else {
+                captureRefusalReason = armRefusalReason()
+                return
+            }
         }
         // Phase 18.4 — the tap is now the *only* way to start the
         // burst, so we keep the gate loose: any fit visible on screen
@@ -698,19 +1364,57 @@ public final class DBHScanViewModel: ObservableObject {
         // the previous auto-capture flow feel sluggish; if the cruiser
         // is committed enough to tap, the burst's own §7.1 tree will
         // catch a fit that's too noisy to record.
-        guard let fit = previewFit, fit.tier != .red else { return }
+        guard let fit = previewFit, fit.tier != .red else {
+            captureRefusalReason = Self.noTrunkLockText
+            return
+        }
+        captureRefusalReason = nil
         // Latch the bracket so mid-burst handle drags / mode exits can't
         // change what this capture measures.
         // Latch the bracket AS DEPTH GEOMETRY. The raw-capture manifest
         // stores depth-space fractions + axis (the same schema Android
         // writes), so latching here means the recorded bundle replays
         // through exactly the code that produced the live number.
-        burstUsedBracket = edgeAdjustActive
-        burstBracketLeft = edgeBracketLeftFraction
-        burstBracketRight = edgeBracketRightFraction
-        burstBracketAxis = adjustAxisLatch
-        burstBuffer.removeAll(keepingCapacity: true)
+        //
+        // A SEGMENTED CAPTURE IS A BRACKET CAPTURE. When the model is placing
+        // the handles the reading must go down the same path a thumb's
+        // placement goes down — same depth geometry, same middle-half
+        // sampling, same tier — because it IS the same measurement, made
+        // between two edges someone else chose. It also means the recorded
+        // bundle replays through the code that produced the live number, and
+        // that the entry is stamped "manual" rather than quietly filed as an
+        // automatic depth-walk reading it is not.
+        burstUsedSegmentation = segmentationDroveTheBracket
+        burstUsedBracket = edgeAdjustActive || burstUsedSegmentation
+        guard let frame = latestFrameForBracket,
+              let axis = DBHEstimator.screenHorizontalGuideAxis(
+                frame: frame, tapPixel: tapPixel) else {
+            captureRefusalReason = "Waiting for camera alignment."
+            return
+        }
+        burstViewSize = viewSize
+        burstScreenLeft = edgeBracketLeftFraction
+        burstScreenRight = edgeBracketRightFraction
         burstTap = tapPixel
+        if burstUsedBracket {
+            guard let geometry = DBHEstimator.bracketDepthGeometry(
+                frame: frame, leftFraction: burstScreenLeft,
+                rightFraction: burstScreenRight, viewSize: burstViewSize) else {
+                captureRefusalReason = "Waiting for camera alignment."
+                return
+            }
+            burstBracketAxis = geometry.axis
+            burstBracketLeft = geometry.left
+            burstBracketRight = geometry.right
+            // Replay reconstructs the fixed row/column from tap_px.
+            switch geometry.axis {
+            case .row(let y): burstTap.y = Double(y)
+            case .col(let x): burstTap.x = Double(x)
+            }
+        } else {
+            burstBracketAxis = axis
+        }
+        burstBuffer.removeAll(keepingCapacity: true)
         subSamples.removeAll(keepingCapacity: true)
         // Raw-capture arm: start a fresh representative-frame set and grab
         // the reference camera image at the burst's first moment.
@@ -718,24 +1422,94 @@ public final class DBHScanViewModel: ObservableObject {
         recordReferenceJPEG = rawCaptureEnabled ? session.currentCameraImageJPEG() : nil
         // A new burst supersedes the previous capture's saved / NOT-saved pill.
         lastCaptureOutcome = nil
+        captureSampleTotal = captureMode.frameCount(developerMode: developerMode)
         captureSampleIndex = 1
-        sampleStartTime = ProcessInfo.processInfo.systemUptime
         captureGeneration &+= 1
-        let generation = captureGeneration
         state = .capturing
-        // Stall watchdog — if depth frames stop arriving mid-capture the
-        // sub-sample close condition never fires; finalise with whatever
-        // sub-samples were collected instead of hanging in `.capturing`.
-        let deadline = Double(captureSampleTotal) * sampleWindowSec + 2.5
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(deadline * 1_000_000_000))
-            guard let self, self.state == .capturing,
-                  self.captureGeneration == generation else { return }
-            self.finalizeCapture()
+        // Normal captures immediately commit the exact latched frame.
+        // Developer captures add four distinct, compatible frames.
+        burstBuffer = [frame]
+        if captureSampleTotal == 1 {
+            finishSubSample()
+        } else {
+            let generation = captureGeneration
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard let self, self.state == .capturing,
+                      self.captureGeneration == generation else { return }
+                self.retake()
+                self.captureRefusalReason = "Not enough fresh depth frames. Hold steady and retry."
+            }
         }
     }
 
+    /// Why the Auto crosshair is not armed, in terms the cruiser can walk on.
+    ///
+    /// Reads the SAME centre pixel of the SAME frame the gate read, so the
+    /// sentence and the refusal can never be describing different frames. A
+    /// centre pixel with no return at all reads 0 m, which is not a distance
+    /// to talk about — that case, and a low-confidence reading inside the
+    /// window, both get the lock sentence instead.
+    private func armRefusalReason() -> String {
+        guard let frame = latestFrameForBracket else { return Self.noTrunkLockText }
+        let d = frame.depth(atX: frame.width / 2, y: frame.height / 2)
+        if d > Self.armDepthRangeM.upperBound { return Self.tooFarText }
+        if d > 0, d < Self.armDepthRangeM.lowerBound { return Self.tooCloseText }
+        return Self.noTrunkLockText
+    }
+
+    /// Exactly the condition `tap(at:)` requires, kept as one expression so a
+    /// refusal banner cannot outlive the state it describes.
+    private var canCaptureNow: Bool {
+        guard !segmentationEnabled || liveAutoHasLock else { return false }
+        guard orientationRefusal(for: latestFrameForBracket) == nil else { return false }
+        let stageOK = (edgeAdjustActive || segmentationDroveTheBracket)
+            ? (state == .armed || state == .aligning)
+            : state == .armed
+        guard stageOK, let fit = previewFit, fit.tier != .red else { return false }
+        return true
+    }
+
+    private func orientationRefusal(for frame: ARDepthFrame?) -> String? {
+        #if os(iOS)
+        guard usesLiveOrientationSafety else { return nil }
+        let status = PortraitSceneState.shared.captureStatus()
+        if let message = status.message { return message }
+        guard let frame, frame.viewMapping != nil,
+              PortraitCaptureSafety.acceptsFrame(currentRevision: session.currentViewportRevision,
+                                                 frameRevision: frame.viewportRevision) else {
+            return "Waiting for fresh camera alignment."
+        }
+        #endif
+        return nil
+    }
+
+    private func invalidateOrientationPreview(_ refusal: String) {
+        clearLiveAutoLock()
+        latestFrameForBracket = nil
+        if state == .armed { state = .aligning }
+        if crosshairIsStable { crosshairIsStable = false }
+        if previewFit != nil { previewFit = nil }
+        if previewDbhCm != nil { previewDbhCm = nil }
+        if previewTier != nil { previewTier = nil }
+        if distanceToStemCenterM != nil { distanceToStemCenterM = nil }
+        if guideRowWorldY != nil { guideRowWorldY = nil }
+        smoothedPreviewDbhCm = nil; smoothedCenterWorldXZ = nil
+        recentRawDiameters.removeAll(); lastTapDepthHint = nil
+        isStable = false; resetBracketSettling()
+        if previewStatusText != refusal { previewStatusText = refusal }
+    }
+
+    /// Dismiss the refusal by hand. The banner also clears itself the moment a
+    /// tap would be honoured; this is for the cruiser who has read it and
+    /// wants the screen back.
+    public func clearCaptureRefusal() {
+        if captureRefusalReason != nil { captureRefusalReason = nil }
+    }
+
     public func retake() {
+        clearLiveAutoLock()
+        captureRefusalReason = nil
         burstBuffer.removeAll()
         subSamples.removeAll(keepingCapacity: true)
         recordFrames.removeAll(keepingCapacity: true)
@@ -750,6 +1524,8 @@ public final class DBHScanViewModel: ObservableObject {
         captureSampleIndex = 0
         captureGeneration &+= 1
         result = nil
+        acquisitionStalled = false
+        lastFitTime = ProcessInfo.processInfo.systemUptime
         state = isLiDARSupported ? .aligning : .manualEntry
     }
 
@@ -786,17 +1562,21 @@ public final class DBHScanViewModel: ObservableObject {
         state = .manualEntry
     }
 
-    /// Unit system the manual-entry field is being typed in. The screen keeps
-    /// this in sync with AppSettings — under imperial the field prompts for
-    /// INCHES, and the typed number used to be stored straight into
-    /// `diameterCm`, corrupting every manual imperial entry by 2.54x.
-    public var manualEntryUnits: UnitSystem = .metric
+    /// The cruiser's unit system, kept in sync with AppSettings by the screen.
+    /// Two uses, and they must be the same value: the manual-entry field
+    /// prompts for INCHES under imperial (the typed number used to be stored
+    /// straight into `diameterCm`, a 2.54x corruption), and the estimator
+    /// words its recovery instructions in these units, so a cruiser who paces
+    /// in feet is not told to stand "0.5-3 m" from the trunk. Mirrors
+    /// `HeightScanViewModel.unitSystem`.
+    public var unitSystem: UnitSystem = .metric
 
     public func submitManualEntry() {
         guard let typed = TruthInput.parsePositive(manualDbhCm) else { return }
-        let cm = manualEntryUnits == .imperial ? Units.inchesToCm(typed) : typed
+        let cm = unitSystem == .imperial ? Units.inchesToCm(typed) : typed
         guard cm > 0 else { return }
         resultCapturedManually = false
+        resultCaptureMode = "auto"
         result = DBHResult(
             diameterCm: Float(cm),
             centerXZ: SIMD2(0, 0),
@@ -811,27 +1591,20 @@ public final class DBHScanViewModel: ObservableObject {
         state = .accepted
     }
 
-    /// Close the current sub-sample: run the full chord/arc estimate over
-    /// the window's frames, stash the result, and either open the next
-    /// window or finalise the capture after the last one.
+    /// Estimate the latched frame/window with the existing estimator, then finalize.
     private func finishSubSample() {
         let frames = burstBuffer
         burstBuffer.removeAll(keepingCapacity: true)
-        // Retain ONE representative depth frame per sub-sample (≤5 → the
-        // depth_0..4.bin bundle layout) for raw-capture replay.
-        if rawCaptureEnabled, let rep = frames.first { recordFrames.append(rep) }
-        if let firstFrame = frames.first {
-            let axis = DBHEstimator.pickGuideAxis(
-                frame: firstFrame,
-                tapPixel: burstTap,
-                calibration: calibration)
+        // Replay receives every frame used, not a representative subset.
+        if rawCaptureEnabled { recordFrames.append(contentsOf: frames) }
+        if !frames.isEmpty, let axis = burstBracketAxis {
             // Dispatch: manual bracket (ADJUST captures, latched at tap
             // time) → chord method → original §7.1 partial-arc pipeline.
             let outcome: DBHResult?
             if burstUsedBracket {
                 outcome = DBHEstimator.bracketChordEstimate(
                     frames: frames,
-                    guideAxis: burstBracketAxis ?? axis,
+                    guideAxis: axis,
                     leftFraction: burstBracketLeft,
                     rightFraction: burstBracketRight,
                     calibration: calibration)
@@ -841,7 +1614,8 @@ public final class DBHScanViewModel: ObservableObject {
                     tapPixel: burstTap,
                     guideAxis: axis,
                     projectCalibration: calibration,
-                    rawPointsWriter: rawPointsWriter)
+                    rawPointsWriter: rawPointsWriter,
+                    unitSystem: unitSystem)
                 switch dbhMeasurementMethod {
                 case .chord:               outcome = DBHEstimator.chordEstimate(input: input)
                 case .partialArcCircleFit: outcome = DBHEstimator.estimate(input: input)
@@ -849,29 +1623,23 @@ public final class DBHScanViewModel: ObservableObject {
             }
             if let outcome { subSamples.append(outcome) }
         }
-        if captureSampleIndex >= captureSampleTotal {
-            finalizeCapture()
-        } else {
-            captureSampleIndex += 1
-            sampleStartTime = ProcessInfo.processInfo.systemUptime
-        }
+        finalizeCapture()
     }
 
-    /// Trimmed-mean aggregation over the capture's sub-samples: the 3
-    /// closest to the median diameter are averaged (5 samples → the 2
-    /// largest deviations dropped). Fewer than 3 usable sub-samples means
-    /// the trunk couldn't be read consistently — reject.
+    /// Publish the estimator result; rejected fits remain rejected.
     private func finalizeCapture() {
         let samples = subSamples
         subSamples.removeAll(keepingCapacity: true)
         burstBuffer.removeAll(keepingCapacity: true)
         captureSampleIndex = 0
         captureGeneration &+= 1
-        let outcome = DBHEstimator.aggregateSamples(samples)
+        let outcome = samples.first.flatMap { $0.confidence == .red ? nil : $0 }
         // On aggregate failure surface a red sub-sample if there was one —
         // it carries the human-readable rejection reason.
         result = outcome ?? samples.first(where: { $0.confidence == .red })
         resultCapturedManually = burstUsedBracket
+        resultCaptureMode = burstUsedSegmentation ? "segmented"
+            : (burstUsedBracket ? "manual" : "auto")
         if let r = result, r.confidence != .red, outcome != nil {
             state = .fitted
         } else {
@@ -909,8 +1677,17 @@ public final class DBHScanViewModel: ObservableObject {
         let tap = burstTap
         let cal = calibration
         let algo = dbhMeasurementMethod
+        // The axis the READING was computed on. The recorder used to vote its
+        // own, off a different frame, and a disagreement rescaled the bundle
+        // against the field log by 4:3 with nothing on screen to show for it.
+        // One vote, both records.
+        let axis = burstBracketAxis
         let bracket = RawCaptureManifest.DBHBundle.Bracket(
-            enabled: burstUsedBracket, left: burstBracketLeft, right: burstBracketRight)
+            enabled: burstUsedBracket, left: burstBracketLeft, right: burstBracketRight,
+            coordinateSpace: burstUsedBracket ? "depth_axis_fraction_v1" : nil,
+            screenFractions: burstUsedBracket ? [burstScreenLeft, burstScreenRight] : nil,
+            viewportSize: burstUsedBracket
+                ? [Double(burstViewSize.width), Double(burstViewSize.height)] : nil)
         let manual = burstUsedBracket
         let ctx = rawCaptureContext
         let jpeg = recordReferenceJPEG
@@ -923,7 +1700,7 @@ public final class DBHScanViewModel: ObservableObject {
             let outcome = RawCaptureRecorder.recordDBH(
                 id: id,
                 frames: framesToRecord, tapPixel: tap, calibration: cal,
-                algorithm: algo, bracket: bracket,
+                algorithm: algo, bracket: bracket, guideAxis: axis,
                 captureManual: manual, context: ctx,
                 referenceJPEG: jpeg, gps: gps)
             await MainActor.run { self?.lastCaptureOutcome = outcome }
@@ -948,6 +1725,7 @@ public extension DBHScanViewModel {
             calibration: ProjectCalibration.identity,
             session: nil,
             rawPointsWriter: nil)
+        vm.usesLiveOrientationSafety = false
         vm.applyPreview(state: state, result: result, unsupported: unsupported)
         return vm
     }

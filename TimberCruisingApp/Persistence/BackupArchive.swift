@@ -26,7 +26,7 @@ import CoreData
 import Common
 import Models
 
-public enum BackupError: Error, CustomStringConvertible {
+public enum BackupError: Error, LocalizedError, CustomStringConvertible {
     case projectNotFound(UUID)
     case missingSqlite
     case archiveCorrupt(String)
@@ -47,6 +47,12 @@ public enum BackupError: Error, CustomStringConvertible {
             return "Filesystem I/O failed: \(m)"
         }
     }
+
+    // Backup and restore report failures with `localizedDescription`. Without
+    // this, a bare Swift Error prints "The operation couldn't be completed
+    // (error 0.)" — and on a failed RESTORE that sentence is the only thing
+    // telling the cruiser whether their archive is corrupt or merely too new.
+    public var errorDescription: String? { description }
 }
 
 public struct BackupManifest: Codable, Sendable, Equatable {
@@ -285,6 +291,7 @@ public enum BackupArchive {
             depthNoiseMm: srcProject.depthNoiseMm,
             dbhCorrectionAlpha: srcProject.dbhCorrectionAlpha,
             dbhCorrectionBeta: srcProject.dbhCorrectionBeta,
+            dbhCalibrationEpoch: srcProject.dbhCalibrationEpoch,
             vioDriftFraction: srcProject.vioDriftFraction)
         _ = try targetProjectRepo.create(newProj)
 
@@ -321,7 +328,10 @@ public enum BackupArchive {
                 stratumId: p.stratumId.map { stratumIdMap[$0] ?? $0 },
                 plotNumber: p.plotNumber,
                 plannedLat: p.plannedLat, plannedLon: p.plannedLon,
-                visited: p.visited, skipped: p.skipped)
+                visited: p.visited, skipped: p.skipped,
+                // Carried, not re-derived: restoring a backup must not turn a
+                // point the cruiser drew into one of unknown origin.
+                plannedSource: p.plannedSource)
             _ = try dstPlannedRepo.create(copy)
         }
 
@@ -345,6 +355,8 @@ public enum BackupArchive {
                 gpsSampleStdXyM: p.gpsSampleStdXyM,
                 offsetWalkM: p.offsetWalkM,
                 slopeDeg: p.slopeDeg, aspectDeg: p.aspectDeg,
+                groundElevationM: p.groundElevationM,
+                canopyCoverPct: p.canopyCoverPct,
                 plotAreaAcres: p.plotAreaAcres,
                 startedAt: p.startedAt,
                 closedAt: p.closedAt, closedBy: p.closedBy,
@@ -430,16 +442,30 @@ public enum BackupArchive {
 
     /// Tree's `id` and `plotId` are `let` properties, so a straight copy
     /// can't reassign them — we rebuild the value through the public init.
+    ///
+    /// EVERY field of `Tree` must be listed below. The init gives several
+    /// parameters a default (`treeName`, `dbhCaptureMode`, `latitude`,
+    /// `longitude`), so omitting one does NOT fail to compile — it silently
+    /// substitutes nil and the restored tree comes back missing data the
+    /// archive was carrying. Restore had already lost all four this way:
+    /// the cruiser's tree names, the estimator provenance, and the GPS fix
+    /// that puts the tree on the map. The Android sibling
+    /// (backup/BackupArchive.kt) uses `t.copy(...)`, which cannot drop a
+    /// field, so a divergence here is also a cross-platform divergence.
+    /// When a field is added to `Tree`, add it here in the same commit.
     private static func rebuildTree(_ t: Tree,
                                     newId: UUID, newPlotId: UUID) -> Tree {
         Tree(
             id: newId, plotId: newPlotId,
-            treeNumber: t.treeNumber, speciesCode: t.speciesCode,
+            treeNumber: t.treeNumber, treeName: t.treeName,
+            speciesCode: t.speciesCode,
             status: t.status,
             dbhCm: t.dbhCm, dbhMethod: t.dbhMethod,
             dbhSigmaMm: t.dbhSigmaMm, dbhRmseMm: t.dbhRmseMm,
             dbhCoverageDeg: t.dbhCoverageDeg, dbhNInliers: t.dbhNInliers,
             dbhConfidence: t.dbhConfidence, dbhIsIrregular: t.dbhIsIrregular,
+            dbhCaptureMode: t.dbhCaptureMode,
+            dbhEstimatorEpoch: t.dbhEstimatorEpoch,
             heightM: t.heightM, heightMethod: t.heightMethod,
             heightSource: t.heightSource,
             heightSigmaM: t.heightSigmaM, heightDHM: t.heightDHM,
@@ -454,7 +480,8 @@ public enum BackupArchive {
             notes: t.notes,
             photoPath: t.photoPath, rawScanPath: t.rawScanPath,
             createdAt: t.createdAt, updatedAt: t.updatedAt,
-            deletedAt: t.deletedAt)
+            deletedAt: t.deletedAt,
+            latitude: t.latitude, longitude: t.longitude)
     }
 
     /// Copy the live sqlite store into a temp file (Core Data checkpoints

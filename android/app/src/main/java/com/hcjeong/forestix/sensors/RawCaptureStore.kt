@@ -20,6 +20,7 @@ import android.net.Uri
 import android.os.Build
 import androidx.core.content.FileProvider
 import com.hcjeong.forestix.ar.Vec3
+import com.hcjeong.forestix.common.TruthInput
 import com.hcjeong.forestix.positioning.CLLocationSnapshot
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -83,11 +84,19 @@ object RawCaptureStore {
         val id: String?,
         val frameCount: Int,
         val error: String?,
-        val queuedTruthSaved: Double? = null,
-        val queuedTruthLost: Double? = null,
+        val queuedTruthSaved: TruthEntry? = null,
+        val queuedTruthLost: TruthEntry? = null,
     ) {
         val saved: Boolean get() = id != null && error == null
     }
+
+    /// A typed ground truth AND the unit it was typed in. `value` is always
+    /// the app's metric base (cm for a diameter, m for a height); `unit` is
+    /// the operator's tag ("cm" | "in" | "m" | "ft"). The two travel together
+    /// everywhere, so a value handed back to a scan screen after a failed
+    /// write is shown in the scale it was typed at rather than converted
+    /// behind the cruiser's back.
+    data class TruthEntry(val value: Double, val unit: TruthInput.Unit)
 
     /// Result of a truth write. QUEUED is NOT durable — the value sits in the
     /// pending queue until the in-flight bundle write folds it in, so a caller
@@ -100,6 +109,7 @@ object RawCaptureStore {
     /// wrote truth when lastRecordedBundleID already existed).
     private class PendingEdit {
         var truth: Double? = null
+        var truthUnit: TruthInput.Unit? = null
         var hasTruth: Boolean = false
         var accepted: Boolean = false
     }
@@ -271,7 +281,7 @@ object RawCaptureStore {
                 frameCount = raw.size,
                 perFrame = perFrame,
             ))
-            manifest.put("truth", truthJson(null, null))
+            manifest.put("truth", truthJson(null, null, null))
             manifest.put("gps", gpsJson(ctx.gps))
 
             // DBH block: per-frame raw descriptors. view_to_depth is ALWAYS
@@ -337,6 +347,9 @@ object RawCaptureStore {
         live: HeightResult,
         cal: ProjectCalibration,
         poseSamples: List<PoseSample>,
+        // Whether VIO tracking dropped between the anchor and the aims — the
+        // on-screen warning, recorded so the bundle can be filtered on it.
+        trackingDropped: Boolean,
         unitSystem: String,
         ctx: CaptureContext,
         baseAim: HeightAim? = null,
@@ -381,7 +394,7 @@ object RawCaptureStore {
                 frameCount = 0,            // patched below once the aims are attached
                 perFrame = emptyList(),
             ))
-            manifest.put("truth", truthJson(null, null))
+            manifest.put("truth", truthJson(null, null, null))
             manifest.put("gps", gpsJson(ctx.gps))
             manifest.put("dbh", JSONObject.NULL)
 
@@ -407,6 +420,13 @@ object RawCaptureStore {
             if (attachAimFrame(dir, topAim, "depth_top.bin", "rgb_top.jpg", topJson)) aimFrames++
             heightBlock.put("top", topJson)
             heightBlock.put("d_h_m", dHm.toDouble())
+            // A dropout moves the world frame the trunk anchor sits in, so it
+            // moves d_h — the entire scale of H — and the pose trail below has
+            // a hole where it happened. Written on every height bundle, so
+            // `false` states the walk-off was continuous rather than leaving
+            // the question unanswered. Byte-identical key on iOS
+            // (`HeightBundle.trackingDropped`).
+            heightBlock.put("tracking_dropped", trackingDropped)
             val samplesArr = JSONArray()
             for (s in poseSamples) {
                 val so = JSONObject()
@@ -450,6 +470,12 @@ object RawCaptureStore {
         val unit: String,
         val tier: String?,
         val truthValue: Double?,
+        /// The unit [truthValue] was typed in, or null when the bundle records
+        /// none. Null is the marker TruthUnitRepair selects on, so it must be
+        /// carried into the summary rather than re-read per bundle: "absent"
+        /// and "present but JSON null" are the same state and both arrive here
+        /// as null, which is also how the iOS decoder reads them.
+        val truthUnit: String?,
         val selfCheckStatus: String?,
         /// Raw depth frames actually stored (DBH bundles). Null for height /
         /// pre-frame_count bundles.
@@ -477,6 +503,7 @@ object RawCaptureStore {
                 unit = if (kind == "height") "m" else "cm",
                 tier = resObj?.optString("tier")?.takeIf { it.isNotEmpty() },
                 truthValue = truthObj?.optDouble("value")?.takeIf { !it.isNaN() },
+                truthUnit = truthObj?.optString("truth_unit")?.takeIf { it.isNotEmpty() },
                 selfCheckStatus = selfObj?.optString("status")?.takeIf { it.isNotEmpty() },
                 frameCount = resObj?.optInt("frame_count", -1)?.takeIf { it >= 0 }
                     ?: m.optJSONObject("dbh")?.optJSONArray("frames")?.length(),
@@ -502,9 +529,16 @@ object RawCaptureStore {
     }
 
     fun inventory(context: Context): Inventory = Inventory(
-        directories = root(context).listFiles()?.count { it.isDirectory } ?: 0,
+        directories = directoryCount(context),
         parsed = list(context).size,
     )
+
+    /// Bundle DIRECTORIES on disk, parsing nothing — the same number
+    /// [Inventory.directories] carries, for a caller that already holds the
+    /// summaries and only needs the denominator. Calling [inventory] there
+    /// would re-parse every manifest on disk a second time.
+    fun directoryCount(context: Context): Int =
+        root(context).listFiles()?.count { it.isDirectory } ?: 0
 
     fun manifestOf(context: Context, id: String): JSONObject? {
         val mf = File(bundleDir(context, id), "manifest.json")
@@ -565,21 +599,82 @@ object RawCaptureStore {
     /// recorder's manifest drain holds — the two used to interleave, and a
     /// direct setTruth landing between the drain's read and its write was
     /// clobbered with no error.
-    suspend fun setTruth(context: Context, id: String, value: Double?): TruthWrite =
+    /// `value` is the metric base (cm / m); `unit` is what the operator typed,
+    /// recorded beside it so the export never has to infer the scale. A clear
+    /// (`value == null`) carries no unit.
+    suspend fun setTruth(
+        context: Context,
+        id: String,
+        value: Double?,
+        unit: TruthInput.Unit?,
+    ): TruthWrite =
         withContext(Dispatchers.IO) {
             synchronized(pendingLock) {
                 val file = manifestFile(context, id)
                 if (!file.exists()) {
                     pending.getOrPut(id) { PendingEdit() }.also {
-                        it.truth = value; it.hasTruth = true
+                        it.truth = value
+                        it.truthUnit = if (value != null) unit else null
+                        it.hasTruth = true
                     }
                     return@synchronized TruthWrite.QUEUED
                 }
                 val m = manifestOf(context, id) ?: return@synchronized TruthWrite.FAILED
-                m.put("truth", truthJson(value, if (value != null) iso8601() else null))
+                m.put("truth", truthJson(
+                    value,
+                    if (value != null) iso8601() else null,
+                    if (value != null) unit else null,
+                ))
                 if (writeQuietly(file, m)) TruthWrite.SAVED else TruthWrite.FAILED
             }
         }
+
+    /// Re-base a stored truth that was typed in imperial and stored as if it
+    /// were the metric base — TruthUnitRepair's write into a bundle.
+    ///
+    /// This is the ONE thing in the app that edits a manifest's truth without
+    /// the cruiser typing into that bundle. It is not an inference: it acts
+    /// only where the bundle ITSELF records no `truth_unit`, and it corrects
+    /// the scale of the field rather than replacing the observation. The digits
+    /// typed are kept in `repaired_from` and `entered_at` is NOT restamped —
+    /// when the cruiser measured the stem has not changed.
+    ///
+    /// RE-CHECKS UNDER pendingLock, the same lock [setTruth] and the recorder's
+    /// manifest drain hold: [before] must still be what is on disk and the
+    /// bundle must still record no unit, so a truth re-typed in the console
+    /// between the plan and this write is left alone, and a second run of the
+    /// repair finds a unit and does nothing. No pending-edit path: a bundle
+    /// with no manifest has no stored truth to re-base, and queueing a
+    /// correction for a value that does not exist yet would apply it to
+    /// whatever the recorder writes next.
+    suspend fun repairTruthUnit(
+        context: Context,
+        id: String,
+        before: Double,
+        after: Double,
+        unit: TruthInput.Unit,
+    ): Boolean = withContext(Dispatchers.IO) {
+        synchronized(pendingLock) {
+            val file = manifestFile(context, id)
+            if (!file.exists()) return@synchronized false
+            val m = manifestOf(context, id) ?: return@synchronized false
+            val truth = m.optJSONObject("truth") ?: return@synchronized false
+            if (truth.optString("truth_unit").isNotEmpty()) return@synchronized false
+            val stored = truth.optDouble("value")
+            if (stored.isNaN() || abs(stored - before) > TRUTH_VALUE_EPSILON) {
+                return@synchronized false
+            }
+            val enteredAt = truth.optString("entered_at").takeIf { it.isNotEmpty() }
+            m.put("truth", truthJson(after, enteredAt, unit, repairedFrom = stored))
+            writeQuietly(file, m)
+        }
+    }
+
+    /// Two truth values are the SAME value inside this band — the same number
+    /// and reasoning as TruthBackfill.VALUE_EPSILON: every writer puts the
+    /// metric base through one parser, so the only difference between two
+    /// copies of a truth is float round-trip.
+    const val TRUTH_VALUE_EPSILON = 0.001
 
     /// Zip result — a Uri, or the reason the export could not be produced.
     data class ExportResult(val uri: Uri?, val error: String?)
@@ -630,7 +725,7 @@ object RawCaptureStore {
     /// recorder can tell the scan screen its typed value is now durable.
     /// A failed write puts the queued edit BACK on the queue and rethrows, so
     /// the caller's failure path reports it as lost instead of eating it.
-    private fun writeManifest(id: String, dir: File, manifest: JSONObject): Double? =
+    private fun writeManifest(id: String, dir: File, manifest: JSONObject): TruthEntry? =
         synchronized(pendingLock) {
             val edit = pending.remove(id)
             if (edit != null) applyPending(manifest, edit)
@@ -640,7 +735,7 @@ object RawCaptureStore {
                 if (edit != null) pending[id] = edit
                 throw t
             }
-            if (edit != null && edit.hasTruth) edit.truth else null
+            edit?.let { truthEntryOf(it) }
         }
 
     /// Temp file + rename. `writeText` truncates in place, so a crash (or a
@@ -684,10 +779,25 @@ object RawCaptureStore {
         if (edit.hasTruth) {
             manifest.put(
                 "truth",
-                truthJson(edit.truth, if (edit.truth != null) iso8601() else null),
+                truthJson(
+                    edit.truth,
+                    if (edit.truth != null) iso8601() else null,
+                    edit.truthUnit,
+                ),
             )
         }
         if (edit.accepted) applyAccepted(manifest)
+    }
+
+    /// The queued value + its typed unit, or null when the edit carried no
+    /// truth (or was an explicit clear). A truth with no unit tag cannot be
+    /// handed back to a field without guessing its scale, so it is reported as
+    /// "nothing to hand back" rather than assumed metric.
+    private fun truthEntryOf(edit: PendingEdit): TruthEntry? {
+        if (!edit.hasTruth) return null
+        val v = edit.truth ?: return null
+        val u = edit.truthUnit ?: return null
+        return TruthEntry(v, u)
     }
 
     private fun applyAccepted(manifest: JSONObject) {
@@ -701,9 +811,9 @@ object RawCaptureStore {
     /// queued edit was an explicit clear). The caller must surface it — a
     /// queued truth thrown away in silence is exactly the invisible loss this
     /// whole path exists to prevent.
-    private fun dropPending(id: String): Double? {
+    private fun dropPending(id: String): TruthEntry? {
         val edit = synchronized(pendingLock) { pending.remove(id) } ?: return null
-        return if (edit.hasTruth) edit.truth else null
+        return truthEntryOf(edit)
     }
 
     /// Human-readable reason for a failed write — a full disk is the one the
@@ -729,11 +839,28 @@ object RawCaptureStore {
         put("algorithm", algorithm)
         put("units", units)
         put("capture_mode", captureMode)
+        // Where the height sighting angle comes from: the elevation of the
+        // AR camera's forward axis, on both platforms (iOS writes the same).
+        put("height_angle_source", "camera_pose")
         put("calibration", JSONObject().apply {
             put("alpha", cal.dbhCorrectionAlpha.toDouble())
             put("beta", cal.dbhCorrectionBeta.toDouble())
             put("depth_noise_mm", cal.depthNoiseMm.toDouble())
             put("vio_drift_fraction", cal.vioDriftFraction.toDouble())
+            // WHICH ESTIMATOR alpha/beta were fitted against, carried so a
+            // replay can put them back exactly as the capture had them.
+            //
+            // It was missing, and the omission silently disarmed the
+            // coefficients on every replay: the rebuilt ProjectCalibration
+            // defaulted to epoch 0, 0 never equals a live epoch, so
+            // appliedToRawCm judged it stale and returned the RAW diameter.
+            // For a calibrated project that made the epoch recompute write
+            // uncalibrated widths back over calibrated ones — and the
+            // difference, alpha + (beta-1)*raw, is about a percent, the same
+            // size as a genuine epoch shift, so the review screen showed a
+            // plausible correction and nothing marked it as a loss.
+            // iOS RawCaptureManifest.Calibration parity, same key spelling.
+            put("dbh_calibration_epoch", cal.dbhCalibrationEpoch)
         })
     }
 
@@ -764,9 +891,30 @@ object RawCaptureStore {
         put("per_frame", JSONArray().apply { perFrame.forEach { put(it) } })
     }
 
-    private fun truthJson(value: Double?, enteredAt: String?): JSONObject = JSONObject().apply {
+    // truth — `value` is ALWAYS the app's metric base (cm for a diameter, m
+    // for a height); `truth_unit` is the unit the operator actually TYPED.
+    // Without the tag the export cannot tell an imperial entry from a metric
+    // one, because the conversion has already happened by the time the number
+    // is written. Null on a bundle with no truth and on bundles written before
+    // the tag existed — a reader must treat that as "not stated", not metric.
+    //
+    // `repaired_from` is the number that WAS in `value` before TruthUnitRepair
+    // re-based it, exactly as the cruiser typed it. Null on every truth that
+    // has not been repaired, which is nearly all of them. It is an audit crumb,
+    // not the idempotence mark — `truth_unit` is that, because "no unit
+    // recorded" is the whole definition of an affected truth. It is written
+    // unconditionally, like the other three, so the two platforms' manifests
+    // stay one document.
+    private fun truthJson(
+        value: Double?,
+        enteredAt: String?,
+        unit: TruthInput.Unit?,
+        repairedFrom: Double? = null,
+    ): JSONObject = JSONObject().apply {
         put("value", value ?: JSONObject.NULL)
         put("entered_at", enteredAt ?: JSONObject.NULL)
+        put("truth_unit", unit?.raw ?: JSONObject.NULL)
+        put("repaired_from", repairedFrom ?: JSONObject.NULL)
     }
 
     // GPS block — {lat, lon, acc_m}, byte-identical to the iOS schema.
@@ -803,25 +951,17 @@ object RawCaptureStore {
     )
 
     private fun deriveBracket(frame0: ArDepthFrame, b: BracketSpec): BracketGeom? {
-        val pL = frame0.viewToDepth(minOf(b.leftViewX, b.rightViewX), b.guideViewY) ?: return null
-        val pR = frame0.viewToDepth(maxOf(b.leftViewX, b.rightViewX), b.guideViewY) ?: return null
-        val dxSpan = abs(pR.first - pL.first)
-        val dySpan = abs(pR.second - pL.second)
-        val midX = (pL.first + pR.first) / 2.0
-        val midY = (pL.second + pR.second) / 2.0
-        return if (dxSpan >= dySpan) {
-            val w = frame0.width.toDouble()
-            BracketGeom(
-                minOf(pL.first, pR.first) / w, maxOf(pL.first, pR.first) / w,
-                GuideAxis.Row(Math.round(midY).toInt()), "row", midX, midY,
-            )
-        } else {
-            val h = frame0.height.toDouble()
-            BracketGeom(
-                minOf(pL.second, pR.second) / h, maxOf(pL.second, pR.second) / h,
-                GuideAxis.Col(Math.round(midX).toInt()), "col", midX, midY,
-            )
-        }
+        val geometry = DBHEstimator.bracketDepthGeometry(
+            frame0, b.leftViewX, b.rightViewX, b.guideViewY,
+        ) ?: return null
+        val row = geometry.axis is GuideAxis.Row
+        val mid = (geometry.leftFraction + geometry.rightFraction) * 0.5
+        val tapX = if (row) mid * frame0.width else (geometry.axis as GuideAxis.Col).x.toDouble()
+        val tapY = if (row) (geometry.axis as GuideAxis.Row).y.toDouble() else mid * frame0.height
+        return BracketGeom(
+            geometry.leftFraction, geometry.rightFraction, geometry.axis,
+            if (row) "row" else "col", tapX, tapY,
+        )
     }
 
     /// Serialize a height aim's depth grid (native u16-mm, little-endian,
@@ -873,8 +1013,13 @@ object RawCaptureStore {
         val pkg = context.packageManager.getPackageInfo(context.packageName, 0)
         val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) pkg.longVersionCode
         else @Suppress("DEPRECATION") pkg.versionCode.toLong()
-        // iOS format parity: "<shortVersion> (<build>)".
-        "${pkg.versionName} ($code)"
+        // iOS format parity: "est<epoch>/<shortVersion> (<build>)".
+        //
+        // THE ESTIMATOR EPOCH LEADS, because the marketing version does
+        // not move and this field is what has to partition a corpus. It
+        // failed to: the bracket depth trim shipped partway through a
+        // 100-stem collection and both eras stamped the same string.
+        "est${DBHEstimator.ESTIMATOR_EPOCH}/${pkg.versionName} ($code)"
     } catch (_: Throwable) {
         "unknown"
     }

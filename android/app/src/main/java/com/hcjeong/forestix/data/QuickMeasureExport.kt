@@ -33,14 +33,37 @@ object QuickMeasureExport {
 
     fun buildCsv(entries: List<QuickMeasureEntry>, plots: List<QuickMeasurePlot>): ByteArray {
         val headers = listOf(
-            "id", "timestamp", "plot", "tree", "kind",
-            "value", "value_unit",
+            "id", "timestamp", "plot", "tree", "tree_name", "kind",
+            // "truth" sits beside the value it is the truth OF, in the same
+            // unit ("value_unit"); blank means none was ever entered.
+            "value", "value_unit", "truth",
             "secondary_value", "secondary_unit",
             "sigma", "sigma_unit",
             "species", "position", "damage", "note",
             "confidence", "method",
             "latitude", "longitude", "photo",
             "capture_mode",
+            // Where latitude/longitude came from ("gpsSingle" for a device
+            // fix, "manual" for one the cruiser typed). Without it a
+            // hand-entered coordinate exported exactly like a satellite one.
+            "position_source",
+            // The same idea one column over: "typed" for a truth entered
+            // against this reading, "capture" for one recovered from a
+            // raw-capture manifest and matched to it. Blank means no truth.
+            // The accuracy work must be able to drop the matched ones and
+            // still have a corpus, so the distinction cannot live only in a
+            // commit message. LAST column, and APPENDED rather than inserted
+            // beside "truth", matching the iOS exporter so the two platforms'
+            // CSVs diff clean and an existing reader still lines up.
+            "truth_source",
+            // Qualifies "timestamp", and the only one of the four that is
+            // never blank: every reading has a time. "device" is the clock at
+            // the moment the reading was recorded; "typed" is a time the
+            // cruiser set by hand from a notebook. The analysis joins on time —
+            // across phones, to raw-capture manifests, and for
+            // live-vs-superseded — so it must be able to see which timestamps
+            // are claims about the past.
+            "time_source",
         )
         val sb = StringBuilder()
         sb.append(headers.joinToString(",") { csv(it) }).append("\r\n")
@@ -54,9 +77,11 @@ object QuickMeasureExport {
                 isoStamp(e.createdAt),
                 plotName,
                 e.treeNumber?.toString() ?: "",
+                e.treeName ?: "",
                 e.kind.raw,
                 fmt(e.value),
                 e.valueUnit,
+                e.truth?.let { fmt(it) } ?: "",
                 secVal,
                 if (e.secondaryValue == null) "" else e.secondaryValueUnit,
                 sigma,
@@ -71,6 +96,9 @@ object QuickMeasureExport {
                 e.longitude?.let { String.format(java.util.Locale.US, "%.6f", it) } ?: "",
                 e.photoPath ?: "",
                 e.captureMode ?: "",
+                e.positionRecordedSource ?: "",
+                e.truthRecordedSource ?: "",
+                e.timeRecordedSource,
             ).joinToString(",") { csv(it) }
             sb.append(row).append("\r\n")
         }
@@ -100,7 +128,7 @@ object QuickMeasureExport {
         }
 
         // -- Trees.csv (plot x treeNumber) --
-        val trees = StringBuilder("plot_id,plot,tree_number,species,damage,note\r\n")
+        val trees = StringBuilder("plot_id,plot,tree_number,tree_name,species,damage,note\r\n")
         val byPlotTree = entries.groupBy { "${it.plotID ?: ""}|${it.treeNumber ?: -1}" }
         for ((_, group) in byPlotTree.toSortedMap()) {
             val any = group.first()
@@ -108,37 +136,54 @@ object QuickMeasureExport {
             val species = group.mapNotNull { it.speciesCode }.firstOrNull() ?: ""
             val dmg = group.flatMap { it.damageCodes }.toSet().joinToString("|")
             val note = group.mapNotNull { it.note }.firstOrNull() ?: ""
+            // Any one reading on the tree carries the name; take the first
+            // that has one rather than `any`'s, which may be a later
+            // re-measurement recorded before the name existed.
+            val name = group.mapNotNull { it.treeName }.firstOrNull() ?: ""
             trees.append(
                 listOf(
                     any.plotID?.toString() ?: "", plotName,
-                    any.treeNumber?.toString() ?: "", species, dmg, note,
+                    any.treeNumber?.toString() ?: "", name, species, dmg, note,
                 ).joinToString(",") { csv(it) }
             ).append("\r\n")
         }
 
         // -- Stems.csv (per DBH) --
-        val stems = StringBuilder("id,plot_id,tree_number,timestamp,dbh_cm,sigma_mm,position,confidence,method,capture_mode\r\n")
+        // "truth_source" then "time_source" appended LAST. truth_source
+        // qualifies truth_cm — "typed" here, "capture" when the value was
+        // recovered from a raw-capture manifest and matched to this stem;
+        // blank when there is no truth. time_source qualifies "timestamp" and
+        // is never blank — "device" for the clock, "typed" for a time set by
+        // hand.
+        val stems = StringBuilder("id,plot_id,tree_number,timestamp,dbh_cm,truth_cm,sigma_mm,position,confidence,method,capture_mode,truth_source,time_source\r\n")
         for (e in entries.filter { it.kind == MeasureKind.DBH }) {
             stems.append(
                 listOf(
                     e.id.toString(), e.plotID?.toString() ?: "",
                     e.treeNumber?.toString() ?: "", isoStamp(e.createdAt),
-                    fmt(e.value), e.sigma?.let { fmt(it) } ?: "",
+                    fmt(e.value), e.truth?.let { fmt(it) } ?: "",
+                    e.sigma?.let { fmt(it) } ?: "",
                     e.position?.raw ?: "", e.confidenceRaw, e.method,
                     e.captureMode ?: "",
+                    e.truthRecordedSource ?: "",
+                    e.timeRecordedSource,
                 ).joinToString(",") { csv(it) }
             ).append("\r\n")
         }
 
         // -- Heights.csv (per Height) --
-        val heights = StringBuilder("id,plot_id,tree_number,timestamp,height_m,sigma_m,confidence,method\r\n")
+        // "truth_source" then "time_source" appended LAST — see Stems.csv.
+        val heights = StringBuilder("id,plot_id,tree_number,timestamp,height_m,truth_m,sigma_m,confidence,method,truth_source,time_source\r\n")
         for (e in entries.filter { it.kind == MeasureKind.HEIGHT }) {
             heights.append(
                 listOf(
                     e.id.toString(), e.plotID?.toString() ?: "",
                     e.treeNumber?.toString() ?: "", isoStamp(e.createdAt),
-                    fmt(e.value), e.sigma?.let { fmt(it) } ?: "",
+                    fmt(e.value), e.truth?.let { fmt(it) } ?: "",
+                    e.sigma?.let { fmt(it) } ?: "",
                     e.confidenceRaw, e.method,
+                    e.truthRecordedSource ?: "",
+                    e.timeRecordedSource,
                 ).joinToString(",") { csv(it) }
             ).append("\r\n")
         }

@@ -12,6 +12,7 @@ import com.hcjeong.forestix.data.cruise.Plot
 import com.hcjeong.forestix.data.cruise.SpeciesConfig
 import com.hcjeong.forestix.data.cruise.Tree
 import com.hcjeong.forestix.data.cruise.TreeStatus
+import com.hcjeong.forestix.data.cruise.displayTitle
 import com.hcjeong.forestix.sensors.ConfidenceTier
 import java.util.Locale
 
@@ -67,7 +68,7 @@ object PlotValidation {
             if (sp == null) {
                 errors.add(ValidationIssue(
                     code = Code.unknownSpecies,
-                    message = "Tree #${tree.treeNumber}: unknown species code '${tree.speciesCode}'.",
+                    message = "${tree.displayTitle}: unknown species code '${tree.speciesCode}'.",
                     affectedId = tree.id))
                 continue
             }
@@ -75,35 +76,35 @@ object PlotValidation {
             if (tree.dbhCm < sp.expectedDbhMinCm) {
                 warnings.add(ValidationIssue(
                     code = Code.dbhBelowMin,
-                    message = "Tree #${tree.treeNumber}: DBH ${formatted(tree.dbhCm)} cm " +
+                    message = "${tree.displayTitle}: DBH ${formatted(tree.dbhCm)} cm " +
                         "below ${sp.commonName} expected minimum ${formatted(sp.expectedDbhMinCm)} cm.",
                     affectedId = tree.id))
             }
             if (tree.dbhCm > sp.expectedDbhMaxCm) {
                 warnings.add(ValidationIssue(
                     code = Code.dbhAboveMax,
-                    message = "Tree #${tree.treeNumber}: DBH ${formatted(tree.dbhCm)} cm " +
+                    message = "${tree.displayTitle}: DBH ${formatted(tree.dbhCm)} cm " +
                         "above ${sp.commonName} expected maximum ${formatted(sp.expectedDbhMaxCm)} cm.",
                     affectedId = tree.id))
             }
             if (tree.dbhConfidence == ConfidenceTier.RED) {
                 warnings.add(ValidationIssue(
                     code = Code.redTierDbh,
-                    message = "Tree #${tree.treeNumber}: the diameter reading is flagged Check — " +
+                    message = "${tree.displayTitle}: the diameter reading is flagged Check — " +
                         "re-measure if you can.",
                     affectedId = tree.id))
             }
             if (tree.status == TreeStatus.LIVE && tree.heightConfidence == ConfidenceTier.RED) {
                 warnings.add(ValidationIssue(
                     code = Code.redTierHeight,
-                    message = "Tree #${tree.treeNumber}: the height reading is flagged Check — " +
+                    message = "${tree.displayTitle}: the height reading is flagged Check — " +
                         "re-measure if you can.",
                     affectedId = tree.id))
             }
             if (tree.status == TreeStatus.LIVE && tree.heightM == null && tree.heightSource != "imputed") {
                 warnings.add(ValidationIssue(
                     code = Code.missingHeightOnLive,
-                    message = "Tree #${tree.treeNumber}: no height measured — the height will be " +
+                    message = "${tree.displayTitle}: no height measured — the height will be " +
                         "estimated from this project's height curve.",
                     affectedId = tree.id))
             }

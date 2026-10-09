@@ -35,8 +35,20 @@ public enum HeightSubsampleRule: Codable, Sendable, Equatable {
     case perSpeciesCount(minPerSpeciesOnPlot: Int)
 }
 
+/// How a plot centre was obtained.
+///
+/// `gpsSingle` is the ONE-SHOT fix: the coordinate the receiver happened to
+/// be reporting at the instant the cruiser dropped the plot, with no window
+/// and no median behind it. It exists because the app has always been able
+/// to record such a centre (the AR "Start plot" path, and now the planned
+/// plot's "Start plot now") and used to file it under `gpsAveraged` with
+/// `gpsNSamples = 1` — a label that says a 60 s median was computed when
+/// nothing of the sort happened. Anyone reading the corpus later has to be
+/// able to separate the two populations, and `gpsNSamples` is not where a
+/// reader looks first. One fix and thirty are different data; they get
+/// different names.
 public enum PositionSource: String, Codable, Sendable {
-    case gpsAveraged, vioOffset, vioChain, externalRTK, manual
+    case gpsAveraged, gpsSingle, vioOffset, vioChain, externalRTK, manual
 }
 
 public enum PositionTier: String, Codable, Sendable { case A, B, C, D }
@@ -58,6 +70,10 @@ public struct Project: Identifiable, Codable, Sendable {
     public var depthNoiseMm: Float
     public var dbhCorrectionAlpha: Float    // from cylinder calibration; default 0
     public var dbhCorrectionBeta: Float     // default 1
+    /// Which estimator the two coefficients above were fitted against — see
+    /// `ProjectCalibration.dbhCalibrationEpoch`. 0 = never calibrated, which
+    /// is safe at any epoch because the identity correction always is.
+    public var dbhCalibrationEpoch: Int     // default 0
     public var vioDriftFraction: Float      // default 0.02
 
     public init(
@@ -74,6 +90,7 @@ public struct Project: Identifiable, Codable, Sendable {
         depthNoiseMm: Float,
         dbhCorrectionAlpha: Float,
         dbhCorrectionBeta: Float,
+        dbhCalibrationEpoch: Int = 0,
         vioDriftFraction: Float
     ) {
         self.id = id
@@ -89,6 +106,7 @@ public struct Project: Identifiable, Codable, Sendable {
         self.depthNoiseMm = depthNoiseMm
         self.dbhCorrectionAlpha = dbhCorrectionAlpha
         self.dbhCorrectionBeta = dbhCorrectionBeta
+        self.dbhCalibrationEpoch = dbhCalibrationEpoch
         self.vioDriftFraction = vioDriftFraction
     }
 }
@@ -118,7 +136,16 @@ public struct CruiseDesign: Identifiable, Codable, Sendable {
     public let projectId: UUID
     public var plotType: PlotType
     public var plotAreaAcres: Float?        // required if fixedArea
-    public var baf: Float?                  // required if variableRadius
+    /// Basal-area factor, required if `variableRadius`, ALWAYS IN ft²/ac.
+    ///
+    /// The one field in this model that is not metric, and deliberately so:
+    /// it is the number etched on the prism, the US convention is what every
+    /// project on disk was typed under (the setup sheet has always defaulted
+    /// to 20), and re-basing it would silently re-read every stored design.
+    /// The setup sheet converts a metric cruiser's m²/ha on the way in and
+    /// back out; `ExpansionFactors.variableRadius` divides it by a basal area
+    /// in ft². Change one of those three and you must change all three.
+    public var baf: Float?
     public var samplingScheme: SamplingScheme
     public var gridSpacingMeters: Float?    // required if systematicGrid
     public var heightSubsampleRule: HeightSubsampleRule
@@ -159,6 +186,26 @@ public struct PlannedPlot: Identifiable, Codable, Sendable {
     /// decision, so the (+) "nearest unvisited" navigation passes over it and
     /// exports mark it skipped rather than merely pending.
     public var skipped: Bool
+    /// How `plannedLat`/`plannedLon` came to exist.
+    ///
+    /// `.manual` — the cruiser DREW this point with a finger on the map. It
+    /// is an intention, not an observation: nothing measured it, and its
+    /// error is however far the finger was from the tree the cruiser meant.
+    /// The one rule this field exists to keep is that a drawn coordinate and
+    /// a GPS-measured one are never stored the same way — the plot that
+    /// eventually opens here still takes its `centerLat`/`centerLon` from
+    /// the ARRIVAL FIX and stamps that fix's own `positionSource`, so the
+    /// drawn point never becomes a measured one. Keeping both is the point:
+    /// their difference is the canopy GPS error, and it can only be read if
+    /// the plan says it was drawn.
+    ///
+    /// `nil` — NOT hand-placed. Every planned plot that existed before this
+    /// field, and every one `SamplingGenerator` lays down, is derived from a
+    /// boundary and a design rather than placed by a person, and there is no
+    /// `PositionSource` case that says "computed from a design". Inventing
+    /// one, or borrowing `.manual` for the generator, would make the field
+    /// say nothing. Absent means absent.
+    public var plannedSource: PositionSource?
 
     public init(
         id: UUID,
@@ -168,7 +215,8 @@ public struct PlannedPlot: Identifiable, Codable, Sendable {
         plannedLat: Double,
         plannedLon: Double,
         visited: Bool,
-        skipped: Bool = false
+        skipped: Bool = false,
+        plannedSource: PositionSource? = nil
     ) {
         self.id = id
         self.projectId = projectId
@@ -178,5 +226,6 @@ public struct PlannedPlot: Identifiable, Codable, Sendable {
         self.plannedLon = plannedLon
         self.visited = visited
         self.skipped = skipped
+        self.plannedSource = plannedSource
     }
 }

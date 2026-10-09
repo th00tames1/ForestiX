@@ -47,6 +47,7 @@ public enum ProjectMapper {
         e.depthNoiseMm = s.depthNoiseMm
         e.dbhCorrectionAlpha = s.dbhCorrectionAlpha
         e.dbhCorrectionBeta = s.dbhCorrectionBeta
+        e.dbhCalibrationEpoch = Int32(s.dbhCalibrationEpoch)
         e.vioDriftFraction = s.vioDriftFraction
     }
 
@@ -71,6 +72,7 @@ public enum ProjectMapper {
             depthNoiseMm: e.depthNoiseMm,
             dbhCorrectionAlpha: e.dbhCorrectionAlpha,
             dbhCorrectionBeta: e.dbhCorrectionBeta,
+            dbhCalibrationEpoch: Int(e.dbhCalibrationEpoch),
             vioDriftFraction: e.vioDriftFraction
         )
     }
@@ -160,6 +162,7 @@ public enum PlannedPlotMapper {
         e.plannedLon = s.plannedLon
         e.visited = s.visited
         e.skipped = s.skipped
+        e.plannedSource = s.plannedSource?.rawValue
     }
 
     public static func toStruct(_ e: PlannedPlotEntity) -> PlannedPlot {
@@ -171,7 +174,11 @@ public enum PlannedPlotMapper {
             plannedLat: e.plannedLat,
             plannedLon: e.plannedLon,
             visited: e.visited,
-            skipped: e.skipped
+            skipped: e.skipped,
+            // An unrecognised string decodes to nil rather than to a
+            // borrowed case: "I don't know how this point was placed" is
+            // the honest reading of a value this build cannot name.
+            plannedSource: e.plannedSource.flatMap(PositionSource.init(rawValue:))
         )
     }
 }
@@ -194,6 +201,8 @@ public enum PlotMapper {
         e.offsetWalkM = s.offsetWalkM.map(NSNumber.init(value:))
         e.slopeDeg = s.slopeDeg
         e.aspectDeg = s.aspectDeg
+        e.groundElevationM = s.groundElevationM.map(NSNumber.init(value:))
+        e.canopyCoverPct = s.canopyCoverPct.map(NSNumber.init(value:))
         e.plotAreaAcres = s.plotAreaAcres
         e.startedAt = s.startedAt
         e.closedAt = s.closedAt
@@ -225,6 +234,8 @@ public enum PlotMapper {
             offsetWalkM: e.offsetWalkM?.floatValue,
             slopeDeg: e.slopeDeg,
             aspectDeg: e.aspectDeg,
+            groundElevationM: e.groundElevationM?.floatValue,
+            canopyCoverPct: e.canopyCoverPct?.floatValue,
             plotAreaAcres: e.plotAreaAcres,
             startedAt: e.startedAt,
             closedAt: e.closedAt,
@@ -243,6 +254,7 @@ public enum TreeMapper {
         e.id = s.id
         e.plotId = s.plotId
         e.treeNumber = Int32(s.treeNumber)
+        e.treeName = s.treeName
         e.speciesCode = s.speciesCode
         e.status = s.status.rawValue
 
@@ -253,6 +265,8 @@ public enum TreeMapper {
         e.dbhCoverageDeg = s.dbhCoverageDeg.map(NSNumber.init(value:))
         e.dbhNInliers = s.dbhNInliers.map { NSNumber(value: Int32($0)) }
         e.dbhConfidence = s.dbhConfidence.rawValue
+        e.dbhCaptureMode = s.dbhCaptureMode
+        e.dbhEstimatorEpoch = s.dbhEstimatorEpoch.map { NSNumber(value: Int32($0)) }
         e.dbhIsIrregular = s.dbhIsIrregular
 
         e.heightM = s.heightM.map(NSNumber.init(value:))
@@ -311,6 +325,7 @@ public enum TreeMapper {
             id: e.id,
             plotId: e.plotId,
             treeNumber: Int(e.treeNumber),
+            treeName: e.treeName,
             speciesCode: e.speciesCode,
             status: status,
             dbhCm: e.dbhCm,
@@ -321,6 +336,8 @@ public enum TreeMapper {
             dbhNInliers: e.dbhNInliers?.intValue,
             dbhConfidence: dbhConf,
             dbhIsIrregular: e.dbhIsIrregular,
+            dbhCaptureMode: e.dbhCaptureMode,
+            dbhEstimatorEpoch: e.dbhEstimatorEpoch?.intValue,
             heightM: e.heightM?.floatValue,
             heightMethod: heightMethod,
             heightSource: e.heightSource,

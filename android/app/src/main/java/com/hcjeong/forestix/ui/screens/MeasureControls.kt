@@ -52,6 +52,10 @@ import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -60,8 +64,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.hcjeong.forestix.common.TruthInput
 import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixProminentButton
+import com.hcjeong.forestix.ui.theme.ForestixWhiteButton
 
 // MARK: - Top-strip geometry (shared by every AR screen)
 
@@ -88,7 +95,7 @@ val MeasureMiniMapSlot = 132.dp
 
 /// The AR screens' top strip, laid out as ONE row instead of a pile of
 /// independently-aligned overlays. The leading slot (GPS pill) and the
-/// centre slot (the cruise "Tree N" title) are siblings in the same Row,
+/// centre slot (the cruise "Tree #N" title) are siblings in the same Row,
 /// so they cannot overlap at any screen width: the centre is centred in
 /// whatever is left between the GPS pill and the reserved trailing slot,
 /// and gives way rather than colliding when the width runs out.
@@ -141,6 +148,55 @@ fun BoxScope.MeasureBackButton(onClick: () -> Unit) {
     }
 }
 
+// MARK: - Sampling-plot tracking-loss wording
+
+/// What the plot screens say once ArSessionHub has hidden the ring because
+/// its anchor pose stopped being corrected. Two strings, one meaning, used
+/// by both plot-placement screens; byte-identical to the iOS
+/// `MeasurementCopy.plotTrackingLost*` pair. The remedy clause is lifted
+/// verbatim from the height screen's TRACKING_LOST_NOW — one tracking
+/// dropout, one thing to do about it.
+const val PLOT_TRACKING_LOST_HINT =
+    "Tracking lost — the plot is hidden rather than drawn in the wrong place. Hold still until the camera picks the scene back up."
+const val PLOT_TRACKING_LOST_STATUS = "TRACKING LOST — inside or outside is unknown"
+
+/// Every screen that plants a plot centre by raycasting the crosshair says
+/// this when the ray finds nothing. Hoisted out of the two plot screens
+/// because the scan screens' "Pin centre" now fires the SAME raycast and
+/// must fail in the same words. Byte-identical to iOS
+/// `MeasurementCopy.plotGroundNotSeen`.
+const val PLOT_GROUND_NOT_SEEN =
+    "Couldn't see the ground here. Aim at the ground and try again."
+
+// MARK: - Plot centre known only as GPS (field report 14 × 17)
+
+/// FIELD REPORT 14 vs 17. The subdued ring + pillar are drawn from an AR
+/// ANCHOR, and only the AR "Start plot" route creates one. A plot opened
+/// from a planned pin ("Start plot now" — the one-tap route report 17
+/// introduced, and now the only one that card offers) and any plot carried
+/// across an app restart have a centre that is a LAT/LON and nothing else,
+/// so the scan screens showed a bare camera feed with a plot active.
+///
+/// The ring is NOT synthesised from the GPS centre. A fix under canopy is
+/// worth several metres and an ARCore anchor is worth centimetres; drawing
+/// one as the other would put a boundary on screen that is not where the
+/// boundary is, and the ring's whole job is answering "am I inside?". So the
+/// screen says what it has and offers the one act that produces a
+/// centimetre-grade centre — the cruiser standing at the centre and pinning
+/// it, exactly what the AR route does.
+///
+/// Byte-identical to the iOS `MeasurementCopy.plotCentreNotPinned*` set.
+const val PLOT_CENTRE_NOT_PINNED_HINT =
+    "No ring: this plot's centre is a GPS position, not an AR pin. Stand at the plot centre, aim at the ground, and tap Pin centre."
+
+/// Said on the same card, because a control that quietly rewrote the
+/// recorded centre would be the invisible data loss the plot-edit path
+/// already refuses. Pinning is a DRAWING act only.
+const val PLOT_PIN_CENTRE_NOTE =
+    "Pinning draws the ring only — the plot's recorded centre does not change."
+const val PLOT_PIN_CENTRE_BUTTON = "Pin centre"
+const val PLOT_PIN_CENTRE_DISMISS = "Not now"
+
 // MARK: - Top instruction banner (U1 — all four AR screens)
 
 /// Stage-guidance banner, top-centre: black 0.65 fill, white 14 sp medium,
@@ -149,13 +205,24 @@ fun BoxScope.MeasureBackButton(onClick: () -> Unit) {
 /// `failure` renders the shared amber banner directly beneath it, so the
 /// AIMING states (which no longer have a bottom panel) keep a failure
 /// surface. Callers hide the whole thing during the capture blackout.
+///
+/// `below` is the mirror of the iOS `MeasureTopBanner`'s `extra` slot: an
+/// INTERACTIVE card rendered in the same 340 dp column under the guidance,
+/// so an offer the cruiser can act on travels with the guidance instead of
+/// fighting the bottom block for room. Used by the scan screens' "Pin
+/// centre" card; it alone is enough to make the column render, because a
+/// card with nothing to say above it still has to be reachable.
+/// `instructionContent` replaces the text at the same position (e.g. DBH's
+/// animated acquisition cue); other callers keep the standard text banner.
 @Composable
 fun BoxScope.MeasureTopChrome(
     instruction: String?,
     failure: String? = null,
     onDismissFailure: (() -> Unit)? = null,
+    below: (@Composable () -> Unit)? = null,
+    instructionContent: (@Composable () -> Unit)? = null,
 ) {
-    if (instruction == null && failure == null) return
+    if (instruction == null && instructionContent == null && failure == null && below == null) return
     Column(
         modifier = Modifier
             .align(Alignment.TopCenter)
@@ -166,7 +233,9 @@ fun BoxScope.MeasureTopChrome(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        if (instruction != null) {
+        if (instructionContent != null) {
+            instructionContent()
+        } else if (instruction != null) {
             Text(
                 instruction,
                 style = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.Medium),
@@ -180,6 +249,78 @@ fun BoxScope.MeasureTopChrome(
             )
         }
         failure?.let { MeasureFailureBanner(it, onDismissFailure) }
+        if (below != null) below()
+    }
+}
+
+// MARK: - "Pin centre" offer (plot centre known only as GPS)
+
+/// The offer the DBH / Height screens make when a plot is being tallied but
+/// no AR anchor marks its centre, so there is no ring to draw. Rendered in
+/// `MeasureTopChrome`'s `below` slot.
+///
+/// Both scan screens use this ONE composable so the offer cannot drift
+/// between them, and it is byte-identical to the iOS `PlotPinCentreCard`.
+///
+/// `failure` carries the raycast refusal ([PLOT_GROUND_NOT_SEEN]) so a tap
+/// that found no ground says so here rather than leaving the button looking
+/// broken. A mis-aimed pin is not trapped: the ring appears immediately, and
+/// the mini-map's enlarged view → "Edit plot" re-opens the full placement
+/// screen (ghost preview + Reset) to put it right.
+@Composable
+fun PlotPinCentreCard(
+    failure: String? = null,
+    onPin: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val warn = Forestix.colors.confidenceWarn
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .shadow(3.dp, RoundedCornerShape(10.dp), clip = false)
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color.Black.copy(alpha = 0.65f))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            PLOT_CENTRE_NOT_PINNED_HINT,
+            style = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.Medium),
+            color = Color.White,
+            textAlign = TextAlign.Center,
+        )
+        Text(
+            PLOT_PIN_CENTRE_NOTE,
+            style = TextStyle(fontSize = 12.sp),
+            color = Color.White.copy(alpha = 0.75f),
+            textAlign = TextAlign.Center,
+        )
+        if (failure != null) {
+            Text(
+                failure,
+                style = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.SemiBold),
+                color = warn,
+                textAlign = TextAlign.Center,
+            )
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(top = 2.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            // White / prominent, the same pair the plot screens' Reset and
+            // Save wear — iOS `.forestixARSecondary` and `.forestixProminent`.
+            ForestixWhiteButton(
+                PLOT_PIN_CENTRE_DISMISS,
+                modifier = Modifier.weight(1f),
+                onClick = onDismiss,
+            )
+            ForestixProminentButton(
+                PLOT_PIN_CENTRE_BUTTON,
+                modifier = Modifier.weight(1f),
+                onClick = onPin,
+            )
+        }
     }
 }
 
@@ -249,16 +390,33 @@ private fun ShutterFlankSlot(content: (@Composable () -> Unit)?) {
 
 // MARK: - Live-value pill (U2 value strip)
 
+/// The three steps of the data type scale a value pill may render at, and
+/// nothing else — a pill never invents a size of its own.
+///
+/// MEDIUM exists because of the field report on the height walk strip: a line
+/// that carries a WORD as well as a number ("Total distance 21.40 m") at the
+/// 26 sp step is far wider than the bare numbers the step was drawn for, and
+/// read as oversized. It is still the emphasised line of its strip, one step
+/// up from the two dimmed lines above it. iOS `MeasureValuePill.Size`.
+enum class MeasurePillSize { LARGE, MEDIUM, SMALL }
+
 /// One line of the compact live-value strip directly above the shutter
 /// row — same dark-glass capsule language as the under-crosshair pills
-/// (iOS MeasureValuePill 1:1). Emphasised lines pass `large = true`
-/// (dataLarge); secondary lines default to dataSmall, `dimmed` on a
-/// lighter scrim.
+/// (iOS MeasureValuePill 1:1). `size` picks the step of the data scale;
+/// `dimmed` drops to 0.85 white on a lighter scrim.
 @Composable
-fun MeasureValuePill(text: String, large: Boolean = false, dimmed: Boolean = false) {
+fun MeasureValuePill(
+    text: String,
+    size: MeasurePillSize = MeasurePillSize.SMALL,
+    dimmed: Boolean = false,
+) {
     Text(
         text,
-        style = if (large) Forestix.type.dataLarge else Forestix.type.dataSmall,
+        style = when (size) {
+            MeasurePillSize.LARGE -> Forestix.type.dataLarge
+            MeasurePillSize.MEDIUM -> Forestix.type.data
+            MeasurePillSize.SMALL -> Forestix.type.dataSmall
+        },
         color = Color.White.copy(alpha = if (dimmed) 0.85f else 1f),
         modifier = Modifier
             .clip(CircleShape)
@@ -422,29 +580,93 @@ fun MeasureFailureBanner(text: String, onDismiss: (() -> Unit)? = null) {
     )
 }
 
-// MARK: - Developer research fields (Target / True value)
+// MARK: - Developer research field (hand-measured true value)
 
-/// Compact fixed-width research capture row — iOS parity: caption labels at
-/// white 0.8, a 70 dp Target-id field and a 90 dp true-value field with a
-/// decimal keyboard, HStack spacing 6.
+/// Compact fixed-width research capture row — iOS parity: caption label at
+/// white 0.8 and a 90 dp true-value field with a decimal keyboard, spacing 6.
+///
+/// The "Target" id box that used to lead this row is gone. It meant nothing to
+/// a cruiser, and it was a free-text field they had to keep in step by hand
+/// with the tree they were actually standing at — when it drifted, the
+/// research CSV's `tree_id` pointed at the wrong tree. That column is now
+/// filled from the tree number the capture is already locked to, which cannot
+/// drift.
+///
+/// `trueLabel` MUST come from `TruthInput.fieldLabel(quantity, unit)` and
+/// `truthUnit` MUST be the same unit that label was built from — the two are
+/// separate parameters only because the label is a plain string here. The
+/// toggle changes the unit for THIS entry; the caller re-derives the label
+/// from it, so the field can never be labelled in one system while the value
+/// is read as another.
 @Composable
 fun ResearchFieldsRow(
-    targetValue: String,
-    onTargetChange: (String) -> Unit,
-    targetPlaceholder: String,
     trueLabel: String,
     trueValue: String,
     onTrueChange: (String) -> Unit,
     truePlaceholder: String,
+    truthUnit: TruthInput.Unit,
+    onToggleTruthUnit: () -> Unit,
 ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Text("Target", style = Forestix.type.caption, color = Color.White.copy(alpha = 0.8f))
-        ResearchField(targetValue, onTargetChange, targetPlaceholder, width = 70.dp, decimal = false)
         Text(trueLabel, style = Forestix.type.caption, color = Color.White.copy(alpha = 0.8f))
         ResearchField(trueValue, onTrueChange, truePlaceholder, width = 90.dp, decimal = true)
+        TruthUnitToggle(truthUnit, onToggle = onToggleTruthUnit)
+    }
+}
+
+/// Per-entry unit switch that sits next to a typed ground-truth field.
+///
+/// The field opens in the cruiser's ACTIVE unit system; this changes it for
+/// THIS entry only, and the field's label is driven from the same value, so
+/// what is typed and what is read can never disagree. The button shows the
+/// unit currently in force — the cruiser reads the state, not the action.
+///
+/// CROSS-PLATFORM: same square, same unit text, same accessibility wording as the
+/// iOS `TruthUnitToggle`.
+///
+/// `onDarkPanel` picks the chrome: the scan screens are a dark camera overlay,
+/// the field log is a standard light sheet, and the white-on-white that once
+/// made the scan-screen truth fields invisible would happen here if one
+/// styling served both.
+///
+/// The 32 dp square is what is DRAWN; the tappable box around it is 48 dp,
+/// Android's minimum touch target — the visual size is a matter of fitting the
+/// row, the touch target is a matter of hitting it with a glove on. It also
+/// carries `Role.Button`, without which TalkBack announces the control as
+/// plain text while VoiceOver announces the iOS twin as a button.
+@Composable
+fun TruthUnitToggle(
+    unit: TruthInput.Unit,
+    onDarkPanel: Boolean = true,
+    onToggle: () -> Unit,
+) {
+    val colors = Forestix.colors
+    val ink = if (onDarkPanel) Color.White else colors.textPrimary
+    val fill = if (onDarkPanel) Color.White.copy(alpha = 0.12f) else colors.surfaceRaised
+    val stroke = if (onDarkPanel) Color.White.copy(alpha = 0.4f) else colors.divider
+    Box(
+        Modifier
+            .size(48.dp)
+            .clickableNoRipple(onToggle)
+            .semantics {
+                role = Role.Button
+                contentDescription = "Unit for this entry: ${unit.raw}. Tap to switch."
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            Modifier
+                .size(32.dp)
+                .clip(RoundedCornerShape(5.dp))
+                .background(fill)
+                .border(0.5.dp, stroke, RoundedCornerShape(5.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(unit.raw, style = Forestix.type.caption, color = ink)
+        }
     }
 }
 

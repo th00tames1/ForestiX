@@ -57,11 +57,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.ar.ArCameraView
 import com.hcjeong.forestix.ar.ArSceneMarker
 import com.hcjeong.forestix.ar.ArSessionHub
+import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.Units
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
@@ -88,6 +90,16 @@ fun SamplingPlotScreen(nav: NavController) {
     val plot = ArSessionHub.activePlot
     val radiusM = ArSessionHub.plotRadiusM
     val placed = plot != null
+    // The ring, the slider and the area line all read the cruiser's units.
+    // The stored radius stays METRES — that is what the AR ring, the
+    // inside/outside test and the saved entry are in; only the dial's scale
+    // and the readouts change.
+    val settings by env.settings.state.collectAsStateWithLifecycle()
+    val unitSystem = settings.unitSystem
+    // The plot is placed but ARCore is no longer correcting its pose, so the
+    // hub has hidden the ring. Everything this screen says about the plot is
+    // derived from that same pose and has to go unknown with it.
+    val trackingLost = placed && ArSessionHub.plotTrackingLost
 
     var isOutside by remember { mutableStateOf(false) }
     var distanceFromCenter by remember { mutableStateOf<Double?>(null) }
@@ -133,7 +145,7 @@ fun SamplingPlotScreen(nav: NavController) {
         if (ArSessionHub.activePlot != null) return
         val hit = controller.screenCenterHit() ?: controller.forwardPointAtHorizontalDistance(3f)
         if (hit == null || !ArSessionHub.placePlot(hit)) {
-            failure = "Couldn't see the ground here. Aim at the ground and try again."
+            failure = PLOT_GROUND_NOT_SEEN
             return
         }
         failure = null
@@ -179,13 +191,27 @@ fun SamplingPlotScreen(nav: NavController) {
                     style = Forestix.type.sectionHead.copy(letterSpacing = 1.2.sp),
                     color = Color.White.copy(alpha = 0.85f),
                 )
-                Text(String.format(Locale.US, "%.1f m", radiusM), style = Forestix.type.data, color = Color.White)
+                Text(
+                    // The same ring the map draws, so the same label its plot
+                    // banner and mini-map put on it.
+                    MeasurementFormatter.plotLength(radiusM, unitSystem),
+                    style = Forestix.type.data,
+                    color = Color.White,
+                )
             }
             Slider(
-                value = radiusM.toFloat(),
-                onValueChange = { ArSessionHub.setPlotRadius(it.toDouble()) },
-                valueRange = 1f..30f,
-                steps = 57,
+                // The slider drags in the cruiser's unit and converts back on
+                // the way in, so an imperial thumb lands on whole and half
+                // FEET instead of on whichever foot value happens to sit on a
+                // half-metre stop. A one-way format here would be a bug: this
+                // control writes.
+                value = MeasurementFormatter.plotRadiusDisplay(radiusM, unitSystem).toFloat(),
+                onValueChange = {
+                    ArSessionHub.setPlotRadius(
+                        MeasurementFormatter.plotRadiusMetres(it.toDouble(), unitSystem))
+                },
+                valueRange = MeasurementFormatter.plotRadiusSliderRange(unitSystem),
+                steps = MeasurementFormatter.plotRadiusSliderSteps(unitSystem),
                 colors = SliderDefaults.colors(
                     thumbColor = colors.confidenceWarn,
                     activeTrackColor = colors.confidenceWarn,
@@ -202,7 +228,8 @@ fun SamplingPlotScreen(nav: NavController) {
         // INSIDE/OUTSIDE status is a value and stays in the panel below).
         MeasureTopChrome(
             instruction = failure
-                ?: if (!placed) "Set the radius, aim at the plot centre, tap +" else null,
+                ?: if (trackingLost) PLOT_TRACKING_LOST_HINT
+                else if (!placed) "Set the radius, aim at the plot centre, tap +" else null,
         )
 
         // U2 — bottom-centre shutter while aiming for the centre (no
@@ -214,14 +241,24 @@ fun SamplingPlotScreen(nav: NavController) {
         // bottom as before.
         if (placed) MeasureStatusPanel {
             CenteredText(
-                if (isOutside) "OUTSIDE — walk back inside" else "INSIDE sampling area",
+                if (trackingLost) PLOT_TRACKING_LOST_STATUS
+                else if (isOutside) "OUTSIDE — walk back inside" else "INSIDE sampling area",
                 large = true,
-                color = if (isOutside) colors.confidenceBad else colors.confidenceOk,
+                color = when {
+                    trackingLost -> colors.confidenceWarn
+                    isOutside -> colors.confidenceBad
+                    else -> colors.confidenceOk
+                },
             )
             // Distance line — iOS distanceLine format + style.
             Text(
+                // Both halves in the cruiser's unit: the distance to the
+                // centre is a measurement, the plot area is sized the way
+                // plots are sized in each convention (m² metric, acres US).
                 distanceFromCenter?.let {
-                    String.format(Locale.US, "Centre: %.2f m · area: %.1f m²", it, Units.circleAreaM2(radiusM))
+                    "Centre: " + MeasurementFormatter.distance(it, unitSystem) +
+                        " · area: " +
+                        MeasurementFormatter.plotArea(Units.circleAreaM2(radiusM), unitSystem)
                 } ?: "—",
                 style = Forestix.type.dataSmall,
                 color = Color.White.copy(alpha = 0.85f),
@@ -242,14 +279,39 @@ fun SamplingPlotScreen(nav: NavController) {
                     modifier = Modifier.weight(1f),
                 ) {
                     val r = ArSessionHub.plotRadiusM
-                    env.history.append(
-                        QuickMeasureEntry(
+                    // FIELD REPORT 12 — "Edit plot" re-opens this screen on
+                    // the ring that is already placed, so Save is BOTH
+                    // "record this ring" and "change the ring I recorded".
+                    // Appending on the second one wrote a second
+                    // SAMPLING_PLOT row for one physical ring, and those rows
+                    // go to the field log and the CSV the validation study
+                    // reads: three radius tweaks read as three plots. One
+                    // ring, one row.
+                    val savedId = ArSessionHub.linkedQuickEntryId
+                    val existing = savedId?.let { id ->
+                        env.history.entries.value.firstOrNull { it.id == id }
+                    }
+                    if (existing != null) {
+                        // createdAt and plotID ride across untouched — the
+                        // ring was recorded when it was PLACED, and an edit
+                        // changes its radius, not when the cruiser stood at
+                        // its centre.
+                        env.history.update(
+                            existing.copy(
+                                value = r,
+                                secondaryValue = Units.circleAreaM2(r),
+                            )
+                        )
+                    } else {
+                        val entry = QuickMeasureEntry(
                             kind = MeasureKind.SAMPLING_PLOT, value = r,
                             secondaryValue = Units.circleAreaM2(r),
                             sigma = null, confidenceRaw = "green", method = "ar.tap",
                             plotID = env.history.activePlotID.value,
                         )
-                    )
+                        env.history.append(entry)
+                        ArSessionHub.linkQuickEntry(entry.id)
+                    }
                     nav.popBackStack()
                 }
             }

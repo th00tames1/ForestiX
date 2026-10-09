@@ -21,6 +21,12 @@ public struct RawCapturesScreen: View {
     @State private var inventory = RawCaptureStore.Inventory(directories: 0, parsed: 0)
     @State private var rerunSummary: String?
     @State private var isRerunning = false
+    /// The repair is two steps on purpose — see `previewRepair`. `pendingRepairs`
+    /// is what Apply would write; empty means there is nothing to apply.
+    @State private var pendingRepairs: [CaptureReadingMatch.Repair] = []
+    @State private var repairSummary: String?
+    @State private var isRepairing = false
+    @EnvironmentObject private var history: QuickMeasureHistory
     @State private var confirmClear = false
     /// Export runs off the main actor and can fail; both states are visible.
     @State private var isExporting = false
@@ -73,6 +79,60 @@ public struct RawCapturesScreen: View {
                     Text("Stored captures")
                 }
 
+                // Re-run above only REPORTS. This is the one that writes, so
+                // it is a separate section, it previews first, and Apply only
+                // appears once there is something to apply.
+                Section {
+                    Button {
+                        previewRepair()
+                    } label: {
+                        HStack {
+                            Label("Check readings against captures",
+                                  systemImage: "checkmark.gobackward")
+                            Spacer()
+                            if isRepairing { ProgressView() }
+                        }
+                    }
+                    .disabled(isRepairing)
+                    .accessibilityIdentifier("rawCaptures.checkReadings")
+                    if let s = repairSummary {
+                        Text(s)
+                            .font(ForestixType.dataSmall)
+                            .foregroundStyle(ForestixPalette.textSecondary)
+                            .accessibilityIdentifier("rawCaptures.repairSummary")
+                    }
+                    if !pendingRepairs.isEmpty {
+                        Button(role: .destructive) {
+                            applyRepair()
+                        } label: {
+                            Label("Apply \(pendingRepairs.count) correction\(pendingRepairs.count == 1 ? "" : "s")",
+                                  systemImage: "square.and.pencil")
+                        }
+                        .accessibilityIdentifier("rawCaptures.applyRepair")
+                    }
+                } header: {
+                    Text("Field log")
+                } footer: {
+                    Text("Replays each capture with the current estimator and compares it with the reading it produced. Readings you typed are never touched.")
+                }
+
+                // The other writer on this screen. It is filed with the
+                // captures rather than with the field log because what it
+                // rewrites is a CRUISE row, and the only thing that can
+                // re-derive one is the bundle it was measured from.
+                Section {
+                    NavigationLink {
+                        DBHEpochRecomputeScreen()
+                    } label: {
+                        Label("Recompute diameters", systemImage: "function")
+                    }
+                    .accessibilityIdentifier("rawCaptures.recomputeDiameters")
+                } header: {
+                    Text("Cruise diameters")
+                } footer: {
+                    Text("Re-derives cruise diameters from their raw captures with this build's estimator (epoch \(DBHEstimator.estimatorEpoch)). Previews every change before anything is written.")
+                }
+
                 Section {
                     NavigationLink {
                         DBHAlgorithmSweepView()
@@ -122,6 +182,17 @@ public struct RawCapturesScreen: View {
                                              ? ForestixPalette.confidenceWarn
                                              : ForestixPalette.textSecondary)
                             .accessibilityIdentifier("rawCaptures.storage")
+                        // WHAT THE ZIP IS, said where the ZIP is exported. The
+                        // research CSV export splits itself against the field
+                        // log; this one deliberately does not, because a
+                        // complete capture archive is the thing worth having
+                        // and a bundle whose reading was retaken is exactly
+                        // what an accuracy study wants to see. Nothing is left
+                        // out — so the honest notice is the inverse one: what
+                        // is IN it that the field log no longer shows.
+                        Text(Self.corpusCompletenessNotice)
+                            .foregroundStyle(ForestixPalette.textSecondary)
+                            .accessibilityIdentifier("rawCaptures.completeness")
                     }
                 }
             }
@@ -169,9 +240,11 @@ public struct RawCapturesScreen: View {
         } message: {
             Text(exportError ?? "")
         }
-        .confirmationDialog("Clear all raw captures?",
-                            isPresented: $confirmClear,
-                            titleVisibility: .visible) {
+        // ALERT, not a confirmationDialog: a destructive confirmation is
+        // centred and reads the same wherever the control that raised it sits.
+        // Same rule as every other delete in this app; see the field log's
+        // delete for the full argument.
+        .alert("Clear all raw captures?", isPresented: $confirmClear) {
             Button("Delete all", role: .destructive) {
                 RawCaptureStore.clearAll()
                 reload()
@@ -239,6 +312,14 @@ public struct RawCapturesScreen: View {
         summaries = listing.summaries
         inventory = listing.inventory
     }
+
+    /// The ZIP holds every bundle, including ones the field log has moved on
+    /// from. Byte-identical to the Android sibling.
+    static let corpusCompletenessNotice =
+        "Export ZIP is the COMPLETE corpus, not the field log: a bundle whose "
+        + "reading was deleted or retaken is still in it, and a ground truth "
+        + "the field log has since corrected keeps its original value here. "
+        + "Nothing is filtered out."
 
     /// "X MB on device · Y GB free".
     private var storageFooter: String {
@@ -347,6 +428,100 @@ public struct RawCapturesScreen: View {
         return lines.joined(separator: "\n")
     }
 
+    /// Which stored readings disagree with their own capture, without
+    /// changing anything. Always run before the repair, and shown on its own,
+    /// because "45 readings will change" is a thing the cruiser should get to
+    /// read before it happens rather than after.
+    private func previewRepair() {
+        isRepairing = true
+        let items = summaries
+        let entries = history.entries
+        Task.detached(priority: .userInitiated) {
+            let found = Self.plan(items: items, entries: entries)
+            await MainActor.run {
+                pendingRepairs = found
+                repairSummary = Self.repairPreviewText(found)
+                isRepairing = false
+            }
+        }
+    }
+
+    /// Write the previewed corrections into the field log.
+    private func applyRepair() {
+        let plan = pendingRepairs
+        guard !plan.isEmpty else { return }
+        let changed = history.repairValuesFromCaptures(CaptureReadingMatch.map(plan))
+        // Report what LANDED, not what was planned. The store re-checks every
+        // repair against the value it expected to find and skips any reading
+        // that moved in between, so the two counts can legitimately differ —
+        // and if they do, that is the interesting number.
+        repairSummary = changed == plan.count
+            ? "\(changed) reading\(changed == 1 ? "" : "s") corrected from their raw captures."
+            : "\(changed) of \(plan.count) corrected — the rest no longer held the value they were matched on."
+        pendingRepairs = []
+    }
+
+    /// Pure so it can run off the main actor and be reasoned about on its own:
+    /// replay every bundle, then pair the results with the readings.
+    static func plan(items: [RawCaptureSummary],
+                     entries: [QuickMeasureEntry]) -> [CaptureReadingMatch.Repair] {
+        var captures: [CaptureReadingMatch.Capture] = []
+        for sum in items {
+            let m = sum.manifest
+            // CRUISE CAPTURES ARE SKIPPED, for the reason `TruthBackfill`
+            // gives: a cruise capture's reading is a Tree/Stem record in Core
+            // Data, not a `QuickMeasureEntry`, so there is nothing here to
+            // pair it with and a tree number would collide across the two
+            // worlds if we tried.
+            guard m.context.mode != "cruise",
+                  let kind = readingKind(m.kind),
+                  let when = TruthBackfill.parseISO(m.createdAt)
+            else { continue }
+            let value: Double?
+            if m.kind == "dbh" {
+                value = RawCaptureReplay.rerunDBH(manifest: m, id: sum.id)
+                    .map { Double($0.diameterCm) }
+            } else {
+                value = RawCaptureReplay.rerunHeight(manifest: m)
+                    .map { Double($0.result.heightM) }
+            }
+            guard let v = value else { continue }
+            captures.append(.init(
+                bundleID: sum.id, kind: kind,
+                treeNumber: m.context.treeNumber,
+                plotID: m.context.plotId.flatMap(UUID.init(uuidString:)),
+                createdAt: when, value: v,
+                oppositeAxisValue: m.kind == "dbh"
+                    ? RawCaptureReplay.rerunDBHOppositeAxis(manifest: m, id: sum.id)
+                    : nil,
+                storedValue: m.resultLive.value,
+                sigma: m.resultLive.sigma > 0 ? m.resultLive.sigma : nil))
+        }
+        return CaptureReadingMatch.repairs(captures: captures, entries: entries)
+    }
+
+    /// A bundle's kind string as a field-log kind. Only the two kinds the
+    /// estimators replay are repairable.
+    private static func readingKind(_ raw: String) -> QuickMeasureEntry.Kind? {
+        switch raw {
+        case "dbh":    return .dbh
+        case "height": return .height
+        default:       return nil
+        }
+    }
+
+    static func repairPreviewText(_ plan: [CaptureReadingMatch.Repair]) -> String {
+        guard !plan.isEmpty else {
+            return "No reading was measured on the wrong guide axis. Nothing to correct."
+        }
+        let factors = plan.map { $0.expected / $0.corrected }.sorted()
+        let median = factors[factors.count / 2]
+        var lines = ["\(plan.count) reading\(plan.count == 1 ? "" : "s") measured on the wrong guide axis."]
+        lines.append(String(format: "Stored / correct: median %.3f", median))
+        lines.append("Tap Apply to replace them with the values their captures give.")
+        return lines.joined(separator: "\n")
+    }
+
     private func shortDate(_ iso: String) -> String {
         // created_at is ISO8601 with fractional seconds; show the date +
         // HH:MM prefix without a heavy formatter round-trip.
@@ -394,6 +569,19 @@ struct RawCaptureDetailView: View {
     }
 
     private var unit: String { manifest?.kind == "height" ? "m" : "cm" }
+
+    // This is the DESK console, not a field-entry surface: it types in the
+    // bundle's own metric base, stated in the section header and in the
+    // placeholder. There is no per-entry unit toggle here (that lives on the
+    // scan screens, where the cruiser's active system decides), but the unit is
+    // still RECORDED with the value, so every truth in the corpus carries a
+    // truth_unit and nothing has to be inferred later.
+    private var consoleQuantity: TruthInput.Quantity {
+        manifest?.kind == "height" ? .height : .diameter
+    }
+    private var consoleUnit: TruthInput.Unit {
+        TruthInput.defaultUnit(consoleQuantity, imperial: false)
+    }
 
     @ViewBuilder
     private func overviewSection(_ m: RawCaptureManifest) -> some View {
@@ -459,18 +647,18 @@ struct RawCaptureDetailView: View {
         Section {
             HStack {
                 // ',' is accepted as the decimal separator and normalised.
-                TextField(m.kind == "height" ? "True height (m)" : "True Ø (cm)",
+                TextField(TruthInput.promptLabel(consoleQuantity, unit: consoleUnit),
                           text: $truthText)
                     #if os(iOS)
                     .keyboardType(.decimalPad)
                     #endif
                     .textFieldStyle(.roundedBorder)
                     .accessibilityIdentifier("rawCaptures.detail.truthField")
-                Button("Save") { saveTruth(kind: m.kind) }
+                Button("Save") { saveTruth() }
                 .buttonStyle(.forestixProminent)
                 .frame(width: 90)
             }
-            if let warning = truthWarning(kind: m.kind) {
+            if let warning = truthWarning() {
                 TruthFieldWarning(text: warning)
             }
             // Clearing a stored truth is EXPLICIT. Save used to write
@@ -501,14 +689,19 @@ struct RawCaptureDetailView: View {
 
     /// Save guard: an empty or unparseable field NEVER overwrites a stored
     /// truth, and the input is left alone so nothing typed is lost.
-    private func saveTruth(kind: String) {
-        guard let value = TruthInput.parsePositive(truthText) else {
+    private func saveTruth() {
+        // parsePositiveBASE, not parsePositive: the value stored is the metric
+        // base and `consoleUnit` is what the field says it is being typed in.
+        // They agree today only because this console is hardcoded metric — the
+        // shared helper exists so that adding a toggle here cannot leave a
+        // number unconverted under a truth_unit that says it was converted.
+        guard let value = TruthInput.parsePositiveBase(truthText, unit: consoleUnit) else {
             truthStatus = TruthInput.normalized(truthText).isEmpty
                 ? "Nothing entered — stored truth left as it was."
                 : "Not a number — stored truth left as it was."
             return
         }
-        switch RawCaptureStore.applyTruth(id: id, value: value) {
+        switch RawCaptureStore.applyTruth(id: id, value: value, unit: consoleUnit) {
         case .applied:
             truthStatus = "Truth saved."
             load()
@@ -523,10 +716,8 @@ struct RawCaptureDetailView: View {
         }
     }
 
-    private func truthWarning(kind: String) -> String? {
-        if TruthInput.isUnparseable(truthText) { return "Not a number" }
-        guard let v = TruthInput.parsePositive(truthText) else { return nil }
-        return TruthInput.warning(value: v, isHeight: kind == "height")
+    private func truthWarning() -> String? {
+        TruthInput.fieldWarning(truthText, quantity: consoleQuantity, unit: consoleUnit)
     }
 
     @ViewBuilder

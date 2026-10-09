@@ -1,0 +1,83 @@
+{
+  "schema": 1,
+  "description": "Analytic cylinder cases and height tier boundaries. Coordinates are normalized inputs, not sensor-adapter or full live replay tests.",
+  "diameter": [
+    {
+      "name": "small",
+      "span_px": 7.319250547114001,
+      "depth_m": 2.001587708172407,
+      "focal_px": 150,
+      "expected_cm": 10.0
+    },
+    {
+      "name": "medium",
+      "span_px": 28.432746132436435,
+      "depth_m": 1.506350832689629,
+      "focal_px": 120,
+      "expected_cm": 40.0
+    },
+    {
+      "name": "large",
+      "span_px": 78.9115139065715,
+      "depth_m": 2.5190524980688873,
+      "focal_px": 200,
+      "expected_cm": 120.0
+    }
+  ],
+  "height": [
+    {
+      "name": "normal",
+      "d_m": 10,
+      "top_rad": 0.7853981633974483,
+      "base_rad": 0.0,
+      "height_m": 9.999999999999998,
+      "sigma_m": 0.23174939889976384,
+      "tier": "green"
+    },
+    {
+      "name": "distance_25",
+      "d_m": 25,
+      "top_rad": 0.7853981633974483,
+      "base_rad": 0.0,
+      "height_m": 24.999999999999996,
+      "sigma_m": 0.5793734972494097,
+      "tier": "green"
+    },
+    {
+      "name": "distance_26",
+      "d_m": 26,
+      "top_rad": 0.7853981633974483,
+      "base_rad": 0.0,
+      "height_m": 25.999999999999996,
+      "sigma_m": 0.602548437139386,
+      "tier": "yellow"
+    },
+    {
+      "name": "distance_30",
+      "d_m": 30,
+      "top_rad": 0.7853981633974483,
+      "base_rad": 0.0,
+      "height_m": 29.999999999999996,
+      "sigma_m": 0.6952481966992916,
+      "tier": "yellow"
+    },
+    {
+      "name": "distance_31",
+      "d_m": 31,
+      "top_rad": 0.7853981633974483,
+      "base_rad": 0.0,
+      "height_m": 30.999999999999996,
+      "sigma_m": 0.718423136589268,
+      "tier": "red"
+    },
+    {
+      "name": "steep",
+      "d_m": 2,
+      "top_rad": 1.3962634015954636,
+      "base_rad": -0.08726646259971647,
+      "height_m": 11.517540966287264,
+      "sigma_m": 0.41687036714963216,
+      "tier": "yellow"
+    }
+  ]
+}

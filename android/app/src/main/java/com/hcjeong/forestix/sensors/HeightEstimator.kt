@@ -11,6 +11,7 @@
 
 package com.hcjeong.forestix.sensors
 
+import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.UncertaintyBand
 import com.hcjeong.forestix.common.UnitSystem
 import java.util.Locale
@@ -167,14 +168,24 @@ object HeightEstimator {
             // so failedCheckReasons below can put ANY of these four in front of
             // the cruiser, not just the σ one. All four therefore say what
             // happened AND what to do about it. Predicates unchanged.
+            // The walk-back distances are quoted through `guidanceDistance`
+            // for the same reason the band above is: these sentences tell the
+            // cruiser where to stand, and one worded in a unit they do not pace
+            // in is not an instruction. The THRESHOLDS are the metric ones they
+            // have always been and are read from the same constants the checks
+            // apply, so the wording cannot drift from the gate.
             check(dh <= YELLOW_DH_M, Severity.WARN,
-                "You walked back more than 25 m — that far out, a small slip in aim " +
+                "You walked back more than " +
+                    MeasurementFormatter.guidanceDistance(YELLOW_DH_M.toDouble(), unitSystem) +
+                    " — that far out, a small slip in aim " +
                     "turns into a big height error. Move closer and retake if you can."),
             check(abs(alphaTopRad) <= MAX_ALPHA_TOP_YELLOW, Severity.WARN,
                 "You aimed more than 75\u00B0 up at the top — you are too close to the " +
                     "tree. Walk back until you can see the top comfortably, then retake."),
             check(dh <= HIGH_DRIFT_DH_M, Severity.WARN,
-                "You walked back more than 30 m — the distance may have crept. Move closer and retake if you can."),
+                "You walked back more than " +
+                    MeasurementFormatter.guidanceDistance(HIGH_DRIFT_DH_M.toDouble(), unitSystem) +
+                    " — the distance may have crept. Move closer and retake if you can."),
         )
         val tier = combineChecks(checks)
 

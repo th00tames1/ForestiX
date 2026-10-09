@@ -94,6 +94,51 @@ public enum RawCaptureReplay {
         }
     }
 
+    /// The same bundle read against the OTHER guide axis.
+    ///
+    /// Not an algorithm variant — a diagnostic. The live estimator and the
+    /// recorder used to choose the walk axis separately, and when they chose
+    /// differently the bracket fractions were measured against the other
+    /// extent (256 px against 192), scaling that reading by about 4:3 with
+    /// nothing on screen to show for it.
+    ///
+    /// Given a stored reading that disagrees with its bundle, comparing it
+    /// with BOTH readings of that bundle says which of the two disagreements
+    /// it is: a reading that lands on this value and not on `rerunDBH`'s was
+    /// computed on the wrong axis, and a reading that matches neither differs
+    /// for some ordinary reason — a different set of frames, a re-measure —
+    /// and must be left alone. Only the first is repairable, and only that
+    /// identification makes an automatic rewrite of field data defensible.
+    ///
+    /// Nil when the bundle has no bracket: the auto path walks out from the
+    /// tap rather than reading fractions off an extent, so it has no 4:3 to
+    /// be wrong by.
+    public static func rerunDBHOppositeAxis(manifest m: RawCaptureManifest,
+                                            id: String) -> Double? {
+        guard let inp = reconstructDBHInputs(manifest: m, id: id),
+              inp.bracket.enabled,
+              let first = inp.frames.first
+        else { return nil }
+        // Flip row<->col about the same tap. `guideAxis(from:tap:)` builds one
+        // from the stored string, so the flip is that string's counterpart.
+        let flipped: GuideAxis
+        switch inp.axis {
+        case .row: flipped = .col(x: Int(inp.tap.x.rounded()))
+        case .col: flipped = .row(y: Int(inp.tap.y.rounded()))
+        }
+        // A tap outside the flipped extent has no line to walk.
+        switch flipped {
+        case .row(let y): guard y >= 0, y < first.height else { return nil }
+        case .col(let x): guard x >= 0, x < first.width else { return nil }
+        }
+        return DBHEstimator.bracketChordEstimate(
+            frames: inp.frames,
+            guideAxis: flipped,
+            leftFraction: inp.bracket.left,
+            rightFraction: inp.bracket.right,
+            calibration: inp.cal).map { Double($0.diameterCm) }
+    }
+
     // MARK: DBH multi-algorithm sweep (accuracy validation)
 
     /// One candidate DBH geometry in the accuracy-validation sweep. `run`
@@ -551,6 +596,11 @@ public enum RawCaptureReplay {
             depthNoiseMm: Float(c.depthNoiseMm),
             dbhCorrectionAlpha: Float(c.alpha),
             dbhCorrectionBeta: Float(c.beta),
+            // 0 for a bundle written before the key existed, which leaves its
+            // coefficients refused — the same answer that build gave. Omitting
+            // this argument is what made EVERY replay epoch 0, so a calibrated
+            // project's replay silently dropped its correction.
+            dbhCalibrationEpoch: c.dbhCalibrationEpoch ?? 0,
             vioDriftFraction: Float(c.vioDriftFraction))
         // depthDiscontinuityM is not a persisted/project-tunable field
         // (always the 0.04 m default on both platforms), so the default
@@ -593,6 +643,12 @@ public enum RawCaptureRecorder {
         calibration: ProjectCalibration,
         algorithm: DBHMeasurementMethod,
         bracket: RawCaptureManifest.DBHBundle.Bracket,
+        /// The axis the LIVE estimate was computed on. Passed in rather than
+        /// re-voted, because a recorder that votes for itself can disagree
+        /// with the reading it is supposed to be the raw record of — and it
+        /// did, on 60 of 107 validation captures, by a factor of 4:3. Nil
+        /// only for callers with no axis of their own; then it votes.
+        guideAxis: GuideAxis?,
         captureManual: Bool,
         context: RawCaptureContext,
         referenceJPEG: Data?,
@@ -613,7 +669,7 @@ public enum RawCaptureRecorder {
         // rule) so the stored bytes fully determine the estimator input.
         let canon = frames.map { RawCaptureFrame.canonicalized($0) }
         let canonFirst = RawCaptureFrame.canonicalized(first)
-        let axis = DBHEstimator.pickGuideAxis(
+        let axis = guideAxis ?? DBHEstimator.pickGuideAxis(
             frame: canonFirst, tapPixel: tapPixel, calibration: calibration)
 
         // Canonical live result over the stored frames.
@@ -785,6 +841,9 @@ public enum RawCaptureRecorder {
         topPose: simd_float4x4,
         dHM: Float,
         poseSamples: [(tMs: Int, pose: simd_float4x4)],
+        // Whether VIO tracking dropped between the anchor and the aims — the
+        // on-screen warning, recorded so the bundle can be filtered on it.
+        trackingDropped: Bool,
         calibration: ProjectCalibration,
         context: RawCaptureContext,
         gps: RawCaptureGPS?,
@@ -882,7 +941,8 @@ public enum RawCaptureRecorder {
             dHM: Double(dHM),
             poseSamples: poseSamples.map {
                 .init(tMs: $0.tMs, pose: RawCaptureMatrix.flat($0.pose))
-            })
+            },
+            trackingDropped: trackingDropped)
         manifest.replaySelfcheck = .init(status: "fail", rerunValue: nil, delta: nil)
         do {
             try RawCaptureStore.writeManifest(manifest, id: id)
@@ -939,7 +999,8 @@ public enum RawCaptureRecorder {
                     alpha: Double(calibration.dbhCorrectionAlpha),
                     beta: Double(calibration.dbhCorrectionBeta),
                     depthNoiseMm: Double(calibration.depthNoiseMm),
-                    vioDriftFraction: Double(calibration.vioDriftFraction))),
+                    vioDriftFraction: Double(calibration.vioDriftFraction),
+                    dbhCalibrationEpoch: calibration.dbhCalibrationEpoch)),
             resultLive: resultLive,
             truth: .init(value: nil, enteredAt: nil),
             gps: gps.map { .init(lat: $0.lat, lon: $0.lon, accM: $0.accM) },

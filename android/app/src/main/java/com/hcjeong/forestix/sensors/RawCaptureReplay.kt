@@ -437,6 +437,11 @@ object RawCaptureReplay {
             dbhCorrectionBeta = cal.optDouble("beta", 1.0).toFloat(),
             vioDriftFraction = cal.optDouble(
                 "vio_drift_fraction", HeightEstimator.DEFAULT_VIO_DRIFT_FRACTION.toDouble()).toFloat(),
+            // 0 for a bundle written before the key existed, which leaves its
+            // coefficients refused — the same answer that build gave. Omitting
+            // this was what made EVERY replay epoch 0, so a calibrated
+            // project's replay silently dropped its correction.
+            dbhCalibrationEpoch = cal.optInt("dbh_calibration_epoch", 0),
         )
     }
 

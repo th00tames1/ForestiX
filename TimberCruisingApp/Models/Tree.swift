@@ -45,8 +45,19 @@ public enum HeightMethod: String, Codable, Sendable {
 
 public struct Tree: Identifiable, Codable, Sendable {
     public let id: UUID
-    public let plotId: UUID
+    /// The plot this tree is filed under — and, through that plot, the
+    /// project. `var` rather than `let` because the field log can re-file a
+    /// captured tree into another project's plot (see Screens/TreeMove.swift):
+    /// readings taken before a project existed, or under the wrong one, had
+    /// no way out otherwise. Nothing else in the app writes it after
+    /// creation, and Android's `Tree` is a data class whose `copy` has always
+    /// been able to.
+    public var plotId: UUID
     public var treeNumber: Int
+    /// The cruiser's own name for this tree ("Plot3-T07"). nil for a tree
+    /// that was never named, and every display falls back to
+    /// "Tree #treeNumber" through `displayTitle`.
+    public var treeName: String?
     public var speciesCode: String
     public var status: TreeStatus
 
@@ -69,6 +80,21 @@ public struct Tree: Identifiable, Codable, Sendable {
     /// collected for needs to know which estimator produced each diameter.
     /// nil for rows written before the field existed.
     public var dbhCaptureMode: String?
+    /// WHICH ESTIMATOR read this stem — `DBHEstimator.estimatorEpoch` as it
+    /// stood when the diameter was written.
+    ///
+    /// The row keeps only `dbhCm`: no span, no depth, no focal length, so
+    /// nothing about how the number was arrived at can be recovered from the
+    /// row itself. Two diameters produced by two different geometries are
+    /// therefore indistinguishable once they are side by side in a plot, and
+    /// the geometry HAS changed under a live corpus — epoch 3 solves the
+    /// silhouette as a cylinder where epoch 2 solved it as a chord, which
+    /// moves every stem by a few per cent.
+    ///
+    /// nil means the estimator is UNKNOWN, not "old": it is what rows written
+    /// before this field existed carry, and it is also what a hand-typed
+    /// diameter carries, because no estimator produced that one.
+    public var dbhEstimatorEpoch: Int?
     public var dbhIsIrregular: Bool
 
     // Height
@@ -109,6 +135,7 @@ public struct Tree: Identifiable, Codable, Sendable {
         id: UUID,
         plotId: UUID,
         treeNumber: Int,
+        treeName: String? = nil,
         speciesCode: String,
         status: TreeStatus,
         dbhCm: Float,
@@ -120,6 +147,7 @@ public struct Tree: Identifiable, Codable, Sendable {
         dbhConfidence: ConfidenceTier,
         dbhIsIrregular: Bool,
         dbhCaptureMode: String? = nil,
+        dbhEstimatorEpoch: Int? = nil,
         heightM: Float?,
         heightMethod: HeightMethod?,
         heightSource: String?,
@@ -147,6 +175,7 @@ public struct Tree: Identifiable, Codable, Sendable {
         self.id = id
         self.plotId = plotId
         self.treeNumber = treeNumber
+        self.treeName = treeName
         self.speciesCode = speciesCode
         self.status = status
         self.dbhCm = dbhCm
@@ -158,6 +187,7 @@ public struct Tree: Identifiable, Codable, Sendable {
         self.dbhConfidence = dbhConfidence
         self.dbhIsIrregular = dbhIsIrregular
         self.dbhCaptureMode = dbhCaptureMode
+        self.dbhEstimatorEpoch = dbhEstimatorEpoch
         self.heightM = heightM
         self.heightMethod = heightMethod
         self.heightSource = heightSource
@@ -181,5 +211,79 @@ public struct Tree: Identifiable, Codable, Sendable {
         self.deletedAt = deletedAt
         self.latitude = latitude
         self.longitude = longitude
+    }
+}
+
+// MARK: - What the cruise surfaces call a tree
+
+/// The one rule for turning a tree's identity into the words on screen.
+///
+/// It lives apart from `Tree` because the tally loop has to label the tree it
+/// is ABOUT to write — a target number and a pending name, with no row behind
+/// them yet. Both callers must produce the same string, so both come through
+/// here rather than one of them re-typing the format.
+///
+/// Ported 1:1 from / to Android `data/cruise/TreeLabel.kt`: a cruise split
+/// across an iPhone and an Android phone must not print one stem two ways.
+public enum TreeLabel {
+
+    /// The cruiser's own name when they gave the tree one, else
+    /// "Tree #<number>" — the same shape as the field log's
+    /// `FieldLogRowModel.title`, so the two worlds call a tree one thing.
+    ///
+    /// The name is used VERBATIM. It was trimmed on the way in (the chooser
+    /// and the tally both trim before storing) precisely so nothing downstream
+    /// has to guess whether " Plot3-T07" and "Plot3-T07" are the same stem.
+    public static func title(name: String?, number: Int) -> String {
+        name ?? "Tree #\(number)"
+    }
+
+    /// How many glyphs a map pin can actually hold.
+    ///
+    /// The pin is a 30 pt teardrop with a 10.5 pt monospaced label drawn
+    /// INSIDE it (see `BasemapMapView.teardropHead` and the Android
+    /// `MapView` PIN branch). Four monospaced characters is what fits at
+    /// full size; past that iOS shrinks the type towards illegible and
+    /// Android simply overflows the drop.
+    public static let pinLabelMaxChars = 4
+
+    /// What a MAP PIN calls this tree — the short form of `title`.
+    ///
+    /// The map used to print "T104" even for a tree the cruiser had named,
+    /// which is the whole complaint. It cannot simply print the name: at
+    /// four glyphs "Starker32" becomes "Star", and every tree in a stand
+    /// named by one convention shares that prefix, so the pin would stop
+    /// distinguishing the very trees it exists to distinguish.
+    ///
+    /// So the rule is TRAILING-BIASED, because that is where a cruiser's
+    /// naming scheme puts the part that varies:
+    ///   • no name          → "T<number>", exactly as before;
+    ///   • name that fits   → the name, whole;
+    ///   • longer name with a trailing digit run → those digits
+    ///     ("Starker32" → "32", "Plot3-T07" → "07");
+    ///   • otherwise        → the last few characters ("Big Doug" → "Doug").
+    /// Nothing is ellipsised: at four glyphs a "…" spends a quarter of the
+    /// label saying "there is more", which the peek already says by
+    /// printing the full `title` the moment the pin is tapped.
+    ///
+    /// A named pin therefore has no leading "T" and an unnamed one does,
+    /// which is itself the signal that this stem is called something.
+    public static func pinTitle(name: String?, number: Int) -> String {
+        guard let name, !name.isEmpty else { return "T\(number)" }
+        if name.count <= pinLabelMaxChars { return name }
+        let tailDigits = String(name.reversed()
+            .prefix { $0.isASCII && $0.isNumber }
+            .reversed())
+        if !tailDigits.isEmpty {
+            return String(tailDigits.suffix(pinLabelMaxChars))
+        }
+        return String(name.suffix(pinLabelMaxChars))
+    }
+}
+
+extension Tree {
+    /// What every cruise surface calls this tree — see `TreeLabel.title`.
+    public var displayTitle: String {
+        TreeLabel.title(name: treeName, number: treeNumber)
     }
 }

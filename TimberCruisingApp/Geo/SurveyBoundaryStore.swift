@@ -8,7 +8,7 @@
 //         boundary.geojson   normalised RFC 7946 FeatureCollection
 //         boundary.json      the small record the sheet shows
 //                            { displayName, featureCount, importedAt,
-//                              sourceFormat }
+//                              sourceFormat, origin }
 //
 // One boundary at a time: importing another overwrites both files;
 // Remove deletes the directory. The record is stored separately from the
@@ -24,13 +24,33 @@ public final class SurveyBoundaryStore: @unchecked Sendable {
         public var featureCount: Int
         public var importedAt: Date
         public var sourceFormat: String
+        /// Survey or sketch — see `BoundaryOrigin`. Kept in the record as
+        /// well as in the GeoJSON so the sheet's row can say which without
+        /// deserialising the geometry.
+        public var origin: BoundaryOrigin
 
         public init(displayName: String, featureCount: Int,
-                    importedAt: Date, sourceFormat: String) {
+                    importedAt: Date, sourceFormat: String,
+                    origin: BoundaryOrigin = .imported) {
             self.displayName = displayName
             self.featureCount = featureCount
             self.importedAt = importedAt
             self.sourceFormat = sourceFormat
+            self.origin = origin
+        }
+
+        /// A record written before drawing existed carries no `origin`, and
+        /// every one of those came from a file — so its absence means
+        /// `.imported`. Decoded explicitly rather than left to fail: a
+        /// cruiser who updates the app mid-cruise must not lose the
+        /// boundary they imported this morning.
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            displayName = try c.decode(String.self, forKey: .displayName)
+            featureCount = try c.decode(Int.self, forKey: .featureCount)
+            importedAt = try c.decode(Date.self, forKey: .importedAt)
+            sourceFormat = try c.decode(String.self, forKey: .sourceFormat)
+            origin = try c.decodeIfPresent(BoundaryOrigin.self, forKey: .origin) ?? .imported
         }
     }
 
@@ -82,6 +102,7 @@ public final class SurveyBoundaryStore: @unchecked Sendable {
         return SurveyBoundary(displayName: record.displayName,
                               importedAt: record.importedAt,
                               sourceFormat: record.sourceFormat,
+                              origin: record.origin,
                               features: features)
     }
 
@@ -96,7 +117,8 @@ public final class SurveyBoundaryStore: @unchecked Sendable {
         let record = Record(displayName: boundary.displayName,
                             featureCount: boundary.featureCount,
                             importedAt: boundary.importedAt,
-                            sourceFormat: boundary.sourceFormat)
+                            sourceFormat: boundary.sourceFormat,
+                            origin: boundary.origin)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.sortedKeys]

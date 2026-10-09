@@ -46,14 +46,34 @@ public struct StandSummaryScreen: View {
                             stat: viewModel.tpaStat.scaledPerArea(by: densityFactor),
                             perPlot: viewModel.perPlotStats.map {
                                 (plot: $0.plot, value: Double($0.stats.tpa) * densityFactor) })
-            statCardSection(title: "Basal area", unit: areaUnit.densityLabel("m²"),
-                            stat: viewModel.baStat.scaledPerArea(by: densityFactor),
+            // Basal area gets a factor of its OWN: the engine reports m² per
+            // ACRE, so an imperial cruise converts the numerator too. Scaling
+            // only the denominator printed "m²/ac" — a unit no cruise sheet
+            // uses, and 10.76× away from the ft²/ac the quick-measure card
+            // shows for the same stand. The card's mean and its ± range are
+            // scaled by the same number, or the band stops bracketing the
+            // value it belongs to.
+            statCardSection(title: "Basal area",
+                            unit: MeasurementFormatter.basalAreaDensityUnit(areaUnit),
+                            stat: viewModel.baStat.scaledPerArea(
+                                by: MeasurementFormatter.basalAreaDensityFactor(areaUnit)),
                             perPlot: viewModel.perPlotStats.map {
-                                (plot: $0.plot, value: Double($0.stats.baPerAcreM2) * densityFactor) })
-            statCardSection(title: "Gross volume", unit: areaUnit.densityLabel("m³"),
-                            stat: viewModel.volStat.scaledPerArea(by: densityFactor),
+                                (plot: $0.plot,
+                                 value: MeasurementFormatter.basalAreaDensity(
+                                    m2PerAcre: Double($0.stats.baPerAcreM2), in: areaUnit)) })
+            // And volume gets its own for the same reason: the engine reports
+            // m³ per ACRE. The mean, the ± range and every per-plot dot go
+            // through the one factor, or the band and the scatter stop
+            // belonging to the average drawn over them.
+            statCardSection(title: "Gross volume",
+                            unit: MeasurementFormatter.volumeDensityUnit(areaUnit),
+                            stat: viewModel.volStat.scaledPerArea(
+                                by: MeasurementFormatter.volumeDensityFactor(areaUnit)),
                             perPlot: viewModel.perPlotStats.map {
-                                (plot: $0.plot, value: Double($0.stats.grossVolumePerAcreM3) * densityFactor) },
+                                (plot: $0.plot,
+                                 value: MeasurementFormatter.volumeDensity(
+                                    m3PerAcre: Double($0.stats.grossVolumePerAcreM3),
+                                    in: areaUnit)) },
                             pending: volumePending)
             perPlotTableSection
         }
@@ -97,7 +117,7 @@ public struct StandSummaryScreen: View {
         pending: Bool = false
     ) -> some View {
         Section(title) {
-            if pending {
+            if pending || !stat.mean.isFinite {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("—").font(ForestixType.dataLarge)
                     Text("Volume isn't available for this region yet. Every other metric is unaffected.")
@@ -108,10 +128,10 @@ public struct StandSummaryScreen: View {
             } else {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
-                    Text(String(format: "%.2f %@", stat.mean, unit))
+                    Text(finiteNumberFormat("%.2f %@", stat.mean, unit))
                         .font(ForestixType.dataLarge)
                     Spacer()
-                    Text(String(format: "± %.2f (95%% confidence)", stat.ci95HalfWidth))
+                    Text(finiteNumberFormat("± %.2f (95%% confidence)", stat.ci95HalfWidth))
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
@@ -149,7 +169,7 @@ public struct StandSummaryScreen: View {
                                 Text(viewModel.stratumName(forKey: key))
                                     .font(.caption)
                                 Spacer()
-                                Text(String(format: "%d plots · average %.2f · spread ±%.2f",
+                                Text(finiteNumberFormat("%d plots · average %.2f · spread ±%.2f",
                                             s.nPlots, s.mean, sqrt(max(s.variance, 0))))
                                     .font(.caption.monospacedDigit())
                                     .foregroundStyle(.secondary)
@@ -182,11 +202,16 @@ public struct StandSummaryScreen: View {
                             .frame(width: 28, alignment: .leading)
                         Text("\(row.stats.liveTreeCount)")
                             .frame(maxWidth: .infinity, alignment: .trailing)
-                        Text(String(format: "%.1f", Double(row.stats.tpa) * densityFactor))
+                        Text(finiteNumberFormat("%.1f", Double(row.stats.tpa) * densityFactor))
                             .frame(maxWidth: .infinity, alignment: .trailing)
-                        Text(String(format: "%.2f", Double(row.stats.baPerAcreM2) * densityFactor))
+                        Text(finiteNumberFormat("%.2f",
+                                    MeasurementFormatter.basalAreaDensity(
+                                        m2PerAcre: Double(row.stats.baPerAcreM2), in: areaUnit)))
                             .frame(maxWidth: .infinity, alignment: .trailing)
-                        Text(String(format: "%.1f", Double(row.stats.grossVolumePerAcreM3) * densityFactor))
+                        Text(finiteNumberFormat("%.1f",
+                                    MeasurementFormatter.volumeDensity(
+                                        m3PerAcre: Double(row.stats.grossVolumePerAcreM3),
+                                        in: areaUnit)))
                             .frame(maxWidth: .infinity, alignment: .trailing)
                     }
                     .font(.caption.monospacedDigit())

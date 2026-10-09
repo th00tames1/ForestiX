@@ -117,7 +117,13 @@ object GeoJSONExporter {
             "positionTier" to p.positionTier.raw,
             "gpsNSamples" to p.gpsNSamples,
             "gpsMedianHAccuracyM" to p.gpsMedianHAccuracyM.toDouble(),
-            "gpsSampleStdXyM" to p.gpsSampleStdXyM.toDouble(),
+            // NULL, not 0, below two samples: a spread needs two fixes to
+            // exist, and zero here would read as "the fixes agreed
+            // perfectly" on a row where none was ever measured. Same rule
+            // and same reasoning as `gps_sample_std_xy_m` in plots.csv, and
+            // the same null this file already uses for `offsetWalkM`.
+            "gpsSampleStdXyM" to
+                (if (p.gpsNSamples >= 2) p.gpsSampleStdXyM.toDouble() else null),
             "offsetWalkM" to (p.offsetWalkM?.toDouble()),
             "slopeDeg" to p.slopeDeg.toDouble(),
             "aspectDeg" to p.aspectDeg.toDouble(),

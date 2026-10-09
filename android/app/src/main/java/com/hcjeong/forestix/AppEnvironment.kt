@@ -90,13 +90,28 @@ class AppEnvironment private constructor(
                 .addMigrations(
                     com.hcjeong.forestix.data.QUICK_MEASURE_MIGRATION_1_2,
                     com.hcjeong.forestix.data.QUICK_MEASURE_MIGRATION_2_3,
+                    com.hcjeong.forestix.data.QUICK_MEASURE_MIGRATION_3_4,
+                    com.hcjeong.forestix.data.QUICK_MEASURE_MIGRATION_4_5,
+                    com.hcjeong.forestix.data.QUICK_MEASURE_MIGRATION_5_6,
+                    com.hcjeong.forestix.data.QUICK_MEASURE_MIGRATION_6_7,
+                    com.hcjeong.forestix.data.QUICK_MEASURE_MIGRATION_7_8,
+                    com.hcjeong.forestix.data.QUICK_MEASURE_MIGRATION_8_9,
                 )
                 .build()
             val history = QuickMeasureHistory.get(app, db.dao())
 
             val cruiseDb = Room.databaseBuilder(
                 app, CruiseDatabase::class.java, CruiseDatabase.NAME)
-                .addMigrations(CruiseDatabase.MIGRATION_1_2, CruiseDatabase.MIGRATION_2_3)
+                .addMigrations(
+                    CruiseDatabase.MIGRATION_1_2,
+                    CruiseDatabase.MIGRATION_2_3,
+                    CruiseDatabase.MIGRATION_3_4,
+                    CruiseDatabase.MIGRATION_4_5,
+                    CruiseDatabase.MIGRATION_5_6,
+                    CruiseDatabase.MIGRATION_6_7,
+                    CruiseDatabase.MIGRATION_7_8,
+                    CruiseDatabase.MIGRATION_8_9,
+                )
                 .build()
             val speciesConfigRepository = RoomSpeciesConfigRepository(cruiseDb.speciesConfigDao())
             val volumeEquationRepository = RoomVolumeEquationRepository(cruiseDb.volumeEquationDao())

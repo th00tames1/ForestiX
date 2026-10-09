@@ -30,6 +30,7 @@ data class EntryRow(
     val method: String,
     val createdAt: Long,
     val treeNumber: Int?,
+    val treeName: String?,
     val plotID: String?,
     val speciesCode: String?,
     val position: String?,
@@ -39,6 +40,11 @@ data class EntryRow(
     val longitude: Double?,
     val photoPath: String?,
     val captureMode: String?,
+    val truth: Double?,
+    val truthSource: String?,
+    val truthUnit: String?,
+    val positionSource: String?,
+    val timeSource: String?,
 ) {
     fun toDomain() = QuickMeasureEntry(
         id = UUID.fromString(id),
@@ -50,6 +56,7 @@ data class EntryRow(
         method = method,
         createdAt = createdAt,
         treeNumber = treeNumber,
+        treeName = treeName,
         plotID = plotID?.let { UUID.fromString(it) },
         speciesCode = speciesCode,
         position = StemPosition.fromRaw(position),
@@ -59,6 +66,11 @@ data class EntryRow(
         longitude = longitude,
         photoPath = photoPath,
         captureMode = captureMode,
+        truth = truth,
+        truthSource = truthSource,
+        truthUnit = truthUnit,
+        positionSource = positionSource,
+        timeSource = timeSource,
     )
 
     companion object {
@@ -72,6 +84,7 @@ data class EntryRow(
             method = e.method,
             createdAt = e.createdAt,
             treeNumber = e.treeNumber,
+            treeName = e.treeName,
             plotID = e.plotID?.toString(),
             speciesCode = e.speciesCode,
             position = e.position?.raw,
@@ -81,6 +94,11 @@ data class EntryRow(
             longitude = e.longitude,
             photoPath = e.photoPath,
             captureMode = e.captureMode,
+            truth = e.truth,
+            truthSource = e.truthSource,
+            truthUnit = e.truthUnit,
+            positionSource = e.positionSource,
+            timeSource = e.timeSource,
         )
     }
 }
@@ -150,6 +168,13 @@ interface QuickMeasureDao {
     @Query("UPDATE entries SET plotID = :newPlot WHERE plotID = :oldPlot")
     suspend fun rehomeEntries(oldPlot: String, newPlot: String?)
 
+    /// Re-home a NAMED set of readings — the cruiser's own move (see
+    /// ui/screens/QuickMove.kt). One statement, so a tree's diameter and its
+    /// height land together rather than as two writes with a window between
+    /// them in which half the stem has moved. Returns rows updated.
+    @Query("UPDATE entries SET plotID = :newPlot WHERE id IN (:ids)")
+    suspend fun moveEntriesToPlot(ids: List<String>, newPlot: String): Int
+
     @Query("SELECT * FROM plots ORDER BY createdAt DESC")
     fun observePlots(): Flow<List<PlotRow>>
 
@@ -186,7 +211,69 @@ val QUICK_MEASURE_MIGRATION_2_3 = object : androidx.room.migration.Migration(2, 
     }
 }
 
-@Database(entities = [EntryRow::class, PlotRow::class], version = 3, exportSchema = false)
+/// v4: the cruiser's name for the tree ("Plot3-T07") — additive and
+/// nullable; a null reads as the "#<treeNumber>" the log always showed, so
+/// nothing recorded before naming existed changes appearance.
+val QUICK_MEASURE_MIGRATION_3_4 = object : androidx.room.migration.Migration(3, 4) {
+    override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE entries ADD COLUMN treeName TEXT")
+    }
+}
+
+/// v5: the hand-measured ground truth typed against a reading — additive
+/// and nullable, so every row written before the field existed reads back
+/// as "no truth entered" rather than as a measured zero.
+val QUICK_MEASURE_MIGRATION_4_5 = object : androidx.room.migration.Migration(4, 5) {
+    override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE entries ADD COLUMN truth REAL")
+    }
+}
+
+/// v6: where the reading's coordinate came from — additive and nullable.
+/// Null on every existing row, which is not an unknown: until the field log
+/// let a coordinate be typed, the Accept-time GPS snapshot was the only
+/// writer of latitude/longitude, so an unlabelled located row IS a device
+/// fix. `QuickMeasureEntry.positionRecordedSource` holds that rule.
+val QUICK_MEASURE_MIGRATION_5_6 = object : androidx.room.migration.Migration(5, 6) {
+    override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE entries ADD COLUMN positionSource TEXT")
+    }
+}
+
+/// v7: how a ground truth came to sit on the reading — additive and
+/// nullable. Null on every existing row, which is not an unknown: until the
+/// recovery pass existed, the only writer of `truth` was a number typed
+/// against the reading itself, so an unlabelled truth IS a typed one.
+/// `QuickMeasureEntry.truthRecordedSource` holds that rule.
+val QUICK_MEASURE_MIGRATION_6_7 = object : androidx.room.migration.Migration(6, 7) {
+    override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE entries ADD COLUMN truthSource TEXT")
+    }
+}
+
+/// v8: the unit a ground truth was TYPED in — additive and nullable. Null on
+/// every existing row, and here null is not an unknown either: it is the marker
+/// TruthUnitRepair reads as "typed before the field could record a unit", which
+/// is the whole reason those values were stored at the wrong scale. Stamping
+/// the unit is what stops a repaired value from being repaired twice.
+val QUICK_MEASURE_MIGRATION_7_8 = object : androidx.room.migration.Migration(7, 8) {
+    override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE entries ADD COLUMN truthUnit TEXT")
+    }
+}
+
+/// v9: how a reading's `createdAt` came to be what it is — additive and
+/// nullable. Null on every existing row, and here null is not an unknown
+/// either: until the record sheet could set a time, nothing but the clock ever
+/// wrote one, so an unlabelled time IS a device-stamped one.
+/// `QuickMeasureEntry.timeRecordedSource` holds that rule.
+val QUICK_MEASURE_MIGRATION_8_9 = object : androidx.room.migration.Migration(8, 9) {
+    override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE entries ADD COLUMN timeSource TEXT")
+    }
+}
+
+@Database(entities = [EntryRow::class, PlotRow::class], version = 9, exportSchema = false)
 @TypeConverters(Converters::class)
 abstract class ForestixDatabase : RoomDatabase() {
     abstract fun dao(): QuickMeasureDao

@@ -8,6 +8,8 @@
 
 package com.hcjeong.forestix.ui.screens.stand
 
+import com.hcjeong.forestix.common.finiteNumberFormat
+
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -48,6 +50,7 @@ import com.hcjeong.forestix.ui.screens.ForestixScaffold
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.common.AreaUnit
+import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.areaUnit
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import java.util.Locale
@@ -133,21 +136,40 @@ fun StandSummaryScreen(nav: NavController, projectId: UUID) {
                 title = "Trees / ${areaUnit.abbreviation}", unit = areaUnit.densitySuffix,
                 stat = tpaStat.scaledPerArea(densityFactor), vm = vm,
                 perPlot = perPlotStats.map { Pair(it.plot, it.stats.tpa.toDouble() * densityFactor) })
+            // Basal area gets a factor of its OWN: the engine reports m² per
+            // ACRE, so an imperial cruise converts the numerator too. Scaling
+            // only the denominator printed "m²/ac" — a unit no cruise sheet
+            // uses, and 10.76x away from the ft²/ac the quick-measure card
+            // shows for the same stand. The card's mean and its ± range are
+            // scaled by the same number, or the band stops bracketing the
+            // value it belongs to.
+            val baFactor = MeasurementFormatter.basalAreaDensityFactor(areaUnit)
             StatCardSection(
-                title = "Basal area", unit = areaUnit.densityLabel("m²"),
-                stat = baStat.scaledPerArea(densityFactor), vm = vm,
-                perPlot = perPlotStats.map { Pair(it.plot, it.stats.baPerAcreM2.toDouble() * densityFactor) })
-            // Volume unit branches on the country: metric countries render m³
-            // (the engine's native unit); the US keeps m³ here as it does today.
-            // Korea is a scaffold — its official NIFoS coefficients are pending,
-            // so stand volume shows "—" rather than a fabricated figure.
-            if (settings.country.volumeStandardPending) {
+                title = "Basal area",
+                unit = MeasurementFormatter.basalAreaDensityUnit(areaUnit),
+                stat = baStat.scaledPerArea(baFactor), vm = vm,
+                perPlot = perPlotStats.map {
+                    Pair(it.plot, it.stats.baPerAcreM2.toDouble() * baFactor)
+                })
+            // And volume gets its own for the same reason: the engine reports
+            // m³ per ACRE. The mean, the ± range and every per-plot dot go
+            // through the one factor, or the band and the scatter stop
+            // belonging to the average drawn over them.
+            //
+            // Korea is a scaffold — its official NIFoS coefficients are
+            // pending, so stand volume shows "—" rather than a fabricated
+            // figure.
+            if (settings.country.volumeStandardPending || !volStat.mean.isFinite()) {
                 PendingVolumeCard()
             } else {
+                val volFactor = MeasurementFormatter.volumeDensityFactor(areaUnit)
                 StatCardSection(
-                    title = "Gross volume", unit = areaUnit.densityLabel("m³"),
-                    stat = volStat.scaledPerArea(densityFactor), vm = vm,
-                    perPlot = perPlotStats.map { Pair(it.plot, it.stats.grossVolumePerAcreM3.toDouble() * densityFactor) })
+                    title = "Gross volume",
+                    unit = MeasurementFormatter.volumeDensityUnit(areaUnit),
+                    stat = volStat.scaledPerArea(volFactor), vm = vm,
+                    perPlot = perPlotStats.map {
+                        Pair(it.plot, it.stats.grossVolumePerAcreM3.toDouble() * volFactor)
+                    })
             }
 
             PerPlotTableSection(perPlotStats, areaUnit)
@@ -230,11 +252,11 @@ private fun StatCardSection(
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Row(Modifier.fillMaxWidth()) {
                     Text(
-                        String.format(Locale.US, "%.2f %s", stat.mean, unit),
+                        finiteNumberFormat(Locale.US, "%.2f %s", stat.mean, unit),
                         style = type.dataLarge, color = colors.textPrimary)
                     Spacer(Modifier.weight(1f))
                     Text(
-                        String.format(Locale.US, "± %.2f (95%% confidence)", stat.ci95HalfWidth),
+                        finiteNumberFormat(Locale.US, "± %.2f (95%% confidence)", stat.ci95HalfWidth),
                         style = type.dataSmall, color = colors.textSecondary)
                 }
                 // The standard error and the Satterthwaite effective degrees
@@ -263,7 +285,7 @@ private fun StatCardSection(
                                 style = type.caption, color = colors.textPrimary)
                             Spacer(Modifier.weight(1f))
                             Text(
-                                String.format(
+                                finiteNumberFormat(
                                     Locale.US, "%d plots · average %.2f · spread ±%.2f",
                                     s.nPlots, s.mean, sqrt(max(s.variance, 0.0))),
                                 style = type.dataSmall, color = colors.textSecondary)
@@ -354,9 +376,25 @@ private fun PerPlotTableSection(
                     Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
                         Text("${row.plot.plotNumber}", style = type.dataSmall, color = colors.textPrimary, modifier = Modifier.width(28.dp))
                         Text("${row.stats.liveTreeCount}", style = type.dataSmall, color = colors.textPrimary, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
-                        Text(String.format(Locale.US, "%.1f", row.stats.tpa * f), style = type.dataSmall, color = colors.textPrimary, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
-                        Text(String.format(Locale.US, "%.2f", row.stats.baPerAcreM2 * f), style = type.dataSmall, color = colors.textPrimary, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
-                        Text(String.format(Locale.US, "%.1f", row.stats.grossVolumePerAcreM3 * f), style = type.dataSmall, color = colors.textPrimary, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
+                        Text(finiteNumberFormat(Locale.US, "%.1f", row.stats.tpa * f), style = type.dataSmall, color = colors.textPrimary, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
+                        Text(
+                            finiteNumberFormat(
+                                Locale.US, "%.2f",
+                                MeasurementFormatter.basalAreaDensity(
+                                    row.stats.baPerAcreM2.toDouble(), areaUnit),
+                            ),
+                            style = type.dataSmall, color = colors.textPrimary,
+                            textAlign = TextAlign.End, modifier = Modifier.weight(1f),
+                        )
+                        Text(
+                            finiteNumberFormat(
+                                Locale.US, "%.1f",
+                                MeasurementFormatter.volumeDensity(
+                                    row.stats.grossVolumePerAcreM3.toDouble(), areaUnit),
+                            ),
+                            style = type.dataSmall, color = colors.textPrimary,
+                            textAlign = TextAlign.End, modifier = Modifier.weight(1f),
+                        )
                     }
                 }
             }

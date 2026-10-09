@@ -50,7 +50,8 @@ public final class SurveyBoundaryModel: ObservableObject {
         return SurveyBoundaryStore.Record(displayName: boundary.displayName,
                                           featureCount: boundary.featureCount,
                                           importedAt: boundary.importedAt,
-                                          sourceFormat: boundary.sourceFormat)
+                                          sourceFormat: boundary.sourceFormat,
+                                          origin: boundary.origin)
     }
 
     /// What `BasemapMapView` draws. nil when nothing is loaded, so the
@@ -88,16 +89,50 @@ public final class SurveyBoundaryModel: ObservableObject {
     /// the app cannot confirm as WGS84 never reaches `boundary`.
     @discardableResult
     public func importBoundary(from url: URL) throws -> SurveyBoundary {
+        let imported = try parseBoundary(from: url)
+        try commit(imported)
+        return imported
+    }
+
+    /// Read and GATE a picked file without storing anything. Split out from
+    /// `importBoundary(from:)` so the caller can ask "replace the boundary
+    /// you already have?" between the two halves: asking before the file is
+    /// known to be valid would demand an answer about a replacement that
+    /// may never happen, and asking after the write would be asking about
+    /// one that already did.
+    public func parseBoundary(from url: URL) throws -> SurveyBoundary {
         // Files handed over by UIDocumentPicker live outside the app
         // container and need the scope opened around every read.
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        return try SurveyBoundaryImporter.load(fileURL: url)
+    }
 
-        let imported = try SurveyBoundaryImporter.load(fileURL: url)
-        try store.save(imported)
-        boundary = imported
+    /// Put a parsed boundary in the one slot, replacing whatever was there.
+    /// Callers own the decision; this method only carries it out.
+    public func commit(_ boundary: SurveyBoundary) throws {
+        try store.save(boundary)
+        self.boundary = boundary
         loadFailure = nil
-        return imported
+    }
+
+    /// Commit a boundary the cruiser DREW. Deliberately a separate entry
+    /// point from `importBoundary(from:)`: there is no file, no
+    /// security-scoped URL and no CRS to confirm — a drawn outline is
+    /// already WGS84 because the map handed the coordinates over in it.
+    /// What it does share with the import path is the replacement rule:
+    /// one boundary at a time, and this one takes the slot. The CALLER is
+    /// responsible for having asked first when something was already
+    /// loaded — see `MapSettingsSheet`'s replace confirmation. This method
+    /// will not second-guess a decision the cruiser has already made.
+    @discardableResult
+    public func saveDrawn(_ draft: BoundaryDraft,
+                          displayName: String) throws -> SurveyBoundary {
+        let boundary = try draft.surveyBoundary(displayName: displayName)
+        try store.save(boundary)
+        self.boundary = boundary
+        loadFailure = nil
+        return boundary
     }
 
     public func remove() {

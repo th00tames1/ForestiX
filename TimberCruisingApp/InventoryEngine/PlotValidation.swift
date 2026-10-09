@@ -60,7 +60,7 @@ public enum PlotValidation {
             guard let sp = speciesByCode[tree.speciesCode] else {
                 errors.append(.init(
                     code: Code.unknownSpecies,
-                    message: "Tree #\(tree.treeNumber): unknown species code '\(tree.speciesCode)'.",
+                    message: "\(tree.displayTitle): unknown species code '\(tree.speciesCode)'.",
                     affectedId: tree.id))
                 continue
             }
@@ -69,7 +69,7 @@ public enum PlotValidation {
                 warnings.append(.init(
                     code: Code.dbhBelowMin,
                     message: """
-                        Tree #\(tree.treeNumber): DBH \(formatted(tree.dbhCm)) cm \
+                        \(tree.displayTitle): DBH \(formatted(tree.dbhCm)) cm \
                         below \(sp.commonName) expected minimum \(formatted(sp.expectedDbhMinCm)) cm.
                         """,
                     affectedId: tree.id))
@@ -78,7 +78,7 @@ public enum PlotValidation {
                 warnings.append(.init(
                     code: Code.dbhAboveMax,
                     message: """
-                        Tree #\(tree.treeNumber): DBH \(formatted(tree.dbhCm)) cm \
+                        \(tree.displayTitle): DBH \(formatted(tree.dbhCm)) cm \
                         above \(sp.commonName) expected maximum \(formatted(sp.expectedDbhMaxCm)) cm.
                         """,
                     affectedId: tree.id))
@@ -90,19 +90,19 @@ public enum PlotValidation {
                     // for a red reading (ConfidenceStyle.descriptor); the
                     // warning used to spell the same thing "red-tier", so
                     // two screens described one reading in two vocabularies.
-                    message: "Tree #\(tree.treeNumber): the diameter reading is flagged Check — re-measure if you can.",
+                    message: "\(tree.displayTitle): the diameter reading is flagged Check — re-measure if you can.",
                     affectedId: tree.id))
             }
             if tree.status == .live, tree.heightConfidence == .red {
                 warnings.append(.init(
                     code: Code.redTierHeight,
-                    message: "Tree #\(tree.treeNumber): the height reading is flagged Check — re-measure if you can.",
+                    message: "\(tree.displayTitle): the height reading is flagged Check — re-measure if you can.",
                     affectedId: tree.id))
             }
             if tree.status == .live, tree.heightM == nil, tree.heightSource != "imputed" {
                 warnings.append(.init(
                     code: Code.missingHeightOnLive,
-                    message: "Tree #\(tree.treeNumber): no height measured — the height will be estimated from this project's height curve.",
+                    message: "\(tree.displayTitle): no height measured — the height will be estimated from this project's height curve.",
                     affectedId: tree.id))
             }
         }

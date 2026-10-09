@@ -33,6 +33,19 @@ sealed class MarkerShape {
     /// iOS ring fix). `radiusM` is the centre-line radius, `thicknessM` the
     /// rim band width.
     data class Ring(val radiusM: Float, val thicknessM: Float) : MarkerShape()
+
+    /// A DOUGHNUT — a tube bent into a circle — as distinct from [Ring],
+    /// which is a flat washer lying in the XZ plane.
+    ///
+    /// The plot boundary is a Ring and should stay one: it lies on the ground
+    /// and is looked at from above, where a flat band reads perfectly. The
+    /// BREAST-HEIGHT marker is the opposite case — it sits at 1.37 m, so a
+    /// cruiser holding the phone at chest height looks at it almost exactly
+    /// edge-on, and edge-on a flat disc collapses to a hairline across the
+    /// bark at the one moment it has to be readable. A tube looks the same
+    /// from every direction. `tubeM` is the tube's DIAMETER.
+    /// iOS `ARSceneMarker.Shape.torus` 1:1.
+    data class Torus(val radiusM: Float, val tubeM: Float) : MarkerShape()
 }
 
 data class ArSceneMarker(

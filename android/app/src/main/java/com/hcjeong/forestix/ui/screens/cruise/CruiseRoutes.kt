@@ -20,8 +20,14 @@ object CruiseRoutes {
     const val OFFSET = "cruiseOffset/{projectId}/{plannedPlotId}"
 
     /// Whole-project roll-up (kept StandSummaryScreen) — reached from the
-    /// cruise project sheet's "Stand summary" row.
+    /// cruise project sheet's "Stand summary" row, and per project from the
+    /// browser below.
     const val STAND_SUMMARY = "standSummary/{projectId}"
+
+    /// Every project that exists — pick one, read it, or delete it. The
+    /// project sheet's "Browse projects" row (field report item 4). Takes no
+    /// argument: the screen is about ALL projects, not the active one.
+    const val PROJECT_BROWSER = "projectBrowser"
 
     fun startPlot(projectId: String) = "cruiseStartPlot/$projectId"
 

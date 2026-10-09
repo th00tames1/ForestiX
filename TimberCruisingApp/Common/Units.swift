@@ -36,6 +36,25 @@ public enum Units {
     // density/area display references it rather than re-hardcoding the number.
     public static let acresPerHectare: Double = 2.4710538147
 
+    // MARK: Breast height
+    // The height a diameter is read at, US convention: 4.5 ft, which is
+    // 1.37 m written in metres (not a conversion of it — see the note on
+    // `BreastHeightGuide.label(in:)` for why the imperial string is never
+    // derived from this number).
+    //
+    // THE ONE PLACE THIS NUMBER LIVES ON iOS. Anything that needs breast
+    // height reads it from here, so the convention can be changed by editing
+    // a single line. Android's twin is `Units.BREAST_HEIGHT_M`.
+    //
+    // IT IS NOT THE 1.3 THE INVENTORY ENGINE USES. HDModel's Näslund form
+    // (H = 1.3 + D²/(a+b·D)²), Laasasenaho's (h − 1.3)^c5 and every
+    // `h > 1.3` guard in PlotStats / the summary view models carry the
+    // INTERNATIONAL convention because that is what those published
+    // equations were fitted with. Retuning them to 1.37 would move every
+    // volume and every H–D fit in the corpus, so they are deliberately left
+    // alone and this constant is deliberately not used by them.
+    public static let breastHeightM: Double = 1.37
+
     // MARK: Volume — m³ ↔ ft³
     public static func cubicMetersToCubicFeet(_ m3: Double) -> Double {
         m3 * (1.0 / metersPerFoot) * (1.0 / metersPerFoot) * (1.0 / metersPerFoot)

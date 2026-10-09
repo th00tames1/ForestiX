@@ -38,6 +38,7 @@ data class ProjectEntity(
     val depthNoiseMm: Float,
     val dbhCorrectionAlpha: Float,
     val dbhCorrectionBeta: Float,
+    val dbhCalibrationEpoch: Int = 0,
     val vioDriftFraction: Float,
 )
 
@@ -72,6 +73,9 @@ data class PlannedPlotEntity(
     val plannedLon: Double,
     val visited: Boolean,
     val skipped: Boolean,
+    /// `PositionSource.raw`, or null for a plot the generator laid / a row
+    /// written before the column existed — see `PlannedPlot.plannedSource`.
+    val plannedSource: String? = null,
 )
 
 @Entity(tableName = "PlotEntity", indices = [Index("projectId")])
@@ -90,6 +94,11 @@ data class PlotEntity(
     val offsetWalkM: Float?,
     val slopeDeg: Float,
     val aspectDeg: Float,
+    /// The site description a cruiser fills in at the plot. Nullable; added in
+    /// schema v8 (CruiseDatabase.MIGRATION_7_8). null is "not recorded", which
+    /// 0 cannot stand for here (0 m is a coastal plot and 0 % is a clearcut).
+    val groundElevationM: Float? = null,
+    val canopyCoverPct: Float? = null,
     val plotAreaAcres: Float,
     val startedAt: Long,
     val closedAt: Long?,
@@ -104,6 +113,9 @@ data class TreeEntity(
     @PrimaryKey val id: UUID,
     val plotId: UUID,
     val treeNumber: Int,
+    /// The cruiser's own name for the tree. Nullable; added in schema v4
+    /// (CruiseDatabase.MIGRATION_3_4). Null reads as "#$treeNumber".
+    val treeName: String? = null,
     val speciesCode: String,
     val status: String,
 
@@ -114,6 +126,17 @@ data class TreeEntity(
     val dbhCoverageDeg: Float?,
     val dbhNInliers: Int?,
     val dbhConfidence: String,
+    /// Which estimator found the diameter's edges: "auto", "manual" (the
+    /// ADJUST bracket), or "typed". Nullable; added in schema v5
+    /// (CruiseDatabase.MIGRATION_4_5). Null on rows written before the
+    /// column existed. `dbhMethod` cannot stand in for this — a bracket
+    /// and an auto fit record the same method.
+    val dbhCaptureMode: String? = null,
+    /// The estimator epoch `dbhCm` was produced under. Nullable; added in
+    /// schema v9 (CruiseDatabase.MIGRATION_8_9). Null on rows written before
+    /// the column existed — the geometry behind those diameters is unknown,
+    /// and 0 cannot stand for that (no estimator ever ran at epoch 0).
+    val dbhEstimatorEpoch: Int? = null,
     val dbhIsIrregular: Boolean,
 
     val heightM: Float?,

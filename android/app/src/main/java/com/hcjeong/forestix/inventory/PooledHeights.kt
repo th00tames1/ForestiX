@@ -21,7 +21,10 @@ object PooledHeights {
 
     /// The pooled (DBH, height) observations: non-deleted trees carrying a
     /// real height (same > 1.3 m / DBH > 0 guards as the §7.4 rollup; no
-    /// species dimension). Matches the heights sheet's "N measured" count.
+    /// species dimension). Matches the sample heights sheet's row list —
+    /// NOT the peek's "N of M", which counts the subsample the rule asks
+    /// for (HeightSubsample.progress) and so counts a measured height the
+    /// pooled fit cannot use.
     fun pairs(trees: List<Tree>): List<HDModel.Observation> =
         trees.filter { it.deletedAt == null }
             .mapNotNull { t ->

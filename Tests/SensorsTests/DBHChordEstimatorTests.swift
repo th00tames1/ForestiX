@@ -131,7 +131,14 @@ final class DBHChordEstimatorTests: XCTestCase {
             projectCalibration: ProjectCalibration(
                 depthNoiseMm: 1.0,
                 dbhCorrectionAlpha: alpha,
-                dbhCorrectionBeta: beta),
+                dbhCorrectionBeta: beta,
+                // AT THE CURRENT EPOCH, or the coefficients are refused before
+                // they are ever applied and this asserts nothing. Omitting it
+                // defaults to 0 — "never calibrated" — which is exactly the
+                // case the staleness guard exists to catch, so the test was
+                // measuring the guard while claiming to measure the
+                // correction. See `testChordBurstRefusesAStaleCalibration`.
+                dbhCalibrationEpoch: DBHEstimator.estimatorEpoch),
             rawPointsWriter: nil)
         guard let r0 = DBHEstimator.chordEstimate(input: identity),
               let r1 = DBHEstimator.chordEstimate(input: calibrated)
@@ -141,6 +148,49 @@ final class DBHChordEstimatorTests: XCTestCase {
             alpha + beta * r0.diameterCm,
             accuracy: 1e-3,
             "Calibrated chord DBH must equal alpha + beta · raw DBH")
+    }
+
+    /// The other half of the contract: coefficients fitted against a DIFFERENT
+    /// estimator are refused, and the raw diameter is published instead.
+    ///
+    /// This is the behaviour that silently replaced the one above, and nothing
+    /// asserted it — the only evidence it existed was that the test above went
+    /// red. A guard whose whole job is to stay quiet needs a test that says so
+    /// out loud, or the next person to see this red deletes the guard.
+    func testChordBurstRefusesAStaleCalibration() {
+        let alpha: Float = 0.5, beta: Float = 0.97
+        var framesA: [ARDepthFrame] = []
+        var framesB: [ARDepthFrame] = []
+        for f in 0..<10 {
+            let fr = makeCylinderFrame(
+                rTrue: 0.15, cameraDistance: 1.2,
+                noise: 0, seed: UInt64(f))
+            framesA.append(fr)
+            framesB.append(fr)
+        }
+        func input(_ cal: ProjectCalibration, _ frames: [ARDepthFrame]) -> DBHScanInput {
+            DBHScanInput(
+                frames: frames,
+                tapPixel: SIMD2(Double(frames[0].width) / 2,
+                                Double(frames[0].height) / 2),
+                guideAxis: .row(y: frames[0].height / 2),
+                projectCalibration: cal,
+                rawPointsWriter: nil)
+        }
+        let raw = input(ProjectCalibration(depthNoiseMm: 1.0,
+                                           dbhCorrectionAlpha: 0,
+                                           dbhCorrectionBeta: 1), framesA)
+        let stale = input(ProjectCalibration(depthNoiseMm: 1.0,
+                                             dbhCorrectionAlpha: alpha,
+                                             dbhCorrectionBeta: beta,
+                                             dbhCalibrationEpoch:
+                                                DBHEstimator.estimatorEpoch - 1), framesB)
+        guard let r0 = DBHEstimator.chordEstimate(input: raw),
+              let rStale = DBHEstimator.chordEstimate(input: stale)
+        else { return XCTFail("Both chord estimates should succeed") }
+        XCTAssertEqual(
+            rStale.diameterCm, r0.diameterCm, accuracy: 1e-4,
+            "A calibration fitted against another epoch must not be applied")
     }
 
     // MARK: - Synthetic multi-row cylinder fixture

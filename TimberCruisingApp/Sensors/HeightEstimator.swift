@@ -192,9 +192,18 @@ public enum HeightEstimator {
                           + UncertaintyBand.text(metres: Double(sigmaH),
                                                  in: input.unitSystem)
                           + " — walk further back and retake for a tighter reading."),
+            // The walk-back distances are quoted through `GuidanceDistance`
+            // for the same reason the band above is: these sentences tell the
+            // cruiser where to stand, and one worded in a unit they do not
+            // pace in is not an instruction. The THRESHOLDS are the metric
+            // ones they have always been and are read from the same constants
+            // the checks apply, so the wording cannot drift from the gate.
             check(dh <= yellowDhMeters,
                   sev: .warn,
-                  reason: "You walked back more than 25 m — that far out, a small slip in aim "
+                  reason: "You walked back more than "
+                          + GuidanceDistance.text(metres: Double(yellowDhMeters),
+                                                  in: input.unitSystem)
+                          + " — that far out, a small slip in aim "
                           + "turns into a big height error. Move closer and retake if you can."),
             check(abs(input.alphaTopRad) <= maxAlphaTopRadYellow,
                   sev: .warn,
@@ -202,7 +211,10 @@ public enum HeightEstimator {
                           + "tree. Walk back until you can see the top comfortably, then retake."),
             check(dh <= highDriftDhMeters,
                   sev: .warn,
-                  reason: "You walked back more than 30 m — the distance may have crept. Move closer and retake if you can.")
+                  reason: "You walked back more than "
+                          + GuidanceDistance.text(metres: Double(highDriftDhMeters),
+                                                  in: input.unitSystem)
+                          + " — the distance may have crept. Move closer and retake if you can.")
         ]
         let tier = combineChecks(checks)
 

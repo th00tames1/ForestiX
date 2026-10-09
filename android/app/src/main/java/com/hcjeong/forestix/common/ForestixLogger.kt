@@ -118,7 +118,7 @@ object ForestixLogger {
     }
 
     /// Copy the events log into the shared-export cache and return a shareable
-    /// content Uri (same FileProvider flow as ResearchLog.exportUri — the only
+    /// content Uri (same FileProvider flow as ResearchExport.write — the only
     /// provider-configured path is `cacheDir/Exports/`).
     fun exportUri(context: Context): Uri? {
         val src = currentLogFile() ?: return null

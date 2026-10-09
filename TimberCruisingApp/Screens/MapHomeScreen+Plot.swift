@@ -51,9 +51,82 @@ private func plotUnitSuffix(_ system: UnitSystem) -> String {
 
 /// A plot length for a cruiser to read at arm's length: one decimal, the
 /// active unit ("7.2 m" / "23.6 ft").
+///
+/// Forwards to `MeasurementFormatter.plotLength` so this map-layer name and
+/// the one the AR slider, the scan screens' border pill and the quick-measure
+/// list use are literally the same rounding. They used to be two `%.1f`s that
+/// happened to agree, which is how the peek and the banner came to print one
+/// ring two ways.
 func plotLengthLabel(_ metres: Double, _ system: UnitSystem) -> String {
-    String(format: "%.1f %@",
-           lengthInDisplayUnit(metres, system), plotUnitSuffix(system))
+    MeasurementFormatter.plotLength(m: metres, in: system)
+}
+
+// MARK: - Framing a new plot
+
+/// How much wider than the plot's DIAMETER the viewport should be when the
+/// map is asked to frame a plot. 1.6 leaves ~30 % of the plot's radius of
+/// ground visible outside the ring on the short side — enough to see which
+/// side of the boundary the you-dot is on, and to see the ring's own labels,
+/// without shrinking the circle to a dot.
+private let plotFramingHeadroom: Double = 1.6
+
+/// The zoom at which a plot of `radiusM` fills the viewport with headroom.
+///
+/// Derived from the RADIUS, never from a hardcoded level: a 1/10-acre fixed
+/// plot is ~11.3 m radius, a variable-radius or a large plot is not, and a
+/// level that framed one would lose the other off-screen or leave it a dot.
+///
+/// The viewport's size in points is not needed — only how much GROUND it
+/// currently shows. `region` is what the map is displaying at `currentZoom`,
+/// so the SHORT side's ground span against the span we want is exactly the
+/// scale change to apply, and zoom is log2 of scale. Returns nil rather than
+/// a guess when there is no measured region yet (the map has not laid out) or
+/// the radius is not a real length — the caller then leaves the camera alone
+/// instead of flinging it to an invented zoom.
+func plotFramingZoom(radiusM: Double,
+                     currentZoom: Double,
+                     region: BasemapRegion?) -> Double? {
+    guard radiusM.isFinite, radiusM > 0 else { return nil }
+    return spanFramingZoom(spanM: 2 * radiusM,
+                           currentZoom: currentZoom,
+                           region: region)
+}
+
+/// Ground metres across the SHORTER side of what the map is showing. nil
+/// until the map has laid out and reported a region — every caller then has
+/// to decide what to do with "no idea how big the screen is" rather than
+/// being handed an invented number.
+func visibleSpanM(region: BasemapRegion?) -> Double? {
+    guard let region else { return nil }
+    let midLat = (region.minLatitude + region.maxLatitude) / 2
+    let widthM = CoordinateConversions.haversineMeters(
+        CoordinateConversions.LatLon(latitude: midLat,
+                                     longitude: region.minLongitude),
+        CoordinateConversions.LatLon(latitude: midLat,
+                                     longitude: region.maxLongitude))
+    let heightM = CoordinateConversions.haversineMeters(
+        CoordinateConversions.LatLon(latitude: region.minLatitude,
+                                     longitude: region.minLongitude),
+        CoordinateConversions.LatLon(latitude: region.maxLatitude,
+                                     longitude: region.minLongitude))
+    let shownM = min(widthM, heightM)
+    guard shownM.isFinite, shownM > 0 else { return nil }
+    return shownM
+}
+
+/// The zoom at which `spanM` of ground fits across the short side with the
+/// plot-framing headroom. `plotFramingZoom` is this expressed as a radius —
+/// one rule, so a plot frame and a fit around two points can never disagree
+/// about what "on screen" means.
+func spanFramingZoom(spanM: Double,
+                     currentZoom: Double,
+                     region: BasemapRegion?) -> Double? {
+    guard let shownM = visibleSpanM(region: region), spanM.isFinite, spanM > 0
+    else { return nil }
+    let zoom = currentZoom + log2(shownM / (spanM * plotFramingHeadroom))
+    guard zoom.isFinite else { return nil }
+    return min(max(zoom, BasemapMapView.zoomRange.lowerBound),
+               BasemapMapView.zoomRange.upperBound)
 }
 
 // MARK: - Range rings
@@ -104,6 +177,79 @@ func plotRangeRings(radiusM: Double,
 }
 
 extension MapHomeScreen {
+
+    // MARK: - Framing a new plot
+
+    /// Put the camera on a plot the cruiser has just created, close enough
+    /// that the BOUNDARY is on screen.
+    ///
+    /// The question a cruiser asks the moment a plot exists is "am I in it?",
+    /// and at the map's default zoom an 11 m ring is a few points across —
+    /// unreadable, and no answer at all. `plotFramingZoom` derives the level
+    /// from the plot's own radius, so a variable-radius or a large plot
+    /// frames on the same rule.
+    ///
+    /// With no measured region yet the zoom is left exactly as it is and
+    /// only the centre moves: a frame computed from nothing would be a
+    /// guess, and this is the screen that answers "where am I standing".
+    func frameCamera(onPlotAt centre: CoordinateConversions.LatLon,
+                     radiusM: Double) {
+        let zoom = plotFramingZoom(radiusM: radiusM,
+                                   currentZoom: camera.zoom,
+                                   region: visibleRegion) ?? camera.zoom
+        withAnimation(.easeOut(duration: 0.35)) {
+            camera = BasemapCamera(latitude: centre.latitude,
+                                   longitude: centre.longitude,
+                                   zoom: zoom)
+        }
+    }
+
+    /// GLIDE the camera to `centre` at `zoom` — the ground travels under the
+    /// cruiser's eye instead of cutting.
+    ///
+    /// `withAnimation` cannot do this. The map is a Canvas that reads
+    /// `camera` at draw time, so an animated assignment slides the pin VIEWS
+    /// over tiles that have already jumped — which reads as a glitch, not as
+    /// a move. Showing someone where a plot is only works if they can watch
+    /// the trip, so the camera is stepped here, frame by frame, and the
+    /// tiles travel with the pins.
+    ///
+    /// Ease-out over ~0.6 s: quick off the mark, settling onto the target.
+    /// A second call replaces the first — two loops writing the same camera
+    /// would fight, and the cruiser's last tap is the one they meant.
+    ///
+    /// EVERY OTHER WRITER ENDS THE FLIGHT TOO, and the loop finds that out by
+    /// looking rather than by being told. The map's own pan and pinch write
+    /// this `camera` straight through the binding, and no gesture can cancel
+    /// a Task it has never heard of — so a drag during a glide used to be
+    /// undone 60 times a second, the ground hauling itself back out from
+    /// under the cruiser's thumb. A camera that stops is a camera they can
+    /// work with; one that fights them is not. The same test also ends a
+    /// flight that a cut (`frameCamera`, my-location, the too-far branch of
+    /// "Go to Plot N") has overtaken, since those assign `camera` outright.
+    func flyCamera(to centre: CoordinateConversions.LatLon, zoom: Double) {
+        let from = camera
+        let steps = 36
+        cameraFlight?.cancel()
+        cameraFlight = Task { @MainActor in
+            // Where this flight left the camera on its previous frame.
+            // Anything else in it means someone else has taken the camera.
+            var lastWritten = from
+            for step in 1...steps {
+                try? await Task.sleep(nanoseconds: 16_000_000)
+                if Task.isCancelled { return }
+                guard camera == lastWritten else { return }
+                let t = Double(step) / Double(steps)
+                let eased = 1 - pow(1 - t, 3)
+                let next = BasemapCamera(
+                    latitude: from.latitude + (centre.latitude - from.latitude) * eased,
+                    longitude: from.longitude + (centre.longitude - from.longitude) * eased,
+                    zoom: from.zoom + (zoom - from.zoom) * eased)
+                camera = next
+                lastWritten = next
+            }
+        }
+    }
 
     // MARK: - The plot the map draws
 
@@ -281,7 +427,7 @@ extension MapHomeScreen {
 
     // MARK: - Tap menu (M2)
 
-    /// A tap on the plot drawn on the map (the map's `onPlotTap`) — raises
+    /// A tap on the plot drawn on the map (the map's `onOverlayTap`) — raises
     /// that plot's Edit / Remove menu. Ignores an id that no longer names
     /// a plot in this project.
     func openPlotMenu(_ plotID: String) {
@@ -368,6 +514,11 @@ extension MapHomeScreen {
     /// beside it.
     func editPlotFromMap(_ plot: Plot) {
         plotMenuPlotID = nil
+        // Any ring belonging to a DIFFERENT plot goes first. This door can
+        // open on an older open plot while the ring still marks the newest
+        // one, and `editCruisePlot` would read that ring as "the cruiser
+        // re-placed this plot's centre" and move the plot onto today's fix.
+        armPlotSetup(editing: plot.id)
         editingMapPlotID = plot.id
         presentingPlotSetup = true
     }
@@ -423,11 +574,10 @@ extension MapHomeScreen {
             // telling the truth; the next tap retries.
             return
         }
+        // One way to drop a ring, anchor included — two ways is how the next
+        // caller forgets the anchor half (`ActiveSamplingPlot.drop`).
         if samplingPlot.linkedCruisePlotID == plot.id {
-            if let ring = samplingPlot.plot {
-                ARKitSessionManager.shared.removeWorldAnchor(id: ring.anchorID)
-            }
-            samplingPlot.clear()
+            samplingPlot.drop()
         }
         withAnimation(.easeOut(duration: 0.18)) { selectedPinID = nil }
         reloadCruise()

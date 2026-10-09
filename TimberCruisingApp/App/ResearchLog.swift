@@ -9,11 +9,16 @@
 //
 // WIRED (developer mode only): the DBH / Height / Distance screens append a
 // row on every accepted reading, with an optional user-entered true value →
-// error column. Settings › Developer exports/clears this CSV. The Android
-// data/ResearchLog.kt mirrors the same column order so the two platforms'
-// exports concatenate for the cross-platform accuracy analysis.
+// error column. Settings › Developer clears this CSV, and exports it through
+// `ResearchExport` — the log is append-only, so the row a retake replaced and
+// the ground truth a correction moved on from are both still in here, and the
+// export is what separates them from what the field log shows. Nothing in this
+// file removes a row. The Android data/ResearchLog.kt mirrors the same column
+// order so the two platforms' exports concatenate for the cross-platform
+// accuracy analysis.
 
 import Foundation
+import Common
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -44,9 +49,35 @@ public final class ResearchLog {
         // stayed under the warning threshold and so was never announced at
         // all. Empty for non-height rows and when no pose was available.
         "aim_drift_m",
+        // truth_unit — the unit the operator TYPED `true_value` in ("cm" |
+        // "in" | "m" | "ft"). `true_value` itself is always the metric base,
+        // normalised on the way in, so nothing else in the row says whether
+        // the cruiser was working in inches or centimetres. Recording it makes
+        // the reconciliation arithmetic instead of guesswork. Empty when no
+        // truth was typed. NEW COLUMNS GO AT THE END: `prepareFileLocked`
+        // re-emits an older on-disk log under this order by column NAME, so
+        // every row a device already holds keeps its columns where they were
+        // and a pooled export sees one schema.
+        "truth_unit",
+        // tracking_dropped — "true" | "false" on a walk-off height row: did
+        // VIO tracking drop at any point between anchoring the trunk and the
+        // aim taps? A dropout moves the world frame the trunk anchor sits in,
+        // so it moves d_h — and d_h is the ENTIRE scale of H, which makes it a
+        // larger threat to the reading than the aim drift beside it. The
+        // cruiser is warned on screen and can retake, but before this column an
+        // accepted run taken across a dropout exported byte-identical to a
+        // clean one and the analyst could neither flag nor exclude it. Empty on
+        // rows with no walk-off (DBH, typed manual heights).
+        "tracking_dropped",
     ]
 
     private let queue = DispatchQueue(label: "forestix.researchlog")
+
+    /// True once the on-disk header has been confirmed to be the current
+    /// column order in this process. The check parses the whole file, and the
+    /// header can only change under us via `clear()`, which runs on the same
+    /// queue and resets this. Guarded by `queue`.
+    private var headerIsCurrent = false
 
     public var fileURL: URL {
         let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -88,17 +119,23 @@ public final class ResearchLog {
         f["os_version"] = Self.osVersion()
         f["device_model"] = Self.deviceModel()
         queue.async {
+            // Bring an older on-disk header up to the current column order
+            // FIRST: a row is written positionally, so appending under a
+            // header this build no longer matches is silent corruption.
+            let state = self.prepareFileLocked()
+            guard state != .unusable else { return }
+            // After the migration, so the indices this reads are the ones the
+            // file now actually uses.
             if let tree = f["tree_id"], !tree.isEmpty, f["repeat"] == nil {
                 f["repeat"] = "\(self.nextRepeatLocked(treeId: tree, measureType: f["measure_type"] ?? ""))"
             }
             let row = Self.columns.map { Self.csvEscape(f[$0] ?? "") }.joined(separator: ",")
             let url = self.fileURL
-            let exists = FileManager.default.fileExists(atPath: url.path)
             var out = ""
-            if !exists { out += Self.columns.joined(separator: ",") + "\n" }
+            if state == .fresh { out += Self.columns.joined(separator: ",") + "\n" }
             out += row + "\n"
             guard let data = out.data(using: .utf8) else { return }
-            if !exists {
+            if state == .fresh {
                 // Fresh file — `out` already carries the header + first row.
                 try? data.write(to: url)
             } else if let handle = try? FileHandle(forWritingTo: url) {
@@ -112,10 +149,291 @@ public final class ResearchLog {
         }
     }
 
+    // MARK: - Header migration
+
+    /// What the log on disk is, from the point of view of the next append.
+    private enum FileState {
+        /// Nothing usable on disk — write the header, then the row.
+        case fresh
+        /// The header on disk IS the current column order — append.
+        case ready
+        /// The header could not be brought up to date. Nothing may be
+        /// appended: a mismatched row is worse than a missing one.
+        case unusable
+    }
+
+    /// Bring a log written by an EARLIER build up to the current column order
+    /// before anything is appended to it.
+    ///
+    /// A row is written positionally, so appending a 31-field row under the
+    /// 30-name header a device already carries leaves every column after the
+    /// difference reading shifted: `pandas.read_csv` on the export either
+    /// raises "Expected 30 fields, saw 31" or, with bad lines suppressed,
+    /// drops exactly the newest rows. Deleting the log was the only remedy,
+    /// which throws away the field days already recorded.
+    ///
+    /// Old rows are re-emitted under the new order by COLUMN NAME. A column
+    /// the old build never had is written empty — that is what "this build did
+    /// not record it" means, and no value is invented. If the old header names
+    /// a column this build no longer has, re-emitting would silently drop
+    /// that data, so the file is set aside whole and a new log is started
+    /// instead. Must run on `queue`.
+    private func prepareFileLocked() -> FileState {
+        let fm = FileManager.default
+        let url = fileURL
+        guard fm.fileExists(atPath: url.path) else {
+            headerIsCurrent = false
+            return .fresh
+        }
+        if headerIsCurrent { return .ready }
+        // Exists but unreadable: do NOT fall through to `.fresh`, which
+        // writes with `write(to:)` and would truncate the whole log.
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+            return .unusable
+        }
+        let records = Self.parseRecords(text)
+        // Exists but holds no record (zero-length, or only blank lines):
+        // safe to start it over under the current header.
+        guard let header = records.first else { return .fresh }
+        if header == Self.columns {
+            headerIsCurrent = true
+            return .ready
+        }
+
+        guard header.allSatisfy({ Self.columns.contains($0) }) else {
+            return Self.archive(url) ? .fresh : .unusable
+        }
+        var out = Self.columns.joined(separator: ",") + "\n"
+        for row in records.dropFirst() {
+            var byName: [String: String] = [:]
+            for (i, name) in header.enumerated() where i < row.count {
+                byName[name] = row[i]
+            }
+            out += Self.columns.map { Self.csvEscape(byName[$0] ?? "") }
+                .joined(separator: ",") + "\n"
+        }
+        do {
+            // Atomic: a crash mid-migration must not leave a half-written log.
+            try out.write(to: url, atomically: true, encoding: .utf8)
+            headerIsCurrent = true
+            return .ready
+        } catch {
+            return .unusable
+        }
+    }
+
+    /// Move a log this build cannot re-emit out of the way, KEEPING IT WHOLE,
+    /// so a new log can start under the current header. Returns false when it
+    /// could not be moved — in which case nothing may be appended.
+    private static func archive(_ url: URL) -> Bool {
+        let fm = FileManager.default
+        let base = url.deletingPathExtension()
+        for n in 1...50 {
+            let dst = base.appendingPathExtension("legacy\(n)")
+                .appendingPathExtension("csv")
+            if fm.fileExists(atPath: dst.path) { continue }
+            do { try fm.moveItem(at: url, to: dst); return true } catch { return false }
+        }
+        return false
+    }
+
+    /// Split CSV text into records of fields, honouring the quoting
+    /// `csvEscape` emits: a quoted field may contain ',', '"' and newlines, so
+    /// neither a naive line split nor a naive comma split can be used to
+    /// rewrite the file. Blank lines are skipped.
+    static func parseRecords(_ text: String) -> [[String]] {
+        var records: [[String]] = []
+        var record: [String] = []
+        var field = ""
+        var inQuotes = false
+        // Tells a genuinely empty trailing field apart from "no field yet",
+        // so a trailing newline doesn't append a phantom one-field record.
+        var started = false
+        var i = text.startIndex
+        while i < text.endIndex {
+            let c = text[i]
+            if inQuotes {
+                if c == "\"" {
+                    let next = text.index(after: i)
+                    if next < text.endIndex, text[next] == "\"" {
+                        field.append("\"")   // "" inside quotes is one quote
+                        i = next
+                    } else {
+                        inQuotes = false
+                    }
+                } else {
+                    field.append(c)
+                }
+            } else if c == "\"" {
+                inQuotes = true
+                started = true
+            } else if c == "," {
+                record.append(field)
+                field = ""
+                started = true
+            } else if c.isNewline {
+                if started || !field.isEmpty {
+                    record.append(field)
+                    records.append(record)
+                }
+                record = []
+                field = ""
+                started = false
+            } else {
+                field.append(c)
+                started = true
+            }
+            i = text.index(after: i)
+        }
+        if started || !field.isEmpty {
+            record.append(field)
+            records.append(record)
+        }
+        return records
+    }
+
+    /// The whole log as parsed records, header first — what `ResearchExport`
+    /// classifies. nil when there is nothing usable on disk.
+    ///
+    /// Runs the header migration FIRST and refuses a log it could not bring up
+    /// to the current column order: an export written from a stale header
+    /// would name its columns wrong, which is the same silent corruption
+    /// appending under one would be. On the log's own queue, so it cannot
+    /// interleave with an append and see half a row.
+    ///
+    /// Read-only — the export never removes a row. `ResearchLog` is
+    /// append-only by design and stays that way; deciding what an export
+    /// SHOWS is a different question from what the device KEEPS.
+    public func snapshotRecords() -> [[String]]? {
+        queue.sync {
+            guard prepareFileLocked() == .ready else { return nil }
+            guard let text = try? String(contentsOf: fileURL, encoding: .utf8)
+            else { return nil }
+            let records = Self.parseRecords(text)
+            return records.isEmpty ? nil : records
+        }
+    }
+
     public func clear() {
         queue.async {
             try? FileManager.default.removeItem(at: self.fileURL)
+            self.headerIsCurrent = false
         }
+    }
+
+    // MARK: - Ground-truth unit repair
+
+    /// What one pass of `TruthUnitRepair` found (and, when applying, did) in
+    /// this log.
+    public struct TruthRepairOutcome: Sendable {
+        public var rows: [TruthUnitRepair.Change] = []
+        public var kept = TruthUnitRepair.Kept()
+        public var written = 0
+        /// The rows were found but the file could not be rewritten. Reported,
+        /// never swallowed: a repair that silently skipped the log would leave
+        /// the `error` column disagreeing with every other store.
+        public var failed = false
+    }
+
+    /// Re-base the `true_value` column of rows whose truth was typed in
+    /// imperial and written as if it were the metric base, and recompute the
+    /// `error` those rows carry.
+    ///
+    /// SAME RULE AS EVERYWHERE ELSE, read straight off the row: a `true_value`
+    /// with an EMPTY `truth_unit`. The screens write those two together (see
+    /// DBHScanScreen / HeightScanScreen), so a truth with no unit beside it can
+    /// only have been written before the column existed — and re-emitting an
+    /// older log under the current header, which `prepareFileLocked` does,
+    /// leaves it empty for exactly that reason. Filling the unit in is what
+    /// makes a second pass find nothing.
+    ///
+    /// `error` is recomputed from `measured_value`, which is already in the
+    /// row and is not touched — the measurement is frozen. A row whose
+    /// `measured_value` will not parse gets an EMPTY error rather than the one
+    /// it had: the old number was computed from the wrong truth, and leaving it
+    /// there would be a wrong number presented as a right one.
+    ///
+    /// Runs on the log's own queue, so it cannot interleave with an append.
+    /// With `apply: false` it reads and reports and writes nothing.
+    public func repairImperialTruths(apply: Bool) -> TruthRepairOutcome {
+        queue.sync { self.repairLocked(apply: apply) }
+    }
+
+    /// Must run on `queue`.
+    private func repairLocked(apply: Bool) -> TruthRepairOutcome {
+        var out = TruthRepairOutcome()
+        // Nothing to repair in a log that does not exist, and a log this build
+        // cannot bring up to the current header must not be rewritten by a
+        // pass that is not about the header.
+        let state = prepareFileLocked()
+        guard state == .ready else {
+            out.failed = apply && state == .unusable
+            return out
+        }
+        guard let text = try? String(contentsOf: fileURL, encoding: .utf8) else {
+            out.failed = apply
+            return out
+        }
+        var records = Self.parseRecords(text)
+        guard let header = records.first, header == Self.columns else {
+            out.failed = apply
+            return out
+        }
+        let typeIdx = Self.columns.firstIndex(of: "measure_type") ?? 0
+        let treeIdx = Self.columns.firstIndex(of: "tree_id") ?? 0
+        let truthIdx = Self.columns.firstIndex(of: "true_value") ?? 0
+        let measIdx = Self.columns.firstIndex(of: "measured_value") ?? 0
+        let errIdx = Self.columns.firstIndex(of: "error") ?? 0
+        let unitIdx = Self.columns.firstIndex(of: "truth_unit") ?? 0
+
+        var changed = false
+        for i in records.indices.dropFirst() {
+            var row = records[i]
+            // A short row (written by a build with fewer columns and never
+            // re-emitted) is padded rather than skipped, so the columns this
+            // pass writes land where the header says they are.
+            if row.count < Self.columns.count {
+                row += Array(repeating: "", count: Self.columns.count - row.count)
+            }
+            guard let before = TruthInput.parsePositive(row[truthIdx]) else { continue }
+            guard row[unitIdx].isEmpty else {
+                out.kept.unitRecorded += 1
+                continue
+            }
+            guard let q = TruthUnitRepair.Quantity.ofRawKind(row[typeIdx]) else {
+                out.kept.otherQuantity += 1
+                continue
+            }
+            let after = TruthUnitRepair.repaired(before, q)
+            out.rows.append(TruthUnitRepair.Change(
+                quantity: q, before: before, after: after,
+                store: "log", key: row[treeIdx]))
+            guard apply else { continue }
+            row[truthIdx] = String(format: "%.2f", after)
+            row[unitIdx] = q.typedUnit.rawValue
+            if let measured = TruthInput.parse(row[measIdx]) {
+                row[errIdx] = String(format: "%.2f", measured - after)
+            } else {
+                row[errIdx] = ""
+            }
+            records[i] = row
+            changed = true
+            out.written += 1
+        }
+        guard apply, changed else { return out }
+        var rebuilt = ""
+        for row in records {
+            rebuilt += row.map(Self.csvEscape).joined(separator: ",") + "\n"
+        }
+        do {
+            // Atomic, for the same reason the header migration is: a crash
+            // here must not leave half a field season on disk.
+            try rebuilt.write(to: fileURL, atomically: true, encoding: .utf8)
+        } catch {
+            out.failed = true
+            out.written = 0
+        }
+        return out
     }
 
     // MARK: - Helpers

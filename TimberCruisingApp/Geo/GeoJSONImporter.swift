@@ -244,20 +244,72 @@ public enum GeoJSONImporter {
 
     // MARK: - Serialisation
 
+    /// The member a circular stratum carries so it can be re-OPENED as a
+    /// circle instead of as the 128-corner polygon it is stored as.
+    ///
+    /// A foreign member inside a geometry object, which RFC 7946 §6.1
+    /// permits and every reader ignores — the same trick and the same
+    /// justification `forestix:source` already uses in
+    /// `SurveyBoundary.geoJSONData()`. The namespace prefix is what keeps
+    /// it from ever colliding with a real GeoJSON key, and the name sorts
+    /// between "coordinates" and "type" so the `.sortedKeys` output below
+    /// puts it exactly where the Kotlin sibling's hand-rolled builder puts
+    /// it. (The two agree on key ORDER and structure, not on every byte —
+    /// `JSONSerialization` renders a fractional double at 17 significant
+    /// digits and Kotlin renders the shortest round-trip form. That has
+    /// been true of the coordinates since this function was written; see
+    /// the note on Kotlin's `jsonNumber`.)
+    public static let circleMemberKey = "forestix:circle"
+
     /// Canonical Polygon GeoJSON string for persistence on `Stratum.polygonGeoJSON`.
-    public static func serialise(rings: [[CoordinateConversions.LatLon]]) -> String {
+    ///
+    /// `circle` is provenance only: the ring passed in is already the
+    /// densified circle, and everything that reads this string back —
+    /// `parseRings`, plot layout, both exporters — sees nothing but a
+    /// Polygon.
+    public static func serialise(rings: [[CoordinateConversions.LatLon]],
+                                 circle: BoundaryDraft.Circle? = nil) -> String {
         let coords: [[[Double]]] = rings.map { ring in
             ring.map { [$0.longitude, $0.latitude] }
         }
-        let geometry: [String: Any] = [
+        var geometry: [String: Any] = [
             "type": "Polygon",
             "coordinates": coords
         ]
+        if let circle {
+            geometry[circleMemberKey] = [
+                "lat": circle.centre.latitude,
+                "lon": circle.centre.longitude,
+                "radiusM": circle.radiusMeters
+            ]
+        }
         if let data = try? JSONSerialization.data(withJSONObject: geometry, options: [.sortedKeys]),
            let s = String(data: data, encoding: .utf8) {
             return s
         }
         return "{}"
+    }
+
+    /// The circle a stored stratum was drawn as, or nil for every polygon
+    /// ever saved before circles existed.
+    ///
+    /// NEVER THROWS. A note that cannot be read must degrade to "this is a
+    /// polygon" — which is the behaviour of every build before this one —
+    /// and never to a refused edit: the ring is intact either way, and
+    /// losing the ability to reshape a stand because a provenance hint went
+    /// bad would be the app punishing the cruiser for its own bookkeeping.
+    public static func parseCircle(from geojson: String) -> BoundaryDraft.Circle? {
+        guard let data = geojson.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let note = obj[circleMemberKey] as? [String: Any],
+              let lat = note["lat"] as? Double,
+              let lon = note["lon"] as? Double,
+              let radius = note["radiusM"] as? Double,
+              radius > 0, lat.isFinite, lon.isFinite, radius.isFinite
+        else { return nil }
+        return BoundaryDraft.Circle(
+            centre: CoordinateConversions.LatLon(latitude: lat, longitude: lon),
+            radiusMeters: radius)
     }
 
     // MARK: - Helpers

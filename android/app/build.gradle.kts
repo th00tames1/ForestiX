@@ -77,6 +77,13 @@ dependencies {
 
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.1")
 
+    // ON-DEVICE SEGMENTATION. The Auto diameter path can read the stem's
+    // edges out of a YOLO-seg mask instead of walking the depth map; see
+    // sensors/TreeSegmenter.kt. Same engine and same model file as iOS, so a
+    // mask decoded on one phone is the mask decoded on the other. The weights
+    // are gitignored (assets/models/README.md) and the app runs without them.
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
+
     // AR — ARCore + SceneView (Sceneform successor) for placing world
     // anchored markers and depth/plane hit-testing, mirroring ARKit +
     // RealityKit on the iOS side.
@@ -106,4 +113,8 @@ dependencies {
     implementation("io.github.sceneview:arsceneview:2.2.1")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
+    testImplementation("junit:junit:4.13.2")
+
+    // Shared numerical fixtures are also read by the Swift and Python tests.
+    android.sourceSets.getByName("test").resources.srcDir("../../validation/fixtures")
 }

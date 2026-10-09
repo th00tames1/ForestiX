@@ -27,20 +27,28 @@ public struct RootView: View {
             // palette AND system sheets/alerts together.
             .preferredColorScheme(environment.settings.appearance == "dark" ? .dark : .light)
             .onOpenURL { url in
-                guard let link = URLRouter.parse(url) else { return }
-                let history = environment.quickMeasureHistory
-                if let name = link.name,
-                   let existing = history.plots.first(where: { $0.name == name }) {
-                    history.setActivePlot(id: existing.id)
-                } else {
-                    let plot = history.createPlot(
-                        name: link.name ?? plotNameFor(link: link),
-                        unitName: link.unit ?? "",
-                        acres: link.acres,
-                        typeRaw: "fixed")
-                    history.setActivePlot(id: plot.id)
-                }
+                openPlotLink(url)
             }
+            #if os(iOS)
+            // UIKit scene delivery retains cold-launch URLs until the live
+            // environment and this view have finished initialising.
+            .onReceive(PortraitSceneState.shared.$pendingURL.compactMap { $0 }.receive(on: RunLoop.main)) { url in
+                openPlotLink(url)
+                PortraitSceneState.shared.consume(url: url)
+            }
+            #endif
+    }
+
+    private func openPlotLink(_ url: URL) {
+        guard let link = URLRouter.parse(url) else { return }
+        let history = environment.quickMeasureHistory
+        if let name = link.name, let existing = history.plots.first(where: { $0.name == name }) {
+            history.setActivePlot(id: existing.id)
+        } else {
+            let plot = history.createPlot(name: link.name ?? plotNameFor(link: link),
+                unitName: link.unit ?? "", acres: link.acres, typeRaw: "fixed")
+            history.setActivePlot(id: plot.id)
+        }
     }
 
     private func plotNameFor(link: PendingPlotLink) -> String {

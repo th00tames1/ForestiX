@@ -10,9 +10,10 @@ package com.hcjeong.forestix.inventory
 
 object VolumeEquationFactory {
 
-    /// Returns null if the record's `form` is not recognized.
-    fun make(record: com.hcjeong.forestix.data.cruise.VolumeEquation): VolumeEquation? =
-        when (record.form) {
+    /// Rejects placeholder coefficients, including records in existing databases.
+    fun make(record: com.hcjeong.forestix.data.cruise.VolumeEquation): VolumeEquation? {
+        if (record.sourceCitation.contains("PLACEHOLDER", ignoreCase = true)) return null
+        return when (record.form) {
             "bruce" -> BruceDouglasFir(coefficients = record.coefficients)
             "chambers_foltz" -> ChambersFoltzHemlock(coefficients = record.coefficients)
             "schumacher_hall" -> SchumacherHall(coefficients = record.coefficients)
@@ -22,4 +23,5 @@ object VolumeEquationFactory {
             "formfactor" -> Formfactor(coefficients = record.coefficients)
             else -> null
         }
+    }
 }

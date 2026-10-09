@@ -6,6 +6,12 @@ import Models
 
 final class CSVExporterTests: XCTestCase {
 
+    func testUnavailableVolumeIsBlankInCsv() {
+        XCTAssertEqual(CSVExporter.format(.nan, places: 4), "")
+        XCTAssertEqual(CSVExporter.format(.infinity, places: 4), "")
+        XCTAssertEqual(CSVExporter.format(0, places: 4), "0.0000")
+    }
+
     func testStratumListHeader() {
         let csv = CSVExporter.stratumListCSV(strata: [])
         XCTAssertEqual(csv, "stratum_id,name,area_acres\r\n")

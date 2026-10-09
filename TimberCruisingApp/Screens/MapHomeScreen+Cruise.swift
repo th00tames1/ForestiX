@@ -25,14 +25,23 @@
 //     distance · bearing row; Navigate toggles the dashed map guide
 //     line + floating distance chip (arrival <5 m pulses a haptic and
 //     clears it) — there is no separate navigation screen.
-//   • "Set plot centre (GPS)" → RecordCentreSheet (inline 60 s GPS
-//     averaging ring; offset fallback one line away); saving converts
-//     the planned pin into a real active plot.
+//   • "Start plot now" (field report 17) converts the planned pin into
+//     a real active plot on the fix that is live at that instant — one
+//     tap, no window to sit out, measuring available immediately. It
+//     and Navigate are the card's PAIR of primary actions.
+//   • The 60 s GPS-averaging sheet is gone from that card: field
+//     feedback found the window worse than not having it, since a
+//     cruiser standing under canopy is not going to be handed a better
+//     fix for waiting. RecordCentreSheet still exists but nothing on
+//     this map opens it (see the note in that file).
 //   • The project sheet exports with one primary "Export all" (full
 //     bundle + share sheet, progress inline); "Choose files…" keeps
 //     the per-file ExportScreen reachable.
 //
 // The single primary action is the state-morphing (+):
+//   • plans waiting   → "Go to Plot N" — glides the camera onto the
+//     lowest-numbered unvisited plan, draws the navigation guide to it
+//     and raises its card, which is the whole of "where is it?";
 //   • no active plot  → "Start plot" — the existing sampling-ring AR
 //     component places centre + radius; Save creates a cruise `Plot`
 //     in the current project (auto-numbered "Plot N", centre from the
@@ -44,11 +53,12 @@
 //     GPS + auto-photo), auto-increments the tree number, and resets
 //     the scan for the next trunk (Undo toast, 3 s). The floating back
 //     exits the loop. Heights are on demand: tree peek "Measure height"
-//     or the plot peek's HEIGHTS SHEET (pooled H–D curve estimates the
-//     rest once ≥3 pairs exist). Zero typing per record.
+//     or the plot peek's SAMPLE HEIGHTS SHEET (pooled H–D curve
+//     estimates the rest once ≥3 pairs exist). Zero typing per record.
 //
 // Tapping a plot ring peeks the tally card (live TREES/BA/TPA/QMD via
-// the InventoryEngine, Add tree, Close plot, Details); tapping a tree
+// the InventoryEngine, Add tree, sample heights, Add details — the
+// site description sheet — Close plot, Details); tapping a tree
 // pin peeks the v2-anatomy card (photo, metric rows, chips, Edit
 // details — post-hoc, never a gate). The project chip opens the
 // project sheet: switcher, one-time naming, Stand summary, advanced
@@ -74,12 +84,43 @@ import Export
 enum CruiseDestination: Hashable, Identifiable {
     case plotDetails(UUID)
     case treeDetails(UUID)
+    case projectBrowser
     case standSummary
     case export
     case fieldLog
+    /// The field log opened already narrowed to ONE cruise plot — the one
+    /// the cruiser has open. Separate from `.fieldLog` so the unscoped
+    /// footer link keeps showing everything.
+    case fieldLogPlot(UUID)
     case reference
     case settings
     var id: Self { self }
+}
+
+/// The CruiseDesign a project's roll-ups are computed against.
+///
+/// Cruise setup is optional, so a project can be tallied to completion with
+/// no CruiseDesign row at all; the informal path must still summarise and
+/// still export, which is why the miss synthesises a fixed-area / manual
+/// design rather than refusing. One rule, called from the map's
+/// `effectiveDesign()` and from the project browser's Stand summary, so the
+/// two can never disagree about what a design-less project is worth.
+enum CruiseDesignFallback {
+    static func effective(forProjectID projectID: UUID?,
+                          repository: any CruiseDesignRepository) -> CruiseDesign {
+        if let projectID,
+           let design = (try? repository.forProject(projectID))?.first {
+            return design
+        }
+        return CruiseDesign(
+            id: UUID(),
+            projectId: projectID ?? UUID(),
+            plotType: .fixedArea,
+            plotAreaAcres: nil,
+            baf: nil,
+            samplingScheme: .manual,
+            gridSpacingMeters: nil)
+    }
 }
 
 /// Identifiable URL wrapper for the export share sheet's `.sheet(item:)`.
@@ -89,28 +130,27 @@ struct ExportShareURL: Identifiable {
     var id: URL { url }
 }
 
-/// Plot whose HEIGHTS SHEET is presented (plot peek → "Heights · N
-/// measured"). Internal because MapHomeScreen.swift owns the state.
+/// Plot whose SAMPLE HEIGHTS SHEET is presented (plot peek →
+/// "Sample heights · N of M"). Internal because MapHomeScreen.swift owns
+/// the state.
 struct HeightsSheetTarget: Identifiable {
     let plotID: UUID
     var id: UUID { plotID }
 }
 
-/// Height screen scoped to one existing tree (tree peek / heights sheet
+/// Plot whose SITE DESCRIPTION sheet is presented (plot peek → "Add
+/// details"). Internal for the same reason as `HeightsSheetTarget`.
+struct SitePlotTarget: Identifiable {
+    let plotID: UUID
+    var id: UUID { plotID }
+}
+
+/// Height screen scoped to one existing tree (tree peek / sample heights sheet
 /// "Measure height") — staged across the sheet dismissal, same two-step
 /// pattern as `pendingDestination`.
 struct ScopedHeightRequest {
     let plotID: UUID
     let treeID: UUID
-}
-
-/// A cruise tree's auto-photo presented full-screen from the tree-peek
-/// thumbnail. Internal because MapHomeScreen.swift owns the `@State`.
-struct CruisePhotoContext: Identifiable {
-    let photoPath: String
-    let title: String
-    let subtitle: String
-    var id: String { photoPath }
 }
 
 // MARK: - Cruise mode
@@ -143,6 +183,44 @@ extension MapHomeScreen {
         (liveTrees(in: plotID).map(\.treeNumber).max() ?? 0) + 1
     }
 
+    /// The name to offer for the next tree in this plot — the HIGHEST name in
+    /// the series the cruiser is using here, stepped on by `TreeNameSequence`.
+    /// nil on a plot whose trees have never been named, and the tally then
+    /// stays zero-typing and labels by number, exactly as cruise always has.
+    ///
+    /// The SAME rule the quick-measure chooser offers
+    /// (`QuickMeasureHistory.suggestedNextTreeName`), through the same helper
+    /// rather than a second copy of it: the two worlds have to agree on what
+    /// follows "Plot3-T07", because a split cruise joins on the name.
+    /// `nextInSeries` wants the names newest-first, so the plot's trees are
+    /// ordered by creation before their names are read — repository order is
+    /// not a promise.
+    func nextTreeName(in plotID: UUID) -> String? {
+        let trees = liveTrees(in: plotID).sorted { $0.createdAt > $1.createdAt }
+        guard let proposed =
+                TreeNameSequence.nextInSeries(trees.compactMap(\.treeName))
+        else { return nil }
+        // NEVER propose a name a stem in this plot already wears.
+        //
+        // `TreeNameSequence.next` deliberately hands a name with no trailing
+        // number back UNCHANGED rather than inventing "Big oak2" — the app
+        // cannot tell whether "Big oak" starts a series, so the quick-measure
+        // chooser shows it again and the cruiser retypes it. The tally loop
+        // never stops to ask: it would accept "Big oak", "Big oak", "Big oak"
+        // down the whole plot, and tree_name is the column a cruise split
+        // across two phones joins on. Dropping back to nil labels the next
+        // stem "Tree #<n>" instead, and the pill is one tap away.
+        guard !trees.contains(where: { $0.treeName == proposed }) else { return nil }
+        return proposed
+    }
+
+    /// What the tally loop calls the tree it is ABOUT to write — the pending
+    /// name when there is one, else "Tree #<target>". One rule, shared with
+    /// every saved tree's `displayTitle`.
+    var chainTreeTitle: String {
+        TreeLabel.title(name: chainTreeName, number: chainTreeNumber)
+    }
+
     /// Tree number of the tree the SCOPED HEIGHT session is measuring — the
     /// raw-capture join key for a height bundle. Read from the tree row
     /// (`chainTreeID`), not from `chainTreeNumber`, which is the diameter
@@ -152,26 +230,48 @@ extension MapHomeScreen {
         return liveTrees(in: plotID).first(where: { $0.id == treeID })?.treeNumber
     }
 
-    /// The unvisited planned plot the (+) "Set plot centre" targets:
-    /// nearest to the current fix, or — with no fix — the lowest-numbered
-    /// one. nil when none exist. (`plannedPlots` is already filtered to
-    /// unvisited in `reloadCruise`.)
-    func nearestUnvisitedPlannedPlot() -> PlannedPlot? {
-        // Skipped plots (documented as inaccessible) are excluded from the
-        // (+) "nearest unvisited" target — they stay visible on the map but
-        // navigation passes over them.
-        let candidates = plannedPlots.filter { !$0.skipped }
-        guard !candidates.isEmpty else { return nil }
-        guard let fix = location.latestSnapshot ?? LocationService.lastGlobalFix
-        else {
-            return candidates.min(by: { $0.plotNumber < $1.plotNumber })
+    /// The scoped height session's tree NAME, read from the same row as
+    /// `chainHeightTreeNumber` and for the same reason: `chainTreeName` is the
+    /// diameter loop's NEXT name and would label the height screen with a tree
+    /// that has not been measured yet. nil when the tree was never named.
+    var chainHeightTreeName: String? {
+        guard let plotID = chainPlotID, let treeID = chainTreeID else { return nil }
+        return liveTrees(in: plotID).first(where: { $0.id == treeID })?.treeName
+    }
+
+    /// The unvisited planned plot the (+) takes the cruiser to when nothing
+    /// is being navigated to: the LOWEST-NUMBERED one. nil when none exist.
+    /// (`plannedPlots` is already filtered to unvisited in `reloadCruise`.)
+    ///
+    /// It used to be the nearest plan to the current fix, and that is the
+    /// wrong rule for a button that now MOVES THE MAP. A cruise is walked in
+    /// plot order and reported in plot order; picking by GPS meant standing
+    /// between two plans and being flung to Plot 9 because it happened to be
+    /// twenty metres closer, which is exactly the "where am I being sent?"
+    /// this button exists to answer. Numbering is the order the cruiser
+    /// already has in their head.
+    func nextUnvisitedPlannedPlot() -> PlannedPlot? {
+        // Skipped plots (documented as inaccessible) are excluded — they stay
+        // visible on the map but navigation passes over them.
+        plannedPlots.filter { !$0.skipped }
+            .min(by: { $0.plotNumber < $1.plotNumber })
+    }
+
+    /// The plan the (+) acts on: THE ONE BEING NAVIGATED TO if a guide is up,
+    /// otherwise the lowest-numbered unvisited plan.
+    ///
+    /// The plot order is the right answer only until the cruiser starts
+    /// walking. Once the dashed guide is drawn to a plot, that plot is the
+    /// one they are on their way to, and a button pressed mid-walk that
+    /// re-aimed the map at some other plan — flinging the camera off the walk
+    /// in progress — is the opposite of what pressing it means. The guide's
+    /// target IS the answer to "which plot?" for as long as it exists.
+    func cruiseTargetPlannedPlot() -> PlannedPlot? {
+        if let id = navTargetPlannedID,
+           let navigating = plannedPlots.first(where: { $0.id == id }) {
+            return navigating
         }
-        return candidates.min(by: { a, b in
-            GeoMath.distanceM(fromLat: fix.latitude, fromLon: fix.longitude,
-                              toLat: a.plannedLat, toLon: a.plannedLon)
-            < GeoMath.distanceM(fromLat: fix.latitude, fromLon: fix.longitude,
-                                toLat: b.plannedLat, toLon: b.plannedLon)
-        })
+        return nextUnvisitedPlannedPlot()
     }
 
     // MARK: Data
@@ -188,6 +288,9 @@ extension MapHomeScreen {
             plannedPlots = []
             navTargetPlannedID = nil
             treesByPlot = [:]
+            reloadAreas()
+            // No project ⇒ no plot the ring could still belong to.
+            reconcileSamplingRing()
             return
         }
         plots = (try? environment.plotRepository.listByProject(project.id)) ?? []
@@ -206,6 +309,78 @@ extension MapHomeScreen {
                                                             includeDeleted: false)) ?? []
         }
         treesByPlot = byPlot
+        reloadAreas()
+        reconcileSamplingRing()
+    }
+
+    // MARK: The AR ring's lifetime (field report 7)
+
+    /// FIELD REPORT 7 — "the plot edge is still visible long after leaving
+    /// it". The AR ring was dropped only by Reset, by a new placement, by
+    /// tracking loss, or by the app dying: NOTHING dropped it when the
+    /// cruiser closed a plot and walked to the next one. Plot 1 → Close plot
+    /// → walk → Start plot opened the setup screen already "placed", on plot
+    /// 1's ring, tens of metres away — no crosshair, no shutter, and a
+    /// boundary drawn around the wrong ground.
+    ///
+    /// The rule: once the ring is linked to a cruise plot it IS that plot's
+    /// boundary, and it lives exactly as long as the plot is one the cruiser
+    /// can still be measuring — i.e. OPEN, and in the current project.
+    /// Closed, deleted, or left behind by a project switch ⇒ dropped, anchor
+    /// and all.
+    ///
+    /// It runs from `reloadCruise`, which is the funnel EVERY plot mutation
+    /// already goes through — the map peek's Close and Delete, the plot
+    /// summary screen's Close / Reopen / Delete (via the `pushed` change),
+    /// the setup cover's dismiss, a project switch — so a new way to close a
+    /// plot cannot be added without this seeing it. Patching the two paths
+    /// the report named would have left the summary screen's Close still
+    /// leaking the ring.
+    ///
+    /// A ring linked to NOTHING is untouched: it is a quick-measure sampling
+    /// ring, or one just placed and not yet saved, and no cruise plot's
+    /// lifetime governs it. `armPlotSetup` handles that half.
+    ///
+    /// An unreadable plot list lands here as an empty one and drops the ring.
+    /// That is the right way to be wrong: a boundary we can no longer prove
+    /// belongs to an open plot is exactly the boundary the cruiser must not
+    /// be shown.
+    ///
+    /// Android runs the same test in `CruiseModeEffects`' cruise-data effect,
+    /// alongside the stale active-plot guard it already had.
+    func reconcileSamplingRing() {
+        guard let linked = samplingPlot.linkedCruisePlotID else { return }
+        // `plots` is this project's, so a ring from another project fails
+        // this test too — which is right: it is not a boundary here.
+        if plots.contains(where: { $0.id == linked && $0.closedAt == nil }) {
+            return
+        }
+        samplingPlot.drop()
+    }
+
+    /// Open the plot-setup cover, dropping a ring that belongs to a DIFFERENT
+    /// cruise plot first. `editing` names the plot the session will rewrite,
+    /// or nil for a fresh "Start plot".
+    ///
+    /// Two things go wrong when a foreign ring survives into this screen.
+    /// The visible one is the report: the screen opens already "placed", so
+    /// there is no crosshair and no shutter, and the cruiser is shown the
+    /// previous plot's boundary while standing in the new one. The invisible
+    /// one is worse — `editCruisePlot` reads "ring placed but not linked to
+    /// THIS plot" as "the cruiser re-placed the centre", so a radius-only
+    /// edit made with plot 1's ring still up would re-stamp plot 2's centre
+    /// at wherever the cruiser happened to be standing.
+    ///
+    /// On a CREATE there is no plot yet, so ANY ring is foreign — including
+    /// an unlinked one, which on this path is the ring left over from a plot
+    /// whose Save was refused for want of a GPS fix. The cruiser asked to
+    /// place a new centre; the screen owes them a crosshair.
+    func armPlotSetup(editing plotID: UUID?) {
+        if let plotID {
+            samplingPlot.dropIfLinkedElsewhere(than: plotID)
+        } else if samplingPlot.plot != nil {
+            samplingPlot.drop()
+        }
     }
 
     // MARK: Crash recovery (resume an in-progress plot)
@@ -299,7 +474,10 @@ extension MapHomeScreen {
                     id: "ctree-\(tree.id.uuidString)",
                     latitude: lat,
                     longitude: lon,
-                    title: "T\(tree.treeNumber)",
+                    // Named trees read by their name here too (shortened to
+                    // what the drop holds) — the peek prints it in full.
+                    title: TreeLabel.pinTitle(name: tree.treeName,
+                                              number: tree.treeNumber),
                     tint: ForestixPalette.primary))
             }
         }
@@ -332,19 +510,26 @@ extension MapHomeScreen {
     // MARK: The state-morphing (+) (label + action; the button itself
     // is the home's shared 74 pt circle)
 
-    /// LOCKED strings: "Add tree · Plot N" (active plot), "Set plot
-    /// centre" (unvisited planned plots waiting, none active), else
-    /// "Start plot" (ad-hoc). The (+) caption slot already absorbs the
-    /// variable width, so the cluster stays pixel-invariant.
+    /// LOCKED strings: "Add tree · Plot N" (active plot), "Go to Plot N"
+    /// (unvisited planned plots waiting, none active), else "Start plot"
+    /// (ad-hoc). The (+) caption slot already absorbs the variable width, so
+    /// the cluster stays pixel-invariant.
+    ///
+    /// It read "Set plot centre", which described a sheet that is no longer
+    /// what the button opens. It NAMES THE PLOT because the whole complaint
+    /// was that the cruiser could not tell which plan they were being sent
+    /// to; "Add tree · Plot N" beside it already establishes that this
+    /// button says what it is about to act on. ("Start cruising" was the
+    /// other candidate and reads wrong by the third plot of the morning —
+    /// the button is pressed once per plot all day, not once per cruise.)
     var cruisePrimaryLabel: String {
         if let plot = activePlot {
             return "Add tree · Plot \(plot.plotNumber)"
         }
-        // Only when a NON-skipped planned plot remains — mirrors the now-nil
-        // nearestUnvisitedPlannedPlot() so the label never promises a target
-        // the (+) can't reach.
-        if plannedPlots.contains(where: { !$0.skipped }) {
-            return "Set plot centre"
+        // Built from the SAME target the action uses, so the label can never
+        // promise a plot the (+) will not go to.
+        if let planned = cruiseTargetPlannedPlot() {
+            return "Go to Plot \(planned.plotNumber)"
         }
         return "Start plot"
     }
@@ -352,15 +537,79 @@ extension MapHomeScreen {
     func cruisePrimaryAction() {
         if let plot = activePlot {
             startAddTree(in: plot)
-        } else if let planned = nearestUnvisitedPlannedPlot() {
-            // Unvisited planned plots exist: the (+) drives the nearest
-            // one's Set-plot-centre flow instead of an ad-hoc start —
-            // exactly as tapping that dashed pin → "Set plot centre (GPS)".
-            withAnimation(.easeOut(duration: 0.18)) { selectedPinID = nil }
-            recordingTarget = planned
+        } else if let planned = cruiseTargetPlannedPlot() {
+            goToPlannedPlot(planned)
         } else {
-            presentingPlotSetup = true
+            // TWO DOORS, because the cruiser sometimes plans and sometimes
+            // just arrives. Neither is a new path: "Start here" is the AR
+            // sampling-ring screen this button has always opened, and "Pick
+            // on the map" arms the press-and-hold that planning already
+            // uses. Adding a third way to plan is what this avoids.
+            presentingStartPlotChoice = true
         }
+    }
+
+    /// How far a glide is still worth watching, measured in screenfuls of
+    /// the ground the map is showing. Two and a half screens is a move the
+    /// eye can follow; twenty is a featureless slide over country nobody
+    /// asked to see, and it ends with the same question it started with.
+    private static let flightScreenWidths: Double = 2.5
+
+    /// THE (+) WITH PLANS WAITING — take the cruiser to the next plot.
+    ///
+    /// The button used to open the averaging sheet on a plan the cruiser
+    /// could not see, so it answered "record a centre" for a question that
+    /// was really "which plot, and where is it?". It now does the three
+    /// things they were doing by hand: glides the map onto the plot, draws
+    /// the navigation guide to it, and raises that plot's own card. Nothing
+    /// here is a new flow — the guide is `navTargetPlannedID` exactly as
+    /// Navigate sets it, and the card is the pin's own selection.
+    func goToPlannedPlot(_ planned: PlannedPlot) {
+        let target = CoordinateConversions.LatLon(latitude: planned.plannedLat,
+                                                  longitude: planned.plannedLon)
+        // Guide and card FIRST: they are what the cruiser reads, and waiting
+        // for the camera to land would leave the button looking dead for the
+        // length of the flight.
+        withAnimation(.easeOut(duration: 0.2)) {
+            navTargetPlannedID = planned.id
+            selectedPinID = "pplot-\(planned.id.uuidString)"
+        }
+
+        let travelM = GeoMath.distanceM(
+            fromLat: camera.latitude, fromLon: camera.longitude,
+            toLat: target.latitude, toLon: target.longitude)
+        let screenM = visibleSpanM(region: visibleRegion)
+        let tooFar = screenM.map { travelM > $0 * Self.flightScreenWidths } ?? false
+        let fix = location.latestSnapshot ?? LocationService.lastGlobalFix
+
+        guard tooFar else {
+            // Same zoom rule as My location, the app's other "take me
+            // there" control: close in if the map was pulled back, and
+            // never pull a cruiser out of a closer look they chose.
+            flyCamera(to: target, zoom: max(camera.zoom, Self.defaultZoom))
+            return
+        }
+        guard let fix else {
+            // Too far to watch and no position to fit against. Cut straight
+            // there rather than glide: a long slide over ground the cruiser
+            // is not standing on tells them nothing they can use.
+            camera = BasemapCamera(latitude: target.latitude,
+                                   longitude: target.longitude,
+                                   zoom: max(camera.zoom, Self.defaultZoom))
+            return
+        }
+        // BOTH ENDS ON SCREEN. The separation is used as the span across the
+        // SHORT side, so the pair fits whatever bearing the plot lies on.
+        let separationM = GeoMath.distanceM(
+            fromLat: fix.latitude, fromLon: fix.longitude,
+            toLat: target.latitude, toLon: target.longitude)
+        let zoom = spanFramingZoom(spanM: separationM,
+                                   currentZoom: camera.zoom,
+                                   region: visibleRegion) ?? camera.zoom
+        flyCamera(to: CoordinateConversions.LatLon(
+            latitude: (fix.latitude + target.latitude) / 2,
+            longitude: (fix.longitude + target.longitude) / 2),
+                  zoom: zoom)
     }
 
     /// CRUISE PROJECT STRIP text — "<project> · Plot N · M trees" while a
@@ -407,9 +656,17 @@ extension MapHomeScreen {
     /// the home's map stack in one place. Presentation FLAGS are only
     /// ever set from cruise-mode UI, so these are inert in measure mode.
     func cruisePresentations<Content: View>(over content: Content) -> some View {
+        // The area alerts hang off a SEPARATE function rather than the end
+        // of this chain: this one is already long enough that adding two
+        // more modifiers put the type-checker over its budget and failed
+        // the build outright.
+        areaPresentations(over: cruiseOwnPresentations(over: content))
+    }
+
+    private func cruiseOwnPresentations<Content: View>(over content: Content) -> some View {
         content
         #if os(iOS)
-            .fullScreenCover(isPresented: $presentingPlotSetup,
+            .portraitFullScreenCover(isPresented: $presentingPlotSetup,
                              onDismiss: {
                                  // The map-overlay edit target is scoped to
                                  // ONE setup session; leaving it set would
@@ -420,18 +677,18 @@ extension MapHomeScreen {
             // Cruise tally loop — the DBH cover saves tree after tree and
             // only closes via the floating back; dismissal refreshes the
             // map's pins + tally.
-            .fullScreenCover(isPresented: $presentingCruiseDBH,
+            .portraitFullScreenCover(isPresented: $presentingCruiseDBH,
                              onDismiss: { reloadCruise() }) { cruiseDBHCover }
-            .fullScreenCover(isPresented: $presentingCruiseHeight,
+            .portraitFullScreenCover(isPresented: $presentingCruiseHeight,
                              onDismiss: { reloadCruise() }) { cruiseHeightCover }
-            // Tree-peek thumbnail → full-screen photo viewer.
-            .fullScreenCover(item: $cruisePhotoContext) { context in
-                CruiseTreePhotoView(context: context)
+            // Tree-peek thumbnail → the app's one full-screen photo viewer.
+            .portraitFullScreenCover(item: $cruisePhotoContext) { context in
+                MeasurePhotoDetailView(context: context)
             }
         #endif
-            // HEIGHTS SHEET (plot peek → "Heights · N measured") — the
-            // scoped Height cover launches from onDismiss so the two
-            // presentations never fight.
+            // SAMPLE HEIGHTS SHEET (plot peek → "Sample heights · N of
+            // M") — the scoped Height cover launches from onDismiss so the
+            // two presentations never fight.
             .sheet(item: $heightsSheetTarget, onDismiss: {
                 if let request = pendingScopedHeight {
                     pendingScopedHeight = nil
@@ -466,34 +723,40 @@ extension MapHomeScreen {
             // Simplified cruise setup (mock ⑥) — a defaulted bottom
             // sheet, not a pushed screen.
             .sheet(isPresented: $presentingCruiseSetup,
-                   onDismiss: { reloadCruise() }) {
+                   onDismiss: {
+                       cruiseSetupAreaID = nil
+                       reloadCruise()
+                   }) {
                 if let project = currentProject {
                     CruiseSetupSheet(
                         project: project,
                         mapCentre: CoordinateConversions.LatLon(
                             latitude: camera.latitude,
                             longitude: camera.longitude),
+                        // Opened from a selected area: the sheet lays plots
+                        // into THAT area and leaves the others alone. From
+                        // the project strip it is nil, and the sheet keeps
+                        // its whole-project behaviour.
+                        area: cruiseSetupAreaID.flatMap { id in
+                            areas.first { $0.id == id }
+                        },
                         onGenerated: { reloadCruise() })
                     .environmentObject(environment)
+                    // The sheet's radius / spacing / BAF boxes are labelled,
+                    // parsed and prefilled in the cruiser's units.
+                    .environmentObject(settings)
                 }
             }
-            // Inline GPS-averaging sheet (mock ⑧) — planned pin → real plot.
-            .sheet(item: $recordingTarget) { planned in
-                if let project = currentProject {
-                    RecordCentreSheet(
-                        plannedPlot: planned,
-                        project: project,
-                        onSaved: { plot in
-                            if navTargetPlannedID == planned.id {
-                                navTargetPlannedID = nil
-                            }
-                            withAnimation(.easeOut(duration: 0.18)) {
-                                selectedPinID = "plot-\(plot.id.uuidString)"
-                            }
-                            reloadCruise()
-                        })
+            // SITE DESCRIPTION (plot peek → "Add details") — slope, aspect,
+            // ground elevation, canopy cover. It takes a plot ID and loads
+            // its own copy: this screen already holds `plots`, and two
+            // holders of one plot is how one of them saves over the other's
+            // edit.
+            .sheet(item: $sitePlotTarget) { target in
+                PlotDetailSheet(plotId: target.plotID,
+                                onSaved: { _ in reloadCruise() })
                     .environmentObject(environment)
-                }
+                    .environmentObject(settings)
             }
             // Returning from a pushed editor (Tree detail, Plot summary…)
             // re-reads the repositories so pins/peeks reflect the edits.
@@ -503,12 +766,19 @@ extension MapHomeScreen {
             .navigationDestination(item: $pushed) { destination in
                 destinationView(destination)
             }
-            .confirmationDialog(
+            // ALERT, not a confirmationDialog — the same shape as the "Delete
+            // plot?" immediately below it, which is raised from the same peek.
+            // A destructive confirmation is centred and reads the same
+            // wherever the pin or row that raised it sits; an action sheet
+            // becomes a popover pinned to its source in a regular size class,
+            // so these two questions about the SAME plot would have appeared
+            // in two different places on the screen. See the field log's
+            // delete for the full argument.
+            .alert(
                 "Close this plot?",
                 isPresented: Binding(
                     get: { closePlotCandidateID != nil },
-                    set: { if !$0 { closePlotCandidateID = nil } }),
-                titleVisibility: .visible
+                    set: { if !$0 { closePlotCandidateID = nil } })
             ) {
                 Button("Close plot", role: .destructive) {
                     if let id = closePlotCandidateID { closePlot(id: id) }
@@ -541,6 +811,63 @@ extension MapHomeScreen {
                     Text("Delete Plot \(plot.plotNumber) and its \(n) tree\(n == 1 ? "" : "s")? This can't be undone.")
                 }
             }
+            // The press-and-hold planning menu is no longer a dialog at all
+            // — it is a PIN dropped where the cruiser pressed, with the
+            // choices in a callout over it (`planPin`, in
+            // MapHomeScreen+Area.swift). A bottom action sheet asked "plan
+            // a plot here" while pointing at nothing; anchored to the
+            // press, the question and the ground it is about are one
+            // object. The state (`mapPlanCoordinate`) and the flow through
+            // "Pick on the map" are unchanged.
+            //
+            // The (+)'s two doors. Not a third path: "Pick on the map" arms
+            // the press-and-hold above and nothing else.
+            .confirmationDialog(
+                "Start plot",
+                isPresented: $presentingStartPlotChoice,
+                titleVisibility: .visible
+            ) {
+                Button("Start here") {
+                    // Unchanged behaviour: the AR sampling-ring screen,
+                    // which records the centre from the fix available now.
+                    armPlotSetup(editing: nil)
+                    presentingPlotSetup = true
+                }
+                Button("Pick on the map") {
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        selectedPinID = nil
+                        awaitingMapPlanPress = true
+                    }
+                }
+                Button("Cancel", role: .cancel) { }
+            }
+            // Delete a planned plot — the plan, never a measurement. Worded
+            // so the cruiser can tell: no tally can be lost here, because a
+            // planned plot has never held one.
+            .alert("Delete planned plot?",
+                   isPresented: Binding(
+                       get: { deletePlannedCandidate != nil },
+                       set: { if !$0 { deletePlannedCandidate = nil } }),
+                   presenting: deletePlannedCandidate) { planned in
+                Button("Delete planned plot", role: .destructive) {
+                    deletePlanned(planned)
+                    deletePlannedCandidate = nil
+                }
+                Button("Cancel", role: .cancel) { deletePlannedCandidate = nil }
+            } message: { planned in
+                Text("Delete the plan for Plot \(planned.plotNumber)? Nothing measured is affected — this plot has no readings yet.")
+            }
+            // A plan has no centre, so it gets its own refusal rather than
+            // borrowing the one titled "Can't save the plot centre".
+            .alert("Can't save the planned plot",
+                   isPresented: Binding(
+                       get: { planSaveRefusal != nil },
+                       set: { if !$0 { planSaveRefusal = nil } })
+            ) {
+                Button("OK", role: .cancel) { planSaveRefusal = nil }
+            } message: {
+                Text(planSaveRefusal ?? "")
+            }
             // Delete tree (peek) — the tree row + its photo.
             .alert("Delete tree?",
                    isPresented: Binding(
@@ -555,7 +882,7 @@ extension MapHomeScreen {
             } message: { id in
                 if let tree = treesByPlot.values.joined()
                     .first(where: { $0.id == id }) {
-                    Text("Delete Tree \(tree.treeNumber)? This removes it and its photo from the map. This can't be undone.")
+                    Text("Delete \(tree.displayTitle)? This removes it and its photo from the map. This can't be undone.")
                 }
             }
     }
@@ -576,11 +903,20 @@ extension MapHomeScreen {
                 // THIRD way in, and it means the same thing: `editingMapPlotID`
                 // names the plot being edited, so Save must not mint a
                 // duplicate here either.
-                if chainingPlotSetup || editingMapPlotID != nil,
+                // Every RE-OPENED path has to be listed here. A path missing
+                // from this test falls through to createCruisePlot and mints
+                // a duplicate Plot N+1 out from under the cruiser —
+                // `heightPlotSetup` (FIELD REPORT 12) is the newest one.
+                //
+                // The result is the REFUSAL the plot screen must show, or nil
+                // when the save landed and it may close. See `editCruisePlot`
+                // for why the refusal travels back here instead of raising the
+                // map's `plotSaveRefusal` alert.
+                if chainingPlotSetup || heightPlotSetup || editingMapPlotID != nil,
                    editableCruisePlot != nil {
-                    editCruisePlot(radiusM: radiusM)
+                    return editCruisePlot(radiusM: radiusM)
                 } else {
-                    createCruisePlot(radiusM: radiusM)
+                    return createCruisePlot(radiusM: radiusM)
                 }
             })
             .environmentObject(history)
@@ -613,35 +949,93 @@ extension MapHomeScreen {
     /// loss — invisible. `ActiveSamplingPlot.place(...)` clears
     /// `linkedCruisePlotID`, so "still linked to this plot" is exactly the
     /// test for "the centre was not re-placed".
-    func editCruisePlot(radiusM: Double) {
+    ///
+    /// RETURNS the refusal to show ON THE PLOT SCREEN, or nil when the save
+    /// landed and that screen may close. It deliberately does NOT raise
+    /// `plotSaveRefusal`: that alert is attached to the MAP body, and the plot
+    /// setup screen is a cover over the map — reached from the cruise scan
+    /// screens it is a cover over ANOTHER cover. A host that is still
+    /// presenting a modal cannot show an alert, so from the two scan doors
+    /// (`chainingPlotSetup`, `heightPlotSetup`) the refusal was raised and
+    /// never seen: the radius was written, the centre was correctly refused,
+    /// and the cruiser was told nothing. Android's `CruiseStartPlotScreen`
+    /// has always kept this message on the plot screen itself and stayed up
+    /// so it can be read and retried; this is the same shape, same words.
+    /// `plotSaveRefusal` remains for `startPlannedPlotNow`, which is raised
+    /// from the map with no cover in the way.
+    func editCruisePlot(radiusM: Double) -> String? {
         guard var plot = editableCruisePlot else {
-            createCruisePlot(radiusM: radiusM)
-            return
+            return createCruisePlot(radiusM: radiusM)
         }
         plot.plotAreaAcres = Float(.pi * radiusM * radiusM / Units.squareMetersPerAcre)
 
         let store = ActiveSamplingPlot.shared
         let recentred = store.plot != nil && store.linkedCruisePlotID != plot.id
-        if recentred,
-           let fix = location.latestSnapshot ?? LocationService.lastGlobalFix {
+        // FRESHNESS-GATED, exactly as `createCruisePlot` below. A re-centre
+        // writes a plot centre, so it is the same act and it answers to the
+        // same rule: `latestSnapshot` is never cleared and
+        // `LocationService.lastGlobalFix` is a static that outlives the
+        // screen, so ungated they hand back the last fix that ever got
+        // through — an hour old, a valley away — and this path would stamp
+        // it as a real single fix. Moving a plot centre to yesterday's
+        // position is the same invisible data loss the `recentred` test
+        // exists to prevent, just arrived at from the other side.
+        let fix = recentred
+            ? FixFreshness.usable(
+                location.latestSnapshot ?? LocationService.lastGlobalFix)
+            : nil
+        if let fix {
             plot.centerLat = fix.latitude
             plot.centerLon = fix.longitude
-            plot.positionSource = .gpsAveraged
+            // ONE fix, named as one. This path never opened an averaging
+            // window, so it may not wear `gpsAveraged`, and the tier comes
+            // from the single-fix rule rather than from `classify` with a
+            // spread of zero it never measured.
+            plot.positionSource = .gpsSingle
             plot.gpsNSamples = 1
             plot.gpsMedianHAccuracyM = Float(fix.horizontalAccuracyM)
             plot.gpsSampleStdXyM = 0
             // Still stored, still exported — just never shown (F9).
-            plot.positionTier = GPSAveraging.classify(
-                medianHAccuracyM: Float(fix.horizontalAccuracyM),
-                sampleStdXyM: 0)
+            plot.positionTier = GPSAveraging.classifySingleFix(
+                horizontalAccuracyM: Float(fix.horizontalAccuracyM))
         }
+        let refusedRecentre = recentred && fix == nil
 
-        if (try? environment.plotRepository.update(plot)) != nil {
+        // The write is the whole point of the button, so a failed one is
+        // reported in the cruiser's own words rather than swallowed by a
+        // `try?` — same sentence as Android's `save()` catch.
+        var storeError: String?
+        do {
+            _ = try environment.plotRepository.update(plot)
+        } catch {
+            storeError = "Couldn't save the plot: \(error.localizedDescription)"
+        }
+        let stored = storeError == nil
+        if stored, !refusedRecentre {
             // Re-link so the mini-map trusts the AR-anchor path for YOU
-            // against the ring the cruiser is actually looking at.
+            // against the ring the cruiser is actually looking at — but ONLY
+            // when that ring is genuinely this plot's centre. On a refused
+            // re-centre the stored centre stayed where it was, so linking
+            // would draw YOU against a ring the plot was never moved to.
+            // Left unlinked, the mini-map falls through to the GPS path
+            // measured from the centre the plot actually has.
             ActiveSamplingPlot.shared.link(cruisePlotID: plot.id)
         }
         reloadCruise()
+        // Nothing was written at all — say that, and say nothing about a
+        // radius that did not land.
+        if let storeError { return storeError }
+        // A button that did not do what it looked like it did has to say so.
+        // The radius edit landed; the re-placed ring did not become the new
+        // centre, and without this the cruiser walks away believing it did.
+        // Only reached when `stored`, so the sentence about the radius is only
+        // said when the radius really was written.
+        if refusedRecentre {
+            return "No GPS fix — the plot keeps its recorded "
+                + "centre. The radius was saved. Step out for sky and "
+                + "try again."
+        }
+        return nil
     }
 
     /// Persist the placed ring as a cruise `Plot` in the current
@@ -651,9 +1045,15 @@ extension MapHomeScreen {
     /// morphs to "Add tree · Plot N". `ActiveSamplingPlot` stays placed
     /// (the sampling screen anchored it), so DBH/Height overlay the
     /// ring while measuring inside it.
-    func createCruisePlot(radiusM: Double) {
+    ///
+    /// RETURNS the refusal to show ON THE PLOT SCREEN, or nil when the plot
+    /// was created and that screen may close — see `editCruisePlot` for why
+    /// the map's alert is not the place for it.
+    func createCruisePlot(radiusM: Double) -> String? {
         let project = currentProject ?? autoCreateProject()
-        guard let project else { return }
+        guard let project else {
+            return "Couldn't save the plot: there is no project to put it in."
+        }
         // FRESHNESS-GATED, and REFUSED when there is nothing usable.
         //
         // This used to fall through to the MAP CAMERA position, which is
@@ -666,16 +1066,17 @@ extension MapHomeScreen {
         guard let fix = FixFreshness.usable(
             location.latestSnapshot ?? LocationService.lastGlobalFix)
         else {
-            plotSaveRefusal = "No GPS fix — the plot centre would be saved "
+            return "No GPS fix — the plot centre would be saved "
                 + "in the wrong place. Step out for sky and try again."
-            return
         }
         let number = ((try? environment.plotRepository
             .listByProject(project.id))?.map(\.plotNumber).max() ?? 0) + 1
         let areaAcres = Float(.pi * radiusM * radiusM / Units.squareMetersPerAcre)
-        let tier = GPSAveraging.classify(
-            medianHAccuracyM: Float(fix.horizontalAccuracyM),
-            sampleStdXyM: 0)
+        // ONE fix, named as one — see `PositionSource.gpsSingle`. Nothing on
+        // this path opens an averaging window, so neither the source nor the
+        // tier may be borrowed from the one that does.
+        let tier = GPSAveraging.classifySingleFix(
+            horizontalAccuracyM: Float(fix.horizontalAccuracyM))
         let plot = Plot(
             id: UUID(),
             projectId: project.id,
@@ -683,7 +1084,7 @@ extension MapHomeScreen {
             plotNumber: number,
             centerLat: fix.latitude,
             centerLon: fix.longitude,
-            positionSource: .gpsAveraged,
+            positionSource: .gpsSingle,
             positionTier: tier,
             gpsNSamples: 1,
             gpsMedianHAccuracyM: Float(fix.horizontalAccuracyM),
@@ -698,11 +1099,69 @@ extension MapHomeScreen {
             notes: "",
             coverPhotoPath: nil,
             panoramaPath: nil)
-        if (try? environment.plotRepository.create(plot)) != nil {
+        // The write is the whole point of the button, so a failed one is
+        // reported rather than swallowed by a `try?` — same sentence as
+        // Android's `save()` catch. Without this a storage error looked
+        // exactly like a saved plot: the screen closed and the cruiser
+        // started tallying into a plot that does not exist.
+        var storeError: String?
+        do {
+            _ = try environment.plotRepository.create(plot)
             // Stamp the placed AR ring as THIS cruise plot's centre so
             // the scan screens' mini-map may use the anchor path (the
             // accurate one) for YOU while measuring into this plot.
             ActiveSamplingPlot.shared.link(cruisePlotID: plot.id)
+            // A plot that has just come into existence is the one thing on
+            // the map worth looking at, and the first question about it is
+            // whether the cruiser is inside its boundary. Frame the ring.
+            frameCamera(onPlotAt: CoordinateConversions.LatLon(
+                latitude: fix.latitude, longitude: fix.longitude),
+                        radiusM: radiusM)
+        } catch {
+            storeError = "Couldn't save the plot: \(error.localizedDescription)"
+        }
+        reloadCruise()
+        return storeError
+    }
+
+    /// FIELD REPORT 17 — open a PLANNED plot on the fix that is live right
+    /// now, with no averaging window in the way. Same conversion the
+    /// averaging sheet's "Save centre" runs (so the planned pin is marked
+    /// visited and the plot opens exactly as it always did); the only
+    /// difference is in the position stamp the result carries, which says
+    /// `gpsSingle` / one sample rather than borrowing the averaged label.
+    ///
+    /// REFUSES rather than guesses. With no fix the app still believes,
+    /// there is nothing to put in `centerLat`/`centerLon` — and a plot
+    /// centre is the anchor for every tree tallied into the plot, so the
+    /// wrong one is worse than none. Same refusal, word for word, as the
+    /// AR "Start plot" path.
+    func startPlannedPlotNow(_ planned: PlannedPlot) {
+        guard let project = currentProject else { return }
+        guard let result = singleFixCentre(location.latestSnapshot) else {
+            plotSaveRefusal = "No GPS fix — the plot centre would be saved "
+                + "in the wrong place. Step out for sky and try again."
+            return
+        }
+        do {
+            let created = try convertPlannedToActivePlot(
+                environment: environment,
+                project: project,
+                planned: planned,
+                result: result)
+            if navTargetPlannedID == planned.id { navTargetPlannedID = nil }
+            HapticFeedback.play(.success)
+            withAnimation(.easeOut(duration: 0.18)) {
+                selectedPinID = "plot-\(created.id.uuidString)"
+            }
+            // Same framing as the AR "Start plot" path — a planned plot that
+            // has just become real is still a new plot to stand inside.
+            frameCamera(onPlotAt: CoordinateConversions.LatLon(
+                latitude: created.centerLat, longitude: created.centerLon),
+                        radiusM: plotRadiusM(created))
+        } catch {
+            plotSaveRefusal =
+                "Storage error: \(error.localizedDescription). The centre was not saved — try again."
         }
         reloadCruise()
     }
@@ -749,13 +1208,46 @@ extension MapHomeScreen {
     /// on every Accept, auto-increments the target number, and resets
     /// itself for the next trunk — no Height chain, no return to the
     /// map until the floating back. Per-tree height on demand lives on
-    /// the tree peek / heights sheet instead.
+    /// the tree peek / sample heights sheet instead.
     func startAddTree(in plot: Plot) {
+        // The tally is switching to THIS plot, so a ring belonging to any
+        // other one stops being the boundary being measured — and the DBH /
+        // Height screens draw whatever ring is placed as their subdued
+        // overlay. An "Add tree" from a plot peek can target an OLDER open
+        // plot than the last-placed ring, which is exactly the case that
+        // survives `reconcileSamplingRing` (both plots are open).
+        samplingPlot.dropIfLinkedElsewhere(than: plot.id)
         chainPlotID = plot.id
         chainTreeNumber = nextTreeNumber(in: plot.id)
+        // Picked up from the plot the loop is entering, not carried over from
+        // whatever was tallied last: re-entering Plot 2 after naming trees in
+        // Plot 1 must continue PLOT 2's series. nil when this plot has never
+        // been named, and the loop stays nameless until the pill is tapped.
+        chainTreeName = nextTreeName(in: plot.id)
         chainTreeID = nil
         withAnimation(.easeOut(duration: 0.18)) { selectedPinID = nil }
         presentingCruiseDBH = true
+    }
+
+    /// Tally pill → rename. Opens the field on the name the next tree would be
+    /// saved under, so the common edit is a tweak rather than a retype.
+    func beginTallyRename() {
+        tallyNameDraft = chainTreeName ?? ""
+        renamingTallyTree = true
+    }
+
+    /// Rename committed. An emptied field CLEARS the name rather than storing
+    /// "": the tree then falls back to "Tree #<n>", which is the only way back
+    /// to an unnamed tally once a series has been started.
+    ///
+    /// Trimmed before it is stored, exactly as the quick-measure chooser does
+    /// in `lockChooserTree()` — the name is a join key for a split cruise, and
+    /// a gloved thumb must not create " Plot3-T07" here and "Plot3-T07" there.
+    func commitTallyRename() {
+        let trimmed = tallyNameDraft
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        chainTreeName = trimmed.isEmpty ? nil : trimmed
+        renamingTallyTree = false
     }
 
     /// Height screen scoped to one EXISTING tree (tree peek / heights
@@ -782,6 +1274,12 @@ extension MapHomeScreen {
         reloadCruise()
         if let plotID = chainPlotID {
             chainTreeNumber = nextTreeNumber(in: plotID)
+            // Stepped back with the number, and re-derived from the plot for
+            // the same reason: the undone row is gone from `liveTrees`, so the
+            // series resolves to the name that row had. Reusing the name the
+            // loop had already advanced to would leave a gap in the series
+            // that nothing ever fills.
+            chainTreeName = nextTreeName(in: plotID)
         }
     }
 
@@ -793,6 +1291,7 @@ extension MapHomeScreen {
             depthNoiseMm: project.depthNoiseMm,
             dbhCorrectionAlpha: project.dbhCorrectionAlpha,
             dbhCorrectionBeta: project.dbhCorrectionBeta,
+            dbhCalibrationEpoch: project.dbhCalibrationEpoch,
             vioDriftFraction: project.vioDriftFraction)
     }
 
@@ -816,6 +1315,7 @@ extension MapHomeScreen {
             let heightWarn = tree.heightConfidence.map { $0 != .green } ?? false
             return PlotMiniMapInfo.TreeDot(
                 number: tree.treeNumber,
+                name: tree.treeName,
                 latitude: tree.latitude,
                 longitude: tree.longitude,
                 bearingFromCenterDeg: tree.bearingFromCenterDeg.map(Double.init),
@@ -879,6 +1379,16 @@ extension MapHomeScreen {
                     reloadCruise()
                     if let plotID = chainPlotID {
                         chainTreeNumber = nextTreeNumber(in: plotID)
+                        // ONLY on a save that landed, and for the same reason
+                        // the number can be recomputed unconditionally: a
+                        // failed Accept wrote no row, so re-deriving from the
+                        // plot would resolve the series WITHOUT the name the
+                        // cruiser typed and quietly throw it away. Leaving it
+                        // alone means the next Accept reuses it, which is what
+                        // the pill is still promising on screen.
+                        if stored {
+                            chainTreeName = nextTreeName(in: plotID)
+                        }
                     }
                     // Chain into Height for the tree that was just written.
                     // Gated on THIS save succeeding, not merely on
@@ -893,15 +1403,36 @@ extension MapHomeScreen {
                 },
                 cruisePlotInfo: cruiseMiniMapInfo(plotID: chainPlotID),
                 tallyTreeNumber: chainTreeNumber,
+                tallyTreeName: chainTreeName,
+                onRenameTally: { beginTallyRename() },
                 onUndoTally: { undoLastTally() },
                 projectID: currentProject?.id.uuidString,
-                onEditPlot: { chainingPlotSetup = true })
+                onEditPlot: {
+                    // The setup session about to open rewrites the plot the
+                    // tally is measuring into — a ring linked to any other
+                    // plot is not this plot's centre and must not be read as
+                    // a re-placement (see `armPlotSetup`).
+                    armPlotSetup(editing: chainPlotID)
+                    chainingPlotSetup = true
+                })
             .environmentObject(settings)
-            .fullScreenCover(isPresented: $chainingHeight,
+            // Tally pill → rename. An alert rather than a sheet: it is one
+            // field, it must not disturb the AR session running underneath,
+            // and it keeps the cruiser on the trunk they are already aiming
+            // at. LOCKED strings — Android's dialog says the same words.
+            .alert("Name this tree", isPresented: $renamingTallyTree) {
+                TextField("e.g. Tree1", text: $tallyNameDraft)
+                    .autocorrectionDisabled()
+                Button("Save") { commitTallyRename() }
+                Button("Cancel", role: .cancel) { renamingTallyTree = false }
+            } message: {
+                Text("Leave it empty and this tree goes back to \(TreeLabel.title(name: nil, number: chainTreeNumber)).")
+            }
+            .portraitFullScreenCover(isPresented: $chainingHeight,
                              onDismiss: { reloadCruise() }) {
                 cruiseChainedHeightCover
             }
-            .fullScreenCover(isPresented: $chainingPlotSetup,
+            .portraitFullScreenCover(isPresented: $chainingPlotSetup,
                              onDismiss: { reloadCruise() }) { plotSetupCover }
         }
     }
@@ -925,9 +1456,16 @@ extension MapHomeScreen {
                 // Raw-capture join keys: the height session measures a KNOWN
                 // tree, so its bundle must carry that tree's number.
                 projectID: currentProject?.id.uuidString,
-                treeNumber: chainHeightTreeNumber)
+                treeNumber: chainHeightTreeNumber,
+                treeName: chainHeightTreeName,
+                onEditPlot: {
+                    armPlotSetup(editing: chainPlotID)
+                    heightPlotSetup = true
+                })
             .environmentObject(history)
             .environmentObject(settings)
+            .portraitFullScreenCover(isPresented: $heightPlotSetup,
+                             onDismiss: { reloadCruise() }) { plotSetupCover }
         }
     }
 
@@ -949,9 +1487,16 @@ extension MapHomeScreen {
                 // Raw-capture join keys: the height session measures a KNOWN
                 // tree, so its bundle must carry that tree's number.
                 projectID: currentProject?.id.uuidString,
-                treeNumber: chainHeightTreeNumber)
+                treeNumber: chainHeightTreeNumber,
+                treeName: chainHeightTreeName,
+                onEditPlot: {
+                    armPlotSetup(editing: chainPlotID)
+                    heightPlotSetup = true
+                })
             .environmentObject(history)
             .environmentObject(settings)
+            .portraitFullScreenCover(isPresented: $heightPlotSetup,
+                             onDismiss: { reloadCruise() }) { plotSetupCover }
         }
     }
 
@@ -980,6 +1525,10 @@ extension MapHomeScreen {
             id: UUID(),
             plotId: plotID,
             treeNumber: chainTreeNumber,
+            // The name the pill was showing when the cruiser accepted. nil is
+            // the norm and stays the norm — an unnamed cruise tree is labelled
+            // by number and exports an empty tree_name, as it always has.
+            treeName: chainTreeName,
             speciesCode: species,
             status: .live,
             dbhCm: result.diameterCm,
@@ -994,6 +1543,15 @@ extension MapHomeScreen {
             // mixing bracket and auto fits cannot be split at analysis time,
             // and the bracket is now the default path.
             dbhCaptureMode: meta.captureMode,
+            // WHICH ESTIMATOR read this stem. The row keeps only the
+            // diameter, so without this a number produced by the cylinder-
+            // tangent inversion and one produced by the chord identity sit
+            // side by side in a plot with nothing to tell them apart. A
+            // TYPED diameter is left unstamped: no estimator produced it,
+            // and nil is the field's word for that.
+            dbhEstimatorEpoch: meta.captureMode == "typed"
+                ? nil
+                : DBHEstimator.estimatorEpoch,
             heightM: nil,
             heightMethod: nil,
             heightSource: nil,
@@ -1158,6 +1716,20 @@ extension MapHomeScreen {
         // computes per acre, so scale for display.
         let areaUnit = settings.unitSystem.areaUnit
         let densityFactor = areaUnit.perAcreDensityFactor
+        // Built here rather than inline: the header line and the four stat
+        // cells together put the SwiftUI type-checker past its budget, and a
+        // string that is composed before the body reads the same either way.
+        let radiusLine = plotLengthLabel(plotRadiusM(plot), settings.unitSystem)
+            + " radius · "
+            + Self.cruisePeekTimeFormatter.string(from: plot.startedAt)
+        let basalAreaValue = String(
+            format: "%.1f",
+            MeasurementFormatter.basalAreaDensity(
+                m2PerAcre: Double(stats.baPerAcreM2), in: areaUnit))
+        let meanDbhValue = MeasurementFormatter.entryText(
+            MeasurementFormatter.diameterValue(cm: Double(stats.qmdCm),
+                                               in: settings.unitSystem),
+            fractionDigits: 1)
         return VStack(spacing: 0) {
             RoundedRectangle(cornerRadius: 2)
                 .fill(ForestixPalette.divider)
@@ -1170,9 +1742,10 @@ extension MapHomeScreen {
                     .foregroundStyle(ForestixPalette.textPrimary)
                 statusChip(closed: isClosed)
                 Spacer(minLength: 4)
-                Text(String(format: "%.1f m radius · %@",
-                            plotRadiusM(plot),
-                            Self.cruisePeekTimeFormatter.string(from: plot.startedAt)))
+                // Same ring, same label as the plot banner and the plot menu —
+                // one plot cannot have one radius where you tap it and another
+                // where the banner shows it.
+                Text(radiusLine)
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(ForestixPalette.textTertiary)
                     .lineLimit(1)
@@ -1187,14 +1760,22 @@ extension MapHomeScreen {
                 // app; basal area is kept forestry vocabulary, so it is
                 // spelled, not renamed. TPA also silently became TPH with
                 // the units setting — the label now names the unit outright.
+                // Basal area converts its NUMERATOR with the basis, not just
+                // its suffix: the engine reports m²/acre, so an imperial cruise
+                // that scaled only the denominator printed "m²/ac" — a unit no
+                // cruise sheet uses and 10.76× off the ft²/ac the same app
+                // shows for the same stand elsewhere. Mean DBH is a diameter
+                // like the ones on the trees above it and follows the same
+                // formatter they do.
                 statCell("TREES", "\(stats.liveTreeCount)", nil, divided: true)
-                statCell("BASAL AREA", String(format: "%.1f", Double(stats.baPerAcreM2) * densityFactor),
-                         areaUnit.densityLabel("m²"), divided: true)
+                statCell("BASAL AREA", basalAreaValue,
+                         MeasurementFormatter.basalAreaDensityUnit(areaUnit), divided: true)
                 statCell(areaUnit == .hectare ? "TREES/HA" : "TREES/AC",
                          String(format: "%.0f", Double(stats.tpa) * densityFactor),
                          areaUnit.densitySuffix, divided: true)
-                statCell("MEAN DBH", String(format: "%.1f", stats.qmdCm),
-                         "cm", divided: false)
+                statCell("MEAN DBH", meanDbhValue,
+                         MeasurementFormatter.diameterUnit(settings.unitSystem),
+                         divided: false)
             }
             .background(
                 RoundedRectangle(cornerRadius: ForestixRadius.card,
@@ -1206,9 +1787,15 @@ extension MapHomeScreen {
                     Button {
                         startAddTree(in: plot)
                     } label: {
-                        Text("Add tree · Tree \(nextTreeNumber(in: plot.id))")
+                        // Names the tree the button is about to open the tally
+                        // on — the auto-incremented name when this plot has a
+                        // series running, else "Tree #<next>".
+                        Text("Add tree · " + TreeLabel.title(
+                            name: nextTreeName(in: plot.id),
+                            number: nextTreeNumber(in: plot.id)))
                             .font(.system(size: 15, weight: .bold))
                             .foregroundStyle(ForestixPalette.primaryInk)
+                            .lineLimit(1)
                             .frame(maxWidth: .infinity, minHeight: 54)
                             .background(
                                 RoundedRectangle(cornerRadius: ForestixRadius.card,
@@ -1220,14 +1807,28 @@ extension MapHomeScreen {
                     .accessibilityIdentifier("cruiseMap.plotPeek.addTree")
                 }
 
-                // PLOT SAMPLE HEIGHTS — full-width secondary into the
+                // PLOT SAMPLE HEIGHTS — full-width secondary into the sample
                 // heights sheet: the plot's measured (tree, DBH, height)
                 // pairs + on-demand height measurement + the pooled-curve
-                // status. LOCKED string "Heights · N measured".
+                // status. LOCKED strings, see `plotHeightsLabel(in:)`.
+                //
+                // NAMED AS A SUBSAMPLE. It read "Heights" and a cruiser who
+                // had just tapped a PLOT asked why heights were being offered
+                // here and where diameter was — a fair question of a word
+                // that looks like a heading. Which trees get a measured
+                // height is a plot-level decision (the rest are imputed from
+                // the H–D curve), which is why the row is here and why there
+                // is correctly no diameter row beside it: every tree gets a
+                // diameter through the tally.
+                //
+                // The count carries the target now, so "0 of 5" is worth
+                // saying where "· 0 measured" was the word "none" dressed up
+                // as a statistic. Where there is no target the row goes quiet
+                // rather than inventing one.
                 Button {
                     heightsSheetTarget = HeightsSheetTarget(plotID: plot.id)
                 } label: {
-                    Text("Heights · \(plotHeightsPairCount(in: plot.id)) measured")
+                    Text(plotHeightsLabel(in: plot.id))
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(ForestixPalette.textPrimary)
                         .frame(maxWidth: .infinity, minHeight: 44)
@@ -1239,6 +1840,28 @@ extension MapHomeScreen {
                 }
                 .buttonStyle(CruisePressableStyle())
                 .accessibilityIdentifier("cruiseMap.plotPeek.heights")
+
+                // SITE DESCRIPTION — slope, aspect, ground elevation, canopy
+                // cover. It sits beside Sample heights because both are the
+                // same kind of act: recording something about THIS PLOT that
+                // the tally itself cannot see. "Add details" rather than a
+                // second "Details" verb — the pair below opens the plot's
+                // report, this one is where a cruiser writes the ground down.
+                Button {
+                    sitePlotTarget = SitePlotTarget(plotID: plot.id)
+                } label: {
+                    Text("Add details")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(ForestixPalette.textPrimary)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .background(
+                            RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                             style: .continuous)
+                                .stroke(ForestixPalette.divider, lineWidth: 1))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(CruisePressableStyle())
+                .accessibilityIdentifier("cruiseMap.plotPeek.addDetails")
 
                 HStack(spacing: ForestixSpace.xs) {
                     if !isClosed {
@@ -1378,13 +2001,34 @@ extension MapHomeScreen {
             hdFits: pooledHDFits(plotTrees: trees))
     }
 
-    // MARK: Pooled H–D relation (heights sheet + volume imputation)
+    // MARK: Pooled H–D relation (sample heights sheet + volume imputation)
 
-    /// Fit-eligible (DBH, height) pairs of a plot — the heights sheet's
-    /// list and the "Heights · N measured" count (matches Android's
-    /// PooledHeights.pairs gate).
-    func plotHeightsPairCount(in plotID: UUID) -> Int {
-        Self.hdPairs(liveTrees(in: plotID)).count
+    /// The plot peek's sample-heights row. Height is a SUBSAMPLE — every tree
+    /// gets a diameter through the tally, only some get a measured height,
+    /// and the rest are imputed from the fitted H–D curve — so the row is
+    /// named as one, and it says how much of this plot's subsample is left.
+    ///
+    /// LOCKED strings "Sample heights" / "Sample heights · N of M" /
+    /// "Sample heights · N measured". Android's `plotHeightsLabel` returns
+    /// the same three.
+    ///
+    /// The target comes from `HeightSubsample`, the one owner of the rule, so
+    /// the row can never ask for a different number than the flow that fills
+    /// it. When the rule sets no target (`.none`) or asks nothing of this
+    /// plot (an empty plot asks nothing), there is no denominator to show:
+    /// the row falls back to the plain count, and to the bare name at zero.
+    /// A fraction is never invented to fill the gap, and a plot with no trees
+    /// never reads as work due.
+    func plotHeightsLabel(in plotID: UUID) -> String {
+        let progress = HeightSubsample.progress(
+            rule: effectiveDesign().heightSubsampleRule,
+            treesOnPlot: liveTrees(in: plotID))
+        if let target = progress.target, target > 0 {
+            return "Sample heights · \(progress.measured) of \(target)"
+        }
+        return progress.measured > 0
+            ? "Sample heights · \(progress.measured) measured"
+            : "Sample heights"
     }
 
     /// Fit-eligible (DBH, height) pairs — the same cleaning the engine
@@ -1441,30 +2085,193 @@ extension MapHomeScreen {
     }
 
     func effectiveDesign() -> CruiseDesign {
-        if let project = currentProject,
-           let design = (try? environment.cruiseDesignRepository
-               .forProject(project.id))?.first {
-            return design
-        }
-        return CruiseDesign(
-            id: UUID(),
-            projectId: currentProject?.id ?? UUID(),
-            plotType: .fixedArea,
-            plotAreaAcres: nil,
-            baf: nil,
-            samplingScheme: .manual,
-            gridSpacingMeters: nil)
+        CruiseDesignFallback.effective(
+            forProjectID: currentProject?.id,
+            repository: environment.cruiseDesignRepository)
     }
 
     /// Toggle a planned plot's `skipped` flag (inaccessible — cliff, water,
     /// private land). Mirrors RecordCentreSheet's mutate → persist → refresh:
     /// a skipped plot stays visible (still in `plannedPlots`, since skipped is
-    /// not visited) but is excluded from the (+) nearest-unvisited navigation
-    /// and renders with the warn tint + "SKIP" badge.
+    /// not visited) but is excluded from the (+)'s running order and renders
+    /// with the warn tint + "SKIP" badge.
+    // MARK: Planning on the map (press and hold)
+
+    /// Where every hand-drawn coordinate enters the app — in BOTH modes; the
+    /// menu it raises is what narrows (see the dialog above).
+    ///
+    /// A press with a MOVE armed relocates that plan and nothing else — the
+    /// cruiser asked one question ("where should this be instead?") and gets
+    /// no menu in the middle of answering it. That branch is cruise-only: a
+    /// planned plot exists only in the cruise world, and an arm that outlived
+    /// a mode flip must not relocate a plan from a map no longer showing it.
+    func handleMapLongPress(at coordinate: CoordinateConversions.LatLon) {
+        // A press while an outline is being dragged belongs to that outline:
+        // raising a planning menu mid-edit would offer to start something
+        // else on top of unsaved work.
+        guard areaDraft == nil else { return }
+        if isCruiseMode, let id = movingPlannedID {
+            movePlanned(id: id, to: coordinate)
+            return
+        }
+        withAnimation(.easeOut(duration: 0.18)) {
+            selectedPinID = nil
+            selectedAreaID = nil
+        }
+        mapPlanCoordinate = coordinate
+    }
+
+    /// The number a newly planned plot takes: one past the highest number
+    /// ALREADY SPOKEN FOR, planned or real.
+    ///
+    /// Both sets have to be consulted because a planned plot carries its
+    /// number into the Plot it becomes (`convertPlannedToActivePlot`), so a
+    /// plan numbered off the planned list alone would collide with an
+    /// ad-hoc plot started earlier in the day — two "Plot 4"s in one
+    /// project, indistinguishable in every export.
+    func nextPlotNumber() -> Int {
+        let planned = plannedPlots.map(\.plotNumber).max() ?? 0
+        let real = plots.map(\.plotNumber).max() ?? 0
+        return max(planned, real) + 1
+    }
+
+    /// Drop a PlannedPlot where the cruiser pressed.
+    ///
+    /// The coordinate is stamped `.manual` and stays in `plannedLat` /
+    /// `plannedLon`. It is an INTENTION: no fix is read here, nothing is
+    /// measured, and the plot this becomes will take its centre from the
+    /// arrival fix instead (`startPlannedPlotNow`). Keeping the drawn point
+    /// and the arrival fix apart is the whole reason both are stored.
+    func planPlot(at coordinate: CoordinateConversions.LatLon) {
+        let project = currentProject ?? autoCreateProject()
+        guard let project else {
+            planSaveRefusal = "Couldn't plan the plot: there is no project to put it in."
+            return
+        }
+        let planned = PlannedPlot(
+            id: UUID(),
+            projectId: project.id,
+            // No stratum: a finger on a map is not inside a stratum the app
+            // knows about, and guessing one from a boundary would file this
+            // plot under a stratum the cruiser never chose.
+            stratumId: nil,
+            plotNumber: nextPlotNumber(),
+            plannedLat: coordinate.latitude,
+            plannedLon: coordinate.longitude,
+            visited: false,
+            skipped: false,
+            plannedSource: .manual)
+        do {
+            _ = try environment.plannedPlotRepository.create(planned)
+            HapticFeedback.play(.success)
+            reloadCruise()
+            // Open its peek straight away: the plan is only useful once the
+            // cruiser can navigate to it, and that is one tap inside here.
+            withAnimation(.easeOut(duration: 0.18)) {
+                selectedPinID = "pplot-\(planned.id.uuidString)"
+            }
+        } catch {
+            planSaveRefusal =
+                "Storage error: \(error.localizedDescription). The planned plot was not saved — try again."
+        }
+    }
+
+    /// Move an existing plan to where the cruiser just pressed.
+    ///
+    /// Re-stamps `.manual` whatever laid the point down first: after this the
+    /// coordinate IS a drawn one, and a generator's provenance left in place
+    /// would be a claim about a point the generator never produced.
+    func movePlanned(id: UUID, to coordinate: CoordinateConversions.LatLon) {
+        movingPlannedID = nil
+        guard var planned = plannedPlots.first(where: { $0.id == id }) else { return }
+        planned.plannedLat = coordinate.latitude
+        planned.plannedLon = coordinate.longitude
+        planned.plannedSource = .manual
+        do {
+            _ = try environment.plannedPlotRepository.update(planned)
+            HapticFeedback.play(.success)
+            reloadCruise()
+            withAnimation(.easeOut(duration: 0.18)) {
+                selectedPinID = "pplot-\(planned.id.uuidString)"
+            }
+        } catch {
+            planSaveRefusal =
+                "Storage error: \(error.localizedDescription). The planned plot was not moved — try again."
+        }
+    }
+
+    /// Delete a plan. Nothing measured can be lost: a PlannedPlot holds no
+    /// trees and no centre, and the moment it becomes a real plot it stops
+    /// being reachable from here (the pin turns solid).
+    func deletePlanned(_ planned: PlannedPlot) {
+        do {
+            try environment.plannedPlotRepository.delete(id: planned.id)
+        } catch {
+            planSaveRefusal =
+                "Storage error: \(error.localizedDescription). The planned plot was not deleted — try again."
+            return
+        }
+        if navTargetPlannedID == planned.id { navTargetPlannedID = nil }
+        if movingPlannedID == planned.id { movingPlannedID = nil }
+        if selectedPinID == "pplot-\(planned.id.uuidString)" {
+            withAnimation(.easeOut(duration: 0.18)) { selectedPinID = nil }
+        }
+        reloadCruise()
+    }
+
+    /// The armed-gesture banner. Names the plot being moved, because a move
+    /// and a fresh plan look identical once the finger is down.
+    var mapPlanPromptBanner: some View {
+        HStack(spacing: ForestixSpace.xs) {
+            Text(mapPlanPromptText)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(ForestixPalette.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 4)
+            Button {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    awaitingMapPlanPress = false
+                    movingPlannedID = nil
+                }
+            } label: {
+                Text("Cancel")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(ForestixPalette.primary)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(
+            RoundedRectangle(cornerRadius: ForestixRadius.control,
+                             style: .continuous)
+                .fill(ForestixPalette.surface))
+        .overlay(
+            RoundedRectangle(cornerRadius: ForestixRadius.control,
+                             style: .continuous)
+                .stroke(ForestixPalette.divider, lineWidth: 1))
+        .padding(.horizontal, ForestixSpace.sm)
+        .accessibilityIdentifier("cruiseMap.planPrompt")
+    }
+
+    private var mapPlanPromptText: String {
+        if let id = movingPlannedID,
+           let planned = plannedPlots.first(where: { $0.id == id }) {
+            return "Press and hold the map to move Plot \(planned.plotNumber)."
+        }
+        return "Press and hold the map to plan a plot."
+    }
+
+    /// A newly-skipped plot drops out of the (+)'s running order, so any
+    /// dashed guide armed at it is cleared: the guide is what the (+) aims
+    /// at while it is up, and a plot documented as unreachable is not
+    /// somewhere to be sent. Android does the same in `skipPlanned`.
     func setPlannedSkipped(_ planned: PlannedPlot, _ value: Bool) {
         var p = planned
         p.skipped = value
         _ = try? environment.plannedPlotRepository.update(p)
+        if value, navTargetPlannedID == planned.id { navTargetPlannedID = nil }
         reloadCruise()
     }
 
@@ -1520,8 +2327,8 @@ extension MapHomeScreen {
 
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(tree.speciesCode.isEmpty
-                     ? "Tree \(tree.treeNumber)"
-                     : "Tree \(tree.treeNumber) · \(RegionalSpecies.name(forCode: tree.speciesCode))")
+                     ? tree.displayTitle
+                     : "\(tree.displayTitle) · \(RegionalSpecies.name(forCode: tree.speciesCode))")
                     .font(.system(size: 16, weight: .bold))
                     .foregroundStyle(ForestixPalette.textPrimary)
                     .lineLimit(1)
@@ -1534,17 +2341,18 @@ extension MapHomeScreen {
             .padding(.bottom, 10)
 
             HStack(alignment: .top, spacing: ForestixSpace.sm) {
-                // Tappable thumbnail → full-screen viewer (reuses the
-                // MeasurePhotoStore path); disabled with no photo.
+                // Tappable thumbnail → the app's one full-screen viewer
+                // (reuses the MeasurePhotoStore path); disabled with no
+                // photo. A cruise Tree row carries a SINGLE photo path, so
+                // this opens one page and shows no counter.
                 Button {
-                    if let path = tree.photoPath {
-                        cruisePhotoContext = CruisePhotoContext(
-                            photoPath: path,
-                            title: tree.speciesCode.isEmpty
-                                ? "Tree \(tree.treeNumber)"
-                                : "Tree \(tree.treeNumber) · \(RegionalSpecies.name(forCode: tree.speciesCode))",
-                            subtitle: peekTreeSubtitle(tree, plot: plot))
-                    }
+                    let pages = MeasurePhotoPage.pages(
+                        forCruiseTree: tree.photoPath,
+                        title: tree.speciesCode.isEmpty
+                            ? tree.displayTitle
+                            : "\(tree.displayTitle) · \(RegionalSpecies.name(forCode: tree.speciesCode))",
+                        subtitle: peekTreeSubtitle(tree, plot: plot))
+                    cruisePhotoContext = PhotoViewerContext(pages: pages)
                 } label: {
                     cruisePhotoThumb(tree.photoPath)
                 }
@@ -1565,6 +2373,7 @@ extension MapHomeScreen {
                         value: MeasurementFormatter.diameter(cm: Double(tree.dbhCm),
                                                              in: system),
                         tier: tree.dbhConfidence.rawValue,
+                        explains: .diameter,
                         divided: tree.heightM != nil)
                     if let h = tree.heightM {
                         metricRow(
@@ -1572,6 +2381,7 @@ extension MapHomeScreen {
                             value: MeasurementFormatter.height(m: Double(h),
                                                                in: system),
                             tier: tree.heightConfidence?.rawValue ?? "green",
+                            explains: .height,
                             divided: false)
                     }
                 }
@@ -1682,7 +2492,8 @@ extension MapHomeScreen {
     // Peek display carries the value only; ±σ is deliberately NOT shown
     // here (the tree record / CSV / FieldLog keep it).
     func metricRow(label: String, value: String,
-                   tier: String, divided: Bool) -> some View {
+                   tier: String, explains: TierExplainer.Kind,
+                   divided: Bool) -> some View {
         HStack(spacing: ForestixSpace.xs) {
             Text(label)
                 .font(.system(size: 10, weight: .bold))
@@ -1695,7 +2506,15 @@ extension MapHomeScreen {
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
             Spacer(minLength: 4)
-            cruiseTierChip(tier)
+            // The grade is a criterion, not a mood: tapping it opens the
+            // same explainer the per-tree report and the quick peek open,
+            // scoped to the measurement this row is showing.
+            Button { explainingTier = explains } label: {
+                cruiseTierChip(tier)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("What this grade means")
+            .accessibilityIdentifier("cruiseMap.treePeek.tierChip.\(explains.rawValue)")
         }
         .padding(.vertical, 6)
         .overlay(alignment: .bottom) {
@@ -1802,7 +2621,7 @@ extension MapHomeScreen {
                     y: min(max((a.y + b.y) / 2, 130), geo.size.height - 130))
                 let metres = CoordinateConversions.haversineMeters(guide.from,
                                                                    guide.to)
-                Text(Self.distanceLabel(metres))
+                Text(Self.distanceLabel(metres, settings.unitSystem))
                     .font(.system(size: 11, weight: .heavy, design: .monospaced))
                     .foregroundStyle(ForestixPalette.textPrimary)
                     .padding(.horizontal, 11)
@@ -1812,7 +2631,8 @@ extension MapHomeScreen {
                                               lineWidth: 1))
                     .shadow(color: Color.black.opacity(0.18), radius: 4, y: 2)
                     .position(mid)
-                    .accessibilityLabel("Distance to plot \(Self.distanceLabel(metres))")
+                    .accessibilityLabel("Distance to plot "
+                        + Self.distanceLabel(metres, settings.unitSystem))
                     .accessibilityIdentifier("cruiseMap.navChip")
             }
         }
@@ -1822,9 +2642,12 @@ extension MapHomeScreen {
         .allowsHitTesting(false)
     }
 
-    static func distanceLabel(_ metres: Double) -> String {
-        metres < 995 ? String(format: "%.0f m", metres)
-                     : String(format: "%.1f km", metres / 1000)
+    /// How far the cruiser still has to walk. A PACING instruction, so it goes
+    /// through `navDistance` rather than `distance` — and through the unit
+    /// system, because a cruiser who paces in feet cannot use "142 m" for
+    /// anything without doing arithmetic on a hillside.
+    static func distanceLabel(_ metres: Double, _ system: UnitSystem) -> String {
+        MeasurementFormatter.navDistance(m: metres, in: system)
     }
 
     /// Arrival = within 5 m of the navigated plot: one haptic pulse
@@ -1847,8 +2670,16 @@ extension MapHomeScreen {
     }
 
     /// Peek for a hollow dashed pin: live distance · bearing from the
-    /// current fix, "Set plot centre (GPS)" (→ inline averaging sheet) and
-    /// "Navigate" (toggles the map guide). Replaces NavigationScreen.
+    /// current fix, then the PAIR — "Start plot now" (opens the plot on that
+    /// fix, field report 17) and "Navigate" (toggles the map guide), both in
+    /// primary treatment because they are the two things a cruiser standing
+    /// in front of this pin actually does. Replaces NavigationScreen.
+    ///
+    /// "Set plot centre (GPS)" used to sit between them, in the outlined
+    /// primary this card now gives Navigate. Field feedback: the 60 s
+    /// averaging window was worse than not having it — a cruiser who has
+    /// already walked to the plot spends a minute standing still under a
+    /// canopy that will not give them a better fix.
     func plannedPeekCard(for planned: PlannedPlot) -> some View {
         let navigating = navTargetPlannedID == planned.id
         return VStack(spacing: 0) {
@@ -1885,13 +2716,15 @@ extension MapHomeScreen {
             .padding(.vertical, 6)
 
             VStack(spacing: ForestixSpace.xs) {
+                // FIELD REPORT 17 — the plot opens on the fix that is live
+                // right now, with no window to sit out. The FROM YOU row
+                // directly above is the check that makes this safe: it is
+                // the cruiser's own reading of whether they are standing at
+                // the plot or looking at it from the far side of a draw.
                 Button {
-                    withAnimation(.easeOut(duration: 0.18)) {
-                        selectedPinID = nil
-                    }
-                    recordingTarget = planned
+                    startPlannedPlotNow(planned)
                 } label: {
-                    Text("Set plot centre (GPS)")
+                    Text("Start plot now")
                         .font(.system(size: 15, weight: .bold))
                         .foregroundStyle(ForestixPalette.primaryInk)
                         .frame(maxWidth: .infinity, minHeight: 54)
@@ -1902,24 +2735,29 @@ extension MapHomeScreen {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(CruisePressableStyle())
-                .accessibilityIdentifier("cruiseMap.plannedPeek.record")
+                .accessibilityIdentifier("cruiseMap.plannedPeek.startNow")
 
+                // THE OTHER HALF OF THE PAIR — same 54 pt outlined primary
+                // the removed averaging button had, so walking to the plot
+                // and opening it read as the two things this card is for.
+                // While the guide is up it takes the accent instead: the
+                // outline is what says "tapping this stops it".
                 Button {
                     withAnimation(.easeOut(duration: 0.2)) {
                         navTargetPlannedID = navigating ? nil : planned.id
                     }
                 } label: {
                     Text("Navigate")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.system(size: 15, weight: .bold))
                         .foregroundStyle(navigating ? ForestixPalette.accent
-                                                    : ForestixPalette.textPrimary)
-                        .frame(maxWidth: .infinity, minHeight: 44)
+                                                    : ForestixPalette.primary)
+                        .frame(maxWidth: .infinity, minHeight: 54)
                         .background(
-                            RoundedRectangle(cornerRadius: ForestixRadius.control,
+                            RoundedRectangle(cornerRadius: ForestixRadius.card,
                                              style: .continuous)
                                 .stroke(navigating ? ForestixPalette.accent
-                                                   : ForestixPalette.divider,
-                                        lineWidth: navigating ? 1.5 : 1))
+                                                   : ForestixPalette.primary,
+                                        lineWidth: 1.5))
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(CruisePressableStyle())
@@ -1928,12 +2766,17 @@ extension MapHomeScreen {
                 .accessibilityIdentifier("cruiseMap.plannedPeek.navigate")
 
                 // Skip toggle — an EXPLICIT cruiser action (unlike `visited`,
-                // which flips implicitly on recording a centre). "Mark
-                // unreachable" documents a cliff/water/private-land plot so
-                // navigation passes over it; "Restore plot" undoes it, mirroring
-                // PlotSummaryScreen's Reopen affordance. "Set plot centre (GPS)"
-                // stays available even when skipped — a cruiser who later
-                // reaches the plot can still record it (which sets visited).
+                // which flips implicitly when the plot is opened). "Skip this
+                // plot" documents a cliff/water/private-land plot so
+                // navigation passes over it; "Unskip this plot" undoes it.
+                //
+                // It read "Mark unreachable" / "Restore plot", which is
+                // office language: nobody in the field says they marked a
+                // plot unreachable, they say they skipped it. "Restore" was
+                // the worse of the two — it is the word for bringing back
+                // something deleted, and nothing here was ever deleted. Every
+                // action stays up on a skipped plot, because "can't reach it"
+                // is a judgement a cruiser is allowed to revise after lunch.
                 Button {
                     if planned.skipped {
                         setPlannedSkipped(planned, false)
@@ -1944,7 +2787,7 @@ extension MapHomeScreen {
                         }
                     }
                 } label: {
-                    Label(planned.skipped ? "Restore plot" : "Mark unreachable",
+                    Label(planned.skipped ? "Unskip this plot" : "Skip this plot",
                           systemImage: planned.skipped ? "lock.open" : "slash.circle")
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(planned.skipped ? ForestixPalette.textPrimary
@@ -1960,6 +2803,55 @@ extension MapHomeScreen {
                 }
                 .buttonStyle(CruisePressableStyle())
                 .accessibilityIdentifier("cruiseMap.plannedPeek.skip")
+
+                // A PLAN IN THE WRONG SPOT IS THE NORMAL CASE. Move re-arms
+                // the same press-and-hold that made the plan; Delete throws
+                // the plan away. Both sit below the skip toggle because they
+                // change the plan itself rather than what to do about it.
+                //
+                // "Move plan", not "Move on map" and not "Relocate": it is
+                // the word-for-word pair of the "Delete plan" beside it, and
+                // it names WHAT moves. A cruiser reading "Relocate" on a card
+                // titled "Plot 4 (planned)" has to work out whether the plot
+                // they measured is about to move — this one cannot be read
+                // that way.
+                HStack(spacing: ForestixSpace.xs) {
+                    Button {
+                        withAnimation(.easeOut(duration: 0.18)) {
+                            selectedPinID = nil
+                            movingPlannedID = planned.id
+                        }
+                    } label: {
+                        Text("Move plan")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(ForestixPalette.textPrimary)
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                            .background(
+                                RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                                 style: .continuous)
+                                    .stroke(ForestixPalette.divider, lineWidth: 1))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(CruisePressableStyle())
+                    .accessibilityIdentifier("cruiseMap.plannedPeek.move")
+
+                    Button {
+                        deletePlannedCandidate = planned
+                    } label: {
+                        Text("Delete plan")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(ForestixPalette.confidenceBad)
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                            .background(
+                                RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                                 style: .continuous)
+                                    .stroke(ForestixPalette.confidenceBad.opacity(0.5),
+                                            lineWidth: 1))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(CruisePressableStyle())
+                    .accessibilityIdentifier("cruiseMap.plannedPeek.delete")
+                }
             }
             .padding(.top, ForestixSpace.sm)
         }
@@ -2032,7 +2924,11 @@ extension MapHomeScreen {
         let b = GeoMath.bearingDeg(
             fromLat: fix.latitude, fromLon: fix.longitude,
             toLat: planned.plannedLat, toLon: planned.plannedLon)
-        return String(format: "%.0f m · bearing %.0f°", d,
+        // The bearing is degrees in both systems — a compass does not change
+        // with the Units toggle. The RANGE does: this row is what the cruiser
+        // paces off, so it is rendered in their unit.
+        return String(format: "%@ · bearing %.0f°",
+                      MeasurementFormatter.navDistance(m: d, in: settings.unitSystem),
                       (b + 360).truncatingRemainder(dividingBy: 360))
     }
 
@@ -2056,6 +2952,21 @@ extension MapHomeScreen {
 
                 Rectangle().fill(ForestixPalette.divider).frame(height: 0.5)
 
+                // FIELD REPORT (item 4) — the door beside "New project".
+                // The switcher rows above can only SWITCH; browsing is where
+                // a project can be read properly and where it can be
+                // deleted. Enabled with no projects too: the empty state is
+                // itself the answer to "which ones exist?".
+                sheetChoiceRow(
+                    "Browse projects",
+                    subtitle: "Open, review or delete a saved project",
+                    icon: "folder",
+                    accessibilityID: "cruiseMap.project.browse",
+                    disabled: false
+                ) {
+                    pendingDestination = .projectBrowser
+                    presentingProjectSheet = false
+                }
                 sheetChoiceRow(
                     "Stand summary",
                     subtitle: standSummarySubtitle,
@@ -2076,6 +2987,25 @@ extension MapHomeScreen {
                 ) {
                     pendingCruiseSetup = true
                     presentingProjectSheet = false
+                }
+
+                // FIELD REPORT 5 — read back THIS plot's trees without
+                // leaving the project. Only offered when a plot is actually
+                // open: with no plot in hand there is nothing to scope to,
+                // and the footer's plain "Field log" already shows
+                // everything. The subtitle names the plot so the row cannot
+                // be mistaken for that unscoped link.
+                if let plot = activePlot {
+                    sheetChoiceRow(
+                        "Field log",
+                        subtitle: FieldLogWords.plotName(number: plot.plotNumber),
+                        icon: "list.bullet.rectangle",
+                        accessibilityID: "cruiseMap.project.plotFieldLog",
+                        disabled: false
+                    ) {
+                        pendingDestination = .fieldLogPlot(plot.id)
+                        presentingProjectSheet = false
+                    }
                 }
 
                 // Export collapse (mock ⑤): ONE primary button runs the
@@ -2202,8 +3132,11 @@ extension MapHomeScreen {
                 let result = try FullCruiseExporter.write(
                     bundle: bundle,
                     into: base,
+                    // The LIVE Units setting, not the stamp taken when the
+                    // project was created — the report says what the cruiser
+                    // is looking at.
                     localization: PDFLocalization.forProject(
-                        units: project.units,
+                        units: settings.unitSystem,
                         species: bundle.species,
                         trees: bundle.trees),
                     progress: { done, total, label in
@@ -2344,14 +3277,9 @@ extension MapHomeScreen {
                             .stroke(ForestixPalette.divider,
                                     style: StrokeStyle(lineWidth: 2, dash: [3, 3]))
                             .frame(width: 20, height: 20)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("New project")
-                                .font(.system(size: 15, weight: .bold))
-                                .foregroundStyle(ForestixPalette.textSecondary)
-                            Text("Name it once — everything else is automatic")
-                                .font(.system(size: 10.5, design: .monospaced))
-                                .foregroundStyle(ForestixPalette.textTertiary)
-                        }
+                        Text("New project")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(ForestixPalette.textSecondary)
                         Spacer(minLength: 0)
                     }
                     .padding(.vertical, 12)
@@ -2456,7 +3384,8 @@ extension MapHomeScreen {
                     speciesRepo: environment.speciesRepository,
                     volRepo: environment.volumeEquationRepository,
                     hdFitRepo: environment.hdFitRepository),
-                    areaUnit: settings.unitSystem.areaUnit)
+                    areaUnit: settings.unitSystem.areaUnit,
+                    unitSystem: settings.unitSystem)
             }
         case .treeDetails(let id):
             if let tree = treesByPlot.values.joined()
@@ -2465,6 +3394,8 @@ extension MapHomeScreen {
                     tree: tree,
                     treeRepo: environment.treeRepository))
             }
+        case .projectBrowser:
+            ProjectBrowserScreen()
         case .standSummary:
             if let project = currentProject {
                 StandSummaryScreen(viewModel: StandSummaryViewModel(
@@ -2486,6 +3417,8 @@ extension MapHomeScreen {
             }
         case .fieldLog:
             FieldLogScreen()
+        case .fieldLogPlot(let plotID):
+            FieldLogScreen(scope: .cruisePlot(plotID))
         case .reference:
             ReferenceLibraryScreen()
         case .settings:
@@ -2561,10 +3494,11 @@ private struct CruisePressableStyle: ButtonStyle {
     }
 }
 
-// MARK: - Heights sheet (plot sample heights, pooled)
+// MARK: - Sample heights sheet (plot height subsample, pooled)
 
-/// The plot's measured (tree #, DBH, height) pairs + on-demand height
-/// measurement. Stage 1 lists the fit-eligible pairs with the primary
+/// The plot's SAMPLE HEIGHTS: the measured (tree #, DBH, height) pairs +
+/// on-demand height measurement. Stage 1 lists the fit-eligible pairs
+/// (the rows the pooled curve can use) with the primary
 /// "Measure height"; tapping it swaps in a compact horizontal tree-
 /// number picker (default = the last tallied tree) whose confirm hands
 /// the chosen tree to the host, which opens the scoped Height screen.
@@ -2604,7 +3538,9 @@ struct PlotHeightsSheet: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                Text("HEIGHTS · PLOT \(plot.plotNumber)")
+                // LOCKED "SAMPLE HEIGHTS · PLOT n" — one vocabulary with the
+                // plot peek row that opens this sheet.
+                Text("SAMPLE HEIGHTS · PLOT \(plot.plotNumber)")
                     .font(.system(size: 13, weight: .heavy))
                     .tracking(1.0)
                     .foregroundStyle(ForestixPalette.textTertiary)
@@ -2661,10 +3597,15 @@ struct PlotHeightsSheet: View {
     private func heightRow(_ tree: Tree) -> some View {
         let system = settings.unitSystem
         return HStack(spacing: ForestixSpace.xs) {
-            Text("Tree \(tree.treeNumber)")
+            // A cruiser's name is longer than "Tree #7" and this column was
+            // sized for the number alone; it gets room to grow, and truncates
+            // rather than shoving the diameter and height out of the row.
+            Text(tree.displayTitle)
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(ForestixPalette.textPrimary)
-                .frame(width: 76, alignment: .leading)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(minWidth: 76, alignment: .leading)
             Text(MeasurementFormatter.diameter(cm: Double(tree.dbhCm),
                                                in: system))
                 .font(.system(size: 12.5, weight: .medium,
@@ -2704,7 +3645,7 @@ struct PlotHeightsSheet: View {
         }
         .accessibilityIdentifier("cruiseMap.heightsSheet.picker")
 
-        primaryButton(selected.map { "Measure Tree \($0.treeNumber)" }
+        primaryButton(selected.map { "Measure \($0.displayTitle)" }
                         ?? "Measure height",
                       enabled: selected != nil) {
             if let tree = selected { onMeasure(tree) }
@@ -2713,11 +3654,11 @@ struct PlotHeightsSheet: View {
         .accessibilityIdentifier("cruiseMap.heightsSheet.confirm")
     }
 
-    /// One pickable tree chip — "Tree N · DBH" plus a check when it
-    /// already carries a height.
+    /// One pickable tree chip — "Tree #N · DBH" (or the cruiser's name for
+    /// it) plus a check when it already carries a height.
     private func numberChip(_ tree: Tree) -> some View {
         let isSelected = tree.id == selectedTreeID
-        let label = "Tree \(tree.treeNumber) · "
+        let label = tree.displayTitle + " · "
             + MeasurementFormatter.diameter(cm: Double(tree.dbhCm),
                                             in: settings.unitSystem)
             + (tree.heightM != nil ? " ✓" : "")
@@ -2769,83 +3710,6 @@ struct PlotHeightsSheet: View {
         .disabled(!enabled)
     }
 }
-
-// MARK: - Cruise tree photo viewer (tree peek thumbnail → full screen)
-
-#if os(iOS)
-/// Full-screen viewer for a cruise tree's auto-photo, reached by tapping
-/// the tree-peek thumbnail. Reuses the MeasurePhotoStore path; the chrome
-/// is fixed dark (it sits on a photograph), matching the measure-mode
-/// photo detail's language.
-private struct CruiseTreePhotoView: View {
-    let context: CruisePhotoContext
-    @Environment(\.dismiss) private var dismiss
-    @State private var image: UIImage?
-
-    private let ink = Color(red: 0.949, green: 0.961, blue: 0.953)      // #F2F5F3
-    private let inkDim = Color(red: 0.647, green: 0.682, blue: 0.659)   // #A5AEA8
-    private let glass = Color(red: 6 / 255, green: 9 / 255, blue: 10 / 255) // #06090A
-
-    var body: some View {
-        ZStack {
-            Color(red: 0.039, green: 0.051, blue: 0.043).ignoresSafeArea() // #0A0D0B
-
-            if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ProgressView().tint(ink)
-            }
-
-            VStack {
-                HStack {
-                    Spacer()
-                    Button {
-                        dismiss()
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(ink)
-                            .frame(width: 44, height: 44)
-                            .background(Circle().fill(glass.opacity(0.70)))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Close photo")
-                    .accessibilityIdentifier("cruiseMap.photo.close")
-                }
-                .padding(.horizontal, 14)
-                Spacer()
-            }
-
-            VStack {
-                Spacer()
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(context.title)
-                        .font(.system(size: 17, weight: .heavy))
-                        .foregroundStyle(ink)
-                    Text(context.subtitle)
-                        .font(.system(size: 12, design: .monospaced))
-                        .foregroundStyle(inkDim)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 20)
-                .padding(.top, 40)
-                .padding(.bottom, 30)
-                .background(
-                    LinearGradient(colors: [glass.opacity(0), glass.opacity(0.92)],
-                                   startPoint: .top, endPoint: .bottom))
-            }
-        }
-        .task {
-            let url = MeasurePhotoStore.url(for: context.photoPath)
-            let data = await Task.detached { try? Data(contentsOf: url) }.value
-            if let data { image = UIImage(data: data) }
-        }
-    }
-}
-#endif
 
 // MARK: - Photo thumbnail loader
 

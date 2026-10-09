@@ -48,6 +48,14 @@ enum class AreaUnit {
     fun fromAcres(acres: Double): Double =
         if (this == HECTARE) acres / Units.ACRES_PER_HECTARE else acres
 
+    /// The inverse: an area the cruiser TYPED in this unit, back to the acres
+    /// the store keeps. Only [fromAcres] existed here because until now this
+    /// platform could only display an area, never take one — which is exactly
+    /// why the field log's acreage entry was iOS-only. iOS
+    /// `AreaUnit.toAcres(_:)` parity.
+    fun toAcres(value: Double): Double =
+        if (this == HECTARE) value * Units.ACRES_PER_HECTARE else value
+
     /// Density-label suffix: "/ha" or "/ac".
     val densitySuffix: String get() = if (this == HECTARE) "/ha" else "/ac"
 
@@ -121,13 +129,13 @@ enum class Country(val raw: String) {
     /// True when the country is selectable but its volume coefficients are
     /// not yet bundled — stand volume must render "—", never a fabricated
     /// figure (Korea, pending official NIFoS coefficients).
-    val volumeStandardPending: Boolean get() = this == SOUTH_KOREA
+    val volumeStandardPending: Boolean get() = this == SOUTH_KOREA || this == UNITED_STATES
 
     /// Read-only "Volume standard" row shown in Settings, derived from the
     /// country (and, for the US, the selected region's log rule elsewhere).
     val volumeStandardLabel: String
         get() = when (this) {
-            UNITED_STATES -> "Board-foot log rule (Scribner / Doyle / Int'l ¼″)"
+            UNITED_STATES -> "PNW stem volume — coefficients pending verification"
             FINLAND -> "Laasasenaho (1982) · m³"
             GERMANY -> "Form factor  V = g·h·f · m³ (approx.)"
             SOUTH_KOREA -> "NIFoS national table — coefficients pending"

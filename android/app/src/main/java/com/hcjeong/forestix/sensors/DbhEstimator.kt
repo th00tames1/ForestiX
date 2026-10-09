@@ -13,11 +13,17 @@
 
 package com.hcjeong.forestix.sensors
 
+import com.hcjeong.forestix.data.cruise.DBHCalibration
+
 import com.hcjeong.forestix.ar.Vec3
+import com.hcjeong.forestix.common.MeasurementFormatter
+import com.hcjeong.forestix.common.UnitSystem
 import java.util.Locale
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
+import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sin
@@ -29,7 +35,28 @@ data class ProjectCalibration(
     val dbhCorrectionBeta: Float = 1f,
     val vioDriftFraction: Float = 0.02f,
     val depthDiscontinuityM: Float = 0.04f,
+    /// The estimator epoch alpha/beta were FITTED against — iOS
+    /// `ProjectCalibration.dbhCalibrationEpoch` parity.
+    ///
+    /// A cylinder calibration is a line through (raw, true) pairs, so it
+    /// absorbs whatever systematic error the estimator had on the day it was
+    /// fitted. Change the estimator and beta corrects for something that is
+    /// no longer there: the geometry's own correction and the fitted one both
+    /// pull the diameter down, they stack, and the project under-reads
+    /// silently. 0 means never calibrated, which is safe at any epoch.
+    val dbhCalibrationEpoch: Int = 0,
 ) {
+    /// Do these coefficients still answer the estimator that is running?
+    val calibrationIsStale: Boolean
+        get() = (dbhCorrectionAlpha != 0f || dbhCorrectionBeta != 1f) &&
+            dbhCalibrationEpoch != DBHEstimator.ESTIMATOR_EPOCH
+
+    /// The published diameter for a raw one — the ONLY place the cylinder
+    /// coefficients may be applied, so no call site can forget the check.
+    fun appliedToRawCm(rawCm: Double): Double =
+        if (calibrationIsStale) rawCm
+        else dbhCorrectionAlpha + dbhCorrectionBeta * rawCm
+
     companion object { val identity = ProjectCalibration() }
 }
 
@@ -103,6 +130,9 @@ class ArDepthFrame(
     /// replayed frame is bit-identical to what the estimator consumed live.
     /// Null in normal operation (zero cost with recording off).
     val rawDepthMm: ShortArray? = null,
+    /// Live-only timing; replay fixtures retain the default and are unchanged.
+    val frameTimestampNanos: Long = 0,
+    val depthAgeNanos: Long = 0,
 ) {
     companion object {
         /// Shared u16-mm → (metres, confidence) ingest rule — the SINGLE
@@ -167,22 +197,188 @@ data class DbhScanInput(
     val tapY: Double,
     val guideAxis: GuideAxis,
     val projectCalibration: ProjectCalibration,
+    /// The unit the RECOVERY INSTRUCTIONS are worded in. A failed scan's reason
+    /// is the only thing telling the cruiser what to do differently, and "stand
+    /// 0.5-3 m from the trunk" is not an instruction a cruiser who paces in
+    /// feet can act on. Carried here rather than fixed up in the screen because
+    /// the reason is built where the check fails. Same field, same purpose, as
+    /// `HeightScanInput.unitSystem`. iOS `DBHScanInput.unitSystem` 1:1.
+    val unitSystem: UnitSystem = UnitSystem.METRIC,
 )
 
 object DBHEstimator {
 
+    /// Plausible-diameter window for any single-frame fit, in centimetres.
+    ///
+    /// THE CEILING USED TO BE 100 cm, WHICH IS 39.4 INCHES. The stand at McDunn
+    /// has Douglas-fir over 40 in, so the gate refused them outright: the bracket
+    /// would be placed correctly on a 42 in stem, the arithmetic would return
+    /// ~107 cm, and the fit would come back null with nothing on screen. It also
+    /// explains why a deliberately wide bracket "stopped working" past about half
+    /// the screen. Same number, three symptoms.
+    ///
+    /// 300 cm clears any stem this app will meet while still refusing the
+    /// degenerate cases the gate exists for. Floor stays at 2.5 cm. iOS value 1:1.
+    /// What the estimators compute, as a number that changes when they do —
+    /// iOS `DBHEstimator.estimatorEpoch` parity, and the two MUST move
+    /// together or a pooled corpus silently mixes geometries.
+    ///
+    ///   1  chord identity, full-span depth median
+    ///   2  chord identity, middle-half depth median (bracketCoreRange)
+    ///   3  cylinder-tangent inversion, middle-half median corrected to the
+    ///      near face — silhouetteDiameterCm
+    /// 4 — the auto path joined the bracket on the tangent form, and the guide
+    /// strip stopped truncating at 0.15 m.
+    ///
+    /// THE NUMBER IS THE CONTRACT. Epoch 3 shipped on 7/30 with the BRACKET on
+    /// the tangent inversion and the auto path still on the chord-at-axis form.
+    /// Changing the auto path and the walk's depth budget alters an auto
+    /// diameter by up to a fifth on a large stem, and leaving the number at 3
+    /// would have meant two geometries under one label — with DbhEpochRecompute
+    /// then refusing, as "already at epoch 3", precisely the rows that needed
+    /// re-deriving.
+    ///
+    /// iOS `DBHEstimator.estimatorEpoch` parity — the two MUST move together.
+    /// 5 — Android's ADJUST bracket stopped keeping two arithmetics behind
+    ///     one pair of handles. iOS reads the same as it did at 4; the
+    ///     number is shared because the epoch describes a GENERATION of the
+    ///     estimators and two corpora that disagree on it must not be
+    ///     pooled — and this study pools iOS and Android. Epoch 5 is the
+    ///     first generation in which both handsets read a bracket the same
+    ///     way.
+    /// THE NUMBER NOW LIVES IN `DBHCalibration.CURRENT_EPOCH`, and this keeps
+    /// its name because a dozen call sites read it. It moved beside the
+    /// Project model for the reason iOS had to move it: the PDF report needed
+    /// the same answer and could not reach the estimator to get it, so it
+    /// answered with a predicate of its own that had no epoch term at all.
+    const val ESTIMATOR_EPOCH = DBHCalibration.CURRENT_EPOCH
+
+    val PLAUSIBLE_DIAMETER_CM = 2.5..300.0
+
+    /// How far the phone may be from the trunk for the tap's depth sample to
+    /// be usable, in METRES. A property of the depth camera, not a preference:
+    /// closer than half a metre the sensor has nothing to triangulate, further
+    /// than three the per-pixel depth noise swamps a stem's curvature. Named so
+    /// the guard and the recovery sentence read it from one place. iOS
+    /// `DBHEstimator.usableTapDepthM` 1:1.
+    val USABLE_TAP_DEPTH_M = 0.5f..3.0f
+
+    /// How far behind the near face the middle-half depth median sits, as a
+    /// fraction of the radius: 1 - sqrt(15)/4. iOS `medianDepthOffsetFactor`.
+    val MEDIAN_DEPTH_OFFSET_FACTOR = 1.0 - sqrt(15.0) / 4.0
+
+    /// Historical middle-half inversion, not the live full-span estimator.
+    /// Live measurement uses BoundaryAlignment.fullSpanDiameterCm instead.
+    /// A stem's diameter from the width of its silhouette — iOS
+    /// `DBHEstimator.silhouetteDiameterCm` parity, same derivation, same
+    /// constants. Keep the two in step.
+    ///
+    /// The bracket's edges are TANGENT points: sight lines graze the bark,
+    /// touching it nearer the camera than the axis and closer together than
+    /// the full width. With k = w/2f = tan(theta) and z the depth to the near
+    /// face, tangency gives R = (z + R) sin(theta), hence
+    ///
+    ///     d = 2 z k (k + sqrt(k^2 + 1))
+    ///
+    /// The identity this replaces, d = w z / (f - w/2), is the same
+    /// expression with sin swapped for tan; rearranged it reads
+    /// d = w (z + d/2) / f, a segment at the stem's AXIS depth, which is not
+    /// what a silhouette marks. It over-reads by about k^2/2.
+    ///
+    /// The caller's z is a median over the bracket's middle half, and those
+    /// pixels lie on a curved face, so it sits MEDIAN_DEPTH_OFFSET_FACTOR * R
+    /// behind the near point the formula wants. R is the unknown, so solve
+    /// rather than iterate: R = z K / (1 + c K), K = k(k + sqrt(k^2+1)).
+    ///
+    /// Measured on 100 taped stems this removes about a third of the
+    /// over-read (Android +9.1 % to +5.6 %, RMSE down 12 %); the remainder is
+    /// unexplained, and both forms assume the stem is centred in frame.
+    /// How far the guide-strip walk lets the surface recede before it calls
+    /// the stem finished, in metres.
+    ///
+    /// THIS IS A RADIUS BUDGET, not a noise tolerance, and it was set as
+    /// though it were one. On a round stem the surface at the silhouette
+    /// sits exactly R behind the near face, so a walk that stops at 0.15 m
+    /// stops short of the tangent points on anything over 30 cm — and stops
+    /// further short the bigger the tree. Traced against a perfect cylinder,
+    /// the auto path read -0.9 % at 20 cm, -4.4 % at 40, -11.0 % at 60 and
+    /// -21.4 % at 90: not a bias, a taper.
+    ///
+    /// 0.80 m covers a 160 cm stem, past anything this app will meet in a
+    /// coastal-PNW cruise. What stops the walk running onto the next trunk
+    /// is NOT this number — it is `depthDiscontinuityM`, a 4 cm jump between
+    /// ADJACENT pixels, untouched and doing that job on its own.
+    ///
+    /// iOS `DBHEstimator.guideStripDepthBudgetM` parity.
+    const val GUIDE_STRIP_DEPTH_BUDGET_M = 0.80f
+
+    fun silhouetteDiameterCm(spanPx: Double, depthM: Double, focalPx: Double): Double? {
+        if (spanPx <= 0.0 || depthM <= 0.0 || focalPx <= 1.0) return null
+        val k = spanPx / (2.0 * focalPx)
+        val kk = k * (k + sqrt(k * k + 1.0))
+        val radiusM = depthM * kk / (1.0 + MEDIAN_DEPTH_OFFSET_FACTOR * kk)
+        if (!radiusM.isFinite() || radiusM <= 0.0) return null
+        return 2.0 * radiusM * 100.0
+    }
+
+
+    /// §7.9 tier thresholds, named once so the cruiser-facing confidence
+    /// explainer can QUOTE the numbers the checks apply instead of carrying a
+    /// prose copy of them that drifts the first time one of them moves. Every
+    /// value is the shipped one; this is a naming change, not a tuning one,
+    /// and no stored measurement, sigma, method or capture_mode moves with it.
+    ///
+    /// Mirrored byte-for-byte by iOS `DBHEstimator.TierThresholds`.
+    object TierThresholds {
+        // The §7.1 partial-arc circle fit (`estimate`). NOT the default
+        // capture — see FRAME_SPREAD_GREEN for the one that is.
+        const val MIN_INLIERS_REJECT = 10
+        const val MIN_INLIERS_WARN = 20
+        const val MIN_ARC_DEG_REJECT = 30.0
+        const val MIN_ARC_DEG_WARN = 45.0
+        const val RMSE_OVER_RADIUS_REJECT = 0.07
+        const val RMSE_OVER_RADIUS_WARN = 0.05
+        const val SIGMA_OVER_RADIUS_REJECT = 0.05
+        const val SIGMA_OVER_RADIUS_WARN = 0.02
+        const val RADIUS_COV_REJECT = 0.10
+        const val RADIUS_COV_WARN = 0.05
+
+        /// THE DEFAULT CAPTURE'S ONLY TIER RULE. The edge-bracket (Adjust)
+        /// path grades a burst on frame-to-frame agreement alone —
+        /// (max − min) / mean of the per-frame diameters. At or below this
+        /// it is green, above it yellow. None of the circle-fit criteria
+        /// above run on that path at all.
+        const val FRAME_SPREAD_GREEN = 0.15
+
+        /// A burst needs this many usable frames before it is graded; fewer
+        /// is the one way the default path produces a red.
+        const val MIN_USABLE_FRAMES = 3
+    }
+
     /// Full §7.1 pipeline. Returns null only if the burst is too small.
     fun estimate(input: DbhScanInput): DBHResult? {
-        if (input.frames.size < 5) return null
+        if (input.frames.size != 1 && input.frames.size < 5) return null
         val lastFrame = input.frames.last()
 
         val dTap = medianDepth(input.tapX, input.tapY, lastFrame, radius = 2)
             ?: return red("The crosshair isn't on anything the depth camera can see — aim at the trunk and capture again.")
-        if (dTap !in 0.5f..3.0f)
+        if (dTap !in USABLE_TAP_DEPTH_M)
             // The instruction IS the whole message; the "tap depth … out of
             // range" half echoed the depth sample under the crosshair, which
-            // a cruiser cannot act on. The 0.5–3 m gate above is unchanged.
-            return red("Stand 0.5–3 m from the trunk and capture again.")
+            // a cruiser cannot act on.
+            //
+            // THE GATE IS UNCHANGED and stays metric — it is the depth
+            // camera's usable range, not a preference. Only the wording
+            // follows the cruiser's units, and it is built from the same
+            // constant the guard tests, so the sentence cannot come to quote a
+            // range the check no longer applies.
+            return red(
+                "Stand " + MeasurementFormatter.guidanceRange(
+                    USABLE_TAP_DEPTH_M.start.toDouble(),
+                    USABLE_TAP_DEPTH_M.endInclusive.toDouble(),
+                    input.unitSystem,
+                ) + " from the trunk and capture again.",
+            )
         if (confidenceAt(input.tapX, input.tapY, lastFrame) < 1)
             return red("Trunk surface not reliably seen; try a cleaner stem area")
 
@@ -191,7 +387,7 @@ object DBHEstimator {
         for (frame in input.frames) {
             val strip = extractGuideStemStrip(
                 frame, input.guideAxis, tapAlong, dTap,
-                deltaDepth = 0.15f,
+                deltaDepth = GUIDE_STRIP_DEPTH_BUDGET_M,
                 discontinuityThresholdM = input.projectCalibration.depthDiscontinuityM,
             )
             for (idx in strip) {
@@ -247,23 +443,23 @@ object DBHEstimator {
         // WARN reasons stay in the estimator's own vocabulary — they never
         // leave the struct. Every THRESHOLD below is unchanged.
         val checks = listOf(
-            check(fit.inliers.size >= 10, Severity.REJECT,
+            check(fit.inliers.size >= TierThresholds.MIN_INLIERS_REJECT, Severity.REJECT,
                 "Too little of the trunk was picked up — move closer, fill the crosshair with bark, and capture again."),
-            check(fit.inliers.size >= 20, Severity.WARN, "Only 10\u201320 trunk surface points"),
-            check(arcDeg >= 30, Severity.REJECT,
+            check(fit.inliers.size >= TierThresholds.MIN_INLIERS_WARN, Severity.WARN, "Only 10\u201320 trunk surface points"),
+            check(arcDeg >= TierThresholds.MIN_ARC_DEG_REJECT, Severity.REJECT,
                 "Not enough of the trunk in view — step back or centre the guide line."),
-            check(arcDeg >= 45, Severity.WARN, "Trunk arc coverage 30\u00B0\u201345\u00B0"),
+            check(arcDeg >= TierThresholds.MIN_ARC_DEG_WARN, Severity.WARN, "Trunk arc coverage 30\u00B0\u201345\u00B0"),
             check(r >= 0.025 && r <= 1.0, Severity.REJECT,
                 "That doesn't measure like a trunk — aim at the stem and capture again."),
-            check(rmse / r <= 0.07, Severity.REJECT,
+            check(rmse / r <= TierThresholds.RMSE_OVER_RADIUS_REJECT, Severity.REJECT,
                 "The shape didn't match a trunk — hold steadier and capture again."),
-            check(rmse / r <= 0.05, Severity.WARN, "Fit error 5\u20137% of radius"),
-            check(sigmaR / r <= 0.05, Severity.REJECT,
+            check(rmse / r <= TierThresholds.RMSE_OVER_RADIUS_WARN, Severity.WARN, "Fit error 5\u20137% of radius"),
+            check(sigmaR / r <= TierThresholds.SIGMA_OVER_RADIUS_REJECT, Severity.REJECT,
                 "This diameter isn't settling — hold steadier and capture again."),
-            check(sigmaR / r <= 0.02, Severity.WARN, "Radius precision \u00B12\u20135%"),
-            check(radiusCoV <= 0.10, Severity.REJECT,
+            check(sigmaR / r <= TierThresholds.SIGMA_OVER_RADIUS_WARN, Severity.WARN, "Radius precision \u00B12\u20135%"),
+            check(radiusCoV <= TierThresholds.RADIUS_COV_REJECT, Severity.REJECT,
                 "The trunk width kept changing between shots — hold the phone steadier and capture again."),
-            check(radiusCoV <= 0.05, Severity.WARN, "Per-frame radius spread 5\u201310%"),
+            check(radiusCoV <= TierThresholds.RADIUS_COV_WARN, Severity.WARN, "Per-frame radius spread 5\u201310%"),
             check(!chordOverride, Severity.WARN, "Fit disagreed with silhouette; using chord"),
         )
         val tier = combineChecks(checks)
@@ -272,7 +468,7 @@ object DBHEstimator {
 
         // Step 10: cylinder calibration.
         val dbhRawCm = 2 * r * 100
-        val dbhCm = cal.dbhCorrectionAlpha + cal.dbhCorrectionBeta * dbhRawCm
+        val dbhCm = cal.appliedToRawCm(dbhRawCm)
 
         return DBHResult(
             diameterCm = dbhCm.toFloat(),
@@ -296,6 +492,23 @@ object DBHEstimator {
     /// collapses the back-projected points to a single world XZ spot and the
     /// diameter reads a few cm. We pick whichever axis yields the wider XZ
     /// chord at the centre, which is the across-the-trunk direction.
+    /** Live screen-horizontal direction. Never infer orientation from depth.
+     * Legacy pickGuideAxis remains available for old recordings without mapping. */
+    fun screenHorizontalGuideAxis(frame: ArDepthFrame, tapX: Double, tapY: Double): GuideAxis? {
+        val m = frame.depthFromViewAffine ?: return null
+        if (m.size != 6 || m.any { !it.isFinite() } ||
+            abs(m[0].toDouble() * m[4] - m[1].toDouble() * m[3]) <= 1e-12 ||
+            !tapX.isFinite() || !tapY.isFinite() ||
+            tapX < 0 || tapX >= frame.width || tapY < 0 || tapY >= frame.height) return null
+        // Row-major affine: screen x maps to (a, c), not (a, b).
+        val dx = abs(m[0].toDouble())
+        val dy = abs(m[3].toDouble())
+        val major = max(dx, dy)
+        if (major <= 1e-12 || min(dx, dy) > major * 0.001) return null
+        return if (dx > dy) GuideAxis.Row(Math.round(tapY).toInt().coerceAtMost(frame.height - 1))
+            else GuideAxis.Col(Math.round(tapX).toInt().coerceAtMost(frame.width - 1))
+    }
+
     fun pickGuideAxis(frame: ArDepthFrame, tapX: Double, tapY: Double, cal: ProjectCalibration): GuideAxis {
         val dTap = medianDepth(tapX, tapY, frame, 2) ?: return GuideAxis.Col(Math.round(tapX).toInt())
         fun chordFor(axis: GuideAxis): Double {
@@ -369,6 +582,9 @@ object DBHEstimator {
         /// translucent cylinder overlay on the SAME fit the bar is drawn
         /// from. Null when unavailable.
         val centerWorld: Vec3? = null,
+        /// Spatial depth statistic used by the full-span silhouette geometry.
+        /// Legacy depth-band fits leave this null and retain their tap depth.
+        val sampledDepthM: Double? = null,
     )
 
     /// Per-frame scan outcome: the chord fit (null when unusable) plus how
@@ -561,7 +777,7 @@ object DBHEstimator {
             is GuideAxis.Row -> frame.fx
             is GuideAxis.Col -> frame.fy
         }
-        if (focal <= 0) return FrameScan(null)
+        if (!focal.isFinite() || focal <= 1) return FrameScan(null)
         val centerAlong = tapAlongAxis(tapX, tapY, axis)
         val widths = ArrayList<Int>()
         var clippedRows = 0
@@ -589,7 +805,7 @@ object DBHEstimator {
             val w = r - l + 1
             if (w < 5) continue
             widths.add(w)
-            if (extentL < 0) { extentL = l; extentR = r }
+            if (offset == 0) { extentL = l; extentR = r }
         }
         val ownWidths = widths.toList()
         // Rolling row quorum: the 5-row requirement may be met across this
@@ -601,12 +817,14 @@ object DBHEstimator {
                 ArrayList(widths).apply { addAll(carryWidths) }
             else -> return FrameScan(null, clippedRows, ownWidths)
         }
-        fitWidths.sort()
-        val medianWidth = fitWidths[fitWidths.size / 2]
-        val halfWidth = medianWidth / 2.0
-        if (focal - halfWidth <= 1.0) return FrameScan(null, clippedRows, ownWidths)
-        val diameterM = medianWidth * dTap.toDouble() / (focal - halfWidth)
-        if (diameterM <= 0.0) return FrameScan(null, clippedRows, ownWidths)
+        if (extentL < 0 || extentR < 0) return FrameScan(null, clippedRows, ownWidths)
+        // Neighbouring rows grade edge consistency only. Read the same actual
+        // measurement-row span shown by the overlay, exactly as Adjust/AI do.
+        val sampled = BoundaryAlignment.fullSpanSample(
+            axisExtent(frame, axis), extentL.toDouble(), extentR.toDouble(), focal,
+        ) { idx -> val (x,y)=pixelCoords(axis,idx);frame.depthAt(x,y).toDouble() }
+            ?: return FrameScan(null, clippedRows, ownWidths)
+        val diameterM = sampled.first / 100.0
         // Width consistency across the row stack — iOS chordPreviewFit's
         // tier input (CoV ≤ 0.10 ⇒ green preview chip).
         val mean = fitWidths.sum().toDouble() / fitWidths.size
@@ -624,7 +842,7 @@ object DBHEstimator {
             val midIdx = (extentL + extentR) / 2
             val (mpx, mpy) = pixelCoords(axis, midIdx)
             val pixDepth = frame.depthAt(mpx, mpy).toDouble()
-            val depthBP = if (pixDepth > 0) pixDepth else dTap.toDouble()
+            val depthBP = if (pixDepth.isFinite() && pixDepth > 0) pixDepth else sampled.second
             val surface = BackProjection.worldXZ(
                 mpx.toDouble(), mpy.toDouble(), depthBP,
                 frame.fx, frame.fy, frame.cx, frame.cy, frame.pose,
@@ -654,8 +872,9 @@ object DBHEstimator {
                 if (extentL >= 0) extentL / extent else 0f,
                 if (extentR >= 0) extentR / extent else 1f,
                 widthCov = cov,
-                widthPx = medianWidth,
+                widthPx = extentR - extentL + 1,
                 centerWorld = centerWorld,
+                sampledDepthM = sampled.second,
             ),
             clippedRows,
             ownWidths,
@@ -685,7 +904,7 @@ object DBHEstimator {
                 cleanWidths = scan.cleanWidths,
             )
         val locked = chord.diameterM in 0.025..2.0
-        val dia = (cal.dbhCorrectionAlpha + cal.dbhCorrectionBeta * (chord.diameterM * 100)).toFloat()
+        val dia = cal.appliedToRawCm(chord.diameterM * 100).toFloat()
         // Preview tier — width consistency, iOS chordPreviewFit parity:
         // CoV ≤ 0.10 ⇒ green (chip shown); otherwise yellow (silent).
         val tier = if (chord.widthCov != null && chord.widthCov <= 0.10) {
@@ -694,26 +913,283 @@ object DBHEstimator {
             ConfidenceTier.YELLOW
         }
         return DbhPreview(
-            dia, dTap, locked, 1, chord.leftFrac, chord.rightFrac, tier,
+            dia, (chord.sampledDepthM ?: dTap.toDouble()).toFloat(), locked, 1, chord.leftFrac, chord.rightFrac, tier,
             clippedRows = scan.borderClippedRows, widthPx = chord.widthPx,
             cleanRows = scan.cleanWidths.size, cleanWidths = scan.cleanWidths,
             centerWorld = chord.centerWorld,
         )
     }
 
-    // MARK: - Manual edge-bracket (ADJUST) constrained estimate
+    // MARK: - Manual edge-bracket (ADJUST) fits
+    //
+    // TWO ENTRY POINTS, and the split is the whole point of this section.
+    //
+    //   `bracketDepthGeometry` is the BOUNDARY. It takes the handles where
+    //   the cruiser put them — VIEW-space pixels on the guide line — and
+    //   converts them ONCE, through the frame's own view→depth affine, into
+    //   a walk axis plus two fractions along it.
+    //
+    //   `bracketChordFit` / `bracketChordEstimate` work purely in DEPTH
+    //   space below that boundary, which is also the space the raw-capture
+    //   manifest stores, so a recorded bracket replays through exactly the
+    //   code that produced it.
+    //
+    // ONE MEASUREMENT, ONE PATH. The live readout used to carry its own copy
+    // of the arithmetic below the boundary: it kept the span fractional and
+    // medianed depth along the interpolated line between the two mapped
+    // handles, rounding x and y per step, while the recording rounded each
+    // handle to a pixel first and medianed a pure row. Across the validation
+    // corpus the two records of the SAME bracket differ by a median 1.0028,
+    // sd 2.6 %, worst 1.133, with only 38 of 106 inside 1 % — a 160×90 depth
+    // grid puts one pixel at ~2.4 % of a 42 px stem, and the two walks touch
+    // different pixels on top of that. Nothing a cruiser reads was wrong;
+    // the raw-capture corpus and the field log simply were not the same
+    // measurement, which is exactly what the study compares.
+    //
+    // iOS `DBHEstimator.bracketDepthGeometry` draws the same line, and the
+    // two platforms keep it in the same place.
 
-    /// Constrained estimate for the manual edge-bracket (ADJUST) mode: the
-    /// user places the trunk's two silhouette edges as VIEW-space x
-    /// positions on the horizontal guide line, so the handle span IS the
-    /// width — depth only supplies z. Same pinhole chord identity and
-    /// axis-matched focal as the auto silhouette path,
-    /// d = w·z/(f_axis − w/2), where w is the span in depth walk-axis
-    /// pixels (view x mapped through the view↔depth affine) and z is the
-    /// median depth INSIDE the bracket at the guide row. The automatic
-    /// edge search never runs here; the auto path is untouched.
-    /// Null when the view↔depth mapping is unavailable or no usable depth
-    /// exists inside the bracket.
+    /// The middle half of a bracket, as an inclusive index range on the
+    /// walk axis.
+    ///
+    /// FIELD REPORT 13 — with the bracket held perfectly still on a trunk,
+    /// the diameter jumped by several inches at random. The bracket's z is a
+    /// median, the chord identity d = w·z/(f − w/2) is LINEAR in z, and the
+    /// median was taken over the WHOLE span. The cruiser puts the handles ON
+    /// the silhouette edges, so the span's end samples sit on the boundary
+    /// and routinely return the background instead of the stem — several
+    /// metres further away in a stand. Whenever the valid samples split near
+    /// evenly between stem and background, one sample dropping in or out of
+    /// validity moves the median from one cluster to the other, and the
+    /// diameter moves with it in exact proportion.
+    ///
+    /// The middle half cannot be background if the bracket is on a trunk at
+    /// all — that is what placing the handles on the edges MEANS — so the
+    /// median is taken from stem samples only and the bimodal hop is gone.
+    ///
+    /// A short temporal median over consecutive frames was the alternative
+    /// and is the wrong tool twice over: it slows a hop it can't remove (the
+    /// distribution is bimodal in SPACE, and the wrong mode persists for as
+    /// long as the cruiser holds still), and ADJUST deliberately publishes
+    /// the raw per-frame fit so the number tracks a handle drag immediately.
+    ///
+    /// Nothing about the geometry changes — same identity, same span, same
+    /// focal. Only which samples the depth is read from. iOS
+    /// DBHEstimator.bracketCoreRange parity.
+    ///
+    /// The measured VALUE does move, though, and whoever pools this study's
+    /// corpora needs to know it: a stem's centre is up to one radius nearer
+    /// than its edges, so a median over the middle half reads a smaller z
+    /// and every bracketed diameter comes out slightly lower than before.
+    /// That is the geometrically right input for the identity — but it is
+    /// not backwards-compatible. A project whose dbhCorrectionAlpha /
+    /// dbhCorrectionBeta were fitted on ADJUST captures from before this
+    /// change now carries that bias into the correction applied on top, and
+    /// a raw-capture bundle recorded before it will not replay to the live
+    /// value in its manifest. The manifest's app_commit is what separates
+    /// the two corpora.
+    fun bracketCoreRange(iLo: Int, iHi: Int): Pair<Int, Int> {
+        val span = iHi - iLo
+        // Too few samples to trim and still make a median of: a bracket this
+        // narrow is a handful of returns either way, and dropping to one or
+        // two would fail the >= 3 gate on a fit that is otherwise fine.
+        if (span < 8) return iLo to iHi
+        val quarter = span / 4
+        return (iLo + quarter) to (iHi - quarter)
+    }
+
+    /// The bracket as the DEPTH MAP sees it: which axis it walks, and where
+    /// its two ends fall along that axis, as fractions of that axis' extent.
+    data class BracketAxisSpan(
+        val axis: GuideAxis,
+        val leftFraction: Double,
+        val rightFraction: Double,
+    )
+
+    /// Convert the two view-space handles on the guide line into the depth
+    /// map's own terms — ONCE, here, for every ADJUST caller.
+    ///
+    /// The walk axis is whichever depth axis the screen-horizontal bracket
+    /// covers more of; the two sit 90° apart in portrait. It comes from the
+    /// display transform the affine carries, which is stable per frame,
+    /// rather than from a vote on depth content, which is not.
+    ///
+    /// Null when the frame carries no view mapping. Fail closed: a view span
+    /// and a depth span do not share a scale, so there is no 1:1 fallback to
+    /// reach for. iOS `DBHEstimator.bracketDepthGeometry` parity.
+    fun bracketDepthGeometry(
+        frame: ArDepthFrame,
+        leftViewX: Float,
+        rightViewX: Float,
+        guideViewY: Float,
+    ): BracketAxisSpan? {
+        if (frame.width < 2 || frame.height < 2) return null
+        val pL = frame.viewToDepth(min(leftViewX, rightViewX), guideViewY) ?: return null
+        val pR = frame.viewToDepth(max(leftViewX, rightViewX), guideViewY) ?: return null
+        val rowWalk = abs(pR.first - pL.first) >= abs(pR.second - pL.second)
+        val midX = (pL.first + pR.first) / 2.0
+        val midY = (pL.second + pR.second) / 2.0
+        val axis: GuideAxis = if (rowWalk) {
+            GuideAxis.Row(Math.round(midY).toInt().coerceIn(0, frame.height - 1))
+        } else {
+            GuideAxis.Col(Math.round(midX).toInt().coerceIn(0, frame.width - 1))
+        }
+        val extent = axisExtent(frame, axis).toDouble()
+        val a = (if (rowWalk) pL.first else pL.second) / extent
+        val b = (if (rowWalk) pR.first else pR.second) / extent
+        val lo = min(a, b)
+        val hi = max(a, b)
+        if (!lo.isFinite() || !hi.isFinite() || hi <= lo) return null
+        return BracketAxisSpan(axis, lo, hi)
+    }
+
+    /// The bracket's index arithmetic on the walk axis, in ONE place, so the
+    /// fit and the read-only spread probe can only ever ask about the same
+    /// pixels. Pure index math — no depth is read here.
+    ///
+    /// The span stays FRACTIONAL. The handles are continuous positions on
+    /// the depth axis, and rounding each to a pixel before subtracting costs
+    /// up to a whole pixel of width — on a stem 42 px across a 160-px grid
+    /// that is 2.4 % of the diameter. Only the SAMPLE range is integral, and
+    /// it is the pixels lying inside the span.
+    ///
+    /// iOS `DBHEstimator.bracketGeometry` parity.
+    data class BracketGeometry(
+        val lo: Double,
+        val hi: Double,
+        val widthPx: Double,
+        val iLo: Int,
+        val iHi: Int,
+    )
+
+    fun bracketGeometry(
+        frame: ArDepthFrame,
+        guideAxis: GuideAxis,
+        leftFraction: Double,
+        rightFraction: Double,
+    ): BracketGeometry? {
+        when (guideAxis) {
+            is GuideAxis.Row -> if (guideAxis.y < 0 || guideAxis.y >= frame.height) return null
+            is GuideAxis.Col -> if (guideAxis.x < 0 || guideAxis.x >= frame.width) return null
+        }
+        val extent = axisExtent(frame, guideAxis)
+        if (extent < 2) return null
+        val lo = min(leftFraction, rightFraction)
+        val hi = max(leftFraction, rightFraction)
+        val leftPx = lo * extent
+        val rightPx = hi * extent
+        val widthPx = rightPx - leftPx
+        if (!widthPx.isFinite() || widthPx < 2.0) return null
+        val iLo = max(0, ceil(leftPx).toInt())
+        val iHi = min(extent - 1, floor(rightPx).toInt())
+        if (iHi < iLo) return null
+        return BracketGeometry(lo, hi, widthPx, iLo, iHi)
+    }
+
+    /// The valid depths over the bracket's middle half, sorted ascending —
+    /// the exact sample the fit takes its median from, so the probe below
+    /// describes the fit's own pixels rather than a second copy of them.
+    /// iOS `DBHEstimator.bracketCoreDepthsSorted` parity.
+    fun bracketCoreDepthsSorted(
+        frame: ArDepthFrame,
+        guideAxis: GuideAxis,
+        iLo: Int,
+        iHi: Int,
+    ): List<Float> {
+        val depths = ArrayList<Float>(max(0, iHi - iLo + 1))
+        val core = bracketCoreRange(iLo, iHi)
+        for (idx in core.first..core.second) {
+            val (px, py) = pixelCoords(guideAxis, idx)
+            if (px < 0 || px >= frame.width || py < 0 || py >= frame.height) continue
+            if (frame.confidenceAt(px, py) < 1) continue
+            val d = frame.depthAt(px, py)
+            if (d > 0f) depths.add(d)
+        }
+        depths.sort()
+        return depths
+    }
+
+    /// Widest depth separation, in metres, that a bracket sitting entirely on
+    /// bark can produce across its middle half.
+    ///
+    /// GEOMETRY, not a tuned number. Over the middle half of a chord the stem
+    /// surface recedes from its nearest point by r·(1 − cos30°) = 0.134·r, so
+    /// even a 1 m stem contributes under 7 cm, and depth noise at bracket
+    /// range adds a centimetre or two. 0.20 m is several times anything bark
+    /// alone can produce, while the excursions it exists to name are 30–60 cm
+    /// of depth — the gap between a stem and whatever stands behind it. iOS
+    /// holds the identical value in
+    /// `DBHEstimator.bracketCoreDepthSpreadLimitM`.
+    const val BRACKET_CORE_DEPTH_SPREAD_LIMIT_M = 0.20
+
+    /// Interquartile depth spread over the ADJUST bracket's middle half, in
+    /// metres — READ-ONLY, and never consulted by any estimator.
+    ///
+    /// FIELD ROUND 10 — THE DIAMETER THAT JUMPS BY INCHES. Over 140 bursts the
+    /// median within-burst spread is 0.41 cm here and 0.49 cm on iOS, the
+    /// same; iOS carries a tail this platform does not (7 of 68 ADJUST bursts
+    /// spanning two inches or more, worst case 26 cm). d = w·z/(f − w/2) is
+    /// LINEAR in z, so 26 cm of diameter on a 30 cm stem is z moving by most
+    /// of a metre — nothing in a depth return moves that far, but that is
+    /// exactly the distance from the bark to what is behind it. Some of the
+    /// sample is not bark.
+    ///
+    /// `bracketCoreRange` already removed the worst of it — the handles sit ON
+    /// the silhouette, so the span's END samples read the background — but the
+    /// middle half is not immune: a gap between stems, a limb, or foliage seen
+    /// through a lean puts a far cluster under the middle too. The median only
+    /// MOVES when that cluster reaches half the sample, which is why the
+    /// failure is intermittent (about one capture in ten) rather than a bias.
+    ///
+    /// THE INTERQUARTILE RANGE IS THE RIGHT STATISTIC, precisely because the
+    /// median is what has to be defended. A handful of stray far samples
+    /// cannot move a median of a dozen and does not widen the IQR either. A
+    /// sample split near evenly between two surfaces moves the median on the
+    /// next return that flips validity — and puts the two clusters on opposite
+    /// sides of the quartiles, which is what a wide IQR reports. min–max would
+    /// fire on the single stray and blank a readout that was fine.
+    ///
+    /// WHAT THIS DELIBERATELY DOES NOT DO is change which samples the
+    /// estimator admits. `constrainedEstimate` below is called by BOTH the
+    /// live readout and the capture burst, and the estimator is frozen. Nor is
+    /// it needed: the stored value is a median of five frames and the
+    /// excursions do not reach it (rho = −0.11 between burst spread and error
+    /// against tape), so the corpus is intact and the defect is entirely in
+    /// what the cruiser sees. This reports; the screen decides.
+    ///
+    /// Mirrors iOS `DBHEstimator.bracketCoreDepthSpreadM`, and reaches the
+    /// samples through the same `bracketDepthGeometry` / `bracketGeometry` /
+    /// `bracketCoreDepthsSorted` the fit medians, so the two can never
+    /// describe different pixels.
+    fun bracketCoreDepthSpreadM(
+        frame: ArDepthFrame,
+        leftViewX: Float,
+        rightViewX: Float,
+        guideViewY: Float,
+    ): Double? {
+        val span = bracketDepthGeometry(frame, leftViewX, rightViewX, guideViewY) ?: return null
+        val g = bracketGeometry(frame, span.axis, span.leftFraction, span.rightFraction)
+            ?: return null
+        val depths = bracketCoreDepthsSorted(frame, span.axis, g.iLo, g.iHi)
+        // Same floor the fit uses: below it there is no median worth
+        // describing, and the fit has already refused.
+        if (depths.size < 3) return null
+        return (depths[(depths.size * 3) / 4] - depths[depths.size / 4]).toDouble()
+    }
+
+    /// The VIEW-space entry to the manual edge-bracket (ADJUST) mode: the
+    /// cruiser places the trunk's two silhouette edges as x positions on the
+    /// horizontal guide line, so the handle span IS the width and depth only
+    /// supplies z. The automatic edge search never runs here; the auto path
+    /// is untouched.
+    ///
+    /// This function is the boundary crossing and nothing else — the handles
+    /// become a depth walk axis and two fractions, and `bracketChordFit`
+    /// does the measuring. The calibration is applied to what comes back,
+    /// which is the one thing the live readout does that the recorded fit
+    /// does not (the corpus stores raw).
+    ///
+    /// Null when the view↔depth mapping is unavailable or the fit refuses.
     fun constrainedEstimate(
         frame: ArDepthFrame,
         leftViewX: Float,
@@ -721,104 +1197,59 @@ object DBHEstimator {
         guideViewY: Float,
         cal: ProjectCalibration,
     ): DbhPreview? {
-        val pL = frame.viewToDepth(min(leftViewX, rightViewX), guideViewY) ?: return null
-        val pR = frame.viewToDepth(max(leftViewX, rightViewX), guideViewY) ?: return null
-        val dxSpan = abs(pR.first - pL.first)
-        val dySpan = abs(pR.second - pL.second)
-        // Walk axis = the depth axis the screen-horizontal bracket spans
-        // (rotated 90° in portrait); divide by the SAME axis-matched focal
-        // as the auto path (fx for a depth-x walk, fy for a depth-y walk).
-        val isRowWalk = dxSpan >= dySpan
-        val focal = if (isRowWalk) frame.fx else frame.fy
-        if (focal <= 1.0) return null
-        val w = max(dxSpan, dySpan)
-        if (w < 2.0) return null
-        // Median depth INSIDE the bracket along the guide row.
-        val steps = Math.round(w).toInt().coerceAtLeast(2)
-        val depths = ArrayList<Float>(steps + 1)
-        for (i in 0..steps) {
-            val t = i.toDouble() / steps
-            val x = Math.round(pL.first + (pR.first - pL.first) * t).toInt()
-            val y = Math.round(pL.second + (pR.second - pL.second) * t).toInt()
-            if (x < 0 || x >= frame.width || y < 0 || y >= frame.height) continue
-            if (frame.confidenceAt(x, y) < 1) continue
-            val d = frame.depthAt(x, y)
-            if (d > 0f) depths.add(d)
-        }
-        if (depths.size < 3) return null
-        depths.sort()
-        val z = depths[depths.size / 2]
-        // Same null gates as iOS bracketChordFit: bracket depth 0.3–5 m,
-        // RAW diameter 2.5–100 cm — outside them there is no fit at all.
-        if (z !in 0.3f..5.0f) return null
-        val halfW = w / 2.0
-        if (focal - halfW <= 1.0) return null
-        val diameterM = w * z / (focal - halfW)
-        val rawCm = diameterM * 100.0
-        if (rawCm !in 2.5..100.0) return null
-        val dia = (cal.dbhCorrectionAlpha + cal.dbhCorrectionBeta * rawCm).toFloat()
+        val span = bracketDepthGeometry(frame, leftViewX, rightViewX, guideViewY) ?: return null
+        val fit = bracketChordFit(frame, span.axis, span.leftFraction, span.rightFraction)
+            ?: return null
+        val dia = cal.appliedToRawCm(fit.diameterCm).toFloat()
         // A returned fit IS capturable (the user vouches for the edges) —
         // iOS tap-gate parity. nPoints carries the bracket span in
         // walk-axis px (iOS PreviewFit.inlierCount).
-        return DbhPreview(dia, z, locked = true, nPoints = Math.round(w).toInt())
+        return DbhPreview(dia, fit.depthM.toFloat(), locked = true, nPoints = fit.spanPx)
     }
 
     /// Single-frame ADJUST bracket fit in DEPTH-axis-fraction space — the
-    /// cross-platform-canonical manual-bracket primitive (iOS
-    /// DBHEstimator.bracketChordFit parity). The two handles are fractions
-    /// [0,1] ALONG THE GUIDE AXIS of the depth grid (row → x, col → y); their
-    /// span is the silhouette width w in walk-axis pixels and z is the median
-    /// depth inside that span at the guide line. Same pinhole chord identity
-    /// as the auto path, d = w·z/(f_axis − w/2), axis-matched focal. Returns
-    /// the RAW (un-calibrated) diameter (cm) + span, or null on the same
-    /// gates iOS uses (bracket depth 0.3–5 m, raw diameter 2.5–100 cm).
+    /// one manual-bracket measurement on this platform, and the
+    /// cross-platform-canonical one (iOS `DBHEstimator.bracketChordFit`
+    /// parity). The live readout reaches it through `constrainedEstimate`,
+    /// the recording and the replay call it directly.
     ///
-    /// This lives in depth-fraction space (not view-px like constrainedEstimate)
-    /// so the raw-capture manifest can store the two handles as view-independent
-    /// fractions — byte-identical to the iOS bracket schema (no view size / no
-    /// guide_y needed to replay). The live view-space ADJUST UI keeps using
-    /// constrainedEstimate; this is the recording/replay-shared entry point.
-    data class BracketFit(val diameterCm: Double, val spanPx: Int)
+    /// The two handles are fractions [0,1] ALONG THE GUIDE AXIS of the depth
+    /// grid (row → x, col → y); their span is the silhouette width w in
+    /// walk-axis pixels and z is the median depth inside that span at the
+    /// guide line. `silhouetteDiameterCm` inverts the tangent form on that
+    /// pair. Returns the RAW (un-calibrated) diameter (cm), the span rounded
+    /// to whole pixels, and the depth the fit read — or null on the same
+    /// gates iOS uses (bracket depth 0.3–5 m, raw diameter within
+    /// PLAUSIBLE_DIAMETER_CM).
+    ///
+    /// Fractions, not view pixels, because that is what the raw-capture
+    /// manifest stores: view-independent, byte-identical to the iOS bracket
+    /// schema, so replaying a bundle needs neither view size nor guide_y.
+    ///
+    /// Both platforms use the guide-axis focal component and the full-span
+    /// median with the corresponding cylindrical surface correction.
+    data class BracketFit(val diameterCm: Double, val spanPx: Int, val depthM: Double)
 
     fun bracketChordFit(
         frame: ArDepthFrame, guideAxis: GuideAxis, leftFraction: Double, rightFraction: Double,
     ): BracketFit? {
-        val extent = axisExtent(frame, guideAxis)
-        if (extent < 2) return null
-        val lo = min(leftFraction, rightFraction)
-        val hi = max(leftFraction, rightFraction)
-        val a = Math.round(lo * extent).toInt().coerceIn(0, extent - 1)
-        val b = Math.round(hi * extent).toInt().coerceIn(0, extent - 1)
-        val w = b - a
-        if (w < 2) return null
+        val g = bracketGeometry(frame, guideAxis, leftFraction, rightFraction) ?: return null
         val focal = when (guideAxis) {
             is GuideAxis.Row -> frame.fx
             is GuideAxis.Col -> frame.fy
         }
         if (focal <= 1.0) return null
-        // Bounds check the fixed guide coordinate.
-        when (guideAxis) {
-            is GuideAxis.Row -> if (guideAxis.y < 0 || guideAxis.y >= frame.height) return null
-            is GuideAxis.Col -> if (guideAxis.x < 0 || guideAxis.x >= frame.width) return null
-        }
-        val depths = ArrayList<Float>(w + 1)
-        for (idx in a..b) {
-            val (px, py) = pixelCoords(guideAxis, idx)
-            if (px < 0 || px >= frame.width || py < 0 || py >= frame.height) continue
-            if (frame.confidenceAt(px, py) < 1) continue
-            val d = frame.depthAt(px, py)
-            if (d > 0f) depths.add(d)
-        }
-        if (depths.size < 3) return null
-        depths.sort()
-        val z = depths[depths.size / 2]
-        if (z !in 0.3f..5.0f) return null
-        val halfW = w / 2.0
-        if (focal - halfW <= 1.0) return null
-        val diameterM = w * z.toDouble() / (focal - halfW)
-        val rawCm = diameterM * 100.0
-        if (rawCm !in 2.5..100.0) return null
-        return BracketFit(rawCm, w)
+        // Epoch 7: shared full-span median and paired surface correction.
+        val col = guideAxis is GuideAxis.Col
+        val width = if (col) frame.height else frame.width
+        val height = if (col) frame.width else frame.height
+        val fixed = when (guideAxis) { is GuideAxis.Row -> guideAxis.y; is GuideAxis.Col -> guideAxis.x }
+        if (fixed !in 0 until height) return null
+        val (rawCm,z) = BoundaryAlignment.fullSpanSample(width,g.lo*width,g.hi*width,focal) { x ->
+            frame.depthAt(if(col)fixed else x,if(col)x else fixed).toDouble()
+        } ?: return null
+        if (rawCm !in PLAUSIBLE_DIAMETER_CM) return null
+        return BracketFit(rawCm, Math.round(g.widthPx).toInt(), z.toDouble())
     }
 
     /// ADJUST bracket burst estimate over the stored frames — median of the
@@ -833,6 +1264,17 @@ object DBHEstimator {
         rightFraction: Double,
         cal: ProjectCalibration,
     ): DBHResult? {
+        if (frames.size == 1) {
+            val fit = bracketChordFit(frames.first(), guideAxis, leftFraction, rightFraction)
+                ?: return null
+            return DBHResult(
+                diameterCm = cal.appliedToRawCm(fit.diameterCm).toFloat(),
+                centerX = 0f, centerZ = 0f, arcCoverageDeg = 0f,
+                rmseMm = 0f, sigmaRmm = 0f, nInliers = fit.spanPx,
+                confidence = ConfidenceTier.YELLOW,
+                method = DBHMethod.LIDAR_CHORD_SILHOUETTE, rejectionReason = null,
+            )
+        }
         if (frames.size < 5) return null
         val diameters = ArrayList<Double>(frames.size)
         var spanPxSum = 0
@@ -841,7 +1283,7 @@ object DBHEstimator {
             diameters.add(fit.diameterCm)
             spanPxSum += fit.spanPx
         }
-        if (diameters.size < 3) {
+        if (diameters.size < TierThresholds.MIN_USABLE_FRAMES) {
             return DBHResult(
                 diameterCm = 0f, centerX = 0f, centerZ = 0f,
                 arcCoverageDeg = 0f, rmseMm = 0f, sigmaRmm = 0f,
@@ -854,12 +1296,12 @@ object DBHEstimator {
         val medianRawCm = diameters[diameters.size / 2]
         val mean = diameters.average()
         val cov = if (mean > 0) (diameters.last() - diameters.first()) / mean else 1.0
-        val diaCm = cal.dbhCorrectionAlpha + cal.dbhCorrectionBeta * medianRawCm
+        val diaCm = cal.appliedToRawCm(medianRawCm)
         return DBHResult(
             diameterCm = diaCm.toFloat(), centerX = 0f, centerZ = 0f,
             arcCoverageDeg = 0f, rmseMm = 0f, sigmaRmm = 0f,
             nInliers = spanPxSum,
-            confidence = if (cov <= 0.15) ConfidenceTier.GREEN else ConfidenceTier.YELLOW,
+            confidence = if (cov <= TierThresholds.FRAME_SPREAD_GREEN) ConfidenceTier.GREEN else ConfidenceTier.YELLOW,
             method = DBHMethod.LIDAR_CHORD_SILHOUETTE, rejectionReason = null,
         )
     }
@@ -873,6 +1315,17 @@ object DBHEstimator {
         frames: List<ArDepthFrame>, tapX: Double, tapY: Double, axis: GuideAxis, cal: ProjectCalibration,
         algorithm: ChordAlgorithm = ChordAlgorithm.SILHOUETTE,
     ): DBHResult? {
+        if (frames.size == 1) {
+            val p = livePreview(frames.first(), tapX, tapY, axis, cal, algorithm)
+                ?: return null
+            if (!p.locked) return redChord("Cannot resolve both trunk edges in this frame", p.nPoints)
+            return DBHResult(
+                diameterCm = p.diameterCm, centerX = 0f, centerZ = 0f,
+                arcCoverageDeg = 0f, rmseMm = 0f, sigmaRmm = 0f,
+                nInliers = p.nPoints, confidence = p.tier,
+                method = DBHMethod.LIDAR_CHORD_SILHOUETTE, rejectionReason = null,
+            )
+        }
         // Min 5 frames to match the iOS chord burst (was 3 — the capture flow
         // already gates at ≥5, so this only aligns the estimator's own floor).
         if (frames.size < 5) return null
@@ -890,7 +1343,7 @@ object DBHEstimator {
             if (c != null) diameters.add(c.diameterM)
             else if (scan.borderClippedRows >= EDGE_CLIP_ROWS_MIN) clippedFrames++
         }
-        if (diameters.size < 3) {
+        if (diameters.size < TierThresholds.MIN_USABLE_FRAMES) {
             // Distinguish the FRAMING failure (silhouette ran off the image
             // border — trunk edges not visible) from a plain surface miss.
             return if (clippedFrames > frames.size / 2)
@@ -903,10 +1356,16 @@ object DBHEstimator {
         val mean = diameters.average()
         val sd = sqrt(diameters.sumOf { (it - mean) * (it - mean) } / diameters.size)
         val cov = if (mean > 0) sd / mean else 1.0
-        val diaCm = (cal.dbhCorrectionAlpha + cal.dbhCorrectionBeta * (medianM * 100)).toFloat()
+        val diaCm = cal.appliedToRawCm(medianM * 100).toFloat()
 
         val checks = listOf(
             check(medianM in 0.025..2.0, Severity.REJECT, "Diameter outside 2.5–200 cm"),
+            // NOT the same rule as the bracket path above, and NOT the
+            // same rule as iOS `chordEstimate`, which grades this method
+            // green/yellow at FRAME_SPREAD_GREEN and never reds it. Left
+            // exactly as shipped (the estimator is frozen) and deliberately
+            // NOT given a shared constant, because sharing a name with the
+            // bracket rule would hide that they disagree.
             check(cov <= 0.15, Severity.REJECT,
                 "The trunk width kept changing between shots — hold the phone steadier and capture again."),
             check(cov <= 0.08, Severity.WARN, "Per-frame spread 8–15%"),

@@ -28,6 +28,12 @@ sealed class CruiseDataError(override val message: String) : Exception(message) 
 
     /// update/delete addressed a row that does not exist.
     class NotFound(id: String) : CruiseDataError("Record not found: $id")
+
+    /// A write was refused because the record carries a value the model says
+    /// cannot exist — a canopy cover of 130 %, an aspect of 400°. The message
+    /// is the sentence the cruiser reads, built by the model, so the refusal
+    /// says the same thing wherever it surfaces.
+    class InvalidValue(detail: String) : CruiseDataError(detail)
 }
 
 @Database(
@@ -42,7 +48,7 @@ sealed class CruiseDataError(override val message: String) : Exception(message) 
         VolumeEquationEntity::class,
         HeightDiameterFitEntity::class,
     ],
-    version = 3,
+    version = 9,
     exportSchema = false,
 )
 @TypeConverters(CruiseConverters::class)
@@ -77,6 +83,90 @@ abstract class CruiseDatabase : RoomDatabase() {
         val MIGRATION_2_3 = object : Migration(2, 3) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE PlannedPlotEntity ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /// v3 → v4: Tree gains `treeName`, the cruiser's own label for the
+        /// tree. Nullable TEXT, no backfill — an unnamed tree reads as
+        /// "#<treeNumber>" exactly as before.
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE TreeEntity ADD COLUMN treeName TEXT")
+            }
+        }
+
+        /// v4 → v5: Tree gains `dbhCaptureMode` — which estimator found the
+        /// diameter's edges ("auto", "manual", "typed"). Nullable TEXT, no
+        /// backfill: rows written before the column existed genuinely have
+        /// no provenance, and guessing one would corrupt the algorithm
+        /// comparison this field is recorded for.
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE TreeEntity ADD COLUMN dbhCaptureMode TEXT")
+            }
+        }
+
+        /// v5 → v6: PlannedPlot gains `plannedSource` — how the planned
+        /// coordinate was placed ("manual" when the cruiser drew it on the
+        /// map). Nullable TEXT, no backfill: every row that exists at this
+        /// point was laid by the sampling generator, and null is what "not
+        /// hand-placed" is spelled as. Backfilling "manual" would claim a
+        /// finger placed a grid the design computed.
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE PlannedPlotEntity ADD COLUMN plannedSource TEXT")
+            }
+        }
+
+        /// v6 → v7: Project gains `dbhCalibrationEpoch` — which diameter
+        /// estimator its cylinder calibration was fitted against.
+        ///
+        /// DEFAULT 0, NOT the current epoch, and the difference matters. A
+        /// project migrating in was calibrated under an older estimator, and
+        /// backfilling the current epoch would assert the opposite: that its
+        /// alpha/beta still apply. They do not — the fitted correction and the
+        /// new geometry's own correction would stack and the project would
+        /// under-read silently. 0 reads as "not fitted against this
+        /// estimator", which is exactly true, and the calibration screen asks
+        /// for a re-scan. A project that never calibrated is unaffected
+        /// either way: the identity correction is valid at every epoch.
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE ProjectEntity ADD COLUMN dbhCalibrationEpoch INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /// v7 → v8: Plot gains the rest of its site description —
+        /// `groundElevationM` (metres, the app's canonical length) and
+        /// `canopyCoverPct` (0–100 %).
+        ///
+        /// NULLABLE, no backfill and no DEFAULT 0. Nobody stood on these plots
+        /// with an altimeter, so their elevation is unknown, not sea level;
+        /// their canopy is unknown, not a clearcut. A DEFAULT 0 would make
+        /// every plot recorded before today claim two readings it never had,
+        /// and no later screen could tell those apart from a coastal plot in
+        /// the open.
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE PlotEntity ADD COLUMN groundElevationM REAL")
+                db.execSQL("ALTER TABLE PlotEntity ADD COLUMN canopyCoverPct REAL")
+            }
+        }
+
+        /// v8 → v9: Tree gains `dbhEstimatorEpoch` — which diameter estimator
+        /// produced the number in `dbhCm`.
+        ///
+        /// NULLABLE, no backfill, and deliberately not DEFAULT 0. Every row
+        /// that exists at this point was written under some estimator, but the
+        /// row records nothing the diameter was derived from, so which one it
+        /// was cannot be read back out of it. Null says exactly that: unknown.
+        /// 0 would name an epoch no estimator ever had, and the current epoch
+        /// would be worse still — it would assert that diameters measured
+        /// under the chord identity came out of the tangent geometry, and the
+        /// recompute that exists to fix them would then skip every one.
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE TreeEntity ADD COLUMN dbhEstimatorEpoch INTEGER")
             }
         }
     }

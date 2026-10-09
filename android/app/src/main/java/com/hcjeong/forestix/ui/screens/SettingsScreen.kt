@@ -70,11 +70,15 @@ import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.backup.BackupViewModel
 import com.hcjeong.forestix.common.Country
+import com.hcjeong.forestix.common.BreastHeightGuideHeight
 import com.hcjeong.forestix.common.ForestixLogger
 import com.hcjeong.forestix.common.Region
 import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.common.defaultLogRule
+import com.hcjeong.forestix.data.ResearchExport
 import com.hcjeong.forestix.data.ResearchLog
+import com.hcjeong.forestix.data.TruthBackfill
+import com.hcjeong.forestix.data.TruthUnitRepair
 import com.hcjeong.forestix.sensors.ChordAlgorithm
 import com.hcjeong.forestix.sensors.LogRule
 import com.hcjeong.forestix.sensors.RawCaptureStore
@@ -85,9 +89,12 @@ import com.hcjeong.forestix.ui.screens.project.FormSection
 import com.hcjeong.forestix.ui.screens.project.MenuPickerRow
 import com.hcjeong.forestix.ui.shareFile
 import com.hcjeong.forestix.ui.theme.Forestix
+import com.hcjeong.forestix.ui.theme.ForestixBorderedButton
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import java.io.File
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -112,6 +119,24 @@ fun SettingsScreen(nav: NavController) {
     // card away from the Export rows (a mis-tap used to wipe the corpus).
     var confirmClearResearch by remember { mutableStateOf(false) }
     var confirmClearEvents by remember { mutableStateOf(false) }
+
+    // Research-CSV export: the run is in flight, and what the last one held
+    // back. The sentence stays on screen after the share sheet closes — the
+    // counts are the point, and a toast the cruiser dismissed is not a record.
+    var researchExportRunning by remember { mutableStateOf(false) }
+    var researchExportResult by remember { mutableStateOf<String?>(null) }
+
+    // Ground-truth recovery: the run is in flight, and what the last one did.
+    var truthBackfillRunning by remember { mutableStateOf(false) }
+    var truthBackfillResult by remember { mutableStateOf<String?>(null) }
+
+    // Ground-truth unit repair. The PLAN is held between the preview and the
+    // confirm so what the cruiser agreed to is what gets written — recomputing
+    // it after the tap would let the corpus move under the sentence they read.
+    var truthRepairRunning by remember { mutableStateOf(false) }
+    var truthRepairPlan by remember { mutableStateOf<TruthUnitRepair.Plan?>(null) }
+    var truthRepairPreview by remember { mutableStateOf<String?>(null) }
+    var truthRepairResult by remember { mutableStateOf<String?>(null) }
 
     // Backup / restore (Data & backup group).
     val backup = remember(env) { BackupViewModel(env) }
@@ -281,6 +306,24 @@ fun SettingsScreen(nav: NavController) {
             // iOS parity).
             FormSection(header = "Display") {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Guide height", style = type.body, color = colors.textPrimary)
+                    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                        BreastHeightGuideHeight.entries.forEachIndexed { index, height ->
+                            SegmentedButton(
+                                selected = settings.breastHeightGuideHeight == height,
+                                onClick = { env.settings.setBreastHeightGuideHeight(height) },
+                                shape = SegmentedButtonDefaults.itemShape(
+                                    index = index, count = BreastHeightGuideHeight.entries.size),
+                            ) { Text(height.metricLabel, style = type.caption, maxLines = 1) }
+                        }
+                    }
+                    Text(
+                        "Vertical height above the selected point.",
+                        style = type.caption, color = colors.textSecondary,
+                    )
+                }
+                FormDivider()
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("Appearance", style = type.body, color = colors.textPrimary)
                     val appearanceOptions = listOf("light" to "Light", "dark" to "Dark")
                     SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
@@ -438,8 +481,8 @@ fun SettingsScreen(nav: NavController) {
                 }
             }
 
-            // MARK: - 6. Developer & research (GATED — the developer-mode
-            // toggle is the only always-visible row; when on it holds ALL dev /
+            // MARK: - 6. Developer & research (hidden until the map's seven-tap
+            // gesture enables it; when on it holds ALL dev /
             // study tooling: DBH algorithm, research CSV, diagnostic log, and
             // the raw-capture recorder). The destructive Clears live in their
             // own card AFTER this one.
@@ -452,7 +495,7 @@ fun SettingsScreen(nav: NavController) {
             val hasEvents = remember(storeRefresh, settings.developerMode) {
                 settings.developerMode && ForestixLogger.hasEvents()
             }
-            FormSection(header = "Developer & research") {
+            if (settings.developerMode) FormSection(header = "Developer & research") {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text("Developer / research mode", style = type.body, color = colors.textPrimary)
@@ -463,10 +506,51 @@ fun SettingsScreen(nav: NavController) {
                     }
                     Switch(
                         checked = settings.developerMode,
-                        onCheckedChange = { env.settings.setDeveloperMode(it) },
+                        onCheckedChange = { if (!it) env.settings.setDeveloperMode(false) },
                     )
                 }
                 if (settings.developerMode) {
+                    FormDivider()
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text("Multi-frame DBH capture (5 frames)", style = type.body, color = colors.textPrimary)
+                            Text("Experimental. Off uses one depth frame per measurement; live preview is unchanged.",
+                                style = type.caption, color = colors.textSecondary)
+                        }
+                        Switch(
+                            checked = settings.dbhCaptureMode == com.hcjeong.forestix.common.DBHCaptureMode.MULTI_5,
+                            onCheckedChange = { env.settings.setDbhCaptureMode(
+                                if (it) com.hcjeong.forestix.common.DBHCaptureMode.MULTI_5
+                                else com.hcjeong.forestix.common.DBHCaptureMode.SINGLE) },
+                        )
+                    }
+                    // AUTOMATIC STEM EDGES — an on-device segmentation model
+                    // placing the measuring bracket.
+                    //
+                    // Developer-only: it decides the two pixels a diameter
+                    // is measured between. Against 60 real captures
+                    // it found a trunk in 40 % of frames, and where it did the
+                    // edges spanned about 0.21 of the screen against the
+                    // cruiser's own 0.36. An experiment does not belong on a
+                    // cruiser's settings screen. The scan gate reads BOTH keys.
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text("Automatic stem edges (experimental)",
+                                style = type.body, color = colors.textPrimary)
+                            Text(
+                                "NOT A MEASUREMENT YET. Finds the trunk in the camera image " +
+                                    "and places the bracket on its edges; take hold of the " +
+                                    "bracket and it stands aside. Falls back to the depth " +
+                                    "edge-finder whenever it has no answer. Readings taken " +
+                                    "this way are recorded as \"segmented\".",
+                                style = type.caption, color = colors.textSecondary,
+                            )
+                        }
+                        Switch(
+                            checked = settings.dbhAutoSegmentation,
+                            onCheckedChange = { env.settings.setDbhAutoSegmentation(it) },
+                        )
+                    }
                     // DBH algorithm — depth-method diameter fit. Moved in from
                     // its own former section; developer-only, since normal
                     // users get the single blessed path (iOS gates it the same).
@@ -516,13 +600,40 @@ fun SettingsScreen(nav: NavController) {
                             modifier = Modifier.weight(1f))
                         Text("$rowCount rows", style = type.body, color = colors.textSecondary)
                     }
+                    // THE EXPORT IS CLASSIFIED, NOT COPIED. The log is
+                    // append-only, so it still holds the row a retake replaced
+                    // and the ground truth a correction moved on from.
+                    // [ResearchExport] splits it into what the FIELD LOG shows
+                    // and what it no longer does, ships BOTH files in one
+                    // archive, and returns the counts — which go on screen
+                    // below, because a quiet filter is how someone later
+                    // concludes data went missing. Nothing on disk is touched.
                     FormDivider()
                     SettingsActionRow(
-                        title = "Export research CSV",
+                        title = if (researchExportRunning) "Exporting…"
+                                else "Export research CSV",
                         icon = Icons.Filled.IosShare,
-                        enabled = hasData,
+                        enabled = hasData && !researchExportRunning,
                     ) {
-                        ResearchLog.exportUri(context)?.let { shareFile(context, it, "text/csv") }
+                        researchExportRunning = true
+                        researchExportResult = null
+                        scope.launch {
+                            // Off the main thread: the pass parses the whole
+                            // research CSV, which is a field season of rows.
+                            val outcome = withContext(Dispatchers.IO) {
+                                ResearchExport.run(context, env.history.entries.value)
+                            }
+                            researchExportResult = outcome.message
+                            researchExportRunning = false
+                            // Shared only when a file was actually written — an
+                            // empty log and a failed write both leave the
+                            // sentence on screen and no share sheet, rather
+                            // than sharing a file that is not there.
+                            outcome.uri?.let { shareFile(context, it, "application/zip") }
+                        }
+                    }
+                    researchExportResult?.let {
+                        Text(it, style = type.caption, color = colors.textSecondary)
                     }
 
                     // Event log — local-only structured analytics (plot open,
@@ -602,6 +713,96 @@ fun SettingsScreen(nav: NavController) {
                             Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null,
                             tint = colors.textTertiary, modifier = Modifier.size(14.dp))
                     }
+
+                    // GROUND-TRUTH RECOVERY. A truth typed for a CAPTURE (on a
+                    // scan screen before the truth moved onto the reading, or
+                    // in the raw-captures console at any time since) lives only
+                    // in that capture's manifest, so the field log shows a
+                    // blank True field for a tree the cruiser taped. This
+                    // attaches those to the readings they belong to.
+                    //
+                    // DELIBERATELY NOT A LAUNCH MIGRATION. It reads every
+                    // manifest on disk — a few hundred after two field days,
+                    // each a whole JSON document with pose trails in it — and a
+                    // blocking pass on a cold morning is its own bug. It also
+                    // has no end date: the console can strand a new truth
+                    // today, so a run-once-at-version-N flag would be wrong by
+                    // design. It is idempotent, so running it again is free and
+                    // changes nothing.
+                    FormDivider()
+                    ForestixBorderedButton(
+                        label = "Recover ground truths",
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !truthBackfillRunning,
+                    ) {
+                        truthBackfillRunning = true
+                        truthBackfillResult = null
+                        scope.launch {
+                            val text = withContext(Dispatchers.IO) {
+                                TruthBackfill.run(context, env.history)
+                            }
+                            truthBackfillResult = text
+                            truthBackfillRunning = false
+                        }
+                    }
+                    Text(
+                        "Attach truths typed for a raw capture to the reading they belong to. Never overwrites a truth already on a reading.",
+                        style = type.caption, color = colors.textSecondary,
+                    )
+                    truthBackfillResult?.let {
+                        // The corpus was just rewritten — say by how much, so
+                        // the cruiser can check it against their own backup. A
+                        // silent repair of research data is the wrong shape
+                        // even when the arithmetic is right.
+                        Text(it, style = type.caption, color = colors.textSecondary)
+                    }
+
+                    // GROUND-TRUTH UNIT REPAIR. Before the truth field had a
+                    // unit toggle the cruiser typed inches and feet off the
+                    // tape into a field the app stored as centimetres and
+                    // metres, so a stem taped at 27 in went into the corpus as
+                    // 27 cm. This multiplies those back into the base they
+                    // meant.
+                    //
+                    // PREVIEW, THEN WRITE. It rewrites research data in three
+                    // stores at once and the correction cannot be read back out
+                    // of the number afterwards, so the cruiser sees the counts
+                    // and worked examples first and nothing moves until they
+                    // confirm.
+                    //
+                    // Like the recovery above it is an action rather than a
+                    // launch migration, and for the same reason: it reads every
+                    // manifest on disk. It is one-shot by construction, not by
+                    // a version flag — repairing a truth records the unit it
+                    // was typed in, which is the very marker that selects an
+                    // unrepaired one.
+                    FormDivider()
+                    ForestixBorderedButton(
+                        label = "Repair imperial ground truths",
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !truthRepairRunning,
+                    ) {
+                        truthRepairRunning = true
+                        truthRepairResult = null
+                        scope.launch {
+                            val plan = withContext(Dispatchers.IO) {
+                                TruthUnitRepair.preview(context, env.history)
+                            }
+                            truthRepairPlan = plan
+                            truthRepairPreview = TruthUnitRepair.previewText(plan)
+                            truthRepairRunning = false
+                        }
+                    }
+                    Text(
+                        "Ground truths typed before the unit toggle were stored as if the digits were metric. This re-bases them — inches to centimetres, feet to metres. A truth that records the unit it was typed in is never touched.",
+                        style = type.caption, color = colors.textSecondary,
+                    )
+                    truthRepairResult?.let {
+                        // Same reason the recovery says what it did: research
+                        // data moved, so say by how much and where the full
+                        // list is.
+                        Text(it, style = type.caption, color = colors.textSecondary)
+                    }
                 }
             }
 
@@ -670,6 +871,42 @@ fun SettingsScreen(nav: NavController) {
             text = { Text(restoreSummary ?: "") },
             confirmButton = {
                 TextButton(onClick = { restoreSummary = null }) { Text("OK") }
+            },
+        )
+    }
+
+    // THE CONFIRM THE REPAIR MUST PASS BEFORE IT WRITES ANYTHING. The plan is
+    // read out of state rather than recomputed on the tap, so what the cruiser
+    // agreed to is what lands. The Repair button is offered only when there IS
+    // something to write — a confirm on an empty plan invites a tap that means
+    // nothing. iOS shows the same text in a `.alert`.
+    truthRepairPreview?.let { previewText ->
+        val plan = truthRepairPlan
+        AlertDialog(
+            onDismissRequest = { truthRepairPreview = null; truthRepairPlan = null },
+            title = { Text("Repair imperial ground truths") },
+            text = { Text(previewText) },
+            confirmButton = {
+                if (plan != null && !plan.isEmpty) {
+                    TextButton(onClick = {
+                        truthRepairPreview = null
+                        truthRepairPlan = null
+                        truthRepairRunning = true
+                        scope.launch {
+                            val result = withContext(Dispatchers.IO) {
+                                TruthUnitRepair.applyPlan(context, plan, env.history)
+                            }
+                            truthRepairResult = TruthUnitRepair.resultText(result)
+                            truthRepairRunning = false
+                        }
+                    }) { Text("Repair") }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    truthRepairPreview = null
+                    truthRepairPlan = null
+                }) { Text("Cancel") }
             },
         )
     }

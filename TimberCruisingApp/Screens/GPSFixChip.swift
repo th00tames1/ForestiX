@@ -32,6 +32,7 @@
 // while the map beside it drew nothing.
 
 import SwiftUI
+import Models
 import Positioning
 
 public struct GPSFixChip: View {
@@ -39,6 +40,13 @@ public struct GPSFixChip: View {
     /// The shared service — the same object the map, the camera seeding and
     /// the plot verdict all read, so the chip cannot disagree with them.
     @ObservedObject private var location = LocationService.shared
+
+    /// The Z row is an ELEVATION, and elevation is the one length in this app
+    /// the cruiser also TYPES — into the plot sheet, which has always asked
+    /// for it in their own unit. With the chip stuck in metres the two
+    /// disagreed about one piece of ground, and copying the chip's figure into
+    /// the sheet stored a 3.28× error.
+    @EnvironmentObject private var settings: AppSettings
 
     /// True on the AR measurement screens: the chip is the only thing
     /// asking for location in its corner there, and holding the service
@@ -73,7 +81,8 @@ public struct GPSFixChip: View {
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(Self.accessibilityText(snap: snap,
                                                            age: age,
-                                                           state: state))
+                                                           state: state,
+                                                           unitSystem: settings.unitSystem))
                 .accessibilityIdentifier("gps.fixChip")
         }
         .onAppear {
@@ -128,7 +137,14 @@ public struct GPSFixChip: View {
                     .padding(.leading, 13)
                 HStack(spacing: 4) {
                     coordRow("Z", snap.altitudeM.map {
-                        String(format: "%.0f m", $0)
+                        // WHOLE units, both systems — `elevationDisplay` is the
+                        // same conversion `PlotDetailSheet` reads and writes
+                        // its elevation field with, so the chip and the sheet
+                        // now name one number.
+                        String(format: "%.0f %@",
+                               MeasurementFormatter.elevationDisplay(
+                                   m: $0, in: settings.unitSystem),
+                               MeasurementFormatter.heightUnit(settings.unitSystem))
                     } ?? "—")
                     // The age only appears once it MATTERS. A live fix is
                     // the normal case and does not need a number ticking
@@ -193,12 +209,16 @@ public struct GPSFixChip: View {
     /// the abbreviation that helps the eye would only cost the ear.
     static func accessibilityText(snap: CLLocationSnapshot?,
                                   age: TimeInterval?,
-                                  state: FixState) -> String {
+                                  state: FixState,
+                                  unitSystem: UnitSystem) -> String {
         guard let snap else { return "No GPS fix" }
         var out = String(format: "GPS fix %.5f, %.5f",
                          snap.latitude, snap.longitude)
         if let alt = snap.altitudeM {
-            out += String(format: ", altitude %.0f metres", alt)
+            // The ear gets the same number the eye does, spelled out.
+            out += String(format: ", altitude %.0f %@",
+                          MeasurementFormatter.elevationDisplay(m: alt, in: unitSystem),
+                          unitSystem == .metric ? "metres" : "feet")
         }
         if state != .live, let age {
             out += age < 60

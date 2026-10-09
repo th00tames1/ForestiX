@@ -20,10 +20,8 @@
 
 package com.hcjeong.forestix.ui.screens
 
-import android.app.Activity
 import android.graphics.Bitmap
 import android.text.format.DateUtils
-import android.graphics.BitmapFactory
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -47,12 +45,15 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentWidth
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -80,6 +81,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -88,6 +90,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -101,6 +104,8 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
@@ -120,13 +125,18 @@ import com.hcjeong.forestix.basemap.MapMarkerShape
 import com.hcjeong.forestix.basemap.MapView
 import com.hcjeong.forestix.basemap.rememberMapCameraState
 import com.hcjeong.forestix.common.ForestixLogger
+import com.hcjeong.forestix.common.DeveloperModeUnlock
 import com.hcjeong.forestix.common.MeasurementFormatter
+import com.hcjeong.forestix.common.UncertaintyBand
+import com.hcjeong.forestix.common.Units
 import com.hcjeong.forestix.common.RegionalSpecies
+import com.hcjeong.forestix.common.TruthInput
 import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
 import com.hcjeong.forestix.data.SettingsSnapshot
 import com.hcjeong.forestix.data.cruise.CrashRecoveryService
+import com.hcjeong.forestix.data.cruise.TreeLabel
 import com.hcjeong.forestix.geo.BoundaryGeometryKind
 import com.hcjeong.forestix.geo.CoordinateConversions
 import com.hcjeong.forestix.geo.SurveyBoundaryStore
@@ -137,6 +147,8 @@ import com.hcjeong.forestix.ui.MeasurePhotoStore
 import com.hcjeong.forestix.ui.PendingTreeNumber
 import com.hcjeong.forestix.ui.Routes
 import com.hcjeong.forestix.ui.clickableNoRipple
+import com.hcjeong.forestix.ui.screens.tree.TierExplainerKind
+import com.hcjeong.forestix.ui.screens.tree.TierExplainerSheet
 import com.hcjeong.forestix.ui.pressableNoRipple
 import com.hcjeong.forestix.ui.screens.cruise.CruiseCapture
 import com.hcjeong.forestix.ui.screens.cruise.CruiseDistanceOverlay
@@ -144,18 +156,37 @@ import com.hcjeong.forestix.ui.screens.cruise.CruiseModeBottomContent
 import com.hcjeong.forestix.ui.screens.cruise.CruiseModeEffects
 import com.hcjeong.forestix.ui.screens.cruise.CruiseModeSheets
 import com.hcjeong.forestix.ui.screens.cruise.CruiseModeState
+import com.hcjeong.forestix.ui.screens.cruise.CruisePlanPromptBanner
 import com.hcjeong.forestix.ui.screens.cruise.CruisePlotBanner
+import com.hcjeong.forestix.ui.screens.cruise.CruiseSetupRefusalDialog
+import com.hcjeong.forestix.ui.screens.cruise.MapAreaCallout
+import com.hcjeong.forestix.ui.screens.cruise.MapAreaDeleteDialog
+import com.hcjeong.forestix.ui.screens.cruise.MapAreaDraftBar
+import com.hcjeong.forestix.ui.screens.cruise.MapAreaEffects
+import com.hcjeong.forestix.ui.screens.cruise.MapAreaHandles
+import com.hcjeong.forestix.ui.screens.cruise.MapAreaRefusalDialog
+import com.hcjeong.forestix.ui.screens.cruise.MapAreaStackHintBanner
+import com.hcjeong.forestix.ui.screens.cruise.MapAreaState
+import com.hcjeong.forestix.ui.screens.cruise.MapPlanCallout
+import com.hcjeong.forestix.ui.screens.cruise.areaOverlays
+import com.hcjeong.forestix.ui.screens.cruise.beginAreaDraw
+import com.hcjeong.forestix.ui.screens.cruise.beginCircleDraw
+import com.hcjeong.forestix.ui.screens.cruise.deleteArea
+import com.hcjeong.forestix.ui.screens.cruise.handleOverlayTap
+import com.hcjeong.forestix.ui.screens.cruise.saveAreaDraft
+import com.hcjeong.forestix.ui.screens.cruise.PendingPlotFraming
 import com.hcjeong.forestix.ui.screens.cruise.cruiseModeMarkers
 import com.hcjeong.forestix.ui.screens.cruise.cruiseModePlotOverlay
 import com.hcjeong.forestix.ui.screens.cruise.cruiseModePolylines
 import com.hcjeong.forestix.ui.screens.cruise.freshFixOrNull
 import com.hcjeong.forestix.ui.screens.cruise.msUntilFreshnessChanges
+import com.hcjeong.forestix.ui.screens.cruise.openCruiseSetupForArea
+import com.hcjeong.forestix.ui.screens.cruise.plotFramingZoom
 import com.hcjeong.forestix.ui.softDropShadow
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixRadius
 import com.hcjeong.forestix.ui.theme.ForestixSpace
 import com.hcjeong.forestix.ui.theme.confidenceDescriptor
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -164,20 +195,33 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /// Peavy Hall (OSU College of Forestry) fallback — used only when there is
 /// no fix and no located reading. Mirrors iOS `fallbackCamera`.
 private val DefaultCenter = CoordinateConversions.LatLon(latitude = 44.56417, longitude = -123.28556)
+
+/// WHERE THE MAP OPENS. Two steps closer than the 16 it used to be: at 16 a
+/// phone viewport is the better part of a kilometre across, which is a road
+/// map. A cruiser opening this screen is standing in the stand they are
+/// working, and what they need to see is their own plots and pins — 18 puts
+/// roughly 150 m across the short side, so a plot and its neighbours are on
+/// screen at arm's length without a pinch. Every camera move that has no
+/// better idea of a scale uses this one constant. iOS `MapHomeScreen
+/// .defaultZoom` is the same 18.
+internal const val DefaultZoom = 18.0
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MapHomeScreen(nav: NavController) {
     val colors = Forestix.colors
     val env = LocalAppEnvironment.current
+    val scope = rememberCoroutineScope()
     val context = LocalContext.current
-    val activity = context as? Activity
     val settings by env.settings.state.collectAsStateWithLifecycle()
+    val developerUnlock = remember { DeveloperModeUnlock() }
     val entries by env.history.entries.collectAsStateWithLifecycle()
 
     // v3.1 merged cruise mode: ONE map, two modes, persisted (tc.mapMode).
@@ -216,7 +260,7 @@ fun MapHomeScreen(nav: NavController) {
     val pins = remember(entries) { buildTreePins(entries) }
 
     // Last fix → else newest located reading → else the Peavy Hall fallback,
-    // always at zoom 16 (iOS startUp()).
+    // always at DefaultZoom (iOS startUp()).
     val initialCamera = remember {
         val fromFix = LocationService.lastGlobalFix?.let {
             CoordinateConversions.LatLon(latitude = it.latitude, longitude = it.longitude)
@@ -241,6 +285,40 @@ fun MapHomeScreen(nav: NavController) {
     }
     val camera = rememberMapCameraState()
 
+    // A plot that has just been created gets FRAMED: the camera goes to its
+    // centre at a zoom derived from its own radius, close enough that the
+    // BOUNDARY is on screen. The question a cruiser asks the moment a plot
+    // exists is "am I in it?", and at the default zoom an 11 m ring is a few
+    // pixels across — unreadable, and no answer at all.
+    //
+    // The request is left by whichever surface created the plot (the AR
+    // "Start plot" destination, or the planned-pin conversion) because none
+    // of them owns this camera; see PendingPlotFraming. Consumed once — a
+    // standing instruction would fight the cruiser's own panning. With no
+    // measured viewport yet the zoom is left alone and only the centre
+    // moves: a frame computed from nothing would be a guess.
+    val framingRequest = PendingPlotFraming.request
+    LaunchedEffect(framingRequest) {
+        val r = framingRequest ?: return@LaunchedEffect
+        // WAIT FOR THE VIEWPORT. The AR "Start plot" screen is its own nav
+        // destination, so popping back re-composes this screen from scratch
+        // and the camera has not been measured yet at this instant — and a
+        // zoom cannot be derived from a viewport whose size is not known.
+        // Poll until it is, then give up after a couple of seconds and just
+        // centre on the plot: late is better than wrong, and doing nothing at
+        // all would leave the cruiser looking at the wrong ground.
+        val zoom = withTimeoutOrNull(2_000L) {
+            var z = plotFramingZoom(camera, r.radiusM)
+            while (z == null) {
+                delay(50)
+                z = plotFramingZoom(camera, r.radiusM)
+            }
+            z
+        }
+        camera.moveTo(r.centre, zoom ?: camera.zoom)
+        PendingPlotFraming.consume()
+    }
+
     // Imported survey boundary (Map settings → Survey boundary). Read once
     // per process off the main thread; the store's flow keeps the map and
     // the sheet in step when it is imported or removed.
@@ -263,13 +341,24 @@ fun MapHomeScreen(nav: NavController) {
     // (header "MEASURE · TREE N", no "(NEXT)"); null = plain chooser on the
     // next free number. Cleared whenever the chooser dismisses.
     var chooserTreeOverride by remember { mutableStateOf<Int?>(null) }
-    // Far-GPS confirmation before the scoped chooser: (tree, whole metres)
-    // when the current fix sits > 30 m from the tapped tree's pin.
-    var farTreeConfirm by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    // Far-GPS confirmation before the scoped chooser: (tree, distance in
+    // METRES) when the current fix sits past the far-tree threshold. The
+    // distance is carried raw and rounded at the point of display, because how
+    // it rounds depends on the unit it is shown in.
+    var farTreeConfirm by remember { mutableStateOf<Pair<Int, Double>?>(null) }
     var mapSettingsOpen by remember { mutableStateOf(false) }
-    var photoEntry by remember { mutableStateOf<QuickMeasureEntry?>(null) }
+    // "Draw an area" — the boundary editor, raised full-screen over the
+    // home. Not a nav destination: it is a modal edit of one map object,
+    // and back out of it must land here, not wherever nav last was.
+    var drawingBoundary by remember { mutableStateOf(false) }
+    // The photos the viewer is open on — every frame the tapped tree has,
+    // in capture order. Empty = closed.
+    var photoPages by remember { mutableStateOf<List<PhotoPage>>(emptyList()) }
     // Quick peek "Edit this tree" → compact edit sheet for one reading.
     var editEntry by remember { mutableStateOf<QuickMeasureEntry?>(null) }
+    // Quick peek "Details" → the field log's own per-tree record sheet,
+    // opened on the row behind the tapped pin. Null = closed.
+    var inspectingRowId by remember { mutableStateOf<String?>(null) }
 
     // Crash-recovery resume prompt: open plots (closedAt == null) edited within
     // the last 24h, most-recent first. Non-null + non-empty shows the prompt.
@@ -282,6 +371,13 @@ fun MapHomeScreen(nav: NavController) {
     // the 180 ms exit crossfade renders from live data)
 
     val cruise = remember { CruiseModeState() }
+    // AREAS — the outlines a cruise is laid out inside, drawn and edited in
+    // place on this map. Its own holder rather than a corner of
+    // CruiseModeState because areas render in BOTH modes: an outline the
+    // cruiser dragged onto their stand does not stop existing because they
+    // flipped to quick measure. See ui/screens/cruise/MapAreas.kt.
+    val areaState = remember { MapAreaState() }
+    MapAreaEffects(areaState, env, settings.cruiseProjectId)
     if (isCruise) {
         CruiseModeEffects(
             state = cruise,
@@ -387,7 +483,7 @@ fun MapHomeScreen(nav: NavController) {
         MapView(
             center = mapCenter,
             modifier = Modifier.fillMaxSize(),
-            initialZoom = 16.0,
+            initialZoom = DefaultZoom,
             // Base = the built-in layer the Map settings sheet selected
             // (satellite / normal); the user template is an overlay on top,
             // honouring its toggle AND the provider usage-policy
@@ -400,6 +496,9 @@ fun MapHomeScreen(nav: NavController) {
             },
             // Imported survey boundary — over the tiles, under app content.
             boundary = importedBoundary,
+            // The cruiser's own areas, above the imported boundary — an area
+            // drawn inside an imported stand reads as being inside it.
+            areas = areaOverlays(areaState),
             // Mode content separation (v3.1): quick pins are measure-only,
             // cruise pins/rings/guides cruise-only — the map itself (camera,
             // zoom, base + overlay) is shared across the toggle.
@@ -432,16 +531,48 @@ fun MapHomeScreen(nav: NavController) {
             },
             // Tapping the selected pin again deselects it (iOS toggle).
             onMarkerTap = { id ->
+                developerUnlock.reset()
                 if (isCruise) {
                     cruise.selectedId = if (cruise.selectedId == id) null else id
                 } else {
                     selectedPinId = if (selectedPinId == id) null else id
                 }
             },
-            // A tap ON the drawn plot's boundary raises its small Edit /
-            // Remove menu (M2) — the plot's own pin still owns the centre.
-            onPlotTap = { id -> cruise.openPlotMenu(id) },
-            onMapTap = { if (isCruise) cruise.selectedId = null else selectedPinId = null },
+            // A tap on the drawn plot's boundary raises its Edit / Remove
+            // menu (M2); a tap inside an area selects the area; a tap on
+            // both toggles between them — see `handleOverlayTap`.
+            onOverlayTap = { plotId, areaId ->
+                developerUnlock.reset()
+                handleOverlayTap(areaState, cruise, plotId, areaId)
+            },
+            onMapTap = {
+                developerUnlock.reset()
+                areaState.selectedId = null
+                if (isCruise) cruise.selectedId = null else selectedPinId = null
+            },
+            // PRESS AND HOLD BELONGS TO THE MAP, not to cruise. It used to be
+            // gated to cruise mode on the reasoning that measure mode has no
+            // plots and no stand to bound; both halves were wrong. The stand
+            // boundary is ONE record shared by both modes — it does not become
+            // a different object because the map that drew it was in measure
+            // mode — and measure mode does keep plots, they are just the
+            // project-less quick-measure ones. What the menu OFFERS narrows
+            // with the mode (see MapPlanCallout); the gesture itself never does.
+            // iOS ungates it the same way.
+            onMapLongPress = { coordinate ->
+                developerUnlock.reset()
+                // A press while an outline is being dragged belongs to that
+                // outline: raising a planning menu mid-edit would offer to
+                // start something else on top of unsaved work.
+                if (areaState.draft == null) {
+                    // The peek the press replaces is per-mode here (iOS keeps
+                    // one selection for both), so clear the one this mode is
+                    // showing.
+                    if (!isCruise) selectedPinId = null
+                    areaState.selectedId = null
+                    cruise.onMapLongPress(coordinate, inCruiseMode = isCruise)
+                }
+            },
             // The you-dot, from the gated fix ONLY. A dot is the map's
             // flattest assertion — "you are here" — so it may never outlive
             // the evidence for it. No usable fix, no dot: the map simply
@@ -451,6 +582,50 @@ fun MapHomeScreen(nav: NavController) {
             },
             cameraState = camera,
         )
+
+        // MARK: - Anchored map furniture
+        //
+        // Everything drawn AT a coordinate rather than in a corner: the
+        // pressed-point pin and its menu, the selected area's menu, and the
+        // draft's drag handles. Children of the map's own Box, so their
+        // offsets and the map's projection are the same space.
+        if (areaState.draft != null) {
+            MapAreaHandles(areaState, camera, settings)
+        } else {
+            MapPlanCallout(
+                cruise = cruise,
+                camera = camera,
+                inCruiseMode = isCruise,
+                onDrawArea = { at -> beginAreaDraw(areaState, camera, at) },
+                onDrawCircle = { at -> beginCircleDraw(areaState, camera, settings, at) },
+            )
+            MapAreaCallout(
+                state = areaState,
+                camera = camera,
+                settings = settings,
+                onCruise = { stratum ->
+                    // Laying out a cruise puts the cruiser in cruise mode:
+                    // the pins this is about to generate are cruise content,
+                    // and generating them onto a map that does not draw them
+                    // would look like nothing happened. Settling the project
+                    // first is what keeps the tap from doing nothing at all
+                    // when it comes from measure mode, where the cruise
+                    // snapshot has never been loaded — see
+                    // `openCruiseSetupForArea`, which is where the whole
+                    // sequence lives so it can refuse out loud.
+                    scope.launch {
+                        openCruiseSetupForArea(
+                            env = env,
+                            settings = settings,
+                            areaState = areaState,
+                            state = cruise,
+                            stratum = stratum,
+                            enterCruiseMode = { setMode("cruise") },
+                        )
+                    }
+                },
+            )
+        }
 
         // MARK: - Top chrome (mock `.topchrome`)
 
@@ -481,24 +656,35 @@ fun MapHomeScreen(nav: NavController) {
                 }
                 // My-location: recentre on the freshest fix (this screen's
                 // live service, else the last global fix) without ever
-                // zooming OUT past 16. Dimmed no-op until any fix exists.
+                // zooming OUT past DefaultZoom. Dimmed no-op until any fix exists.
                 val locateSnap = fix ?: LocationService.lastGlobalFix
                 RoundChromeButton(
                     Icons.Filled.MyLocation,
                     "My location",
-                    enabled = locateSnap != null,
+                    dimmed = locateSnap == null,
                 ) {
+                    if (!settings.developerMode &&
+                        developerUnlock.tap(android.os.SystemClock.elapsedRealtime() / 1000.0)) {
+                        env.settings.setDeveloperMode(true)
+                        android.widget.Toast.makeText(context,
+                            "Developer mode enabled — tools are available in Settings.",
+                            android.widget.Toast.LENGTH_SHORT).show()
+                    }
                     locateSnap?.let {
                         camera.moveTo(
                             CoordinateConversions.LatLon(
                                 latitude = it.latitude, longitude = it.longitude),
-                            zoom = max(camera.zoom, 16.0),
+                            zoom = max(camera.zoom, DefaultZoom),
                         )
                     }
                 }
-                RoundChromeButton(Icons.Filled.Layers, "Map settings") { mapSettingsOpen = true }
+                RoundChromeButton(Icons.Filled.Layers, "Map settings") {
+                    developerUnlock.reset()
+                    mapSettingsOpen = true
+                }
                 // Settings — rightmost of the top-right group, both modes.
                 RoundChromeButton(Icons.Filled.Settings, "Settings") {
+                    developerUnlock.reset()
                     nav.navigate(Routes.SETTINGS)
                 }
             }
@@ -509,13 +695,29 @@ fun MapHomeScreen(nav: NavController) {
         // cruiser's units.
         plotOverlay?.let { CruisePlotBanner(it, settings, cruise) }
 
+        // The map is waiting for a press: says so. Rides under the plot
+        // status banner when there is one, so the two stack rather than
+        // overlap (iOS puts them in the same top VStack).
+        if (isCruise && (cruise.awaitingPlanPress || cruise.movingPlannedId != null)) {
+            CruisePlanPromptBanner(
+                cruise,
+                topPaddingDp = if (plotOverlay != null) 108.dp else 56.dp,
+            )
+        }
+
+        // The overlap toggle, said once — see MapAreaState.stackHint.
+        MapAreaStackHintBanner(
+            areaState,
+            topPaddingDp = if (plotOverlay != null) 152.dp else 100.dp,
+        )
+
         // Cruise navigate mode: floating live distance chip riding the
         // dashed guide line's midpoint (mock ⑦ `.distchip`).
         if (isCruise) {
             // Rides the guide line's midpoint and states a distance measured
             // from the cruiser — same evidence, same gate, so chip and line
             // appear and disappear together.
-            CruiseDistanceOverlay(cruise, camera, usableFix)
+            CruiseDistanceOverlay(cruise, camera, usableFix, settings.unitSystem)
         }
 
         // MARK: - Bottom: action cluster ①, or peek card ② when a pin is up.
@@ -534,8 +736,19 @@ fun MapHomeScreen(nav: NavController) {
                 .fillMaxWidth()
                 .navigationBarsPadding(),
         ) {
+            // An outline under the thumb owns the bottom of the screen: the
+            // cluster's actions all start something else, and offering them
+            // mid-drag is offering to throw the drag away.
+            if (areaState.draft != null) {
+                MapAreaDraftBar(areaState, settings) {
+                    scope.launch {
+                        saveAreaDraft(areaState, env, settings)
+                        cruise.refresh++
+                    }
+                }
+            }
             AnimatedContent(
-                targetState = isCruise,
+                targetState = isCruise && areaState.draft == null,
                 modifier = Modifier.align(Alignment.BottomCenter),
                 contentAlignment = Alignment.BottomCenter,
                 transitionSpec = {
@@ -544,11 +757,13 @@ fun MapHomeScreen(nav: NavController) {
                 },
                 label = "modeSwap",
             ) { cruiseMode ->
+                if (areaState.draft != null) return@AnimatedContent
                 if (cruiseMode) {
                     CruiseModeBottomContent(
                         state = cruise,
                         nav = nav,
                         fix = fix,
+                        camera = camera,
                         onToggleMode = { setMode("measure") },
                     )
                 } else {
@@ -556,7 +771,6 @@ fun MapHomeScreen(nav: NavController) {
                         selectedPin = selectedPin,
                         lastPin = lastPin,
                         settings = settings,
-                        activity = activity,
                         plotNameFor = { pin ->
                             pin.entries.firstOrNull()?.plotID
                                 ?.let { env.history.plot(it) }
@@ -565,8 +779,25 @@ fun MapHomeScreen(nav: NavController) {
                         onToggleMode = { setMode("cruise") },
                         onMeasure = { chooserOpen = true },
                         onLog = { nav.navigate(Routes.FIELD_LOG) },
-                        onViewPhoto = { photoEntry = it },
+                        onViewPhoto = { pages -> photoPages = pages },
                         onEditEntry = { editEntry = it },
+                        // Which field-log row the peek's "Details" opens.
+                        //
+                        // The log groups by (plot, tree number) because tree
+                        // numbering restarts on each plot; the map groups by
+                        // tree number ALONE, so one pin can in principle span
+                        // two plots' trees. The row picked is the one the
+                        // pin's REPRESENTATIVE reading belongs to — the same
+                        // reading "Edit this tree" edits — so the two peek
+                        // buttons can never be about different trees. The key
+                        // is built by `fieldLogRows`, and this reads it from
+                        // there rather than spelling the format a second time.
+                        onDetails = { pin ->
+                            val entry = pin.entries.first()
+                            inspectingRowId = entry.treeNumber
+                                ?.let { fieldLogTreeRowId(entry.plotID, it) }
+                                ?: fieldLogLooseRowId(entry.id)
+                        },
                         onMeasureAgain = { pin ->
                             val tree = pin.treeNumber
                             if (tree == null) {
@@ -584,8 +815,10 @@ fun MapHomeScreen(nav: NavController) {
                                         pin.coordinate.latitude, pin.coordinate.longitude,
                                     )
                                 }
-                                if (distM != null && distM > 30.0) {
-                                    farTreeConfirm = tree to distM.roundToInt()
+                                if (distM != null &&
+                                    distM > farTreeWarnDistanceM(settings.unitSystem)
+                                ) {
+                                    farTreeConfirm = tree to distM
                                 } else {
                                     chooserTreeOverride = tree
                                     chooserOpen = true
@@ -601,21 +834,37 @@ fun MapHomeScreen(nav: NavController) {
     // MARK: - Sheets + photo detail
 
     if (chooserOpen) {
+        // The species already recorded against the tree the peek card scoped
+        // to. Read once so the sheet and its provisional flag cannot disagree
+        // about where the value came from.
+        val scopedSpecies = chooserTreeOverride
+            ?.let { env.history.speciesCode(it, env.history.activePlotID.value) }
         MeasureChooserSheet(
             nextTree = env.history.suggestedNextTreeNumber,
             treeOverride = chooserTreeOverride,
+            // A tree the peek card scoped to already has its name; only a NEW
+            // tree gets the incremented suggestion.
+            suggestedName = chooserTreeOverride
+                ?.let { env.history.treeName(it, env.history.activePlotID.value) }
+                ?: env.history.suggestedNextTreeName,
+            suggestedSpecies = scopedSpecies ?: env.history.suggestedNextSpeciesCode,
+            suggestedSpeciesConfirmed = scopedSpecies != null,
             onDismiss = {
                 chooserOpen = false
                 chooserTreeOverride = null
             },
-            onChoose = { route, lockTree ->
+            onChoose = { route, lockTree, name, speciesCode ->
                 chooserOpen = false
                 // Full / DBH / Height lock the reading to the tree number
                 // the sheet header promised (iOS chooserRow actions) — the
-                // peek card's override tree when set, else the next free.
+                // peek card's override tree when set, else the next free —
+                // and to the name and species typed above them.
                 if (lockTree) {
-                    PendingTreeNumber.value =
-                        chooserTreeOverride ?: env.history.suggestedNextTreeNumber
+                    PendingTreeNumber.set(
+                        number = chooserTreeOverride ?: env.history.suggestedNextTreeNumber,
+                        name = name,
+                        speciesCode = speciesCode,
+                    )
                 }
                 chooserTreeOverride = null
                 nav.navigate(route)
@@ -625,12 +874,22 @@ fun MapHomeScreen(nav: NavController) {
     // Far-GPS confirmation — shown before the scoped chooser when the tree's
     // pin is > 30 m from the current fix (peek "Measure this tree" only).
     farTreeConfirm?.let { (tree, metres) ->
+        // The alert names the tree the way every other surface does — the
+        // cruiser's name when it has one, else "Tree #n".
+        val farTreeTitle = TreeLabel.title(
+            entries.firstOrNull { it.treeNumber == tree && it.treeName != null }?.treeName,
+            tree,
+        )
+        // The distance is what the cruiser is being asked to judge, so it is
+        // quoted in the unit they are working in — a pacing number, so through
+        // `navDistance` rather than the measurement formatter.
+        val farTreeRange = MeasurementFormatter.navDistance(metres, settings.unitSystem)
         AlertDialog(
             onDismissRequest = { farTreeConfirm = null },
-            title = { Text("Tree $tree is $metres m away") },
+            title = { Text("$farTreeTitle is $farTreeRange away") },
             text = {
                 Text(
-                    "Your current GPS position is about $metres m from this " +
+                    "Your current GPS position is about $farTreeRange from this " +
                         "tree's pin. Measure it anyway?",
                 )
             },
@@ -650,14 +909,29 @@ fun MapHomeScreen(nav: NavController) {
         MapSettingsSheet(
             camera = camera,
             onDismiss = { mapSettingsOpen = false },
+            // The boundary editor needs the whole screen — a map you drag
+            // corners on cannot live inside a bottom sheet. Close the sheet
+            // and raise it over the home instead.
+            onDrawArea = {
+                mapSettingsOpen = false
+                drawingBoundary = true
+            },
         )
     }
-    photoEntry?.let { entry ->
+    // DRAW THE BOUNDARY — full-screen over the home, opening on the ground
+    // the cruiser was already looking at. Map settings is its one door; the
+    // map's press-and-hold draws a cruise AREA in place instead.
+    if (drawingBoundary) {
+        BoundaryDrawScreen(
+            initialCenter = camera.center ?: mapCenter,
+            initialZoom = camera.zoom,
+            onDismiss = { drawingBoundary = false },
+        )
+    }
+    if (photoPages.isNotEmpty()) {
         PhotoViewerDialog(
-            entry = entry,
-            unitSystem = settings.unitSystem,
-            activity = activity,
-            onDismiss = { photoEntry = null },
+            pages = photoPages,
+            onDismiss = { photoPages = emptyList() },
         )
     }
     // Quick-edit sheet (map-peek spec item 2): value / species / note +
@@ -681,6 +955,52 @@ fun MapHomeScreen(nav: NavController) {
         )
     }
 
+    // Quick-peek "Details" — the SAME sheet the field log opens, not a second
+    // copy of it. "Measure again" from inside it lands on the map's own
+    // route: close the sheet, hand the scan the tree it must land on (the
+    // slot the peek's own tree lock uses) and go.
+    inspectingRowId?.let { id ->
+        val live = fieldLogRows(entries).firstOrNull { it.id == id }
+        ModalBottomSheet(
+            onDismissRequest = { inspectingRowId = null },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            containerColor = colors.canvas,
+        ) {
+            if (live == null) {
+                // Every reading behind this pin went away while the sheet was
+                // open. An empty sheet would read as "this tree has nothing
+                // on it" — say what happened instead. Same sentence the field
+                // log uses for the same state.
+                Text(
+                    "Every reading on this row has been deleted.",
+                    style = Forestix.type.caption, color = colors.textTertiary,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(ForestixSpace.lg),
+                )
+            } else {
+                FieldLogDetailSheet(
+                    row = live,
+                    unitSystem = settings.unitSystem,
+                    developerMode = settings.developerMode,
+                    onSave = { env.history.update(it) },
+                    onAdd = { env.history.append(it) },
+                    onRowMoved = { inspectingRowId = it },
+                    onRemeasure = { kind, tree, name, species, truth, truthSource, truthUnit ->
+                        inspectingRowId = null
+                        PendingTreeNumber.set(
+                            number = tree, name = name, speciesCode = species,
+                            replaceExisting = true, truth = truth,
+                            truthSource = truthSource, truthUnit = truthUnit,
+                            plotID = live.entries.firstOrNull()?.plotID)
+                        nav.navigate(
+                            if (kind == MeasureKind.DBH) Routes.DBH else Routes.HEIGHT)
+                    },
+                )
+            }
+        }
+    }
+
     // First-launch UX: the map home hosts the region picker (it is the
     // screen after the splash). Auto-present once; picking, skipping or
     // swipe-dismissing all stamp regionPickerSeen, and it stays reachable
@@ -698,6 +1018,26 @@ fun MapHomeScreen(nav: NavController) {
         }
     }
 
+    // MARK: - Press-and-hold planning menu — BOTH modes
+
+    // The planning menu is no longer a dialog at all — it is a PIN dropped
+    // where the cruiser pressed, with the choices in a callout over it
+    // (MapPlanCallout, inside the map's Box above). A dialog in the middle
+    // of the screen asked "plan a plot here" while pointing at nothing;
+    // anchored to the press, the question and the ground it is about are one
+    // object. The state and the "Pick on the map" flow are unchanged.
+    MapAreaDeleteDialog(areaState) { stratum ->
+        scope.launch {
+            deleteArea(areaState, env, stratum)
+            cruise.refresh++
+        }
+    }
+    MapAreaRefusalDialog(areaState)
+    // Beside the area's own refusal, and outside the `isCruise` gate below
+    // for the same reason: "Cruise this area" is tapped from either mode, so
+    // the reason it could not open has to render in either mode.
+    CruiseSetupRefusalDialog(cruise)
+
     // MARK: - Cruise-mode sheets (project ⑤ / cruise setup ⑥ / record ⑧)
 
     if (isCruise) {
@@ -706,6 +1046,13 @@ fun MapHomeScreen(nav: NavController) {
             nav = nav,
             camera = camera,
             fallbackCentre = mapCenter,
+            setupArea = areaState.cruiseSetupArea,
+            // Generation just changed how many plots sit inside this area,
+            // and that count is what the area's own callout reports.
+            onSetupClosed = {
+                areaState.cruiseSetupArea = null
+                areaState.refresh++
+            },
         )
     }
 
@@ -784,13 +1131,13 @@ private fun MeasureBottomContent(
     selectedPin: TreePin?,
     lastPin: TreePin?,
     settings: SettingsSnapshot,
-    activity: Activity?,
     plotNameFor: (TreePin) -> String?,
     onToggleMode: () -> Unit,
     onMeasure: () -> Unit,
     onLog: () -> Unit,
-    onViewPhoto: (QuickMeasureEntry) -> Unit,
+    onViewPhoto: (List<PhotoPage>) -> Unit,
     onEditEntry: (QuickMeasureEntry) -> Unit,
+    onDetails: (TreePin) -> Unit,
     onMeasureAgain: (TreePin) -> Unit,
 ) {
     AnimatedContent(
@@ -816,13 +1163,13 @@ private fun MeasureBottomContent(
             PeekCard(
                 pin = pin,
                 unitSystem = settings.unitSystem,
-                activity = activity,
                 plotName = plotNameFor(pin),
                 modifier = Modifier
                     .padding(horizontal = 12.dp)
                     .padding(bottom = 20.dp),
                 onViewPhoto = onViewPhoto,
                 onEditEntry = onEditEntry,
+                onDetails = { onDetails(pin) },
                 onMeasureAgain = { onMeasureAgain(pin) },
             )
         }
@@ -873,7 +1220,13 @@ private fun buildTreePins(entries: List<QuickMeasureEntry>): List<TreePin> {
                 id = "tree-$number",
                 coordinate = CoordinateConversions.LatLon(
                     latitude = anchor.latitude!!, longitude = anchor.longitude!!),
-                title = "T$number",
+                // The pin says what the cruiser called this tree, shortened
+                // to what a 30 dp drop holds — one rule, shared with the
+                // cruise pins and both mini-maps.
+                title = TreeLabel.pinTitle(
+                    name = all.firstNotNullOfOrNull { it.treeName },
+                    number = number,
+                ),
                 warn = all.any { isWarnTier(it.confidenceRaw) },
                 badges = badgeKinds.filter { k -> all.any { it.kind == k } }.map(::kindLetter),
                 entries = all,
@@ -906,13 +1259,14 @@ internal fun RoundChromeButton(
     icon: ImageVector,
     contentDescription: String,
     enabled: Boolean = true,
+    dimmed: Boolean = !enabled,
     onClick: () -> Unit,
 ) {
     val colors = Forestix.colors
     Box(
         Modifier
             .size(44.dp)
-            .alpha(if (enabled) 1f else 0.45f)
+            .alpha(if (dimmed) 0.45f else 1f)
             .pressableNoRipple(enabled = enabled, onClick = onClick)
             .clip(CircleShape)
             .background(colors.surfaceRaised)
@@ -1109,11 +1463,11 @@ internal fun ClusterLabel(label: String, gap: Dp) {
 private fun PeekCard(
     pin: TreePin,
     unitSystem: UnitSystem,
-    activity: Activity?,
     plotName: String?,
     modifier: Modifier = Modifier,
-    onViewPhoto: (QuickMeasureEntry) -> Unit,
+    onViewPhoto: (List<PhotoPage>) -> Unit,
     onEditEntry: (QuickMeasureEntry) -> Unit,
+    onDetails: () -> Unit,
     onMeasureAgain: () -> Unit,
 ) {
     val colors = Forestix.colors
@@ -1121,14 +1475,19 @@ private fun PeekCard(
     val shape = RoundedCornerShape(14.dp)
     val newest = pin.entries.first()
     val species = pin.entries.firstNotNullOfOrNull { it.speciesCode }
-    val title = (pin.treeNumber?.let { "Tree $it" } ?: rowLabel(newest)) +
+    // The cruiser's name if this tree has one — same rule as the field log's
+    // TREE column, so the two surfaces call the tree one thing.
+    val title = (pin.entries.firstNotNullOfOrNull { it.treeName }
+        ?: pin.treeNumber?.let { "Tree $it" } ?: rowLabel(newest)) +
         (species?.takeIf { it.isNotBlank() }
             ?.let { " · ${RegionalSpecies.nameForCode(it)}" } ?: "")
     // Date, plus the plot name when the reading isn't on the default plot
     // (iOS peekSubtitle: "7 Jul · 09:41 · Plot 2").
     val subtitle = listOfNotNull(dateLine(newest.createdAt), plotName).joinToString(" · ")
-    val photoOwner = pin.entries.firstOrNull { it.photoPath != null }
-    val photoCount = pin.entries.count { it.photoPath != null }
+    // EVERY photo on this tree, in the order the readings were taken — a
+    // Full measurement leaves a diameter frame and a height frame, and the
+    // thumbnail used to be a dead end at whichever one was newest.
+    val photoPages = measurePhotoPages(pin.entries, unitSystem)
 
     Column(
         modifier
@@ -1170,8 +1529,9 @@ private fun PeekCard(
             // Tapping the thumbnail opens the existing full-screen viewer
             // (map-peek spec item 2 — the retired "View photo" button's job).
             PhotoThumb(
-                photoOwner?.photoPath, photoCount, activity,
-                onClick = photoOwner?.let { owner -> { onViewPhoto(owner) } },
+                photoPages.firstOrNull()?.photoPath, photoPages.size,
+                onClick = photoPages.takeIf { it.isNotEmpty() }
+                    ?.let { pages -> { onViewPhoto(pages) } },
             )
             Column(Modifier.weight(1f)) {
                 val rows = latestPerKind(pin.entries)
@@ -1182,6 +1542,20 @@ private fun PeekCard(
             }
         }
         Spacer(Modifier.size(12.dp))
+        // DETAILS — the whole record behind this pin, on the SAME surface the
+        // field log opens (`FieldLogDetailSheet`): species, stem position,
+        // damage, note, ±sigma, where and when it was recorded, every photo.
+        // The word is "Details" because that is what the map's plot peek
+        // already calls its equivalent step; a second word for one idea is
+        // how a map ends up with two.
+        //
+        // Full width above the pair rather than a third button in the row:
+        // three 44 dp controls across a phone leave no label room.
+        PeekActionButton(
+            "Details", primary = false, modifier = Modifier.fillMaxWidth(),
+            onClick = onDetails,
+        )
+        Spacer(Modifier.size(ForestixSpace.xs))
         Row(horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs)) {
             // "Edit this tree" replaces the redundant "View photo" (the thumb
             // now opens the viewer): a compact edit sheet on the newest
@@ -1234,21 +1608,53 @@ private fun MeasureRow(entry: QuickMeasureEntry, unitSystem: UnitSystem) {
                 color = colors.textPrimary,
             )
         }
-        TierChipSoft(entry.confidenceRaw)
+        TierChipSoft(entry.confidenceRaw, explains = tierExplainerKind(entry.kind))
     }
+}
+
+/// Which explainer a peek row's chip opens. Null where nothing in the
+/// confidence framework graded the reading.
+internal fun tierExplainerKind(kind: MeasureKind): TierExplainerKind? = when (kind) {
+    MeasureKind.DBH -> TierExplainerKind.DIAMETER
+    MeasureKind.HEIGHT -> TierExplainerKind.HEIGHT
+    else -> null
 }
 
 /// Mock `.chip` — soft tier-coloured background, dot + uppercase label.
 /// Internal: the cruise tree/plot peeks reuse it (v3).
+///
+/// Pass `explains` and the chip becomes tappable, opening the confidence
+/// explainer for that measurement. "Good" / "Fair" with no stated criteria
+/// reads as a mood; the sheet is what makes it a criterion. It is left null
+/// where the grade is not one an estimator computed (crown, distance, plot),
+/// because a sheet describing diameter checks over a plot radius would be a
+/// worse answer than no sheet.
+///
+/// The sheet's open state lives HERE rather than in each host screen: it is
+/// a ModalBottomSheet, it needs nothing from the host, and one state per
+/// chip is what keeps the two peeks from having to agree about it.
 @Composable
-internal fun TierChipSoft(rawTier: String) {
+internal fun TierChipSoft(rawTier: String, explains: TierExplainerKind? = null) {
     val d = confidenceDescriptor(rawTier)
+    var explaining by remember { mutableStateOf(false) }
+    if (explaining) {
+        TierExplainerSheet(explains ?: TierExplainerKind.DIAMETER) { explaining = false }
+    }
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         modifier = Modifier
             .clip(ForestixRadius.chip)
             .background(d.color.copy(alpha = 0.12f))
+            .then(
+                if (explains != null) {
+                    Modifier
+                        .clickableNoRipple { explaining = true }
+                        .semantics { contentDescription = "What this grade means" }
+                } else {
+                    Modifier
+                }
+            )
             .padding(horizontal = 7.dp, vertical = 2.dp),
     ) {
         Box(Modifier.size(6.dp).clip(CircleShape).background(d.color))
@@ -1268,15 +1674,15 @@ internal fun TierChipSoft(rawTier: String) {
 internal fun PhotoThumb(
     photoName: String?,
     photoCount: Int,
-    activity: Activity?,
     onClick: (() -> Unit)? = null,
 ) {
     val colors = Forestix.colors
-    val thumb by produceState<Bitmap?>(initialValue = null, photoName, activity) {
-        value = withContext(Dispatchers.IO) {
-            if (photoName == null || activity == null) null
-            else decodeSampled(MeasurePhotoStore.file(activity, photoName), targetPx = 256)
-        }
+    // LocalContext, not an Activity threaded down from the screen root. The
+    // store resolves against any Context, and this composable is reused
+    // inside sheets and dialogs where LocalContext is a ContextThemeWrapper.
+    val context = LocalContext.current
+    val thumb by produceState<Bitmap?>(initialValue = null, photoName, context) {
+        value = photoName?.let { MeasurePhotoStore.loadBitmap(context, it, targetPx = 256) }
     }
     Box(
         Modifier
@@ -1366,19 +1772,50 @@ private fun MeasureChooserSheet(
     /// Non-null when the peek card scoped the sheet to an existing tree —
     /// the header drops "(NEXT)" and the tree-bound rows lock to it.
     treeOverride: Int? = null,
+    /// Name the tree-name field opens on: the tree's existing name when the
+    /// peek card scoped this sheet, else the auto-incremented successor of the
+    /// last name in the log. Null / blank starts the field empty.
+    suggestedName: String? = null,
+    /// Species the picker opens on — the scoped tree's own recorded species,
+    /// else the last species seen anywhere in the log. Null opens it unset.
+    suggestedSpecies: String? = null,
+    /// True when [suggestedSpecies] came off the scoped tree's own readings, so
+    /// somebody already recorded it against this stem. False when it is the
+    /// log-wide carry-over, which is a guess about the tree in front of the
+    /// cruiser and is drawn provisional until they pick.
+    suggestedSpeciesConfirmed: Boolean = false,
     onDismiss: () -> Unit,
-    /// (route, lockTree) — lockTree is true for the tree-bound rows
-    /// (Full / DBH / Height), which pin the reading to `treeOverride`
-    /// when set, else `nextTree`.
-    onChoose: (String, Boolean) -> Unit,
+    /// (route, lockTree, name, speciesCode) — lockTree is true for the
+    /// tree-bound rows (Full / DBH / Height), which pin the reading to
+    /// `treeOverride` when set, else `nextTree`. Name and species ride along
+    /// only for those rows; a distance or a plot belongs to no tree.
+    onChoose: (String, Boolean, String?, String?) -> Unit,
 ) {
     val colors = Forestix.colors
     val type = Forestix.type
+    // Named BEFORE the scan, not after: the cruiser is standing at the tree
+    // when they open this sheet, and typing its tag then is one action rather
+    // than a second trip through the details sheet once the number is already
+    // recorded.
+    var treeName by remember(suggestedName) { mutableStateOf(suggestedName.orEmpty()) }
+    // Species used to start unset, on the grounds that it must not be inherited
+    // by accident — but in one stand it is the same species tree after tree, so
+    // that made it the most retyped field in the app. It is inherited now and
+    // marked provisional instead, which shows the inheritance rather than
+    // hiding it. `speciesConfirmed` drives that styling and nothing else: the
+    // code is stored either way, because the sheet showed it and this app does
+    // not silently drop what it showed. See the iOS sibling's
+    // `suggestedSpecies` for the full argument.
+    var speciesCode by remember(suggestedSpecies) { mutableStateOf(suggestedSpecies) }
+    var speciesConfirmed by remember(suggestedSpecies) {
+        mutableStateOf(suggestedSpeciesConfirmed)
+    }
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = colors.surface) {
         Column(
             Modifier
                 .padding(horizontal = ForestixSpace.md)
-                .padding(bottom = ForestixSpace.xl),
+                .padding(bottom = ForestixSpace.xl)
+                .imePadding(),
         ) {
             Text(
                 treeOverride?.let { "MEASURE · TREE $it" }
@@ -1388,6 +1825,39 @@ private fun MeasureChooserSheet(
                 color = colors.textTertiary,
                 modifier = Modifier.padding(bottom = ForestixSpace.xs),
             )
+            Row(
+                Modifier.fillMaxWidth().padding(bottom = ForestixSpace.sm),
+                horizontalArrangement = Arrangement.spacedBy(ForestixSpace.sm),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                // The placeholder is an EXAMPLE, not the words "Tree name": the
+                // shape of the first name decides whether the app can name the
+                // rest of the stand, because [TreeNameSequence] only steps on a
+                // TRAILING NUMBER. "Big oak" comes back unchanged and the
+                // cruiser retypes every tree. Same string on both platforms.
+                OutlinedTextField(
+                    value = treeName,
+                    onValueChange = { treeName = it },
+                    placeholder = { Text("e.g. Tree1") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+                // The same control the reading-details sheet uses — one
+                // species list, one typed-code escape, no second copy to
+                // drift.
+                SpeciesPickerField(
+                    speciesCode = speciesCode,
+                    onSpeciesCode = {
+                        speciesCode = it
+                        // Any pick makes it definite, including re-picking the
+                        // code already showing — that IS the confirmation.
+                        speciesConfirmed = true
+                    },
+                    unspecifiedLabel = "Species",
+                    bordered = true,
+                    provisional = !speciesConfirmed,
+                )
+            }
             // Field fix: the chained DBH → Height capture is the common
             // whole-tree workflow, so it leads the sheet (emphasised icon
             // tile). "dbh?chain=true" tells DBH Accept to jump straight to
@@ -1397,22 +1867,22 @@ private fun MeasureChooserSheet(
                 "Full measurement",
                 "DBH → Height, one tree",
                 emphasized = true,
-            ) { onChoose("${Routes.DBH}?chain=true", true) }
+            ) { onChoose("${Routes.DBH}?chain=true", true, treeName, speciesCode) }
             HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
             ChoiceRow(Icons.Filled.Straighten, "Diameter (DBH)", "Scan the trunk with the camera") {
-                onChoose(Routes.DBH, true)
+                onChoose(Routes.DBH, true, treeName, speciesCode)
             }
             HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
             ChoiceRow(Icons.Filled.Height, "Height", "Walk back, aim at the base and the top") {
-                onChoose(Routes.HEIGHT, true)
+                onChoose(Routes.HEIGHT, true, treeName, speciesCode)
             }
             HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
             ChoiceRow(Icons.Filled.SwapHoriz, "Distance", "Point at a target, or tap two points") {
-                onChoose(Routes.DISTANCE, false)
+                onChoose(Routes.DISTANCE, false, null, null)
             }
             HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
             ChoiceRow(Icons.Filled.CenterFocusWeak, "Sampling plot", "Centre stake · boundary ring") {
-                onChoose(Routes.SAMPLING, false)
+                onChoose(Routes.SAMPLING, false, null, null)
             }
         }
     }
@@ -1474,55 +1944,154 @@ private fun ChoiceRow(
 
 // MARK: - Photo detail (mock ⑤) ------------------------------------------------
 
-/// Full-screen accept-snapshot viewer. Deliberately dark in both app
-/// appearances, matching the mock's photo screens (iOS
-/// MeasurePhotoDetailView).
+/// One page of the photo viewer: the frame, and the caption saying what it
+/// belongs to. A photo with no caption is half a record — with two frames on
+/// one tree the cruiser cannot otherwise tell the diameter frame from the
+/// height frame.
+internal data class PhotoPage(
+    /// Filename inside the MeasurePhotoStore directory.
+    val photoPath: String,
+    val headline: String,
+    val detail: String?,
+    /// TREE / METHOD / GPS cells. Empty draws no meta row at all.
+    val meta: List<Pair<String, String>>,
+    val caption: PhotoCaption,
+)
+
+/// How a page's caption reads.
+internal enum class PhotoCaption {
+    /// A quick-measure reading's own frame: the kind and the value in
+    /// figures ("DBH 32.4 cm"), then σ and the confidence word.
+    READING,
+
+    /// A cruise tree's photo. The Tree row keeps ONE photo path and does not
+    /// record which leg of the measurement it came off, so the page is
+    /// labelled with the tree rather than with a reading it cannot honestly
+    /// claim.
+    TREE,
+}
+
+/// Every photo attached to a group of readings, IN THE ORDER THEY WERE
+/// TAKEN. The history hands entries back newest-first, which would have
+/// paged a Full measurement height-then-diameter — backwards from the way
+/// the cruiser shot them.
 @Composable
-private fun PhotoViewerDialog(
-    entry: QuickMeasureEntry,
-    unitSystem: UnitSystem,
-    activity: Activity?,
-    onDismiss: () -> Unit,
-) {
-    val type = Forestix.type
-    val tier = confidenceDescriptor(entry.confidenceRaw)
-    val ink = Color(0xFFF2F5F3)
-    val inkDim = Color(0xFFA5AEA8)
-    // Spinner while the JPEG decodes; "Photo unavailable" only once the
-    // decode has actually failed (iOS ProgressView behaviour).
-    var loadFailed by remember(entry.photoPath) { mutableStateOf(false) }
-    val bitmap by produceState<Bitmap?>(initialValue = null, entry.photoPath, activity) {
-        val decoded = withContext(Dispatchers.IO) {
-            val name = entry.photoPath
-            if (name == null || activity == null) null
-            else decodeSampled(MeasurePhotoStore.file(activity, name), targetPx = 1600)
-        }
-        value = decoded
-        if (decoded == null) loadFailed = true
+internal fun measurePhotoPages(
+    entries: List<QuickMeasureEntry>,
+    system: UnitSystem,
+): List<PhotoPage> = entries
+    .sortedBy { it.createdAt }
+    .mapNotNull { entry ->
+        // A reading that was never photographed has no page; an empty path
+        // would open a black screen.
+        entry.photoPath?.let { path -> readingPhotoPage(entry, path, system) }
     }
+
+@Composable
+private fun readingPhotoPage(
+    entry: QuickMeasureEntry,
+    photoPath: String,
+    system: UnitSystem,
+): PhotoPage {
+    val tier = confidenceDescriptor(entry.confidenceRaw)
+    val tree = listOfNotNull(
+        // The caption strip has room for the whole name, so it prints the
+        // full title rather than the pin's shortened form.
+        entry.treeNumber?.let { TreeLabel.title(entry.treeName, it) },
+        entry.speciesCode?.takeIf { it.isNotEmpty() }
+            ?.let { RegionalSpecies.nameForCode(it) },
+    ).joinToString(" · ").ifEmpty { "—" }
+    // The entry stores the fix itself (not its accuracy), so the GPS cell
+    // shows the coordinates the reading was anchored to.
+    val gps = if (entry.latitude != null && entry.longitude != null) {
+        String.format(Locale.US, "%.5f, %.5f", entry.latitude, entry.longitude)
+    } else {
+        "—"
+    }
+    return PhotoPage(
+        photoPath = photoPath,
+        headline = bigValueText(entry, system),
+        detail = listOfNotNull(sigmaText(entry, system), tier.label).joinToString(" · "),
+        meta = listOf("TREE" to tree, "METHOD" to methodLabel(entry.method), "GPS" to gps),
+        caption = PhotoCaption.READING,
+    )
+}
+
+/// A cruise tree's single Accept snapshot — see [PhotoCaption.TREE] for why
+/// it is not labelled with a diameter or a height.
+internal fun cruiseTreePhotoPages(
+    photoPath: String?,
+    title: String,
+    subtitle: String,
+): List<PhotoPage> = if (photoPath == null) {
+    emptyList()
+} else {
+    listOf(PhotoPage(photoPath, title, subtitle, emptyList(), PhotoCaption.TREE))
+}
+
+/// THE full-screen photo viewer — one dialog, every surface.
+///
+/// The map peek, the field-log detail sheet and the cruise tree peek all
+/// open THIS. They had a viewer each before, and none of them could reach
+/// past the first frame: a Full measurement records a diameter AND a height,
+/// each with its own Accept snapshot, so the second photo sat on the tree
+/// with no way in. One viewer is what stops the gesture, the caption and the
+/// chrome drifting apart between the three again.
+///
+/// PAGING STAYS INVISIBLE UNTIL THERE IS SOMEWHERE TO PAGE TO. A tree with
+/// one photo renders exactly as it did before — no counter, nothing new.
+///
+/// Deliberately dark in both app appearances, matching the mock's photo
+/// screens (iOS MeasurePhotoDetailView).
+@Composable
+internal fun PhotoViewerDialog(
+    pages: List<PhotoPage>,
+    onDismiss: () -> Unit,
+    startIndex: Int = 0,
+) {
+    if (pages.isEmpty()) return
+    val type = Forestix.type
+    val ink = Color(0xFFF2F5F3)
+    val pagerState = rememberPagerState(
+        initialPage = startIndex.coerceIn(0, pages.lastIndex),
+        pageCount = { pages.size },
+    )
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         Box(Modifier.fillMaxSize().background(Color(0xFF0A0D0B))) {
-            val image = bitmap
-            when {
-                image != null -> Image(
-                    image.asImageBitmap(),
-                    contentDescription = "Measurement photo",
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize(),
-                )
-                !loadFailed -> CircularProgressIndicator(
-                    color = ink,
-                    modifier = Modifier.align(Alignment.Center),
-                )
-                else -> Text(
-                    "Photo unavailable",
-                    style = type.body,
-                    color = Color(0xFF79837D),
-                    modifier = Modifier.align(Alignment.Center),
-                )
+            HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { index ->
+                PhotoViewerPage(pages[index])
+            }
+            // "1 / 2" — says there IS a second photo and which one is on
+            // screen. Drawn only from two photos up; one photo gets no
+            // counter, and the screen is what it always was.
+            if (pages.size > 1) {
+                val position = "${pagerState.currentPage + 1} / ${pages.size}"
+                Box(
+                    Modifier
+                        .align(Alignment.TopStart)
+                        .statusBarsPadding()
+                        .padding(start = 14.dp)
+                        .height(44.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        position,
+                        style = type.dataSmall.copy(
+                            fontSize = 13.sp, fontWeight = FontWeight.SemiBold),
+                        color = ink,
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .background(Color(0xB306090A))
+                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                            .semantics {
+                                contentDescription =
+                                    "Photo ${pagerState.currentPage + 1} of ${pages.size}"
+                            },
+                    )
+                }
             }
             // Close — 44 dp dark-glass circle flush to the status-bar
             // inset, trailing 14 (iOS xmark button).
@@ -1544,58 +2113,104 @@ private fun PhotoViewerDialog(
                     modifier = Modifier.size(16.dp),
                 )
             }
-            // Bottom meta strip (mock `.photofull .meta`) over a vertical
-            // fade into near-black.
-            Column(
-                Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .background(
-                        Brush.verticalGradient(
-                            colors = listOf(Color.Transparent, Color(0xEB06090A)),
-                        ),
-                    )
-                    .navigationBarsPadding()
-                    .padding(start = 20.dp, end = 20.dp, top = 40.dp, bottom = 30.dp),
-            ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        }
+    }
+}
+
+/// One page: the photo itself plus its caption strip. Each page decodes its
+/// own file, so paging never shows the previous photo under the next one's
+/// caption.
+@Composable
+private fun PhotoViewerPage(page: PhotoPage) {
+    val type = Forestix.type
+    val ink = Color(0xFFF2F5F3)
+    val inkDim = Color(0xFFA5AEA8)
+    // Spinner while the JPEG decodes; "Photo unavailable" only once the
+    // decode has actually failed (iOS ProgressView behaviour).
+    var loadFailed by remember(page.photoPath) { mutableStateOf(false) }
+    // This page is composed inside a Dialog, so LocalContext here is the
+    // dialog's ContextThemeWrapper — fine, because the store resolves
+    // against a Context and no longer asks anyone for an Activity.
+    val context = LocalContext.current
+    val bitmap by produceState<Bitmap?>(initialValue = null, page.photoPath, context) {
+        val decoded = MeasurePhotoStore.loadBitmap(context, page.photoPath, targetPx = 1600)
+        value = decoded
+        if (decoded == null) loadFailed = true
+    }
+    Box(Modifier.fillMaxSize()) {
+        val image = bitmap
+        when {
+            image != null -> Image(
+                image.asImageBitmap(),
+                contentDescription = "Measurement photo",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize(),
+            )
+            !loadFailed -> CircularProgressIndicator(
+                color = ink,
+                modifier = Modifier.align(Alignment.Center),
+            )
+            else -> Text(
+                "Photo unavailable",
+                style = type.body,
+                color = Color(0xFF79837D),
+                modifier = Modifier.align(Alignment.Center),
+            )
+        }
+        // Bottom meta strip (mock `.photofull .meta`) over a vertical fade
+        // into near-black.
+        Column(
+            Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(Color.Transparent, Color(0xEB06090A)),
+                    ),
+                )
+                .navigationBarsPadding()
+                .padding(start = 20.dp, end = 20.dp, top = 40.dp, bottom = 30.dp),
+        ) {
+            // A reading leads with its number, so the value and its σ sit on
+            // one baseline in figures. A cruise tree leads with the tree's
+            // name, which is prose and stacks above its date line.
+            when (page.caption) {
+                PhotoCaption.READING -> Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
-                        bigValueText(entry, unitSystem),
+                        page.headline,
                         style = type.dataLarge.copy(
                             fontSize = 30.sp, fontWeight = FontWeight.ExtraBold),
                         color = ink,
                         modifier = Modifier.alignByBaseline(),
                     )
                     Text(
-                        listOfNotNull(sigmaText(entry, unitSystem), tier.label)
-                            .joinToString(" · "),
+                        page.detail ?: "",
                         style = type.dataSmall,
                         color = inkDim,
                         modifier = Modifier.alignByBaseline(),
                     )
                 }
+                PhotoCaption.TREE -> {
+                    Text(
+                        page.headline,
+                        style = type.bodyBold.copy(
+                            fontSize = 17.sp, fontWeight = FontWeight.ExtraBold),
+                        color = ink,
+                    )
+                    Spacer(Modifier.size(4.dp))
+                    Text(
+                        page.detail ?: "",
+                        style = type.dataSmall.copy(fontSize = 12.sp),
+                        color = inkDim,
+                    )
+                }
+            }
+            if (page.meta.isNotEmpty()) {
                 Row(
                     Modifier.padding(top = 10.dp),
                     horizontalArrangement = Arrangement.spacedBy(18.dp),
                 ) {
-                    MetaCell(
-                        "TREE",
-                        listOfNotNull(
-                            entry.treeNumber?.let { "T$it" },
-                            entry.speciesCode?.takeIf { it.isNotEmpty() }
-                                ?.let { RegionalSpecies.nameForCode(it) },
-                        ).joinToString(" · ").ifEmpty { "—" },
-                    )
-                    MetaCell("METHOD", methodLabel(entry.method))
-                    MetaCell(
-                        "GPS",
-                        if (entry.latitude != null && entry.longitude != null) {
-                            String.format(
-                                Locale.US, "%.5f, %.5f", entry.latitude, entry.longitude)
-                        } else {
-                            "—"
-                        },
-                    )
+                    page.meta.forEach { (label, value) -> MetaCell(label, value) }
                 }
             }
         }
@@ -1658,10 +2273,17 @@ private fun MetaCell(label: String, value: String) {
 // MARK: - Quick-entry edit sheet (map-peek spec item 2) ------------------------
 
 /// Compact editor raised from the quick peek's "Edit this tree": the measured
-/// value (native cm/m), species code, and note for ONE reading, plus a
-/// destructive Delete behind an AlertDialog confirm (removes the row + its
-/// photo via the history store). Measurement math is untouched — only the
-/// stored value and labels change.
+/// value, species code, and note for ONE reading, plus a destructive Delete
+/// behind an AlertDialog confirm (removes the row + its photo via the history
+/// store). Measurement math is untouched — only the stored value and labels
+/// change.
+///
+/// THE VALUE BOX IS IN THE CRUISER'S UNITS, both directions, through
+/// [TruthInput.Unit] — the same route TreeDetailScreen takes. It used to show
+/// the stored metric number beside a hardcoded "cm"/"m" chip while the peek
+/// two taps away read "13.6 in": correcting that tree to "14" meaning inches
+/// wrote a 14 cm stem. Storage is unchanged — a diameter is still cm and
+/// everything else still metres.
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun QuickEntryEditSheet(
@@ -1672,7 +2294,34 @@ private fun QuickEntryEditSheet(
 ) {
     val colors = Forestix.colors
     val type = Forestix.type
-    var valueField by remember(entry.id) { mutableStateOf(editFormatNumber(entry.value)) }
+    val settings by LocalAppEnvironment.current.settings.state
+        .collectAsStateWithLifecycle()
+    // The unit this reading is TYPED in — the cruiser's own, from the helper
+    // every other typed measurement in the app goes through. A diameter is
+    // cm/in; a height, a crown span, a distance and a plot radius are all
+    // lengths in m/ft.
+    val imperial = settings.unitSystem == UnitSystem.IMPERIAL
+    val valueUnit = TruthInput.defaultUnit(
+        if (entry.kind == MeasureKind.DBH) TruthInput.Quantity.DIAMETER
+        else TruthInput.Quantity.DISTANCE,
+        imperial = imperial,
+    )
+    // The text the value field opens with: the stored reading in the cruiser's
+    // unit at the SAME precision the row above it prints — one decimal for a
+    // diameter or a height, two for a distance — so the peek and its editor
+    // never show one reading as two numbers. iOS builds the identical string.
+    // `save` compares the field against this STRING, which is what tells an
+    // untouched form from a retyped one.
+    val valuePrefill = MeasurementFormatter.entryText(
+        TruthInput.fromBase(entry.value, valueUnit),
+        if (entry.kind == MeasureKind.DISTANCE) 2 else 1,
+    )
+    var valueField by remember(entry.id, valueUnit) { mutableStateOf(valuePrefill) }
+    // False when the cruiser has typed something that is not a usable reading.
+    // Save is held off and the field says why, rather than the sheet quietly
+    // keeping the old number and closing.
+    val valueEntryValid =
+        valueField == valuePrefill || TruthInput.parsePositive(valueField) != null
     var species by remember(entry.id) { mutableStateOf(entry.speciesCode ?: "") }
     var note by remember(entry.id) { mutableStateOf(entry.note ?: "") }
     var confirmDelete by remember(entry.id) { mutableStateOf(false) }
@@ -1685,14 +2334,19 @@ private fun QuickEntryEditSheet(
             verticalArrangement = Arrangement.spacedBy(ForestixSpace.sm),
         ) {
             Text(
-                entry.treeNumber?.let { "EDIT · TREE $it" }
+                // A named stem is headed by its name, not by the number the
+                // cruiser stopped using the moment they named it. The name
+                // is NOT uppercased — it is the cruiser's own word, and
+                // "STARKER32" is not what they typed. Unnamed rows keep the
+                // header they have always had.
+                entry.treeName?.takeIf { it.isNotEmpty() }?.let { "EDIT · $it" }
+                    ?: entry.treeNumber?.let { "EDIT · TREE $it" }
                     ?: "EDIT · ${rowLabel(entry).uppercase(Locale.US)}",
                 style = type.sectionHead.copy(
                     fontWeight = FontWeight.ExtraBold, letterSpacing = 1.0.sp),
                 color = colors.textTertiary,
             )
-            // Measured value — edited in native units (cm for DBH, m else),
-            // matching storage; the display unit system doesn't apply here.
+            // Measured value — in the cruiser's unit, same as the peek row.
             Row(verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
                     value = valueField,
@@ -1703,7 +2357,25 @@ private fun QuickEntryEditSheet(
                     modifier = Modifier.weight(1f),
                 )
                 Spacer(Modifier.width(8.dp))
-                Text(entry.valueUnit, style = type.body, color = colors.textSecondary)
+                // `entry.valueUnit` is the STORAGE unit and always metric; the
+                // chip has to name the unit the box is actually in.
+                Text(valueUnit.raw, style = type.body, color = colors.textSecondary)
+            }
+            if (!valueEntryValid) {
+                // Diameter and height reuse the field log's sentences word for
+                // word; the other kinds get the same sentence about a reading.
+                Text(
+                    when (entry.kind) {
+                        MeasureKind.DBH ->
+                            "A typed diameter must be a number greater than zero."
+                        MeasureKind.HEIGHT ->
+                            "A typed height must be a number greater than zero."
+                        else ->
+                            "A typed reading must be a number greater than zero."
+                    },
+                    style = type.body.copy(fontSize = 13.sp),
+                    color = colors.confidenceBad,
+                )
             }
             OutlinedTextField(
                 value = species,
@@ -1733,10 +2405,36 @@ private fun QuickEntryEditSheet(
                 maxLines = 4,
                 modifier = Modifier.fillMaxWidth(),
             )
-            PeekActionButton("Save changes", primary = true, modifier = Modifier.fillMaxWidth()) {
+            PeekActionButton(
+                "Save changes",
+                primary = true,
+                enabled = valueEntryValid,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                // A value the cruiser retyped is a TYPED reading from here on:
+                // it keeps neither the sensor's sigma nor its edge provenance.
+                // Carrying those across left a hand-entered number wearing the
+                // precision of a measurement it has nothing to do with.
+                //
+                // "Retyped" is decided on the TEXT against the prefill, not on
+                // the numbers. The prefill is the reading ROUNDED for display,
+                // so a sensor value of 18.274 opened as "18.3" and every
+                // numeric test — the old 0.001 tolerance included, at any
+                // tolerance — called that a change: opening the sheet and
+                // pressing Save rounded the reading AND demoted it to a hand
+                // entry with no sigma. Comparing the strings is the only test
+                // an untouched form passes.
+                //
+                // The typed number is converted back to the app's metric base
+                // before it is stored — `parsePositiveBase`, not
+                // `parsePositive`. Storing the raw text is what wrote a 14 cm
+                // stem when the cruiser typed 14 inches.
+                val base =
+                    if (valueField == valuePrefill) entry
+                    else TruthInput.parsePositiveBase(valueField, valueUnit)
+                        ?.let { entry.typedValue(it) } ?: entry
                 onSave(
-                    entry.copy(
-                        value = valueField.toDoubleOrNull() ?: entry.value,
+                    base.copy(
                         speciesCode = species.trim().ifEmpty { null },
                         note = note.trim().ifEmpty { null },
                     ),
@@ -1778,80 +2476,19 @@ private fun QuickEntryEditSheet(
     }
 }
 
-private fun editFormatNumber(v: Double): String =
-    if (v == v.toLong().toDouble()) {
-        v.toLong().toString()
-    } else {
-        String.format(Locale.US, "%.2f", v).trimEnd('0').trimEnd('.')
-    }
-
-// MARK: - Full-screen image viewer --------------------------------------------
-
-/// Bare full-screen photo viewer (image + close, no measurement meta) — the
-/// cruise tree peek's tappable thumbnail opens this. Reuses the quick-measure
-/// photo store + decoder; deliberately dark in both app appearances.
-@Composable
-internal fun FullScreenImageViewer(
-    photoName: String,
-    activity: Activity?,
-    onDismiss: () -> Unit,
-) {
-    val type = Forestix.type
-    val ink = Color(0xFFF2F5F3)
-    var loadFailed by remember(photoName) { mutableStateOf(false) }
-    val bitmap by produceState<Bitmap?>(initialValue = null, photoName, activity) {
-        val decoded = withContext(Dispatchers.IO) {
-            if (activity == null) null
-            else decodeSampled(MeasurePhotoStore.file(activity, photoName), targetPx = 1600)
-        }
-        value = decoded
-        if (decoded == null) loadFailed = true
-    }
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false),
-    ) {
-        Box(Modifier.fillMaxSize().background(Color(0xFF0A0D0B))) {
-            val image = bitmap
-            when {
-                image != null -> Image(
-                    image.asImageBitmap(),
-                    contentDescription = "Measurement photo",
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize(),
-                )
-                !loadFailed -> CircularProgressIndicator(
-                    color = ink,
-                    modifier = Modifier.align(Alignment.Center),
-                )
-                else -> Text(
-                    "Photo unavailable",
-                    style = type.body,
-                    color = Color(0xFF79837D),
-                    modifier = Modifier.align(Alignment.Center),
-                )
-            }
-            Box(
-                Modifier
-                    .align(Alignment.TopEnd)
-                    .statusBarsPadding()
-                    .padding(end = 14.dp)
-                    .size(44.dp)
-                    .clip(CircleShape)
-                    .background(Color(0xB306090A))
-                    .clickableNoRipple(onDismiss),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    Icons.Filled.Close,
-                    contentDescription = "Close photo",
-                    tint = ink,
-                    modifier = Modifier.size(16.dp),
-                )
-            }
-        }
-    }
-}
+/// Peek "Measure this tree" beyond this distance from the pin asks for
+/// confirmation first — measuring a tree you're not standing at is usually a
+/// mis-tap on the wrong pin.
+///
+/// A ROUND number in each system rather than one fixed distance. This is not a
+/// physical trigger like the plot-boundary band — there is nothing about 30 m
+/// that makes a tap wrong — it is a judgement call the cruiser is being asked
+/// to make, and 30 m quoted to a US cruiser fires at 98 ft, which is neither a
+/// number they would have chosen nor one they can reason about. 100 ft is. The
+/// two are 1.6 % apart, so no tap changes verdict for any reason a cruiser
+/// would notice. iOS applies the identical rule.
+private fun farTreeWarnDistanceM(system: UnitSystem): Double =
+    if (system == UnitSystem.METRIC) 30.0 else Units.feetToMeters(100.0)
 
 // MARK: - Formatting (mirrors FieldLogScreen's row switches) -------------------
 
@@ -1866,12 +2503,16 @@ private fun rowLabel(e: QuickMeasureEntry) = when (e.kind) {
 private fun valueText(e: QuickMeasureEntry, system: UnitSystem): String = when (e.kind) {
     MeasureKind.DBH -> MeasurementFormatter.diameter(e.value, system)
     MeasureKind.HEIGHT -> MeasurementFormatter.height(e.value, system)
-    MeasureKind.CROWN -> String.format(Locale.US, "%.1f × %.1f m", e.value, e.secondaryValue ?: 0.0)
+    // Crown and plot follow `system` like the two rows above them. Left
+    // metric, one card read "13.6 in", "92.7 ft", then "4.2 × 5.1 m" and
+    // "11.3 m radius" — two unit systems stacked four rows apart with nothing
+    // saying which row is which.
+    MeasureKind.CROWN -> MeasurementFormatter.crownSpread(e.value, e.secondaryValue ?: 0.0, system)
     // Unit-aware shared formatter (metric keeps the <1 m cm branch).
     MeasureKind.DISTANCE -> MeasurementFormatter.distance(e.value, system)
     MeasureKind.SAMPLING_PLOT -> {
         val area = e.secondaryValue ?: (PI * e.value * e.value)
-        String.format(Locale.US, "%.1f m radius · %.0f m²", e.value, area)
+        MeasurementFormatter.samplingPlotSummary(e.value, area, system)
     }
 }
 
@@ -1881,33 +2522,14 @@ private fun sigmaText(e: QuickMeasureEntry, system: UnitSystem): String? {
     return when (e.kind) {
         MeasureKind.DBH -> MeasurementFormatter.diameterSigma(s, system)
         MeasureKind.HEIGHT -> MeasurementFormatter.heightSigma(s, system)
-        else -> String.format(Locale.US, "±%.2f m", s)
+        // A band beside a converted value has to be in the same unit as the
+        // value, or it understates the error by 3.28x. Crown, distance and
+        // plot are plain lengths in metres, which is exactly what
+        // [UncertaintyBand] takes — the one rounding rule for every ± here.
+        else -> UncertaintyBand.text(s, system)
     }
 }
 
 /// "7 Jul · 09:41" — the mock's peek-card date line.
 private fun dateLine(epochMs: Long): String =
     SimpleDateFormat("d MMM · HH:mm", Locale.US).format(Date(epochMs))
-
-/// Decode a stored JPEG at roughly `targetPx` on the short side — thumbs
-/// shouldn't pay for a full window-size bitmap.
-private fun decodeSampled(file: File, targetPx: Int): Bitmap? {
-    if (!file.exists()) return null
-    return try {
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(file.absolutePath, bounds)
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
-        var sample = 1
-        while (bounds.outWidth / (sample * 2) >= targetPx &&
-            bounds.outHeight / (sample * 2) >= targetPx
-        ) {
-            sample *= 2
-        }
-        BitmapFactory.decodeFile(
-            file.absolutePath,
-            BitmapFactory.Options().apply { inSampleSize = sample },
-        )
-    } catch (_: Exception) {
-        null
-    }
-}

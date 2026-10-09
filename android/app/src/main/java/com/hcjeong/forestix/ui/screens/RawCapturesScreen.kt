@@ -48,7 +48,10 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
+import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.common.TruthInput
+import com.hcjeong.forestix.data.cruise.DBHEpochRecompute
+import com.hcjeong.forestix.sensors.DBHEstimator
 import com.hcjeong.forestix.sensors.RawCaptureReplay
 import com.hcjeong.forestix.sensors.RawCaptureStore
 import com.hcjeong.forestix.ui.clickableNoRipple
@@ -65,6 +68,14 @@ import kotlin.math.abs
 import kotlin.math.sqrt
 
 private const val REL_TOL = 1e-3
+
+/// The ZIP holds every bundle, including ones the field log has moved on from.
+/// Byte-identical to the iOS sibling (RawCapturesScreen.corpusCompletenessNotice).
+private const val CORPUS_COMPLETENESS_NOTICE =
+    "Export ZIP is the COMPLETE corpus, not the field log: a bundle whose " +
+        "reading was deleted or retaken is still in it, and a ground truth " +
+        "the field log has since corrected keeps its original value here. " +
+        "Nothing is filtered out."
 
 /// Minimum scored captures before the ranking table dares to crown a winner
 /// (shared with the replay engine so both platforms use the same floor).
@@ -125,6 +136,7 @@ private object SweepCopy {
 @Composable
 fun RawCapturesScreen(nav: NavController) {
     val context = LocalContext.current
+    val env = LocalAppEnvironment.current
     val scope = rememberCoroutineScope()
     val colors = Forestix.colors
     val type = Forestix.type
@@ -153,6 +165,16 @@ fun RawCapturesScreen(nav: NavController) {
     var clearConfirm by remember { mutableStateOf(false) }
     var exporting by remember { mutableStateOf(false) }
     var exportError by remember { mutableStateOf<String?>(null) }
+
+    // PREVIEW-THEN-COMMIT over the cruise diameters. Nothing here decides
+    // anything — the rule, the tolerance and the skip reasons are
+    // DBHEpochRecompute, and the arithmetic is the shipped estimator under it.
+    var recomputePlan by remember { mutableStateOf<DBHEpochRecompute.Plan?>(null) }
+    var recomputePlanning by remember { mutableStateOf(false) }
+    var recomputeConfirming by remember { mutableStateOf(false) }
+    // What LANDED. Set only after a run, and it replaces the plan on screen so
+    // a stale preview can never be confirmed twice.
+    var recomputeResult by remember { mutableStateOf<String?>(null) }
 
     // Detail overrides the list in-place (single scaffold, iOS push feel).
     val openId = detailId
@@ -258,6 +280,18 @@ fun RawCapturesScreen(nav: NavController) {
                     }
                 }
                 FormDivider()
+                // WHAT THE ZIP IS, said where the ZIP is exported. The research
+                // CSV export splits itself against the field log; this one
+                // deliberately does not, because a complete capture archive is
+                // the thing worth having and a bundle whose reading was retaken
+                // is exactly what an accuracy study wants to see. Nothing is
+                // left out — so the honest notice is the inverse one: what is
+                // IN it that the field log no longer shows. Byte-identical to
+                // the iOS sibling.
+                Text(
+                    CORPUS_COMPLETENESS_NOTICE,
+                    style = type.caption, color = colors.textSecondary,
+                )
                 SettingsActionRowLocal(
                     title = if (exporting) "Exporting…" else "Export ZIP",
                     icon = Icons.Filled.IosShare,
@@ -302,6 +336,107 @@ fun RawCapturesScreen(nav: NavController) {
                 }
             }
 
+            // RECOMPUTE DIAMETERS — preview, then commit. It lives in this
+            // console because that is where the evidence is: a tree only HAS a
+            // bundle when raw capture was on, and this rewrites measured field
+            // data from those bundles. The counts, the largest move, the mean
+            // move and every per-tree before/after are on screen BEFORE the
+            // confirm, because "47 diameters changed" is a thing the cruiser
+            // should get to read before it happens rather than after.
+            FormSection(
+                header = "Estimator epoch ${DBHEstimator.ESTIMATOR_EPOCH}",
+                footer = DBHEpochRecompute.EXPLANATION,
+            ) {
+                SettingsActionRowLocal(
+                    title = if (recomputePlanning) "Checking…" else "Check stored diameters",
+                    icon = Icons.Filled.Replay,
+                    enabled = !recomputePlanning,
+                    tint = colors.primary,
+                ) {
+                    recomputePlanning = true
+                    recomputeResult = null
+                    scope.launch {
+                        // Read the trees off the store first, then replay the
+                        // depth bundles — the second is the slow half and it
+                        // touches no repository.
+                        val projects = DBHEpochRecompute.loadProjects(
+                            env.projectRepository, env.plotRepository, env.treeRepository)
+                        val bundles = DBHEpochRecompute.indexBundles(context)
+                        var merged = DBHEpochRecompute.Plan()
+                        for (p in projects) {
+                            merged = merged.merged(DBHEpochRecompute.plan(bundles, p))
+                        }
+                        recomputePlan = merged
+                        recomputePlanning = false
+                    }
+                }
+                recomputeResult?.let {
+                    FormDivider()
+                    Text(it, style = type.caption, color = colors.textSecondary)
+                }
+            }
+
+            recomputePlan?.let { plan ->
+                FormSection(
+                    header = "What would change",
+                    footer = "${plan.treesSeen} trees checked · ${plan.skips.size} left alone.",
+                ) {
+                    if (plan.isEmpty) {
+                        // A button that would do nothing is worse than a
+                        // sentence saying so — it invites the tap and then
+                        // reports zero.
+                        Text(
+                            DBHEpochRecompute.NOTHING_TO_DO,
+                            style = type.caption, color = colors.textSecondary,
+                        )
+                    } else {
+                        SummaryLine("Trees to rewrite", "${plan.changes.size}")
+                        SummaryLine(
+                            "Mean change", DBHEpochRecompute.signedCm(plan.meanDeltaCm))
+                        plan.largestChange?.let { largest ->
+                            SummaryLine(
+                                "Largest change",
+                                DBHEpochRecompute.signedCm(largest.deltaCm) +
+                                    " · " + largest.treeLabel,
+                            )
+                        }
+                        FormDivider()
+                        SettingsActionRowLocal(
+                            title = "Rewrite ${plan.changes.size} diameters",
+                            icon = Icons.Filled.Replay,
+                            enabled = true,
+                            tint = colors.confidenceBad,
+                        ) { recomputeConfirming = true }
+                    }
+                }
+                if (plan.skips.isNotEmpty()) {
+                    FormSection(header = "Left alone", footer = DBHEpochRecompute.SKIP_FOOTER) {
+                        plan.skipGroups.forEachIndexed { i, group ->
+                            if (i > 0) FormDivider()
+                            SummaryLine(group.reason.text, "${group.count}")
+                        }
+                    }
+                }
+                if (plan.changes.isNotEmpty()) {
+                    FormSection(header = "Every change") {
+                        plan.changes.forEachIndexed { i, change ->
+                            if (i > 0) FormDivider()
+                            Column {
+                                Text(
+                                    change.treeLabel,
+                                    style = type.body, color = colors.textPrimary,
+                                )
+                                Text(
+                                    DBHEpochRecompute.changeLine(change),
+                                    style = type.caption, color = colors.textSecondary,
+                                    fontFamily = FontFamily.Monospace,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             // Algorithm sweep: ranked table + per-capture value-vs-truth.
             sweepReport?.let { rep -> SweepView(rep) }
             sweepReportHeight?.let { rep -> SweepView(rep) }
@@ -342,6 +477,36 @@ fun RawCapturesScreen(nav: NavController) {
             title = { Text("Export failed") },
             text = { Text(msg) },
             confirmButton = { TextButton(onClick = { exportError = null }) { Text("OK") } },
+        )
+    }
+
+    // THE CONFIRM THE RECOMPUTE MUST PASS BEFORE IT WRITES ANYTHING. The
+    // changes are read out of state, never recomputed on the tap, so what the
+    // cruiser agreed to is exactly what is written.
+    if (recomputeConfirming) {
+        val plan = recomputePlan
+        AlertDialog(
+            onDismissRequest = { recomputeConfirming = false },
+            title = { Text("Rewrite ${plan?.changes?.size ?: 0} diameters?") },
+            text = { Text(DBHEpochRecompute.CONFIRM_MESSAGE) },
+            confirmButton = {
+                TextButton(onClick = {
+                    recomputeConfirming = false
+                    val changes = plan?.changes.orEmpty()
+                    if (changes.isNotEmpty()) {
+                        scope.launch {
+                            val result = DBHEpochRecompute.apply(changes, env.treeRepository)
+                            recomputeResult = DBHEpochRecompute.resultText(result)
+                            // The preview is spent: every row it described has
+                            // either been written or re-read and refused.
+                            recomputePlan = null
+                        }
+                    }
+                }) { Text("Rewrite", color = colors.confidenceBad) }
+            },
+            dismissButton = {
+                TextButton(onClick = { recomputeConfirming = false }) { Text("Cancel") }
+            },
         )
     }
 
@@ -533,6 +698,17 @@ private fun RawCaptureDetail(
             // unparseable field can NEVER reach the store: Save leaves the
             // stored value (and the typed text) exactly as they were, so a
             // stored truth is only ever removed by the explicit Clear below.
+            //
+            // This is the DESK console, not a field-entry surface: it types in
+            // the bundle's own metric base, stated in the header and in the
+            // placeholder. There is no per-entry unit toggle here (that lives
+            // on the scan screens, where the cruiser's active system decides),
+            // but the unit is still RECORDED with the value, so every truth in
+            // the corpus carries a truth_unit and nothing has to be inferred.
+            val consoleQuantity =
+                if (data.kind == "height") TruthInput.Quantity.HEIGHT
+                else TruthInput.Quantity.DIAMETER
+            val consoleUnit = TruthInput.defaultUnit(consoleQuantity, imperial = false)
             FormSection(
                 header = "Ground truth (${data.unit})",
                 footer = "Persists into the bundle manifest; used as the reference in " +
@@ -549,9 +725,7 @@ private fun RawCaptureDetail(
                         // ',' is accepted as the decimal separator and normalised.
                         onValueChange = { truthText = TruthInput.sanitize(it) },
                         placeholder = {
-                            Text(
-                                if (data.kind == "height") "True height (m)" else "True Ø (cm)",
-                            )
+                            Text(TruthInput.promptLabel(consoleQuantity, consoleUnit))
                         },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -562,7 +736,16 @@ private fun RawCaptureDetail(
                             // Save guard: an empty or unparseable field NEVER
                             // overwrites a stored truth, and the input is left
                             // alone so nothing typed is lost.
-                            val v = TruthInput.parsePositive(truthText)
+                            //
+                            // parsePositiveBASE, not parsePositive: the value
+                            // stored is the metric base and `consoleUnit` is
+                            // what the field says it is being typed in. They
+                            // agree today only because this console is
+                            // hardcoded metric — the shared helper exists so
+                            // that adding a toggle here cannot leave a number
+                            // unconverted under a truth_unit that says it was
+                            // converted.
+                            val v = TruthInput.parsePositiveBase(truthText, consoleUnit)
                             if (v == null) {
                                 truthStatus = if (TruthInput.normalized(truthText).isEmpty()) {
                                     "Nothing entered — stored truth left as it was."
@@ -577,7 +760,7 @@ private fun RawCaptureDetail(
                                 // the value is not in any manifest yet — the
                                 // console reaches finished bundles, so this is
                                 // the belt-and-braces branch.
-                                when (RawCaptureStore.setTruth(context, id, v)) {
+                                when (RawCaptureStore.setTruth(context, id, v, consoleUnit)) {
                                     RawCaptureStore.TruthWrite.SAVED -> {
                                         truthStatus = "Truth saved."
                                         truthText = ""
@@ -593,7 +776,7 @@ private fun RawCaptureDetail(
                         },
                     ) { Text("Save") }
                 }
-                TruthInput.fieldWarning(truthText, isHeight = data.kind == "height")?.let { w ->
+                TruthInput.fieldWarning(truthText, consoleQuantity, consoleUnit)?.let { w ->
                     TruthFieldWarning(w)
                 }
                 // Clearing a stored truth is EXPLICIT.
@@ -628,7 +811,9 @@ private fun RawCaptureDetail(
                 TextButton(onClick = {
                     clearTruthConfirm = false
                     scope.launch {
-                        truthStatus = when (RawCaptureStore.setTruth(context, id, null)) {
+                        // A clear carries no unit — there is no longer a typed
+                        // value for one to describe.
+                        truthStatus = when (RawCaptureStore.setTruth(context, id, null, null)) {
                             RawCaptureStore.TruthWrite.SAVED -> "Truth cleared."
                             RawCaptureStore.TruthWrite.QUEUED ->
                                 "Clear pending — applied when the capture is written."

@@ -16,12 +16,16 @@
 //     spacing — ceil(√n) columns, row-major, exactly n plots. A small
 //     woodlot rarely needs a boundary before pins are useful.
 //
-// Planned-plot numbering continues after the project's existing real
-// plots (max plotNumber + 1) so informal plots started before setup
-// never collide with the plan. Generating replaces the project's
-// previous planned plots and upserts the single CruiseDesign record —
-// identical persistence semantics to the retired screen. Generation
-// never gates measuring: planned pins are suggestions.
+// Planned-plot numbering settles after the project's existing real plots
+// (max plotNumber + 1) so informal plots started before setup never
+// collide with the plan, and after the plans that survive the run so no
+// two of them share a number. It gets there in two steps, because the
+// new plan is written before the old one is deleted and the two are
+// briefly on disk together — see `generate`. Generating replaces the
+// previous UNVISITED planned plots — a VISITED plan has a measured plot
+// standing on it and survives every re-run — and upserts the single
+// CruiseDesign record. Generation never gates measuring: planned pins
+// are suggestions.
 
 import SwiftUI
 import Common
@@ -32,6 +36,7 @@ import Geo
 public struct CruiseSetupSheet: View {
 
     @EnvironmentObject private var environment: AppEnvironment
+    @EnvironmentObject private var settings: AppSettings
     @Environment(\.dismiss) private var dismiss
 
     private enum LayoutMode: String, CaseIterable, Identifiable {
@@ -43,19 +48,47 @@ public struct CruiseSetupSheet: View {
     /// Anchor for the no-polygon fallback grid — the map centre the
     /// cruiser has framed (they are looking at their woodlot).
     public let mapCentre: CoordinateConversions.LatLon
+    /// The AREA this setup is for, when the sheet was opened from an
+    /// outline the cruiser selected on the map ("Cruise this area").
+    ///
+    /// It changes two things, and nothing else. The stratum row stops
+    /// offering to draw a boundary — one is already chosen, and its name
+    /// and size are shown instead — and generation lays plots into THIS
+    /// stratum only, replacing this area's previous plan and leaving every
+    /// other area's alone. Opened from the project strip it is nil and the
+    /// sheet behaves exactly as it always has: every stratum, or the
+    /// centred fallback grid when there are none.
+    public let area: Stratum?
     public var onGenerated: () -> Void
 
     public init(project: Project,
                 mapCentre: CoordinateConversions.LatLon,
+                area: Stratum? = nil,
                 onGenerated: @escaping () -> Void = {}) {
         self.project = project
         self.mapCentre = mapCentre
+        self.area = area
         self.onGenerated = onGenerated
     }
 
     // Defaults from the existing design model (CruiseDesign record when
     // present; otherwise the long-standing 0.1 ac / BAF 20 / 150 m
     // grid / 10-per-stratum defaults the old screen shipped with).
+    //
+    // EVERY NUMERIC FIELD ON THIS SHEET IS TYPED AND READ IN THE CRUISER'S
+    // OWN UNIT. Radius and spacing are lengths — `lengthUnit` below is what
+    // labels them and what converts them, in both directions — and the BAF is
+    // the prism factor, ft²/ac or m²/ha. What is STORED never changes: a
+    // radius becomes `plotAreaAcres`, spacing becomes `gridSpacingMeters`,
+    // and the BAF stays ft²/ac (see `CruiseDesign.baf`). These three text
+    // fields are the only place the conversion happens, so a prefill written
+    // without going through `applyInitialDefaults` will be a raw metre value
+    // sitting under a "ft" label — which is how a US cruiser laid a 37-metre
+    // plot meaning 37 feet.
+    //
+    // The initial values below are placeholders in the METRIC base and are
+    // rewritten in the cruiser's unit by `applyInitialDefaults` on appear;
+    // `settings` is not readable from a property initialiser.
     @State private var plotType: PlotType = .fixedArea
     @State private var radiusText = CruiseSetupSheet.defaultRadiusText
     @State private var bafText = "20"
@@ -65,6 +98,11 @@ public struct CruiseSetupSheet: View {
     @State private var strataCount = 0
     @State private var pushingStratumDraw = false
     @State private var errorMessage: String?
+    /// Non-nil while the "this run takes work you can't get back" question
+    /// is up; the string IS the sentence it asks. Its own channel beside
+    /// `errorMessage` because that one is a refusal and this one is a
+    /// choice, and a cruiser must never have to read which it is.
+    @State private var discardWarning: String?
     @State private var loadedExisting = false
 
     /// Radius of the default 0.1 ac fixed plot — the existing design
@@ -85,6 +123,31 @@ public struct CruiseSetupSheet: View {
 
     private static func acres(fromRadiusM radius: Double) -> Double {
         .pi * radius * radius / Units.squareMetersPerAcre
+    }
+
+    /// The length unit the radius and spacing boxes are typed in — metres or
+    /// feet, from the cruiser's Units setting. `TruthInput.Unit` rather than a
+    /// bare string because it carries the label AND both conversions, so the
+    /// row's caption, the parse and the prefill cannot disagree about which
+    /// unit the box is in.
+    private var lengthUnit: TruthInput.Unit {
+        TruthInput.defaultUnit(.distance, imperial: settings.unitSystem == .imperial)
+    }
+
+    /// A stored metre value written into one of those boxes, at the precision
+    /// the box has always shown.
+    private func entryText(metres: Double, fractionDigits: Int = 1) -> String {
+        MeasurementFormatter.entryText(
+            TruthInput.fromBase(metres, unit: lengthUnit),
+            fractionDigits: fractionDigits)
+    }
+
+    /// The round default grid pitch in the cruiser's unit: the 150 m this
+    /// sheet has always offered, or 500 ft — near enough the same ground
+    /// (152.4 m) that the plan comes out the same size, and a number a cruiser
+    /// pacing in chains can actually aim at.
+    private var defaultSpacingMetres: Double {
+        settings.unitSystem == .imperial ? Units.feetToMeters(500) : 150
     }
 
     public var body: some View {
@@ -116,7 +179,13 @@ public struct CruiseSetupSheet: View {
                     fieldHeader("Plot size")
                     numericRow(
                         value: plotType == .fixedArea ? $radiusText : $bafText,
-                        unit: plotType == .fixedArea ? "m radius" : "BAF",
+                        // The BAF row states its dimension. "BAF" alone is the
+                        // same box for a US cruiser typing 20 ft²/ac and a
+                        // metric one typing 4 m²/ha, and nothing downstream can
+                        // tell the two apart afterwards.
+                        unit: plotType == .fixedArea
+                            ? "\(lengthUnit.rawValue) radius"
+                            : MeasurementFormatter.bafUnit(settings.unitSystem),
                         caption: plotType == .fixedArea
                             ? sizeCaptionFixed
                             : "Prism basal-area factor",
@@ -134,7 +203,7 @@ public struct CruiseSetupSheet: View {
                     fieldHeader(layoutMode == .count ? "Plots" : "Spacing")
                     numericRow(
                         value: layoutMode == .count ? $countText : $spacingText,
-                        unit: layoutMode == .count ? "plots" : "m",
+                        unit: layoutMode == .count ? "plots" : lengthUnit.rawValue,
                         caption: layoutMode == .count
                             ? "How many plot centres to lay out"
                             : "Distance between plot centres",
@@ -192,7 +261,7 @@ public struct CruiseSetupSheet: View {
         .onChange(of: pushingStratumDraw) { _, pushing in
             if !pushing { refreshStrata() }
         }
-        .alert("Couldn't generate plots",
+        .alert(errorAlertTitle,
                isPresented: Binding(
                    get: { errorMessage != nil },
                    set: { if !$0 { errorMessage = nil } })
@@ -200,6 +269,30 @@ public struct CruiseSetupSheet: View {
             Button("OK", role: .cancel) { errorMessage = nil }
         } message: {
             Text(errorMessage ?? "")
+        }
+        // GENERATING OVER A PLAN, step two. The count is the whole point of
+        // the sentence — same reason the area-delete confirmation carries
+        // one: a cruiser about to lose a morning's planning has to know how
+        // much before they answer. Only raised when the run would take
+        // something generating again cannot put back (see `discardWarning`).
+        .alert(discardConfirmationTitle,
+               isPresented: Binding(
+                   get: { discardWarning != nil },
+                   set: { if !$0 { discardWarning = nil } })
+        ) {
+            Button("Replace plan", role: .destructive) {
+                discardWarning = nil
+                // The re-run waits until this alert is actually gone. A
+                // second alert raised while the first is still dismissing
+                // is one SwiftUI drops, and the alert this run can still
+                // raise is "Couldn't generate plots" — a storage refusal
+                // nobody sees reads as a plan that saved.
+                DispatchQueue.main.async { generate(confirmedDiscard: true) }
+            }
+            .accessibilityIdentifier("cruiseSetup.discard.confirm")
+            Button("Cancel", role: .cancel) { discardWarning = nil }
+        } message: {
+            Text(discardWarning ?? "")
         }
     }
 
@@ -212,11 +305,19 @@ public struct CruiseSetupSheet: View {
             .padding(.bottom, 6)
     }
 
+    /// The area the typed radius comes to. The box holds the radius in the
+    /// cruiser's unit, so it is converted to metres FIRST — read as metres it
+    /// reported an 11-acre plot for a 37 ft one.
     private var sizeCaptionFixed: String {
-        if let r = Double(radiusText), r > 0 {
-            return String(format: "≈ %.2f ha · %.2f ac",
-                          Self.acres(fromRadiusM: r) * 0.404685642,
-                          Self.acres(fromRadiusM: r))
+        if let r = TruthInput.parsePositiveBase(radiusText, unit: lengthUnit) {
+            let ac = Self.acres(fromRadiusM: r)
+            let unit = settings.unitSystem.areaUnit
+            // Metric reads hectares only; the US keeps the dual ha · ac
+            // readout this sheet has always shown. (Android parity.)
+            return unit == .hectare
+                ? String(format: "≈ %.3f ha", unit.fromAcres(ac))
+                : String(format: "≈ %.2f ha · %.2f ac",
+                         AreaUnit.hectare.fromAcres(ac), ac)
         }
         return "Circular fixed-area plot"
     }
@@ -259,6 +360,12 @@ public struct CruiseSetupSheet: View {
     /// Optional stratum polygon — "Draw boundary" pushes the kept
     /// StratumDrawScreen; with none drawn, generation falls back to the
     /// centred default pattern around the map centre.
+    ///
+    /// Opened from an area on the map the row has nothing to offer: the
+    /// outline is already chosen, so it states which one and how big it is
+    /// and gets out of the way. A "Draw boundary" button there would offer
+    /// to change the very thing the cruiser opened this sheet to cruise.
+    @ViewBuilder
     private var stratumRow: some View {
         HStack(spacing: ForestixSpace.sm) {
             VStack(alignment: .leading, spacing: 2) {
@@ -266,40 +373,51 @@ public struct CruiseSetupSheet: View {
                 // beside this row already says "Draw boundary" and the
                 // state line below says "None drawn", so the label was
                 // the only place the GIS term appeared.
-                Text("Stratum boundary")
+                Text(area == nil ? "Stratum boundary" : "Area")
                     .font(.system(size: 14.5, weight: .bold))
                     .foregroundStyle(ForestixPalette.textPrimary)
                 // FIELD REPORT F7 — the field is named, not qualified. The
                 // word "Optional" told the cruiser nothing they could act on;
                 // "None drawn" says what the state actually is.
-                Text(strataCount == 0
-                     ? "None drawn — whole area"
-                     : "\(strataCount) boundar\(strataCount == 1 ? "y" : "ies") drawn")
+                Text(areaRowDetail)
                     .font(.system(size: 11.5))
                     .foregroundStyle(ForestixPalette.textTertiary)
             }
             Spacer(minLength: 4)
-            Button {
-                pushingStratumDraw = true
-            } label: {
-                Text("Draw boundary")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(ForestixPalette.textPrimary)
-                    .padding(.horizontal, 12)
-                    .frame(minHeight: 38)
-                    .background(
-                        RoundedRectangle(cornerRadius: ForestixRadius.control,
-                                         style: .continuous)
-                            .stroke(ForestixPalette.divider, lineWidth: 1))
-                    .contentShape(Rectangle())
+            if area == nil {
+                Button {
+                    pushingStratumDraw = true
+                } label: {
+                    Text("Draw boundary")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(ForestixPalette.textPrimary)
+                        .padding(.horizontal, 12)
+                        .frame(minHeight: 38)
+                        .background(
+                            RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                             style: .continuous)
+                                .stroke(ForestixPalette.divider, lineWidth: 1))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("cruiseSetup.drawBoundary")
             }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("cruiseSetup.drawBoundary")
         }
         .padding(.vertical, ForestixSpace.xs)
         .overlay(alignment: .top) {
             Rectangle().fill(ForestixPalette.divider).frame(height: 0.5)
         }
+    }
+
+    private var areaRowDetail: String {
+        if let area {
+            let acres = Double(area.areaAcres)
+            return String(format: "%@ · %.2f ha · %.2f ac",
+                          area.name, acres * 0.404685642, acres)
+        }
+        return strataCount == 0
+            ? "None drawn — whole area"
+            : "\(strataCount) boundar\(strataCount == 1 ? "y" : "ies") drawn"
     }
 
     // MARK: Data
@@ -310,64 +428,110 @@ public struct CruiseSetupSheet: View {
     }
 
     /// One-time initial defaults: prefill from the last saved design if one
-    /// exists, otherwise fall back to a round default plot size — the imperial
-    /// 0.1-acre default (already baked into `radiusText`) for the US, or a
-    /// round metric 0.05 ha for metric-country projects.
+    /// exists, otherwise fall back to a round default plot size — 0.1 acre for
+    /// the US, a round 0.05 ha for a metric cruiser — and a round grid pitch
+    /// and BAF in the same system. Every one of them is written through the
+    /// display conversion, because the boxes are labelled in that system.
+    ///
+    /// Runs on appear rather than in the property initialisers because that is
+    /// the first moment `settings` exists.
     private func applyInitialDefaults() {
         guard !loadedExisting else { return }
-        let appliedStoredRadius = prefillFromExistingDesign()
-        if !appliedStoredRadius && project.units == .metric {
-            radiusText = String(format: "%.1f",
-                                Self.radiusM(fromSquareMeters: 500))  // 0.05 ha
+        let stored = prefillFromExistingDesign()
+        if !stored.radius {
+            let metres = settings.unitSystem == .imperial
+                ? Self.radiusM(fromAcres: 0.1)
+                : Self.radiusM(fromSquareMeters: 500)  // 0.05 ha
+            radiusText = entryText(metres: metres)
+        }
+        if !stored.baf {
+            bafText = MeasurementFormatter.entryText(
+                MeasurementFormatter.bafDisplay(
+                    stored: MeasurementFormatter.defaultBAFStored(settings.unitSystem),
+                    in: settings.unitSystem),
+                fractionDigits: 0)
+        }
+        if !stored.spacing {
+            spacingText = entryText(metres: defaultSpacingMetres, fractionDigits: 0)
         }
     }
 
-    /// Re-opening setup shows what was generated last time — same
-    /// prefill behaviour the old screen's refresh() had. Returns true when a
-    /// saved plot size was applied to `radiusText`.
+    /// Which of the saved design's fields this prefill actually filled — the
+    /// rest fall back to a round default in `applyInitialDefaults`.
+    private struct Prefilled {
+        var radius = false
+        var baf = false
+        var spacing = false
+    }
+
+    /// Re-opening setup shows what was generated last time — same prefill
+    /// behaviour the old screen's refresh() had, with each stored value put
+    /// back in the unit its box is labelled in. Storage is untouched: the
+    /// design still holds acres, metres and ft²/ac.
     @discardableResult
-    private func prefillFromExistingDesign() -> Bool {
-        guard !loadedExisting else { return false }
+    private func prefillFromExistingDesign() -> Prefilled {
+        var filled = Prefilled()
+        guard !loadedExisting else { return filled }
         loadedExisting = true
         guard let design = (try? environment.cruiseDesignRepository
-            .forProject(project.id))?.first else { return false }
+            .forProject(project.id))?.first else { return filled }
         plotType = design.plotType
-        var appliedStoredRadius = false
         if let a = design.plotAreaAcres {
-            radiusText = String(format: "%.1f", Self.radiusM(fromAcres: Double(a)))
-            appliedStoredRadius = true
+            radiusText = entryText(metres: Self.radiusM(fromAcres: Double(a)))
+            filled.radius = true
         }
         if let b = design.baf {
-            bafText = String(format: "%.0f", b)
+            bafText = MeasurementFormatter.entryText(
+                MeasurementFormatter.bafDisplay(stored: Double(b),
+                                                in: settings.unitSystem),
+                fractionDigits: 0)
+            filled.baf = true
         }
         switch design.samplingScheme {
         case .systematicGrid:
             layoutMode = .spacing
             if let g = design.gridSpacingMeters {
-                spacingText = String(format: "%.0f", g)
+                spacingText = entryText(metres: Double(g), fractionDigits: 0)
+                filled.spacing = true
             }
         case .stratifiedRandom:
             layoutMode = .count
         case .manual:
             break
         }
-        return appliedStoredRadius
+        return filled
     }
 
     // MARK: Generation (the existing engine)
 
-    private func generate() {
-        // Validate the three visible fields.
-        let radiusM = Double(radiusText) ?? 0
-        let baf = Double(bafText) ?? 0
+    /// `confirmedDiscard` is the answer to the question below: false on the
+    /// press of "Generate plots", true only after the cruiser has read what
+    /// this run takes and said replace it anyway. Re-running generation
+    /// after the answer costs nothing — the generator is deterministic —
+    /// and it keeps the question in front of the writes rather than in
+    /// front of a plan that might not even generate.
+    private func generate(confirmedDiscard: Bool = false) {
+        // Validate the three visible fields. Radius and spacing come out of
+        // their boxes in the cruiser's unit and are converted to METRES here,
+        // once, so everything below this point — the generator, the design
+        // record, the refusals — is in the base it has always been in.
+        let radiusM = TruthInput.parsePositiveBase(radiusText, unit: lengthUnit) ?? 0
+        let baf = MeasurementFormatter.bafStored(
+            display: TruthInput.parsePositive(bafText) ?? 0,
+            in: settings.unitSystem)
         let count = Int(countText) ?? 0
-        let spacing = Double(spacingText) ?? 0
+        let spacing = TruthInput.parsePositiveBase(spacingText, unit: lengthUnit) ?? 0
+        // The refusals name the unit the box is labelled in — a cruiser told
+        // to type "a positive number of metres" into a box marked "ft" has
+        // been given the wrong instruction twice over.
+        let lengthWord = lengthUnit == .feet ? "feet" : "metres"
         if plotType == .fixedArea && radiusM <= 0 {
-            errorMessage = "Plot radius must be a positive number of metres."
+            errorMessage = "Plot radius must be a positive number of \(lengthWord)."
             return
         }
         if plotType == .variableRadius && baf <= 0 {
-            errorMessage = "Basal area factor must be a positive number."
+            errorMessage = "Basal area factor must be a positive number of "
+                + MeasurementFormatter.bafUnit(settings.unitSystem) + "."
             return
         }
         if layoutMode == .count && count <= 0 {
@@ -375,17 +539,69 @@ public struct CruiseSetupSheet: View {
             return
         }
         if layoutMode == .spacing && spacing <= 0 {
-            errorMessage = "Grid spacing must be a positive number of metres."
+            errorMessage = "Grid spacing must be a positive number of \(lengthWord)."
             return
         }
 
         do {
-            let strata = try environment.stratumRepository
+            // Opened from an area, that area is the only stratum in play.
+            let strata = try area.map { [$0] }
+                ?? environment.stratumRepository.listByProject(project.id)
+            // Which plans this run REPLACES. From an area it is that
+            // area's own plans and nobody else's: generating into one
+            // outline must not wipe the plan laid inside another, which is
+            // the whole-project rule and would be a silent loss of work
+            // the cruiser never asked to touch.
+            //
+            // A VISITED plan is never in it. The moment a planned plot is
+            // opened a real Plot stands on it with a tally inside, pointing
+            // back here through `Plot.plannedPlotId` — and this path does
+            // not merely orphan that reference the way deleting an area
+            // does, it destroys the row the reference names. `deleteArea`
+            // and `relayPlots` both carry `!visited` for that reason; all
+            // three paths agree, and this is the same predicate.
+            let allPlanned = try environment.plannedPlotRepository
                 .listByProject(project.id)
-            // Continue numbering after the project's existing REAL plots
-            // so informal plots and the plan never share a number.
-            let startNumber = ((try? environment.plotRepository
-                .listByProject(project.id))?.map(\.plotNumber).max() ?? 0) + 1
+            let replacing = (area.map { seed in
+                allPlanned.filter { $0.stratumId == seed.id }
+            } ?? allPlanned).filter { !$0.visited }
+            let surviving = allPlanned.filter { plan in
+                !replacing.contains { $0.id == plan.id }
+            }
+            // TWO NUMBERINGS, because the swap has two moments and they do
+            // not have the same free set — the same pair `relayPlots` uses
+            // and for the same reason: the new plan is written BEFORE the
+            // plans it replaces are deleted (see the write order below), so
+            // for the length of the swap the old plan is still on disk and
+            // its numbers are still spoken for.
+            //
+            // WHILE THE SWAP RUNS, number past everything the project has
+            // spoken for: its REAL plots, so informal plots and the plan
+            // never share a number, and EVERY plan — the surviving ones, so
+            // two areas never both hold a "Plot 4", and the ones this run
+            // replaces, so old and new can sit in the store together without
+            // either claiming the other's number.
+            //
+            // The real plots are READ, not attempted. An empty list from a
+            // refused read is indistinguishable from a project that has no
+            // measured plots, and both numberings below would then hand a new
+            // pin the number a tally is already filed under. This is still in
+            // front of every write, so refusing costs the run and nothing
+            // else — the same hard read `relayPlots` insists on.
+            let realNumbers = try environment.plotRepository
+                .listByProject(project.id).map(\.plotNumber)
+            let startNumber =
+                ((realNumbers + allPlanned.map(\.plotNumber)).max() ?? 0) + 1
+            // AND ONCE IT IS DONE the replaced numbers are free again, so the
+            // new plan comes back down onto them: past the real plots and the
+            // plans that survive this run, and nothing further. The visited
+            // plans this run leaves standing are among the survivors, which is
+            // what keeps a new pin off a measured plot's number. Without this
+            // second pass every re-run pushed the plan up a block — 1-5 became
+            // 6-10 became 11-15 — and those numbers are what the tally sheet,
+            // the export and the field log show.
+            let settledStart = max(realNumbers.max() ?? 0,
+                                   surviving.map(\.plotNumber).max() ?? 0) + 1
 
             let planned: [PlannedPlot]
             if strata.isEmpty {
@@ -393,7 +609,7 @@ public struct CruiseSetupSheet: View {
                     projectId: project.id,
                     anchor: mapCentre,
                     count: layoutMode == .count ? count : 12,
-                    spacingM: layoutMode == .spacing ? spacing : 150,
+                    spacingM: layoutMode == .spacing ? spacing : defaultSpacingMetres,
                     startingPlotNumber: startNumber)
             } else {
                 let inputs: [SamplingGenerator.StratumInput] = try strata.map {
@@ -418,19 +634,72 @@ public struct CruiseSetupSheet: View {
                 // area"), so the fix names the same two controls the
                 // cruiser would go back to. Nothing about the generator
                 // changed — only the sentence when it returns nothing.
-                errorMessage = "No plot centres fell inside the boundary — try a tighter spacing or a bigger area."
+                errorMessage = area == nil
+                    ? "No plot centres fell inside the boundary — try a tighter spacing or a bigger area."
+                    : "No plot centres fell inside this area — try a tighter spacing, or make the area bigger."
                 return
             }
 
-            // Replace previously-generated planned plots (same semantics
-            // as the retired CruiseDesignScreen).
-            let existing = try environment.plannedPlotRepository
-                .listByProject(project.id)
-            for p in existing {
-                try environment.plannedPlotRepository.delete(id: p.id)
+            // Everything above this line is a question; everything below it
+            // writes. The last question is what the run costs.
+            if !confirmedDiscard,
+               let warning = Self.discardWarning(replacing: replacing) {
+                discardWarning = warning
+                return
             }
-            for p in planned {
-                _ = try environment.plannedPlotRepository.create(p)
+
+            // WRITE ORDER IS THE ONLY TRANSACTION THERE IS. The repositories
+            // have none, so the new plan goes in FIRST and the plans it
+            // replaces (whole project, or just this area's, and never a
+            // visited one — see `replacing`) are dropped only once every one
+            // of its plots is on disk. Deleting first meant a throw between
+            // the two loops left the area with no plan at all: an unvisited
+            // plan destroyed before its replacement existed, and a cruiser
+            // reading "Plot generation failed" over ground that now had
+            // nothing planned on it.
+            var written: [PlannedPlot] = []
+            do {
+                for p in planned {
+                    _ = try environment.plannedPlotRepository.create(p)
+                    written.append(p)
+                }
+            } catch {
+                // Half a plan is not a plan. Take back what went in so what
+                // is left standing is the plan the cruiser already had.
+                for p in written {
+                    try? environment.plannedPlotRepository.delete(id: p.id)
+                }
+                throw error
+            }
+            // THE SWAP IS DONE ONCE THE NEW PLAN IS ON DISK. What is left is
+            // tidying, and tidying must not be reported as failure: headed
+            // "Couldn't generate plots", a throw here sends the cruiser to
+            // press Generate again over a plan that already landed, which
+            // replaces the good plan with a copy of itself and leaves the same
+            // rows behind. Stragglers are counted and named instead.
+            var stragglers = 0
+            for p in replacing {
+                do { try environment.plannedPlotRepository.delete(id: p.id) }
+                catch { stragglers += 1 }
+            }
+            // The swap is complete and the old numbers are free. Settle the
+            // new plan onto them, lowest first, in the order it was laid, so
+            // generating twice with the same settings lands on the same
+            // numbers both times.
+            //
+            // Only when every old plan actually went: a straggler still holds
+            // its number, and settling onto it would mint the duplicate this
+            // whole numbering exists to prevent. `try?` for the reason the
+            // re-lay gives — a plan numbered 6-9 where it could read 4-7 is a
+            // cosmetic complaint, and failing the run over it would report a
+            // failure to a cruiser whose plan is complete and correct.
+            if stragglers == 0,
+               settledStart <= written.map(\.plotNumber).min() ?? Int.max {
+                for (offset, p) in written.enumerated() {
+                    var settled = p
+                    settled.plotNumber = settledStart + offset
+                    _ = try? environment.plannedPlotRepository.update(settled)
+                }
             }
 
             // Upsert the single CruiseDesign record for the project.
@@ -453,12 +722,117 @@ public struct CruiseSetupSheet: View {
                 _ = try environment.cruiseDesignRepository.create(design)
             }
 
-            HapticFeedback.play(.success)
+            // The plan IS generated, so the map is told either way; only the
+            // ending differs. A run with leftovers ends on a sentence the
+            // cruiser can act on rather than on a dismissal that would take
+            // the news away with the sheet.
             onGenerated()
+            guard stragglers == 0 else {
+                errorMessage = Self.strayPlanMessage(stragglers)
+                return
+            }
+            HapticFeedback.play(.success)
             dismiss()
         } catch {
             errorMessage = "Plot generation failed: \(error)"
         }
+    }
+
+    /// The opening words of the leftover-plot notice. `errorMessage` carries
+    /// both kinds of news and the alert has to head them differently — see
+    /// `errorAlertTitle`. Mirrors `MapHomeScreen.relayRefusalPrefix`.
+    static var strayPlanPrefix: String { "The new plan was generated" }
+
+    /// Old plan rows the tidy-up could not delete. The NEW plan is complete
+    /// and in place; these are extra pins, not missing ones, so the sentence
+    /// must not read as an invitation to press Generate again — a re-run
+    /// cannot clear what a delete has just refused to clear, and would only
+    /// lay the plan a second time to leave the same rows behind. The plot
+    /// list is where a stray pin can actually be removed, so that is where
+    /// the cruiser is sent.
+    private static func strayPlanMessage(_ n: Int) -> String {
+        let them = n == 1 ? "it" : "them"
+        return strayPlanPrefix + ", but "
+            + (n == 1 ? "1 old planned plot could not be removed"
+                      : "\(n) old planned plots could not be removed")
+            + ". Delete \(them) from the plot list — generating again will "
+            + "not clear \(them)."
+    }
+
+    /// Which of the two pieces of news the alert is heading. A plan that IS
+    /// on disk must not be announced as one that isn't: headed "Couldn't
+    /// generate plots", leftover rows send the cruiser to generate again over
+    /// a plan that already landed.
+    private var errorAlertTitle: String {
+        errorMessage?.hasPrefix(Self.strayPlanPrefix) == true
+            ? "The plan was generated, but old plots remain"
+            : "Couldn't generate plots"
+    }
+
+    /// Named for what is being replaced, the way `areaDeletionTitle` is
+    /// named for the area it is about: from an outline it is that outline's
+    /// plan, from the project strip it is the cruise plan.
+    private var discardConfirmationTitle: String {
+        area.map { "Replace the plan in \($0.name)?" } ?? "Replace the cruise plan?"
+    }
+
+    /// What this run takes that pressing "Generate plots" again cannot give
+    /// back — or nil, when it takes nothing of the kind and no question is
+    /// worth asking.
+    ///
+    /// A generated pin is CHEAP to lose but not free, and the difference
+    /// decides what this sentence has to say.
+    ///
+    /// It is cheap because replacing it is the thing the cruiser pressed the
+    /// button to do. It is not free because "reproducible from the design
+    /// that laid it" — the reason this warning used to give itself for
+    /// staying quiet — is not true of this code: the same run overwrites the
+    /// project's single `CruiseDesign` row with the new parameters before it
+    /// returns, and `CruiseDesign` carries no plot COUNT at all
+    /// (`Models/Project.swift`: plotType, plotAreaAcres, baf, samplingScheme,
+    /// gridSpacingMeters, heightSubsampleRule). For a stratified design the
+    /// old n therefore lived only in the plan rows this run is deleting, and
+    /// nothing left on disk can say what it was. So the count of what goes is
+    /// stated whenever anything goes, and the two kinds below are called out
+    /// by name on top of it, because they are gone in a way even a rerun with
+    /// the old numbers could not undo:
+    ///
+    ///   • DRAWN (`plannedSource == .manual`) — the cruiser put that point
+    ///     on the map with a finger. Nothing else in the project knows
+    ///     where it was, so a re-run is the end of it.
+    ///   • SKIPPED — a documented decision about ground somebody went and
+    ///     looked at (cliff, water, private land). Regenerating produces a
+    ///     fresh pin that says nothing, and the walk gets made twice.
+    ///
+    /// A drawn plot that was also skipped is counted once, as drawn: two
+    /// counts that add up to more plots than the plan holds would read as
+    /// the run destroying more than it can.
+    private static func discardWarning(replacing: [PlannedPlot]) -> String? {
+        let drawn = replacing.filter { $0.plannedSource == .manual }.count
+        let skipped = replacing.filter {
+            $0.skipped && $0.plannedSource != .manual
+        }.count
+        var clauses: [String] = []
+        if drawn > 0 {
+            clauses.append("\(drawn) plot\(drawn == 1 ? "" : "s") you placed by hand")
+        }
+        if skipped > 0 {
+            clauses.append("\(skipped) plot\(skipped == 1 ? "" : "s") you marked skipped")
+        }
+        guard !replacing.isEmpty else { return nil }
+        let n = replacing.count
+        var out = "\(n) planned plot\(n == 1 ? "" : "s") "
+            + "\(n == 1 ? "is" : "are") replaced by the new layout"
+        if !clauses.isEmpty {
+            let total = drawn + skipped
+            out += ", including " + clauses.joined(separator: " and ")
+                + " that generating again cannot put \(total == 1 ? "it" : "them") back"
+        }
+        // The design goes with them: this run writes the new parameters over
+        // the project's only CruiseDesign row, so the settings that produced
+        // the plan being replaced are not on disk afterwards either.
+        return out + ". The settings that laid the old plan are overwritten too. "
+            + "Plots you have already opened are kept — this only replaces the plan."
     }
 
     /// No-polygon default pattern: a centred, walkable square-ish grid

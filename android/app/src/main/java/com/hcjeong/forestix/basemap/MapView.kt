@@ -46,10 +46,12 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableDoubleStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -95,6 +97,9 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sinh
 import kotlin.math.tan
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 
 // MARK: - Overlay models (mirror MapPolygon / Marker content on iOS)
 
@@ -107,6 +112,36 @@ import kotlin.math.tan
 data class MapBoundaryOverlay(
     val rings: List<List<CoordinateConversions.LatLon>>,
     val closed: Boolean,
+)
+
+/// A CRUISE AREA the cruiser drew on this map — the outline a cruise is
+/// laid out inside.
+///
+/// Separate from `MapBoundaryOverlay` because the two are different objects
+/// to the cruiser and behave differently on screen: the imported boundary
+/// is a file's geometry and is hit-test transparent, while an area is the
+/// cruiser's own editable plan and TAKES TAPS — selecting it is how its
+/// menu is reached. They also sit in different layers, areas above the
+/// boundary, so an area drawn inside an imported stand reads as inside it.
+///
+/// `rings[0]` is the outer ring; the rest are holes. The ring may be open
+/// or closed — the renderer closes it either way, so a stored polygon and a
+/// half-drawn draft can be handed over unchanged. iOS `BasemapArea`.
+data class MapAreaOverlay(
+    /// Echoed back through MapView's onOverlayTap when this area is tapped.
+    val id: String,
+    val rings: List<List<CoordinateConversions.LatLon>>,
+    /// Drawn heavier, with its corners marked — the cruiser has to be able
+    /// to tell which of several outlines their next action applies to.
+    val selected: Boolean = false,
+    /// Whether a SELECTED area marks its outer-ring vertices. On for the
+    /// shapes a cruiser drags corner by corner; off for a circle, whose ring
+    /// is 128 densified points — marked, it reads as a beaded rim rather
+    /// than an outline, and every dot is a corner the cruiser cannot grab.
+    /// An explicit flag rather than a vertex-count threshold, so a genuinely
+    /// 30-corner hand-drawn stand keeps its corners. iOS
+    /// `BasemapArea.drawsCorners`.
+    val drawsCorners: Boolean = true,
 )
 
 /// An open polyline (v3 cruise mock `.guide`) — the dashed you-dot → plot
@@ -161,7 +196,7 @@ data class MapPlotOverlay(
     val rings: List<MapPlotRing> = emptyList(),
     val cruiser: CoordinateConversions.LatLon? = null,
     val state: MapPlotFix = MapPlotFix.UNKNOWN,
-    /// Echoed back through MapView's onPlotTap when the boundary is tapped.
+    /// Echoed back through MapView's onOverlayTap when the boundary is tapped.
     val id: String = "plot",
 )
 
@@ -193,6 +228,14 @@ data class MapMarker(
 
 // MARK: - Camera state (map home / offline downloader)
 
+/// Zoom the camera is clamped to, everywhere it can be changed — gesture,
+/// double-tap, and a host's `moveTo`. Past the tile source's native maximum
+/// the z-19 tiles simply draw scaled (overzoom), which is what lets a plot
+/// ring a few tens of metres across be framed at all. iOS
+/// `BasemapMapView.zoomRange` is the same 3…24.
+const val MAP_ZOOM_MIN: Double = 3.0
+const val MAP_ZOOM_MAX: Double = 24.0
+
 /// Live camera holder a host can pass to MapView to observe the viewport.
 /// MapView writes `center`/`zoom` after every gesture and the viewport size
 /// on layout; the map home's offline sheet calls `visibleBounds()` when the
@@ -206,14 +249,100 @@ class MapCameraState {
     internal var viewportSizePx: IntSize by mutableStateOf(IntSize.Zero)
     internal var densityScale: Float = 1f
 
-    /// One-shot host-requested camera move — MapView consumes and clears it.
+    /// Host-requested camera move — MapView applies whatever is here whenever
+    /// [moveTick] changes.
     internal var pendingMove: Pair<CoordinateConversions.LatLon, Double>? by mutableStateOf(null)
+
+    /// Bumped by every requested move. MapView keys its consumption on this
+    /// COUNTER rather than on the value, so the same target can be asked for
+    /// twice (my-location tapped again after a pan back) and so a per-frame
+    /// glide costs one state write per frame instead of a write-then-clear
+    /// round trip through the consumer.
+    internal var moveTick: Int by mutableIntStateOf(0)
+
+    /// The glide currently running, if any. A camera has ONE state and can
+    /// only be going to one place, so the flight is held here rather than
+    /// launched and forgotten: every other way the camera moves — a second
+    /// [flyTo], a [moveTo] cut, the cruiser's own pan or pinch — ends it
+    /// first. Two loops writing [pendingMove] on the same frame clock is a
+    /// camera that drags itself out from under the finger.
+    private var flight: Job? = null
+
+    /// End any glide in flight. Called by EVERY path that takes the camera
+    /// somewhere else — `moveTo`, a new `flyTo`, the map's own gesture
+    /// handling, and the host re-keying `center`. A cruiser who pans has said
+    /// where they want to look, and a glide that keeps hauling them back is
+    /// worse than one that simply stops; the same is true of a recentre.
+    fun cancelFlight() {
+        flight?.cancel()
+        flight = null
+        // The frame already posted but not yet consumed goes with it. The
+        // consumer reads this value when it runs, not when it was written, so
+        // leaving it would let one last glide frame land on top of the pan
+        // that just ended the glide — a visible tug at the start of the drag.
+        pendingMove = null
+    }
 
     /// Recentre on `target` at `zoom` — the same snap the map does when the
     /// host's `center` parameter changes, but usable when that parameter
     /// hasn't changed (my-location button after the user panned away).
+    ///
+    /// A cut REPLACES a glide, it does not race one: without this the
+    /// too-far branch of "Go to Plot N" would land on the plot and then be
+    /// dragged back along the previous flight's remaining frames.
     fun moveTo(target: CoordinateConversions.LatLon, zoom: Double) {
+        cancelFlight()
         pendingMove = target to zoom
+        moveTick++
+    }
+
+    /// GLIDE to `target` at `zoom` instead of cutting there.
+    ///
+    /// [moveTo] jumps, which is right for my-location (the cruiser knows
+    /// where they are) and wrong for "here is the plot you are walking to":
+    /// a cut answers "where is it?" with a different picture rather than
+    /// with a direction. Stepped on the frame clock, ease-out over ~0.6 s —
+    /// quick off the mark, settling onto the target.
+    ///
+    /// The flight is launched HERE, into the caller's `scope`, rather than
+    /// left for the caller to `launch` itself: the coroutine a second tap
+    /// starts has to replace the first, and it can only do that if one place
+    /// owns the [Job]. Callers used to launch their own, so two taps left two
+    /// loops interpolating from different origins into the same camera.
+    /// iOS `flyCamera(to:zoom:)` holds its Task the same way.
+    fun flyTo(scope: CoroutineScope, target: CoordinateConversions.LatLon, zoom: Double) {
+        cancelFlight()
+        flight = scope.launch { glide(target, zoom) }
+    }
+
+    private suspend fun glide(target: CoordinateConversions.LatLon, zoom: Double) {
+        val from = center
+        val fromZoom = this.zoom
+        val toZoom = zoom.coerceIn(MAP_ZOOM_MIN, MAP_ZOOM_MAX)
+        // No camera to fly FROM (the map has not laid out): nothing to
+        // interpolate, so land on the target rather than animate from a
+        // position we made up. The request is posted directly rather than
+        // through `moveTo`, whose first act is to cancel the flight — which
+        // here is this coroutine.
+        if (from == null) {
+            pendingMove = target to toZoom
+            moveTick++
+            return
+        }
+        val steps = 36
+        for (step in 1..steps) {
+            // Cancellation lands here: `withFrameMillis` is the flight's only
+            // suspension point, so a cancelled glide stops before it writes
+            // another frame's camera rather than at the end of the loop.
+            withFrameMillis { }
+            val eased = 1.0 - (1.0 - step.toDouble() / steps).pow(3)
+            pendingMove = CoordinateConversions.LatLon(
+                latitude = from.latitude + (target.latitude - from.latitude) * eased,
+                longitude = from.longitude + (target.longitude - from.longitude) * eased,
+            ) to (fromZoom + (toZoom - fromZoom) * eased)
+            moveTick++
+        }
+        flight = null
     }
 
     /// Pure projection of a coordinate into viewport pixels for the
@@ -231,6 +360,31 @@ class MapCameraState {
         return Offset(
             (lonToXNorm(p.longitude) * worldPx - originX).toFloat(),
             (latToYNorm(p.latitude) * worldPx - originY).toFloat(),
+        )
+    }
+
+    /// The exact inverse of `screenPoint` — where on the ground a point on
+    /// screen is. Null until the map has laid out and produced a camera.
+    ///
+    /// Needed by any host that lets the cruiser MOVE something with a
+    /// finger rather than just look at it (the boundary editor's corner and
+    /// edge handles). Derived from the same normalised-world maths as the
+    /// forward projection, so a coordinate round-trips through both
+    /// unchanged and a handle dragged one pixel moves one pixel's worth of
+    /// ground. Clamped to one world copy: a drag past the antimeridian or
+    /// into the Mercator pole cap has no sensible boundary meaning, and
+    /// wrapping silently would fling a corner to the far side of the planet.
+    /// iOS BasemapMapView.coordinate(at:camera:viewportSize:) is the same.
+    fun coordinateAt(point: Offset): CoordinateConversions.LatLon? {
+        val c = center ?: return null
+        val size = viewportSizePx
+        if (size.width <= 0 || size.height <= 0) return null
+        val worldPx = 256.0 * densityScale * 2.0.pow(zoom)
+        val xNorm = lonToXNorm(c.longitude) + (point.x - size.width / 2.0) / worldPx
+        val yNorm = latToYNorm(c.latitude) + (point.y - size.height / 2.0) / worldPx
+        return CoordinateConversions.LatLon(
+            latitude = yNormToLat(yNorm.coerceIn(0.0, 1.0)),
+            longitude = xNormToLon(xNorm.coerceIn(0.0, 1.0)),
         )
     }
 
@@ -282,6 +436,9 @@ fun MapView(
     /// Imported survey boundary — over the tile layers, UNDER everything
     /// the app itself draws (the plot, pins, guide, you-dot).
     boundary: List<MapBoundaryOverlay> = emptyList(),
+    /// Cruise areas — above the imported boundary, below the sampling plot,
+    /// and unlike the boundary they take taps (see `onOverlayTap`).
+    areas: List<MapAreaOverlay> = emptyList(),
     polylines: List<MapPolylineOverlay> = emptyList(),
     /// The cruiser's sampling plot at true ground scale — over the survey
     /// boundary and the stratum/guide overlays, UNDER the you-dot and the
@@ -291,13 +448,24 @@ fun MapView(
     attribution: String? = null,
     /// Tap within ~24 dp of a marker's screen point → its `id`.
     onMarkerTap: ((String) -> Unit)? = null,
-    /// Tap within ~24 dp of the PLOT's boundary ring → its `id`. The ring is
-    /// the target, not the whole disc: the plot's own pin owns the centre,
-    /// and a disc-wide target would swallow every tap meant to dismiss a
-    /// peek card.
-    onPlotTap: ((String) -> Unit)? = null,
+    /// A tap that missed every marker and landed on the PLOT's boundary
+    /// ring (within ~24 dp — the ring is the target, not the whole disc:
+    /// the plot's own pin owns the centre, and a disc-wide target would
+    /// swallow every tap meant to dismiss a peek card), inside an AREA, or
+    /// on both at once. Carries `(plotId, areaId)`.
+    ///
+    /// BOTH hits are reported, never just the topmost: an area and the
+    /// plots laid inside it overlap by construction, and the map cannot
+    /// know which one the cruiser meant on this particular tap — the host
+    /// can, because it knows what is selected right now. A tap that hit
+    /// neither goes to `onMapTap` instead. iOS `onOverlayTap`.
+    onOverlayTap: ((String?, String?) -> Unit)? = null,
     /// Tap that hit no marker — the map home uses it to dismiss the peek card.
     onMapTap: (() -> Unit)? = null,
+    /// Press-and-hold anywhere on the map, carrying the coordinate under the
+    /// finger. The host raises its own menu; the map has no opinion about
+    /// what a long press means. iOS BasemapMapView takes the same callback.
+    onMapLongPress: ((CoordinateConversions.LatLon) -> Unit)? = null,
     /// Pulsing blue "you are here" dot (mock `.youdot`).
     youLocation: CoordinateConversions.LatLon? = null,
     /// Observable camera for hosts that need visibleBounds() on demand.
@@ -309,7 +477,17 @@ fun MapView(
     val density = LocalDensity.current.density
     val scope = rememberCoroutineScope()
 
-    var camCenter by remember(center) { mutableStateOf(center) }
+    // A HOST `center` CHANGE IS A WRITER TOO. `remember(center)` re-keys and
+    // resets the camera without going through `moveTo`, so it used to be the
+    // one path that moved the camera without ending a glide: a Go-to-Plot
+    // flight running when the first GPS fix lands (MapHomeScreen's
+    // `mapCenter`) went on writing `pendingMove` and dragged the camera back
+    // off the recentre. iOS never had the hole because its guard is a
+    // divergence test that catches any writer, not a list of call sites.
+    var camCenter by remember(center) {
+        cameraState?.cancelFlight()
+        mutableStateOf(center)
+    }
     var camZoom by remember { mutableDoubleStateOf(initialZoom) }
 
     // Mirror the camera into the host-observable state + change callback
@@ -319,13 +497,13 @@ fun MapView(
         onCameraChange?.invoke(camCenter, camZoom)
     }
 
-    // Host-requested one-shot move (MapCameraState.moveTo — my-location
-    // button): same snap recentre as a `center` change, plus a zoom.
-    LaunchedEffect(cameraState?.pendingMove) {
+    // Host-requested move (MapCameraState.moveTo / flyTo): same recentre as
+    // a `center` change, plus a zoom. Keyed on the COUNTER so the same target
+    // can be requested twice and so a glide's per-frame writes all land.
+    LaunchedEffect(cameraState?.moveTick) {
         val move = cameraState?.pendingMove ?: return@LaunchedEffect
         camCenter = move.first
-        camZoom = move.second.coerceIn(3.0, 24.0)
-        cameraState.pendingMove = null
+        camZoom = move.second.coerceIn(MAP_ZOOM_MIN, MAP_ZOOM_MAX)
     }
 
     // Pulse phase for the "you" dot; only read during draw when a location
@@ -417,10 +595,18 @@ fun MapView(
                 }
                 .pointerInput(Unit) {
                     detectTransformGestures { _, pan, gestureZoom, _ ->
+                        // THE FINGER WINS. A glide in flight is writing this
+                        // same camera on the frame clock, so a pan during one
+                        // used to be undone frame by frame — the map dragging
+                        // itself back out from under the cruiser's thumb. The
+                        // gesture is a statement about where they want to
+                        // look, so it ENDS the flight rather than competing
+                        // with it.
+                        cameraState?.cancelFlight()
                         if (gestureZoom != 1f && gestureZoom > 0f) {
                             // 24, not the native tile max (19): past 19 the
                             // renderer overzooms so dense stands separate.
-                            camZoom = (camZoom + log2(gestureZoom.toDouble())).coerceIn(3.0, 24.0)
+                            camZoom = (camZoom + log2(gestureZoom.toDouble())).coerceIn(MAP_ZOOM_MIN, MAP_ZOOM_MAX)
                         }
                         if (pan != Offset.Zero) {
                             val worldPx = 256.0 * density * 2.0.pow(camZoom)
@@ -435,13 +621,36 @@ fun MapView(
                         }
                     }
                 }
-                .pointerInput(markers, plot, onMarkerTap, onPlotTap, onMapTap) {
+                .pointerInput(markers, plot, areas, onMarkerTap, onOverlayTap, onMapTap, onMapLongPress) {
                     detectTapGestures(
+                        // PRESS AND HOLD → the ground under the finger.
+                        // Compose's own long-press timing, so it agrees with
+                        // every other hold in the app; the projection is the
+                        // exact inverse of the draw pass below, evaluated
+                        // with the camera as of the press, so the pin the
+                        // host drops lands where the finger was.
+                        onLongPress = onLongPress@{ press ->
+                            val emit = onMapLongPress ?: return@onLongPress
+                            val worldPx = 256.0 * density * 2.0.pow(camZoom)
+                            val originX = lonToXNorm(camCenter.longitude) * worldPx - size.width / 2.0
+                            val originY = latToYNorm(camCenter.latitude) * worldPx - size.height / 2.0
+                            val xNorm = ((press.x + originX) / worldPx).mod(1.0)
+                            val yNorm = ((press.y + originY) / worldPx).coerceIn(0.0, 1.0)
+                            emit(
+                                CoordinateConversions.LatLon(
+                                    latitude = yNormToLat(yNorm),
+                                    longitude = xNormToLon(xNorm),
+                                ),
+                            )
+                        },
                         // iOS BasemapMapView doubleTapZoom: one level in,
                         // keeping the tapped point stationary.
                         onDoubleTap = { tap ->
+                            // Same rule as the pan above: a zoom the cruiser
+                            // asked for ends whatever glide was in flight.
+                            cameraState?.cancelFlight()
                             val oldZoom = camZoom
-                            val newZoom = (oldZoom + 1.0).coerceIn(3.0, 24.0)
+                            val newZoom = (oldZoom + 1.0).coerceIn(MAP_ZOOM_MIN, MAP_ZOOM_MAX)
                             if (newZoom != oldZoom) {
                                 val worldPx = 256.0 * density * 2.0.pow(oldZoom)
                                 val scale = 2.0.pow(newZoom - oldZoom)
@@ -460,7 +669,7 @@ fun MapView(
                         },
                         onTap = { tap ->
                             if (onMarkerTap == null && onMapTap == null &&
-                                onPlotTap == null
+                                onOverlayTap == null
                             ) {
                                 return@detectTapGestures
                             }
@@ -492,7 +701,7 @@ fun MapView(
                             // once the circle is bigger on screen than the
                             // hit band itself; below that it is a blob under
                             // its own pin and every tap would be a plot tap.
-                            val plotHit = if (hit == null && plot != null && onPlotTap != null) {
+                            val plotHit = if (hit == null && plot != null && onOverlayTap != null) {
                                 val pc = Offset(
                                     (lonToXNorm(plot.center.longitude) * worldPx - originX).toFloat(),
                                     (latToYNorm(plot.center.latitude) * worldPx - originY).toFloat(),
@@ -505,9 +714,28 @@ fun MapView(
                             } else {
                                 null
                             }
+                            // Which AREA a tap landed in — the SMALLEST one
+                            // by projected extent, so an area nested inside
+                            // a larger one is still reachable. Whole
+                            // interior rather than an outline band: an area
+                            // is selected by tapping the ground it covers,
+                            // which is how a cruiser points at it, and a
+                            // band would be unfindable on a stand the size
+                            // of the screen.
+                            val areaHit = if (hit == null && onOverlayTap != null) {
+                                areaHitTest(areas, tap) { p ->
+                                    Offset(
+                                        (lonToXNorm(p.longitude) * worldPx - originX).toFloat(),
+                                        (latToYNorm(p.latitude) * worldPx - originY).toFloat(),
+                                    )
+                                }
+                            } else {
+                                null
+                            }
                             when {
                                 hit != null && onMarkerTap != null -> onMarkerTap(hit)
-                                plotHit != null -> onPlotTap?.invoke(plotHit)
+                                plotHit != null || areaHit != null ->
+                                    onOverlayTap?.invoke(plotHit, areaHit)
                                 else -> onMapTap?.invoke()
                             }
                         },
@@ -619,6 +847,48 @@ fun MapView(
                         val pt = screenPoint(ring[0])
                         drawCircle(color = casing, radius = 5.dp.toPx(), center = pt)
                         drawCircle(color = boundaryTint, radius = 3.5.dp.toPx(), center = pt)
+                    }
+                }
+            }
+
+            // MARK: Cruise areas — between the imported boundary and the
+            // sampling plot, so an area drawn inside an imported stand
+            // reads as inside it and a plot laid inside an area reads as
+            // inside that. Selected areas draw LAST so a smaller area
+            // sitting inside a bigger one is never buried by the one the
+            // cruiser did not pick.
+            if (areas.isNotEmpty()) {
+                val areaTint = colors.cruiseAccent
+                val casing = Color.Black.copy(alpha = 0.45f)
+                for (area in areas.sortedBy { it.selected }) {
+                    val rings = area.rings.filter { it.size >= 3 }
+                    if (rings.isEmpty()) continue
+                    val path = Path()
+                    path.fillType = androidx.compose.ui.graphics.PathFillType.EvenOdd
+                    for (ring in rings) {
+                        ring.forEachIndexed { i, p ->
+                            val pt = screenPoint(p)
+                            if (i == 0) path.moveTo(pt.x, pt.y) else path.lineTo(pt.x, pt.y)
+                        }
+                        path.close()
+                    }
+                    val width = if (area.selected) 4.dp.toPx() else 2.5.dp.toPx()
+                    drawPath(
+                        path,
+                        color = areaTint.copy(alpha = if (area.selected) 0.22f else 0.14f),
+                    )
+                    drawPath(path, color = casing, style = Stroke(width = width + 2.5.dp.toPx()))
+                    drawPath(path, color = areaTint, style = Stroke(width = width))
+                    if (!area.selected || !area.drawsCorners) continue
+                    for (corner in rings[0]) {
+                        val pt = screenPoint(corner)
+                        drawCircle(color = areaTint, radius = 3.5.dp.toPx(), center = pt)
+                        drawCircle(
+                            color = colors.surface,
+                            radius = 3.5.dp.toPx(),
+                            center = pt,
+                            style = Stroke(width = 1.5.dp.toPx()),
+                        )
                     }
                 }
             }
@@ -964,6 +1234,56 @@ private fun DrawScope.drawBadgeRow(
 /// ground metres. Paired with the 1/cos(latitude) scale factor below it
 /// gives the plot TRUE GEOGRAPHIC SCALE at any zoom.
 private const val EARTH_CIRCUMFERENCE_M = 40_075_016.686
+
+/// Which area a tap landed in, or null. Smallest projected extent wins so a
+/// nested area is reachable; a tap in a HOLE is a tap on whatever is under
+/// the area, exactly as the even-odd fill draws it. iOS
+/// `BasemapMapView.areaHitTest`.
+private fun areaHitTest(
+    areas: List<MapAreaOverlay>,
+    tap: Offset,
+    project: (CoordinateConversions.LatLon) -> Offset,
+): String? {
+    var bestId: String? = null
+    var bestExtent = Float.MAX_VALUE
+    for (area in areas) {
+        val outer = area.rings.firstOrNull() ?: continue
+        if (outer.size < 3) continue
+        val projected = outer.map(project)
+        if (!pointInScreenRing(tap, projected)) continue
+        val inHole = area.rings.drop(1).any { hole ->
+            hole.size >= 3 && pointInScreenRing(tap, hole.map(project))
+        }
+        if (inHole) continue
+        val xs = projected.map { it.x }
+        val ys = projected.map { it.y }
+        val extent = (xs.max() - xs.min()) * (ys.max() - ys.min())
+        if (extent < bestExtent) {
+            bestExtent = extent
+            bestId = area.id
+        }
+    }
+    return bestId
+}
+
+/// Crossing-number point-in-polygon in viewport pixels. Screen space rather
+/// than lat/lon so the answer matches what was drawn.
+private fun pointInScreenRing(p: Offset, ring: List<Offset>): Boolean {
+    if (ring.size < 3) return false
+    var inside = false
+    var j = ring.size - 1
+    for (i in ring.indices) {
+        val a = ring[i]
+        val b = ring[j]
+        if ((a.y > p.y) != (b.y > p.y) &&
+            p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x
+        ) {
+            inside = !inside
+        }
+        j = i
+    }
+    return inside
+}
 
 /// Screen pixels per ground metre at `latitude` for a world `worldPx` wide.
 private fun pxPerMetreAt(latitude: Double, worldPx: Double): Float {

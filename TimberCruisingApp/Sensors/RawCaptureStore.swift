@@ -116,14 +116,21 @@ public struct RawCaptureManifest: Codable, Sendable {
         public var units: String            // "metric" | "imperial"
         public var captureMode: String      // "auto" | "manual"
         public var calibration: Calibration
+        /// Where the height sighting angle comes from: "camera_pose", the
+        /// elevation of the AR camera's forward axis, on both platforms.
+        /// Optional so bundles written before the field existed still decode.
+        public var heightAngleSource: String?
         enum CodingKeys: String, CodingKey {
             case algorithm, units
             case captureMode = "capture_mode"
             case calibration
+            case heightAngleSource = "height_angle_source"
         }
-        public init(algorithm: String, units: String, captureMode: String, calibration: Calibration) {
+        public init(algorithm: String, units: String, captureMode: String, calibration: Calibration,
+                    heightAngleSource: String? = "camera_pose") {
             self.algorithm = algorithm; self.units = units
             self.captureMode = captureMode; self.calibration = calibration
+            self.heightAngleSource = heightAngleSource
         }
     }
 
@@ -132,14 +139,35 @@ public struct RawCaptureManifest: Codable, Sendable {
         public var beta: Double
         public var depthNoiseMm: Double
         public var vioDriftFraction: Double
+        /// WHICH ESTIMATOR alpha/beta were fitted against, carried so a replay
+        /// can put them back exactly as the capture had them.
+        ///
+        /// It was missing, and the omission silently disarmed the coefficients
+        /// on every replay: `ProjectCalibration.dbhCalibrationEpoch` defaults
+        /// to 0, 0 never equals a live epoch, so `appliedToRawCm` judged every
+        /// rebuilt calibration stale and returned the RAW diameter. For a
+        /// calibrated project that made `DBHEpochRecompute` write uncalibrated
+        /// widths back over calibrated ones — and the difference,
+        /// `alpha + (beta-1)·raw`, is about a percent, the same size as a
+        /// genuine epoch shift, so the review screen showed a plausible
+        /// correction and nothing marked it as a loss.
+        ///
+        /// OPTIONAL, defaulting to 0 on read. Bundles written before this key
+        /// existed keep exactly today's conservative behaviour — their
+        /// coefficients stay refused — rather than being retro-fitted with an
+        /// epoch nobody recorded.
+        public var dbhCalibrationEpoch: Int?
         enum CodingKeys: String, CodingKey {
             case alpha, beta
             case depthNoiseMm = "depth_noise_mm"
             case vioDriftFraction = "vio_drift_fraction"
+            case dbhCalibrationEpoch = "dbh_calibration_epoch"
         }
-        public init(alpha: Double, beta: Double, depthNoiseMm: Double, vioDriftFraction: Double) {
+        public init(alpha: Double, beta: Double, depthNoiseMm: Double,
+                    vioDriftFraction: Double, dbhCalibrationEpoch: Int? = nil) {
             self.alpha = alpha; self.beta = beta
             self.depthNoiseMm = depthNoiseMm; self.vioDriftFraction = vioDriftFraction
+            self.dbhCalibrationEpoch = dbhCalibrationEpoch
         }
     }
 
@@ -201,14 +229,55 @@ public struct RawCaptureManifest: Codable, Sendable {
     }
 
     public struct Truth: Codable, Sendable {
+        /// ALWAYS the app's metric base — cm for a diameter, m for a height.
         public var value: Double?
         public var enteredAt: String?
+        /// The unit the operator actually TYPED ("cm" | "in" | "m" | "ft").
+        /// Recorded rather than inferred at read time: `value` is normalised
+        /// on the way in, so without this the export cannot tell an imperial
+        /// entry from a metric one and has to guess. Nil on bundles written
+        /// before the unit was recorded and on bundles with no truth — a
+        /// reader must treat that as "not stated", not as metric.
+        public var truthUnit: String?
+        /// The number that WAS in `value` before `TruthUnitRepair` re-based it,
+        /// exactly as the cruiser typed it. Nil on every truth that has not
+        /// been repaired, which is nearly all of them.
+        ///
+        /// It is an audit crumb, not the idempotence mark — `truthUnit` is
+        /// that, because "no unit recorded" is the whole definition of an
+        /// affected truth. This is here so the cruiser can reconcile a repaired
+        /// bundle against their backup without needing the report file, and so
+        /// the digits they typed survive the correction rather than only the
+        /// product of it.
+        public var repairedFrom: Double?
         enum CodingKeys: String, CodingKey {
             case value
             case enteredAt = "entered_at"
+            case truthUnit = "truth_unit"
+            case repairedFrom = "repaired_from"
         }
-        public init(value: Double?, enteredAt: String?) {
+        public init(value: Double?, enteredAt: String?, truthUnit: String? = nil,
+                    repairedFrom: Double? = nil) {
             self.value = value; self.enteredAt = enteredAt
+            self.truthUnit = truthUnit
+            self.repairedFrom = repairedFrom
+        }
+
+        /// Explicit encoder. The SYNTHESIZED one emits `encodeIfPresent`, so a
+        /// nil field disappears from manifest.json entirely, while the Android
+        /// writer always writes `"truth_unit": null` (sensors/RawCaptureStore
+        /// .kt `truthJson`). A corpus reader keyed on the presence of the key
+        /// then sees a missing key on iOS bundles and a present-but-null key
+        /// on Android bundles for the IDENTICAL "no truth typed" state.
+        /// Writing all three keys unconditionally makes one document out of
+        /// the two platforms' manifests. Decoding stays synthesized, which
+        /// reads both shapes.
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(value, forKey: .value)
+            try c.encode(enteredAt, forKey: .enteredAt)
+            try c.encode(truthUnit, forKey: .truthUnit)
+            try c.encode(repairedFrom, forKey: .repairedFrom)
         }
     }
 
@@ -288,8 +357,24 @@ public struct RawCaptureManifest: Codable, Sendable {
             public var enabled: Bool
             public var left: Double
             public var right: Double
-            public init(enabled: Bool, left: Double, right: Double) {
+            /// Absent in historical bundles whose coordinate semantics vary.
+            public var coordinateSpace: String?
+            public var screenFractions: [Double]?
+            public var viewportSize: [Double]?
+            enum CodingKeys: String, CodingKey {
+                case enabled, left, right
+                case coordinateSpace = "coordinate_space"
+                case screenFractions = "screen_fractions"
+                case viewportSize = "viewport_size"
+            }
+            public init(enabled: Bool, left: Double, right: Double,
+                        coordinateSpace: String? = nil,
+                        screenFractions: [Double]? = nil,
+                        viewportSize: [Double]? = nil) {
                 self.enabled = enabled; self.left = left; self.right = right
+                self.coordinateSpace = coordinateSpace
+                self.screenFractions = screenFractions
+                self.viewportSize = viewportSize
             }
         }
     }
@@ -302,14 +387,25 @@ public struct RawCaptureManifest: Codable, Sendable {
         public var top: Aim
         public var dHM: Double
         public var poseSamples: [PoseSample]
+        /// VIO tracking dropped somewhere between anchoring the trunk and the
+        /// aims. A dropout moves the world frame the anchor sits in, so it
+        /// moves `d_h_m` — the entire scale of H — and the pose trail above
+        /// has a hole where it happened. Optional so bundles written before
+        /// this key still decode; nil there means UNRECORDED, not "clean".
+        /// Byte-identical key on Android (`tracking_dropped` in the height
+        /// block), and the same fact the research CSV column carries.
+        public var trackingDropped: Bool?
         enum CodingKeys: String, CodingKey {
             case anchor, base, top
             case dHM = "d_h_m"
             case poseSamples = "pose_samples"
+            case trackingDropped = "tracking_dropped"
         }
-        public init(anchor: Anchor, base: Aim, top: Aim, dHM: Double, poseSamples: [PoseSample]) {
+        public init(anchor: Anchor, base: Aim, top: Aim, dHM: Double,
+                    poseSamples: [PoseSample], trackingDropped: Bool? = nil) {
             self.anchor = anchor; self.base = base; self.top = top
             self.dHM = dHM; self.poseSamples = poseSamples
+            self.trackingDropped = trackingDropped
         }
 
         public struct Anchor: Codable, Sendable {
@@ -770,10 +866,17 @@ public enum RawCaptureStore {
     /// the async bundle write: an existing manifest is patched, otherwise the
     /// value is parked in a sidecar the recorder picks up. Callers MUST NOT
     /// clear their input field unless the returned outcome `isDurable`.
-    public static func applyTruth(id: String, value: Double) -> TruthOutcome {
+    ///
+    /// `value` is the metric base (cm / m); `unit` is what the operator typed,
+    /// and is stored beside it so the export never has to infer the scale.
+    public static func applyTruth(id: String,
+                                  value: Double,
+                                  unit: TruthInput.Unit) -> TruthOutcome {
         patchLock.lock()
         defer { patchLock.unlock() }
-        let truth = RawCaptureManifest.Truth(value: value, enteredAt: Self.isoNow())
+        let truth = RawCaptureManifest.Truth(value: value,
+                                             enteredAt: Self.isoNow(),
+                                             truthUnit: unit.rawValue)
         if var m = loadManifest(id: id) {
             // Carry over anything already parked (e.g. an Accept that beat the
             // recorder) so writing the manifest can't drop it.
@@ -798,6 +901,47 @@ public enum RawCaptureStore {
         }
     }
 
+    /// Re-base a stored truth that was typed in imperial and stored as if it
+    /// were the metric base — `TruthUnitRepair`'s write into a bundle.
+    ///
+    /// This is the ONE thing in the app that edits a manifest's truth without
+    /// the cruiser typing into that bundle. It is not an inference: it acts
+    /// only where the bundle ITSELF records no `truth_unit`, and it corrects
+    /// the scale of the field rather than replacing the observation. The digits
+    /// typed are kept in `repaired_from` and `entered_at` is NOT restamped —
+    /// when the cruiser measured the stem has not changed.
+    ///
+    /// RE-CHECKS UNDER THE LOCK. `before` must still be what is on disk and the
+    /// bundle must still record no unit, so a truth the console re-typed
+    /// between the plan and this write is left alone, and a second run of the
+    /// repair finds a unit and does nothing. No sidecar path: a bundle with no
+    /// manifest has no stored truth to re-base, and parking a correction for a
+    /// value that does not exist yet would apply it to whatever the recorder
+    /// writes next.
+    public static func repairTruthUnit(id: String,
+                                       before: Double,
+                                       after: Double,
+                                       unit: TruthInput.Unit) -> Bool {
+        patchLock.lock()
+        defer { patchLock.unlock() }
+        guard var m = loadManifest(id: id),
+              m.truth.truthUnit == nil,
+              let stored = m.truth.value,
+              abs(stored - before) <= truthValueEpsilon
+        else { return false }
+        m.truth = RawCaptureManifest.Truth(value: after,
+                                           enteredAt: m.truth.enteredAt,
+                                           truthUnit: unit.rawValue,
+                                           repairedFrom: stored)
+        do { try writeManifest(m, id: id); return true } catch { return false }
+    }
+
+    /// Two truth values are the SAME value inside this band — the same number
+    /// and the same reasoning as `TruthBackfill.valueEpsilon`: every writer
+    /// puts the metric base through one parser, so the only difference between
+    /// two copies of a truth is float round-trip.
+    static let truthValueEpsilon: Double = 0.001
+
     /// Clear a stored truth. EXPLICIT ONLY — an empty or unparseable input
     /// must never reach this (that is how a good truth got wiped).
     @discardableResult
@@ -809,7 +953,7 @@ public enum RawCaptureStore {
             try? savePendingPatch(patch, id: id)
         }
         guard var m = loadManifest(id: id) else { return .failed("bundle not found") }
-        m.truth = RawCaptureManifest.Truth(value: nil, enteredAt: nil)
+        m.truth = RawCaptureManifest.Truth(value: nil, enteredAt: nil, truthUnit: nil)
         do {
             try writeManifest(m, id: id)
             return .applied
@@ -955,11 +1099,29 @@ public enum RawCaptureStore {
         return machine.isEmpty ? "Apple" : machine
     }
 
+    /// What produced this bundle, in enough detail to partition the corpus.
+    ///
+    /// THIS USED TO BE THE MARKETING VERSION, and it never moved: every iOS
+    /// bundle in the validation corpus says "1.0 (2)" and every Android one
+    /// "1.0 (1)". A comment in `DBHEstimator` asserted that `app_commit` was
+    /// what separated two estimator eras. It was not, and the cost was real —
+    /// the bracket's middle-half depth trim shipped partway through a
+    /// 100-stem collection, moved every diameter, and stamped both eras
+    /// identically. Half that corpus cannot be attributed to the code that
+    /// produced it, and the only reason the study survived is that every
+    /// diameter was recomputed offline from the stored depth frames.
+    ///
+    /// So the estimator's OWN version leads, and it is a constant this file
+    /// controls rather than a build setting someone has to remember to bump:
+    /// any change to what the estimators compute changes
+    /// `DBHEstimator.estimatorEpoch`, and every bundle written afterwards
+    /// says so. The build string is kept after it, for the cases where the
+    /// estimator is innocent and the platform is not.
     static func appCommit() -> String {
         let info = Bundle.main.infoDictionary
         let short = info?["CFBundleShortVersionString"] as? String ?? "?"
         let build = info?["CFBundleVersion"] as? String ?? "?"
-        return "\(short) (\(build))"
+        return "est\(DBHEstimator.estimatorEpoch)/\(short) (\(build))"
     }
 
     // MARK: - Byte (de)serialization of an f32 depth buffer
@@ -1011,7 +1173,8 @@ public enum RawCaptureFrame {
             confidence: conf,
             intrinsics: frame.intrinsics,
             cameraPoseWorld: frame.cameraPoseWorld,
-            timestamp: frame.timestamp)
+            timestamp: frame.timestamp,
+            viewMapping: frame.viewMapping)
     }
 
     /// Reconstruct a canonical frame from stored depth bytes + metadata.
@@ -1019,6 +1182,9 @@ public enum RawCaptureFrame {
                                    depth: [Float]) -> ARDepthFrame {
         var conf = [UInt8](repeating: 0, count: depth.count)
         for i in 0..<depth.count where validDepth(depth[i]) { conf[i] = 2 }
+        let m = meta.viewToDepth
+        let mapping: DepthViewMapping? = m.count == 6 && m.allSatisfy({ $0.isFinite })
+            ? .init(a: m[0], b: m[1], tx: m[2], c: m[3], d: m[4], ty: m[5]) : nil
         return ARDepthFrame(
             width: meta.width,
             height: meta.height,
@@ -1027,7 +1193,8 @@ public enum RawCaptureFrame {
             intrinsics: RawCaptureMatrix.intrinsics(fx: meta.fx, fy: meta.fy,
                                                     cx: meta.cx, cy: meta.cy),
             cameraPoseWorld: RawCaptureMatrix.pose(meta.cameraPose),
-            timestamp: 0)
+            timestamp: 0,
+            viewMapping: mapping)
     }
 }
 

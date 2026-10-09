@@ -17,6 +17,7 @@
 // may assume the reader knows what a regression coefficient is.
 
 import SwiftUI
+import Common
 import Models
 import Sensors
 import Persistence
@@ -36,7 +37,33 @@ public struct CalibrationScreen: View {
     /// snapshot tests with no environment at all, and a missing
     /// `@EnvironmentObject` is a crash, not a fallback.
     @AppStorage(AppSettings.Keys.developerMode)
-    private var developerMode: Bool = false
+    private var developerModeStored: Bool = false
+    @AppStorage(AppSettings.Keys.developerModeUnlocked)
+    private var developerModeUnlocked: Bool = false
+    private var developerMode: Bool {
+        DeveloperModeUnlock.isEnabled(savedEnabled: developerModeStored,
+                                      gestureUnlocked: developerModeUnlocked)
+    }
+
+    /// The unit system the round-post boxes are labelled, read and fitted in.
+    /// Read from the key for the same reason `developerMode` is: this screen
+    /// is built with no environment at all by a NavigationLink and by the
+    /// snapshot tests, and a missing `@EnvironmentObject` is a crash.
+    @AppStorage(AppSettings.Keys.unitSystem)
+    private var unitSystemRaw: String = UnitSystem.imperial.rawValue
+
+    private var unitSystem: UnitSystem {
+        UnitSystem(rawValue: unitSystemRaw) ?? .imperial
+    }
+
+    /// The unit a round-post width is TYPED in. Both boxes and both read-back
+    /// columns carry it, and `addCylinderSample(unit:)` converts with it —
+    /// the fitted offset α is added in CENTIMETRES to every diameter this
+    /// phone measures, so a fit taken on inch-scale numbers biases the whole
+    /// project and nothing downstream says so.
+    private var postUnit: TruthInput.Unit {
+        TruthInput.defaultUnit(.diameter, imperial: unitSystem == .imperial)
+    }
 
     /// Optional — when set, the "Apply" buttons persist back into Core
     /// Data via this repository. `@State` so the projectStatusSection
@@ -120,10 +147,31 @@ public struct CalibrationScreen: View {
             ) {
                 // Identity correction (α = 0, β = 1) is exactly the untouched /
                 // "standard settings" state — see sensibleDefaultsApplied.
-                Text(p.dbhCorrectionAlpha != 0 || p.dbhCorrectionBeta != 1
+                //
+                // THREE STATES, not two. A round-post scan corrects for
+                // whatever the width estimator got wrong on the day it was
+                // fitted, so when that estimator changes the correction is
+                // answering a question that no longer exists and is no longer
+                // applied. Saying "corrected" there would be a plain lie, and
+                // saying "not corrected" would hide a scan the cruiser
+                // remembers doing — so the stale case gets its own sentence
+                // and asks for the one action that fixes it.
+                //
+                // Through `DBHCalibration.state` rather than re-derived here.
+                // This screen's copy of the test was the correct one and the
+                // PDF's was not, which is the whole argument for there being
+                // one copy.
+                let stale = DBHCalibration.state(of: p) == .ignoredStale
+                let calibrated = DBHCalibration.state(of: p) != .none
+                Text(stale
+                     ? "Your round-post scan was made with an earlier version of the width measurement and no longer applies, so it is being ignored. Run the round-post scan again to correct widths on this project."
+                     : calibrated
                      ? "Widths are being corrected using your round-post scan."
                      : "Widths are being used exactly as the phone measures them — no round-post scan has been applied yet.")
                     .fixedSize(horizontal: false, vertical: true)
+                    .foregroundStyle(stale ? ForestixPalette.confidenceWarn
+                                           : ForestixPalette.textPrimary)
+                    .accessibilityIdentifier("calibration.widthStatus")
                 if developerMode {
                     HStack {
                         Text("Depth reading spread")
@@ -219,7 +267,13 @@ public struct CalibrationScreen: View {
         // with the phone — a cruiser standing in front of a wall had no
         // way to tell why the app wanted this.
         Section(header: Text("Wall scan"),
-                footer: Text("Shows the app how steady this phone's distance readings are. Point it at a flat wall 1–2 m away and hold still until the bar fills.")) {
+                // The standing distance follows the cruiser's units like every
+                // other instruction on the scan screens; the range itself is
+                // the depth camera's and does not move.
+                footer: Text("Shows the app how steady this phone's distance readings are. Point it at a flat wall "
+                             + MeasurementFormatter.guidanceRange(
+                                 fromM: 1, toM: 2, in: unitSystem)
+                             + " away and hold still until the bar fills.")) {
             switch viewModel.wall {
             case .idle:
                 Text("No wall scan yet.")
@@ -283,17 +337,19 @@ public struct CalibrationScreen: View {
         Section(header: Text("Round-post scan"),
                 footer: Text("Corrects the widths this phone measures. Scan round posts you have already measured by hand, then enter both widths for each one — the app works out how far the scan runs wide or narrow and takes it off every tree.")) {
             HStack {
-                TextField("Scanned (cm)", text: $viewModel.newMeasuredCm)
+                TextField("Scanned (\(postUnit.rawValue))",
+                          text: $viewModel.newMeasuredText)
                     #if os(iOS)
                     .keyboardType(.decimalPad)
                     #endif
                     .accessibilityIdentifier("calibration.cylinder.measured")
-                TextField("By hand (cm)", text: $viewModel.newTrueCm)
+                TextField("By hand (\(postUnit.rawValue))",
+                          text: $viewModel.newTrueText)
                     #if os(iOS)
                     .keyboardType(.decimalPad)
                     #endif
                     .accessibilityIdentifier("calibration.cylinder.true")
-                Button("Add") { viewModel.addCylinderSample() }
+                Button("Add") { viewModel.addCylinderSample(unit: postUnit) }
                     .buttonStyle(.forestixProminent)
             }
 
@@ -313,9 +369,16 @@ public struct CalibrationScreen: View {
                 // a cruiser needs is how close the CORRECTED width now lands
                 // to the hand measurement, in centimetres. Display only: the
                 // fit, its thresholds and what gets stored are untouched.
+                // Stated in the unit the posts were measured in — this is the
+                // one number that tells a cruiser how good the correction is,
+                // and it is useless in a unit they did not type.
                 Text("Correction worked out from \(s.count) posts. Corrected widths "
                      + "land within "
-                     + String(format: "%.1f cm", meanAbsResidualCm(result: r, samples: s))
+                     + String(format: "%.1f %@",
+                              TruthInput.fromBase(
+                                  meanAbsResidualCm(result: r, samples: s),
+                                  unit: postUnit),
+                              postUnit.rawValue)
                      + " of your hand measurements on average.")
                     .fixedSize(horizontal: false, vertical: true)
                 if developerMode {
@@ -365,10 +428,14 @@ public struct CalibrationScreen: View {
         ForEach(Array(samples.enumerated()), id: \.offset) { _, s in
             // "raw" / "true" are the fit's names for the two columns; the
             // cruiser typed a scanned diameter and a hand measurement.
+            // Read back in the unit they were typed in — a post entered as
+            // 12 in must not reappear as "30.5 cm" on the same screen.
             HStack {
-                Text("scanned \(String(format: "%.1f", s.dbhMeasuredCm)) cm")
+                Text("scanned "
+                     + MeasurementFormatter.diameter(cm: s.dbhMeasuredCm, in: unitSystem))
                 Spacer()
-                Text("by hand \(String(format: "%.1f", s.dbhTrueCm)) cm")
+                Text("by hand "
+                     + MeasurementFormatter.diameter(cm: s.dbhTrueCm, in: unitSystem))
             }
             .font(.caption.monospacedDigit())
         }

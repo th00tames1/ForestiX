@@ -3,7 +3,7 @@
 // Expansion factor (EF):
 //   - fixed-area:     EF = 1 / plot_area_acres  (trees per acre per tree)
 //   - variable-radius (BAF): per-tree EF = BAF / BA_tree   (trees per acre
-//     per "in" tree).
+//     per "in" tree), with BAF and BA_tree BOTH in square feet.
 //
 // These functions are shared between the live plot-tally display and the
 // stand aggregation pipeline.
@@ -22,9 +22,15 @@ public enum ExpansionFactors {
 
     /// §7.6 BAF expansion factor for a single tree: trees/acre per "in" tree.
     /// EF_i = BAF / BA_i.
+    ///
+    /// BOTH SIDES IN SQUARE FEET. `baf` is ft²/ac — see the unit note at the
+    /// top of `BasalAreaMath.swift` — so the tree's area comes from
+    /// `basalAreaFt2`, not the metric `basalAreaM2` this used to divide by.
+    /// The ratio of the two is 10.76, and it lands on every TPA, basal area
+    /// and volume a prism plot reports.
     public static func variableRadius(baf: Float, dbhCm: Float) -> Float {
         precondition(baf > 0, "baf must be > 0")
-        let ba = basalAreaM2(dbhCm: dbhCm)
+        let ba = basalAreaFt2(dbhCm: dbhCm)
         precondition(ba > 0, "DBH must be > 0")
         return baf / ba
     }

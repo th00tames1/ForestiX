@@ -3,6 +3,7 @@
 // OffsetFlowViewModel / Positioning.
 
 import SwiftUI
+import Common
 import Models
 import Positioning
 
@@ -10,6 +11,18 @@ public struct OffsetFlowScreen: View {
 
     @StateObject private var viewModel: OffsetFlowViewModel
     public var onDone: (PlotCenterResult) -> Void = { _ in }
+
+    /// Read from the key rather than through an injected `AppSettings` — this
+    /// screen is pushed from `RecordCentreSheet`, which carries none, and an
+    /// `@EnvironmentObject` that is not there is a crash, not a fallback. Both
+    /// distances on this screen are ones the cruiser WALKS, so both follow
+    /// their Units setting.
+    @AppStorage(AppSettings.Keys.unitSystem)
+    private var unitSystemRaw: String = UnitSystem.imperial.rawValue
+
+    private var unitSystem: UnitSystem {
+        AppSettings.unitSystem(fromRaw: unitSystemRaw)
+    }
 
     public init(
         viewModel: @autoclosure @escaping () -> OffsetFlowViewModel,
@@ -90,8 +103,10 @@ public struct OffsetFlowScreen: View {
             }
         case .walkBack(let d):
             VStack {
-                Text(d.map { String(format: "%.1f m from plot", $0) }
-                     ?? "Finding your position…")
+                Text(d.map {
+                        MeasurementFormatter.distance(m: Double($0), in: unitSystem)
+                            + " from plot"
+                     } ?? "Finding your position…")
                     .font(.title3.monospacedDigit())
             }
         case .computed(let r):
@@ -104,7 +119,8 @@ public struct OffsetFlowScreen: View {
                 Text(String(format: "%.6f, %.6f", r.lat, r.lon))
                     .font(.title3.monospacedDigit())
                 if let w = r.offsetWalkM {
-                    Text(String(format: "Walk %.1f m", w))
+                    Text("Walk " + MeasurementFormatter.distance(m: Double(w),
+                                                                 in: unitSystem))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

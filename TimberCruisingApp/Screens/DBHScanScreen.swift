@@ -56,6 +56,14 @@ public struct DBHScanScreen: View {
         /// "manual" when the reading was captured in ADJUST (edge-
         /// bracket) mode, "auto" otherwise. Recorded with the entry.
         public var captureMode: String?
+        /// The tape diameter typed on THIS screen for THIS capture, already
+        /// converted to the metric base (cm). It goes onto the reading, not
+        /// only into the raw-capture manifest: the manifest is developer
+        /// plumbing that can be pruned, while the truth column the accuracy
+        /// study reads is exported from the reading. nil when nothing usable
+        /// was typed — never a zero, which would read as a tape that
+        /// measured nothing.
+        public var truth: Double?
         public init(speciesCode: String? = nil,
                     position: QuickMeasureEntry.StemPosition? = nil,
                     damageCodes: [String] = [],
@@ -63,7 +71,8 @@ public struct DBHScanScreen: View {
                     photoPath: String? = nil,
                     latitude: Double? = nil,
                     longitude: Double? = nil,
-                    captureMode: String? = nil) {
+                    captureMode: String? = nil,
+                    truth: Double? = nil) {
             self.speciesCode = speciesCode
             self.position = position
             self.damageCodes = damageCodes
@@ -72,34 +81,109 @@ public struct DBHScanScreen: View {
             self.latitude = latitude
             self.longitude = longitude
             self.captureMode = captureMode
+            self.truth = truth
         }
     }
 
     @State private var metaSpecies: String?
-    @State private var metaPosition: QuickMeasureEntry.StemPosition? = .dbh
     @State private var metaDamage: [String] = []
     @State private var metaNote: String = ""
     @State private var presentingMetadata = false
-    /// True while the Accept-time window snapshot is being taken — hides
-    /// every piece of 2D chrome so the captured JPEG shows only the AR
+    /// True while the measurement-moment window snapshot is being taken —
+    /// hides every piece of 2D chrome so the captured JPEG shows only the AR
     /// feed and the measurement overlays (crosshair, chord, markers).
     @State private var hidingChromeForCapture = false
-    /// Whether the bracket has already been armed from an auto fit during
-    /// this appearance. Stops the arming from fighting a cruiser who taps
-    /// Auto — one arm per visit, then the pill decides.
-    @State private var adjustArmedThisAppearance = false
+    /// The JPEG taken THE INSTANT THE BURST FINISHED, held here until Accept
+    /// attaches it to the reading.
+    ///
+    /// FIELD REPORT: the shutter used to sit in the Accept handler, and by
+    /// the time the cruiser has read the panel and decided, the phone is down
+    /// at their side — every stored photo was leaf litter and boots. The
+    /// frame worth keeping is the one where the bracket is still on the stem,
+    /// so it is taken at `resultGeneration` (see `captureHeldPhoto`) and
+    /// parked here. Nothing about the stored measurement changes: this is
+    /// still the value that goes into `ScanMetadata.photoPath` at Accept.
+    ///
+    /// It is a FILE, so every path that abandons it has to delete it:
+    /// `discardHeldPhoto()` on retake / a superseding capture / leaving the
+    /// screen. It is released (not deleted) only once a reading has taken
+    /// ownership of it.
+    @State private var heldPhoto: String?
+    /// True between `onDisappear` and the next `onAppear`. Read by
+    /// `captureHeldPhoto` only: its 80 ms settle is an unstructured task that
+    /// outlives the screen, and a shot taken after the screen is gone is both
+    /// the wrong picture and an undeletable file.
+    @State private var hasLeftScreen = false
+    /// True once this screen has produced a fit — the switch that turns the
+    /// scene-reconstruction wireframe off. See `showsScanMesh`.
+    @State private var hasProducedFit = false
 
     /// Bridge that turns SwiftUI screen taps into world-space rays / hits
     /// against the live ARView; also the source of the camera pitch logged
     /// with every research row.
     @StateObject private var raycaster = ARCenterRaycaster()
 
-    /// Developer-mode research capture: tape-measured true diameter (cm)
-    /// typed before Accept; logged with the scan context to the research
-    /// CSV so error can be analysed against distance / aim angle.
+    /// BREAST-HEIGHT GUIDE (developer mode + Settings toggle) — the
+    /// drawn answer to "how do you know that was read at breast height?".
+    /// Per-screen, because the base belongs to the tree in front of the
+    /// camera. It never touches `viewModel`, the stage machine or the
+    /// shutter; the capture path below is identical with it on or off.
+    /// Live camera tilt, driving the horizon line. @State and polled rather
+    /// than read straight off the raycaster at draw time: `cameraPitchDeg` is
+    /// a plain computed property, so nothing would ever tell SwiftUI to
+    /// redraw and the line would sit still however the phone moved.
+    ///
+    /// 20 Hz — the rate the breast-height label is already projected at, and
+    /// fast enough that the line reads as attached to the world rather than
+    /// as catching up with it. Each tick is one 4x4 matrix read.
+    @State private var cameraPitchDeg: Double?
+    /// The last pitch that came from a real pose, so the horizon can hold
+    /// where it was rather than sliding to level when tracking drops.
+    @State private var lastKnownPitchDeg: Double?
+
+    @StateObject private var bhGuide = BreastHeightGuide()
+    /// Projected height in AR-VIEW coordinates. nil whenever the height
+    /// point is behind the camera or nothing is anchored.
+    @State private var bhLabelPoint: CGPoint?
+    @State private var bhPlacementFailed = false
+    @State private var displayedAutoMessage: String?
+    @State private var autoSafetyNotice: String?
+    @State private var deviceIsHot = false
+
+    /// "Pin centre" offer, waved off for this visit. Not persisted: the
+    /// offer is an offer, and a cruiser who is measuring from outside the
+    /// plot (or simply does not want the ring) should not be nagged for a
+    /// whole tally. Re-entering the screen asks once more, which is right —
+    /// by then they may be standing at the centre.
+    @State private var pinOfferDismissed = false
+    /// Why the last "Pin centre" tap planted nothing. Shown on the card.
+    @State private var pinCentreFailure: String?
+
+    /// Developer-mode research capture: the tape-measured true diameter AS
+    /// TYPED, logged with the scan context to the research CSV so error can be
+    /// analysed against distance / aim angle. The unit is `activeTruthUnit`
+    /// below, never assumed — the field used to be named (and read) as
+    /// centimetres whatever the cruiser was working in.
     /// NEVER cleared until the value is durably on the bundle (or there is
     /// no bundle to attach it to) — see `applyTypedTruth`.
-    @State private var researchTrueCm: String = ""
+    @State private var researchTrueText: String = ""
+    /// The cruiser's per-entry unit choice, remembered with the unit system it
+    /// was made under. Nil means "no choice yet", which falls back to the
+    /// ACTIVE system — an imperial operator gets inches, not a centimetre
+    /// field they type inches into. The choice sticks for the rest of this
+    /// screen session (a plot is not walked switching units tree by tree) and
+    /// is dropped if the project's unit system changes underneath it.
+    @State private var truthUnitChoice: (unit: TruthInput.Unit, imperial: Bool)?
+    /// The unit in force for the field right now: the per-entry choice, or the
+    /// active system's default until one is made.
+    private var activeTruthUnit: TruthInput.Unit {
+        let imperial = settings.unitSystem == .imperial
+        // A choice made under the OTHER system is discarded rather than
+        // carried across: switching the project to imperial must not leave
+        // the field sitting in centimetres.
+        if let choice = truthUnitChoice, choice.imperial == imperial { return choice.unit }
+        return TruthInput.defaultUnit(.diameter, imperial: imperial)
+    }
     /// Non-nil when the last Accept could NOT attach the typed truth. The
     /// text stays in the field so the value isn't lost.
     @State private var truthSaveFailure: String?
@@ -140,9 +224,16 @@ public struct DBHScanScreen: View {
     /// diameter loop: each Accept saves the tree via `onAccept`, then the
     /// screen RESETS to aiming for the next tree instead of dismissing.
     /// The value is the tree number currently being aimed at (the host
-    /// auto-increments it after every save) and drives the "Tree 8"
-    /// target pill. Quick-measure call sites pass nothing.
+    /// auto-increments it after every save) and, with `tallyTreeName`,
+    /// drives the "Tree #8" target pill. Quick-measure sites pass nothing.
     private let tallyTreeNumber: Int?
+    /// The name the host will save the next tallied tree under, when the
+    /// cruiser has a series running in this plot. nil keeps the pill on the
+    /// number alone — the zero-typing default.
+    private let tallyTreeName: String?
+    /// Tally pill tapped — the host opens its rename field. nil leaves the
+    /// pill inert, which is what every quick-measure call site wants.
+    private let onRenameTally: (() -> Void)?
     /// Undo tap on the tally toast — the host deletes the just-saved
     /// tree row (and its photo) and steps the auto number back.
     private let onUndoTally: (() -> Void)?
@@ -164,20 +255,31 @@ public struct DBHScanScreen: View {
     /// target when looping, else the host's quick-measure target.
     private var captureTreeNumber: Int? { tallyTreeNumber ?? quickTreeNumber }
 
+    /// What the tally chrome calls the tree being aimed at — the cruiser's
+    /// name for it when there is one, else "Tree #<target>". nil outside the
+    /// cruise loop, where there is no tally at all.
+    private var tallyTreeTitle: String? {
+        tallyTreeNumber.map { TreeLabel.title(name: tallyTreeName, number: $0) }
+    }
+
     /// Non-nil when the host could NOT store the accepted diameter. The
     /// result stays on screen with this reason instead of the loop resetting
     /// (and, in cruise, chaining into Height) as if the tree had been written.
     @State private var dbhSaveFailure: String?
 
-    /// Saved-tree toast state: number shown in "Tree 7 saved · Undo".
-    @State private var tallyToastNumber: Int?
+    /// Saved-tree toast state: what the just-saved tree was called, shown in
+    /// "Tree #7 saved · Undo". Held as the finished LABEL rather than a
+    /// number, because the host advances both the number and the name the
+    /// instant the save lands — by the time the toast renders, recomputing it
+    /// would name the NEXT tree instead of the one Undo would remove.
+    @State private var tallyToastLabel: String?
     /// Bumps on every toast show so the 3 s auto-hide task restarts.
     @State private var tallyToastGeneration = 0
 
     /// Signed metres from the camera to the active cruise plot BOUNDARY
     /// (|camera→centre| − radius; negative = inside). Polled from the
     /// plot's AR anchor at 0.2 s — the sampling screen's inside/outside
-    /// machinery. nil while no anchor for THIS plot is alive.
+    /// machinery. nil while this plot's centre is not being tracked.
     @State private var boundarySignedM: Double?
 
     public init(viewModel: @autoclosure @escaping () -> DBHScanViewModel,
@@ -185,15 +287,24 @@ public struct DBHScanScreen: View {
                 onAccept: @escaping (DBHResult, ScanMetadata) -> Bool = { _, _ in true },
                 cruisePlotInfo: PlotMiniMapInfo? = nil,
                 tallyTreeNumber: Int? = nil,
+                tallyTreeName: String? = nil,
+                onRenameTally: (() -> Void)? = nil,
                 onUndoTally: (() -> Void)? = nil,
                 projectID: String? = nil,
                 quickTreeNumber: Int? = nil,
+                initialSpeciesCode: String? = nil,
                 onEditPlot: (() -> Void)? = nil) {
         _viewModel = StateObject(wrappedValue: viewModel())
+        // Seeded from the measure chooser's species control when it was used,
+        // so the details chip already reads the species the cruiser picked at
+        // the tree instead of asking for it a second time.
+        _metaSpecies = State(initialValue: initialSpeciesCode)
         self.onResult = onResult
         self.onAccept = onAccept
         self.cruisePlotInfo = cruisePlotInfo
         self.tallyTreeNumber = tallyTreeNumber
+        self.tallyTreeName = tallyTreeName
+        self.onRenameTally = onRenameTally
         self.onUndoTally = onUndoTally
         self.projectID = projectID
         self.quickTreeNumber = quickTreeNumber
@@ -263,6 +374,27 @@ public struct DBHScanScreen: View {
         .accessibilityIdentifier("dbhScan.lidarRequired")
     }
 
+    /// Whether the LiDAR scene-reconstruction wireframe is drawn over the
+    /// camera feed right now.
+    ///
+    /// FIELD REPORT 9. `.showSceneUnderstanding` re-renders the WHOLE
+    /// accumulated reconstruction every display frame, and ARKit keeps
+    /// accumulating it for as long as the session lives — which here is the
+    /// whole plot, because the scan screens attach to a shared session with
+    /// no reset options so world anchors survive. That is the one cost on
+    /// this screen whose shape matches the report exactly: fine on the first
+    /// tree, heavy by the tenth, worst on the trees that take longest.
+    ///
+    /// It is not decoration and it is not being deleted — the cruiser asked
+    /// for it as the "it's actually scanning" feedback. But that question is
+    /// answered, permanently, by the first diameter this screen puts on the
+    /// glass. So the wireframe runs until the first fit and then gets out of
+    /// the way; a stall keeps it up, which is exactly when the cruiser is
+    /// asking whether the sensor sees anything at all. Reopening the screen
+    /// brings it back (in the cruise tally the screen is reused across
+    /// trees, and by then the answer is in hand).
+    private var showsScanMesh: Bool { !hasProducedFit }
+
     private var scanBody: some View {
         ZStack {
             // Live AR camera feed wired to the same ARSession the
@@ -272,18 +404,52 @@ public struct DBHScanScreen: View {
             // the live single-frame fit as a translucent blue cylinder
             // at the trunk's world position — world-anchored, so it
             // stays locked to the tree as the phone moves.
-            // Mesh overlay ON for DBH (field fix): the scene-reconstruction
-            // wireframe is the "it's actually scanning" feedback cruisers
-            // asked for. Height keeps it off. The subdued sampling-plot
-            // overlay (if a plot is active) renders under the cylinder.
+            // Mesh overlay: see `showsScanMesh` — the "it's actually
+            // scanning" feedback the cruiser asked for, until the first
+            // diameter answers the question for good. Height keeps it off
+            // entirely. The subdued sampling-plot overlay (if a plot is
+            // active) renders under the cylinder.
             ARCameraView(manager: viewModel.session,
-                         debugMeshOverlay: true,
-                         sceneMarkers: plotOverlayMarkers + cylinderMarkers,
+                         debugMeshOverlay: showsScanMesh,
+                         sceneMarkers: plotOverlayMarkers
+                             + bhGuideMarkers
+                             + (bhGroundPlacementActive ? [] : cylinderMarkers),
                          raycaster: raycaster)
                 .ignoresSafeArea()
 
+            // TAP THE GROUND AT THE FOOT OF THE TREE.
+            //
+            // A LAYER, not a gesture on the AR view. `.onTapGesture` on
+            // `ARCameraView` never fired: the AR view is the bottom child of
+            // this ZStack and the chrome `GeometryReader` directly above it is
+            // full-bleed with a hit-testable `Color.clear` at its root, so the
+            // touch was consumed before it ever reached the camera. The
+            // comment that used to sit here had it exactly backwards — being
+            // the bottom layer is the reason the tap died, not the reason it
+            // was safe. This sits ABOVE the AR view and BELOW every panel,
+            // banner and control, so it can only ever see a touch that nothing
+            // above it wanted, which is what "tap the ground" means.
+            //
+            // Only while the guide is armed, nothing is placed, and the screen
+            // is still AIMING — the same states the guide's own chrome is
+            // drawn in. Without the stage gate a tap on a frozen result frame
+            // would plant a world anchor in a scene the cruiser has stopped
+            // measuring.
+            if bhGuide.stage == .aiming, bhGuideChromeVisible {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .ignoresSafeArea()
+                    .onTapGesture { point in placeBreastHeightBase(at: point) }
+                    .accessibilityIdentifier("dbhScan.breastHeightTapLayer")
+            }
+
             GeometryReader { geo in
                 ZStack {
+                    if isAiming, !hidingChromeForCapture, !bhGroundPlacementActive,
+                       let mask = viewModel.liveStemMask {
+                        liveStemMaskLayer(mask, in: geo.size)
+                            .allowsHitTesting(false)
+                    }
                     // THE VIEWPORT THE BRACKET IS MEASURED AGAINST.
                     //
                     // Reported from here because this reader is
@@ -298,8 +464,30 @@ public struct DBHScanScreen: View {
                         .onChange(of: geo.size) { _, new in
                             viewModel.viewSize = new
                         }
-                    guideLine(height: geo.size.height)
-                    fitChord(in: geo.size)
+                        // IT MEASURES, IT DOES NOT TOUCH. A `Color` — clear
+                        // included — is hit-testable across its whole frame,
+                        // and this one is full-bleed, so it silently swallowed
+                        // every touch on the AR region. That is why the
+                        // breast-height ground tap did nothing. This sentinel
+                        // exists only to report `geo.size`; it has no gesture
+                        // and never wanted a touch.
+                        .allowsHitTesting(false)
+                    // THE ROW MARKER STAYS IN THE PHOTO. It marks where the
+                    // number came from, which is the whole evidentiary point.
+                    if !bhGroundPlacementActive {
+                        measuredRowLine(size: geo.size)
+                            .allowsHitTesting(false)
+                    }
+                    // THE HORIZON DOES NOT. It is tilt, not measurement, and
+                    // a tilt-dependent line baked into a stored image is a
+                    // line a reviewer will read as marking something.
+                    if !hidingChromeForCapture && !bhGroundPlacementActive {
+                        guideLine(size: geo.size)
+                            // Chrome. `chordBar` already opts out for the same
+                            // reason — a drawn line is not a control.
+                            .allowsHitTesting(false)
+                    }
+                    if !bhGroundPlacementActive { fitChord(in: geo.size) }
                     // Crosshair ring is now positioned by GeometryReader
                     // at exactly (centerX, midY) so the guide line
                     // passes through the centre of the ring, not above
@@ -312,16 +500,18 @@ public struct DBHScanScreen: View {
                     // readouts moved to the value strip above the
                     // bottom-centre shutter; only the capture-progress
                     // pill stays under the crosshair (locked).
-                    if !hidingChromeForCapture {
+                    if !hidingChromeForCapture && !bhGroundPlacementActive {
                         TiltBadge()
                             .position(x: geo.size.width / 2,
                                       y: geo.size.height / 2
                                            - Self.crosshairOuterRadius
                                            - 22)
                     }
-                    crosshairRing
-                        .position(x: geo.size.width / 2,
-                                  y: geo.size.height / 2)
+                    if !bhGroundPlacementActive {
+                        crosshairRing
+                            .position(x: geo.size.width / 2,
+                                      y: geo.size.height / 2)
+                    }
                     if !hidingChromeForCapture,
                        viewModel.state == .capturing {
                         captureProgressPill
@@ -329,6 +519,15 @@ public struct DBHScanScreen: View {
                                       y: geo.size.height / 2
                                            + Self.crosshairOuterRadius
                                            + 28)
+                    }
+                    if bhGuideChromeVisible, bhGuide.stage == .placed,
+                       !bhGuide.trackingLost, let point = bhLabelPoint {
+                        BreastHeightMarker(point: point, size: geo.size,
+                            stemLeft: adjustOverlayVisible
+                                ? geo.size.width * CGFloat(viewModel.edgeBracketLeftFraction) : nil,
+                            stemRight: adjustOverlayVisible
+                                ? geo.size.width * CGFloat(viewModel.edgeBracketRightFraction) : nil,
+                            label: bhGuide.label(in: settings.unitSystem))
                     }
                 }
                 .frame(width: geo.size.width, height: geo.size.height)
@@ -350,7 +549,7 @@ public struct DBHScanScreen: View {
             // ADJUST-mode edge handles. The handles are measurement chrome,
             // but they read as controls in a photo, so the Accept snapshot
             // hides them.
-            if adjustOverlayVisible && !hidingChromeForCapture {
+            if adjustOverlayVisible && !hidingChromeForCapture && !bhGroundPlacementActive {
                 GeometryReader { geo in
                     // Handles only. The rect they are fractions of is
                     // published by the chrome reader above, which exists in
@@ -376,7 +575,7 @@ public struct DBHScanScreen: View {
 
                 // Cruise tally target — small top-centre pill naming the
                 // tree the loop is aiming at, updating on every save.
-                if let target = tallyTreeNumber {
+                if let target = tallyTreeTitle {
                     VStack(spacing: 0) {
                         tallyTargetPill(target)
                             .padding(.top, 22)
@@ -392,12 +591,37 @@ public struct DBHScanScreen: View {
                     if let banner = viewModel.unsupportedBanner {
                         bannerView(banner, tint: .orange)
                     }
+                    // A "+" that refused says why. Same surface and the same
+                    // tap-to-clear as the height screen's anchor-failure
+                    // banner, because it is the same defect: a capture button
+                    // that does nothing is indistinguishable from a broken
+                    // one. It also clears itself once the tap would be
+                    // honoured, so it can't sit there after the cruiser has
+                    // acted on it.
+                    if let refusal = viewModel.captureRefusalReason {
+                        bannerView(refusal, tint: .orange,
+                                   identifier: "dbhScan.captureRefusalBanner")
+                            .onTapGesture { viewModel.clearCaptureRefusal() }
+                    }
                     // The accepted diameter did NOT reach a tree row. Loud,
                     // and the value stays on screen so Accept can be retried.
                     if let failure = dbhSaveFailure {
                         bannerView(failure,
                                    tint: ForestixPalette.confidenceBad,
                                    identifier: "dbhScan.saveFailureBanner")
+                    }
+                    // FIELD REPORT 14 × 17 — a plot is being tallied but no
+                    // AR anchor marks its centre, so there is no ring to
+                    // draw. Say that, and offer the one act that produces a
+                    // centre worth drawing. See `plotCentreNeedsPin`.
+                    if showsPinCentreOffer {
+                        PlotPinCentreCard(
+                            failure: pinCentreFailure,
+                            onPin: pinPlotCentre,
+                            onDismiss: {
+                                pinCentreFailure = nil
+                                pinOfferDismissed = true
+                            })
                     }
                 }
 
@@ -436,17 +660,18 @@ public struct DBHScanScreen: View {
                 // the live value strip directly above it. RESULT states
                 // drop the shutter and show the status/result panel
                 // exactly as before. The Developer-mode method picker and
-                // the ADJUST Auto pill float 12 pt above whichever block
-                // is present. The undo toast (cruise tally) floats above
+                // Set ground stays centred above it; Auto/Adjust always
+                // occupies the right-hand shutter flank. The undo toast floats above
                 // the bottom controls.
                 VStack(spacing: 12) {
                     Spacer()
-                    if let saved = tallyToastNumber {
+                    if let saved = tallyToastLabel {
                         tallyUndoToast(saved)
                     }
-                    if adjustOverlayVisible {
-                        autoPillButton
+                    if isAiming {
+                        autoMessageSlot
                     }
+                    if bhGuideChromeVisible { bhGuideButton }
                     if isAiming {
                         liveValueStrip
                         MeasureShutterRow(
@@ -456,10 +681,12 @@ public struct DBHScanScreen: View {
                                            caption: "Type") {
                                 viewModel.enterManualEntry()
                             },
-                            trailing: showsAdjustRailButton
-                                ? .init(systemImage: "arrow.left.and.right",
-                                        caption: "Adjust") { enterAdjustMode() }
-                                : nil)
+                            trailing: .init(
+                                systemImage: viewModel.edgeAdjustActive ? "sparkles" : "arrow.left.and.right",
+                                caption: viewModel.edgeAdjustActive ? "Auto" : "Adjust") {
+                                    if viewModel.edgeAdjustActive { viewModel.requestAutoAlignment() }
+                                    else { enterAdjustMode() }
+                                })
                     } else if showsResultPanel {
                         bottomPanel
                     }
@@ -490,69 +717,174 @@ public struct DBHScanScreen: View {
                 try? await Task.sleep(nanoseconds: 200_000_000)
             }
         }
+        // THE HORIZON'S FEED. Runs whatever the guide is doing — the line is
+        // drawn on every scan, not only when the breast-height guide is on.
+        .task {
+            while !Task.isCancelled {
+                cameraPitchDeg = raycaster.cameraPitchDeg
+                if let p = raycaster.cameraPitchDeg { lastKnownPitchDeg = p }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+        }
+        // FIELD REPORT 14 — the plot's tracked centre, refreshed off the
+        // body at the sampling screen's cadence. This is what draws the
+        // overlay here: the ring and pillar used to be pinned to the plot's
+        // ARAnchor, and on THIS screen the ARView is built over a session
+        // where that anchor already exists, so RealityKit never saw it
+        // arrive and had nothing to bind them to — the overlay simply never
+        // appeared. Reading the pose ourselves removes the ordering
+        // dependency, and it is the same rule Android runs (see
+        // ActiveSamplingPlot.refreshTrackedCentre). It also replaces the old
+        // anchor-liveness poll: one gate, not two.
+        .task(id: activePlot.plot?.anchorID) {
+            guard activePlot.plot != nil else { return }
+            while !Task.isCancelled {
+                activePlot.refreshTrackedCentre(using: viewModel.session)
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+        }
+        // BREAST-HEIGHT GUIDE — one 5 Hz poll, doing whichever of the two
+        // reads the current state needs: the aiming ghost's crosshair
+        // raycast, or the anchored base's pose. 5 Hz for a centre raycast is
+        // the cadence the sampling screen's ghost preview already runs at
+        // (see the caller list in `ARCenterRaycaster.meshRaycastHit`), and it
+        // runs ONLY while the guide is on — a cruiser with the toggle off
+        // pays nothing at all.
+        .task(id: bhGuide.stage) {
+            guard bhGuide.stage != .off else { return }
+            while !Task.isCancelled {
+                switch bhGuide.stage {
+                case .off:
+                    return
+                case .aiming:
+                    // The same source choice the "Pin centre" raycast makes.
+                    raycaster.preferLiDARMesh =
+                        settings.measurementSource == .lidar
+                    // THE GROUND POLICY HERE TOO. The ghost is the preview of
+                    // exactly what the button will place, so a ghost found by
+                    // the ungated raycast promises a base the gated one will
+                    // refuse — or worse, agrees with it and shows a base 30 m
+                    // away as if it were fine.
+                    bhGuide.updateGhost(raycaster.screenCenterGroundHit())
+                case .placed:
+                    bhGuide.refresh(using: viewModel.session)
+                }
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+        }
+        // The label's screen position, at 20 Hz so it tracks the phone
+        // instead of lagging behind it. This is NOT the cost field report 9
+        // is about: it is a 4×4 multiply through `ARView.project` and touches
+        // no reconstruction mesh. Keyed on the stage and not on the base
+        // point — each tick re-reads the live point anyway, so restarting the
+        // loop every time the anchor is corrected would buy nothing.
+        .task(id: bhGuide.stage) {
+            guard bhGuide.stage == .placed else {
+                bhLabelPoint = nil
+                return
+            }
+            while !Task.isCancelled {
+                bhLabelPoint = bhGuide.heightWorldPoint
+                    .flatMap { raycaster.projectToScreen($0) }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+        }
         // Tally toast auto-hide — 3 s per show; the generation id
         // restarts the clock when a new save replaces the toast.
         .task(id: tallyToastGeneration) {
-            guard tallyToastNumber != nil else { return }
+            guard tallyToastLabel != nil else { return }
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             if !Task.isCancelled {
                 withAnimation(.easeOut(duration: 0.18)) {
-                    tallyToastNumber = nil
+                    tallyToastLabel = nil
                 }
             }
         }
+        .task(id: viewModel.edgeAdjustActive) {
+            guard !viewModel.edgeAdjustActive else { return }
+            autoSafetyNotice = nil
+            let started = ProcessInfo.processInfo.systemUptime
+            while !Task.isCancelled {
+                if AutoSafetyPolicy.shouldReturnToAdjust(startedAt: started,
+                    now: ProcessInfo.processInfo.systemUptime, isAiming: isAiming) {
+                    enterAdjustMode()
+                    autoSafetyNotice = AutoSafetyPolicy.timeoutMessage
+                    return
+                }
+                do { try await Task.sleep(for: .milliseconds(250)) }
+                catch { return }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification)
+            .receive(on: RunLoop.main)) { _ in
+            refreshThermalWarning()
+        }
         .onAppear {
+            refreshThermalWarning()
+            hasLeftScreen = false
             // Phase 19 — pull the cruiser's chosen DBH method off
             // AppSettings every time the screen comes back into view
             // so flipping the picker in Settings takes effect on the
             // next return without leaving the scan screen.
             viewModel.dbhMeasurementMethod = settings.dbhMeasurementMethod
             viewModel.developerMode = settings.developerMode
-            // ADJUST IS NOT ARMED HERE. It waits for a fit — see
-            // `armAdjustOnFirstFit`.
+            viewModel.captureMode = settings.dbhCaptureMode
+            // ADJUST IS LIVE FROM THE FIRST FRAME when the cruiser's last
+            // choice was the bracket. No Auto interlude: they chose Adjust,
+            // so they get Adjust, at the width they were already using.
             //
-            // THIS BLOCK WAS THE BUG, and it survived three attempts to find
-            // it because it looks harmless. It opened the bracket at a fixed
-            // 0.25/0.75 of the SCREEN and handed those two numbers to
-            // `bracketChordFit`, which reads them as fractions of the DEPTH
-            // map's walk axis. Half of a 192-px axis is a 96-px span, and
-            // with the depth-scaled focal (~210) that is a diameter of
-            // roughly 59·z centimetres — 119 cm at two metres. The
-            // estimator's own sanity gate refuses anything over 100 cm, so
-            // every frame returned nil: no diameter, no chord, and a "+"
-            // that could not fire because capture requires a fit. Auto kept
-            // working because its only view-space input is the centre pixel.
+            // This is deliberately BEFORE `viewModel.onAppear()`, which is
+            // what subscribes to depth — so there is no window, not even one
+            // tick, in which the automatic edge-finder owns the screen and
+            // publishes a fit the bracket would then have to be re-seeded
+            // from. That flicker (a couple of seconds of Auto, then a
+            // bracket at whatever width the auto fit happened to find) is
+            // the report this fixes: "폭이 들쭉날쭉한 상태로 Adjust 모드가
+            // 실행".
             //
-            // Worse, arming here PRE-EMPTED the auto path: with the bracket
-            // already active on the first depth frame the auto branch never
-            // ran, so no fit ever existed for `enterAdjustMode` to seed
-            // from, and the Adjust rail button is hidden while the bracket
-            // is up. The one correct seeding path was unreachable.
-            adjustArmedThisAppearance = false
+            // THE HISTORY, because this exact line has been wrong twice in
+            // opposite directions. Arming on appear used to open the bracket
+            // at a hard-coded 0.25/0.75 — half the walk axis, ~96 px of 192,
+            // which against the depth-scaled focal is ≈ 59·z cm and so blew
+            // the 100 cm plausibility ceiling of the day at any realistic
+            // distance: no fit, no diameter, a dead "+". Two things make the
+            // same arming safe now. The ceiling is 300 cm. And the width is
+            // no longer a constant chosen for symmetry: it is the cruiser's
+            // own remembered half-span, or on a fresh install
+            // `AppSettings.defaultBracketHalfWidth`, which is derived from
+            // the field corpus and is about half the old number.
+            //
+            // NOT a preference write. Appearing is not a choice — only the
+            // Adjust rail button and the Auto pill move
+            // `settings.dbhEdgeAdjustDefault`.
+            // Both modes begin with the operator's target-tree guides.
+            seedBracketFromRememberedWidth()
+            viewModel.edgeAdjustActive = true
             configureRawCapture()
+            syncBreastHeightGuide()
+            // Start manually; Auto is enabled explicitly by its button.
+            viewModel.stopSegmentationFeed()
             viewModel.onAppear()
         }
-        // FIELD REPORT 4 asked the diameter scan to OPEN on the bracket.
-        // It does — just not before there is something to open it ON. The
-        // auto path runs first, and the moment it has a fit the bracket
-        // takes over seeded from that fit's own DEPTH-space edges, which is
-        // the seeding that round-trips exactly through `bracketChordFit` and
-        // the reason the pre-regression build measured a stand correctly.
-        // In practice that is the second or so the cruiser spends raising
-        // the phone, and it costs nothing: the handles arrive already on the
-        // trunk instead of at an arbitrary half-screen span.
-        .onChange(of: viewModel.previewFit?.stripRightFraction) { _, _ in
-            guard settings.dbhEdgeAdjustDefault,
-                  !adjustArmedThisAppearance,
-                  !viewModel.edgeAdjustActive,
-                  let fit = viewModel.previewFit,
-                  fit.stripRightFraction > fit.stripLeftFraction
-            else { return }
-            adjustArmedThisAppearance = true
-            enterAdjustMode()
+        // The wireframe's off-switch — see `showsScanMesh`. Latched, never
+        // released: it answers a question that only gets asked once.
+        .onChange(of: viewModel.previewFit != nil) { _, has in
+            if has, !hasProducedFit { hasProducedFit = true }
         }
         .onDisappear {
-            adjustArmedThisAppearance = false
+            hasLeftScreen = true
+            // Leaving without accepting: the held frame belongs to a
+            // measurement that was never stored, so the file goes with it.
+            // Anything already handed to a reading was released at Accept, so
+            // this can only ever delete an orphan.
+            discardHeldPhoto()
+            // The guide's anchor is the screen's, not the session's: leaving
+            // without dropping it would leave a base pinned in the shared
+            // world map with nobody holding its id.
+            bhGuide.disable(using: viewModel.session)
+            viewModel.stopSegmentationFeed()
+            bhPlacementFailed = false
+            bhLabelPoint = nil
             viewModel.onDisappear()
         }
         // CRUISE TALLY — the loop reuses this one screen and advances its
@@ -560,10 +892,17 @@ public struct DBHScanScreen: View {
         // the number (belt-and-braces with the rebuild at burst start).
         .onChange(of: captureTreeNumber) { _, _ in
             configureRawCapture()
+            // The tally loop advances the target without re-appearing, so a
+            // base placed at tree 7's foot would otherwise still be drawn
+            // while tree 8 is being measured — at 7's distance and 7's
+            // ground. The next tree gets its own base or none.
+            bhGuide.disable(using: viewModel.session)
+            bhPlacementFailed = false
+            bhLabelPoint = nil
         }
         // Editing the truth field retires any "couldn't save" state: the text
         // is now the cruiser's current intent for the capture on screen.
-        .onChange(of: researchTrueCm) { _, _ in
+        .onChange(of: researchTrueText) { _, _ in
             truthOwnerBundleID = nil
             truthSaveFailure = nil
             // The text is no longer the value that was queued.
@@ -579,7 +918,17 @@ public struct DBHScanScreen: View {
             configureRawCapture()
         }
         .onChange(of: settings.developerMode) { _, _ in
+            viewModel.developerMode = settings.developerMode
             configureRawCapture()
+        }
+        .onChange(of: settings.dbhCaptureMode) { _, mode in
+            viewModel.captureMode = mode
+        }
+        .onChange(of: settings.breastHeightGuideHeight) { _, _ in
+            syncBreastHeightGuide()
+        }
+        .onChange(of: bhGroundPlacementActive) { _, active in
+            viewModel.autoAlignmentPaused = active
         }
         .onChange(of: settings.dbhMeasurementMethod) { _, m in
             viewModel.dbhMeasurementMethod = m
@@ -592,6 +941,31 @@ public struct DBHScanScreen: View {
             if newValue != nil, let r = viewModel.result, r.confidence != .red {
                 onResult(r)
             }
+        }
+        // THE SHUTTER — fires the instant the 5-frame burst finalises and the
+        // diameter is computed, while the cruiser is still holding the bracket
+        // on the stem. NOT at Accept: see `heldPhoto`.
+        //
+        // `resultGeneration` is bumped once per `finalizeCapture()`, so this
+        // fires exactly once per burst. A failed save (`acceptFailed()`) drops
+        // back to `.fitted` WITHOUT producing a new result, so the retry keeps
+        // the frame this burst produced instead of photographing the ground.
+        .onChange(of: viewModel.resultGeneration) { _, _ in
+            // A red fit cannot be accepted (`accept()` refuses it), so no
+            // reading will ever carry this photo — don't write a file whose
+            // only future is deletion. Any frame held for the superseded
+            // measurement goes with it.
+            guard let tier = viewModel.result?.confidence, tier != .red else {
+                discardHeldPhoto()
+                return
+            }
+            // Raised HERE, in the same synchronous turn as the state change
+            // that puts the result panel on screen, so the panel is never
+            // composed un-blacked-out: the first frame SwiftUI commits after
+            // the burst is already chrome-less, and that is the frame the shot
+            // is taken from. `captureHeldPhoto` lowers it again.
+            hidingChromeForCapture = true
+            Task { @MainActor in await captureHeldPhoto() }
         }
         .onChange(of: viewModel.state) { _, newState in
             switch newState {
@@ -608,20 +982,16 @@ public struct DBHScanScreen: View {
             // only on an explicit user confirmation (Quick Measure) can
             // distinguish a fitted preview from a committed reading.
             if newState == .accepted, let r = viewModel.result {
-                // Auto-capture (map home): snapshot the AR view + the
-                // measurement overlays as evidence of what was measured,
-                // plus the latest GPS fix from the badge's running
-                // location service. The 2D chrome is hidden first — a
-                // short sleep lets SwiftUI commit the chrome-less frame —
-                // so the JPEG doesn't show buttons/panels that read as
-                // live controls in the photo viewer. The entry must get
-                // its photoPath before it is appended, hence the await
-                // before onAccept.
+                // Auto-capture (map home): the snapshot of the AR view + the
+                // measurement overlays was already taken, at the moment the
+                // burst landed (see `heldPhoto`) — Accept only attaches it,
+                // together with the latest GPS fix from the badge's running
+                // location service. A TYPED diameter has no such moment and
+                // carries no photo: the frame at Save is the keyboard panel
+                // and whatever the phone happened to be pointing at, which is
+                // evidence of nothing.
                 Task { @MainActor in
-                    hidingChromeForCapture = true
-                    try? await Task.sleep(for: .milliseconds(80))
-                    let photo = MeasurePhotoStore.captureWindow()
-                    hidingChromeForCapture = false
+                    let photo = heldPhoto
                     // FRESHNESS-GATED. `lastGlobalFix` is the newest fix ANY screen ever saw,
                     // with no age check, so a red GPS chip and a green one used to produce
                     // byte-identical records: a cruiser under heavy canopy stamped every tree in
@@ -632,7 +1002,13 @@ public struct DBHScanScreen: View {
                         LocationService.lastGlobalFix)
                     let meta = ScanMetadata(
                         speciesCode: metaSpecies,
-                        position: metaPosition,
+                        // Always breast height, and no longer a question the
+                        // cruiser is asked. The column stays on the record and
+                        // in every export; it is now stamped rather than
+                        // picked, which is what a diameter scan has always
+                        // actually done — the guide puts the phone at 1.37 m
+                        // and the chord identity assumes the reading is there.
+                        position: .dbh,
                         damageCodes: metaDamage,
                         note: metaNote,
                         photoPath: photo,
@@ -645,13 +1021,23 @@ public struct DBHScanScreen: View {
                         // bucket the algorithm comparison draws from.
                         captureMode: r.method == .manualVisual
                             ? "typed"
-                            : (viewModel.resultCapturedManually ? "manual" : "auto"))
+                            : viewModel.resultCaptureMode,
+                        // The tape value rides WITH the reading. Read before
+                        // `applyTypedTruth` runs, because that call clears the
+                        // field once the value is durable on the bundle.
+                        truth: typedTruthForThisMeasurement)
                     // The host reports whether the reading actually reached
                     // storage. A dropped diameter used to be indistinguishable
                     // from a saved one — the loop reset for the next tree
                     // either way, and in cruise the chain then opened Height
                     // against whatever tree `chainTreeID` still pointed at.
                     let stored = onAccept(r, meta)
+                    // The reading owns the file now — release it WITHOUT
+                    // deleting, so the cruise tally's `retake()` below and the
+                    // screen's own exit can't take the photo off a saved tree.
+                    // A failed store keeps it held: Accept can be tapped again
+                    // and the same measurement-moment frame goes with it.
+                    if stored { heldPhoto = nil }
                     // Raw-capture (developer mode): attach the tape-measured
                     // truth to the just-recorded bundle. The bundle id is
                     // minted synchronously at burst finalize, so this works
@@ -660,8 +1046,8 @@ public struct DBHScanScreen: View {
                     recordResearchRow(r)
                     applyTypedTruth()
                     guard stored else {
-                        dbhSaveFailure = tallyTreeNumber.map {
-                            "Diameter NOT saved as Tree \($0) — the tree row couldn't be written. Tap Accept again."
+                        dbhSaveFailure = tallyTreeTitle.map {
+                            "Diameter NOT saved as \($0) — the tree row couldn't be written. Tap Accept again."
                         } ?? "Diameter NOT saved — the tree row couldn't be written. Tap Accept again."
                         // Back to the result panel so the value is still on
                         // screen and Accept is tappable again. Nothing is
@@ -675,15 +1061,15 @@ public struct DBHScanScreen: View {
                     // and auto-incremented its target; reset this screen
                     // (scan + per-tree metadata) to aiming for the next
                     // trunk and offer Undo. (The struct copy that built
-                    // this task still carries the just-saved number.)
-                    if let saved = tallyTreeNumber {
+                    // this task still carries the just-saved tree's label —
+                    // the host has already advanced to the next one.)
+                    if let saved = tallyTreeTitle {
                         viewModel.retake()
                         metaSpecies = nil
-                        metaPosition = .dbh
                         metaDamage = []
                         metaNote = ""
                         withAnimation(.easeOut(duration: 0.18)) {
-                            tallyToastNumber = saved
+                            tallyToastLabel = saved
                         }
                         tallyToastGeneration += 1
                     }
@@ -692,9 +1078,7 @@ public struct DBHScanScreen: View {
         }
         .sheet(isPresented: $presentingMetadata) {
             ScanMetadataSheet(
-                kind: .diameter,
                 speciesCode: $metaSpecies,
-                position: $metaPosition,
                 damageCodes: $metaDamage,
                 note: $metaNote)
         }
@@ -799,7 +1183,7 @@ public struct DBHScanScreen: View {
             units: settings.unitSystem.rawValue)
         viewModel.rawCaptureGPS = Self.currentGPS()
         // Manual entry is typed in whatever the active unit system is.
-        viewModel.manualEntryUnits = settings.unitSystem
+        viewModel.unitSystem = settings.unitSystem
         storageLow = viewModel.rawCaptureEnabled && RawCaptureStore.isStorageLow()
     }
 
@@ -845,21 +1229,104 @@ public struct DBHScanScreen: View {
         return out
     }
 
-    private func guideLine(height: CGFloat) -> some View {
-        // Dual-stroke line for sun-glare readability: a thin dark halo
-        // under a bright white line. On either a bright sky or dark
-        // foliage background, at least one of the two strokes has
-        // enough contrast to stay visible.
+    /// Degrees of tilt per point of travel. 40 pt at 10° off level puts the
+    /// line clear of the ring's rim without it leaving the screen at the
+    /// angles a cruiser actually reaches while aiming at a trunk.
+    private static let guideLinePointsPerDegree: CGFloat = 4
+    /// How far it may travel. Past this the line has said all it can say —
+    /// "not level, and by a lot" — and a line pinned to the top of the frame
+    /// reads as broken rather than as informative.
+    private static let guideLineMaxTravel: CGFloat = 90
+    /// Inside this band the phone counts as level and the line goes green.
+    /// 1.5° at 1.5 m is 4 cm of height across the stem: below what the chord
+    /// median can resolve, so calling it level is not a rounding-down.
+    private static let guideLineLevelBandDeg: Double = 1.5
+
+    /// THE HORIZON, AND HOW FAR THE PHONE IS OFF IT.
+    ///
+    /// This line used to run the full width of the screen and never move —
+    /// the spec said so in as many words — because it marked the depth row
+    /// the estimator reads, which is the middle one. That is a true thing to
+    /// draw and a useless one to look at: it is in the same place whatever
+    /// the cruiser does, so it can never tell them they are aiming uphill.
+    ///
+    /// THE RING ALREADY MARKS THE MEASURED POINT. The crosshair sits at the
+    /// centre of the frame, which is where the centre row is, so nothing is
+    /// lost by giving this line the other job — and a stem read off a tilted
+    /// phone is read across a slanted chord, which is exactly the error the
+    /// cruiser could not see before.
+    ///
+    /// It is the RING'S WIDTH now, not the screen's: a horizon that runs edge
+    /// to edge reads as chrome, and one that fits the ring reads as part of
+    /// the instrument the cruiser is already looking through. Level and it
+    /// sits in the ring, dead centre, and turns green. Off level and it
+    /// climbs out — the direction it moves is the direction the phone is
+    /// pointing, so bringing it back to the middle is the correction.
+    /// THE ROW THE ESTIMATOR READS. Fixed at mid-screen, never moves.
+    ///
+    /// This is the original guide line, restored. It went away when the line
+    /// became an artificial horizon, and taking it away cost something real:
+    /// the depth row the estimator samples is the screen's centre row, and
+    /// with the only long line on screen now riding the phone's tilt there
+    /// was nothing marking it but the crosshair ring. Two jobs, two marks —
+    /// the quiet full-width line says WHERE THE NUMBER COMES FROM, and the
+    /// short bright one above it says HOW THE PHONE IS HELD.
+    ///
+    /// Deliberately the dimmer of the two. It is a reference, not a reading,
+    /// and the cruiser's eye should go to the horizon and the ring.
+    private func measuredRowLine(size: CGSize) -> some View {
         ZStack {
             Rectangle()
-                .fill(Color.black.opacity(0.55))
-                .frame(height: 3)
+                .fill(Color.black.opacity(0.4))
+                .frame(width: size.width, height: 2)
             Rectangle()
-                .fill(Color.white.opacity(0.9))
-                .frame(height: 1.5)
+                .fill(Color.white.opacity(0.45))
+                .frame(width: size.width, height: 1)
         }
-        .frame(height: 3)
-        .position(x: UIScreenWidth() / 2, y: height / 2)
+        .position(x: size.width / 2, y: size.height / 2)
+        .accessibilityIdentifier("dbhScan.measuredRowLine")
+    }
+
+    /// THE ARTIFICIAL HORIZON, riding the camera's pitch — overlaid on the
+    /// fixed row line, not replacing it.
+    ///
+    /// Twice the ring width so it reads as a different instrument from the full-width
+    /// row marker underneath, 4 pt per degree to a 90 pt stop, and green
+    /// inside 1.5° of level — which at 1.5 m is 4 cm across the stem, smaller
+    /// than the chord median can resolve, so calling that band level is not a
+    /// rounding-up.
+    ///
+    /// HOLDS THE LAST KNOWN PITCH when the pose is gone. Folding a nil to 0
+    /// does not hold a line still: it glides it to dead centre — the one row
+    /// that means level — at the moment the phone has no idea where it is
+    /// pointing. It dims and stays put instead, and only a real pose is ever
+    /// allowed to claim level.
+    private func guideLine(size: CGSize) -> some View {
+        let known = cameraPitchDeg != nil
+        let deg = cameraPitchDeg ?? lastKnownPitchDeg ?? 0
+        let travel = min(Self.guideLineMaxTravel,
+                         CGFloat(abs(deg)) * Self.guideLinePointsPerDegree)
+        // Aiming UP moves the horizon DOWN the screen, which is where the
+        // horizon actually goes when you raise a camera.
+        let offset = deg > 0 ? travel : -travel
+        let level = known && abs(deg) <= Self.guideLineLevelBandDeg
+        let width = Self.crosshairOuterRadius * 4
+        return ZStack {
+            // Dual-stroke line for sun-glare readability: a thin dark halo
+            // under a bright line. On either a bright sky or dark foliage
+            // background, at least one of the two strokes has enough
+            // contrast to stay visible.
+            Rectangle()
+                .fill(Color.black.opacity(0.55))
+                .frame(width: width, height: 3)
+            Rectangle()
+                .fill(level ? ForestixPalette.confidenceOk
+                            : Color.white.opacity(known ? 0.9 : 0.35))
+                .frame(width: width, height: 1.5)
+        }
+        .frame(width: width, height: 3)
+        .position(x: size.width / 2, y: size.height / 2 + offset)
+        .animation(.linear(duration: 0.08), value: offset)
         .accessibilityIdentifier("dbhScan.guideLine")
     }
 
@@ -882,7 +1349,20 @@ public struct DBHScanScreen: View {
     /// In ADJUST mode the chord bar tracks the handles exactly instead.
     @ViewBuilder
     private func fitChord(in size: CGSize) -> some View {
-        if viewModel.edgeAdjustActive {
+        if viewModel.segmentationDroveTheBracket, adjustOverlayVisible {
+            // THE MODEL'S BRACKET, drawn exactly like the cruiser's. It is
+            // the same two handles going into the same estimate, so drawing
+            // it some other way would suggest a second kind of measurement
+            // that does not exist. What tells them apart is the caption
+            // under the ring, not the geometry.
+            let lo = min(viewModel.edgeBracketLeftFraction,
+                         viewModel.edgeBracketRightFraction)
+            let hi = max(viewModel.edgeBracketLeftFraction,
+                         viewModel.edgeBracketRightFraction)
+            chordBar(x0: size.width * CGFloat(lo),
+                     x1: size.width * CGFloat(hi),
+                     in: size)
+        } else if viewModel.edgeAdjustActive {
             if adjustOverlayVisible {
                 let lo = min(viewModel.edgeBracketLeftFraction,
                              viewModel.edgeBracketRightFraction)
@@ -947,11 +1427,13 @@ public struct DBHScanScreen: View {
     /// Smallest allowed handle separation (fraction of view width).
     private static let adjustMinGapFraction: Double = 0.04
 
-    /// The bracket's half-width, read off the two published fractions.
+    /// The bracket's half-SPAN, read off the two published fractions.
     ///
     /// They stay the source of truth — the estimator and the chord overlay
-    /// both consume them — but since FIELD REPORT 4 they are always
-    /// symmetric about 0.5, so this one number describes the whole bracket.
+    /// both consume them, and each handle moves independently — so this is
+    /// not the whole bracket, only the part worth carrying to the next tree:
+    /// a re-opened bracket has nothing but the crosshair to centre on, and
+    /// the width is what the cruiser would otherwise re-drag.
     private var bracketHalfWidth: Double {
         (viewModel.edgeBracketRightFraction
             - viewModel.edgeBracketLeftFraction) / 2
@@ -969,7 +1451,8 @@ public struct DBHScanScreen: View {
     /// estimate runs (plus `.capturing`, so the frozen bracket stays
     /// visible through the burst).
     private var adjustOverlayVisible: Bool {
-        guard viewModel.edgeAdjustActive else { return false }
+        guard viewModel.edgeAdjustActive || (viewModel.segmentationDroveTheBracket && viewModel.segmentedExtent != nil)
+        else { return false }
         switch viewModel.state {
         case .idle, .aligning, .armed, .capturing, .rejected: return true
         default: return false
@@ -994,6 +1477,18 @@ public struct DBHScanScreen: View {
             .allowsHitTesting(false)
         adjustHandle(atX: xL, y: y, isLeft: true, viewWidth: size.width)
         adjustHandle(atX: xR, y: y, isLeft: false, viewWidth: size.width)
+    }
+
+    private func liveStemMaskLayer(_ mask: LiveStemMask, in size: CGSize) -> some View {
+        Path { path in
+            let dx = size.width / CGFloat(mask.width), dy = size.height / CGFloat(mask.height)
+            for run in mask.runs {
+                path.addRect(CGRect(x: CGFloat(run.start) * dx, y: CGFloat(run.row) * dy,
+                                    width: CGFloat(run.end - run.start) * dx, height: dy))
+            }
+        }
+        .fill(ForestixPalette.confidenceOk.opacity(0.18))
+        .accessibilityIdentifier("dbhScan.liveStemMask")
     }
 
     /// One draggable edge handle: white 2 pt line with a small grab
@@ -1038,6 +1533,7 @@ public struct DBHScanScreen: View {
                 // still carries over to the next tree, which was the other
                 // half of the request and the part that saves real time.
                 .onChanged { v in
+                    if !viewModel.edgeAdjustActive { viewModel.edgeAdjustActive = true }
                     guard viewWidth > 1 else { return }
                     let frac = min(max(Double(v.location.x / viewWidth),
                                        0.02), 0.98)
@@ -1062,7 +1558,10 @@ public struct DBHScanScreen: View {
         .accessibilityIdentifier(isLeft ? "dbhScan.adjustHandleLeft"
                                         : "dbhScan.adjustHandleRight")
         .accessibilityLabel(isLeft ? "Left trunk edge" : "Right trunk edge")
-        .accessibilityHint("Drag to set the trunk width. Both edges move together.")
+        // The hint used to say "Both edges move together", which is what the
+        // symmetric bracket did before it was reverted for over-reading by
+        // 1.5x. VoiceOver was describing a behaviour the code no longer has.
+        .accessibilityHint("Drag to set this edge of the trunk. Each edge moves on its own.")
         // VoiceOver cannot drag, so the width is also reachable in steps.
         .accessibilityAdjustableAction { direction in
             // Widen / narrow by moving THIS edge outward or inward.
@@ -1085,28 +1584,144 @@ public struct DBHScanScreen: View {
         }
     }
 
-    /// Way back to automatic edge-finding — black-scrim capsule pill
-    /// floating just above the status panel while ADJUST is active.
-    private var autoPillButton: some View {
-        Button {
-            viewModel.edgeAdjustActive = false
-            // Remembered, so a cruiser who prefers the automatic edges is
-            // not handed the bracket again on the next tree. This pill and
-            // the ADJUST rail button are the whole control — the preference
-            // has no Settings row of its own.
-            settings.dbhEdgeAdjustDefault = false
-        } label: {
-            Text("Auto")
+    /// A fixed slot prevents guidance changes from moving the ground/shutter buttons.
+    private var autoMessageSlot: some View {
+        ZStack {
+            if let message = deviceIsHot ? AutoSafetyPolicy.heatMessage : (autoSafetyNotice ?? displayedAutoMessage) {
+                Text(message).font(.caption2).foregroundStyle(.white)
+                    .multilineTextAlignment(.center).lineLimit(2)
+                    .padding(6)
+                    .background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 6))
+            }
+        }
+        .frame(width: 260, height: 44)
+        .allowsHitTesting(false)
+        .task(id: viewModel.edgeAdjustActive) {
+            displayedAutoMessage = nil
+            guard !viewModel.edgeAdjustActive else { return }
+            var filter = StableGuidanceMessage(initial: viewModel.autoAlignmentMessage,
+                                                now: ProcessInfo.processInfo.systemUptime)
+            while !Task.isCancelled {
+                let next = filter.update(viewModel.autoAlignmentMessage,
+                                         now: ProcessInfo.processInfo.systemUptime)
+                if displayedAutoMessage != next { displayedAutoMessage = next }
+                do { try await Task.sleep(for: .milliseconds(125)) }
+                catch { return }
+            }
+        }
+    }
+
+    private func refreshThermalWarning() {
+        let state = ProcessInfo.processInfo.thermalState
+        deviceIsHot = state == .serious || state == .critical
+    }
+
+    // MARK: - Breast-height guide
+
+    /// Ground placement has its own preview dot, not the DBH measuring row.
+    private var bhGroundPlacementActive: Bool {
+        bhGuideChromeVisible && bhGuide.stage == .aiming
+    }
+
+    /// Whether any of the guide is on screen right now — the gate plus the
+    /// guide having actually been armed.
+    private var bhGuideActive: Bool {
+        bhGuide.stage != .off
+    }
+
+    /// Apply height without arming the optional placement mode.
+    private func syncBreastHeightGuide() {
+        bhGuide.height = settings.breastHeightGuideHeight
+        // Only the Set ground button may arm placement.
+    }
+
+    /// The guide's world geometry, or nothing.
+    ///
+    /// HIDDEN DURING THE ACCEPT SNAPSHOT. The held JPEG is attached to the
+    /// reading and travels with the export, and the guide is a guide: it must
+    /// not appear in an export, so it goes away for the frame like every
+    /// other non-measurement overlay.
+    private var bhGuideMarkers: [ARSceneMarker] {
+        // The placed world guide persists through capture/review. Only the
+        // exported snapshot removes it; placement controls remain aiming-only.
+        guard bhGuideActive, !hidingChromeForCapture else { return [] }
+        return bhGuide.markers()
+    }
+
+    /// Placement controls are disabled throughout capture and result review.
+    private var bhGuideChromeVisible: Bool {
+        guard !hidingChromeForCapture else { return false }
+        switch viewModel.state {
+        case .idle, .aligning, .armed, .rejected: return true
+        default: return false
+        }
+    }
+
+    /// Compact opt-in controls above the shutter; no instructional banner.
+    private var bhGuideButton: some View {
+        HStack(spacing: 8) {
+            Button {
+                if bhGuide.stage == .off {
+                    bhGuide.arm()
+                    bhPlacementFailed = false
+                } else if bhGuide.stage == .placed {
+                    bhGuide.clearBase(using: viewModel.session)
+                    bhPlacementFailed = false
+                    bhLabelPoint = nil
+                } else {
+                    placeBreastHeightBase()
+                }
+            } label: {
+                Text(bhGuide.stage == .placed ? "Reset ground"
+                     : bhGuide.stage == .off ? "Set ground"
+                     : bhPlacementFailed ? "Retry ground" : "Place ground")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.black.opacity(0.88))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7)
+                    .frame(minHeight: 44)
+                    .background(Color.white, in: Capsule())
+                    .overlay(Capsule().stroke(.black.opacity(0.12), lineWidth: 0.5))
+                    .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("dbhScan.breastHeightBase")
+            if bhGuide.stage != .off {
+                Button(bhGuide.stage == .placed ? "Clear ground" : "Cancel") {
+                    bhGuide.disable(using: viewModel.session)
+                    bhPlacementFailed = false
+                    bhLabelPoint = nil
+                }
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 7)
                 .background(Color.black.opacity(0.55), in: Capsule())
-                .overlay(Capsule().stroke(.white.opacity(0.18),
-                                          lineWidth: 0.5))
+                .frame(minHeight: 44)
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("dbhScan.cancelGround")
+            }
         }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("dbhScan.autoMode")
+    }
+
+    /// Use the user's tapped point, or the crosshair for the button. A miss
+    /// leaves the guide unplaced; it never invents a ground coordinate.
+    private func placeBreastHeightBase(at point: CGPoint? = nil) {
+        guard bhGuideChromeVisible, bhGuide.stage == .aiming else { return }
+        raycaster.preferLiDARMesh = settings.measurementSource == .lidar
+        let hit: SIMD3<Float>?
+        if let point {
+            hit = raycaster.hit(at: point, intent: .ground)
+        } else {
+            hit = raycaster.screenCenterGroundHit()
+        }
+        guard let hit, bhGuide.place(hit: hit, using: viewModel.session) else {
+            bhPlacementFailed = true
+            return
+        }
+        bhPlacementFailed = false
+        HapticFeedback.play(.success)
     }
 
     private var crosshairRing: some View {
@@ -1163,7 +1778,7 @@ public struct DBHScanScreen: View {
     /// Flips in the instant the "+" starts the capture, so the cruiser
     /// gets immediate feedback that the burst is running.
     private var captureProgressPill: some View {
-        Text("Capturing \(max(1, viewModel.captureSampleIndex))/\(viewModel.captureSampleTotal) — hold steady.")
+        Text("Capturing…")
             .font(ForestixType.dataSmall)
             .foregroundStyle(.white)
             .padding(.horizontal, 8).padding(.vertical, 4)
@@ -1191,7 +1806,7 @@ public struct DBHScanScreen: View {
                 MeasureValuePill(
                     "DBH: " + MeasurementFormatter.diameter(
                         cm: cm, in: settings.unitSystem),
-                    large: true)
+                    size: .large)
                     .accessibilityIdentifier("dbhScan.livePreview")
                 if let d = viewModel.distanceToStemCenterM {
                     MeasureValuePill(
@@ -1201,7 +1816,7 @@ public struct DBHScanScreen: View {
                         .accessibilityIdentifier("dbhScan.distanceBadge")
                 }
             }
-        } else if let status = viewModel.previewStatusText {
+        } else if !viewModel.segmentationEnabled, let status = viewModel.previewStatusText {
             // Phase 19 — only the legacy partial-arc method ever sets
             // `previewStatusText` (the chord method returns nil for
             // unmeasurable frames instead of producing a red fit).
@@ -1212,31 +1827,47 @@ public struct DBHScanScreen: View {
 
     // MARK: - Cruise tally chrome (target pill, undo toast, border chip)
 
-    /// Top-centre target pill — which tree number the tally loop is
-    /// aiming at right now. Updates as the host auto-increments.
+    /// Top-centre target pill — which tree the tally loop is aiming at right
+    /// now. Updates as the host auto-increments.
     /// (13 semibold on black 0.55 — Android parity.)
-    private func tallyTargetPill(_ number: Int) -> some View {
-        Text("Tree \(number)")
-            .font(.system(size: 13, weight: .semibold))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(Color.black.opacity(0.55), in: Capsule())
-            .overlay(Capsule().stroke(.white.opacity(0.18), lineWidth: 0.5))
-            .accessibilityIdentifier("dbhScan.tallyTarget")
+    ///
+    /// TAPPABLE in the cruise loop: this is where the tree gets its name, and
+    /// it is deliberately the pill rather than a step in front of the scan.
+    /// The cruiser is already aiming at the trunk; the name is offered
+    /// pre-filled by `TreeNameSequence` and only has to be touched when the
+    /// series starts or breaks, so the loop stays zero-typing per tree.
+    private func tallyTargetPill(_ title: String) -> some View {
+        Button {
+            onRenameTally?()
+        } label: {
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.black.opacity(0.55), in: Capsule())
+                .overlay(Capsule().stroke(.white.opacity(0.18), lineWidth: 0.5))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(onRenameTally == nil)
+        .accessibilityLabel(onRenameTally == nil ? title : "\(title). Rename")
+        .accessibilityIdentifier("dbhScan.tallyTarget")
     }
 
-    /// "Tree 7 saved · Undo" — dark-glass toast above the bottom
+    /// "Tree #7 saved · Undo" — dark-glass toast above the bottom
     /// controls for 3 s after every tally Accept; Undo is the tappable
     /// bold segment. Metrics mirror Android's snackbar-equivalent pill.
-    private func tallyUndoToast(_ number: Int) -> some View {
+    private func tallyUndoToast(_ title: String) -> some View {
         HStack(spacing: 0) {
-            Text("Tree \(number) saved · ")
+            Text("\(title) saved · ")
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(.white)
+                .lineLimit(1)
             Button {
                 onUndoTally?()
-                tallyToastNumber = nil
+                tallyToastLabel = nil
             } label: {
                 Text("Undo")
                     .font(.system(size: 14, weight: .bold))
@@ -1264,9 +1895,11 @@ public struct DBHScanScreen: View {
     private func liveBoundarySignedM() -> Double? {
         guard let info = cruisePlotInfo else { return nil }
         let store = ActiveSamplingPlot.shared
-        guard let plot = store.plot,
+        // The TRACKED centre, not the raw anchor pose: a border chip counted
+        // off an uncorrected pose is the same lie the ring itself would be.
+        guard store.plot != nil,
               store.linkedCruisePlotID == info.plotID,
-              let centre = viewModel.session.worldAnchorPosition(id: plot.anchorID),
+              let centre = store.centreWorld,
               let cam = viewModel.session.currentCameraWorldPosition
         else { return nil }
         let dx = Double(cam.x - centre.x)
@@ -1274,15 +1907,24 @@ public struct DBHScanScreen: View {
         return (dx * dx + dz * dz).squareRoot() - info.radiusM
     }
 
-    /// Dark-glass boundary pill under the mini-map: "Border 1.3 m"
-    /// while inside within 2 m of the ring, "Outside plot" (warn tint)
-    /// while outside within 2 m. Hidden otherwise. (12 semibold on
-    /// black 0.55 — Android parity.)
+    /// Dark-glass boundary pill under the mini-map: "Border 1.3 m" / "Border
+    /// 4.3 ft" while inside within 2 m of the ring, "Outside plot" (warn tint)
+    /// while outside within 2 m. Hidden otherwise. (12 semibold on black 0.55
+    /// — Android parity.)
+    ///
+    /// The READING follows the cruiser's units; the 2 m APPEARANCE THRESHOLD
+    /// (`boundarySignedM` gate above) deliberately does not. That distance is
+    /// a physical property of the plot edge — the band inside which a stem is
+    /// borderline and has to be called in or out — not a readout, and making
+    /// it 6 ft in the US would mean two cruisers on the same plot got the
+    /// prompt on different trees. One band, one plot, whatever the phone is
+    /// set to.
     private func borderChip(_ signedM: Double) -> some View {
         let outside = signedM >= 0
         return Text(outside
                     ? "Outside plot"
-                    : String(format: "Border %.1f m", -signedM))
+                    : "Border " + MeasurementFormatter.plotLength(
+                        m: -signedM, in: settings.unitSystem))
             .font(.system(size: 12, weight: .semibold))
             .foregroundStyle(outside
                              ? ForestixPalette.confidenceWarn
@@ -1327,17 +1969,108 @@ public struct DBHScanScreen: View {
     private static let cylinderMarkerId: UUID =
         UUID(uuidString: "00DBC415-0000-0000-0000-000000000001") ?? UUID()
 
-    /// Subdued sampling-plot context (ring + centre pole at ~0.5 alpha,
-    /// pinned to the plot's ARAnchor). Shown only while a plot is active
-    /// AND its anchor is still alive in the shared session — after an
-    /// app restart or a session reset there is no anchor, so nothing is
-    /// drawn. Non-interactive by construction (scene markers take no
-    /// input) and listed before the measurement markers.
+    /// Subdued sampling-plot context (ring + centre pole at ~0.5 alpha, at
+    /// the plot's tracked centre). Shown only while a plot is active AND
+    /// ARKit is correcting its centre — after an app restart, a session
+    /// reset, or a lost-tracking stretch there is no tracked centre and
+    /// nothing is drawn. Non-interactive by construction (scene markers
+    /// take no input) and listed before the measurement markers.
     private var plotOverlayMarkers: [ARSceneMarker] {
         guard let plot = activePlot.plot,
-              viewModel.session.worldAnchorExists(id: plot.anchorID)
+              let centre = activePlot.centreWorld
         else { return [] }
-        return ActiveSamplingPlot.subduedOverlayMarkers(for: plot)
+        return ActiveSamplingPlot.subduedOverlayMarkers(for: plot,
+                                                        centre: centre)
+    }
+
+    // MARK: - "Pin centre" offer (field report 14 × 17)
+
+    /// A cruise plot is being tallied but NO AR anchor marks its centre, so
+    /// `plotOverlayMarkers` is empty and the cruiser is looking at a bare
+    /// camera feed with a plot open.
+    ///
+    /// That is every plot opened from a planned pin ("Start plot now" — the
+    /// fast route report 17 introduced) and every plot carried across an
+    /// app restart, because the ARKit world
+    /// map dies with the process. The linked-id test is the same one the
+    /// border chip and the mini-map use: an "Add tree" can target an OLDER
+    /// open plot than the last-placed ring, and that ring is not this
+    /// plot's centre.
+    ///
+    /// Deliberately NOT gated on tracking loss. A tracking dip hides a ring
+    /// that EXISTS and already says so in its own words
+    /// (`plotTrackingLostHint`); this card would be a second, wrong
+    /// explanation for it.
+    private var plotCentreNeedsPin: Bool {
+        guard let plotID = cruisePlotInfo?.plotID,
+              pinnableRadiusM != nil
+        else { return false }
+        if activePlot.plot != nil, activePlot.linkedCruisePlotID == plotID {
+            return false
+        }
+        return true
+    }
+
+    /// The plot's OWN radius, or nil when its stored area can't produce a
+    /// sane one. There is no honest radius to invent in its place, so the
+    /// offer stands down rather than drawing a ring of a made-up size.
+    /// Same > 0.5 m floor Android's plot mini-map applies to the same field.
+    private var pinnableRadiusM: Double? {
+        guard let r = cruisePlotInfo?.radiusM, r.isFinite, r > 0.5 else {
+            return nil
+        }
+        return r
+    }
+
+    /// Whether the offer is on screen right now.
+    private var showsPinCentreOffer: Bool {
+        plotCentreNeedsPin && !pinOfferDismissed && !hidingChromeForCapture
+    }
+
+    /// Plant the plot centre where the crosshair meets the ground and hand
+    /// the ring to THIS cruise plot.
+    ///
+    /// The act is the AR "Start plot" act: the cruiser stands at the centre
+    /// and pins it, so the ring is worth what that ring has always been
+    /// worth. The stored `Plot.centerLat/centerLon` are deliberately NOT
+    /// rewritten — the card says so — because a control that silently moved
+    /// a plot centre to wherever the cruiser was standing is exactly the
+    /// invisible data loss `editCruisePlot` refuses.
+    ///
+    /// NO forward-ray fallback, unlike the two placement screens. There the
+    /// ghost preview shows the cruiser where a 3 m-forward fallback point
+    /// lands before they commit; here there is no preview (a mesh raycast
+    /// on a poll is the cost field report 9 was about), so a fallback would
+    /// plant the centre in mid-air with nothing to warn them. Refusing is
+    /// the honest half of that trade, and the message says what to do.
+    private func pinPlotCentre() {
+        guard let plotID = cruisePlotInfo?.plotID,
+              let radiusM = pinnableRadiusM
+        else { return }
+        raycaster.preferLiDARMesh = settings.measurementSource == .lidar
+        guard let hit = raycaster.screenCenterHit() else {
+            pinCentreFailure = MeasurementCopy.plotGroundNotSeen
+            return
+        }
+        // Replace any earlier ring's anchor rather than leaving it in the
+        // session — `ActiveSamplingPlot.place` drops the reference and only
+        // the caller can still name the anchor to remove.
+        if let previous = activePlot.plot {
+            viewModel.session.removeWorldAnchor(id: previous.anchorID)
+        }
+        guard let anchorID = viewModel.session.addWorldAnchor(
+            at: hit, name: "forestix.samplingPlot.center")
+        else {
+            pinCentreFailure = MeasurementCopy.plotGroundNotSeen
+            return
+        }
+        pinCentreFailure = nil
+        // The plot's OWN radius, not whatever the sampling slider was last
+        // left at — this ring stands for a saved cruise plot.
+        activePlot.place(anchorID: anchorID, radiusM: radiusM)
+        // `place` clears the link (a fresh ring belongs to nobody), so the
+        // stamp has to come after it.
+        activePlot.link(cruisePlotID: plotID)
     }
 
     // MARK: - Bottom panel
@@ -1371,54 +2104,125 @@ public struct DBHScanScreen: View {
         }
     }
 
-    /// True when the ADJUST flank is offered. Hidden while ADJUST is
-    /// already active (the Auto pill is the way back).
-    private var showsAdjustRailButton: Bool {
-        !viewModel.edgeAdjustActive
-    }
-
     /// Open the bracket at the width the LAST tree was measured at, centred
     /// on the crosshair.
     ///
-    /// FIELD REPORT 4 — this used to seed from the automatic fit's edges
-    /// when it had any. That sounded helpful and was not: the automatic
-    /// edges are the thing the cruiser reached for ADJUST to get away from,
-    /// so the bracket opened already wrong and asymmetric, and the first
-    /// drag was spent undoing it. A plot is walked at roughly one standing
-    /// distance, so the previous tree's width is the better guess — and
-    /// when it is wrong it is wrong symmetrically, which one drag fixes.
+    /// WHICH SPACE THE SEED IS IN, and how I know. Getting this wrong is the
+    /// bug that cost three field rounds, so it is written out rather than
+    /// assumed.
     ///
-    /// On the very first scan of a fresh install the stored width is 0.25,
-    /// i.e. the ±25 % this used to fall back to.
+    /// `DBHEstimator.bracketChordFit` reads its two handle arguments as
+    /// fractions of the DEPTH MAP's walk axis: `leftPx = lo · extent`, with
+    /// `extent` = `frame.width` for a row walk and `frame.height` for a col
+    /// walk. `DBHScanViewModel` passes `edgeBracketLeftFraction` /
+    /// `…RightFraction` in UNCONVERTED, and those two are written by the
+    /// drag handler as `v.location.x / viewWidth` — a fraction of the VIEW.
+    /// So the app identifies view-x fraction with depth walk-axis fraction
+    /// 1:1, with no affine in between, and the same identity runs in reverse
+    /// when the auto fit's `stripLeftFraction` is drawn at `size.width · f`.
+    ///
+    /// That identity is NOT to be "corrected" here. It was checked against
+    /// 48 tape-measured stems: the span the app uses is 1.028× the span the
+    /// trunk actually subtends (median). Two separate derivations argued for
+    /// a 1.4–1.6× aspect-crop inflation and the field data falsified both;
+    /// changing the mapping would put every iOS reading out by the size of
+    /// the change.
+    ///
+    /// The consequence for the SEED is the whole point: what gets persisted
+    /// is `(right − left) / 2` read straight off those same two published
+    /// fractions (see `adjustHandle`'s `onEnded`), so putting it back is an
+    /// exact round trip into the space the estimator consumes. There is no
+    /// conversion on the way out, so there must be none on the way in.
+    ///
+    /// WHY NOT SEED FROM THE AUTO FIT — it did, once. The automatic edges
+    /// are the thing the cruiser reached for ADJUST to get away from, so the
+    /// bracket opened already wrong and asymmetric and the first drag was
+    /// spent undoing it; worse, once the screen opens on the bracket there
+    /// is no auto fit to borrow from anyway, and waiting for one is the Auto
+    /// interlude this round removed. A plot is walked at roughly one
+    /// standing distance, so the previous tree's width is the better guess,
+    /// and when it is wrong it is wrong symmetrically — one drag fixes it.
+    /// This is also what the Android sibling has always done.
+    ///
+    /// On the very first scan of a fresh install the width comes from
+    /// `AppSettings.defaultBracketHalfWidth`, which is derived there from
+    /// the field corpus rather than chosen for symmetry.
+    private func seedBracketFromRememberedWidth() {
+        setBracketHalfWidth(settings.dbhBracketHalfWidth)
+    }
+
+    /// The Adjust rail button: same seeding, plus the preference write —
+    /// this one IS a choice, so it is remembered for the next tree.
     private func enterAdjustMode() {
-        // Seed from the auto fit when one is on screen, else from the width
-        // the last tree ended on. The auto-fit seed is how the version the
-        // field verified opened, and it puts the handles on the trunk before
-        // the first drag; the remembered width is the fallback and is what
-        // the cruiser asked for when there is no fit to borrow from.
-        if let fit = viewModel.previewFit,
-           fit.stripRightFraction > fit.stripLeftFraction {
-            viewModel.edgeBracketLeftFraction = fit.stripLeftFraction
-            viewModel.edgeBracketRightFraction = fit.stripRightFraction
-        } else {
-            setBracketHalfWidth(settings.dbhBracketHalfWidth)
-        }
+        seedBracketFromRememberedWidth()
         viewModel.edgeAdjustActive = true
         settings.dbhEdgeAdjustDefault = true
     }
 
+    /// Field report 15 — what to DO when depth won't resolve. Both remedies
+    /// are the cruiser's own: a small movement, or a different standing
+    /// distance. Byte-identical to the Android sibling.
+    static let acquisitionStallHint =
+        "No depth lock yet — move the phone gently side to side, or change your distance."
+
+    /// Whether the banner should carry the acquisition hint right now.
+    ///
+    /// Suppressed while an ADVICE line is up: that line is a SPECIFIC reason
+    /// (the bracket's "narrow it onto the trunk", a fit's own rejection)
+    /// already on screen in the value strip, and two sentences giving
+    /// different advice about the same failure is worse than one.
+    ///
+    /// NOT suppressed by the developer-mode diagnostic. That line is numbers,
+    /// not a remedy, so it competes with nothing — and developer mode is worn
+    /// in the stand here, not just on the bench: the tape-truth field, the
+    /// research CSV row and the typed-truth capture below are all gated on
+    /// `settings.developerMode`, so the accuracy-study cruiser runs with it
+    /// on all day. Treating the diagnostic as advice therefore withheld field
+    /// report 15's hint from exactly the operator the study depends on, while
+    /// Android (which has no developer gate on its banner at all) showed it.
+    ///
+    /// The other half of the bargain lives in the view model: the ADJUST
+    /// branch — the default path — stops writing its bracket line once the
+    /// stall interval has elapsed, and the stall ticker takes down whatever
+    /// the last frame left behind when depth delivery itself stops, precisely
+    /// so this hint can come through.
+    private var showsAcquisitionHint: Bool {
+        viewModel.acquisitionStalled
+            && (viewModel.previewStatusText == nil
+                || viewModel.previewStatusIsDiagnostic)
+    }
+
     private var statusText: String {
+        if isAiming, viewModel.segmentationEnabled, !viewModel.edgeAdjustActive {
+            return "Keep the trunk in view; tap + when ready, or use Adjust."
+        }
         switch viewModel.state {
         case .idle:         return "Starting camera…"
-        case .aligning:     return "Align the guide to the trunk's uphill side; hold steady."
-        case .armed:        return "Hold steady, then tap + to capture."
+        case .aligning:
+            // Only when there is genuinely no fit: the ADJUST bracket sits
+            // in `.aligning` even while it is producing a diameter, and the
+            // stall flag is what tells those two apart.
+            if showsAcquisitionHint { return Self.acquisitionStallHint }
+            return "Align the guide to the trunk's uphill side; hold steady."
+        case .armed:
+            // Centre-pixel depth can be stable while no fit comes out of it;
+            // "tap + to capture" would then be an instruction the tap gate
+            // refuses to honour.
+            if showsAcquisitionHint { return Self.acquisitionStallHint }
+            return "Hold steady, then tap + to capture."
         case .capturing:
-            return "Capturing \(max(1, viewModel.captureSampleIndex))/\(viewModel.captureSampleTotal) — hold steady."
-        case .fitted:       return "Scan complete. Accept, retake, or add a second view."
+            return "Capturing…"
+        case .fitted:       return "Scan complete. Accept or retake."
         case .accepted:     return "Saved."
         case .rejected:     return viewModel.result?.rejectionReason
                                  ?? "Scan rejected. Try again."
-        case .manualEntry:  return "Enter diameter manually in cm."
+        // The banner names the SAME unit the field below it is placeheld with
+        // (:2357) and the same one `submitManualEntry` converts from. It used
+        // to say "cm" over a box marked "Diameter in inches", and a cruiser
+        // who obeyed the banner and typed 34 stored an 86 cm tree.
+        case .manualEntry:
+            return "Enter diameter manually in "
+                + (settings.unitSystem == .metric ? "cm" : "inches") + "."
         }
     }
 
@@ -1442,9 +2246,10 @@ public struct DBHScanScreen: View {
             "species": metaSpecies ?? "",
             "note": metaNote,
         ]
-        if !settings.researchTreeId.isEmpty {
-            f["tree_id"] = settings.researchTreeId   // repeat auto-filled by record()
-        }
+        // The tree this capture is ALREADY locked to, not a box the cruiser
+        // had to retype. Same value the raw-capture bundle and the saved
+        // reading carry, so the three join.
+        f["tree_id"] = captureTreeNumber.map(String.init) ?? ""
         if let d = viewModel.distanceToStemCenterM {
             f["distance_m"] = String(format: "%.2f", d)
         }
@@ -1456,23 +2261,38 @@ public struct DBHScanScreen: View {
             f["depth_w"] = "\(frame.width)"
             f["depth_h"] = "\(frame.height)"
         }
-        // ',' is a legitimate decimal separator on the cruiser's keypad.
-        //
-        // OWNER GATE: the field is deliberately kept across trees when a truth
-        // could not be attached (queued, no bundle, or a failed save), so the
-        // text on screen may belong to an EARLIER measurement. Both owner marks
-        // are nil only while the value was typed for THIS burst — anything else
-        // would stamp the previous tree's tape reading onto this row.
-        let truthIsForThisMeasurement =
-            truthOwnerBundleID == nil && truthQueuedForBundleID == nil
-        if truthIsForThisMeasurement,
-           let t = TruthInput.parsePositive(researchTrueCm) {
+        if let t = typedTruthForThisMeasurement {
+            // `true_value` and `error` are in the row's `unit` (cm) — the same
+            // scale as `measured_value`, so the error column stays
+            // subtractable. `truth_unit` records what was actually typed.
             f["true_value"] = String(format: "%.2f", t)
             f["error"] = String(format: "%.2f", Double(r.diameterCm) - t)
+            f["truth_unit"] = activeTruthUnit.rawValue
         }
         ResearchLog.shared.record(f)
         // NOTE: the field is deliberately NOT cleared here — `applyTypedTruth`
         // clears it only once the value is durably on the bundle.
+    }
+
+    /// The typed tape diameter in the metric base (cm) when it belongs to the
+    /// measurement being accepted right now, else nil. Read by BOTH consumers
+    /// of the field — the reading and the research row — so they can never
+    /// disagree about which capture a number was typed for.
+    ///
+    /// ',' is a legitimate decimal separator on the cruiser's keypad.
+    ///
+    /// OWNER GATE: the field is deliberately kept across trees when a truth
+    /// could not be attached (queued, no bundle, or a failed save), so the text
+    /// on screen may belong to an EARLIER measurement. Both owner marks are nil
+    /// only while the value was typed for THIS burst — anything else would
+    /// stamp the previous tree's tape reading onto this one.
+    private var typedTruthForThisMeasurement: Double? {
+        guard settings.developerMode,
+              truthOwnerBundleID == nil,
+              truthQueuedForBundleID == nil
+        else { return nil }
+        return TruthInput.parsePositiveBase(researchTrueText,
+                                            unit: activeTruthUnit)
     }
 
     /// Attach the typed ground truth to the bundle this Accept confirms.
@@ -1486,9 +2306,13 @@ public struct DBHScanScreen: View {
     private func applyTypedTruth() {
         guard settings.developerMode else { return }
         truthSaveFailure = nil
-        let raw = researchTrueCm
+        let raw = researchTrueText
+        // The unit is read once here and used for both the conversion and the
+        // record, so a toggle mid-save cannot split them.
+        let unit = activeTruthUnit
         guard !TruthInput.normalized(raw).isEmpty else { return }
-        guard let t = TruthInput.parsePositive(raw) else {
+        // Always the metric base (cm) — the conversion lives in TruthInput.
+        guard let t = TruthInput.parsePositiveBase(raw, unit: unit) else {
             truthSaveFailure = "Not a number — truth not saved"
             return
         }
@@ -1496,7 +2320,7 @@ public struct DBHScanScreen: View {
         // CSV row written just above, so the field can clear. The dev block
         // already carries the "Raw capture OFF" notice.
         guard viewModel.rawCaptureEnabled else {
-            researchTrueCm = ""
+            researchTrueText = ""
             truthOwnerBundleID = nil
             truthQueuedForBundleID = nil
             return
@@ -1527,10 +2351,10 @@ public struct DBHScanScreen: View {
             truthQueuedForBundleID = nil
             return
         }
-        switch RawCaptureStore.applyTruth(id: id, value: t) {
+        switch RawCaptureStore.applyTruth(id: id, value: t, unit: unit) {
         case .applied:
             // In the manifest — the only state that may clear the field.
-            researchTrueCm = ""
+            researchTrueText = ""
             truthOwnerBundleID = nil
             truthQueuedForBundleID = nil
         case .pending:
@@ -1558,7 +2382,7 @@ public struct DBHScanScreen: View {
             truthQueuedForBundleID = nil
             truthOwnerBundleID = nil
             truthSaveFailure = nil
-            researchTrueCm = ""
+            researchTrueText = ""
         case .failed(let reason):
             truthQueuedForBundleID = nil
             truthSaveFailure = "Capture NOT saved (\(reason)) — truth kept on screen"
@@ -1568,12 +2392,13 @@ public struct DBHScanScreen: View {
     }
 
     /// Live warning under the truth field: unparseable text, or a value
-    /// outside the plausible DBH window.
+    /// outside the plausible DBH window. The window is judged on the CONVERTED
+    /// value, so an imperial entry is checked against the same limits.
     private var truthFieldWarning: String? {
         if let failure = truthSaveFailure { return failure }
-        if TruthInput.isUnparseable(researchTrueCm) { return "Not a number" }
-        guard let v = TruthInput.parsePositive(researchTrueCm) else { return nil }
-        return TruthInput.dbhWarning(cm: v)
+        return TruthInput.fieldWarning(researchTrueText,
+                                       quantity: .diameter,
+                                       unit: activeTruthUnit)
     }
 
     @ViewBuilder
@@ -1592,6 +2417,29 @@ public struct DBHScanScreen: View {
                     cm: Double(r.diameterCm), in: settings.unitSystem))
                     .font(ForestixType.dataLarge)
                     .foregroundStyle(.white)
+                // BASAL AREA, beside the diameter it comes from. It is one
+                // line of arithmetic off a number already on screen, and it is
+                // the number foresters actually ask a diameter for. Same
+                // function every plot and stand total is summed from
+                // (`TreeComputed.basalAreaText` → `InventoryEngine`), and the
+                // same square unit rule, so this and the tree form cannot
+                // disagree. Reads "—" until there is a usable diameter.
+                //
+                // NAMED, not just printed. Unlabelled, the panel read
+                // "33.7 cm  0.089 m²" and left the second figure to be
+                // guessed from its unit — and ft² is a unit a cruiser also
+                // sees on the BAF and on per-acre totals, so the guess is not
+                // a safe one. The tree form's row carries the words "Basal
+                // area"; this one carries "BA" because it sits on a line the
+                // diameter has to stay large on.
+                Text("BA")
+                    .font(ForestixType.caption)
+                    .foregroundStyle(.white.opacity(0.55))
+                Text(TreeComputed.basalAreaText(dbhCm: Double(r.diameterCm),
+                                                in: settings.unitSystem))
+                    .font(ForestixType.data)
+                    .foregroundStyle(.white.opacity(0.8))
+                    .accessibilityIdentifier("dbhScan.basalArea")
                 Spacer()
             }
             // FIELD REPORT 7 — the details chip, identical to the height
@@ -1622,24 +2470,24 @@ public struct DBHScanScreen: View {
             if settings.developerMode {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
-                        Text("Target")
-                            .font(ForestixType.caption)
-                            .foregroundStyle(.white.opacity(0.8))
-                        TextField("T1", text: Binding(
-                            get: { settings.researchTreeId },
-                            set: { settings.researchTreeId = $0 }))
-                            .scanPanelTextField()
-                            .frame(width: 70)
-                            .accessibilityIdentifier("dbhScan.researchTarget")
-                        Text("True Ø (cm)")
+                        // Label and unit come from the SAME value, so the field
+                        // can never say cm while the app reads inches.
+                        Text(TruthInput.fieldLabel(.diameter, unit: activeTruthUnit))
                             .font(ForestixType.caption)
                             .foregroundStyle(.white.opacity(0.8))
                         // ',' is accepted and normalised to '.' on submit.
-                        TextField("tape", text: $researchTrueCm)
+                        TextField("tape", text: $researchTrueText)
                             .keyboardType(.decimalPad)
                             .scanPanelTextField()
                             .frame(width: 90)
                             .accessibilityIdentifier("dbhScan.researchTrue")
+                        TruthUnitToggle(
+                            unit: activeTruthUnit,
+                            onToggle: {
+                                truthUnitChoice = (TruthInput.toggled(activeTruthUnit),
+                                                   settings.unitSystem == .imperial)
+                            },
+                            identifier: "dbhScan.researchTrueUnit")
                     }
                     if let warning = truthFieldWarning {
                         TruthFieldWarning(text: warning)
@@ -1660,10 +2508,8 @@ public struct DBHScanScreen: View {
 
     private var metadataChipLabel: String {
         // Shared with the height scan (FIELD REPORT 7) — one label rule for
-        // one chip, on both screens. The diameter scan is the one that also
-        // carries stem position, so it passes it.
+        // one chip, on both screens, and now the same three things on both.
         ScanMetadataChip.label(speciesCode: metaSpecies,
-                               position: metaPosition,
                                damageCodes: metaDamage,
                                note: metaNote)
     }
@@ -1684,12 +2530,87 @@ public struct DBHScanScreen: View {
                 // The field prompts in the ACTIVE unit system; the view model
                 // converts inches → cm on submit (it used to store the typed
                 // inches straight into diameterCm, a 2.54x corruption).
-                viewModel.manualEntryUnits = settings.unitSystem
+                viewModel.unitSystem = settings.unitSystem
                 viewModel.submitManualEntry()
             }
                 .buttonStyle(.forestixProminent)
                 .accessibilityIdentifier("dbhScan.manualSave")
         }
+    }
+
+    // MARK: - Measurement photo
+
+    /// Take the measurement-moment JPEG and park it in `heldPhoto`.
+    ///
+    /// ORDER MATTERS. The chrome blackout is up before the settle sleep — the
+    /// caller raises it in the same turn the burst lands, and this re-raise is
+    /// idempotent — so the frame SwiftUI has committed by the time the
+    /// renderer runs carries no panels and no buttons, the result panel
+    /// included. What deliberately stays is the FIT CHORD, the CROSSHAIR and
+    /// the AR cylinder: those are the measurement, and they are the whole
+    /// evidentiary value of the photo.
+    ///
+    /// THE GUIDE LINE IS NOT IN THAT LIST ANY MORE. It used to be — it marked
+    /// the depth row the estimator read, so a reviewer could see the row the
+    /// number came from. It is an artificial horizon now: it rides the phone's
+    /// pitch and sits wherever the phone was tilted, which in a stored photo
+    /// is a line across the trunk that looks like it marks something and does
+    /// not. The crosshair ring marks the measured row, and it stays. A photo
+    /// kept as evidence should contain the evidence and nothing dressed as it.
+    ///
+    /// ONLY THE RENDER BLOCKS. The store hands the filename back as soon as
+    /// the picture exists in memory and finishes the JPEG on its own queue,
+    /// so the screen is unresponsive for the render alone (~10-20 ms) instead
+    /// of for the render plus the encode plus the write (160-250 ms) — which
+    /// is what the cruiser was reporting as a freeze, once per diameter and
+    /// again per height.
+    @MainActor
+    private func captureHeldPhoto() async {
+        // A fresh capture supersedes whatever was held — never leave the
+        // previous burst's file behind on disk.
+        discardHeldPhoto()
+        hidingChromeForCapture = true
+        try? await Task.sleep(for: .milliseconds(80))
+        // THE SCREEN CAN BE LEFT INSIDE THAT SLEEP (the cruiser backs out,
+        // the host dismisses the cover). This task is unstructured, so it
+        // would still run: it would photograph whatever replaced this screen
+        // and write a file that no reading and no `onDisappear` would ever
+        // delete — an orphan in the photo store. Nothing is captured instead.
+        guard !hasLeftScreen else {
+            hidingChromeForCapture = false
+            return
+        }
+        let shot = MeasurePhotoStore.captureWindow()
+        // Held IMMEDIATELY, before the bytes are on disk: an Accept tapped
+        // while the JPEG is still encoding must attach this frame, not
+        // nothing. The store keeps writing under this name regardless of who
+        // ends up owning it.
+        heldPhoto = shot?.name
+        hidingChromeForCapture = false
+        guard let shot else { return }
+        // The write can still fail (a full container, a refused write). If it
+        // does, drop the name rather than leave a reading pointing at a file
+        // that will never exist — the same "no photo" outcome the old
+        // synchronous failure produced. Only if this screen is still holding
+        // THIS frame: once Accept released it to a stored reading, or a
+        // Retake superseded it, `heldPhoto` no longer names it and nothing
+        // here may touch it. (A reading that took the name and then lost the
+        // write shows "Photo unavailable" in the viewer — it never pretends
+        // to have a picture.)
+        if await shot.written.value == false, heldPhoto == shot.name {
+            heldPhoto = nil
+        }
+    }
+
+    /// Drop the held frame AND delete the file. Called on retake, on a
+    /// superseding capture, and on the way off the screen — the store keeps
+    /// one file per reading (`QuickMeasureHistory` deletes a reading's photo
+    /// with it), so a frame no reading will ever claim has to go here.
+    @MainActor
+    private func discardHeldPhoto() {
+        guard let name = heldPhoto else { return }
+        heldPhoto = nil
+        MeasurePhotoStore.delete(name)
     }
 
     // MARK: - Actions
@@ -1704,7 +2625,9 @@ public struct DBHScanScreen: View {
             // aiming-phase Type rail button. Secondary buttons are solid
             // white (sun-glare legibility) — the green Accept stays.
             HStack(spacing: 12) {
-                Button("Retake") { viewModel.retake() }
+                // The held frame captions the measurement being thrown away —
+                // keeping it would put the OLD aim on the NEW diameter.
+                Button("Retake") { discardHeldPhoto(); viewModel.retake() }
                     .buttonStyle(.forestixARSecondary)
                     .frame(maxWidth: .infinity)
                 Button("Details") { presentingMetadata = true }
@@ -1719,7 +2642,7 @@ public struct DBHScanScreen: View {
             }
         case .manualEntry:
             HStack(spacing: 12) {
-                Button("Cancel") { viewModel.retake() }
+                Button("Cancel") { discardHeldPhoto(); viewModel.retake() }
                     .buttonStyle(.forestixARSecondary)
                     .frame(maxWidth: .infinity)
             }

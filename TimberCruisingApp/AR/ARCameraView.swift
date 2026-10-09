@@ -45,6 +45,20 @@ public struct ARSceneMarker: Identifiable, Equatable {
         /// rate. `radiusM` is the centre-line radius; `thicknessM` is the
         /// rim band width.
         case ring(radiusM: Float, thicknessM: Float)
+        /// A DOUGHNUT — a tube bent into a circle — as distinct from `ring`,
+        /// which is a flat washer lying in the XZ plane.
+        ///
+        /// The plot boundary is a `ring` and should stay one: it lies on the
+        /// ground and is looked at from above, where a flat band reads
+        /// perfectly and a tube would only look bulbous. The BREAST-HEIGHT
+        /// marker is the opposite case. It sits at 1.37 m, so a cruiser
+        /// holding the phone at chest height looks at it almost exactly
+        /// edge-on — and edge-on a flat disc collapses to a hairline across
+        /// the bark, at the one moment it has to be readable. A tube has the
+        /// same silhouette from every direction.
+        ///
+        /// `tubeM` is the tube's DIAMETER.
+        case torus(radiusM: Float, tubeM: Float)
     }
 
     public let id: UUID
@@ -65,8 +79,23 @@ public struct ARSceneMarker: Identifiable, Equatable {
     /// tracks the anchor's live transform, so ARKit world-map
     /// corrections (drift compensation, relocalization) move the marker
     /// with the anchor. If the anchor doesn't exist the marker simply
-    /// doesn't render. Used by the sampling-plot ring/pole so the plot
-    /// centre stays pinned to the physical ground across screens.
+    /// doesn't render.
+    ///
+    /// NOTHING SETS THIS TODAY, and the sampling plot — which used to — is
+    /// the reason. Two traps, both bitten in the field:
+    ///
+    ///  • BINDING IS ORDER-DEPENDENT. A screen that builds its ARView over a
+    ///    session where the anchor ALREADY exists gets a scene that never
+    ///    saw the anchor arrive, and the marker never renders at all. That
+    ///    was field report 14: the plot overlay was invisible on the DBH and
+    ///    Height screens while working on the sampling screen, which places
+    ///    the anchor with its own view already up.
+    ///  • IT CANNOT BE HIDDEN ON TRACKING LOSS. RealityKit keeps drawing at
+    ///    the anchor's last transform, and a plot drawn where the plot is not
+    ///    is worse than no plot at all.
+    ///
+    /// Geometry that must follow an anchor reads the pose itself and passes
+    /// world coordinates — see `ActiveSamplingPlot.refreshTrackedCentre`.
     public var worldAnchorID: UUID?
 
     public init(id: UUID = UUID(),
@@ -231,8 +260,15 @@ public struct ARCameraView: UIViewRepresentable {
         // `scalesWithDistance` — keeps their apparent size readable when
         // the cruiser walks away (height walk-off can be 15–20 m out).
         let coordinator = context.coordinator
+        let manager = sessionManager
         coordinator.updateSub = view.scene.subscribe(to: SceneEvents.Update.self) { [weak view, weak coordinator] _ in
-            guard let view, let coordinator, !coordinator.scalingIds.isEmpty else { return }
+            guard let view, let coordinator else { return }
+            // A resize/rotation or lock change need not trigger a SwiftUI
+            // update. Report the actual AR viewport before new depth arrives.
+            if let orientation = view.window?.windowScene?.interfaceOrientation {
+                manager?.reportViewport(size: view.bounds.size, orientation: orientation)
+            }
+            guard !coordinator.scalingIds.isEmpty else { return }
             let cam = view.cameraTransform.translation
             for id in coordinator.scalingIds {
                 guard let anchor = coordinator.markerAnchors[id] else { continue }
@@ -437,6 +473,20 @@ public struct ARCameraView: UIViewRepresentable {
             let mesh = generateRing(radius: r, thickness: thickness, segments: 96)
             return ModelEntity(mesh: mesh, materials: [UnlitMaterial(color: uiColor)])
         }
+        // Unlit for the same reason the flat rim is: the tube carries real
+        // normals, but the marker has to read the same against sky and
+        // against bark, and a lit doughnut goes dark on whichever side the
+        // sun is not.
+        if case .torus(let r, let tube) = marker.shape {
+            let uiColor = UIColor(
+                red:   CGFloat(marker.colorRGBA.x),
+                green: CGFloat(marker.colorRGBA.y),
+                blue:  CGFloat(marker.colorRGBA.z),
+                alpha: CGFloat(marker.colorRGBA.w))
+            let mesh = generateTorus(radius: r, tube: tube,
+                                     majorSegments: 72, minorSegments: 10)
+            return ModelEntity(mesh: mesh, materials: [UnlitMaterial(color: uiColor)])
+        }
 
         let mesh: MeshResource = {
             switch marker.shape {
@@ -444,7 +494,7 @@ public struct ARCameraView: UIViewRepresentable {
                 return .generateSphere(radius: r)
             case .cylinder(let r, let h):
                 return .generateCylinder(height: h, radius: r)
-            case .ring:
+            case .ring, .torus:
                 return .generateSphere(radius: 0.01) // unreachable (handled above)
             }
         }()
@@ -471,6 +521,52 @@ public struct ARCameraView: UIViewRepresentable {
     /// Builds a flat, double-sided annulus (ring) mesh in the XZ plane,
     /// centred at the entity origin. Cheap (≈ 4·segments triangles) so a
     /// 30 m boundary costs nothing versus a filled translucent disk.
+    /// A tube of diameter `tube` swept around a circle of radius `radius`,
+    /// lying flat (the tube's centre-line in the XZ plane) so it goes round a
+    /// trunk the way the flat rim did — but with a silhouette that does not
+    /// vanish when it is looked at edge-on. See `Shape.torus`.
+    private static func generateTorus(radius: Float,
+                                      tube: Float,
+                                      majorSegments: Int,
+                                      minorSegments: Int) -> MeshResource {
+        let minor = max(0.004, tube / 2)
+        let major = max(0.01, radius)
+        var positions: [SIMD3<Float>] = []
+        var normals: [SIMD3<Float>] = []
+        positions.reserveCapacity(majorSegments * minorSegments)
+        normals.reserveCapacity(majorSegments * minorSegments)
+        for i in 0..<majorSegments {
+            let a = Float(i) / Float(majorSegments) * 2 * .pi
+            let ca = cos(a), sa = sin(a)
+            for j in 0..<minorSegments {
+                let b = Float(j) / Float(minorSegments) * 2 * .pi
+                let cb = cos(b), sb = sin(b)
+                positions.append(SIMD3<Float>((major + minor * cb) * ca,
+                                              minor * sb,
+                                              (major + minor * cb) * sa))
+                normals.append(SIMD3<Float>(cb * ca, sb, cb * sa))
+            }
+        }
+        var indices: [UInt32] = []
+        indices.reserveCapacity(majorSegments * minorSegments * 6)
+        for i in 0..<majorSegments {
+            let ni = (i + 1) % majorSegments
+            for j in 0..<minorSegments {
+                let nj = (j + 1) % minorSegments
+                let p0 = UInt32(i * minorSegments + j)
+                let p1 = UInt32(ni * minorSegments + j)
+                let p2 = UInt32(ni * minorSegments + nj)
+                let p3 = UInt32(i * minorSegments + nj)
+                indices.append(contentsOf: [p0, p1, p2, p0, p2, p3])
+            }
+        }
+        var desc = MeshDescriptor(name: "torus")
+        desc.positions = MeshBuffers.Positions(positions)
+        desc.normals = MeshBuffers.Normals(normals)
+        desc.primitives = .triangles(indices)
+        return (try? MeshResource.generate(from: [desc])) ?? .generateSphere(radius: 0.01)
+    }
+
     private static func generateRing(radius: Float,
                                      thickness: Float,
                                      segments: Int) -> MeshResource {
@@ -549,7 +645,6 @@ extension ARCameraView {
                   realWorldOcclusion: realWorldOcclusion,
                   sceneMarkers: sceneMarkers,
                   raycaster: raycaster)
-        self.sessionManager = manager as? ARKitSessionManager
     }
 }
 #endif

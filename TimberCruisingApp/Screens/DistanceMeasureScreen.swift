@@ -49,8 +49,11 @@ public struct DistanceMeasureScreen: View {
     @State private var mode: Mode = .live
 
     /// Live continuous distance from device to whatever the crosshair
-    /// hits. Updated by a timer at ~20 Hz.
+    /// hits. The timer ticks at 20 Hz; the LiDAR path is resampled at
+    /// 10 Hz — see `lidarLivePollIntervalSec`.
     @State private var liveDistanceM: Double?
+    /// Uptime of the last LiDAR-path resample, for that throttle.
+    @State private var lastLidarPollAt: TimeInterval = 0
 
     /// Two-point screen positions (in the AR view's screen space) +
     /// world positions. Screen positions drive the overlay drawing; the
@@ -67,10 +70,26 @@ public struct DistanceMeasureScreen: View {
     /// path — the raw raycast distance flickers there. LiDAR stays raw.
     @State private var arSmoother = DistanceSmoother()
 
-    /// Developer-mode research capture: tape-measured true distance (m).
-    /// Logged with source + aim pitch so distance accuracy can be analysed
-    /// by range / angle / sensing path.
-    @State private var researchTrueM: String = ""
+    /// Developer-mode research capture: the tape-measured true distance AS
+    /// TYPED. Logged with source + aim pitch so distance accuracy can be
+    /// analysed by range / angle / sensing path. The unit is `activeTruthUnit`
+    /// below, never assumed.
+    @State private var researchTrueText: String = ""
+    /// The cruiser's per-entry unit choice, remembered with the unit system it
+    /// was made under. Nil falls back to the ACTIVE system; the choice sticks
+    /// for the rest of this screen session and is dropped if that system
+    /// changes underneath it.
+    @State private var truthUnitChoice: (unit: TruthInput.Unit, imperial: Bool)?
+    /// The unit in force for the field right now: the per-entry choice, or the
+    /// active system's default until one is made.
+    private var activeTruthUnit: TruthInput.Unit {
+        let imperial = settings.unitSystem == .imperial
+        // A choice made under the OTHER system is discarded rather than
+        // carried across: switching the project to imperial must not leave
+        // the field sitting in centimetres.
+        if let choice = truthUnitChoice, choice.imperial == imperial { return choice.unit }
+        return TruthInput.defaultUnit(.distance, imperial: imperial)
+    }
 
     public init() {}
 
@@ -318,31 +337,52 @@ public struct DistanceMeasureScreen: View {
             MeasureValuePill(mode == .live ? "PHONE → TARGET"
                                            : "POINT A → POINT B",
                              dimmed: true)
-            MeasureValuePill(currentDistanceString, large: true)
+            MeasureValuePill(currentDistanceString, size: .large)
         }
     }
 
-    /// Developer-mode research capture fields (Target / True value).
+    /// Developer-mode research capture field: the typed true value and the
+    /// unit it is being typed in.
     private var researchFieldsRow: some View {
-        HStack(spacing: 6) {
-            Text("Target")
-                .font(ForestixType.caption)
-                .foregroundStyle(.white.opacity(0.8))
-            TextField("D1", text: Binding(
-                get: { settings.researchTreeId },
-                set: { settings.researchTreeId = $0 }))
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 70)
-                .accessibilityIdentifier("distance.researchTarget")
-            Text("True (m)")
-                .font(ForestixType.caption)
-                .foregroundStyle(.white.opacity(0.8))
-            TextField("tape", text: $researchTrueM)
-                .keyboardType(.decimalPad)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 90)
-                .accessibilityIdentifier("distance.researchTrue")
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                // Label and unit come from the SAME value, so the field can never
+                // say m while the app reads feet.
+                Text(TruthInput.fieldLabel(.distance, unit: activeTruthUnit))
+                    .font(ForestixType.caption)
+                    .foregroundStyle(.white.opacity(0.8))
+                TextField("tape", text: $researchTrueText)
+                    .keyboardType(.decimalPad)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 90)
+                    .accessibilityIdentifier("distance.researchTrue")
+                TruthUnitToggle(
+                    unit: activeTruthUnit,
+                    onToggle: {
+                        truthUnitChoice = (TruthInput.toggled(activeTruthUnit),
+                                           settings.unitSystem == .imperial)
+                    },
+                    identifier: "distance.researchTrueUnit")
+            }
+            // Same live warning as the DBH and height screens. Without it,
+            // "12.5.3" parsed to nil and Save wrote the row with no
+            // true_value, no error and no truth_unit while the screen said
+            // nothing — the hand measurement was gone and the cruiser had no
+            // way to know. A distance has no plausibility window, so this
+            // says only whether the text is a number.
+            if let warning = truthFieldWarning {
+                TruthFieldWarning(text: warning)
+            }
         }
+    }
+
+    /// Live warning under the truth field: unparseable text. The window check
+    /// is quantity-dispatched and `.distance` has none, so nothing else can
+    /// come back from here.
+    private var truthFieldWarning: String? {
+        TruthInput.fieldWarning(researchTrueText,
+                                quantity: .distance,
+                                unit: activeTruthUnit)
     }
 
     /// RESULT panel — a completed A→B pair: label + value + dev fields +
@@ -440,15 +480,18 @@ public struct DistanceMeasureScreen: View {
             "unit": "m",
             "distance_m": String(format: "%.3f", measured),
         ]
-        if !settings.researchTreeId.isEmpty {
-            f["tree_id"] = settings.researchTreeId   // repeat auto-filled by record()
-        }
+        // No tree_id: a distance reading is not taken against a tree, and the
+        // retyped "Target" box that used to fill this column was as likely to
+        // name the previous tree as this measurement's subject.
         if let p = raycaster.cameraPitchDeg {
             f["pitch_deg"] = String(format: "%.1f", p)
         }
-        if let t = Double(researchTrueM), t > 0 {
+        // Converted to the row's `unit` (m) so `error` stays subtractable
+        // against `measured_value`; `truth_unit` records what was typed.
+        if let t = TruthInput.parsePositiveBase(researchTrueText, unit: activeTruthUnit) {
             f["true_value"] = String(format: "%.3f", t)
             f["error"] = String(format: "%.3f", measured - t)
+            f["truth_unit"] = activeTruthUnit.rawValue
         }
         ResearchLog.shared.record(f)
     }
@@ -486,21 +529,48 @@ public struct DistanceMeasureScreen: View {
 
     // MARK: - Live distance polling
 
+    /// How often the LIDAR live readout is actually resampled. The 0.05 s
+    /// timer below is left alone on purpose, and the throttle sits inside the
+    /// LiDAR branch only.
+    ///
+    /// WHY NOT JUST RE-RATE THE TIMER. The AR branch feeds `DistanceSmoother`,
+    /// whose window is "every sample inside the last 1.2 s, capped at 12". At
+    /// 20 Hz that cap binds and the window spans 0.6 s; at 10 Hz it does not
+    /// and the window spans the full 1.2 s. Re-rating the timer would silently
+    /// re-tune the published AR distance — and `saveLiveReading` stores that
+    /// number. The estimator is frozen, so the AR path keeps its 20 Hz.
+    ///
+    /// The LiDAR branch has no such coupling: it resets the smoother and
+    /// publishes the single raycast sample. Sampling it half as often changes
+    /// WHICH instant is on screen, never how the number is computed — the same
+    /// difference as tapping Save 50 ms later. What it does buy is halving the
+    /// app's highest-rate caller of the LiDAR scene-mesh walk, which on this
+    /// screen is the whole main-thread cost of the readout. See the caller
+    /// inventory in `ARCenterRaycaster.meshRaycastHit`.
+    private static let lidarLivePollIntervalSec: TimeInterval = 0.1
+
     private func startLiveTimer() {
+        lastLidarPollAt = 0
         liveTimer?.invalidate()
         liveTimer = Timer.scheduledTimer(withTimeInterval: 0.05,
                                           repeats: true) { _ in
             Task { @MainActor in
-                let raw = currentDeviceToCenterDistance()
                 if settings.measurementSource == .ar {
                     // AR estimated-plane distances flicker — publish the
                     // spike-rejecting moving average instead of the raw
                     // sample (real movement still tracks via the median).
-                    if let raw { arSmoother.add(raw) }
+                    // Every tick, at the rate the smoother was tuned on.
+                    if let raw = currentDeviceToCenterDistance() {
+                        arSmoother.add(raw)
+                    }
                     liveDistanceM = arSmoother.value()
                 } else {
                     arSmoother.reset()
-                    liveDistanceM = raw
+                    let now = ProcessInfo.processInfo.systemUptime
+                    guard now - lastLidarPollAt >= Self.lidarLivePollIntervalSec
+                    else { return }
+                    lastLidarPollAt = now
+                    liveDistanceM = currentDeviceToCenterDistance()
                 }
             }
         }

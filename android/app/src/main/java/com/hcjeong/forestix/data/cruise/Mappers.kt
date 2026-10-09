@@ -79,6 +79,7 @@ object ProjectMapper {
         depthNoiseMm = s.depthNoiseMm,
         dbhCorrectionAlpha = s.dbhCorrectionAlpha,
         dbhCorrectionBeta = s.dbhCorrectionBeta,
+        dbhCalibrationEpoch = s.dbhCalibrationEpoch,
         vioDriftFraction = s.vioDriftFraction,
     )
 
@@ -103,6 +104,7 @@ object ProjectMapper {
             depthNoiseMm = e.depthNoiseMm,
             dbhCorrectionAlpha = e.dbhCorrectionAlpha,
             dbhCorrectionBeta = e.dbhCorrectionBeta,
+            dbhCalibrationEpoch = e.dbhCalibrationEpoch,
             vioDriftFraction = e.vioDriftFraction,
         )
     }
@@ -177,6 +179,7 @@ object PlannedPlotMapper {
         plannedLon = s.plannedLon,
         visited = s.visited,
         skipped = s.skipped,
+        plannedSource = s.plannedSource?.raw,
     )
 
     fun toStruct(e: PlannedPlotEntity) = PlannedPlot(
@@ -188,6 +191,10 @@ object PlannedPlotMapper {
         plannedLon = e.plannedLon,
         visited = e.visited,
         skipped = e.skipped,
+        // An unrecognised string decodes to null rather than to a borrowed
+        // case: "I don't know how this point was placed" is the honest
+        // reading of a value this build cannot name.
+        plannedSource = PositionSource.fromRaw(e.plannedSource),
     )
 }
 
@@ -209,6 +216,8 @@ object PlotMapper {
         offsetWalkM = s.offsetWalkM,
         slopeDeg = s.slopeDeg,
         aspectDeg = s.aspectDeg,
+        groundElevationM = s.groundElevationM,
+        canopyCoverPct = s.canopyCoverPct,
         plotAreaAcres = s.plotAreaAcres,
         startedAt = s.startedAt,
         closedAt = s.closedAt,
@@ -239,6 +248,8 @@ object PlotMapper {
             offsetWalkM = e.offsetWalkM,
             slopeDeg = e.slopeDeg,
             aspectDeg = e.aspectDeg,
+            groundElevationM = e.groundElevationM,
+            canopyCoverPct = e.canopyCoverPct,
             plotAreaAcres = e.plotAreaAcres,
             startedAt = e.startedAt,
             closedAt = e.closedAt,
@@ -257,6 +268,7 @@ object TreeMapper {
         id = s.id,
         plotId = s.plotId,
         treeNumber = s.treeNumber,
+        treeName = s.treeName,
         speciesCode = s.speciesCode,
         status = s.status.raw,
 
@@ -267,6 +279,8 @@ object TreeMapper {
         dbhCoverageDeg = s.dbhCoverageDeg,
         dbhNInliers = s.dbhNInliers,
         dbhConfidence = s.dbhConfidence.raw,
+        dbhCaptureMode = s.dbhCaptureMode,
+        dbhEstimatorEpoch = s.dbhEstimatorEpoch,
         dbhIsIrregular = s.dbhIsIrregular,
 
         heightM = s.heightM,
@@ -319,6 +333,7 @@ object TreeMapper {
             id = e.id,
             plotId = e.plotId,
             treeNumber = e.treeNumber,
+            treeName = e.treeName,
             speciesCode = e.speciesCode,
             status = status,
             dbhCm = e.dbhCm,
@@ -328,6 +343,8 @@ object TreeMapper {
             dbhCoverageDeg = e.dbhCoverageDeg,
             dbhNInliers = e.dbhNInliers,
             dbhConfidence = dbhConf,
+            dbhCaptureMode = e.dbhCaptureMode,
+            dbhEstimatorEpoch = e.dbhEstimatorEpoch,
             dbhIsIrregular = e.dbhIsIrregular,
             heightM = e.heightM,
             heightMethod = heightMethod,

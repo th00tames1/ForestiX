@@ -6,6 +6,8 @@
 
 package com.hcjeong.forestix.ui.screens.plot
 
+import com.hcjeong.forestix.common.finiteNumberFormat
+
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -45,6 +47,7 @@ import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.common.AreaUnit
 import com.hcjeong.forestix.common.RegionalSpecies
+import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.areaUnit
 import com.hcjeong.forestix.inventory.PlotStats
 import com.hcjeong.forestix.ui.screens.ForestixScaffold
@@ -190,21 +193,41 @@ fun PlotSummaryScreen(
             // acre; scale + relabel at display only (mirrors StandSummaryScreen).
             val areaUnit = settings.unitSystem.areaUnit
             val f = areaUnit.perAcreDensityFactor
-            val suffix = areaUnit.densitySuffix
             val abbr = areaUnit.abbreviation
 
             // MARK: - Stats
             FormSection(header = "Plot stats") {
                 StatRow("Live trees", "${stats.liveTreeCount}")
-                StatRow("Trees / $abbr", String.format(Locale.US, "%.1f", stats.tpa * f))
+                StatRow("Trees / $abbr", finiteNumberFormat(Locale.US, "%.1f", stats.tpa * f))
+                // Basal area converts its NUMERATOR with the basis, not only
+                // its suffix — the engine reports m² per ACRE, so scaling just
+                // the denominator left an imperial cruise reading "11.49
+                // m²/ac", a unit no cruise sheet uses and 10.76x away from the
+                // ft²/ac the quick-measure card shows for the same stand.
                 StatRow("Basal area / $abbr",
-                    String.format(Locale.US, "%.2f m²$suffix", stats.baPerAcreM2 * f))
+                    finiteNumberFormat(Locale.US, "%.2f %s",
+                        MeasurementFormatter.basalAreaDensity(stats.baPerAcreM2.toDouble(), areaUnit),
+                        MeasurementFormatter.basalAreaDensityUnit(areaUnit)))
+                // The one row in this block that used to stay metric — and the
+                // one a cruiser compares against the inch diameters above it.
                 StatRow("Quadratic mean diameter",
-                    String.format(Locale.US, "%.1f cm", stats.qmdCm))
+                    MeasurementFormatter.diameter(stats.qmdCm.toDouble(), settings.unitSystem))
+                // Volume turns on the same rule as the basal-area row above
+                // it: the engine reports m³ per ACRE, so an imperial cruise
+                // converts the numerator too. Scaling only the denominator
+                // printed "m³/ac" — 35.3x away from the cubic feet per acre
+                // the sheet is written in, and the one figure on this card a
+                // landowner is paid on.
                 StatRow("Gross volume / $abbr",
-                    String.format(Locale.US, "%.1f m³$suffix", stats.grossVolumePerAcreM3 * f))
+                    finiteNumberFormat(Locale.US, "%.1f %s",
+                        MeasurementFormatter.volumeDensity(
+                            stats.grossVolumePerAcreM3.toDouble(), areaUnit),
+                        MeasurementFormatter.volumeDensityUnit(areaUnit)))
                 StatRow("Merchantable volume / $abbr",
-                    String.format(Locale.US, "%.1f m³$suffix", stats.merchVolumePerAcreM3 * f))
+                    finiteNumberFormat(Locale.US, "%.1f %s",
+                        MeasurementFormatter.volumeDensity(
+                            stats.merchVolumePerAcreM3.toDouble(), areaUnit),
+                        MeasurementFormatter.volumeDensityUnit(areaUnit)))
             }
 
             // MARK: - Species breakdown
@@ -232,10 +255,14 @@ fun PlotSummaryScreen(
                             // RMSE label ("a=1.234 b=0.567 n=42 RMSE=1.20m") —
                             // nothing a cruiser can act on. The fit itself is
                             // unchanged and still ships whole in the export.
+                            // The ± is the ONLY thing this screen says about
+                            // how far an imputed height can be out. Read as
+                            // feet on an imperial cruise it understated the
+                            // curve's error by 3.28x, so it goes through the
+                            // same band the per-tree report uses.
                             Text(
-                                String.format(Locale.US,
-                                    "Height curve from %d trees, typically within ±%.1f m",
-                                    fit.nObs, fit.rmse),
+                                "Height curve from ${fit.nObs} trees, typically within " +
+                                    MeasurementFormatter.heightSigma(fit.rmse.toDouble(), settings.unitSystem),
                                 style = type.dataSmall,
                                 color = colors.textSecondary)
                         }
@@ -373,15 +400,20 @@ private fun SpeciesRow(code: String, stat: PlotStats.SpeciesStat, areaUnit: Area
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
-                String.format(Locale.US, "%.1f $suffix", stat.tpa * f),
+                finiteNumberFormat(Locale.US, "%.1f $suffix", stat.tpa * f),
                 style = type.dataSmall, color = colors.textSecondary)
             Spacer(Modifier.weight(1f))
             Text(
-                String.format(Locale.US, "%.2f m²$suffix", stat.baPerAcreM2 * f),
+                finiteNumberFormat(Locale.US, "%.2f %s",
+                    MeasurementFormatter.basalAreaDensity(stat.baPerAcreM2.toDouble(), areaUnit),
+                    MeasurementFormatter.basalAreaDensityUnit(areaUnit)),
                 style = type.dataSmall, color = colors.textSecondary)
             Spacer(Modifier.weight(1f))
             Text(
-                String.format(Locale.US, "%.1f m³$suffix", stat.grossVolumePerAcreM3 * f),
+                finiteNumberFormat(Locale.US, "%.1f %s",
+                    MeasurementFormatter.volumeDensity(
+                        stat.grossVolumePerAcreM3.toDouble(), areaUnit),
+                    MeasurementFormatter.volumeDensityUnit(areaUnit)),
                 style = type.dataSmall, color = colors.textSecondary)
         }
     }

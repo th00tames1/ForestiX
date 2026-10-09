@@ -1133,7 +1133,19 @@ internal object BoundaryGeoJSON {
 
     /// Compact FeatureCollection, sorted keys — same shape the app's
     /// GeoJSON exporter writes, so the stored file opens in any GIS.
-    fun serialise(geometries: List<BoundaryGeometry>): String {
+    ///
+    /// `origin` becomes the RFC 7946 §6.1 foreign member
+    /// `"forestix:source"`, and it has to be HERE rather than only in the
+    /// app's own record file: the GeoJSON is what leaves the device. A
+    /// stand outline opened in QGIS six months from now must still say
+    /// whether it was surveyed or sketched, and a member every other
+    /// reader ignores is exactly how it says it. "forestix:source" sorts
+    /// between "features" and "type", so the sorted-key output stays
+    /// byte-identical to the iOS sibling's.
+    fun serialise(
+        geometries: List<BoundaryGeometry>,
+        origin: BoundaryOrigin = BoundaryOrigin.IMPORTED,
+    ): String {
         val sb = StringBuilder()
         sb.append("{\"features\":[")
         geometries.forEachIndexed { i, g ->
@@ -1161,7 +1173,8 @@ internal object BoundaryGeoJSON {
             g.name?.let { sb.append("\"name\":\"").append(escape(it)).append('"') }
             sb.append("},\"type\":\"Feature\"}")
         }
-        sb.append("],\"type\":\"FeatureCollection\"}")
+        sb.append("],\"forestix:source\":\"").append(origin.raw)
+        sb.append("\",\"type\":\"FeatureCollection\"}")
         return sb.toString()
     }
 

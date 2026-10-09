@@ -1,15 +1,7 @@
 // swift-tools-version: 6.0
-// TimberCruisingApp — Phase 0 + Phase 1
-// Spec: timber_cruising_app_design.md §8 (Module & File Layout), §9.2 Phase 0 & Phase 1
-//
-// Phase 0: Common, Models, Persistence, InventoryEngine.
-// Phase 1: adds Geo, Basemap, Export, UI.
-//
-// Phase 2+ directories (AR, Positioning, Sensors, and the Phase 2+ screens/
-// viewmodels inside Screens/ and ViewModels/) are present as stub files under
-// TimberCruisingApp/. Stubs are 2-line comments and compile cleanly into the
-// UI target, which is why we do NOT exclude them explicitly — they just carry
-// no code until their phase begins.
+// ForestiX modules and tests. UI and ARKit integration require iOS.
+// For non-UI macOS tests use tools/validation/run_host_tests.py with a full
+// Xcode DEVELOPER_DIR; it omits iOS-only UI and binary package dependencies.
 
 import PackageDescription
 
@@ -41,6 +33,17 @@ let package = Package(
         .package(
             url: "https://github.com/pointfreeco/swift-snapshot-testing",
             from: "1.17.0"
+        ),
+        // ON-DEVICE SEGMENTATION. The Auto diameter path can read the stem's
+        // edges out of a YOLO-seg mask instead of walking the depth map; see
+        // Sensors/TreeSegmenter.swift. iOS ONLY — the runtime ships as an
+        // iOS/macCatalyst xcframework, and `Sensors` still has to compile on
+        // a macOS host for the test suites, so the dependency below is
+        // platform-conditioned and every use of it is behind
+        // `#if canImport(OnnxRuntimeBindings)`.
+        .package(
+            url: "https://github.com/microsoft/onnxruntime-swift-package-manager",
+            from: "1.20.0"
         )
     ],
     targets: [
@@ -93,8 +96,22 @@ let package = Package(
 
         .target(
             name: "Sensors",
-            dependencies: ["Common", "Models"],
-            path: "TimberCruisingApp/Sensors"
+            // See the package dependency note: iOS-only, and guarded at every
+            // import so the macOS host build of this target still succeeds.
+            dependencies: ["Common", "Models",
+                .product(name: "onnxruntime",
+                         package: "onnxruntime-swift-package-manager",
+                         condition: .when(platforms: [.iOS]))
+            ],
+            path: "TimberCruisingApp/Sensors",
+            resources: [
+                // The segmentation weights, when a build has them. `.copy` of
+                // the DIRECTORY rather than the file: it is gitignored (see
+                // Models/README.md), so naming the file would make a fresh
+                // clone fail to resolve rather than simply build without the
+                // feature.
+                .copy("Models")
+            ]
         ),
 
         // MARK: - Phase 3
@@ -188,7 +205,7 @@ let package = Package(
         .testTarget(
             name: "UISnapshotTests",
             dependencies: [
-                "UI",
+                "UI", "Persistence",
                 .product(name: "SnapshotTesting", package: "swift-snapshot-testing")
             ],
             path: "Tests/UISnapshotTests"

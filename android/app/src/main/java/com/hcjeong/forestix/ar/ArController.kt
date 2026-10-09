@@ -25,10 +25,17 @@ import java.nio.ByteOrder
 import java.util.Locale
 import kotlin.math.sqrt
 
+// The aim-offset instrument that used to live here (an `OpticalAxisProbe`
+// reporting where the lens principal point lands against the view centre) is
+// gone: it was built to settle whether the height anchor sphere sits off the
+// crosshair, it was tested on device, and the answer was that it does not.
+// Nothing measured, stored or exported ever read it.
+
 class ArController {
 
     @Volatile var frame: Frame? = null
         internal set
+    @Volatile private var heightFrame: Pair<HeightCameraSnapshot, Long>? = null
     @Volatile var session: Session? = null
         internal set
 
@@ -70,6 +77,17 @@ class ArController {
     fun onUpdate(session: Session, frame: Frame) {
         this.session = session
         this.frame = frame
+        val received = System.nanoTime()
+        val camera = frame.camera
+        val pose = camera.pose
+        val t = pose.translation
+        val z = pose.zAxis
+        heightFrame = HeightCameraSnapshot(
+            Vec3(t[0], t[1], t[2]),
+            kotlin.math.atan2(-z[1], sqrt(z[0]*z[0] + z[2]*z[2])),
+            camera.trackingState == TrackingState.TRACKING,
+            FloatArray(16).also { pose.toMatrix(it, 0) },
+        ) to received
         if (frame.camera.trackingState != TrackingState.TRACKING) trackedNormalSinceWatch = false
     }
 
@@ -91,6 +109,25 @@ class ArController {
         return f.camera.trackingState == TrackingState.TRACKING && viewWidthPx > 1 && viewHeightPx > 1
     }
 
+    /// The live frame ONLY while ARCore is actually tracking — the gate every
+    /// pose reader below goes through.
+    ///
+    /// `Frame.camera.pose` is undefined once the camera's tracking state
+    /// drops to PAUSED, and in practice it collapses toward the identity
+    /// pose. The readers turn that into a world position, an aim angle or a
+    /// distance with nothing in the return value to say the pose was never
+    /// real. That is the height walk-off's vanishing anchor (field round 9):
+    /// the anchoring pose sits near the session origin, so a distance
+    /// measured from an identity pose to it is ~0 and "Walked back" drops to
+    /// 0.00 while the cruiser is still walking — and the same untracked pose
+    /// is what the base/top aim taps would have read for d_h.
+    ///
+    /// Null is the honest answer and the contract the hit tests have always
+    /// had: it means "no pose", never "a pose that happens to be wrong".
+    /// Every caller in the app already treats it that way (`?.let` / `?:`).
+    private fun trackingFrame(): Frame? =
+        frame?.takeIf { it.camera.trackingState == TrackingState.TRACKING }
+
     /// Last screenCenterHit's trackable type + distance — dev-HUD readout so
     /// a field run can see WHAT the anchor landed on ("depth 1.62m").
     @Volatile var lastCenterHitInfo: String? = null
@@ -111,15 +148,34 @@ class ArController {
     /// off the crosshair — the height-anchor sphere then renders visibly off
     /// the aim and d_h (→ H) is computed from that wrong point. iOS never
     /// consumes feature-point hits (mesh raycast → estimated planes only).
-    fun screenCenterHit(): Vec3? {
+    fun screenCenterHit(): Vec3? = screenHit(viewWidthPx / 2f, viewHeightPx / 2f)
+
+    /// How far a GROUND tap may land, in metres. The cruiser is standing at
+    /// the tree they are measuring — the DBH band itself is 0.5–3 m and the
+    /// foot of the trunk sits a little further down the ray than the bark
+    /// does — so six metres is generous for the act and nowhere near the
+    /// tens of metres a grazed ground plane returns.
+    private val GROUND_TAP_MAX_M = 6f
+
+    /// The crosshair's own GROUND hit — the "Place base" button and the ghost
+    /// preview, which aim at the same thing the tap does and were left on the
+    /// ungated `screenCenterHit()` when the tap got its policy.
+    fun screenCenterGroundHit(): Vec3? =
+        screenGroundHit(viewWidthPx / 2f, viewHeightPx / 2f)
+
+    /// The same hit, at an arbitrary screen point — what a TAP lands on.
+    ///
+    /// `screenCenterHit` is this with the crosshair's coordinates, so the two
+    /// cannot disagree about what counts as a surface: the DepthPoint/Plane
+    /// policy, the dev-HUD readout and the null contract are one body of code
+    /// rather than two that drift. iOS `ARCenterRaycaster.hit(at:)` is the
+    /// same split for the same reason.
+    fun screenHit(x: Float, y: Float): Vec3? {
         if (!ready()) { lastCenterHitInfo = null; return null }
         val f = frame ?: return null
-        val cx = viewWidthPx / 2f
-        val cy = viewHeightPx / 2f
-        val hits = try { f.hitTest(cx, cy) } catch (_: Throwable) { return null }
+        val hits = try { f.hitTest(x, y) } catch (_: Throwable) { return null }
         // LiDAR mode: nearest SURFACE hit (depth-image points + planes).
-        // AR mode (no Depth API): estimated-plane hits first, then anything —
-        // the dev-only caliper/motion arms need some distance to work with.
+        // AR mode (no Depth API): estimated-plane hits first, then anything.
         val hit = if (preferDepth) hits.firstOrNull { it.trackable is DepthPoint || it.trackable is Plane }
         else hits.firstOrNull { it.trackable is Plane } ?: hits.firstOrNull()
         lastCenterHitInfo = hit?.let {
@@ -134,6 +190,71 @@ class ArController {
         hit ?: return null
         val t = hit.hitPose.translation
         return Vec3(t[0], t[1], t[2])
+    }
+
+    /// GROUND raycast at an arbitrary screen point — what the breast-height
+    /// guide's tap lands on.
+    ///
+    /// SHAPED LIKE `screenCenterAnchorHit`, deliberately, because it has the
+    /// same failure to avoid and that one already learned it in the field.
+    /// A tap near the foot of a stem sends a ray down at a shallow angle, and
+    /// the plain surface filter in `screenHit` happily returns the ray's
+    /// intersection with ARCore's detected ground plane TENS OF METRES OUT —
+    /// field round 8 measured 12.78 / 31.11 / 44.33 m as the pitch wobbled a
+    /// few degrees. Planting a breast-height guide out there is the same
+    /// defect wearing a different hat.
+    ///
+    /// So, the same three rules, plus the one this case needs:
+    ///   • nothing past `maxDistM` — the foot of the tree the cruiser is
+    ///     standing at, not a hillside behind it;
+    ///   • a DepthPoint within the gate wins outright, as it does there;
+    ///   • sparse Point hits never place anything;
+    ///   • and a Plane must be HORIZONTAL. That is the rule this raycast adds
+    ///     and the anchor one cannot use: the anchor wants the trunk, so it
+    ///     asks only that the plane FACE the ray — which a trunk face and a
+    ///     floor both do. Ground is the one that has to be told apart from
+    ///     bark, and ARCore tags plane type, so it is answerable rather than
+    ///     guessed at.
+    ///
+    /// `lastCenterHitInfo` reports what was accepted or why the tap did
+    /// nothing, so a dev-mode field run can see it. iOS
+    /// `ARCenterRaycaster.hit(at:intent:.ground)` is the same policy.
+    fun screenGroundHit(x: Float, y: Float, maxDistM: Float = GROUND_TAP_MAX_M): Vec3? {
+        if (!ready()) { lastCenterHitInfo = null; return null }
+        val f = frame ?: return null
+        val hits = try { f.hitTest(x, y) } catch (_: Throwable) { return null }
+        var rejected: String? = null
+        for (h in hits) {
+            val d = h.distance
+            when (val trackable = h.trackable) {
+                is DepthPoint -> {
+                    if (d <= maxDistM) {
+                        lastCenterHitInfo = String.format(Locale.US, "ground depth %.2fm", d)
+                        val t = h.hitPose.translation
+                        return Vec3(t[0], t[1], t[2])
+                    }
+                    if (rejected == null) rejected = String.format(Locale.US, "depth %.1fm too far", d)
+                }
+                is Plane -> {
+                    if (d > maxDistM) {
+                        if (rejected == null) rejected = String.format(Locale.US, "plane %.1fm too far", d)
+                        continue
+                    }
+                    val horizontal = trackable.type == Plane.Type.HORIZONTAL_UPWARD_FACING ||
+                        trackable.type == Plane.Type.HORIZONTAL_DOWNWARD_FACING
+                    if (!horizontal) {
+                        if (rejected == null) rejected = String.format(Locale.US, "plane %.1fm not ground", d)
+                        continue
+                    }
+                    lastCenterHitInfo = String.format(Locale.US, "ground plane %.2fm", d)
+                    val t = h.hitPose.translation
+                    return Vec3(t[0], t[1], t[2])
+                }
+                else -> { /* sparse Point / other: never places the guide */ }
+            }
+        }
+        lastCenterHitInfo = rejected
+        return null
     }
 
     /// Height-anchor raycast (locked spec, field round 8). At eye level the
@@ -195,7 +316,7 @@ class ArController {
     /// metres of horizontal distance — fallback when no surface is hit
     /// (sky / canopy). Direct port of forwardPointAtHorizontalDistance.
     fun forwardPointAtHorizontalDistance(d: Float): Vec3? {
-        val f = frame ?: return null
+        val f = trackingFrame() ?: return null
         val pose = f.camera.pose
         // ARCore camera looks down -Z of its pose, like ARKit.
         val zAxis = pose.zAxis            // forward = -zAxis
@@ -218,17 +339,34 @@ class ArController {
         return distance(cam, hit).toDouble()
     }
 
+    data class HeightCameraSnapshot(
+        val position: Vec3, val elevationRad: Float,
+        val trackingNormal: Boolean, val poseMatrix: FloatArray,
+    )
+
+    /** A sighting reads one copied AR frame, not separately advancing poses. */
+    fun heightCameraSnapshot(): HeightCameraSnapshot? {
+        val q = heightFrame ?: return null
+        val age = (System.nanoTime() - q.second) / 1e9
+        val s = q.first
+        if (!s.trackingNormal || !com.hcjeong.forestix.common.HeightSampleFreshness.isRecent(age) ||
+            !s.position.x.isFinite() || !s.position.y.isFinite() || !s.position.z.isFinite() ||
+            !s.elevationRad.isFinite()) return null
+        return s
+    }
+
     fun currentCameraPosition(): Vec3? {
-        val f = frame ?: return null
+        val f = trackingFrame() ?: return null
         val t = f.camera.pose.translation
         return Vec3(t[0], t[1], t[2])
     }
 
     /// Elevation angle (radians) of the camera's forward aim ray above the
-    /// horizon — the Android analogue of the iOS IMU pitch α used by the
-    /// height walk-off tangent. Positive = aiming up. Forward = -zAxis.
+    /// horizon — the sighting angle α the height walk-off tangent uses on
+    /// both platforms (iOS reads the same elevation from its ARKit camera
+    /// pose). Positive = aiming up. Forward = -zAxis.
     fun cameraForwardElevationRad(): Float? {
-        val f = frame ?: return null
+        val f = trackingFrame() ?: return null
         val z = f.camera.pose.zAxis
         val fwd = Vec3(-z[0], -z[1], -z[2])
         val horiz = sqrt(fwd.x * fwd.x + fwd.z * fwd.z)
@@ -243,8 +381,7 @@ class ArController {
     /// no `.gravityAndHeading` world alignment like ARKit. Null while not
     /// tracking or when the forward ray is near-vertical (no stable yaw).
     fun cameraWorldYawDeg(): Double? {
-        val f = frame ?: return null
-        if (f.camera.trackingState != TrackingState.TRACKING) return null
+        val f = trackingFrame() ?: return null
         val z = f.camera.pose.zAxis
         val fwd = Vec3(-z[0], -z[1], -z[2])
         val horiz = sqrt(fwd.x * fwd.x + fwd.z * fwd.z)
@@ -265,8 +402,11 @@ class ArController {
     /// Full-resolution camera focal length (x) + image width, used to
     /// project a real-world width (m) to on-screen pixels for the live HUD.
 
-    /// True when the latest frame is tracking — for the dev HUD.
-    fun trackingOk(): Boolean = frame?.camera?.trackingState == TrackingState.TRACKING
+    /// True when the latest frame is tracking, i.e. when every pose reader
+    /// above will actually return something. Read live by the height
+    /// walk-off so a dropout is announced while it is happening, not
+    /// inferred afterwards from a frozen number.
+    fun trackingOk(): Boolean = trackingFrame() != null
 
     /// Camera-forward elevation in degrees (the dev-HUD readout of the
     /// pitch the height tangent uses).
@@ -386,6 +526,8 @@ class ArController {
                 w, h, depth, conf, fx, fy, cx, cy, pose,
                 fxImg = fxImg, fyImg = fyImg, depthFromViewAffine = depthFromView,
                 rawDepthMm = rawMm,
+                frameTimestampNanos = f.timestamp,
+                depthAgeNanos = (f.androidCameraTimestamp - image.timestamp).coerceAtLeast(0L),
             )
         } finally {
             image.close()
@@ -397,8 +539,7 @@ class ArController {
     /// raw-capture recorder stores this for the height anchor/base/top +
     /// the 5 Hz pose-sample trail. Null while not tracking.
     fun currentCameraPose(): FloatArray? {
-        val f = frame ?: return null
-        if (f.camera.trackingState != TrackingState.TRACKING) return null
+        val f = trackingFrame() ?: return null
         val m = FloatArray(16)
         f.camera.pose.toMatrix(m, 0)
         return m
@@ -410,6 +551,92 @@ class ArController {
     /// JPEG at `quality`. Returns false on any failure (bundle still saves,
     /// just without an rgb_file). Best-effort + fully guarded so a recorder
     /// hiccup can never crash the AR screen.
+    /// THE CAMERA FRAME, LETTERBOXED AND NORMALISED, ready for the segmenter.
+    ///
+    /// Straight from the ARCore YUV planes to the network's input buffer — no
+    /// JPEG, no Bitmap. `captureCameraJpeg` beside this encodes because its
+    /// output is a file a person looks at; this runs several times a second
+    /// and an encode/decode round trip would cost more than the network does.
+    ///
+    /// Captures the camera image immediately; RGB preparation can then run
+    /// on a worker without acquiring a different AR frame.
+    fun acquireCameraLetterboxInput(size: Int): CameraLetterboxInput? {
+        val f = trackingFrame() ?: return null
+        val vw = viewWidthPx.toFloat(); val vh = viewHeightPx.toFloat()
+        if (vw <= 1 || vh <= 1) return null
+        val image = try { f.acquireCameraImage() } catch (_: Throwable) { return null }
+        return try {
+            val out = FloatArray(6)
+            f.transformCoordinates2d(Coordinates2d.VIEW, floatArrayOf(0f,0f,vw,0f,0f,vh),
+                Coordinates2d.IMAGE_PIXELS, out)
+            val affine = floatArrayOf((out[2]-out[0])/vw,(out[4]-out[0])/vh,out[0],
+                (out[3]-out[1])/vw,(out[5]-out[1])/vh,out[1])
+            if (!affine.all { it.isFinite() }) { image.close(); null }
+            else CameraLetterboxInput(image,size,affine,f.timestamp)
+        } catch (_: Throwable) { image.close(); null }
+    }
+
+    /** Retains the captured camera image while preprocessing runs off the UI thread. */
+    class CameraLetterboxInput(private val image: android.media.Image,private val size:Int,
+        val imageFromViewAffine:FloatArray,val frameTimestampNanos:Long):AutoCloseable {
+        private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
+        override fun close() { if(closed.compareAndSet(false,true))image.close() }
+        fun convert():Pair<FloatArray,com.hcjeong.forestix.sensors.Letterbox>? {
+            if(closed.get() || size<=0)return null
+            return try {
+                if (image.format != android.graphics.ImageFormat.YUV_420_888) return null
+                val w = image.width
+                val h = image.height
+                if (w <= 0 || h <= 0) return null
+                val box = com.hcjeong.forestix.sensors.Letterbox(w, h, size)
+                val yP = image.planes[0]; val uP = image.planes[1]; val vP = image.planes[2]
+                val yB = yP.buffer; val uB = uP.buffer; val vB = vP.buffer
+                val yRow = yP.rowStride; val yPix = yP.pixelStride
+                val uRow = uP.rowStride; val uPix = uP.pixelStride
+                val vRow = vP.rowStride; val vPix = vP.pixelStride
+                val area = size * size
+                val out = FloatArray(3 * area)
+                // 114/255, the grey the letterbox pads with.
+                val pad = 114f / 255f
+                java.util.Arrays.fill(out, pad)
+                val nw = kotlin.math.max(1, kotlin.math.round(w * box.scale).toInt())
+                val nh = kotlin.math.max(1, kotlin.math.round(h * box.scale).toInt())
+                val ox = box.padX.toInt()
+                val oy = box.padY.toInt()
+                for (dy in 0 until nh) {
+                    val my = oy + dy
+                    if (my < 0 || my >= size) continue
+                    val sy = (dy * h / nh).coerceIn(0, h - 1)
+                    val outRow = my * size
+                    val yBase = sy * yRow
+                    val cBaseU = (sy / 2) * uRow
+                    val cBaseV = (sy / 2) * vRow
+                    for (dx in 0 until nw) {
+                        val mx = ox + dx
+                        if (mx < 0 || mx >= size) continue
+                        val sx = (dx * w / nw).coerceIn(0, w - 1)
+                        val yv = (yB.get(yBase + sx * yPix).toInt() and 0xFF)
+                        val uv = (uB.get(cBaseU + (sx / 2) * uPix).toInt() and 0xFF) - 128
+                        val vv = (vB.get(cBaseV + (sx / 2) * vPix).toInt() and 0xFF) - 128
+                        // BT.601, the conversion YuvImage uses, so this and the
+                        // reference JPEG describe the same colours.
+                        val r = (yv + 1.402f * vv).coerceIn(0f, 255f)
+                        val g = (yv - 0.344136f * uv - 0.714136f * vv).coerceIn(0f, 255f)
+                        val b = (yv + 1.772f * uv).coerceIn(0f, 255f)
+                        val idx = outRow + mx
+                        out[idx] = r / 255f
+                        out[area + idx] = g / 255f
+                        out[2 * area + idx] = b / 255f
+                    }
+                }
+                return out to box
+            } catch (_: Throwable) { null }
+        }
+    }
+
+    fun cameraLetterboxCHW(size: Int): Pair<FloatArray, com.hcjeong.forestix.sensors.Letterbox>? =
+        acquireCameraLetterboxInput(size)?.use { it.convert() }
+
     fun captureCameraJpeg(dest: java.io.File, quality: Int = 80): Boolean {
         val f = frame ?: return false
         return try {

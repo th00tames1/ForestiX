@@ -21,6 +21,13 @@ class TreeDetailViewModel(tree: Tree, private val treeRepo: TreeRepository) {
 
     val speciesCode = MutableStateFlow(tree.speciesCode)
     val status = MutableStateFlow(tree.status)
+    /// WHEN THIS STEM WAS TALLIED. `createdAt` is the only measurement time a
+    /// cruise tree has — the analysis pairs stems across two phones by capture
+    /// time, so a stem that went into a notebook at the tree and into the app
+    /// back at the office carries the office time until somebody corrects it.
+    /// The form's Time row is that correction, so the instant is an edit mirror
+    /// like the species and the notes.
+    val measuredAt = MutableStateFlow(tree.createdAt)
     val dbhCm = MutableStateFlow(tree.dbhCm)
     val dbhIsIrregular = MutableStateFlow(tree.dbhIsIrregular)
     val heightM = MutableStateFlow<Float?>(tree.heightM)
@@ -52,7 +59,23 @@ class TreeDetailViewModel(tree: Tree, private val treeRepo: TreeRepository) {
             val t = _tree.value.copy()
             t.speciesCode = speciesCode.value
             t.status = status.value
-            t.dbhCm = dbhCm.value
+            if (dbhCm.value != t.dbhCm) {
+                t.dbhCm = dbhCm.value
+                // A diameter typed over on this screen was not produced by any
+                // estimator, so the row stops claiming one produced it — null
+                // is the epoch field's word for "unknown" — AND says it was
+                // typed, because clearing only the epoch re-arms the row for
+                // DbhEpochRecompute. A hand correction is normally a small
+                // nudge, well inside the 2 % window the bundle match uses, so
+                // the row would match its own old capture and the replay would
+                // write over the tape reading the cruiser came here to enter.
+                // A cruiser who overrides the app has said the last word on
+                // that stem.
+                //
+                // Mirrors iOS TreeDetailViewModel.
+                t.dbhEstimatorEpoch = null
+                t.dbhCaptureMode = "typed"
+            }
             t.dbhIsIrregular = dbhIsIrregular.value
             if (heightM.value != t.heightM) {
                 t.heightM = heightM.value
@@ -64,6 +87,7 @@ class TreeDetailViewModel(tree: Tree, private val treeRepo: TreeRepository) {
             t.notes = notes.value
             t.bearingFromCenterDeg = bearingFromCenterDeg.value
             t.distanceFromCenterM = distanceFromCenterM.value
+            t.createdAt = measuredAt.value
             t.updatedAt = System.currentTimeMillis()
 
             _tree.value = treeRepo.update(t)
@@ -73,6 +97,59 @@ class TreeDetailViewModel(tree: Tree, private val treeRepo: TreeRepository) {
             _errorMessage.value = "Save failed: ${e.message ?: e}"
         } finally {
             _isSaving.value = false
+        }
+    }
+
+    /// Re-read the stored row after a write this screen did not make itself —
+    /// the Plot row re-parents the tree through `TreeMover`, which reads and
+    /// writes the row in the store, and a snapshot taken before that move
+    /// still names the plot the tree has left (and, when the destination was
+    /// already using its number, the number it no longer wears).
+    ///
+    /// The edit mirrors are deliberately left as the cruiser typed them: a
+    /// half-finished species or note is theirs, and their Save still lands —
+    /// on the row where it now lives, because `save()` copies from this
+    /// re-read tree.
+    suspend fun reload() {
+        try {
+            treeRepo.read(_tree.value.id, includeDeleted = true)?.let { fresh ->
+                _tree.value = fresh
+            }
+        } catch (e: Exception) {
+            _errorMessage.value = "Reload failed: ${e.message ?: e}"
+        }
+    }
+
+    /// Writes the measured time STRAIGHT TO THE RECORD, the way iOS's
+    /// `saveTime()` does and the way the field log's record sheet already did
+    /// on this platform.
+    ///
+    /// This used to set the `measuredAt` mirror and mark the form dirty. The
+    /// row then showed the corrected time immediately — so it read as saved —
+    /// while nothing had been written, and a cruiser who backed out without
+    /// pressing "Save changes" lost the correction with no sign it had gone.
+    /// A row that answers a tap by displaying the new value has told the
+    /// cruiser it is stored; the only honest way to keep that promise is to
+    /// store it.
+    ///
+    /// The row is re-read first rather than copied from the open snapshot: the
+    /// Plot row re-parents through `TreeMover`, so the tree in hand may be one
+    /// write behind.
+    suspend fun setMeasuredTime(epochMs: Long) {
+        try {
+            val fresh = treeRepo.read(_tree.value.id, includeDeleted = true) ?: run {
+                _errorMessage.value = "This tree is no longer in the cruise."
+                return
+            }
+            fresh.createdAt = epochMs
+            fresh.updatedAt = System.currentTimeMillis()
+            _tree.value = treeRepo.update(fresh)
+            // `save()` copies the form's mirror back over `createdAt`, so a
+            // stale mirror would put the old instant back on the next Save.
+            measuredAt.value = epochMs
+            _errorMessage.value = null
+        } catch (e: Exception) {
+            _errorMessage.value = "Save failed: ${e.message ?: e}"
         }
     }
 

@@ -99,19 +99,34 @@ public struct MapHomeScreen: View {
     /// (MapHomeScreen+Plot.swift).
     @ObservedObject var samplingPlot = ActiveSamplingPlot.shared
 
+    /// WHERE THE MAP OPENS. Two steps closer than the 16 it used to be:
+    /// at 16 a phone viewport is the better part of a kilometre across,
+    /// which is a road map. A cruiser opening this screen is standing in
+    /// the stand they are working, and what they need to see is their own
+    /// plots and pins — 18 puts roughly 150 m across the short side, so
+    /// a plot and its neighbours are on screen at arm's length without a
+    /// pinch. Every camera move that has no better idea of a scale uses
+    /// this one constant.
+    static let defaultZoom: Double = 18
+
     /// Peavy Hall (OSU College of Forestry) fallback — used only when
     /// there is no fix and no located reading.
     private static let fallbackCamera = BasemapCamera(
-        latitude: 44.56417, longitude: -123.28556, zoom: 16)
+        latitude: 44.56417, longitude: -123.28556, zoom: MapHomeScreen.defaultZoom)
 
     /// SHARED camera — one map serves both modes, so flipping the mode
     /// toggle never snaps position or zoom.
     @State var camera = MapHomeScreen.fallbackCamera
     @State private var cameraInitialised = false
+    @State private var developerUnlock = DeveloperModeUnlock()
+    @State private var showingDeveloperUnlock = false
     /// True while the camera still sits on the hardcoded fallback — the
     /// first real GPS fix recenters exactly once.
     @State private var awaitingFirstFix = false
-    @State private var visibleRegion: BasemapRegion?
+    /// What the map is currently showing. Read by the offline downloader and
+    /// by `frameCamera(onPlotAt:radiusM:)`, which needs a measured ground
+    /// span to turn a plot radius into a zoom — hence not private.
+    @State var visibleRegion: BasemapRegion?
     /// Shared selection — measure ids ("tree-…"/"entry-…") and cruise
     /// ids ("plot-…"/"pplot-…"/"ctree-…") are prefix-disjoint, and the
     /// toggle clears it, so a selection never leaks across modes.
@@ -129,6 +144,20 @@ public struct MapHomeScreen: View {
     /// Quick-peek "Edit this tree" — the entry the compact edit sheet is
     /// editing (the pin's primary reading). nil = sheet closed.
     @State private var editingEntry: QuickMeasureEntry?
+    /// The tier chip a cruiser tapped on a peek, and therefore which
+    /// explainer to raise. Diameter and height are graded by different
+    /// checks, so the sheet must be told which one it is explaining.
+    ///
+    /// Deliberately not `private`: the cruise peek lives in
+    /// MapHomeScreen+Cruise.swift, Swift's `private` is file-scoped, and the
+    /// two peeks must raise ONE sheet rather than keep a state each.
+    @State var explainingTier: TierExplainer.Kind?
+    /// Quick-peek "Details" — the field log's own per-tree record sheet,
+    /// opened on the row behind the tapped pin. nil = closed.
+    @State private var inspectingRow: MapDetailTarget?
+    /// A "measure again" raised inside that sheet, held until the sheet is
+    /// actually gone. nil = none pending.
+    @State private var pendingRescanTree: Int?
     /// Chooser row picked — launched from the sheet's onDismiss so the
     /// fullScreenCover doesn't fight the sheet dismissal animation.
     @State private var pendingChoice: MeasureChoice?
@@ -138,6 +167,12 @@ public struct MapHomeScreen: View {
     @State private var presentingHeightScan = false
     @State private var presentingDistance = false
     @State private var presentingSampling = false
+    /// FIELD REPORT 12 — plot setup re-opened from the mini-map WHILE a
+    /// quick measurement is on screen. Nested over the DBH / Height cover
+    /// (never both at once: the full-measurement chain closes one before
+    /// opening the other), so the scan the cruiser is in the middle of is
+    /// still there when they come back from changing the radius.
+    @State private var scanPlotSetup = false
     /// Plot-overlay tap menu (Edit / Remove) and the Remove confirmation
     /// that always precedes an actual removal. Both name the plot, so a
     /// reload that changes the active plot can never redirect them.
@@ -148,6 +183,11 @@ public struct MapHomeScreen: View {
     @State var plotMenuPlotID: UUID?
     @State var confirmingPlotRemovalID: UUID?
     @State private var pendingTreeNumber: Int?
+    /// The name and species the cruiser typed above the chooser's Full
+    /// measurement row, carried into the reading the scan writes. Both nil
+    /// for a flow that never went through the chooser's tree rows.
+    @State private var pendingTreeName: String?
+    @State private var pendingSpeciesCode: String?
     /// Full-measurement chain (the chooser's first row): ONE tree number,
     /// DBH first, then the Height cover auto-opens on DBH Accept. No
     /// continuation prompt in this mode — the chain IS the answer.
@@ -160,6 +200,17 @@ public struct MapHomeScreen: View {
     /// to that pin's tree number instead of the next free one. Cleared
     /// whenever the chooser dismisses so the plain (+) stays unscoped.
     @State private var chooserTreeOverride: Int?
+    /// The chooser's tree-name field and species control, live while the
+    /// sheet is up. Seeded on every presentation from the log (see
+    /// `suggestedTreeName`) and read into the pending slots when a tree row
+    /// is tapped.
+    @State private var chooserTreeName: String = ""
+    @State private var chooserSpeciesCode: String?
+    /// False while `chooserSpeciesCode` is only the app's carry-over guess,
+    /// true once the cruiser has picked in the control. It drives the dim
+    /// tertiary styling and nothing else — the code is stored either way (see
+    /// `suggestedSpecies`).
+    @State private var chooserSpeciesConfirmed = false
     /// Far-GPS guard — set when the peek primary button is tapped while
     /// the cruiser stands > 30 m from the pin; the alert asks before the
     /// scoped chooser opens.
@@ -228,13 +279,115 @@ public struct MapHomeScreen: View {
     // cruise tree photo viewer opened from the tree-peek thumbnail.
     @State var deletePlotCandidateID: UUID?
     @State var deleteTreeCandidateID: UUID?
-    @State var cruisePhotoContext: CruisePhotoContext?
+    @State var cruisePhotoContext: PhotoViewerContext?
 
-    // Planned-plot navigation + centre recording + setup.
+    // Planned-plot navigation + setup.
     @State var navTargetPlannedID: UUID?
-    @State var recordingTarget: PlannedPlot?
     @State var presentingCruiseSetup = false
     @State var pendingCruiseSetup = false
+    /// The plot whose SITE DESCRIPTION sheet is up ("Add details" on the plot
+    /// peek). nil = closed.
+    @State var sitePlotTarget: SitePlotTarget?
+    /// The camera glide in flight ("Go to Plot N"). Held so a second tap
+    /// cancels the first rather than two loops fighting over one camera.
+    @State var cameraFlight: Task<Void, Never>?
+
+    // MARK: Planning on the map (long press)
+
+    /// Coordinate a press-and-hold landed on, while its menu is up. This is
+    /// the ONE door into planning: the (+)'s "Pick on the map" arms the
+    /// prompt below and then waits for this same gesture, so there is a
+    /// single flow to learn and a single place a drawn coordinate is born.
+    @State var mapPlanCoordinate: CoordinateConversions.LatLon?
+    /// The cruiser asked to plan on the map and has not pressed yet — the
+    /// map shows the instruction banner until they do or cancel.
+    @State var awaitingMapPlanPress = false
+    /// The planned plot a "Move plan" is in flight for. The next long
+    /// press MOVES it instead of raising the menu; a plan drawn in the wrong
+    /// spot is the ordinary case, not an exception.
+    @State var movingPlannedID: UUID?
+    /// Planned plot the delete confirmation is up for.
+    @State var deletePlannedCandidate: PlannedPlot?
+    /// Why a PLAN could not be written. Its own channel rather than
+    /// `plotSaveRefusal`, whose alert is titled "Can't save the plot centre"
+    /// — a plan has no centre, and a refusal that names the wrong thing sends
+    /// the cruiser looking for a GPS problem they do not have.
+    @State var planSaveRefusal: String?
+    /// The (+)'s two doors into a plot — start on the fix that exists now,
+    /// or plan the location on the map first.
+    @State var presentingStartPlotChoice = false
+    // MARK: Areas drawn on this map (MapHomeScreen+Area.swift)
+    //
+    // An AREA is a `Stratum` — the polygon a cruise is generated inside.
+    // It is drawn, selected, edited, cruised and deleted here rather than
+    // on an editor screen of its own, so "Draw an area" never costs the
+    // cruiser the view they had framed.
+
+    /// The current project's areas, reloaded alongside the cruise data.
+    @State var areas: [Stratum] = []
+    /// The area whose callout is up. Mutually exclusive with a pin peek
+    /// and with the plot menu — one selection on the map at a time.
+    @State var selectedAreaID: UUID?
+    /// The outline being dragged. Non-nil is the whole "editing an area"
+    /// mode: the bottom cluster becomes the draft bar, the handles appear,
+    /// and press-and-hold planning is suppressed.
+    @State var areaDraft: BoundaryDraft?
+    /// Full-shape undo, pushed BEFORE each gesture rather than after, so a
+    /// dragged corner undoes to where the drag started. WHOLE DRAFTS, not
+    /// vertex lists: a circle's undo has to put back the circle, and a
+    /// stack of bare corners would restore its ring as a 128-corner polygon
+    /// the cruiser can neither resize nor move. Android's stack has always
+    /// held drafts for the same reason it is easy there — the type is
+    /// immutable.
+    @State var areaDraftUndo: [BoundaryDraft] = []
+    @State var areaDraftName: String = ""
+    /// The radius field's text while a CIRCLE is being drawn, in the
+    /// cruiser's own unit (m or ft). Its own state rather than a formatting
+    /// of the draft, because a half-typed "5" must survive the keystroke
+    /// that is about to make it "50".
+    @State var areaDraftRadiusText: String = ""
+    /// Where on the ring the radius handle is sitting, as a bearing in
+    /// radians anticlockwise from east. It follows the finger during a drag
+    /// (see `areaRadiusDrag`) so the handle never snaps sideways away from
+    /// a thumb pulling at an angle; due east at rest.
+    @State var areaRadiusHandleAngle: Double = 0
+    /// True between the first movement of a centre / radius drag and its
+    /// end — one undo entry per gesture, as with `areaDraggingCorner`.
+    @State var areaDraggingCircle = false
+    /// The stored area the draft is replacing. nil = the draft is new.
+    @State var editingAreaID: UUID?
+    /// The corner a drag is currently moving, so a gesture that outlives a
+    /// delete cannot start writing to a different vertex.
+    @State var areaDraggingCorner: Int?
+    /// Set when a long-press deleted a corner mid-touch — the drag
+    /// recogniser on that same finger is ignored until it lifts.
+    @State var areaSuppressDragUntilRelease = false
+    /// The corner an edge-handle drag CREATED, once it has moved far
+    /// enough to mean it.
+    @State var areaInsertedFromEdge: Int?
+    /// Why an area could not be saved or deleted. Its own channel: neither
+    /// `plotSaveRefusal` nor `planSaveRefusal` names an area, and a refusal
+    /// that names the wrong thing sends the cruiser looking for the wrong
+    /// problem.
+    @State var areaSaveRefusal: String?
+    @State var deleteAreaCandidateID: UUID?
+    /// The overlap toggle, announced the first time a tap hits both an area
+    /// and a plot. `areaStackHintSeen` keeps it to once a session — a hint
+    /// that reappears forever is noise, and one that never appears is a
+    /// gesture nobody finds.
+    @State var areaStackHint: String?
+    @State var areaStackHintSeen = false
+    /// The area Cruise setup was opened FROM, so generation lays plots into
+    /// that area and leaves every other area's plan alone.
+    @State var cruiseSetupAreaID: UUID?
+    /// Why Cruise setup did not open. Its own channel rather than
+    /// `areaSaveRefusal`, which is headed "Couldn't save the area" — see
+    /// `openCruiseSetup(forArea:)`. Android: `CruiseModeState.cruiseSetupRefusal`.
+    @State var cruiseSetupRefusal: String?
+    /// The map's laid-out size, captured by the projected object layer. The
+    /// handles and callouts need it to turn coordinates into points, and
+    /// the starting rectangle needs it to be sized from what is on screen.
+    @State var mapViewportSize: CGSize = .zero
 
     // One-button Export all, run inline in the project sheet.
     @State var isExportingAll = false
@@ -249,6 +402,17 @@ public struct MapHomeScreen: View {
     @State var chainPlotID: UUID?
     @State var chainTreeNumber: Int = 1
     @State var chainTreeID: UUID?
+    /// The name the NEXT tallied tree will be saved under, stepped on by
+    /// `TreeNameSequence` after every save exactly as the number is. nil on a
+    /// plot nobody has named — the loop then stays zero-typing and the trees
+    /// are labelled by number, which is what cruise mode has always done.
+    /// The tally pill is where the cruiser sets or clears it.
+    @State var chainTreeName: String?
+    /// Tally pill tapped — the rename field for `chainTreeName` is up, holding
+    /// the text being edited. Separate from `chainTreeName` so cancelling
+    /// leaves the pending name untouched.
+    @State var renamingTallyTree = false
+    @State var tallyNameDraft = ""
 
     // FIELD REPORT F10 / F11 — two covers presented FROM INSIDE the cruise
     // diameter tally rather than from the map. Nesting matters: the tally
@@ -261,7 +425,17 @@ public struct MapHomeScreen: View {
     @State var chainingHeight = false
     @State var chainingPlotSetup = false
 
-    // Heights sheet (plot peek → "Heights · N measured") + the scoped
+    /// FIELD REPORT 12 — plot setup re-opened from the mini-map while a
+    /// cruise HEIGHT is on screen. Its own flag rather than
+    /// `chainingPlotSetup`: the chained Height cover is itself presented by
+    /// the tally screen, and a view can only present one cover at a time —
+    /// so the setup cover has to hang off the Height screen instead. The two
+    /// Height covers never coexist (one is nested in the tally loop, the
+    /// other opens from the map), so one flag serves both.
+    @State var heightPlotSetup = false
+
+    // Sample heights sheet (plot peek → "Sample heights · N of M") +
+    // the scoped
     // Height request staged across its dismissal.
     @State var heightsSheetTarget: HeightsSheetTarget?
     @State var pendingScopedHeight: ScopedHeightRequest?
@@ -275,7 +449,11 @@ public struct MapHomeScreen: View {
     // MARK: Mode toggle
 
     /// `tc.mapMode` — the persisted mode the screen renders.
-    private var isCruiseMode: Bool { settings.mapMode == "cruise" }
+    ///
+    /// Internal rather than private because the press-and-hold menu lives in
+    /// the cruise extension but serves BOTH modes: it has to ask the same one
+    /// definition of "is this cruise", not re-derive it from `settings`.
+    var isCruiseMode: Bool { settings.mapMode == "cruise" }
 
     /// Flip modes (the left side-circle). Camera stays put — the map is
     /// shared — and the selection clears so a peek never leaks across
@@ -286,29 +464,55 @@ public struct MapHomeScreen: View {
             selectedPinID = nil
             settings.mapMode = enteringCruise ? "cruise" : "measure"
         }
-        if enteringCruise { reloadCruise() }
+        if enteringCruise { reloadCruise() } else { reloadAreas() }
     }
 
     private enum MeasureChoice {
         case fullMeasurement, dbh, height, distance, sampling
     }
 
-    /// Payload for the far-GPS confirmation alert.
+    /// Which field-log row the peek's "Details" is showing. A wrapper only
+    /// because `.sheet(item:)` wants an Identifiable, and the row key IS the
+    /// identity.
+    private struct MapDetailTarget: Identifiable {
+        let rowID: String
+        var id: String { rowID }
+    }
+
+    /// Payload for the far-GPS confirmation alert. The distance is carried in
+    /// METRES and rounded at the point of display, because how it rounds
+    /// depends on the unit it is shown in.
     private struct FarTreeWarning: Identifiable {
         let treeNumber: Int
-        let distanceM: Int
+        let distanceM: Double
         var id: Int { treeNumber }
     }
 
     /// Peek "Measure this tree" beyond this distance from the pin asks
     /// for confirmation first — measuring a tree you're not standing at
     /// is usually a mis-tap on the wrong pin.
-    private static let farTreeWarnDistanceM: Double = 30
+    ///
+    /// A ROUND number in each system rather than one fixed distance. This is
+    /// not a physical trigger like the plot-boundary band — there is nothing
+    /// about 30 m that makes a tap wrong — it is a judgement call the cruiser
+    /// is being asked to make, and 30 m quoted to a US cruiser fires at 98 ft,
+    /// which is neither a number they would have chosen nor one they can
+    /// reason about. 100 ft is. The two are 1.6 % apart, so no tap changes
+    /// verdict for any reason a cruiser would notice.
+    private static func farTreeWarnDistanceM(_ system: UnitSystem) -> Double {
+        system == .metric ? 30 : Units.feetToMeters(100)
+    }
 
     public var body: some View {
         NavigationStack {
             cruisePresentations(over: ZStack {
                 map
+                // Everything drawn AT a coordinate rather than in a corner
+                // — the pressed-point pin and its menu, the selected area's
+                // menu, and the draft's drag handles. Directly over the map
+                // so it shares the map's coordinate space, and under the
+                // chrome so a callout never covers the GPS chip.
+                mapObjectLayer
                 if isCruiseMode, navGuide != nil { distanceChipOverlay }
                 attributionBadge
                 VStack(spacing: ForestixSpace.xs) {
@@ -320,11 +524,25 @@ public struct MapHomeScreen: View {
                     if isCruiseMode, let plot = cruisePlotOverlay {
                         cruisePlotBanner(plot)
                     }
+                    // The map is waiting for a press: says so, because an
+                    // armed gesture with no visible state is a mode the
+                    // cruiser cannot see they are in.
+                    if isCruiseMode, awaitingMapPlanPress || movingPlannedID != nil {
+                        mapPlanPromptBanner
+                    }
+                    // The overlap toggle, said once — see `areaStackHint`.
+                    if areaStackHint != nil { areaStackHintBanner }
                     Spacer()
                 }
                 VStack {
                     Spacer()
-                    if isCruiseMode {
+                    // An outline under the thumb owns the bottom of the
+                    // screen: the cluster's actions all start something
+                    // else, and offering them mid-drag is offering to throw
+                    // the drag away.
+                    if areaDraft != nil {
+                        areaDraftBar
+                    } else if isCruiseMode {
                         // Cruise peeks — plot ring, planned ring, tree pin.
                         if let plot = selectedPlot {
                             plotPeekCard(for: plot)
@@ -352,9 +570,14 @@ public struct MapHomeScreen: View {
             .background(ForestixPalette.canvas.ignoresSafeArea())
             .onAppear {
                 startUp()
-                if isCruiseMode { reloadCruise() }
+                if isCruiseMode { reloadCruise() } else { reloadAreas() }
             }
-            .onDisappear { location.release() }
+            .onDisappear { location.release(); developerUnlock.reset() }
+            .alert("Developer mode enabled", isPresented: $showingDeveloperUnlock) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("Developer tools are now available in Settings.")
+            }
             .onChange(of: location.latestSnapshot) { _, snap in
                 recenterOnFirstFix(snap)
                 if isCruiseMode { checkNavArrival(snap) }
@@ -389,27 +612,26 @@ public struct MapHomeScreen: View {
             }
             #if os(iOS)
             .navigationBarHidden(true)
-            .fullScreenCover(isPresented: $presentingDBHScan,
+            .portraitFullScreenCover(isPresented: $presentingDBHScan,
                              onDismiss: continueChainAfterDBH) { dbhCover }
-            .fullScreenCover(isPresented: $presentingHeightScan,
+            .portraitFullScreenCover(isPresented: $presentingHeightScan,
                              onDismiss: { fullMeasurementChain = false }) { heightCover }
-            .fullScreenCover(isPresented: $presentingDistance) {
+            .portraitFullScreenCover(isPresented: $presentingDistance) {
                 NavigationStack {
                     DistanceMeasureScreen()
                         .environmentObject(history)
                         .environmentObject(settings)
                 }
             }
-            .fullScreenCover(isPresented: $presentingSampling) {
+            .portraitFullScreenCover(isPresented: $presentingSampling) {
                 NavigationStack {
                     SamplingPlotScreen()
                         .environmentObject(history)
                         .environmentObject(settings)
                 }
             }
-            .fullScreenCover(item: $photoViewer) { context in
-                MeasurePhotoDetailView(context: context,
-                                       unitSystem: settings.unitSystem)
+            .portraitFullScreenCover(item: $photoViewer) { context in
+                MeasurePhotoDetailView(context: context)
             }
             #endif
             .sheet(isPresented: $presentingChooser,
@@ -418,12 +640,52 @@ public struct MapHomeScreen: View {
             // (value / species / note + confirmed delete).
             .sheet(item: $editingEntry) { entry in
                 QuickEntryEditSheet(entry: entry, history: history)
+                    // The value box is read and typed in the cruiser's units.
+                    .environmentObject(settings)
+            }
+            // "Good" / "Fair" / "Check" with no stated criteria is a mood,
+            // not a grade. The chip on the peek opens the same explainer the
+            // per-tree report opens — one sheet, one set of thresholds.
+            .sheet(item: $explainingTier) { kind in
+                TierExplainer(kind: kind)
+            }
+            // Quick-peek "Details" — the SAME sheet the field log opens, not
+            // a second copy of it. "Measure again" from inside it lands on
+            // the map's own route: close the sheet, then open the measure
+            // chooser scoped to that tree, which is what the peek's primary
+            // button does. Nothing else on the map can present a scan while
+            // a sheet is up, so the chooser is raised from onDismiss.
+            .sheet(item: $inspectingRow, onDismiss: {
+                if let tree = pendingRescanTree {
+                    pendingRescanTree = nil
+                    openChooser(scopedTo: tree)
+                }
+            }) { target in
+                FieldLogDetailSheet(
+                    rowID: target.rowID,
+                    unitSystem: settings.unitSystem,
+                    onRemeasure: { request in
+                        pendingRescanTree = request.treeNumber
+                        inspectingRow = nil
+                    })
+                    .environmentObject(history)
+                    .environmentObject(settings)
             }
             // Far-GPS guard — confirm before measuring a tree whose pin
             // is > 30 m from the current fix (usually a wrong-pin tap).
             .modifier(PlotSaveRefusalAlert(message: $plotSaveRefusal))
+            // The alert names the tree the way every other surface does —
+            // the cruiser's name when it has one, else "Tree #n".
+            // The distance is what the cruiser is being asked to judge, so it
+            // is quoted in the unit they are working in — a pacing number, so
+            // through `navDistance` rather than the measurement formatter.
             .alert(farTreeWarning.map {
-                       "Tree \($0.treeNumber) is \($0.distanceM) m away"
+                       TreeLabel.title(name: farTreeName($0.treeNumber),
+                                       number: $0.treeNumber)
+                           + " is "
+                           + MeasurementFormatter.navDistance(m: $0.distanceM,
+                                                              in: settings.unitSystem)
+                           + " away"
                    } ?? "",
                    isPresented: Binding(
                        get: { farTreeWarning != nil },
@@ -435,10 +697,14 @@ public struct MapHomeScreen: View {
                 .keyboardShortcut(.defaultAction)
                 Button("Cancel", role: .cancel) {}
             } message: { warning in
-                Text("Your current GPS position is about \(warning.distanceM) m from this tree's pin. Measure it anyway?")
+                Text("Your current GPS position is about "
+                     + MeasurementFormatter.navDistance(m: warning.distanceM,
+                                                        in: settings.unitSystem)
+                     + " from this tree's pin. Measure it anyway?")
             }
             .sheet(isPresented: $presentingLayers) {
-                MapSettingsSheet(visibleRegion: visibleRegion)
+                MapSettingsSheet(visibleRegion: visibleRegion,
+                                 mapCamera: camera)
                     .environmentObject(settings)
             }
             // REMOVE, step two. The one destructive step on the plot
@@ -475,6 +741,10 @@ public struct MapHomeScreen: View {
                 }
                 .environmentObject(environment)
                 .environmentObject(settings)
+                // A sheet does not inherit the host's environment objects.
+                // Settings' ground-truth recovery writes into the quick-measure
+                // log, so the log has to travel with it.
+                .environmentObject(history)
             }
             // CRASH RECOVERY — resume an in-progress plot from a recent
             // session. The summary (plot #, tree count, last-edited) is folded
@@ -545,6 +815,12 @@ public struct MapHomeScreen: View {
             // every pin/ring/you-dot (those are views over the Canvas,
             // so the boundary can never intercept a tap meant for one).
             boundary: surveyBoundary.overlay,
+            // The cruiser's own areas, above the imported boundary — an
+            // area drawn inside an imported stand reads as being inside
+            // it. Drawn in BOTH modes: an outline the cruiser dragged onto
+            // their stand does not stop existing because they flipped to
+            // quick measure.
+            areas: areaOverlays,
             // THE SAMPLING PLOT — one layer above the imported boundary,
             // still under every pin. Cruise-only, like every other piece
             // of cruise content on this shared map.
@@ -577,18 +853,46 @@ public struct MapHomeScreen: View {
                 badgeBackground: ForestixPalette.surface,
                 badgeBorder: ForestixPalette.divider,
                 badgeText: ForestixPalette.textSecondary,
-                selectionHalo: ForestixPalette.primaryMuted),
+                selectionHalo: ForestixPalette.primaryMuted,
+                // Cruise blue for the areas: the same accent cruise mode
+                // uses for the things a cruise is made of, and never the
+                // survey boundary's orange — those two outlines are
+                // different evidence and must not look alike.
+                areaStroke: ForestixPalette.cruiseAccent,
+                areaFill: ForestixPalette.cruiseAccent.opacity(0.14)),
             onMarkerTap: { id in
+                developerUnlock.reset()
                 withAnimation(.easeOut(duration: 0.18)) {
                     selectedPinID = (selectedPinID == id) ? nil : id
                 }
             },
             onMapTap: {
-                withAnimation(.easeOut(duration: 0.18)) { selectedPinID = nil }
+                developerUnlock.reset()
+                withAnimation(.easeOut(duration: 0.18)) {
+                    selectedPinID = nil
+                    selectedAreaID = nil
+                }
             },
-            // A tap ON the drawn plot's boundary raises its small Edit /
-            // Remove menu (M2) — the plot's own pin still owns the centre.
-            onPlotTap: { id in openPlotMenu(id) },
+            // A tap on the drawn plot's boundary raises its Edit / Remove
+            // menu (M2); a tap inside an area selects the area; a tap on
+            // both toggles between them — see `handleOverlayTap`.
+            onOverlayTap: { hit in
+                developerUnlock.reset()
+                handleOverlayTap(hit)
+            },
+            // PRESS AND HOLD BELONGS TO THE MAP, not to cruise. It used to
+            // be gated to cruise mode on the reasoning that measure mode has
+            // no plots and no stand to bound; both halves were wrong. The
+            // stand boundary is ONE record shared by both modes — it does
+            // not become a different object because the map that drew it was
+            // in measure mode — and measure mode does keep plots, they are
+            // just the project-less quick-measure ones. What the menu OFFERS
+            // narrows with the mode (see `planPin` in the area extension);
+            // the gesture itself never does.
+            onMapLongPress: { coordinate in
+                developerUnlock.reset()
+                handleMapLongPress(at: coordinate)
+            },
             onCameraChange: { _, region in
                 visibleRegion = region
             })
@@ -629,7 +933,12 @@ public struct MapHomeScreen: View {
             let all = history.entries.filter { $0.treeNumber == number }
             return MapPin(id: "tree-\(number)",
                           treeNumber: number,
-                          title: "T\(number)",
+                          // The pin says what the cruiser called this tree,
+                          // shortened to what a 30 pt drop holds — one rule,
+                          // shared with the cruise pins and both mini-maps.
+                          title: TreeLabel.pinTitle(
+                              name: all.compactMap(\.treeName).first,
+                              number: number),
                           entries: all,
                           latitude: anchor.latitude ?? 0,
                           longitude: anchor.longitude ?? 0)
@@ -696,11 +1005,13 @@ public struct MapHomeScreen: View {
         cameraInitialised = true
         if let fix = LocationService.lastGlobalFix ?? location.latestSnapshot {
             camera = BasemapCamera(latitude: fix.latitude,
-                                   longitude: fix.longitude, zoom: 16)
+                                   longitude: fix.longitude,
+                                   zoom: Self.defaultZoom)
         } else if let entry = history.entries.first(where: {
             $0.latitude != nil && $0.longitude != nil
         }), let lat = entry.latitude, let lon = entry.longitude {
-            camera = BasemapCamera(latitude: lat, longitude: lon, zoom: 16)
+            camera = BasemapCamera(latitude: lat, longitude: lon,
+                                   zoom: Self.defaultZoom)
         } else {
             camera = Self.fallbackCamera
             awaitingFirstFix = true
@@ -714,7 +1025,8 @@ public struct MapHomeScreen: View {
         awaitingFirstFix = false
         withAnimation(.easeOut(duration: 0.3)) {
             camera = BasemapCamera(latitude: snap.latitude,
-                                   longitude: snap.longitude, zoom: 16)
+                                   longitude: snap.longitude,
+                                   zoom: Self.defaultZoom)
         }
     }
 
@@ -738,11 +1050,17 @@ public struct MapHomeScreen: View {
             // No fix yet: the button dims and the tap is a no-op.
             let locateFix = location.latestSnapshot ?? LocationService.lastGlobalFix
             Button {
+                if !settings.developerMode,
+                   developerUnlock.tap(at: ProcessInfo.processInfo.systemUptime) {
+                    settings.developerMode = true
+                    showingDeveloperUnlock = true
+                }
                 guard let fix = locateFix else { return }
                 withAnimation(.easeOut(duration: 0.3)) {
                     camera = BasemapCamera(latitude: fix.latitude,
                                            longitude: fix.longitude,
-                                           zoom: max(camera.zoom, 16))
+                                           zoom: max(camera.zoom,
+                                                     Self.defaultZoom))
                 }
             } label: {
                 chromeButtonGlyph("location.fill")
@@ -753,6 +1071,7 @@ public struct MapHomeScreen: View {
             .accessibilityIdentifier("mapHome.locate")
 
             Button {
+                developerUnlock.reset()
                 presentingLayers = true
             } label: {
                 chromeButtonGlyph("square.stack.3d.up")
@@ -764,6 +1083,7 @@ public struct MapHomeScreen: View {
             // Settings — rightmost of the top-right group, both modes.
             // Reuses the existing SettingsScreen sheet.
             Button {
+                developerUnlock.reset()
                 presentingSettings = true
             } label: {
                 chromeButtonGlyph("gearshape")
@@ -999,7 +1319,11 @@ public struct MapHomeScreen: View {
     // MARK: Peek card (mock ②)
 
     private func peekCard(for pin: MapPin) -> some View {
-        let photos = pin.entries.compactMap(\.photoPath)
+        // Capture order, so the thumbnail is the viewer's first page rather
+        // than whichever frame happens to be newest.
+        let photos = pin.entries
+            .sorted { $0.createdAt < $1.createdAt }
+            .compactMap(\.photoPath)
         return VStack(spacing: 0) {
             RoundedRectangle(cornerRadius: 2)
                 .fill(ForestixPalette.divider)
@@ -1047,6 +1371,32 @@ public struct MapHomeScreen: View {
                 }
                 .frame(maxWidth: .infinity)
             }
+
+            // DETAILS — the whole record behind this pin, on the SAME
+            // surface the field log opens (`FieldLogDetailSheet`): species,
+            // stem position, damage, note, ±σ, where and when it was
+            // recorded, every photo. The word is "Details" because that is
+            // what the map's plot peek already calls its equivalent step;
+            // a second word for one idea is how a map ends up with two.
+            //
+            // Full width above the pair rather than a third button in the
+            // row: three 44 pt controls across a phone leave no label room.
+            Button {
+                inspectingRow = MapDetailTarget(rowID: detailRowID(for: pin))
+            } label: {
+                Text("Details")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(ForestixPalette.textPrimary)
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .background(
+                        RoundedRectangle(cornerRadius: ForestixRadius.control,
+                                         style: .continuous)
+                            .stroke(ForestixPalette.divider, lineWidth: 1))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(MapPressableStyle())
+            .padding(.top, ForestixSpace.sm)
+            .accessibilityIdentifier("mapHome.peek.details")
 
             HStack(spacing: ForestixSpace.xs) {
                 Button {
@@ -1108,7 +1458,11 @@ public struct MapHomeScreen: View {
     private func peekTitle(_ pin: MapPin) -> String {
         let species = pin.entries.compactMap(\.speciesCode).first
         let base: String
-        if let n = pin.treeNumber {
+        // The cruiser's name if this tree has one — same rule as the field
+        // log's TREE column, so the two surfaces call the tree one thing.
+        if let named = pin.entries.compactMap(\.treeName).first {
+            base = named
+        } else if let n = pin.treeNumber {
             base = "Tree \(n)"
         } else {
             base = kindLabel(pin.entries[0].kind)
@@ -1148,6 +1502,12 @@ public struct MapHomeScreen: View {
         let label: String
         let value: String
         let confidenceRaw: String
+        /// Which explainer this row's chip opens, or nil where the grade is
+        /// not one an estimator computed. Crown, distance and plot rows
+        /// carry a tier field but no confidence framework behind it, and a
+        /// sheet describing diameter checks over a plot radius would be a
+        /// worse answer than no sheet.
+        let explainerKind: TierExplainer.Kind?
     }
 
     private func peekRows(_ pin: MapPin) -> [PeekRow] {
@@ -1163,20 +1523,32 @@ public struct MapHomeScreen: View {
                 value = MeasurementFormatter.diameter(cm: entry.value, in: system)
             case .height:
                 value = MeasurementFormatter.height(m: entry.value, in: system)
+            // Crown and plot go through the same `system` the four rows above
+            // them do. Left metric, this one card read "13.6 in", "92.7 ft",
+            // then "4.2 × 5.1 m" and "11.3 m radius" — two unit systems
+            // stacked four rows apart with nothing saying which row is which.
             case .crown:
-                value = String(format: "%.1f × %.1f m",
-                               entry.value, entry.secondaryValue ?? 0)
+                value = MeasurementFormatter.crownSpread(
+                    entry.value, entry.secondaryValue ?? 0, in: system)
             case .distance:
                 value = MeasurementFormatter.distance(m: entry.value, in: system)
             case .samplingPlot:
                 let area = entry.secondaryValue
                     ?? (.pi * entry.value * entry.value)
-                value = String(format: "%.1f m radius · %.0f m²", entry.value, area)
+                value = MeasurementFormatter.samplingPlotSummary(
+                    radiusM: entry.value, areaM2: area, in: system)
+            }
+            let explainerKind: TierExplainer.Kind?
+            switch kind {
+            case .dbh:    explainerKind = .diameter
+            case .height: explainerKind = .height
+            default:      explainerKind = nil
             }
             return PeekRow(id: kind.rawValue,
                            label: peekRowLabel(kind),
                            value: value,
-                           confidenceRaw: entry.confidenceRaw)
+                           confidenceRaw: entry.confidenceRaw,
+                           explainerKind: explainerKind)
         }
     }
 
@@ -1203,7 +1575,16 @@ public struct MapHomeScreen: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
             Spacer(minLength: 4)
-            tierChip(row.confidenceRaw)
+            if let explainerKind = row.explainerKind {
+                Button { explainingTier = explainerKind } label: {
+                    tierChip(row.confidenceRaw)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("What this grade means")
+                .accessibilityIdentifier("mapPeek.tierChip.\(row.id)")
+            } else {
+                tierChip(row.confidenceRaw)
+            }
         }
         .padding(.vertical, 6)
     }
@@ -1258,10 +1639,31 @@ public struct MapHomeScreen: View {
         }
     }
 
+    /// Opens EVERY photo on the pin, not just the first one found. A Full
+    /// measurement leaves the tree with a diameter frame and a height
+    /// frame; the viewer pages between them in the order they were shot.
     private func openPhotoViewer(_ pin: MapPin) {
-        guard let entry = pin.entries.first(where: { $0.photoPath != nil })
-        else { return }
-        photoViewer = PhotoViewerContext(entry: entry, title: peekTitle(pin))
+        let pages = MeasurePhotoPage.pages(for: pin.entries,
+                                           unitSystem: settings.unitSystem)
+        photoViewer = PhotoViewerContext(pages: pages)
+    }
+
+    /// Which field-log row the peek's "Details" opens.
+    ///
+    /// The log groups by (plot, tree number) because tree numbering restarts
+    /// on each plot; the map groups by tree number ALONE, so one pin can in
+    /// principle span two plots' trees. The row picked is the one the pin's
+    /// REPRESENTATIVE reading belongs to — the same reading "Edit this tree"
+    /// edits — so the two peek buttons can never be about different trees.
+    /// The key is built by `FieldLogRowModel.rows`, and this reads it from
+    /// there rather than spelling the format a second time.
+    private func detailRowID(for pin: MapPin) -> String {
+        let entry = primaryEntry(for: pin)
+        guard let number = entry.treeNumber else {
+            return FieldLogRowModel.looseRowID(entryID: entry.id)
+        }
+        return FieldLogRowModel.treeRowID(plotID: entry.plotID,
+                                          treeNumber: number)
     }
 
     /// The pin's representative reading for "Edit this tree" — DBH first,
@@ -1295,14 +1697,21 @@ public struct MapHomeScreen: View {
                                              longitude: fix.longitude),
                 CoordinateConversions.LatLon(latitude: pin.latitude,
                                              longitude: pin.longitude))
-            if distanceM > Self.farTreeWarnDistanceM {
-                farTreeWarning = FarTreeWarning(
-                    treeNumber: tree,
-                    distanceM: Int(distanceM.rounded()))
+            if distanceM > Self.farTreeWarnDistanceM(settings.unitSystem) {
+                farTreeWarning = FarTreeWarning(treeNumber: tree,
+                                                distanceM: distanceM)
                 return
             }
         }
         openChooser(scopedTo: tree)
+    }
+
+    /// The cruiser's name for a tree number, from any reading that carries
+    /// one. Used only to NAME the tree in the far-GPS alert; nil falls the
+    /// title back to "Tree #n".
+    private func farTreeName(_ number: Int) -> String? {
+        history.entries.first { $0.treeNumber == number && $0.treeName != nil }?
+            .treeName
     }
 
     /// Present the measure chooser locked to `tree` — the Full / DBH /
@@ -1320,6 +1729,66 @@ public struct MapHomeScreen: View {
         chooserTreeOverride ?? history.suggestedNextTreeNumber
     }
 
+    /// Name the chooser's field opens on: the tree's existing name when the
+    /// peek card scoped this sheet, else the auto-incremented successor of the
+    /// last name in the log. Empty starts the field blank.
+    private var suggestedTreeName: String {
+        if let tree = chooserTreeOverride,
+           let existing = history.treeName(forTreeNumber: tree,
+                                           plotID: history.activePlotID) {
+            return existing
+        }
+        return history.suggestedNextTreeName ?? ""
+    }
+
+    /// Species the chooser's picker opens on, and whether that value counts as
+    /// already observed.
+    ///
+    /// Scoped from a peek card, the species comes off THAT tree's own readings
+    /// — somebody already recorded it against this stem, so it is confirmed and
+    /// draws normally. Otherwise it is the last species seen anywhere in the
+    /// log, which is a guess about the tree in front of the cruiser and draws
+    /// provisional.
+    ///
+    /// WHY THE UNTOUCHED GUESS IS STILL STORED. The alternative — show it, then
+    /// write nothing unless the cruiser taps the control — makes the sheet and
+    /// the log disagree about a value the cruiser was looking at when they
+    /// started the measurement, and this app does not silently drop what it
+    /// showed. Tapping "Full measurement" is already how the tree NAME above it
+    /// is accepted; the species is accepted by the same tap. The honesty is
+    /// bought at the point of decision instead: the value is visibly dim until
+    /// picked, and "— Unspecified —" is one tap away.
+    ///
+    /// This is the weaker half of the trade. A carried-over species that is
+    /// wrong is silent in a way a carried-over NAME is not — the name climbs, so
+    /// a stale one shows itself. What would actually close the gap is
+    /// per-field provenance on the reading, the way a coordinate carries its
+    /// `PositionSource`, so the export could say "carried over, never
+    /// confirmed". That is a schema change and is not in this job.
+    private var suggestedSpecies: (code: String?, confirmed: Bool) {
+        if let tree = chooserTreeOverride,
+           let recorded = history.speciesCode(forTreeNumber: tree,
+                                              plotID: history.activePlotID) {
+            return (recorded, true)
+        }
+        return (history.suggestedNextSpeciesCode, false)
+    }
+
+    /// Copies the tree identity typed above the rows into the pending slots
+    /// the covers read when they write the reading. Distance and sampling
+    /// belong to no tree and never call this.
+    private func lockChooserTree() {
+        pendingTreeNumber = chooserTargetTree
+        // `.whitespacesAndNewlines`, not `.whitespaces`: Kotlin's `trim()` in
+        // the Android sibling (ui/PendingTreeNumber.set) strips newlines too,
+        // and a pasted "Plot3-T07\n" must persist the same bytes on both
+        // phones — the two halves of a split cruise join on this name.
+        let trimmed = chooserTreeName
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        pendingTreeName = trimmed.isEmpty ? nil : trimmed
+        pendingSpeciesCode = chooserSpeciesCode
+    }
+
     private var measureChooser: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Scoped from a tree pin the header drops "(NEXT)" — this is
@@ -1333,10 +1802,37 @@ public struct MapHomeScreen: View {
                 .padding(.top, ForestixSpace.md)
                 .padding(.bottom, ForestixSpace.xs)
 
+            // Named BEFORE the scan, not after: the cruiser is standing at
+            // the tree when they open this sheet, and typing its tag then is
+            // one action rather than a second trip through the details sheet
+            // once the number is already recorded.
+            HStack(spacing: ForestixSpace.sm) {
+                // The placeholder is an EXAMPLE, not the words "Tree name":
+                // the shape of the first name decides whether the app can name
+                // the rest of the stand, because `TreeNameSequence` only steps
+                // on a TRAILING NUMBER. "Big oak" comes back unchanged and the
+                // cruiser retypes every tree. Same string on both platforms.
+                TextField("e.g. Tree1", text: $chooserTreeName)
+                    .textFieldStyle(.roundedBorder)
+                    .autocorrectionDisabled()
+                    .accessibilityIdentifier("mapHome.choose.treeName")
+                // The same control the reading-details sheet uses — one
+                // species list, one typed-code escape, no second copy to
+                // drift.
+                SpeciesPickerField(speciesCode: $chooserSpeciesCode,
+                                   unspecifiedLabel: "Species",
+                                   compact: true,
+                                   provisional: !chooserSpeciesConfirmed,
+                                   onPick: { chooserSpeciesConfirmed = true })
+                    .environmentObject(settings)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+            .padding(.bottom, ForestixSpace.sm)
+
             chooserRow("Full measurement", "DBH → Height, one tree",
                        icon: "tree", accessibilityID: "mapHome.choose.full",
                        divided: true, emphasized: true) {
-                pendingTreeNumber = chooserTargetTree
+                lockChooserTree()
                 pendingChoice = .fullMeasurement
                 presentingChooser = false
             }
@@ -1348,14 +1844,14 @@ public struct MapHomeScreen: View {
             chooserRow("Diameter (DBH)", "Scan the trunk with the camera",
                        icon: "ruler", accessibilityID: "mapHome.choose.dbh",
                        divided: true) {
-                pendingTreeNumber = chooserTargetTree
+                lockChooserTree()
                 pendingChoice = .dbh
                 presentingChooser = false
             }
             chooserRow("Height", "Walk back, aim at the base and the top",
                        icon: "arrow.up.and.down", accessibilityID: "mapHome.choose.height",
                        divided: true) {
-                pendingTreeNumber = chooserTargetTree
+                lockChooserTree()
                 pendingChoice = .height
                 presentingChooser = false
             }
@@ -1373,8 +1869,21 @@ public struct MapHomeScreen: View {
             }
             Spacer(minLength: 0)
         }
+        .onAppear {
+            // Re-seeded on every presentation: both follow the LOG, so a
+            // reading saved since the sheet last closed moves the suggestions
+            // on. Species used to start unset, on the grounds that it must not
+            // be inherited by accident — but in one stand it is the same
+            // species tree after tree, so that made it the most retyped field
+            // in the app. It is inherited now and marked provisional instead,
+            // which shows the inheritance rather than hiding it.
+            chooserTreeName = suggestedTreeName
+            let species = suggestedSpecies
+            chooserSpeciesCode = species.code
+            chooserSpeciesConfirmed = species.confirmed
+        }
         .padding(.horizontal, ForestixSpace.md)
-        .presentationDetents([.height(470)])
+        .presentationDetents([.height(530)])
         .presentationDragIndicator(.visible)
         .presentationBackground(ForestixPalette.surface)
     }
@@ -1463,6 +1972,17 @@ public struct MapHomeScreen: View {
 
     // MARK: Measurement covers
 
+    /// The name to stamp on the reading a cover is about to write: the
+    /// chooser's when this flow was launched with one, else the name the tree
+    /// already carries. The fallback is what keeps a chained height and a
+    /// re-measurement from arriving nameless and splitting the tree in two in
+    /// the export.
+    private var resolvedTreeName: String? {
+        pendingTreeName
+            ?? history.treeName(forTreeNumber: pendingTreeNumber,
+                                plotID: history.activePlotID)
+    }
+
     #if os(iOS)
     private var dbhCover: some View {
         NavigationStack {
@@ -1483,6 +2003,7 @@ public struct MapHomeScreen: View {
                         confidenceRaw: result.confidence.rawValue,
                         method: result.method.rawValue,
                         treeNumber: pendingTreeNumber,
+                        treeName: resolvedTreeName,
                         plotID: history.activePlotID,
                         speciesCode: meta.speciesCode,
                         position: meta.position ?? .dbh,
@@ -1491,7 +2012,12 @@ public struct MapHomeScreen: View {
                         latitude: meta.latitude,
                         longitude: meta.longitude,
                         photoPath: meta.photoPath,
-                        captureMode: meta.captureMode))
+                        captureMode: meta.captureMode,
+                        // The tape diameter typed on the scan screen belongs
+                        // to THIS reading. Leaving it in the raw-capture
+                        // manifest alone exported a blank truth column for
+                        // every tree measured the normal way.
+                        truth: meta.truth))
                     // Full-measurement chain: an accepted DBH arms the
                     // Height cover; onDismiss presents it for the same
                     // tree number.
@@ -1505,7 +2031,22 @@ public struct MapHomeScreen: View {
                 // Raw-capture join keys: without these a stored bundle can't
                 // be paired back to the tree (and its truth) it documents.
                 projectID: currentProject?.id.uuidString,
-                quickTreeNumber: pendingTreeNumber)
+                quickTreeNumber: pendingTreeNumber,
+                initialSpeciesCode: pendingSpeciesCode,
+                onEditPlot: { scanPlotSetup = true })
+            .portraitFullScreenCover(isPresented: $scanPlotSetup) { scanPlotSetupCover }
+        }
+    }
+
+    /// Plot setup re-opened from a scan screen's mini-map (FIELD REPORT 12).
+    /// The quick sampling screen exactly as the chooser opens it — same
+    /// slider, same Reset, same anchor — so "Edit plot" means one thing
+    /// wherever it is tapped.
+    private var scanPlotSetupCover: some View {
+        NavigationStack {
+            SamplingPlotScreen()
+                .environmentObject(history)
+                .environmentObject(settings)
         }
     }
 
@@ -1524,13 +2065,17 @@ public struct MapHomeScreen: View {
                         confidenceRaw: result.confidence.rawValue,
                         method: result.method.rawValue,
                         treeNumber: pendingTreeNumber,
+                        treeName: resolvedTreeName,
                         plotID: history.activePlotID,
                         speciesCode: meta.speciesCode,
                         damageCodes: meta.damageCodes,
                         note: meta.note.isEmpty ? nil : meta.note,
                         latitude: meta.latitude,
                         longitude: meta.longitude,
-                        photoPath: meta.photoPath))
+                        photoPath: meta.photoPath,
+                        // The pole height typed on the scan screen belongs to
+                        // THIS reading — see the note on the diameter cover.
+                        truth: meta.truth))
                     presentingHeightScan = false
                     // Quick measure is an in-memory/JSON append that cannot
                     // report a row-level failure — the reading is on the
@@ -1549,15 +2094,19 @@ public struct MapHomeScreen: View {
                         confidenceRaw: "green",
                         method: "ar.crown.dh",
                         treeNumber: pendingTreeNumber,
+                        treeName: resolvedTreeName,
                         plotID: history.activePlotID))
                 },
                 // Raw-capture join keys — height bundles used to be anonymous
                 // (tree + project hardcoded nil), so they couldn't be paired
                 // with the tree's DBH bundle or its hand-measured truth.
                 projectID: currentProject?.id.uuidString,
-                treeNumber: pendingTreeNumber)
+                treeNumber: pendingTreeNumber,
+                initialSpeciesCode: pendingSpeciesCode,
+                onEditPlot: { scanPlotSetup = true })
             .environmentObject(history)
             .environmentObject(settings)
+            .portraitFullScreenCover(isPresented: $scanPlotSetup) { scanPlotSetupCover }
         }
     }
     #endif
@@ -1611,25 +2160,37 @@ private struct MeasurePhotoThumbnail: View {
 // MARK: - Quick entry edit sheet (map peek → "Edit this tree")
 
 /// Compact editor for one QuickMeasureEntry reached from the quick peek.
-/// Edits the measured value (native unit — cm for DBH, m otherwise), the
-/// species code and the note, then persists via QuickMeasureHistory
-/// `update`. A confirmed destructive Delete removes the entry AND its
-/// photo (through `delete`, which calls MeasurePhotoStore). The measure
-/// math is untouched — only the primary value the cruiser typed changes.
+/// Edits the measured value, the species code and the note, then persists via
+/// QuickMeasureHistory `update`. A confirmed destructive Delete removes the
+/// entry AND its photo (through `delete`, which calls MeasurePhotoStore). The
+/// measure math is untouched — only the primary value the cruiser typed
+/// changes.
+///
+/// THE VALUE BOX IS IN THE CRUISER'S UNITS, both directions, through
+/// `TruthInput.Unit` — the same route `TreeDetailScreen` takes. It used to
+/// show the stored metric number beside a hardcoded "cm"/"m" chip while the
+/// peek two taps away read "13.6 in": correcting that tree to "14" meaning
+/// inches wrote a 14 cm stem. Storage is unchanged — a diameter is still cm
+/// and everything else still metres.
 private struct QuickEntryEditSheet: View {
     let entry: QuickMeasureEntry
     @ObservedObject var history: QuickMeasureHistory
+    @EnvironmentObject private var settings: AppSettings
     @Environment(\.dismiss) private var dismiss
 
     @State private var valueText: String
     @State private var speciesText: String
     @State private var noteText: String
     @State private var confirmingDelete = false
+    /// The value field is seeded on appear, not in `init`: the prefill has to
+    /// be in the cruiser's unit and `settings` does not exist yet at init.
+    /// Once seeded it is the cruiser's text and nothing re-writes it.
+    @State private var seededValue = false
 
     init(entry: QuickMeasureEntry, history: QuickMeasureHistory) {
         self.entry = entry
         _history = ObservedObject(wrappedValue: history)
-        _valueText = State(initialValue: Self.formatValue(entry.value))
+        _valueText = State(initialValue: "")
         _speciesText = State(initialValue: entry.speciesCode ?? "")
         _noteText = State(initialValue: entry.note ?? "")
     }
@@ -1642,7 +2203,7 @@ private struct QuickEntryEditSheet: View {
                 .foregroundStyle(ForestixPalette.textTertiary)
                 .padding(.top, ForestixSpace.md)
 
-            // Measured value — native unit (cm for DBH, m otherwise).
+            // Measured value — in the cruiser's unit, same as the peek row.
             fieldLabel(kindTitle.uppercased())
             HStack(spacing: ForestixSpace.xs) {
                 TextField("0.0", text: $valueText)
@@ -1655,10 +2216,19 @@ private struct QuickEntryEditSheet: View {
                     .frame(minHeight: 44)
                     .background(fieldBackground)
                     .accessibilityIdentifier("mapHome.editSheet.value")
-                Text(entry.valueUnit)
+                // `entry.valueUnit` is the STORAGE unit and always metric;
+                // the chip has to name the unit the box is actually in.
+                Text(valueUnit.rawValue)
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(ForestixPalette.textSecondary)
                     .frame(width: 32, alignment: .leading)
+            }
+            if !valueEntryValid {
+                Text(valueEntryWarning)
+                    .font(.system(size: 13))
+                    .foregroundStyle(ForestixPalette.confidenceBad)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("mapHome.editSheet.valueWarning")
             }
 
             // Species — the short FIA code (free text; uppercased on save).
@@ -1714,6 +2284,8 @@ private struct QuickEntryEditSheet: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(MapPressableStyle())
+            .disabled(!valueEntryValid)
+            .opacity(valueEntryValid ? 1 : 0.45)
             .accessibilityIdentifier("mapHome.editSheet.save")
 
             Button(role: .destructive) {
@@ -1739,6 +2311,11 @@ private struct QuickEntryEditSheet: View {
         .presentationDetents([.height(430)])
         .presentationDragIndicator(.visible)
         .presentationBackground(ForestixPalette.surface)
+        .onAppear {
+            guard !seededValue else { return }
+            seededValue = true
+            valueText = valuePrefill
+        }
         .alert("Delete this reading?", isPresented: $confirmingDelete) {
             Button("Delete", role: .destructive) {
                 history.delete(id: entry.id)
@@ -1764,31 +2341,42 @@ private struct QuickEntryEditSheet: View {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedNote = noteText
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let newValue = Double(valueText.replacingOccurrences(of: ",", with: "."))
-            ?? entry.value
-        history.update(QuickMeasureEntry(
-            id: entry.id,
-            kind: entry.kind,
-            value: newValue,
-            secondaryValue: entry.secondaryValue,
-            sigma: entry.sigma,
-            confidenceRaw: entry.confidenceRaw,
-            method: entry.method,
-            createdAt: entry.createdAt,
-            treeNumber: entry.treeNumber,
-            plotID: entry.plotID,
+        // A value the cruiser retyped is a TYPED reading from here on: it
+        // keeps neither the sensor's σ nor its edge provenance. Carrying
+        // those across left a hand-entered number wearing the precision of
+        // a measurement it has nothing to do with.
+        //
+        // "Retyped" is decided on the TEXT against the prefill, not on the
+        // numbers. The prefill is the reading ROUNDED for display, so a
+        // sensor value of 18.274 opened as "18.3" and every numeric test —
+        // this one included, at any tolerance — called that a change: opening
+        // the sheet and pressing Save rounded the reading AND demoted it to a
+        // hand entry with no σ. Comparing the strings is the only test that
+        // an untouched form passes.
+        //
+        // The typed number is converted back to the app's metric base before
+        // it is stored — `parsePositiveBase`, not `parsePositive`. Storing the
+        // raw text is what wrote a 14 cm stem when the cruiser typed 14 inches.
+        let base = valueText == valuePrefill
+            ? entry
+            : (TruthInput.parsePositiveBase(valueText, unit: valueUnit)
+                .map { entry.typedValue($0) } ?? entry)
+        // Only the two fields this sheet edits are named. Rebuilding the whole
+        // entry from an argument list here is what dropped `positionSource`
+        // off the end and re-labelled a typed coordinate a device fix — see
+        // `settingDetails`.
+        history.update(base.settingDetails(
             speciesCode: trimmedSpecies.isEmpty ? nil : trimmedSpecies.uppercased(),
-            position: entry.position,
-            damageCodes: entry.damageCodes,
-            note: trimmedNote.isEmpty ? nil : trimmedNote,
-            latitude: entry.latitude,
-            longitude: entry.longitude,
-            photoPath: entry.photoPath,
-            captureMode: entry.captureMode))
+            note: trimmedNote.isEmpty ? nil : trimmedNote))
         dismiss()
     }
 
     private var headerText: String {
+        // A named stem is headed by its name, not by the number the cruiser
+        // stopped using the moment they named it. The name is NOT uppercased
+        // — it is the cruiser's own word, and "STARKER32" is not what they
+        // typed. Unnamed rows keep the header they have always had.
+        if let name = entry.treeName, !name.isEmpty { return "EDIT · \(name)" }
         if let n = entry.treeNumber { return "EDIT · TREE \(n)" }
         return "EDIT · \(kindTitle.uppercased())"
     }
@@ -1815,212 +2403,57 @@ private struct QuickEntryEditSheet: View {
             .fill(ForestixPalette.surfaceRaised)
     }
 
-    /// Show the stored value compactly: integers with no decimals, else
-    /// up to two decimals with a lone trailing zero trimmed.
-    private static func formatValue(_ v: Double) -> String {
-        if v == v.rounded() { return String(format: "%.0f", v) }
-        return String(format: "%.2f", v)
-            .replacingOccurrences(of: "0$", with: "", options: .regularExpression)
-    }
-}
-
-// MARK: - Photo detail (mock ⑤)
-
-private struct PhotoViewerContext: Identifiable {
-    let entry: QuickMeasureEntry
-    let title: String
-    var id: UUID { entry.id }
-}
-
-/// Full-screen AR-snapshot viewer: the photo (feed + overlay, captured
-/// at Accept) with the reading's identity along the bottom. The chrome
-/// is fixed dark regardless of appearance — it sits on a photograph.
-private struct MeasurePhotoDetailView: View {
-    let context: PhotoViewerContext
-    let unitSystem: UnitSystem
-
-    @Environment(\.dismiss) private var dismiss
-    #if canImport(UIKit)
-    @State private var image: UIImage?
-    #endif
-
-    private let ink = Color(red: 0.949, green: 0.961, blue: 0.953)      // #F2F5F3
-    private let inkDim = Color(red: 0.647, green: 0.682, blue: 0.659)   // #A5AEA8
-    /// Meta-cell labels — dark-appearance textSecondary, fixed because
-    /// the chrome sits on a photograph regardless of the app theme.
-    private let labelDim = Color(red: 0.718, green: 0.753, blue: 0.729) // #B7C0BA
-    /// Dark-glass chrome base (mock `rgba(6,9,10,…)`).
-    private let glass = Color(red: 6 / 255, green: 9 / 255, blue: 10 / 255) // #06090A
-
-    var body: some View {
-        ZStack {
-            Color(red: 0.039, green: 0.051, blue: 0.043).ignoresSafeArea() // #0A0D0B
-
-            #if canImport(UIKit)
-            if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ProgressView().tint(ink)
-            }
-            #endif
-
-            VStack {
-                HStack {
-                    Spacer()
-                    Button {
-                        dismiss()
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(ink)
-                            .frame(width: 44, height: 44)
-                            .background(Circle().fill(glass.opacity(0.70)))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Close photo")
-                    .accessibilityIdentifier("mapHome.photo.close")
-                }
-                .padding(.horizontal, 14)
-                Spacer()
-            }
-
-            VStack {
-                Spacer()
-                meta
-            }
-        }
-        #if canImport(UIKit)
-        .task {
-            let url = MeasurePhotoStore.url(for: context.entry.photoPath ?? "")
-            let data = await Task.detached { try? Data(contentsOf: url) }.value
-            if let data { image = UIImage(data: data) }
-        }
-        #endif
-    }
-
-    private var meta: some View {
-        let entry = context.entry
-        let descriptor = ConfidenceStyle.descriptor(for: entry.confidenceRaw)
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text(bigValue)
-                    .font(.system(size: 30, weight: .heavy, design: .monospaced))
-                    .foregroundStyle(ink)
-                Text([sigmaText, descriptor.label]
-                    .compactMap { $0 }.joined(separator: " · "))
-                    .font(.system(size: 13, design: .monospaced))
-                    .foregroundStyle(inkDim)
-            }
-            HStack(alignment: .top, spacing: 18) {
-                metaCell("TREE", treeText)
-                metaCell("METHOD", methodText)
-                metaCell("GPS", gpsText)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 20)
-        .padding(.top, 40)
-        .padding(.bottom, 30)
-        .background(
-            LinearGradient(colors: [glass.opacity(0),
-                                    glass.opacity(0.92)],
-                           startPoint: .top, endPoint: .bottom))
-    }
-
-    private func metaCell(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(label)
-                .font(.system(size: 11.5, design: .monospaced))
-                .foregroundStyle(labelDim)
-            Text(value)
-                .font(.system(size: 13, weight: .bold, design: .monospaced))
-                .foregroundStyle(ink)
-                .lineLimit(1)
-        }
-    }
-
-    private var bigValue: String {
-        let entry = context.entry
+    /// The unit this reading is TYPED in — the cruiser's own, from the helper
+    /// every other typed measurement in the app goes through. A diameter is
+    /// cm/in; a height, a crown span, a distance and a plot radius are all
+    /// lengths in m/ft. Storage never moves: the conversion happens on the way
+    /// out (`valuePrefill`) and on the way back in (`save`).
+    private var valueUnit: TruthInput.Unit {
+        let imperial = settings.unitSystem == .imperial
         switch entry.kind {
         case .dbh:
-            // The peek card this viewer opens from labels these two
-            // values "DBH" and "HEIGHT"; Ø and H were the only place
-            // they appeared as symbols.
-            return "DBH " + MeasurementFormatter.diameter(cm: entry.value, in: unitSystem)
-        case .height:
-            return "Height " + MeasurementFormatter.height(m: entry.value, in: unitSystem)
-        case .crown:
-            return String(format: "%.1f × %.1f m",
-                          entry.value, entry.secondaryValue ?? 0)
-        case .distance:
-            return MeasurementFormatter.distance(m: entry.value, in: unitSystem)
-        case .samplingPlot:
-            return String(format: "%.1f m radius", entry.value)
+            return TruthInput.defaultUnit(.diameter, imperial: imperial)
+        case .height, .crown, .distance, .samplingPlot:
+            return TruthInput.defaultUnit(.distance, imperial: imperial)
         }
     }
 
-    /// Plain-language name for the stored capture method. `entry.method`
-    /// holds the raw enum/tag string that goes into the CSV export
-    /// ("lidarChordSilhouette", "vioWalkoffTangent", "two-point.lidar",
-    /// …); printing it verbatim put camelCase identifiers on a cruiser's
-    /// screen. The raw value is unchanged in storage and export — only
-    /// this readout is translated, and an unknown tag degrades to a
-    /// generic phrase rather than leaking the identifier.
-    private var methodText: String {
-        let raw = context.entry.method
-        switch raw {
-        case "lidarChordSilhouette", "lidarPartialArcSingleView",
-             "lidarPartialArcDualView", "lidarIrregular":
-            return "Trunk scan"
-        case "arCaliper", "arVioCircleFit":
-            return "Trunk scan (earlier app version)"
-        case "manualCaliper":       return "Measured by hand"
-        case "manualVisual":        return "Estimated by eye"
-        case "vioWalkoffTangent":   return "Walked back and sighted"
-        case "tapeTangent":         return "Tape and angle"
-        case "manualEntry":         return "Typed in"
-        case "imputedHD":           return "Estimated from the height curve"
-        case "ar.crown.dh":         return "Crown edges tapped"
-        case "ar.tap":              return "Centre dropped on the ground"
-        default:
-            if raw.hasPrefix("live.")      { return "Pointed at a target" }
-            if raw.hasPrefix("two-point.") { return "Two points on screen" }
-            return "Measured in Forestix"
-        }
+    /// The text the value field opens with: the stored reading in the
+    /// cruiser's unit at the SAME precision the row above it prints — one
+    /// decimal for a diameter or a height, two for a distance — so the peek
+    /// and its editor never show one reading as two numbers. Android builds
+    /// the identical string.
+    ///
+    /// `save()` compares the current text against this STRING, not against the
+    /// number it parses to, so an untouched form writes nothing back.
+    private var valuePrefill: String {
+        MeasurementFormatter.entryText(
+            TruthInput.fromBase(entry.value, unit: valueUnit),
+            fractionDigits: entry.kind == .distance ? 2 : 1)
     }
 
-    private var sigmaText: String? {
-        let entry = context.entry
-        guard let sigma = entry.sigma, sigma > 0 else { return nil }
+    /// False when the cruiser has typed something that is not a usable
+    /// reading. Save is held off and the field says why, rather than the
+    /// sheet quietly keeping the old number and closing.
+    ///
+    /// The single frame before `onAppear` seeds the field is not a refusal —
+    /// an empty box the cruiser has not touched must not flash a warning at
+    /// them on the way in.
+    private var valueEntryValid: Bool {
+        !seededValue || valueText == valuePrefill
+            || TruthInput.parsePositive(valueText) != nil
+    }
+
+    /// The refusal for this reading's kind. Diameter and height reuse the
+    /// field log's sentences word for word; the other kinds get the same
+    /// sentence about a reading.
+    private var valueEntryWarning: String {
         switch entry.kind {
-        case .dbh:
-            return MeasurementFormatter.diameterSigma(mm: sigma, in: unitSystem)
-        case .height:
-            return MeasurementFormatter.heightSigma(m: sigma, in: unitSystem)
+        case .dbh:    return "A typed diameter must be a number greater than zero."
+        case .height: return "A typed height must be a number greater than zero."
         case .crown, .distance, .samplingPlot:
-            return String(format: "±%.2f m", sigma)
+            return "A typed reading must be a number greater than zero."
         }
-    }
-
-    private var treeText: String {
-        let entry = context.entry
-        var parts: [String] = []
-        if let n = entry.treeNumber { parts.append("T\(n)") }
-        if let species = entry.speciesCode, !species.isEmpty {
-            parts.append(RegionalSpecies.name(forCode: species))
-        }
-        return parts.isEmpty ? "—" : parts.joined(separator: " · ")
-    }
-
-    /// The entry stores the fix itself (not its accuracy), so the GPS
-    /// cell shows the coordinates the reading was anchored to.
-    private var gpsText: String {
-        guard let lat = context.entry.latitude,
-              let lon = context.entry.longitude else { return "—" }
-        return String(format: "%.5f, %.5f", lat, lon)
     }
 }
 

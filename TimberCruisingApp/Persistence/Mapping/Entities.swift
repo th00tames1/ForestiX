@@ -21,6 +21,7 @@ public final class ProjectEntity: NSManagedObject {
     @NSManaged public var depthNoiseMm: Float
     @NSManaged public var dbhCorrectionAlpha: Float
     @NSManaged public var dbhCorrectionBeta: Float
+    @NSManaged public var dbhCalibrationEpoch: Int32
     @NSManaged public var vioDriftFraction: Float
 }
 
@@ -55,6 +56,9 @@ public final class PlannedPlotEntity: NSManagedObject {
     @NSManaged public var plannedLon: Double
     @NSManaged public var visited: Bool
     @NSManaged public var skipped: Bool
+    /// `PositionSource` rawValue, or nil for a plot the generator laid /
+    /// a row written before the column existed — see `PlannedPlot.plannedSource`.
+    @NSManaged public var plannedSource: String?
 }
 
 @objc(PlotEntity)
@@ -73,6 +77,12 @@ public final class PlotEntity: NSManagedObject {
     @NSManaged public var offsetWalkM: NSNumber?
     @NSManaged public var slopeDeg: Float
     @NSManaged public var aspectDeg: Float
+    // Model v5 — the site description a cruiser fills in at the plot.
+    // Optional: nil is "not recorded", which 0 cannot stand for here (0 m is
+    // a coastal plot and 0 % is a clearcut). Rows written before these
+    // columns existed read back nil, which is exactly true of them.
+    @NSManaged public var groundElevationM: NSNumber?
+    @NSManaged public var canopyCoverPct: NSNumber?
     @NSManaged public var plotAreaAcres: Float
     @NSManaged public var startedAt: Date
     @NSManaged public var closedAt: Date?
@@ -87,6 +97,9 @@ public final class TreeEntity: NSManagedObject {
     @NSManaged public var id: UUID
     @NSManaged public var plotId: UUID
     @NSManaged public var treeNumber: Int32
+    // Model v3 — the cruiser's own name for the tree. Optional; nil reads as
+    // "#treeNumber", the label the cruise surfaces have always shown.
+    @NSManaged public var treeName: String?
     @NSManaged public var speciesCode: String
     @NSManaged public var status: String
 
@@ -97,6 +110,15 @@ public final class TreeEntity: NSManagedObject {
     @NSManaged public var dbhCoverageDeg: NSNumber?
     @NSManaged public var dbhNInliers: NSNumber?
     @NSManaged public var dbhConfidence: String
+    // Model v4 — which estimator found the diameter's edges: "auto",
+    // "manual" (the ADJUST bracket), or "typed". Optional; nil on rows
+    // written before the field existed. `dbhMethod` cannot stand in for
+    // this — a bracket and an auto fit record the same method.
+    @NSManaged public var dbhCaptureMode: String?
+    // Model v6 — the estimator epoch that produced `dbhCm`. Optional, and nil
+    // means UNKNOWN: rows written before the field existed carry it, and so
+    // does a hand-typed diameter, which no estimator produced.
+    @NSManaged public var dbhEstimatorEpoch: NSNumber?
     @NSManaged public var dbhIsIrregular: Bool
 
     @NSManaged public var heightM: NSNumber?

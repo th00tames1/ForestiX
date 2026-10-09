@@ -109,8 +109,21 @@ sealed class HeightSubsampleRule {
     }
 }
 
+/// How a plot centre was obtained.
+///
+/// `GPS_SINGLE` is the ONE-SHOT fix: the coordinate the receiver happened to
+/// be reporting at the instant the cruiser dropped the plot, with no window
+/// and no median behind it. It exists because the app has always been able
+/// to record such a centre (the AR "Start plot" path, and now the planned
+/// plot's "Start plot now") and used to file it under `GPS_AVERAGED` with
+/// `gpsNSamples = 1` — a label that says a 60 s median was computed when
+/// nothing of the sort happened. Anyone reading the corpus later has to be
+/// able to separate the two populations, and `gpsNSamples` is not where a
+/// reader looks first. One fix and thirty are different data; they get
+/// different names.
 enum class PositionSource(val raw: String) {
     GPS_AVERAGED("gpsAveraged"),
+    GPS_SINGLE("gpsSingle"),
     VIO_OFFSET("vioOffset"),
     VIO_CHAIN("vioChain"),
     EXTERNAL_RTK("externalRTK"),
@@ -146,6 +159,9 @@ data class Project(
     var depthNoiseMm: Float,
     var dbhCorrectionAlpha: Float,      // from cylinder calibration; default 0
     var dbhCorrectionBeta: Float,       // default 1
+    /// Which estimator the two coefficients above were fitted against —
+    /// see ProjectCalibration.dbhCalibrationEpoch. 0 = never calibrated.
+    var dbhCalibrationEpoch: Int = 0,
     var vioDriftFraction: Float,        // default 0.02
 )
 
@@ -166,7 +182,16 @@ data class CruiseDesign(
     val projectId: UUID,
     var plotType: PlotType,
     var plotAreaAcres: Float?,          // required if fixedArea
-    var baf: Float?,                    // required if variableRadius
+    /// Basal-area factor, required if `VARIABLE_RADIUS`, ALWAYS IN ft²/ac.
+    ///
+    /// The one field in this model that is not metric, and deliberately so:
+    /// it is the number etched on the prism, the US convention is what every
+    /// project on disk was typed under (the setup sheet has always defaulted
+    /// to 20), and re-basing it would silently re-read every stored design.
+    /// The setup sheet converts a metric cruiser's m²/ha on the way in and
+    /// back out; `ExpansionFactors.variableRadius` divides it by a basal area
+    /// in ft². Change one of those three and you must change all three.
+    var baf: Float?,
     var samplingScheme: SamplingScheme,
     var gridSpacingMeters: Float?,      // required if systematicGrid
     var heightSubsampleRule: HeightSubsampleRule = HeightSubsampleRule.EveryKth(k = 5),
@@ -189,4 +214,24 @@ data class PlannedPlot(
     /// mirrors iOS `skipped: Bool = false` so existing PlannedPlot(...) sites
     /// compile unchanged.
     var skipped: Boolean = false,
+    /// How `plannedLat`/`plannedLon` came to exist.
+    ///
+    /// `MANUAL` — the cruiser DREW this point with a finger on the map. It
+    /// is an intention, not an observation: nothing measured it, and its
+    /// error is however far the finger was from the tree the cruiser meant.
+    /// The one rule this field exists to keep is that a drawn coordinate and
+    /// a GPS-measured one are never stored the same way — the plot that
+    /// eventually opens here still takes its `centerLat`/`centerLon` from
+    /// the ARRIVAL FIX and stamps that fix's own `positionSource`, so the
+    /// drawn point never becomes a measured one. Keeping both is the point:
+    /// their difference is the canopy GPS error, and it can only be read if
+    /// the plan says it was drawn.
+    ///
+    /// `null` — NOT hand-placed. Every planned plot that existed before this
+    /// field, and every one `SamplingGenerator` lays down, is derived from a
+    /// boundary and a design rather than placed by a person, and there is no
+    /// `PositionSource` case that says "computed from a design". Inventing
+    /// one, or borrowing `MANUAL` for the generator, would make the field
+    /// say nothing. Absent means absent.
+    var plannedSource: PositionSource? = null,
 )

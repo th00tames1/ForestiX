@@ -178,6 +178,55 @@ public struct MeasureCircleButton: View {
 
 // MARK: - Top instruction banner (U1)
 
+// MARK: - Sampling-plot tracking-loss wording
+
+/// What the plot screens say once the plot has been hidden because ARKit
+/// stopped correcting its centre. Two strings, one meaning, used by every
+/// plot-placement screen; byte-identical to the Android
+/// `PLOT_TRACKING_LOST_HINT` / `PLOT_TRACKING_LOST_STATUS` pair.
+/// The remedy clause is lifted verbatim from the height screen's
+/// `trackingLostNow` — one tracking dropout, one thing to do about it.
+public enum MeasurementCopy {
+    public static let plotTrackingLostHint =
+        "Tracking lost — the plot is hidden rather than drawn in the wrong place. Hold still until the camera picks the scene back up."
+    public static let plotTrackingLostStatus =
+        "TRACKING LOST — inside or outside is unknown"
+
+    /// Every screen that plants a plot centre by raycasting the crosshair
+    /// says this when the ray finds nothing. Hoisted out of the two plot
+    /// screens because the scan screens' "Pin centre" now fires the SAME
+    /// raycast and must fail in the same words.
+    public static let plotGroundNotSeen =
+        "Couldn't see the ground here. Aim at the ground and try again."
+
+    // MARK: - Plot centre known only as GPS (field report 14 × 17)
+
+    /// FIELD REPORT 14 vs 17. The subdued ring + pillar are drawn from an
+    /// AR ANCHOR, and only the AR "Start plot" route creates one. A plot
+    /// opened from a planned pin ("Start plot now" — the one-tap route
+    /// report 17 introduced, and now the only one that card offers) and
+    /// any plot carried across an app restart have a centre that is a
+    /// LAT/LON and nothing else, so the scan screens showed a bare camera
+    /// feed with a plot active.
+    ///
+    /// The ring is NOT synthesised from the GPS centre. A fix under canopy
+    /// is worth several metres and an AR anchor is worth centimetres;
+    /// drawing one as the other would put a boundary on screen that is not
+    /// where the boundary is, and the ring's whole job is answering "am I
+    /// inside?". So the screen says what it has and offers the one act that
+    /// produces a centimetre-grade centre — the cruiser standing at the
+    /// centre and pinning it, exactly what the AR route does.
+    public static let plotCentreNotPinnedHint =
+        "No ring: this plot's centre is a GPS position, not an AR pin. Stand at the plot centre, aim at the ground, and tap Pin centre."
+    /// Said on the same card, because a control that quietly rewrote the
+    /// recorded centre would be the invisible data loss the plot-edit path
+    /// already refuses. Pinning is a DRAWING act only.
+    public static let plotPinCentreNote =
+        "Pinning draws the ring only — the plot's recorded centre does not change."
+    public static let plotPinCentreButton = "Pin centre"
+    public static let plotPinCentreDismiss = "Not now"
+}
+
 /// Stage-guidance banner pinned top-centre on every AR measure screen —
 /// the instruction strings moved OUT of the bottom status panel so the
 /// bottom edge is free for the camera-app shutter row. Locked geometry
@@ -227,6 +276,80 @@ public struct MeasureTopBanner<Extra: View>: View {
             Spacer()
         }
         .frame(maxWidth: .infinity)
+    }
+}
+
+// MARK: - "Pin centre" offer (plot centre known only as GPS)
+
+/// The offer the DBH / Height screens make when a plot is being tallied but
+/// no AR anchor marks its centre, so there is no ring to draw. Rendered in
+/// `MeasureTopBanner`'s `extra` slot, which stays hit-testable.
+///
+/// Both scan screens use this ONE view so the offer cannot drift between
+/// them, and it is byte-identical to the Android `PlotPinCentreCard`.
+///
+/// `failure` carries the raycast refusal (`plotGroundNotSeen`) so a tap that
+/// found no ground says so here rather than leaving the button looking
+/// broken. A mis-aimed pin is not trapped: the ring appears immediately, and
+/// the mini-map's enlarged view → "Edit plot" re-opens the full placement
+/// screen (ghost preview + Reset) to put it right.
+public struct PlotPinCentreCard: View {
+
+    private let failure: String?
+    private let onPin: () -> Void
+    private let onDismiss: () -> Void
+
+    public init(failure: String? = nil,
+                onPin: @escaping () -> Void,
+                onDismiss: @escaping () -> Void) {
+        self.failure = failure
+        self.onPin = onPin
+        self.onDismiss = onDismiss
+    }
+
+    public var body: some View {
+        VStack(spacing: 8) {
+            Text(MeasurementCopy.plotCentreNotPinnedHint)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(.white)
+                .multilineTextAlignment(.center)
+            Text(MeasurementCopy.plotPinCentreNote)
+                .font(.system(size: 12))
+                .foregroundStyle(.white.opacity(0.75))
+                .multilineTextAlignment(.center)
+            if let failure {
+                Text(failure)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(ForestixPalette.confidenceWarn)
+                    .multilineTextAlignment(.center)
+                    .accessibilityIdentifier("measure.pinCentreFailure")
+            }
+            buttonRow
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity)
+        .background(Color.black.opacity(0.65),
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .floatingShadow()
+        .accessibilityIdentifier("measure.pinCentreCard")
+    }
+
+    /// Split out of `body`: the whole card in one literal pushed the
+    /// SwiftUI type-checker into the slow path this build has been bitten
+    /// by before.
+    private var buttonRow: some View {
+        HStack(spacing: 12) {
+            Button(MeasurementCopy.plotPinCentreDismiss, action: onDismiss)
+                .buttonStyle(.forestixARSecondary)
+                .frame(maxWidth: .infinity)
+                .accessibilityIdentifier("measure.pinCentreDismiss")
+            Button(MeasurementCopy.plotPinCentreButton, action: onPin)
+                .buttonStyle(.forestixProminent)
+                .frame(maxWidth: .infinity)
+                .accessibilityIdentifier("measure.pinCentre")
+        }
+        .padding(.top, 2)
     }
 }
 
@@ -313,23 +436,45 @@ public struct MeasureShutterRow: View {
 
 /// One line of the compact live-value strip directly above the shutter
 /// row — the dark-glass capsule language of the under-crosshair pills.
-/// `large` renders `ForestixType.dataLarge` (the primary value line);
-/// default lines are `dataSmall`; `dimmed` drops to 0.85 white on a
-/// lighter 0.45 scrim. Identical to Android's MeasureValuePill.
+/// `size` picks the step of `ForestixType`'s data scale; `dimmed` drops to
+/// 0.85 white on a lighter 0.45 scrim. Identical to Android's
+/// MeasureValuePill.
 public struct MeasureValuePill: View {
+
+    /// The three steps of the data type scale, and nothing else — a pill
+    /// never invents a size of its own.
+    ///
+    /// `.medium` exists because of the field report on the height walk
+    /// strip: a line that carries a WORD as well as a number ("Total
+    /// distance 21.40 m") at the 26 pt step is far wider than the bare
+    /// numbers the step was drawn for, and read as oversized. It is still
+    /// the emphasised line of its strip, one step up from the two dimmed
+    /// lines above it.
+    public enum Size {
+        case large, medium, small
+
+        var font: Font {
+            switch self {
+            case .large:  return ForestixType.dataLarge
+            case .medium: return ForestixType.data
+            case .small:  return ForestixType.dataSmall
+            }
+        }
+    }
+
     private let text: String
-    private let large: Bool
+    private let size: Size
     private let dimmed: Bool
 
-    public init(_ text: String, large: Bool = false, dimmed: Bool = false) {
+    public init(_ text: String, size: Size = .small, dimmed: Bool = false) {
         self.text = text
-        self.large = large
+        self.size = size
         self.dimmed = dimmed
     }
 
     public var body: some View {
         Text(text)
-            .font(large ? ForestixType.dataLarge : ForestixType.dataSmall)
+            .font(size.font)
             .foregroundStyle(.white.opacity(dimmed ? 0.85 : 1))
             .padding(.horizontal, 10)
             .padding(.vertical, 4)

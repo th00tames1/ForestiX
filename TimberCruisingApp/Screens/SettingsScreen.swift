@@ -25,6 +25,8 @@ public struct SettingsScreen: View {
 
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var environment: AppEnvironment
+    /// The quick-measure log — the readings ground-truth recovery writes into.
+    @EnvironmentObject private var history: QuickMeasureHistory
     @StateObject private var backup = BackupViewModel()
 
     @State private var tileTemplate: String = ""
@@ -43,6 +45,21 @@ public struct SettingsScreen: View {
     @State private var isPresentingClearEvents = false
     /// Bumped after a clear so the row count / disabled state re-reads.
     @State private var storeRefresh = 0
+    /// Ground-truth recovery: the run is in flight, and what the last one did.
+    @State private var truthBackfillRunning = false
+    @State private var truthBackfillResult: String?
+    /// Ground-truth unit repair. The PLAN is held between the preview and the
+    /// confirm so what the cruiser agreed to is what gets written — recomputing
+    /// it after the tap would let the corpus move under the sentence they read.
+    /// Research-CSV export: the run is in flight, and what the last one held
+    /// back. The sentence stays on screen after the share sheet closes — the
+    /// counts are the point, and a toast the cruiser dismissed is not a record.
+    @State private var researchExportRunning = false
+    @State private var researchExportResult: String?
+    @State private var truthRepairRunning = false
+    @State private var truthRepairPlan: TruthUnitRepair.Plan?
+    @State private var truthRepairPreview: String?
+    @State private var truthRepairResult: String?
 
     #if os(iOS)
     @State private var isPresentingImport = false
@@ -60,11 +77,32 @@ public struct SettingsScreen: View {
             // Basemap tiles is ordinary field setup, not developer tooling —
             // it sits ABOVE the developer group (Android matches).
             advancedSection
-            developerSection
+            if settings.developerMode { developerSection }
             clearDeveloperDataSection
             dangerZoneSection
         }
         .navigationTitle("Settings")
+        // THE CONFIRM THE REPAIR MUST PASS. On the Form, not on the Section
+        // that raises it: an alert presented from inside a Form row is not
+        // reliably shown, and a repair whose confirm never appears would be
+        // either a silent write or a dead button.
+        .alert("Repair imperial ground truths",
+               isPresented: Binding(
+                get: { truthRepairPreview != nil },
+                set: { if !$0 { truthRepairPreview = nil; truthRepairPlan = nil } })
+        ) {
+            Button("Cancel", role: .cancel) {
+                truthRepairPreview = nil
+                truthRepairPlan = nil
+            }
+            // Offered only when there IS something to write — a confirm on an
+            // empty plan invites a tap that means nothing.
+            if let plan = truthRepairPlan, !plan.isEmpty {
+                Button("Repair") { applyTruthRepair(plan) }
+            }
+        } message: {
+            Text(truthRepairPreview ?? "")
+        }
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -116,10 +154,19 @@ public struct SettingsScreen: View {
         }
         // Developer-data clears — each Clear is confirmed, and the Clears
         // themselves live in their own section, never under an Export row.
-        .confirmationDialog(
+        //
+        // ALERTS, not confirmationDialogs. A destructive confirmation is read
+        // before an irreversible write, so it is centred and it looks the same
+        // wherever the row that raised it happens to sit — an action sheet
+        // raised from a Form row becomes a popover pinned to that row in a
+        // regular size class, and a two-step reset whose first sheet appears
+        // against the top edge and whose second appears somewhere else is the
+        // worst possible place for a wandering dialog. Same rule as every
+        // other delete in this app; see the field log's delete for the full
+        // argument.
+        .alert(
             "Clear research CSV?",
-            isPresented: $isPresentingClearResearch,
-            titleVisibility: .visible
+            isPresented: $isPresentingClearResearch
         ) {
             Button("Clear", role: .destructive) {
                 ResearchLog.shared.clear()
@@ -129,10 +176,9 @@ public struct SettingsScreen: View {
         } message: {
             Text("This deletes every research row on this device. Anything not already exported is gone for good.")
         }
-        .confirmationDialog(
+        .alert(
             "Clear diagnostic log?",
-            isPresented: $isPresentingClearEvents,
-            titleVisibility: .visible
+            isPresented: $isPresentingClearEvents
         ) {
             Button("Clear", role: .destructive) {
                 ForestixLogger.clear()
@@ -142,10 +188,9 @@ public struct SettingsScreen: View {
         } message: {
             Text("This deletes every logged event on this device. Anything not already exported is gone for good.")
         }
-        .confirmationDialog(
+        .alert(
             "Reset Forestix data?",
-            isPresented: $isPresentingResetStep1,
-            titleVisibility: .visible
+            isPresented: $isPresentingResetStep1
         ) {
             Button("Continue", role: .destructive) {
                 isPresentingResetStep2 = true
@@ -154,10 +199,9 @@ public struct SettingsScreen: View {
         } message: {
             Text("This deletes every project, plot, tree, photo, and scan. Back up anything you need to keep first. This cannot be undone.")
         }
-        .confirmationDialog(
+        .alert(
             "Are you absolutely sure?",
-            isPresented: $isPresentingResetStep2,
-            titleVisibility: .visible
+            isPresented: $isPresentingResetStep2
         ) {
             Button("Delete everything", role: .destructive) {
                 performFullReset()
@@ -269,6 +313,20 @@ public struct SettingsScreen: View {
             }
             .pickerStyle(.segmented)
             .accessibilityIdentifier("settings.appearance")
+
+            Picker("Guide height", selection: Binding(
+                get: { settings.breastHeightGuideHeight },
+                set: { settings.breastHeightGuideHeight = $0 })
+            ) {
+                ForEach(BreastHeightGuideHeight.allCases, id: \.self) { height in
+                    Text(height.metricLabel).tag(height)
+                }
+            }
+            .pickerStyle(.segmented)
+            .accessibilityIdentifier("settings.breastHeightGuideHeight")
+            Text("Vertical height above the selected point.")
+                .font(ForestixType.caption)
+                .foregroundStyle(ForestixPalette.textSecondary)
         }
     }
 
@@ -346,7 +404,7 @@ public struct SettingsScreen: View {
     }
 
     // MARK: - 6. Developer & research
-    // Gated behind developer mode: the toggle is the only always-visible row.
+    // Hidden until the map's seven-tap gesture enables developer mode.
     // When on, this is the single home for every dev/study tool — the DBH
     // algorithm picker (moved in from its own section), Research CSV, the
     // diagnostic log (gated here too, matching Android), and the raw-capture
@@ -356,7 +414,7 @@ public struct SettingsScreen: View {
         Section {
             Toggle(isOn: Binding(
                 get: { settings.developerMode },
-                set: { settings.developerMode = $0 })
+                set: { if !$0 { settings.developerMode = false } })
             ) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Developer / research mode")
@@ -368,6 +426,36 @@ public struct SettingsScreen: View {
             .accessibilityIdentifier("settings.developerMode")
 
             if settings.developerMode {
+                Toggle("Multi-frame DBH capture (5 frames)", isOn: Binding(
+                    get: { settings.dbhCaptureMode == .multi5 },
+                    set: { settings.dbhCaptureMode = $0 ? .multi5 : .single }))
+                    .accessibilityIdentifier("settings.dbhMultiFrame")
+                Text("Experimental. Off uses one depth frame per measurement; live preview is unchanged.")
+                    .font(ForestixType.caption)
+                    .foregroundStyle(ForestixPalette.textSecondary)
+                // AUTOMATIC STEM EDGES — an on-device segmentation model
+                // placing the measuring bracket.
+                //
+                // Developer-only: it decides the two pixels a diameter is
+                // measured between. Against 60 real captures it found a
+                // trunk in 40 % of frames, and where it did the edges spanned
+                // about 0.21 of the screen against the cruiser's own 0.36:
+                // the mask has holes mid-stem and bleeds into the background.
+                // An experiment does not belong on a cruiser's settings
+                // screen. The scan gate reads BOTH keys.
+                Toggle(isOn: Binding(
+                    get: { settings.dbhAutoSegmentation },
+                    set: { settings.dbhAutoSegmentation = $0 })
+                ) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Automatic stem edges (experimental)")
+                        Text("NOT A MEASUREMENT YET. Finds the trunk in the camera image and places the bracket on its edges; take hold of the bracket and it stands aside. Falls back to the depth edge-finder whenever it has no answer. Readings taken this way are recorded as \"segmented\".")
+                            .font(ForestixType.caption)
+                            .foregroundStyle(ForestixPalette.textSecondary)
+                    }
+                }
+                .accessibilityIdentifier("settings.dbhAutoSegmentation")
+
                 // DBH algorithm — developer-only; normal users get the single
                 // blessed DBH path. Moved in from its former standalone section.
                 Picker("DBH algorithm",
@@ -401,13 +489,29 @@ public struct SettingsScreen: View {
                         .foregroundStyle(ForestixPalette.textSecondary)
                 }
                 .id(storeRefresh)
+                // THE EXPORT IS CLASSIFIED, NOT COPIED. The log is append-only,
+                // so it still holds the row a retake replaced and the ground
+                // truth a correction moved on from. `ResearchExport` splits it
+                // into what the FIELD LOG shows and what it no longer does,
+                // ships BOTH files in one archive, and returns the counts —
+                // which are put on screen below, because a quiet filter is how
+                // someone later concludes data went missing. Nothing on disk is
+                // touched.
                 Button {
-                    backup.shareURL = ResearchLog.shared.fileURL
+                    runResearchExport()
                 } label: {
-                    Label("Export research CSV", systemImage: "square.and.arrow.up")
+                    Label(researchExportRunning
+                          ? "Exporting…" : "Export research CSV",
+                          systemImage: "square.and.arrow.up")
                 }
-                .disabled(!ResearchLog.shared.hasData)
+                .disabled(!ResearchLog.shared.hasData || researchExportRunning)
                 .accessibilityIdentifier("settings.exportResearch")
+                if let result = researchExportResult {
+                    Text(result)
+                        .font(ForestixType.caption)
+                        .foregroundStyle(ForestixPalette.textSecondary)
+                        .accessibilityIdentifier("settings.exportResearchResult")
+                }
 
                 // Diagnostic log — gated here to match Android (it used to be a
                 // standalone, always-visible section). Share only; the Clear
@@ -449,9 +553,160 @@ public struct SettingsScreen: View {
                     }
                 }
                 .accessibilityIdentifier("settings.rawCaptures")
+
+                // GROUND-TRUTH RECOVERY. A truth typed for a CAPTURE (on a
+                // scan screen before the truth moved onto the reading, or in
+                // the raw-captures console at any time since) lives only in
+                // that capture's manifest, so the field log shows a blank True
+                // field for a tree the cruiser taped. This attaches those to
+                // the readings they belong to.
+                //
+                // DELIBERATELY NOT A LAUNCH MIGRATION. It reads every manifest
+                // on disk — a few hundred after two field days, each one a
+                // whole JSON document with pose trails in it — and a blocking
+                // pass on a cold morning is its own bug. It also has no end
+                // date: the console can strand a new truth today, so a
+                // run-once-at-version-N flag would be wrong by design. It is
+                // idempotent, so running it again is free and changes nothing.
+                Button {
+                    runTruthBackfill()
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Label("Recover ground truths", systemImage: "arrow.uturn.down")
+                        Text("Attach truths typed for a raw capture to the reading they belong to. Never overwrites a truth already on a reading.")
+                            .font(ForestixType.caption)
+                            .foregroundStyle(ForestixPalette.textSecondary)
+                    }
+                }
+                .disabled(truthBackfillRunning)
+                .accessibilityIdentifier("settings.recoverGroundTruths")
+                if let result = truthBackfillResult {
+                    // The corpus was just rewritten — say by how much, so the
+                    // cruiser can check it against their own backup. A silent
+                    // repair of research data is the wrong shape even when the
+                    // arithmetic is right.
+                    Text(result)
+                        .font(ForestixType.caption)
+                        .foregroundStyle(ForestixPalette.textSecondary)
+                        .accessibilityIdentifier("settings.recoverGroundTruthsResult")
+                }
+
+                // GROUND-TRUTH UNIT REPAIR. Before the truth field had a unit
+                // toggle the cruiser typed inches and feet off the tape into a
+                // field the app stored as centimetres and metres, so a stem
+                // taped at 27 in went into the corpus as 27 cm. This multiplies
+                // those back into the base they meant.
+                //
+                // PREVIEW, THEN WRITE. It rewrites research data in three
+                // stores at once and the correction cannot be read back out of
+                // the number afterwards, so the cruiser sees the counts and
+                // worked examples first and nothing moves until they confirm.
+                //
+                // Like the recovery above it is an action rather than a launch
+                // migration, and for the same reason: it reads every manifest
+                // on disk. It is one-shot by construction, not by a version
+                // flag — repairing a truth records the unit it was typed in,
+                // which is the very marker that selects an unrepaired one.
+                Button {
+                    previewTruthRepair()
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Label("Repair imperial ground truths",
+                              systemImage: "ruler")
+                        Text("Ground truths typed before the unit toggle were stored as if the digits were metric. This re-bases them — inches to centimetres, feet to metres. A truth that records the unit it was typed in is never touched.")
+                            .font(ForestixType.caption)
+                            .foregroundStyle(ForestixPalette.textSecondary)
+                    }
+                }
+                .disabled(truthRepairRunning)
+                .accessibilityIdentifier("settings.repairTruthUnits")
+                if let result = truthRepairResult {
+                    // Same reason the recovery says what it did: research data
+                    // moved, so say by how much and where the full list is.
+                    Text(result)
+                        .font(ForestixType.caption)
+                        .foregroundStyle(ForestixPalette.textSecondary)
+                        .accessibilityIdentifier("settings.repairTruthUnitsResult")
+                }
             }
         } header: {
             Text("Developer & research")
+        }
+    }
+
+    /// Read all three stores and show what WOULD change. Writes nothing.
+    ///
+    /// Detached for the same reason the recovery pass is: it parses every
+    /// manifest on disk and the whole research CSV, and neither belongs on the
+    /// main actor.
+    private func previewTruthRepair() {
+        guard !truthRepairRunning else { return }
+        truthRepairRunning = true
+        truthRepairResult = nil
+        Task.detached(priority: .userInitiated) {
+            let plan = await TruthUnitRepair.preview(history: history)
+            let text = TruthUnitRepair.previewText(plan)
+            await MainActor.run {
+                truthRepairPlan = plan
+                truthRepairPreview = text
+                truthRepairRunning = false
+            }
+        }
+    }
+
+    /// Write the plan the cruiser just read. The plan is passed in rather than
+    /// recomputed, so what they confirmed is what lands.
+    private func applyTruthRepair(_ plan: TruthUnitRepair.Plan) {
+        truthRepairPreview = nil
+        truthRepairPlan = nil
+        truthRepairRunning = true
+        Task.detached(priority: .userInitiated) {
+            let result = await TruthUnitRepair.applyPlan(plan, history: history)
+            let text = TruthUnitRepair.resultText(result)
+            await MainActor.run {
+                truthRepairResult = text
+                truthRepairRunning = false
+            }
+        }
+    }
+
+    /// Classify the research log against the field log and hand the archive to
+    /// the share sheet. Detached for the same reason the two repair passes
+    /// beside it are: it parses the whole research CSV, which is a field
+    /// season's worth of rows, and that does not belong on the main actor.
+    ///
+    /// The share sheet is only raised when a file was actually written — an
+    /// empty log and a failed write both leave the sentence on screen and no
+    /// sheet, rather than sharing a file that is not there.
+    private func runResearchExport() {
+        guard !researchExportRunning else { return }
+        researchExportRunning = true
+        researchExportResult = nil
+        Task.detached(priority: .userInitiated) {
+            let outcome = await ResearchExport.run(history: history)
+            await MainActor.run {
+                researchExportResult = outcome.message
+                if let url = outcome.url { backup.shareURL = url }
+                researchExportRunning = false
+            }
+        }
+    }
+
+    /// Off the main actor for the manifest sweep; the history write inside
+    /// `TruthBackfill.run` hops back on its own, once.
+    private func runTruthBackfill() {
+        guard !truthBackfillRunning else { return }
+        truthBackfillRunning = true
+        truthBackfillResult = nil
+        // Detached, like every other sweep over the raw-capture tree on this
+        // screen's sibling console: the pass reads a few hundred manifests and
+        // must not be on the main actor to do it.
+        Task.detached(priority: .userInitiated) {
+            let text = await TruthBackfill.run(history: history)
+            await MainActor.run {
+                truthBackfillResult = text
+                truthBackfillRunning = false
+            }
         }
     }
 

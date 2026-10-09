@@ -14,6 +14,9 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.hcjeong.forestix.common.Country
+import com.hcjeong.forestix.common.DBHCaptureMode
+import com.hcjeong.forestix.common.DeveloperModeUnlock
+import com.hcjeong.forestix.common.BreastHeightGuideHeight
 import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.sensors.LogRule
 import kotlinx.coroutines.CoroutineScope
@@ -33,12 +36,38 @@ enum class DBHMeasurementMethod(val raw: String) {
     companion object { fun fromRaw(s: String?) = entries.firstOrNull { it.raw == s } ?: CHORD }
 }
 
+/// FIRST-RUN DBH bracket half-width — half the fraction of the guide line a
+/// typical stem covers at a typical working distance. Replaced by the
+/// cruiser's own width the first time a handle is released.
+///
+/// DERIVED, not picked for symmetry (the old 0.25 opened the bracket across
+/// half the screen, roughly twice a real stem). `val/analysis/relayer.py`
+/// replays 97 tape-verified McDunn captures through the shipped ADJUST path
+/// and reproduces the stored diameter to a median of 0.00 cm; median
+/// k = w/(2f) there is 0.130 on iOS, so the span is 2k·(f/extent) ≈ 0.27 of
+/// the walk axis and half of it is 0.135. Cross-check on the identity
+/// d = w·z/(f − w/2): that is a 35 cm stem at 1.2 m, the middle of the range
+/// the field protocol asks for.
+///
+/// SAME NUMBER AS iOS (`AppSettings.defaultBracketHalfWidth`) because the two
+/// platforms share the `tc.dbhBracketHalfWidth` key. The number does not mean
+/// quite the same thing on each: iOS identifies the view fraction with the
+/// depth walk-axis fraction 1:1 (validated at 1.028x against 48 taped stems),
+/// whereas here it is a VIEW fraction that `constrainedEstimate` converts
+/// through ARCore's own display transform. As a SEED that is fine — a stem of
+/// a given size at a given range covers a similar fraction of either phone's
+/// preview, and the cruiser drags from there. Android's own median k (0.184)
+/// cannot be inverted into a view fraction without the device's transform, so
+/// deriving a separate Android number is a device job, not a keyboard one.
+const val DEFAULT_BRACKET_HALF_WIDTH = 0.135f
+
 /// The DBH bracket's legal half-width range. 0.02 is half the fit's 0.04
 /// minimum handle gap; 0.48 puts the handles 2 % in from each screen edge,
 /// where they are still grabbable. Mirror of iOS
 /// `AppSettings.clampBracketHalfWidth`.
 fun clampBracketHalfWidth(value: Float): Float =
-    if (!value.isFinite()) 0.25f else value.coerceIn(0.02f, 0.48f)
+    if (!value.isFinite()) DEFAULT_BRACKET_HALF_WIDTH
+    else value.coerceIn(0.02f, 0.48f)
 
 
 data class SettingsSnapshot(
@@ -77,13 +106,16 @@ data class SettingsSnapshot(
     ///
     /// FIELD REPORT 4 — a cruise walks a plot at roughly one standing
     /// distance from stem to stem, so consecutive trees subtend nearly the
-    /// same on-screen width. Re-dragging from ±25 % every time was work the
-    /// previous tree had already done.
+    /// same on-screen width. Re-dragging from a constant every time was work
+    /// the previous tree had already done.
     ///
-    /// HALF-width, not two edges, because the bracket is symmetric about
-    /// the crosshair by construction — one number is the whole state.
+    /// ONE number, not two edges: the handles move INDEPENDENTLY once the
+    /// bracket is up (symmetric handles caused a 1.5x over-read and were
+    /// reverted), but a re-opened bracket has nothing better than the
+    /// crosshair to centre on, so the width is the only part worth carrying.
+    /// What is stored is the half-SPAN, (right - left) / 2.
     /// Mirror of iOS tc.dbhBracketHalfWidth.
-    val dbhBracketHalfWidth: Float = 0.25f,
+    val dbhBracketHalfWidth: Float = DEFAULT_BRACKET_HALF_WIDTH,
     /// Which BUILT-IN base layer the map draws — "satellite" (Esri World
     /// Imagery) or "normal" (OpenStreetMap standard). Default satellite so
     /// nothing changes for existing installs (mirror of iOS tc.mapType).
@@ -118,11 +150,7 @@ data class SettingsSnapshot(
     /// (depth source, intrinsics, point counts, raw chord, pitch, σ) on the
     /// AR screens and unlocks the validation-experiment tooling.
     val developerMode: Boolean = false,
-    /// Operator-set target/tree id written into every research-log row while
-    /// developer mode is on — groups repeats + joins to ground truth. Shared
-    /// across the scan screens and persisted so a field session survives
-    /// app restarts (mirror of iOS tc.researchTreeId).
-    val researchTreeId: String = "",
+    val dbhCaptureMode: DBHCaptureMode = DBHCaptureMode.SINGLE,
     /// Raw-capture recording (developer mode only) — when ON, every DBH
     /// capture burst and Height compute serializes a replay bundle (raw
     /// depth u16 + intrinsics + poses + calibration) under
@@ -130,6 +158,22 @@ data class SettingsSnapshot(
     /// field ground truth. Default OFF; zero cost while off (mirror of iOS
     /// tc.rawCaptureEnabled). Cross-platform schema is identical.
     val rawCaptureEnabled: Boolean = false,
+    /// Breast-height guide — draws the selected-height marker up
+    /// from the tree base on the Diameter scan so the cruiser can see where
+    /// breast height crosses the stem before reading the diameter there.
+    ///
+    /// Legacy preference retained for compatibility; the scan ignores it.
+    /// Set ground is public and only an explicit button tap arms placement.
+    /// It changes no measurement and appears in no export. Same key as iOS
+    /// (`AppSettings.Keys.breastHeightGuide`, "tc.breastHeightGuide").
+    val breastHeightGuide: Boolean = false,
+    val breastHeightGuideHeight: BreastHeightGuideHeight = BreastHeightGuideHeight.METERS_137,
+    /// AUTO reads the stem's edges out of a segmentation mask instead of
+    /// walking the depth map. OFF BY DEFAULT and it must stay that way until
+    /// it has been checked against tape: it changes the two pixels the chord
+    /// identity is applied between, and this project's numbers are a paper's
+    /// numbers. iOS reads the same `tc.dbhAutoSegmentation` key.
+    val dbhAutoSegmentation: Boolean = false,
     /// App appearance — "light" (default) or "dark". Same Field
     /// High-Contrast identity in both; ForestixTheme maps this to the
     /// light or dark token set (mirror of iOS tc.appearance).
@@ -185,8 +229,12 @@ class AppSettings(private val context: Context) {
         val dbhBracketHalfWidth = floatPreferencesKey("tc.dbhBracketHalfWidth")
         val measureHeightAfterDBH = booleanPreferencesKey("tc.measureHeightAfterDiameter")
         val developerMode = booleanPreferencesKey("tc.developerMode")
-        val researchTreeId = stringPreferencesKey("tc.researchTreeId")
+        val developerModeUnlocked = booleanPreferencesKey("tc.developerModeUnlocked")
+        val dbhCaptureMode = stringPreferencesKey("tc.dbhCaptureMode")
         val rawCaptureEnabled = booleanPreferencesKey("tc.rawCaptureEnabled")
+        val breastHeightGuide = booleanPreferencesKey("tc.breastHeightGuide")
+        val breastHeightGuideHeight = stringPreferencesKey("tc.breastHeightGuideHeight")
+        val dbhAutoSegmentation = booleanPreferencesKey("tc.dbhAutoSegmentation")
         val appearance = stringPreferencesKey("tc.appearance")
         // Unified with the iOS sibling's key (was "tc.cruiseProjectId"); the
         // one-time reset of this transient current-project pointer is
@@ -223,7 +271,7 @@ class AppSettings(private val context: Context) {
             dbhChordAlgorithm = p[Keys.dbhChordAlgorithm] ?: "silhouette",
             dbhEdgeAdjustDefault = p[Keys.dbhEdgeAdjustDefault] ?: true,
             dbhBracketHalfWidth = clampBracketHalfWidth(
-                p[Keys.dbhBracketHalfWidth] ?: 0.25f),
+                p[Keys.dbhBracketHalfWidth] ?: DEFAULT_BRACKET_HALF_WIDTH),
             // Anything unrecognised falls back to the satellite default.
             mapType = if (p[Keys.mapType] == "normal") "normal" else "satellite",
             tileURLTemplate = p[Keys.tileURLTemplate]?.takeIf { it.isNotBlank() },
@@ -236,9 +284,13 @@ class AppSettings(private val context: Context) {
             // Defaults ON (F10) — `?: true`, so an install that has never
             // touched the toggle chains diameter → height.
             measureHeightAfterDiameter = p[Keys.measureHeightAfterDBH] ?: true,
-            developerMode = p[Keys.developerMode] ?: false,
-            researchTreeId = p[Keys.researchTreeId] ?: "",
+            developerMode = DeveloperModeUnlock.isEnabled(p[Keys.developerMode] ?: false,
+                p[Keys.developerModeUnlocked] ?: false),
+            dbhCaptureMode = DBHCaptureMode.fromRaw(p[Keys.dbhCaptureMode]),
             rawCaptureEnabled = p[Keys.rawCaptureEnabled] ?: false,
+            breastHeightGuide = p[Keys.breastHeightGuide] ?: false,
+            breastHeightGuideHeight = BreastHeightGuideHeight.fromRaw(p[Keys.breastHeightGuideHeight]),
+            dbhAutoSegmentation = p[Keys.dbhAutoSegmentation] ?: false,
             appearance = p[Keys.appearance] ?: "light",
             cruiseProjectId = p[Keys.cruiseProjectId],
             cruisePlotId = p[Keys.cruisePlotId],
@@ -272,14 +324,24 @@ class AppSettings(private val context: Context) {
         it[Keys.appearance] = value
     }
 
-    fun setResearchTreeId(value: String) = update {
-        _state.value = _state.value.copy(researchTreeId = value)
-        it[Keys.researchTreeId] = value
-    }
-
     fun setRawCaptureEnabled(value: Boolean) = update {
         _state.value = _state.value.copy(rawCaptureEnabled = value)
         it[Keys.rawCaptureEnabled] = value
+    }
+
+    fun setBreastHeightGuide(value: Boolean) = update {
+        _state.value = _state.value.copy(breastHeightGuide = value)
+        it[Keys.breastHeightGuide] = value
+    }
+
+    fun setBreastHeightGuideHeight(value: BreastHeightGuideHeight) = update {
+        _state.value = _state.value.copy(breastHeightGuideHeight = value)
+        it[Keys.breastHeightGuideHeight] = value.raw
+    }
+
+    fun setDbhAutoSegmentation(value: Boolean) = update {
+        _state.value = _state.value.copy(dbhAutoSegmentation = value)
+        it[Keys.dbhAutoSegmentation] = value
     }
 
     fun setMeasureHeightAfterDiameter(value: Boolean) = update {
@@ -290,6 +352,12 @@ class AppSettings(private val context: Context) {
     fun setDeveloperMode(value: Boolean) = update {
         _state.value = _state.value.copy(developerMode = value)
         it[Keys.developerMode] = value
+        it[Keys.developerModeUnlocked] = value
+    }
+
+    fun setDbhCaptureMode(value: DBHCaptureMode) = update {
+        _state.value = _state.value.copy(dbhCaptureMode = value)
+        it[Keys.dbhCaptureMode] = value.raw
     }
 
     fun setUnitSystem(value: UnitSystem) = update {

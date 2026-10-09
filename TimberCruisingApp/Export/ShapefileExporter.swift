@@ -33,7 +33,7 @@ import Foundation
 import Common
 import Models
 
-public enum ShapefileExporterError: Error, CustomStringConvertible {
+public enum ShapefileExporterError: Error, LocalizedError, CustomStringConvertible {
     case invalidGeometry(String)
     case serializationFailed(String)
     case emptyLayer
@@ -45,6 +45,11 @@ public enum ShapefileExporterError: Error, CustomStringConvertible {
         case .emptyLayer: return "Cannot write shapefile with zero features"
         }
     }
+
+    // The export screens catch every failure and show `localizedDescription`.
+    // Without this, a bare Swift Error prints "The operation couldn't be
+    // completed (error 0.)" and the reason above never reaches the cruiser.
+    public var errorDescription: String? { description }
 }
 
 // MARK: - Public API

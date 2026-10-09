@@ -92,6 +92,13 @@ public enum PositionTierEvaluator {
 
     /// Lower number = higher priority. Matches §7.3's "four
     /// strategies in priority order".
+    ///
+    /// `gpsSingle` sits below both VIO strategies and above `manual`: an
+    /// un-averaged fix taken under canopy can be tens of metres out with
+    /// nothing to reveal it, whereas a VIO offset or chain is anchored to a
+    /// position that WAS averaged and degrades by a bounded drift fraction.
+    /// Only the numbers' ORDER is meaningful — `decide` compares them, it
+    /// never reads them as ranks — so inserting a case renumbers freely.
     @inlinable
     public static func sourcePriority(_ s: PositionSource) -> Int {
         switch s {
@@ -99,7 +106,8 @@ public enum PositionTierEvaluator {
         case .gpsAveraged: return 1
         case .vioOffset:   return 2
         case .vioChain:    return 3
-        case .manual:      return 4
+        case .gpsSingle:   return 4
+        case .manual:      return 5
         }
     }
 }

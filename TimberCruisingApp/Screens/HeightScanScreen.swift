@@ -71,18 +71,28 @@ public struct HeightScanScreen: View {
         public var photoPath: String?
         public var latitude: Double?
         public var longitude: Double?
+        /// The pole / clinometer height typed on THIS screen for THIS capture,
+        /// already converted to the metric base (m). It goes onto the reading,
+        /// not only into the raw-capture manifest: the manifest is developer
+        /// plumbing that can be pruned, while the truth column the accuracy
+        /// study reads is exported from the reading. nil when nothing usable
+        /// was typed — never a zero, which would read as a pole that measured
+        /// nothing.
+        public var truth: Double?
         public init(speciesCode: String? = nil,
                     damageCodes: [String] = [],
                     note: String = "",
                     photoPath: String? = nil,
                     latitude: Double? = nil,
-                    longitude: Double? = nil) {
+                    longitude: Double? = nil,
+                    truth: Double? = nil) {
             self.speciesCode = speciesCode
             self.damageCodes = damageCodes
             self.note = note
             self.photoPath = photoPath
             self.latitude = latitude
             self.longitude = longitude
+            self.truth = truth
         }
     }
 
@@ -90,14 +100,62 @@ public struct HeightScanScreen: View {
     @State private var metaDamage: [String] = []
     @State private var metaNote: String = ""
     @State private var presentingMetadata = false
-    /// True while the Accept-time window snapshot is being taken — hides
-    /// every piece of 2D chrome so the captured JPEG shows only the AR
+    /// True while the measurement-moment window snapshot is being taken —
+    /// hides every piece of 2D chrome so the captured JPEG shows only the AR
     /// feed and the measurement overlays (crosshair + scene markers).
     @State private var hidingChromeForCapture = false
-    /// Developer-mode research capture: true height (m) from a clinometer /
-    /// Vertex, typed before Accept; logged to the research CSV.
+    /// The JPEG taken THE INSTANT THE TOP SIGHTING LANDED, held here until
+    /// Accept attaches it to the reading.
+    ///
+    /// FIELD REPORT: the shutter used to sit in the Accept handler, and by
+    /// the time the cruiser has read the H ± σ panel and decided, the phone is
+    /// down at their side — every stored photo was leaf litter and boots. The
+    /// frame worth keeping is the one taken with the phone still pointed at
+    /// the crown, because "was the top actually visible, and was it THIS
+    /// tree's top?" is the one thing about a height that cannot be checked
+    /// afterwards from the numbers. Nothing about the stored measurement
+    /// changes: this is still the value that goes into
+    /// `ScanMetadata.photoPath` at Accept.
+    ///
+    /// It is a FILE, so every path that abandons it has to delete it:
+    /// `discardHeldPhoto()` on retake / a superseding compute / leaving the
+    /// screen. It is released (not deleted) only once a reading has taken
+    /// ownership of it.
+    @State private var heldPhoto: String?
+    /// True between `onDisappear` and the next `onAppear`. Read by
+    /// `captureHeldPhoto` only: its 80 ms settle is an unstructured task that
+    /// outlives the screen, and a shot taken after the screen is gone is both
+    /// the wrong picture and an undeletable file.
+    @State private var hasLeftScreen = false
+
+    /// "Pin centre" offer, waved off for this visit — see the DBH twin for
+    /// why it is not persisted.
+    @State private var pinOfferDismissed = false
+    /// Why the last "Pin centre" tap planted nothing. Shown on the card.
+    @State private var pinCentreFailure: String?
+    /// Developer-mode research capture: the clinometer / Vertex true height AS
+    /// TYPED, logged to the research CSV. The unit is `activeTruthUnit` below,
+    /// never assumed — the field used to be named (and read) as metres
+    /// whatever the cruiser was working in.
     /// NEVER cleared until durably applied — see `applyTypedTruth`.
-    @State private var researchTrueM: String = ""
+    @State private var researchTrueText: String = ""
+    /// The cruiser's per-entry unit choice, remembered with the unit system it
+    /// was made under. Nil means "no choice yet", which falls back to the
+    /// ACTIVE system — an imperial operator gets feet, not a metre field they
+    /// type feet into. The choice sticks for the rest of this screen session
+    /// (a plot is not walked switching units tree by tree) and is dropped if
+    /// the project's unit system changes underneath it.
+    @State private var truthUnitChoice: (unit: TruthInput.Unit, imperial: Bool)?
+    /// The unit in force for the field right now: the per-entry choice, or the
+    /// active system's default until one is made.
+    private var activeTruthUnit: TruthInput.Unit {
+        let imperial = settings.unitSystem == .imperial
+        // A choice made under the OTHER system is discarded rather than
+        // carried across: switching the project to imperial must not leave
+        // the field sitting in centimetres.
+        if let choice = truthUnitChoice, choice.imperial == imperial { return choice.unit }
+        return TruthInput.defaultUnit(.height, imperial: imperial)
+    }
     /// Non-nil when the last Accept could NOT attach the typed truth; the
     /// text stays in the field so the value isn't lost.
     @State private var truthSaveFailure: String?
@@ -142,6 +200,18 @@ public struct HeightScanScreen: View {
     private let projectID: String?
     private let treeNumber: Int?
 
+    /// The scoped tree's own name, when the cruiser gave it one. DISPLAY
+    /// ONLY — the raw-capture join key stays `treeNumber`, which is the
+    /// column the bundles and the tree rows actually pair on. nil falls back
+    /// to "Tree #<number>", so an unnamed tree reads exactly as before.
+    private let treeName: String?
+
+    /// What this screen calls the tree it is measuring — nil when the host
+    /// scoped it to no tree at all (every quick-measure call site).
+    private var treeTitle: String? {
+        treeNumber.map { TreeLabel.title(name: treeName, number: $0) }
+    }
+
     /// Re-open plot setup, to change radius / centre after the first
     /// placement. Reached from the ENLARGED plot view that the top-right
     /// mini-map now opens — the tap itself no longer jumps into re-setup.
@@ -156,8 +226,14 @@ public struct HeightScanScreen: View {
                 cruisePlotInfo: PlotMiniMapInfo? = nil,
                 projectID: String? = nil,
                 treeNumber: Int? = nil,
+                treeName: String? = nil,
+                initialSpeciesCode: String? = nil,
                 onEditPlot: (() -> Void)? = nil) {
         _viewModel = StateObject(wrappedValue: viewModel())
+        // Seeded from the measure chooser's species control when it was used,
+        // so the details chip already reads the species the cruiser picked at
+        // the tree instead of asking for it a second time.
+        _metaSpecies = State(initialValue: initialSpeciesCode)
         self.onResult = onResult
         self.onAccept = onAccept
         self.onCrown = onCrown
@@ -165,6 +241,7 @@ public struct HeightScanScreen: View {
         self.cruisePlotInfo = cruisePlotInfo
         self.projectID = projectID
         self.treeNumber = treeNumber
+        self.treeName = treeName
         self.onEditPlot = onEditPlot
     }
 
@@ -189,6 +266,14 @@ public struct HeightScanScreen: View {
     enum CrownStep { case none, left, right, top, bottom, done }
 
     @State private var crownStep: CrownStep = .none
+    // CROWN CORNERS, HELD AGAINST THE ANCHOR — as OFFSETS, never as bare
+    // world points, because `computeCrown` DIFFERENCES them and the result is
+    // stored as a crown measurement. The four taps are seconds apart and a
+    // world re-fit between any two leaves those two in different frames, so
+    // the recorded width is wrong by however far ARKit moved the world.
+    // Against the anchor the subtraction is (a+dL) − (a+dR) = dL − dR: the
+    // anchor cancels and the re-fit cancels with it. Android got this in
+    // commit 8339eaf; this side was missed.
     @State private var crownLeft: SIMD3<Float>?
     @State private var crownRight: SIMD3<Float>?
     @State private var crownTop: SIMD3<Float>?
@@ -282,6 +367,18 @@ public struct HeightScanScreen: View {
                         bannerView(failure, tint: ForestixPalette.confidenceBad)
                             .accessibilityIdentifier("heightScan.saveFailureBanner")
                     }
+                    // FIELD REPORT 14 × 17 — a plot is being tallied but no
+                    // AR anchor marks its centre, so there is no ring to
+                    // draw. Same card, same words, same act as DBH.
+                    if showsPinCentreOffer {
+                        PlotPinCentreCard(
+                            failure: pinCentreFailure,
+                            onPin: pinPlotCentre,
+                            onDismiss: {
+                                pinCentreFailure = nil
+                                pinOfferDismissed = true
+                            })
+                    }
                 }
 
                 // (The bottom-right LiDAR/AR toggle is GONE — field report
@@ -343,8 +440,16 @@ public struct HeightScanScreen: View {
             }
             while !Task.isCancelled {
                 raycaster.preferLiDARMesh = settings.measurementSource == .lidar
+                // THE SAME CALL THE "+" MAKES (field round 10). This used to
+                // sample the general `screenCenterHit()`, which accepts a
+                // grazed ground plane tens of metres out — so the status line
+                // read "Move closer" while the cruiser was already touching
+                // the bark, and it went on reading it however close they got.
+                // Sampling the gated hit makes the chrome and the button agree
+                // by construction: a distance here means the tap will take.
                 if let cam = raycaster.cameraWorldPosition,
-                   let hit = raycaster.screenCenterHit() {
+                   let hit = raycaster.screenCenterAnchorHit(
+                       maxDistM: HeightScanViewModel.anchorMaxRangeM) {
                     anchorAimDistanceM = simd_distance(cam, hit)
                 } else {
                     anchorAimDistanceM = nil
@@ -352,13 +457,37 @@ public struct HeightScanScreen: View {
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
         }
+        // FIELD REPORT 14 — the plot's tracked centre, refreshed off the
+        // body at the sampling screen's cadence. This is what draws the
+        // overlay here; see the DBH twin for why the old ARAnchor-pinned
+        // markers never appeared on a scan screen at all.
+        .task(id: activePlot.plot?.anchorID) {
+            guard activePlot.plot != nil else { return }
+            while !Task.isCancelled {
+                activePlot.refreshTrackedCentre(using: viewModel.session)
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+        }
         .onAppear {
+            hasLeftScreen = false
             configureRawCapture()
             viewModel.onAppear()
         }
-        .onDisappear { viewModel.onDisappear() }
+        // View removal, NOT backgrounding (the scenePhase handler below calls
+        // `onDisappear` too) — so the trunk anchor is released here and only
+        // here, and survives a phone call taken mid-walk.
+        .onDisappear {
+            // Leaving without accepting: the held frame belongs to a
+            // measurement that was never stored, so the file goes with it.
+            // Anything already handed to a reading was released at Accept, so
+            // this can only ever delete an orphan.
+            hasLeftScreen = true
+            discardHeldPhoto()
+            viewModel.onDisappear()
+            viewModel.releaseTrunkAnchor()
+        }
         // Editing the truth field retires any "couldn't save" state.
-        .onChange(of: researchTrueM) { _, _ in
+        .onChange(of: researchTrueText) { _, _ in
             truthOwnerBundleID = nil
             truthSaveFailure = nil
             // The text is no longer the value that was queued.
@@ -378,19 +507,43 @@ public struct HeightScanScreen: View {
                 onResult(r)
             }
         }
+        // THE SHUTTER — fires the instant the treetop sighting is taken and
+        // the height is computed, while the phone is still up on the crown.
+        // NOT at Accept: see `heldPhoto`.
+        //
+        // `resultGeneration` is bumped once per `compute()`, so this fires
+        // exactly once per measurement. A failed save (`acceptFailed()`)
+        // moves the STATE back to `.computed` / `.rejected` without producing
+        // a new result, so the retry keeps this frame instead of
+        // photographing the ground.
+        .onChange(of: viewModel.resultGeneration) { _, _ in
+            // A height that is not a measurement at all (inverted aims,
+            // out-of-range H, degenerate geometry) can never be accepted, so
+            // no reading will carry the photo — don't write a file whose only
+            // future is deletion. A RED height is acceptable and does get one.
+            guard viewModel.canAcceptResult else {
+                discardHeldPhoto()
+                return
+            }
+            // Raised HERE, in the same synchronous turn as the state change
+            // that puts the H ± σ panel on screen, so the panel is never
+            // composed un-blacked-out: the first frame SwiftUI commits after
+            // the sighting is already chrome-less, and that is the frame the
+            // shot is taken from. `captureHeldPhoto` lowers it again.
+            hidingChromeForCapture = true
+            Task { @MainActor in await captureHeldPhoto() }
+        }
         .onChange(of: viewModel.state) { _, newState in
             if newState == .accepted, let r = viewModel.result {
-                // Auto-capture at Accept — the 2D chrome is hidden first
-                // (a short sleep lets SwiftUI commit the chrome-less
-                // frame) so the JPEG shows only the AR feed + overlays,
-                // not buttons/panels that read as live controls in the
-                // photo viewer. The entry must get its photoPath before
-                // it is appended, hence the await before onAccept.
+                // Auto-capture (map home): the snapshot of the AR feed + the
+                // measurement overlays was already taken, at the moment the
+                // top sighting produced the height (see `heldPhoto`) — Accept
+                // only attaches it. A TYPED height has no such moment and
+                // carries no photo: the frame at Save is the keyboard panel
+                // and whatever the phone happened to be pointing at, which is
+                // evidence of nothing.
                 Task { @MainActor in
-                    hidingChromeForCapture = true
-                    try? await Task.sleep(for: .milliseconds(80))
-                    let photo = MeasurePhotoStore.captureWindow()
-                    hidingChromeForCapture = false
+                    let photo = heldPhoto
                     // Freshness-gated — see the note on the diameter
                     // scan's accept path. A stale fix stores no position
                     // rather than a confident wrong one.
@@ -402,7 +555,11 @@ public struct HeightScanScreen: View {
                         note: metaNote,
                         photoPath: photo,
                         latitude: fix?.latitude,
-                        longitude: fix?.longitude)
+                        longitude: fix?.longitude,
+                        // The pole value rides WITH the reading. Read before
+                        // `applyTypedTruth` runs, because that call clears the
+                        // field once the value is durable on the bundle.
+                        truth: typedTruthForThisMeasurement)
                     // The host reports whether the reading actually reached
                     // storage. A dropped height used to be indistinguishable
                     // from a saved one (the cover closed either way), which is
@@ -410,9 +567,15 @@ public struct HeightScanScreen: View {
                     // peek with nothing on screen to say so.
                     if onAccept(r, meta) {
                         heightSaveFailure = nil
+                        // The reading owns the file now — release it WITHOUT
+                        // deleting, so the screen's own exit can't take the
+                        // photo off a saved tree. A failed store keeps it
+                        // held: Accept can be tapped again and the same
+                        // crown-moment frame goes with it.
+                        heldPhoto = nil
                     } else {
-                        heightSaveFailure = treeNumber.map {
-                            "Height NOT saved to Tree \($0) — the tree row couldn't be updated. Tap Accept again."
+                        heightSaveFailure = treeTitle.map {
+                            "Height NOT saved to \($0) — the tree row couldn't be updated. Tap Accept again."
                         } ?? "Height NOT saved — the tree row couldn't be updated. Tap Accept again."
                         // Back to the result panel so the value is still on
                         // screen and Accept is tappable again.
@@ -430,9 +593,7 @@ public struct HeightScanScreen: View {
         }
         .sheet(isPresented: $presentingMetadata) {
             ScanMetadataSheet(
-                kind: .height,
                 speciesCode: $metaSpecies,
-                position: .constant(nil),
                 damageCodes: $metaDamage,
                 note: $metaNote)
         }
@@ -448,6 +609,73 @@ public struct HeightScanScreen: View {
         }
     }
 
+    // MARK: - Measurement photo
+
+    /// Take the measurement-moment JPEG and park it in `heldPhoto`.
+    ///
+    /// ORDER MATTERS. The chrome blackout is up before the settle sleep — the
+    /// caller raises it in the same turn the height lands, and this re-raise
+    /// is idempotent — so the frame SwiftUI has committed by the time the
+    /// renderer runs carries no panels and no buttons, the H ± σ result panel
+    /// included. What deliberately stays is the AR scene: the anchor, base and
+    /// top spheres are the measurement, and they are the whole evidentiary
+    /// value of the photo.
+    ///
+    /// ONLY THE RENDER BLOCKS. The store hands the filename back as soon as
+    /// the picture exists in memory and finishes the JPEG on its own queue,
+    /// so the screen is unresponsive for the render alone (~10-20 ms) instead
+    /// of for the render plus the encode plus the write (160-250 ms) — which
+    /// is what the cruiser was reporting as a freeze, once per height and
+    /// again per diameter.
+    @MainActor
+    private func captureHeldPhoto() async {
+        // A fresh compute supersedes whatever was held — never leave the
+        // previous measurement's file behind on disk.
+        discardHeldPhoto()
+        hidingChromeForCapture = true
+        try? await Task.sleep(for: .milliseconds(80))
+        // THE SCREEN CAN BE LEFT INSIDE THAT SLEEP (the cruiser backs out,
+        // the host dismisses the cover). This task is unstructured, so it
+        // would still run: it would photograph whatever replaced this screen
+        // and write a file that no reading and no `onDisappear` would ever
+        // delete — an orphan in the photo store. Nothing is captured instead.
+        guard !hasLeftScreen else {
+            hidingChromeForCapture = false
+            return
+        }
+        let shot = MeasurePhotoStore.captureWindow()
+        // Held IMMEDIATELY, before the bytes are on disk: an Accept tapped
+        // while the JPEG is still encoding must attach this frame, not
+        // nothing. The store keeps writing under this name regardless of who
+        // ends up owning it.
+        heldPhoto = shot?.name
+        hidingChromeForCapture = false
+        guard let shot else { return }
+        // The write can still fail (a full container, a refused write). If it
+        // does, drop the name rather than leave a reading pointing at a file
+        // that will never exist — the same "no photo" outcome the old
+        // synchronous failure produced. Only if this screen is still holding
+        // THIS frame: once Accept released it to a stored reading, or a
+        // Retake superseded it, `heldPhoto` no longer names it and nothing
+        // here may touch it. (A reading that took the name and then lost the
+        // write shows "Photo unavailable" in the viewer — it never pretends
+        // to have a picture.)
+        if await shot.written.value == false, heldPhoto == shot.name {
+            heldPhoto = nil
+        }
+    }
+
+    /// Drop the held frame AND delete the file. Called on retake, on a
+    /// superseding compute, and on the way off the screen — the store keeps
+    /// one file per reading (`QuickMeasureHistory` deletes a reading's photo
+    /// with it), so a frame no reading will ever claim has to go here.
+    @MainActor
+    private func discardHeldPhoto() {
+        guard let name = heldPhoto else { return }
+        heldPhoto = nil
+        MeasurePhotoStore.delete(name)
+    }
+
     // MARK: - Overlay chrome per stage
 
     /// Always-visible centre crosshair so the cruiser can see exactly
@@ -456,8 +684,36 @@ public struct HeightScanScreen: View {
     @ViewBuilder
     private var overlayChrome: some View {
         if let label = crosshairLabel {
-            crosshair(label: label)
-                .accessibilityIdentifier(crosshairIdentifier)
+            // FIELD REPORT 16, SECOND PASS — the ring has to sit on the pixel
+            // the raycast samples. `ARCenterRaycaster` shoots through the AR
+            // view's bounds centre, and the AR view is FULL-BLEED
+            // (`.ignoresSafeArea()` on the camera layer above), so the aiming
+            // rect is the SCREEN rect. The body ZStack is not: it is laid out
+            // inside the safe area, so centring in it puts the ring on the
+            // SAFE-AREA centre — on a notched phone (top inset ≈ 59, bottom
+            // ≈ 34) that is ~12 pt below true screen centre, and the sphere
+            // lands that far off the ring on every tap. Centring the ring
+            // alone (the previous fix) removed the label's ~16 pt offset,
+            // which had been masking this one.
+            //
+            // It is not only a vertical error. In LANDSCAPE the safe-area
+            // insets are horizontally asymmetric (sensor housing on one side,
+            // home indicator on the other), so the safe-area centre sits to one
+            // side of the screen centre too — which is the only mechanism found
+            // for the sideways half of the field report, and it disappears with
+            // the same fix. Android was never exposed to either: its root Box
+            // is `fillMaxSize()` with no inset padding and the AR view fills
+            // the same Box, so `Alignment.Center` IS the view centre there.
+            //
+            // Positioned from a full-bleed GeometryReader, exactly as
+            // `DBHScanScreen.crosshairRing` is — same defect, same remedy,
+            // and the Diameter screen documents it at its own reader.
+            GeometryReader { geo in
+                crosshair(label: label)
+                    .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                    .accessibilityIdentifier(crosshairIdentifier)
+            }
+            .ignoresSafeArea()
         }
     }
 
@@ -473,7 +729,17 @@ public struct HeightScanScreen: View {
         }
         switch viewModel.state {
         case .idle, .anchorSet: return "Aim at trunk (eye level)"
-        case .walking:          return "Walk back — aim stays on tree"
+        // WHAT THE WALK ACTUALLY NEEDS is live VIO, not a particular aim.
+        // The trunk anchor is a bare world anchor (`addWorldAnchor`), not
+        // attached to a trackable, and the walk reads only tracking state
+        // and the horizontal distance to it — camera direction is not an
+        // input. Position comes from visual-inertial odometry, so what
+        // breaks it is a covered or smeared lens and featureless scenery;
+        // the IMU alone cannot hold a position (double-integrated bias is
+        // metres out within seconds). Telling the cruiser to keep the aim
+        // on the tree was stricter than the code and made them walk
+        // backwards for nothing.
+        case .walking:          return "Walk back — keep the phone up and the lens clear"
         case .aimTopArmed:      return "Aim at treetop"
         case .aimBaseArmed:     return "Aim at trunk + ground"
         case .aimTopCaptured,
@@ -493,11 +759,28 @@ public struct HeightScanScreen: View {
         }
     }
 
+    /// Label pill CENTRE, measured down from the crosshair centre: the ring's
+    /// outer radius (20) + the original 8 pt gap + half the pill (13 pt line +
+    /// 4 pt padding top and bottom ≈ 24). Offsets the LABEL only — the ring
+    /// cannot move with it.
+    private static let crosshairLabelOffset: CGFloat = 40
+
     /// Ring + cross mark — the cross explicitly pinpoints the world
     /// pixel a raycast will sample from, making "what am I actually
     /// tagging" unambiguous.
     private func crosshair(label: String) -> some View {
-        VStack(spacing: 8) {
+        // FIELD REPORT 16 — the ring and the label used to be a VStack, and
+        // the VSTACK was what got centred in the body's ZStack. That put the
+        // ring's centre half the label block (label height + the 8 gap,
+        // ≈ 16 pt) ABOVE the true screen centre, while every raycast and every
+        // geometric marker placement uses the true centre — so the anchor
+        // sphere landed consistently below the ring, by a fixed amount, on
+        // every tap. The ring IS the aiming instrument, so it is centred on
+        // its own here and the label is pushed clear with an explicit offset.
+        // Same construction as the Diameter scan, where `crosshairRing` is
+        // `.position`ed at the view centre alone and the tilt badge / capture
+        // pill ride explicit offsets from it.
+        ZStack {
             // Dual-stroke + dark halo for sun-glare readability: a
             // plain yellow ring disappears against sky. The black
             // halo underneath gives the chrome contrast against any
@@ -528,6 +811,7 @@ public struct HeightScanScreen: View {
                 .padding(.horizontal, 8).padding(.vertical, 4)
                 .background(Color.black.opacity(0.65))
                 .cornerRadius(4)
+                .offset(y: Self.crosshairLabelOffset)
         }
     }
 
@@ -600,6 +884,9 @@ public struct HeightScanScreen: View {
         if showsRetakeFlank {
             return .init(systemImage: "arrow.counterclockwise",
                          caption: "Retake") {
+                // The held frame captions the measurement being thrown away —
+                // keeping it would put the OLD aim on the NEW height.
+                discardHeldPhoto()
                 viewModel.retake()
                 resetCrown()
             }
@@ -616,6 +903,11 @@ public struct HeightScanScreen: View {
     /// distance lines — Initial dist, Walked back (starts at 0.00), and
     /// the primary Total distance d_h — plus the computed height while
     /// the crown sub-flow is capturing so the value stays on screen.
+    ///
+    /// Total distance is the `.medium` step, not `.large`: it carries its
+    /// own label, so at 26 pt it ran most of the width of the screen and the
+    /// cruiser read it as oversized. It is still the emphasised line of the
+    /// three. The crown height below is a bare number and stays `.large`.
     @ViewBuilder
     private var heightValueStrip: some View {
         if viewModel.state == .walking {
@@ -634,7 +926,7 @@ public struct HeightScanScreen: View {
                     "Total distance " + MeasurementFormatter.distance(
                         m: Double(viewModel.dhMeters),
                         in: settings.unitSystem),
-                    large: true)
+                    size: .medium)
             }
             .accessibilityIdentifier("heightScan.walkingReadout")
         } else if crownActive, let r = viewModel.result {
@@ -643,7 +935,7 @@ public struct HeightScanScreen: View {
             MeasureValuePill(
                 MeasurementFormatter.height(m: Double(r.heightM),
                                             in: settings.unitSystem),
-                large: true)
+                size: .large)
         }
     }
 
@@ -670,11 +962,38 @@ public struct HeightScanScreen: View {
     }
 
     private var statusText: String {
+        // Walk-off integrity beats stage guidance: "walk back" is useless
+        // advice while the camera has no idea where it is, and the trunk
+        // anchor being gone ends the measurement outright. Same precedence
+        // and the same strings as the Android sibling.
+        switch viewModel.state {
+        // `.aimTopCaptured` is in the list because `observeWalkIntegrity`
+        // watches it too — without it a dropout during the top capture updated
+        // state that nothing on screen displayed.
+        case .walking, .aimBaseArmed, .aimTopArmed, .aimTopCaptured:
+            if viewModel.anchorLost { return HeightScanViewModel.anchorLostText }
+            // Ahead of `trackingLive`, and behind `anchorLost`, because the
+            // three are ordered by how final they are. A runaway pose is not
+            // something to hold still through — the distance will not come
+            // back — so printing "hold still" over it would be advice that
+            // cannot work. Same precedence on Android.
+            if viewModel.poseJumped { return HeightScanViewModel.poseJumpedText }
+            if !viewModel.trackingLive { return HeightScanViewModel.trackingLostNow }
+        default: break
+        }
         switch viewModel.state {
         case .idle, .anchorSet:
             return anchorWithinGate
                 ? "Aim at the trunk at eye level, then tap +."
-                : "Move closer — stand within 4 m of the trunk, then tap +."
+                // The gate stays the metric ≤ 4 m the view model applies — it
+                // is a property of how far a plane can be reliably anchored,
+                // not a preference. The SENTENCE follows the cruiser's units,
+                // and reads the same constant the gate does.
+                : "Move closer — stand within "
+                    + MeasurementFormatter.guidanceDistance(
+                        m: Double(HeightScanViewModel.anchorMaxRangeM),
+                        in: settings.unitSystem)
+                    + " of the trunk, then tap +."
         case .walking:            return "Walk back, then tap + to continue."
         case .aimTopArmed:        return "Aim at the treetop, then tap +."
         case .aimTopCaptured:     return "Top captured."
@@ -683,7 +1002,14 @@ public struct HeightScanScreen: View {
         case .accepted:           return "Saved."
         case .rejected:           return viewModel.result?.rejectionReason
                                        ?? "Rejected."
-        case .manualEntry:        return "Enter height manually in metres."
+        // The banner names the SAME unit the field below it is placeheld with
+        // (:1383) and the same one `submitManualEntry` converts from. It used
+        // to say "metres" over a box marked "Height in feet": a cruiser who
+        // obeyed the banner and typed 28 stored 8.5 m, and a typed height
+        // carries no σ to flag it.
+        case .manualEntry:
+            return "Enter height manually in "
+                + (settings.unitSystem == .metric ? "metres" : "feet") + "."
         }
     }
 
@@ -720,7 +1046,14 @@ public struct HeightScanScreen: View {
                 .foregroundStyle(ForestixPalette.confidenceWarn)
         case .done:
             if let w = crownWidthM, let h = crownHeightM {
-                Text(String(format: "Crown %.2f m wide · %.2f m tall", w, h))
+                // The height this crown hangs on is printed in the cruiser's
+                // unit one panel up; a crown left in metres beside it is the
+                // same screen quoting two systems.
+                Text("Crown "
+                     + MeasurementFormatter.crownSpan(m: w, in: settings.unitSystem)
+                     + " wide · "
+                     + MeasurementFormatter.crownSpan(m: h, in: settings.unitSystem)
+                     + " tall")
                     .font(ForestixType.data)
                     .foregroundStyle(.white)
             }
@@ -743,6 +1076,30 @@ public struct HeightScanScreen: View {
     /// validated against ground truth.
     private func recordResearchRow(_ r: HeightResult) {
         guard settings.developerMode else { return }
+        // Did VIO drop between anchoring and the aims? The warning the cruiser
+        // saw travels WITH the row — an accepted reading taken across a dropout
+        // used to export identically to a clean one. On a WALK-OFF row "false"
+        // is a positive statement that the walk was continuous, not a missing
+        // observation.
+        //
+        // EMPTY on a typed manual height, which is what the column's own
+        // definition says ("Empty on rows with no walk-off (DBH, typed manual
+        // heights)" — ResearchLog) and what this row did not do.
+        // `submitManualEntry` does not reset the latch, so a cruiser who
+        // anchored, walked, hit a dropout, gave up and typed the number
+        // exported tracking_dropped=true for a row where nothing was tracked;
+        // and an ordinary typed row exported "false", positively claiming that
+        // a walk-off which never happened was continuous. Both are assertions
+        // about a measurement the row did not make. Android makes the same test.
+        //
+        // Bound out of the literal below deliberately: that dictionary is
+        // already long enough to be worth keeping cheap for the type-checker.
+        let trackingDroppedCell: String
+        if r.method == .manualEntry {
+            trackingDroppedCell = ""
+        } else {
+            trackingDroppedCell = viewModel.trackingDroppedDuringWalk ? "true" : "false"
+        }
         var f: [String: String] = [
             "measure_type": "height",
             "method": r.method.rawValue,
@@ -762,29 +1119,47 @@ public struct HeightScanScreen: View {
             // unmeasured drift and a zero drift are different facts.
             "aim_drift_m": viewModel.aimDriftM
                 .map { String(format: "%.3f", $0) } ?? "",
+            // Walk-off continuity — see `trackingDroppedCell` above.
+            "tracking_dropped": trackingDroppedCell,
             "species": metaSpecies ?? "",
             "note": metaNote,
         ]
-        if !settings.researchTreeId.isEmpty {
-            f["tree_id"] = settings.researchTreeId   // repeat auto-filled by record()
-        }
-        // ',' is a legitimate decimal separator on the cruiser's keypad.
-        //
-        // OWNER GATE: the field is deliberately kept across trees when a truth
-        // could not be attached (queued, no bundle, or a failed save), so the
-        // text on screen may belong to an EARLIER measurement. Both owner marks
-        // are nil only while the value was typed for THIS compute — anything
-        // else would stamp the previous tree's clinometer reading onto this row.
-        let truthIsForThisMeasurement =
-            truthOwnerBundleID == nil && truthQueuedForBundleID == nil
-        if truthIsForThisMeasurement,
-           let t = TruthInput.parsePositive(researchTrueM) {
+        // The tree this capture is ALREADY locked to, not a box the cruiser
+        // had to retype. Same value the raw-capture bundle and the saved
+        // reading carry, so the three join.
+        f["tree_id"] = treeNumber.map(String.init) ?? ""
+        if let t = typedTruthForThisMeasurement {
+            // `true_value` and `error` are in the row's `unit` (m) — the same
+            // scale as `measured_value`, so the error column stays
+            // subtractable. `truth_unit` records what was actually typed.
             f["true_value"] = String(format: "%.2f", t)
             f["error"] = String(format: "%.2f", Double(r.heightM) - t)
+            f["truth_unit"] = activeTruthUnit.rawValue
         }
         ResearchLog.shared.record(f)
         // NOTE: the field is deliberately NOT cleared here — `applyTypedTruth`
         // clears it only once the value is durably on the bundle.
+    }
+
+    /// The typed pole / clinometer height in the metric base (m) when it
+    /// belongs to the measurement being accepted right now, else nil. Read by
+    /// BOTH consumers of the field — the reading and the research row — so they
+    /// can never disagree about which capture a number was typed for.
+    ///
+    /// ',' is a legitimate decimal separator on the cruiser's keypad.
+    ///
+    /// OWNER GATE: the field is deliberately kept across trees when a truth
+    /// could not be attached (queued, no bundle, or a failed save), so the text
+    /// on screen may belong to an EARLIER measurement. Both owner marks are nil
+    /// only while the value was typed for THIS compute — anything else would
+    /// stamp the previous tree's clinometer reading onto this one.
+    private var typedTruthForThisMeasurement: Double? {
+        guard settings.developerMode,
+              truthOwnerBundleID == nil,
+              truthQueuedForBundleID == nil
+        else { return nil }
+        return TruthInput.parsePositiveBase(researchTrueText,
+                                            unit: activeTruthUnit)
     }
 
     /// Attach the typed ground truth to the bundle this Accept confirms.
@@ -795,9 +1170,13 @@ public struct HeightScanScreen: View {
     private func applyTypedTruth() {
         guard settings.developerMode else { return }
         truthSaveFailure = nil
-        let raw = researchTrueM
+        let raw = researchTrueText
+        // The unit is read once here and used for both the conversion and the
+        // record, so a toggle mid-save cannot split them.
+        let unit = activeTruthUnit
         guard !TruthInput.normalized(raw).isEmpty else { return }
-        guard let t = TruthInput.parsePositive(raw) else {
+        // Always the metric base (m) — the conversion lives in TruthInput.
+        guard let t = TruthInput.parsePositiveBase(raw, unit: unit) else {
             truthSaveFailure = "Not a number — truth not saved"
             return
         }
@@ -805,7 +1184,7 @@ public struct HeightScanScreen: View {
         // CSV row written just above, so the field can clear. The dev block
         // already carries the "Raw capture OFF" notice.
         guard viewModel.rawCaptureEnabled else {
-            researchTrueM = ""
+            researchTrueText = ""
             truthOwnerBundleID = nil
             truthQueuedForBundleID = nil
             return
@@ -833,10 +1212,10 @@ public struct HeightScanScreen: View {
             truthQueuedForBundleID = nil
             return
         }
-        switch RawCaptureStore.applyTruth(id: id, value: t) {
+        switch RawCaptureStore.applyTruth(id: id, value: t, unit: unit) {
         case .applied:
             // In the manifest — the only state that may clear the field.
-            researchTrueM = ""
+            researchTrueText = ""
             truthOwnerBundleID = nil
             truthQueuedForBundleID = nil
         case .pending:
@@ -864,7 +1243,7 @@ public struct HeightScanScreen: View {
             truthQueuedForBundleID = nil
             truthOwnerBundleID = nil
             truthSaveFailure = nil
-            researchTrueM = ""
+            researchTrueText = ""
         case .failed(let reason):
             truthQueuedForBundleID = nil
             truthSaveFailure = "Capture NOT saved (\(reason)) — truth kept on screen"
@@ -877,9 +1256,9 @@ public struct HeightScanScreen: View {
     /// outside the plausible height window.
     private var truthFieldWarning: String? {
         if let failure = truthSaveFailure { return failure }
-        if TruthInput.isUnparseable(researchTrueM) { return "Not a number" }
-        guard let v = TruthInput.parsePositive(researchTrueM) else { return nil }
-        return TruthInput.heightWarning(m: v)
+        return TruthInput.fieldWarning(researchTrueText,
+                                       quantity: .height,
+                                       unit: activeTruthUnit)
     }
 
     private func resultPanel(_ r: HeightResult) -> some View {
@@ -915,17 +1294,29 @@ public struct HeightScanScreen: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("heightScan.resultReason")
             }
-            // The instrument moved between the two sightings, so the tangent
-            // pair no longer shares an origin and the height is soft by
-            // roughly this much. Said plainly and with the number, at the
-            // moment the cruiser decides whether to keep the reading.
-            if let drift = viewModel.aimDriftM,
-               drift > HeightScanViewModel.aimDriftWarnM {
-                Text("You moved \(MeasurementFormatter.distance(m: Double(drift), in: settings.unitSystem)) between the base and top sightings. Both have to be taken from one spot — retake for a firm number.")
+            // NO BASE-TO-TOP DRIFT WARNING HERE. It used to sit between the
+            // rejection reason and the tracking-dropped line; the cruiser
+            // asked for it off the field panel, and it never refused a
+            // reading, so removing it changes nothing about what is stored.
+            // `viewModel.aimDriftM` is still computed on every top sighting
+            // and still written to `aim_drift_m` in the research CSV and the
+            // raw-capture manifest (see `recordResearchRow`) — the study
+            // carries the drift in the height error budget.
+            // THE CAMERA LOST THE SCENE somewhere between anchoring and this
+            // reading. d_h is the whole scale of H — H = d_h(tan α_top −
+            // tan α_base) — and it rests on a walk ARKit did not see all of.
+            // The status line said so at the time, but that is transient and
+            // this is the moment the cruiser decides whether to keep the
+            // number, so it is repeated here for the same reason the drift
+            // warning is. Not a refusal: ARKit usually relocalizes and the
+            // corrected anchor makes the reading sound again, and the cruiser
+            // has already walked the off-distance.
+            if viewModel.trackingDroppedDuringWalk {
+                Text(HeightScanViewModel.trackingDroppedDuringWalkText)
                     .font(ForestixType.caption)
                     .foregroundStyle(ForestixPalette.confidenceWarn)
                     .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("heightScan.aimDrift")
+                    .accessibilityIdentifier("heightScan.trackingDropped")
             }
             HStack {
                 Spacer()
@@ -958,24 +1349,24 @@ public struct HeightScanScreen: View {
                         .foregroundStyle(.white.opacity(0.55))
                         .accessibilityIdentifier("heightScan.diagnosticLine")
                     HStack(spacing: 6) {
-                        Text("Target")
-                            .font(ForestixType.caption)
-                            .foregroundStyle(.white.opacity(0.8))
-                        TextField("T1", text: Binding(
-                            get: { settings.researchTreeId },
-                            set: { settings.researchTreeId = $0 }))
-                            .scanPanelTextField()
-                            .frame(width: 70)
-                            .accessibilityIdentifier("heightScan.researchTarget")
-                        Text("True H (m)")
+                        // Label and unit come from the SAME value, so the
+                        // field can never say m while the app reads feet.
+                        Text(TruthInput.fieldLabel(.height, unit: activeTruthUnit))
                             .font(ForestixType.caption)
                             .foregroundStyle(.white.opacity(0.8))
                         // ',' is accepted and normalised to '.' on submit.
-                        TextField("clinometer", text: $researchTrueM)
+                        TextField("clinometer", text: $researchTrueText)
                             .keyboardType(.decimalPad)
                             .scanPanelTextField()
                             .frame(width: 90)
                             .accessibilityIdentifier("heightScan.researchTrue")
+                        TruthUnitToggle(
+                            unit: activeTruthUnit,
+                            onToggle: {
+                                truthUnitChoice = (TruthInput.toggled(activeTruthUnit),
+                                                   settings.unitSystem == .imperial)
+                            },
+                            identifier: "heightScan.researchTrueUnit")
                     }
                     if let warning = truthFieldWarning {
                         TruthFieldWarning(text: warning)
@@ -1078,36 +1469,105 @@ public struct HeightScanScreen: View {
     private static let crownTopId    = UUID(uuidString: "00000000-C0C0-0000-0000-000000000003") ?? UUID()
     private static let crownBottomId = UUID(uuidString: "00000000-C0C0-0000-0000-000000000004") ?? UUID()
 
-    /// Subdued sampling-plot context (ring + centre pole at ~0.5 alpha,
-    /// pinned to the plot's ARAnchor). Shown only while a plot is active
-    /// AND its anchor is still alive in the shared session. Non-
-    /// interactive and listed before the measurement markers.
+    /// Subdued sampling-plot context (ring + centre pole at ~0.5 alpha, at
+    /// the plot's tracked centre). Shown only while a plot is active AND
+    /// ARKit is correcting its centre. Non-interactive and listed before
+    /// the measurement markers.
     private var plotOverlayMarkers: [ARSceneMarker] {
         guard let plot = activePlot.plot,
-              viewModel.session.worldAnchorExists(id: plot.anchorID)
+              let centre = activePlot.centreWorld
         else { return [] }
-        return ActiveSamplingPlot.subduedOverlayMarkers(for: plot)
+        return ActiveSamplingPlot.subduedOverlayMarkers(for: plot,
+                                                        centre: centre)
+    }
+
+    // MARK: - "Pin centre" offer (field report 14 × 17)
+
+    /// A cruise plot is being tallied but NO AR anchor marks its centre, so
+    /// `plotOverlayMarkers` is empty and the cruiser is looking at a bare
+    /// camera feed with a plot open. See the DBH twin for the full note —
+    /// the rule, the words and the act are one thing in two screens.
+    private var plotCentreNeedsPin: Bool {
+        guard let plotID = cruisePlotInfo?.plotID,
+              pinnableRadiusM != nil
+        else { return false }
+        if activePlot.plot != nil, activePlot.linkedCruisePlotID == plotID {
+            return false
+        }
+        return true
+    }
+
+    /// The plot's OWN radius, or nil when its stored area can't produce a
+    /// sane one — see the DBH twin.
+    private var pinnableRadiusM: Double? {
+        guard let r = cruisePlotInfo?.radiusM, r.isFinite, r > 0.5 else {
+            return nil
+        }
+        return r
+    }
+
+    /// Whether the offer is on screen right now — the same test as the DBH
+    /// twin, deliberately: the cruiser decides when to aim at the ground and
+    /// tap, and a card that appeared on one scan screen but not the other
+    /// would be a third rule to learn.
+    private var showsPinCentreOffer: Bool {
+        plotCentreNeedsPin && !pinOfferDismissed && !hidingChromeForCapture
+    }
+
+    /// Plant the plot centre where the crosshair meets the ground and hand
+    /// the ring to THIS cruise plot. Identical to the DBH twin, including
+    /// the refusal instead of a forward-ray fallback; see it for why.
+    private func pinPlotCentre() {
+        guard let plotID = cruisePlotInfo?.plotID,
+              let radiusM = pinnableRadiusM
+        else { return }
+        raycaster.preferLiDARMesh = settings.measurementSource == .lidar
+        guard let hit = raycaster.screenCenterHit() else {
+            pinCentreFailure = MeasurementCopy.plotGroundNotSeen
+            return
+        }
+        if let previous = activePlot.plot {
+            viewModel.session.removeWorldAnchor(id: previous.anchorID)
+        }
+        guard let anchorID = viewModel.session.addWorldAnchor(
+            at: hit, name: "forestix.samplingPlot.center")
+        else {
+            pinCentreFailure = MeasurementCopy.plotGroundNotSeen
+            return
+        }
+        pinCentreFailure = nil
+        activePlot.place(anchorID: anchorID, radiusM: radiusM)
+        activePlot.link(cruisePlotID: plotID)
+    }
+
+    /// The corners are stored as OFFSETS from the anchor, so drawing them
+    /// means re-adding the anchor as it is NOW — the same rebasing the aim
+    /// spheres take. Absent anchor, absent markers: the honest vanish the
+    /// rest of this screen already uses.
+    private func crownAt(_ offset: SIMD3<Float>?) -> SIMD3<Float>? {
+        guard let offset, let a = viewModel.anchorPointWorld else { return nil }
+        return a + offset
     }
 
     private var crownMarkers: [ARSceneMarker] {
         // Stable ids so these aren't torn down + rebuilt on every frame.
         var out: [ARSceneMarker] = []
-        if let p = crownLeft {
+        if let p = crownAt(crownLeft) {
             out.append(ARSceneMarker(id: Self.crownLeftId, worldPosition: p, shape: .sphere(radiusM: 0.05),
                                      colorRGBA: SIMD4<Float>(1, 0.85, 0, 1),
                                      scalesWithDistance: true))
         }
-        if let p = crownRight {
+        if let p = crownAt(crownRight) {
             out.append(ARSceneMarker(id: Self.crownRightId, worldPosition: p, shape: .sphere(radiusM: 0.05),
                                      colorRGBA: SIMD4<Float>(1, 0.85, 0, 1),
                                      scalesWithDistance: true))
         }
-        if let p = crownTop {
+        if let p = crownAt(crownTop) {
             out.append(ARSceneMarker(id: Self.crownTopId, worldPosition: p, shape: .sphere(radiusM: 0.05),
                                      colorRGBA: SIMD4<Float>(0.2, 0.7, 1, 1),
                                      scalesWithDistance: true))
         }
-        if let p = crownBottom {
+        if let p = crownAt(crownBottom) {
             out.append(ARSceneMarker(id: Self.crownBottomId, worldPosition: p, shape: .sphere(radiusM: 0.05),
                                      colorRGBA: SIMD4<Float>(0.2, 0.7, 1, 1),
                                      scalesWithDistance: true))
@@ -1119,20 +1579,40 @@ public struct HeightScanScreen: View {
     /// the raycast (sky / foliage). This is the height session's measured
     /// walk-off distance d_h — that's what makes the crown real-scale
     /// rather than a guessed fixed distance.
+    /// THE MEASURED d_h, not the live walking hint.
+    ///
+    /// `viewModel.dhMeters` is refreshed by `updateLiveHint`, which stops at
+    /// `.walking` — so by the time a crown is being tapped it holds whatever
+    /// the distance was BEFORE the base tap locked the standing pose, and the
+    /// crown is scaled off a stale number. The result's own `dH` is the
+    /// distance the height was actually computed from, which is the one the
+    /// crown should project against. Android uses `result?.dH` for this.
     private var crownProjectionDistance: Float {
-        viewModel.dhMeters > 0.5 ? viewModel.dhMeters : 8.0
+        if let dh = viewModel.result?.dHm, dh > 0.5 { return dh }
+        return viewModel.dhMeters > 0.5 ? viewModel.dhMeters : 8.0
     }
 
     private func crownCapture() {
         raycaster.preferLiDARMesh = settings.measurementSource == .lidar
-        guard let hit = raycaster.screenCenterHit()
-                ?? raycaster.forwardPointAtHorizontalDistance(crownProjectionDistance)
+        // THE FORWARD PROJECTION ONLY, like Android.
+        //
+        // This used to try `screenCenterHit()` first and fall back to the
+        // projection, which means the four corners of ONE crown could come
+        // from two different constructions — a raycast hit on whatever the
+        // crosshair happened to find for two of them, a geometric projection
+        // for the others — and then be differenced against each other. At
+        // 10–30 m a raycast falls back to planes or sparse points, which is
+        // exactly why Android's `captureCrown` carries a comment refusing to
+        // use one. Two provenances in one subtraction is not a measurement.
+        guard let hit = raycaster.forwardPointAtHorizontalDistance(crownProjectionDistance),
+              let anchor = viewModel.anchorPointWorld
         else { return }
+        let d = hit - anchor
         switch crownStep {
-        case .left:   crownLeft = hit;   crownStep = .right
-        case .right:  crownRight = hit;  crownStep = .top
-        case .top:    crownTop = hit;    crownStep = .bottom
-        case .bottom: crownBottom = hit; computeCrown()
+        case .left:   crownLeft = d;   crownStep = .right
+        case .right:  crownRight = d;  crownStep = .top
+        case .top:    crownTop = d;    crownStep = .bottom
+        case .bottom: crownBottom = d; computeCrown()
         case .none, .done: break
         }
     }
@@ -1190,7 +1670,7 @@ public struct HeightScanScreen: View {
                     }
                 }
                 HStack(spacing: 12) {
-                    Button("Retake") { viewModel.retake(); resetCrown() }
+                    Button("Retake") { discardHeldPhoto(); viewModel.retake(); resetCrown() }
                         .buttonStyle(.forestixARSecondary)
                         .frame(maxWidth: .infinity)
                     Button("Accept") {
@@ -1241,10 +1721,18 @@ public struct HeightScanScreen: View {
                     }
                 }
                 HStack(spacing: 12) {
-                    Button("Retake") { viewModel.retake(); resetCrown() }
+                    Button("Retake") { discardHeldPhoto(); viewModel.retake(); resetCrown() }
                         .buttonStyle(.forestixARSecondary)
                         .frame(maxWidth: .infinity)
-                    Button("Manual") { viewModel.enterManualEntry() }
+                    // The AR frame held for the red fit must NOT ride along on
+                    // a typed height: it would caption a hand-entered number
+                    // with a sighting the cruiser has just decided against.
+                    // (Android's Manual button goes through `resetAll()`,
+                    // which discards for the same reason.)
+                    Button("Manual") {
+                        discardHeldPhoto()
+                        viewModel.enterManualEntry()
+                    }
                         .buttonStyle(.forestixARSecondary)
                         .frame(maxWidth: .infinity)
                     Button("Accept") {
@@ -1264,7 +1752,7 @@ public struct HeightScanScreen: View {
                 }
             }
         case .manualEntry:
-            Button("Cancel") { viewModel.retake() }
+            Button("Cancel") { discardHeldPhoto(); viewModel.retake() }
                 .buttonStyle(.forestixARSecondary)
         case .idle, .anchorSet, .walking,
              .aimTopArmed, .aimTopCaptured, .aimBaseArmed, .accepted:
@@ -1298,8 +1786,15 @@ public struct HeightScanScreen: View {
         // from LIVE values as the measurement opens — see DBHScanScreen.
         configureRawCapture()
         let hitType = settings.measurementSource == .lidar ? "lidarMesh" : "estimatedPlane"
-        viewModel.anchorHereNow(screenCenterHit: raycaster.screenCenterHit(),
-                                hitType: hitType)
+        // The ANCHOR-specific raycast, not the general one: it applies the
+        // ≤ 4 m gate and the plane facing test inside the selection, so a
+        // grazed ground plane can no longer consume the tap and leave the "+"
+        // looking broken. See `ARCenterRaycaster.screenCenterAnchorHit`. The
+        // view model's own range gate below is unchanged and still authoritative.
+        viewModel.anchorHereNow(
+            screenCenterHit: raycaster.screenCenterAnchorHit(
+                maxDistM: HeightScanViewModel.anchorMaxRangeM),
+            hitType: hitType)
     }
 
     /// Push the raw-capture recording config onto the view model (developer

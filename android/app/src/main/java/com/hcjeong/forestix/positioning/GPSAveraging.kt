@@ -124,6 +124,22 @@ object GPSAveraging {
         return PositionTier.D
     }
 
+    /// Tier for a centre taken from ONE instantaneous fix.
+    ///
+    /// The A and B rows of the table above both require the sample spread
+    /// to be under a bound, and a single fix has no spread to measure —
+    /// there is exactly one sample. Feeding `classify` a stdXY of 0 (which
+    /// is what the one-shot paths used to do) passes those bounds for free,
+    /// so a lone 4 m fix under canopy came out wearing tier A, the grade a
+    /// full 60 s window earns. Unmeasured is not zero. The rows a single
+    /// fix can honestly reach are the accuracy-only ones: C while the
+    /// receiver's own accuracy figure is inside the spec's 20 m ceiling,
+    /// D otherwise — including the negative accuracy the platform reports
+    /// when it could not compute one at all.
+    fun classifySingleFix(horizontalAccuracyM: Float): PositionTier =
+        if (horizontalAccuracyM > 0f && horizontalAccuracyM < 20f) PositionTier.C
+        else PositionTier.D
+
     // MARK: - Median helper
 
     internal fun median(xs: List<Double>): Double {

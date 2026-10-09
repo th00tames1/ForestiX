@@ -39,6 +39,34 @@ public struct ProjectCalibration: Sendable, Equatable {
     /// Cylinder calibration: `DBH_true = alpha + beta · DBH_raw_cm`.
     public var dbhCorrectionAlpha: Float
     public var dbhCorrectionBeta: Float
+    /// The estimator epoch these coefficients were FITTED against.
+    ///
+    /// A cylinder calibration is a straight line through (raw, true) pairs, so
+    /// it absorbs whatever systematic error the estimator had on the day it
+    /// was fitted. Change the estimator and beta is answering a question that
+    /// no longer exists: the geometry's own correction and the fitted one both
+    /// pull the diameter down, they stack, and the project starts under-
+    /// reading silently and without limit. Nothing warns anyone, because a
+    /// calibrated project looks more trustworthy than an uncalibrated one.
+    ///
+    /// So the coefficients carry the epoch they belong to, and
+    /// `appliedToRawCm` refuses to use them under any other. 0 means "never
+    /// calibrated", which is safe at any epoch because the identity is.
+    public var dbhCalibrationEpoch: Int
+
+    /// Is this project's calibration still answering the current estimator?
+    public var calibrationIsStale: Bool {
+        (dbhCorrectionAlpha != 0 || dbhCorrectionBeta != 1)
+            && dbhCalibrationEpoch != DBHEstimator.estimatorEpoch
+    }
+
+    /// The published diameter for a raw one — the ONLY place the cylinder
+    /// coefficients may be applied, so the staleness check cannot be
+    /// forgotten at one of the call sites.
+    public func appliedToRawCm(_ rawCm: Double) -> Double {
+        guard !calibrationIsStale else { return rawCm }
+        return Double(dbhCorrectionAlpha) + Double(dbhCorrectionBeta) * rawCm
+    }
     /// §7.2 VIO drift fraction — σ_d = vioDriftFraction · d_h. Default 0.02.
     public var vioDriftFraction: Float
     /// Maximum allowed depth jump between adjacent guide-row pixels
@@ -57,6 +85,7 @@ public struct ProjectCalibration: Sendable, Equatable {
         depthNoiseMm: Float,
         dbhCorrectionAlpha: Float,
         dbhCorrectionBeta: Float,
+        dbhCalibrationEpoch: Int = 0,
         vioDriftFraction: Float = 0.02,
         depthDiscontinuityM: Float = 0.04
     ) {
@@ -65,6 +94,7 @@ public struct ProjectCalibration: Sendable, Equatable {
         self.dbhCorrectionBeta = dbhCorrectionBeta
         self.vioDriftFraction = vioDriftFraction
         self.depthDiscontinuityM = depthDiscontinuityM
+        self.dbhCalibrationEpoch = dbhCalibrationEpoch
     }
 
     /// Neutral calibration — pre-calibration projects start here.
@@ -72,6 +102,7 @@ public struct ProjectCalibration: Sendable, Equatable {
         depthNoiseMm: 5.0,
         dbhCorrectionAlpha: 0,
         dbhCorrectionBeta: 1,
+        dbhCalibrationEpoch: 0,
         vioDriftFraction: 0.02,
         depthDiscontinuityM: 0.04)
 }
@@ -98,19 +129,28 @@ public struct DBHScanInput: Sendable {
     /// Optional sidecar that persists the cleaned point set to PLY when
     /// the caller opts in (REQ-DBH-007). Returns the file path or nil.
     public let rawPointsWriter: (@Sendable ([SIMD2<Double>]) -> String?)?
+    /// The unit the RECOVERY INSTRUCTIONS are worded in. A failed scan's
+    /// reason is the only thing telling the cruiser what to do differently,
+    /// and "stand 0.5–3 m from the trunk" is not an instruction a cruiser who
+    /// paces in feet can act on. Carried here rather than fixed up in the
+    /// screen because the reason is built where the check fails. Same field,
+    /// same purpose, as `HeightScanInput.unitSystem`.
+    public let unitSystem: UnitSystem
 
     public init(
         frames: [ARDepthFrame],
         tapPixel: SIMD2<Double>,
         guideAxis: GuideAxis,
         projectCalibration: ProjectCalibration,
-        rawPointsWriter: (@Sendable ([SIMD2<Double>]) -> String?)? = nil
+        rawPointsWriter: (@Sendable ([SIMD2<Double>]) -> String?)? = nil,
+        unitSystem: UnitSystem = .metric
     ) {
         self.frames = frames
         self.tapPixel = tapPixel
         self.guideAxis = guideAxis
         self.projectCalibration = projectCalibration
         self.rawPointsWriter = rawPointsWriter
+        self.unitSystem = unitSystem
     }
 }
 
@@ -118,11 +158,70 @@ public struct DBHScanInput: Sendable {
 
 public enum DBHEstimator {
 
+    /// Plausible-diameter window for any single-frame fit, in centimetres.
+    ///
+    /// THE CEILING USED TO BE 100 cm, WHICH IS 39.4 INCHES. The stand at McDunn
+    /// has Douglas-fir over 40 in, so the gate refused them outright: the bracket
+    /// would be placed correctly on a 42 in stem, the arithmetic would return
+    /// ~107 cm, and the fit would come back nil with nothing on screen. It also
+    /// explains why a deliberately wide bracket "stopped working" past about half
+    /// the screen, and why the automatic path could not hold a big tree from a
+    /// distance — all three were the same number.
+    ///
+    /// 300 cm is chosen to clear any stem this app will meet (the largest known
+    /// Douglas-fir is ~440 cm, and a hand-held phone is not measuring that) while
+    /// still refusing the degenerate cases the gate exists for: a bracket dragged
+    /// across the whole depth axis at arm's length computes tens of metres and is
+    /// still rejected. The floor stays at 2.5 cm.
+    public static let plausibleDiameterCm: ClosedRange<Double> = 2.5...300.0
+
+    /// How far the phone may be from the trunk for the tap's depth sample to
+    /// be usable, in METRES. A property of the depth camera, not a preference:
+    /// closer than half a metre the sensor has nothing to triangulate, further
+    /// than three the per-pixel depth noise swamps a stem's curvature. Named
+    /// so the guard and the recovery sentence read it from one place.
+    /// `Float` because the depth map is — `medianDepth` returns one, and a
+    /// Double range here would only add a conversion at the guard.
+    public static let usableTapDepthM: ClosedRange<Float> = 0.5...3.0
+
+    /// §7.9 tier thresholds, named once so the cruiser-facing confidence
+    /// explainer can QUOTE the numbers the checks apply instead of carrying a
+    /// prose copy of them that drifts the first time one of them moves. Every
+    /// value is the shipped one; this is a naming change, not a tuning one,
+    /// and no stored measurement, sigma, method or capture_mode moves with it.
+    ///
+    /// Mirrored byte-for-byte by Android `DBHEstimator.TierThresholds`.
+    public enum TierThresholds {
+        // The §7.1 partial-arc circle fit (`estimate`). NOT the default
+        // capture — see `frameSpreadGreen` for the one that is.
+        public static let minInliersReject = 10
+        public static let minInliersWarn = 20
+        public static let minArcDegReject: Double = 30
+        public static let minArcDegWarn: Double = 45
+        public static let rmseOverRadiusReject: Double = 0.07
+        public static let rmseOverRadiusWarn: Double = 0.05
+        public static let sigmaOverRadiusReject: Double = 0.05
+        public static let sigmaOverRadiusWarn: Double = 0.02
+        public static let radiusCoVReject: Double = 0.10
+        public static let radiusCoVWarn: Double = 0.05
+
+        /// THE DEFAULT CAPTURE'S ONLY TIER RULE. The edge-bracket (Adjust)
+        /// and chord/silhouette paths grade a burst on frame-to-frame
+        /// agreement alone — (max − min) / mean of the per-frame diameters.
+        /// At or below this it is green, above it yellow. None of the
+        /// circle-fit criteria above run on that path at all.
+        public static let frameSpreadGreen: Double = 0.15
+
+        /// A burst needs this many usable frames before it is graded; fewer
+        /// is the one way the default path produces a red.
+        public static let minUsableFrames = 3
+    }
+
     /// Full §7.1 pipeline. Returns nil only if the input cannot be
     /// attempted at all (e.g. burst too small). Quality failures return
     /// a `.red` `DBHResult` carrying `rejectionReason`.
     public static func estimate(input: DBHScanInput) -> DBHResult? {
-        guard input.frames.count >= 5 else { return nil }
+        guard input.frames.count == 1 || input.frames.count >= 5 else { return nil }
 
         // Step 2: depth + confidence at tap (last frame, 5×5 median).
         guard let lastFrame = input.frames.last else { return nil }
@@ -133,14 +232,23 @@ public enum DBHEstimator {
                 reason: "The crosshair isn't on anything the depth camera can see — aim at the trunk and capture again.",
                 method: .lidarPartialArcSingleView)
         }
-        guard (0.5...3.0).contains(dTap) else {
+        guard usableTapDepthM.contains(dTap) else {
             return redResult(
                 // The first clause was already the whole instruction; the
                 // "tap depth … out of range" half echoed the internal
                 // depth-map sample at the crosshair pixel and told the
-                // cruiser nothing they could act on. The RANGE is
-                // unchanged — it still reports the 0.5–3 m gate above.
-                reason: "Stand 0.5–3 m from the trunk and capture again.",
+                // cruiser nothing they could act on.
+                //
+                // THE GATE IS UNCHANGED and stays metric — it is the depth
+                // camera's usable range, not a preference. Only the wording
+                // follows the cruiser's units, and it is built from the same
+                // constant the guard tests, so the sentence cannot come to
+                // quote a range the check no longer applies.
+                reason: "Stand "
+                        + GuidanceDistance.range(fromMetres: Double(usableTapDepthM.lowerBound),
+                                                 toMetres: Double(usableTapDepthM.upperBound),
+                                                 in: input.unitSystem)
+                        + " from the trunk and capture again.",
                 method: .lidarPartialArcSingleView)
         }
         guard confidenceAt(pixel: input.tapPixel, frame: lastFrame) >= 1 else {
@@ -159,7 +267,7 @@ public enum DBHEstimator {
                 axis: input.guideAxis,
                 tapAlongAxis: tapAlongAxis,
                 dTap: dTap,
-                deltaDepth: 0.15,
+                deltaDepth: guideStripDepthBudgetM,
                 discontinuityThresholdM: input.projectCalibration.depthDiscontinuityM)
             for idx in strip {
                 let (px, py) = pixelCoords(axis: input.guideAxis, idx: idx)
@@ -281,32 +389,32 @@ public enum DBHEstimator {
             // wrong and what to change. "Fewer than 10 trunk surface points"
             // was the count the code tests, in the code's words. The COUNT
             // is unchanged.
-            check(fit.inliers.count >= 10, sev: .reject,
+            check(fit.inliers.count >= TierThresholds.minInliersReject, sev: .reject,
                   reason: "Too little of the trunk was picked up — move closer, fill the crosshair with bark, and capture again."),
-            check(fit.inliers.count >= 20, sev: .warn,
+            check(fit.inliers.count >= TierThresholds.minInliersWarn, sev: .warn,
                   reason: "Only 10–20 trunk surface points"),
             // Reject reasons are the ones a cruiser reads (the banner shows
             // `firstFailingRejectReason`), so they are written as
             // instructions. Warn reasons stay in the estimator's own
             // vocabulary — they never leave the struct. Every THRESHOLD
             // below is unchanged.
-            check(arcDeg >= 30, sev: .reject,
+            check(arcDeg >= TierThresholds.minArcDegReject, sev: .reject,
                   reason: "Not enough of the trunk in view — step back or centre the guide line."),
-            check(arcDeg >= 45, sev: .warn,
+            check(arcDeg >= TierThresholds.minArcDegWarn, sev: .warn,
                   reason: "Trunk arc coverage 30°–45°"),
             check(r >= 0.025 && r <= 1.0, sev: .reject,
                   reason: "That doesn't measure like a trunk — aim at the stem and capture again."),
-            check(rmse / r <= 0.07, sev: .reject,
+            check(rmse / r <= TierThresholds.rmseOverRadiusReject, sev: .reject,
                   reason: "The shape didn't match a trunk — hold steadier and capture again."),
-            check(rmse / r <= 0.05, sev: .warn,
+            check(rmse / r <= TierThresholds.rmseOverRadiusWarn, sev: .warn,
                   reason: "Fit error 5–7% of radius"),
-            check(sigmaR / r <= 0.05, sev: .reject,
+            check(sigmaR / r <= TierThresholds.sigmaOverRadiusReject, sev: .reject,
                   reason: "This diameter isn't settling — hold steadier and capture again."),
-            check(sigmaR / r <= 0.02, sev: .warn,
+            check(sigmaR / r <= TierThresholds.sigmaOverRadiusWarn, sev: .warn,
                   reason: "Radius precision ±2–5%"),
-            check(radiusCoV <= 0.10, sev: .reject,
+            check(radiusCoV <= TierThresholds.radiusCoVReject, sev: .reject,
                   reason: "The trunk width kept changing between shots — hold the phone steadier and capture again."),
-            check(radiusCoV <= 0.05, sev: .warn,
+            check(radiusCoV <= TierThresholds.radiusCoVWarn, sev: .warn,
                   reason: "Per-frame radius spread 5–10%"),
             // Extra warn when we had to override with the chord fallback
             // so the cruiser knows the fit didn't fully converge.
@@ -324,8 +432,7 @@ public enum DBHEstimator {
 
         // Step 10: apply cylinder calibration.
         let dbhRawCm = 2 * r * 100
-        let dbhCm = Double(cal.dbhCorrectionAlpha)
-            + Double(cal.dbhCorrectionBeta) * dbhRawCm
+        let dbhCm = cal.appliedToRawCm(dbhRawCm)
 
         // Step 11: build the DBHResult.
         return DBHResult(
@@ -347,6 +454,28 @@ public enum DBHEstimator {
     /// collapses the back-projected points to one world-XZ spot and the
     /// diameter reads a few centimetres. We try both axes at the tap and pick
     /// whichever yields the wider XZ chord — the across-the-trunk direction.
+    /// Direction of a horizontal screen segment in sensor-native depth pixels.
+    /// Depth content must never decide screen orientation. Keep this separate
+    /// from legacy replay's content-based fallback.
+    public static func screenHorizontalGuideAxis(
+        frame: ARDepthFrame, tapPixel: SIMD2<Double>
+    ) -> GuideAxis? {
+        guard let m = frame.viewMapping,
+              m.flattened.allSatisfy({ $0.isFinite }),
+              abs(m.a * m.d - m.b * m.c) > 1e-12,
+              tapPixel.x.isFinite, tapPixel.y.isFinite,
+              tapPixel.x >= 0, tapPixel.x < Double(frame.width),
+              tapPixel.y >= 0, tapPixel.y < Double(frame.height) else { return nil }
+        // Screen x maps to (a, c), NOT (a, b) in this row-major affine.
+        let dx = abs(m.a), dy = abs(m.c)
+        let major = max(dx, dy), minor = min(dx, dy)
+        // The estimator walks one grid axis; do not approximate an oblique ray.
+        guard major > 1e-12, minor <= major * 0.001 else { return nil }
+        return dx > dy
+            ? .row(y: min(Int(tapPixel.y.rounded()), frame.height - 1))
+            : .col(x: min(Int(tapPixel.x.rounded()), frame.width - 1))
+    }
+
     public static func pickGuideAxis(
         frame: ARDepthFrame,
         tapPixel: SIMD2<Double>,
@@ -359,7 +488,7 @@ public enum DBHEstimator {
             let along = tapAlongAxis(tapPixel, axis: axis)
             let strip = extractGuideStemStrip(
                 frame: frame, axis: axis, tapAlongAxis: along, dTap: dTap,
-                deltaDepth: 0.15,
+                deltaDepth: guideStripDepthBudgetM,
                 discontinuityThresholdM: cal.depthDiscontinuityM)
             if strip.count < 4 { return 0 }
             let pts = strip.map { idx -> SIMD2<Double> in
@@ -625,7 +754,7 @@ public enum DBHEstimator {
                 axis: axis,
                 tapAlongAxis: tapAlongAxis,
                 dTap: dTap,
-                deltaDepth: 0.15,
+                deltaDepth: guideStripDepthBudgetM,
                 discontinuityThresholdM: discontinuityThresholdM)
             if strip.count < 5 { continue }
             let pts = strip.map { idx -> SIMD2<Double> in
@@ -980,9 +1109,9 @@ public enum DBHEstimator {
                   reason: "Too little of the trunk was picked up — move closer, fill the crosshair with bark, and capture again."),
             check(inlierCount >= 18, sev: .warn,
                   reason: "Only 10–18 trunk surface points"),
-            check(arcDeg >= 30, sev: .reject,
+            check(arcDeg >= TierThresholds.minArcDegReject, sev: .reject,
                   reason: "Not enough of the trunk in view — step back or centre the guide line."),
-            check(arcDeg >= 45, sev: .warn,
+            check(arcDeg >= TierThresholds.minArcDegWarn, sev: .warn,
                   reason: "Trunk arc coverage 30°–45°"),
             check(radiusM_ >= 0.025 && radiusM_ <= 1.0, sev: .reject,
                   reason: "That doesn't measure like a trunk — aim at the stem and capture again."),
@@ -1171,15 +1300,19 @@ public enum DBHEstimator {
         else { return nil }
         guard (0.3...5.0).contains(dTap) else { return nil }
 
-        let fx = Double(frame.intrinsics[0, 0])
-        guard fx > 0 else { return nil }
+        let focal: Double
+        switch guideAxis {
+        case .row: focal = Double(frame.intrinsics[0, 0])
+        case .col: focal = Double(frame.intrinsics[1, 1])
+        }
+        guard focal.isFinite, focal > 1 else { return nil }
 
         let centerAlong = tapAlongAxis(tapPixel, axis: guideAxis)
 
         // Walk the guide row plus a stack of neighbour rows. Keep the
         // ones that produced a usable strip (≥ 5 pixels wide).
         var widths: [Int] = []
-        var firstUsableExtent: (left: Int, right: Int)?
+        var guideExtent: (left: Int, right: Int)?
         for offset in -rowSpan...rowSpan {
             let neighbourAxis: GuideAxis
             switch guideAxis {
@@ -1198,40 +1331,29 @@ public enum DBHEstimator {
             let w = r - l + 1
             if w < 5 { continue }
             widths.append(w)
-            if firstUsableExtent == nil, offset == 0 {
-                firstUsableExtent = (l, r)
-            } else if firstUsableExtent == nil {
-                firstUsableExtent = (l, r)
-            }
+            if offset == 0 { guideExtent = (l, r) }
         }
 
         // Need at least a handful of rows agreeing on the width — one
         // row alone could be a branch crossing the guide line.
         guard widths.count >= 5 else { return nil }
-        guard let extent = firstUsableExtent else { return nil }
+        guard let extent = guideExtent else { return nil }
+        let walkLength: Int
+        switch guideAxis { case .row: walkLength = frame.width; case .col: walkLength = frame.height }
+        // A clipped silhouette has no measured pair of boundaries.
+        guard extent.left > 0, extent.right < walkLength - 1 else { return nil }
 
-        // Sort + median. Take the middle row's width.
-        let sortedWidths = widths.sorted()
-        let medianWidth = sortedWidths[sortedWidths.count / 2]
-
-        // Chord diameter formula. The naive d = w·z/fx underestimates
-        // because the surface depth `dTap` is closer than the cylinder
-        // axis (by one radius). The exact pinhole formula:
-        //
-        //   diameter = pixel_width · (axis_distance) / fx
-        //
-        // and axis_distance = surface_depth + radius = dTap + d/2, so
-        //
-        //   d · (fx − w/2) = w · dTap   →   d = w·dTap / (fx − w/2)
-        //
-        // For typical trunks (w ≪ fx) the correction is small (≤ 5 %),
-        // but it's free precision and lines the synthetic-cylinder
-        // tests up with the true diameter to within a percent.
-        let halfWidth = Double(medianWidth) / 2.0
-        guard fx - halfWidth > 1.0 else { return nil }
-        let diameterM = Double(medianWidth) * Double(dTap) / (fx - halfWidth)
-        let diameterCm = diameterM * 100.0
-        guard (2.5...100.0).contains(diameterCm) else { return nil }
+        // The neighbouring rows grade boundary consistency only. The displayed
+        // guide span and the committed value use this measurement row's actual
+        // boundaries, full-span median and the same correction as Adjust/AI.
+        guard let (diameterCm, sampledDepth) = BoundaryAlignment.fullSpanSample(
+            width: walkLength, left: Double(extent.left), right: Double(extent.right), focal: focal,
+            depthAt: { idx in
+                let (x, y) = pixelCoords(axis: guideAxis, idx: idx)
+                return Double(frame.depth(atX: x, y: y))
+            }) else { return nil }
+        let diameterM = diameterCm / 100.0
+        guard plausibleDiameterCm.contains(diameterCm) else { return nil }
 
         // Confidence: width consistency. Tight CoV ⇒ green; otherwise
         // yellow (renders as a silent / "gray" chip in the HUD per
@@ -1253,7 +1375,7 @@ public enum DBHEstimator {
         let midIdx = (extent.left + extent.right) / 2
         let (mpx, mpy) = pixelCoords(axis: guideAxis, idx: midIdx)
         let pixDepth = Double(frame.depth(atX: mpx, y: mpy))
-        let depthForBackProject = pixDepth > 0 ? pixDepth : Double(dTap)
+        let depthForBackProject = pixDepth.isFinite && pixDepth > 0 ? pixDepth : sampledDepth
         let surfaceXZ = BackProjection.worldXZ(
             x: Double(mpx), y: Double(mpy),
             depth: depthForBackProject,
@@ -1285,11 +1407,11 @@ public enum DBHEstimator {
             stripLeftFraction: leftFrac,
             stripRightFraction: rightFrac,
             tier: tier,
-            inlierCount: medianWidth,
+            inlierCount: extent.right - extent.left + 1,
             arcDeg: 0,
             rmseMm: 0,
             rejectionReason: nil,
-            effectiveTapDepth: Double(dTap))
+            effectiveTapDepth: sampledDepth)
     }
 
     /// Burst-mode chord measurement. Runs `chordPreviewFit` against
@@ -1300,6 +1422,13 @@ public enum DBHEstimator {
     /// `.yellow` when they spread, `.red` only when too few frames
     /// produced a chord at all.
     public static func chordEstimate(input: DBHScanInput) -> DBHResult? {
+        if input.frames.count == 1, let frame = input.frames.first {
+            guard let fit = chordPreviewFit(
+                frame: frame, tapPixel: input.tapPixel, guideAxis: input.guideAxis,
+                discontinuityThresholdM: input.projectCalibration.depthDiscontinuityM)
+            else { return nil }
+            return singleFrameResult(fit, calibration: input.projectCalibration)
+        }
         guard input.frames.count >= 5 else { return nil }
 
         var diameters: [Double] = []
@@ -1319,7 +1448,7 @@ public enum DBHEstimator {
             widths.append(fit.inlierCount)
         }
 
-        guard diameters.count >= 3 else {
+        guard diameters.count >= TierThresholds.minUsableFrames else {
             return redResult(
                 reason: "Not enough usable frames; hold steadier or move closer",
                 method: .lidarChordSilhouette,
@@ -1334,14 +1463,13 @@ public enum DBHEstimator {
         let lo = sortedDia.first ?? mean
         let hi = sortedDia.last ?? mean
         let cov = mean > 0 ? (hi - lo) / mean : 1
-        let tier: ConfidenceTier = cov <= 0.15 ? .green : .yellow
+        let tier: ConfidenceTier = cov <= TierThresholds.frameSpreadGreen ? .green : .yellow
 
         // Apply cylinder calibration last so the published cm value
         // ends up identical to what a trained Cylinder calibration on
         // a chord-method burst would expect.
         let cal = input.projectCalibration
-        let dbhCm = Double(cal.dbhCorrectionAlpha)
-            + Double(cal.dbhCorrectionBeta) * medianRawCm
+        let dbhCm = cal.appliedToRawCm(medianRawCm)
 
         // Median centre across frames for the persisted XZ — robust to
         // a frame or two with bad depth.
@@ -1379,7 +1507,7 @@ public enum DBHEstimator {
         guideAxis: GuideAxis,
         calibration cal: ProjectCalibration
     ) -> DBHResult? {
-        guard frames.count >= 5 else { return nil }
+        guard frames.count == 1 || frames.count >= 5 else { return nil }
         let tapAlong = tapAlongAxis(tapPixel, axis: guideAxis)
 
         var diameters: [Double] = []
@@ -1390,7 +1518,7 @@ public enum DBHEstimator {
                   (0.3...5.0).contains(dTap) else { continue }
             let strip = extractGuideStemStrip(
                 frame: frame, axis: guideAxis, tapAlongAxis: tapAlong,
-                dTap: dTap, deltaDepth: 0.15,
+                dTap: dTap, deltaDepth: guideStripDepthBudgetM,
                 discontinuityThresholdM: cal.depthDiscontinuityM)
             guard strip.count >= 6 else { continue }
             var pts: [SIMD2<Double>] = []
@@ -1406,7 +1534,7 @@ public enum DBHEstimator {
             let chordM = chordDiameterFromCloud(pts)
             guard chordM > 0 else { continue }
             let diameterCm = chordM * 100.0
-            guard (2.5...100.0).contains(diameterCm) else { continue }
+            guard plausibleDiameterCm.contains(diameterCm) else { continue }
             diameters.append(diameterCm)
             var minX = Double.infinity, maxX = -Double.infinity
             var minZ = Double.infinity, maxZ = -Double.infinity
@@ -1418,7 +1546,7 @@ public enum DBHEstimator {
             centersZ.append((minZ + maxZ) / 2)
         }
 
-        guard diameters.count >= 3 else {
+        guard diameters.count >= (frames.count == 1 ? 1 : TierThresholds.minUsableFrames) else {
             return redResult(
                 reason: "Not enough usable frames; hold steadier or move closer",
                 method: .lidarChordSilhouette,
@@ -1431,10 +1559,9 @@ public enum DBHEstimator {
         let lo = sortedDia.first ?? mean
         let hi = sortedDia.last ?? mean
         let cov = mean > 0 ? (hi - lo) / mean : 1
-        let tier: ConfidenceTier = cov <= 0.15 ? .green : .yellow
+        let tier: ConfidenceTier = frames.count > 1 && cov <= TierThresholds.frameSpreadGreen ? .green : .yellow
 
-        let dbhCm = Double(cal.dbhCorrectionAlpha)
-            + Double(cal.dbhCorrectionBeta) * medianRawCm
+        let dbhCm = cal.appliedToRawCm(medianRawCm)
 
         let sortedCx = centersX.sorted()
         let sortedCz = centersZ.sorted()
@@ -1498,6 +1625,12 @@ public enum DBHEstimator {
         viewSize: CGSize
     ) -> (axis: GuideAxis, left: Double, right: Double)? {
         guard let mapping = frame.viewMapping,
+              mapping.flattened.allSatisfy({ $0.isFinite }),
+              abs(mapping.a * mapping.d - mapping.b * mapping.c) > 1e-12,
+              leftFraction.isFinite, rightFraction.isFinite,
+              guideFractionY.isFinite, (0...1).contains(guideFractionY),
+              (0...1).contains(leftFraction), (0...1).contains(rightFraction),
+              viewSize.width.isFinite, viewSize.height.isFinite,
               viewSize.width > 1, viewSize.height > 1,
               frame.width > 0, frame.height > 0 else { return nil }
         let lo = min(leftFraction, rightFraction)
@@ -1507,6 +1640,13 @@ public enum DBHEstimator {
         let pR = mapping.viewToDepth(x: hi * Double(viewSize.width), y: gy)
         let dx = abs(pR.x - pL.x)
         let dy = abs(pR.y - pL.y)
+        guard max(dx, dy) > 1e-12,
+              min(dx, dy) <= max(dx, dy) * 0.001,
+              [pL, pR].allSatisfy({ p in
+                  p.x.isFinite && p.y.isFinite
+                      && p.x >= 0 && p.x <= Double(frame.width)
+                      && p.y >= 0 && p.y <= Double(frame.height)
+              }) else { return nil }
         // The walk axis is whichever depth axis the screen-horizontal
         // bracket covers more of — they sit 90° apart in portrait. Derived
         // per frame from the display transform, which is stable, rather than
@@ -1529,28 +1669,66 @@ public enum DBHEstimator {
         return (axis, left, right)
     }
 
-    /// Single-frame DBH estimate constrained by two user-placed edge
-    /// handles instead of the automatic silhouette walk — the DBH
-    /// ADJUST mode's estimator. `leftFraction` / `rightFraction` are
-    /// handle positions normalised 0…1 along the walked axis (the same
-    /// normalisation `PreviewFit.stripLeftFraction` uses, so on-screen
-    /// handles and the published chord agree by construction: the
-    /// screen's view-x fraction maps 1:1 onto the depth map's walk-axis
-    /// extent, exactly like the fit-chord overlay in reverse).
+    /// The middle half of a bracket, as an index range on the walk axis.
     ///
-    ///     w = handle span in walk-axis pixels
-    ///     z = median valid depth INSIDE the bracket at the guide row
-    ///     d = w·z / (f_axis − w/2)
+    /// FIELD REPORT 13 — with the bracket held perfectly still on a trunk,
+    /// the diameter jumped by several inches at random. The bracket's z is a
+    /// median, the chord identity d = w·z/(f − w/2) is LINEAR in z, and the
+    /// median was taken over the WHOLE span. The cruiser puts the handles ON
+    /// the silhouette edges, so the span's end pixels sit on the boundary and
+    /// routinely return the background instead of the stem — several metres
+    /// further away in a stand. Whenever the valid samples split near evenly
+    /// between stem and background, one pixel dropping in or out of validity
+    /// moves the median from one cluster to the other, and the diameter moves
+    /// with it in exact proportion: a 2 m stem behind a 6 m gap triples.
     ///
-    /// — the same axis-matched pinhole identity the auto chord path
-    /// uses, with the user's bracket supplying the width instead of the
-    /// silhouette edge-finder.
-    public static func bracketChordFit(
+    /// The middle half cannot be background if the bracket is on a trunk at
+    /// all — that is what placing the handles on the edges MEANS — so the
+    /// median is taken from stem pixels only and the bimodal hop is gone.
+    ///
+    /// A short temporal median over consecutive frames was the alternative
+    /// and is the wrong tool twice over: it slows a hop it can't remove (the
+    /// distribution is bimodal in SPACE, and the wrong mode persists for as
+    /// long as the cruiser holds still), and ADJUST deliberately publishes
+    /// the raw per-frame fit so the number tracks a handle drag immediately.
+    ///
+    /// Nothing about the geometry changes — same identity, same span, same
+    /// focal. Only which pixels the depth is read from.
+    ///
+    /// The measured VALUE does move, though, and whoever pools this study's
+    /// corpora needs to know it: a stem's centre is up to one radius nearer
+    /// than its edges, so a median over the middle half reads a smaller z
+    /// and every bracketed diameter comes out slightly lower than before.
+    /// That is the geometrically right input for the identity — but it is
+    /// not backwards-compatible. A project whose `dbhCorrectionAlpha` /
+    /// `dbhCorrectionBeta` were fitted on ADJUST captures from before this
+    /// change now carries that bias into the correction applied on top, and
+    /// a raw-capture bundle recorded before it will not replay to the live
+    /// value in its manifest. The manifest's `app_commit` is what separates
+    /// the two corpora.
+    static func bracketCoreRange(iLo: Int, iHi: Int) -> (Int, Int) {
+        let span = iHi - iLo
+        // Too few pixels to trim and still make a median of: a bracket this
+        // narrow is a handful of samples either way, and dropping to one or
+        // two would fail the ≥ 3 gate on a fit that is otherwise fine.
+        guard span >= 8 else { return (iLo, iHi) }
+        let quarter = span / 4
+        return (iLo + quarter, iHi - quarter)
+    }
+
+    /// The bracket's index arithmetic on the walk axis, lifted verbatim out of
+    /// `bracketChordFit` so the read-only probe below can ask about EXACTLY
+    /// the pixels the fit medians — not about pixels derived by a second copy
+    /// of the same arithmetic that is free to drift away from it.
+    ///
+    /// Pure index math: no depth is read here, and all three refusals are the
+    /// fit's own (axis in bounds, span at least 2 px, a non-empty index range).
+    static func bracketGeometry(
         frame: ARDepthFrame,
         guideAxis: GuideAxis,
         leftFraction: Double,
         rightFraction: Double
-    ) -> PreviewFit? {
+    ) -> (lo: Double, hi: Double, widthPx: Double, iLo: Int, iHi: Int)? {
         let extent: Int
         switch guideAxis {
         case .row(let y):
@@ -1566,37 +1744,265 @@ public enum DBHEstimator {
         let rightPx = hi * Double(extent)
         let widthPx = rightPx - leftPx
         guard widthPx >= 2 else { return nil }
-
-        // Median depth INSIDE the bracket at the guide row. Zero-depth /
-        // low-confidence pixels are skipped; a handful of valid returns
-        // is required before the median is trusted.
         let iLo = max(0, Int(leftPx.rounded(.up)))
         let iHi = min(extent - 1, Int(rightPx.rounded(.down)))
         guard iHi >= iLo else { return nil }
+        return (lo, hi, widthPx, iLo, iHi)
+    }
+
+    /// The valid depths over the bracket's middle half, sorted ascending —
+    /// the exact sample `bracketChordFit` takes its median from. Also lifted
+    /// verbatim, for the same reason as `bracketGeometry`.
+    static func bracketCoreDepthsSorted(
+        frame: ARDepthFrame,
+        guideAxis: GuideAxis,
+        iLo: Int,
+        iHi: Int
+    ) -> [Float] {
         var depths: [Float] = []
         depths.reserveCapacity(iHi - iLo + 1)
-        for idx in iLo...iHi {
+        let (cLo, cHi) = bracketCoreRange(iLo: iLo, iHi: iHi)
+        for idx in cLo...cHi {
             let (px, py) = pixelCoords(axis: guideAxis, idx: idx)
             guard frame.confidence(atX: px, y: py) >= 1 else { continue }
             let d = frame.depth(atX: px, y: py)
             if d > 0 { depths.append(d) }
         }
-        guard depths.count >= 3 else { return nil }
         depths.sort()
-        let z = Double(depths[depths.count / 2])
-        guard (0.3...5.0).contains(z) else { return nil }
+        return depths
+    }
 
-        // fx on BOTH axes, which is what the version the field verified
-        // used. Switching a column walk to fy is defensible on paper and is
-        // NOT being done here: this path is being restored to the code that
-        // measured correctly in the stand, and every change to it made from
-        // reasoning alone has been wrong. Revisit with a device and a tape,
-        // not from a reading of the geometry.
-        let fx = Double(frame.intrinsics[0, 0])
-        guard fx - widthPx / 2.0 > 1.0 else { return nil }
-        let diameterM = widthPx * z / (fx - widthPx / 2.0)
-        let diameterCm = diameterM * 100.0
-        guard (2.5...100.0).contains(diameterCm) else { return nil }
+    /// What the estimators compute, as a number that changes when they do.
+    ///
+    /// Stamped into every raw-capture bundle by `RawCaptureStore.appCommit`
+    /// and into every project's calibration by `CylinderCalibration`. Bump it
+    /// for ANY change to a published diameter — a new identity, a different
+    /// depth statistic, a different sample. Two corpora that disagree on this
+    /// number must not be pooled, and a calibration fitted under one epoch
+    /// must not be applied under another.
+    ///
+    ///   1  chord identity, full-span depth median
+    ///   2  chord identity, middle-half depth median (`bracketCoreRange`)
+    ///   3  cylinder-tangent inversion, middle-half median corrected to the
+    ///      near face — `silhouetteDiameterCm`
+    /// 4 — the auto path joined the bracket on the tangent form, and the
+    /// guide strip stopped truncating at 0.15 m.
+    /// 5 — Android's ADJUST bracket stopped keeping two arithmetics behind one
+    ///     pair of handles. iOS reads the same as it did at 4; the number is
+    ///     shared because the epoch describes a GENERATION of the estimators
+    ///     and two corpora that disagree on it must not be pooled — and this
+    ///     study pools iOS and Android. Epoch 5 is the first generation in
+    ///     which both handsets read a bracket the same way.
+    ///
+    /// THE NUMBER IS THE CONTRACT, and it was nearly broken. Epoch 3 shipped
+    /// on 7/30 with the BRACKET on the tangent inversion and the auto path
+    /// still on the chord-at-axis form. Changing the auto path and the walk's
+    /// depth budget alters an auto diameter by up to a fifth on a large stem
+    /// (traced: -4.4 % at 40 cm, -21.4 % at 90 cm against a cylinder), and
+    /// leaving the number at 3 would have meant two geometries under one
+    /// label — with `DBHEpochRecompute` then refusing, as "already at epoch
+    /// 3", precisely the rows that needed re-deriving.
+    ///
+    /// Bump this whenever a change moves a stored diameter. It is what the
+    /// recompute decides on and what an analysis splits the corpus by.
+    ///
+    /// THE NUMBER NOW LIVES IN `Models.DBHCalibration.currentEpoch`, and this
+    /// keeps its name because a dozen call sites read it. It had to move down
+    /// a module: `Export` cannot see `Sensors`, so the PDF report could not
+    /// ask this question and answered it with a predicate of its own that had
+    /// no epoch term in it at all — telling a landowner a calibration was
+    /// applied while this file was refusing to apply it.
+    public static let estimatorEpoch = DBHCalibration.currentEpoch
+
+    /// How far the guide-strip walk lets the surface recede before it calls
+    /// the stem finished, in metres.
+    ///
+    /// THIS IS A RADIUS BUDGET, not a noise tolerance, and it was set as
+    /// though it were one. On a round stem the surface at the silhouette sits
+    /// exactly R behind the near face, so a walk that stops at 0.15 m stops
+    /// short of the tangent points on anything over 30 cm — and stops further
+    /// short the bigger the tree. Traced against a perfect cylinder, the auto
+    /// path read -0.9 % at 20 cm, -4.4 % at 40, -11.0 % at 60 and -21.4 % at
+    /// 90: not a bias, a taper.
+    ///
+    /// 0.80 m covers a 160 cm stem, which is past anything this app will meet
+    /// in a coastal-PNW cruise. What stops the walk running onto the next
+    /// trunk is NOT this number — it is `depthDiscontinuityM`, a 4 cm jump
+    /// between ADJACENT pixels, which is untouched and does that job on its
+    /// own. The remaining ~1 % under-read is the last pixel or two before the
+    /// tangent, where the surface turns faster than the grid can follow, and
+    /// it is the same at every size.
+    static let guideStripDepthBudgetM: Float = 0.80
+
+    /// Historical middle-half sampler's inversion. Live full-span measurement
+    /// uses `BoundaryAlignment.fullSpanDiameterCm`; do not pair this coefficient
+    /// with a full-span median. Retained for old synthetic/legacy calculations.
+    /// A stem's diameter from the width of its silhouette.
+    ///
+    /// THE EDGES ARE TANGENT POINTS, NOT THE ENDS OF A DIAMETER. Sight lines
+    /// to the left and right of a round stem graze the bark; they touch it
+    /// nearer the camera than the axis and closer together than the full
+    /// width. Writing that out, with `theta` the half-angle the stem
+    /// subtends,
+    ///
+    ///     w/2 = f·tan(theta)                    the edges, in pixels
+    ///     R   = (z + R)·sin(theta)              tangency, z to the near face
+    ///
+    /// and eliminating theta with `k = w/2f = tan(theta)` gives
+    ///
+    ///     d = 2·z·k·(k + sqrt(k² + 1))
+    ///
+    /// The identity this replaces, `d = w·z/(f − w/2)`, is the same expression
+    /// with `sin` swapped for `tan`. Rearranged it reads `d = w·(z + d/2)/f`
+    /// — a segment of length d at the depth of the stem's AXIS — so it was
+    /// answering a different question from the one the bracket asks. It
+    /// agrees to second order and over-reads for every real k, by about
+    /// k²/2: a tenth of a percent on a distant sapling, 2.5 % on a stem
+    /// filling a fifth of the frame.
+    ///
+    /// z ARRIVES A LITTLE TOO FAR AWAY. The caller's depth is a median over
+    /// the bracket's middle half, and those pixels lie on a curved face, so
+    /// the median sits behind the near point the tangent form wants — by
+    /// `(1 − sqrt(15)/4)·R = 0.0318·R` for a uniform sample across the middle
+    /// half. (Over the FULL span it would be `1 − sqrt(3)/2 = 0.134·R`; the
+    /// trim already removed most of it, which is why the correction here is
+    /// small.) R is what we are solving for, so substitute and solve rather
+    /// than iterate:
+    ///
+    ///     R = z_median·K / (1 + 0.0318·K),   K = k·(k + sqrt(k² + 1))
+    ///
+    /// WHAT THIS DOES NOT FIX. Measured against tape on 100 stems it removes
+    /// about a third of the over-read — iOS +4.8 % to +2.1 %, Android +9.1 %
+    /// to +5.6 %, RMSE down 14 % and 12 %, and every diameter class improves
+    /// on both platforms. The rest of the bias is unexplained. Both this form
+    /// and the old one also assume the stem sits on the optical axis; off to
+    /// one side by psi the bracket spans about `sec²(psi)` too much, which at
+    /// 20° off-centre is larger than everything above.
+    ///
+    /// Returns nil when the geometry cannot produce a diameter at all.
+    public static func silhouetteDiameterCm(
+        spanPx: Double,
+        depthM: Double,
+        focalPx: Double
+    ) -> Double? {
+        guard spanPx > 0, depthM > 0, focalPx > 1 else { return nil }
+        let k = spanPx / (2.0 * focalPx)
+        let kk = k * (k + (k * k + 1).squareRoot())
+        let radiusM = depthM * kk / (1.0 + medianDepthOffsetFactor * kk)
+        guard radiusM.isFinite, radiusM > 0 else { return nil }
+        return 2.0 * radiusM * 100.0
+    }
+
+    /// How far behind the near face the middle-half depth median sits, as a
+    /// fraction of the radius: `1 − sqrt(15)/4`. Derivation in
+    /// `silhouetteDiameterCm`. Exact in the orthographic limit; the
+    /// perspective correction is first order in k and worth ~0.003 R here.
+    static let medianDepthOffsetFactor = 1.0 - (15.0.squareRoot() / 4.0)
+
+    /// Widest depth separation, in metres, that a bracket sitting entirely on
+    /// bark can produce across its middle half.
+    ///
+    /// GEOMETRY, not a tuned number. Over the middle half of a chord the stem
+    /// surface recedes from its nearest point by r·(1 − cos30°) = 0.134·r, so
+    /// even a 1 m stem contributes under 7 cm, and LiDAR noise at bracket range
+    /// adds a centimetre or two. 0.20 m is therefore several times anything
+    /// bark alone can produce, while the excursions this exists to name are
+    /// 30–60 cm of depth — the gap between a stem and whatever stands behind
+    /// it. Same value on Android.
+    public static let bracketCoreDepthSpreadLimitM: Double = 0.20
+
+    /// Interquartile depth spread over the bracket's middle half, in metres —
+    /// READ-ONLY, and never consulted by any estimator.
+    ///
+    /// FIELD ROUND 10 — THE DIAMETER THAT JUMPS BY INCHES. Quantified over 140
+    /// bursts: the median within-burst spread is 0.49 cm on iOS and 0.41 cm on
+    /// Android, the same, but iOS carries a tail Android does not — 7 of 68
+    /// ADJUST bursts spanning two inches or more, worst case 26 cm. d = w·z/(f
+    /// − w/2) is LINEAR in z, so 26 cm of diameter on a 30 cm stem is z moving
+    /// by most of a metre. Nothing in a LiDAR return moves that far; a metre is
+    /// the distance from the bark to what is behind it. Some of the sample is
+    /// not bark.
+    ///
+    /// `bracketCoreRange` already removed the worst of it — the handles sit ON
+    /// the silhouette, so the span's END pixels read the background — but the
+    /// middle half is not immune: a gap between stems, a limb, or foliage seen
+    /// through a lean puts a far cluster under the middle of the bracket too.
+    /// The median only MOVES when that cluster reaches half the sample, which
+    /// is why the failure is intermittent (about one capture in ten) rather
+    /// than a constant bias.
+    ///
+    /// THE INTERQUARTILE RANGE IS THE RIGHT STATISTIC, precisely because the
+    /// median is what has to be defended. A handful of stray far pixels cannot
+    /// move a median of a dozen and does not widen the IQR either. A sample
+    /// split near evenly between two surfaces moves the median on the next
+    /// pixel that flips validity — and puts the two clusters on opposite sides
+    /// of the quartiles, which is exactly what a wide IQR reports. min–max
+    /// would fire on the single stray and blank a readout that was fine.
+    ///
+    /// WHAT THIS DELIBERATELY DOES NOT DO is change which pixels the estimator
+    /// admits. That was the better physical fix and it is not available: the
+    /// stored diameter is the median of five frames, `bracketChordFit` is the
+    /// per-frame fit BOTH the live readout and the burst call, and the
+    /// estimator is frozen. It is also not needed — the excursions do not
+    /// reach the stored value (rho = −0.11 between burst spread and error
+    /// against tape), so the corpus is intact and the defect is entirely in
+    /// what the cruiser sees. This reports; the screen decides.
+    public static func bracketCoreDepthSpreadM(
+        frame: ARDepthFrame,
+        guideAxis: GuideAxis,
+        leftFraction: Double,
+        rightFraction: Double
+    ) -> Double? {
+        guard let g = bracketGeometry(frame: frame,
+                                      guideAxis: guideAxis,
+                                      leftFraction: leftFraction,
+                                      rightFraction: rightFraction)
+        else { return nil }
+        let depths = bracketCoreDepthsSorted(frame: frame,
+                                             guideAxis: guideAxis,
+                                             iLo: g.iLo, iHi: g.iHi)
+        // Same floor the fit uses: below it there is no median worth
+        // describing, and the fit has already refused.
+        guard depths.count >= 3 else { return nil }
+        let q1 = depths[depths.count / 4]
+        let q3 = depths[(depths.count * 3) / 4]
+        return Double(q3 - q1)
+    }
+
+    /// Diameter from the manual or AI-assisted span in depth-grid coordinates.
+    /// Uses the full-span valid-depth median, the focal component along the
+    /// guide axis, and the cylindrical surface-corrected tangent relation.
+    /// The central-half depth helpers above remain preview-quality probes.
+    public static func bracketChordFit(
+        frame: ARDepthFrame,
+        guideAxis: GuideAxis,
+        leftFraction: Double,
+        rightFraction: Double
+    ) -> PreviewFit? {
+        guard let g = bracketGeometry(frame: frame,
+                                      guideAxis: guideAxis,
+                                      leftFraction: leftFraction,
+                                      rightFraction: rightFraction)
+        else { return nil }
+        let lo = g.lo, hi = g.hi
+        let widthPx = g.widthPx
+        let iLo = g.iLo, iHi = g.iHi
+
+        // Both guide-placement modes use full-span median and its paired
+        // cylindrical surface correction (estimator epoch 7).
+        let isColumn: Bool, fixed: Int
+        switch guideAxis { case .row(let y): isColumn = false; fixed = y
+        case .col(let x): isColumn = true; fixed = x }
+        let walkWidth = isColumn ? frame.height : frame.width
+        let walkHeight = isColumn ? frame.width : frame.height
+        guard fixed >= 0, fixed < walkHeight,
+              let (diameterCm,z) = BoundaryAlignment.fullSpanSample(
+                width:walkWidth,left:lo*Double(walkWidth),right:hi*Double(walkWidth),
+                focal:Double(frame.intrinsics[isColumn ? 1:0,isColumn ? 1:0]),
+                depthAt: { x in Double(frame.depth(atX:isColumn ? fixed:x,y:isColumn ? x:fixed)) })
+        else { return nil }
+        let diameterM = diameterCm / 100.0
+        guard plausibleDiameterCm.contains(diameterCm) else { return nil }
 
         // Centre for the cylinder overlay + distance HUD — bracket
         // midpoint back-projected at its depth, pushed one radius behind
@@ -1645,6 +2051,11 @@ public enum DBHEstimator {
         rightFraction: Double,
         calibration cal: ProjectCalibration
     ) -> DBHResult? {
+        if frames.count == 1, let frame = frames.first {
+            guard let fit = bracketChordFit(frame: frame, guideAxis: guideAxis,
+                leftFraction: leftFraction, rightFraction: rightFraction) else { return nil }
+            return singleFrameResult(fit, calibration: cal)
+        }
         guard frames.count >= 5 else { return nil }
 
         var diameters: [Double] = []
@@ -1664,7 +2075,7 @@ public enum DBHEstimator {
             widths.append(fit.inlierCount)
         }
 
-        guard diameters.count >= 3 else {
+        guard diameters.count >= TierThresholds.minUsableFrames else {
             return redResult(
                 reason: "Not enough usable frames; hold steadier or move closer",
                 method: .lidarChordSilhouette,
@@ -1677,10 +2088,9 @@ public enum DBHEstimator {
         let lo = sortedDia.first ?? mean
         let hi = sortedDia.last ?? mean
         let cov = mean > 0 ? (hi - lo) / mean : 1
-        let tier: ConfidenceTier = cov <= 0.15 ? .green : .yellow
+        let tier: ConfidenceTier = cov <= TierThresholds.frameSpreadGreen ? .green : .yellow
 
-        let dbhCm = Double(cal.dbhCorrectionAlpha)
-            + Double(cal.dbhCorrectionBeta) * medianRawCm
+        let dbhCm = cal.appliedToRawCm(medianRawCm)
 
         let sortedCx = centersX.sorted()
         let sortedCz = centersZ.sorted()
@@ -1701,7 +2111,18 @@ public enum DBHEstimator {
             rejectionReason: nil)
     }
 
-    // MARK: - Multi-sample aggregation (trimmed mean)
+    /// Preserve within-frame quality checks; one frame has no temporal spread.
+    private static func singleFrameResult(_ fit: PreviewFit,
+                                          calibration: ProjectCalibration) -> DBHResult {
+        DBHResult(diameterCm: Float(calibration.appliedToRawCm(fit.diameterCm)),
+                  centerXZ: SIMD2<Float>(Float(fit.centerWorldXZ.x), Float(fit.centerWorldXZ.y)),
+                  arcCoverageDeg: Float(fit.arcDeg), rmseMm: Float(fit.rmseMm),
+                  sigmaRmm: 0, nInliers: fit.inlierCount, confidence: fit.tier,
+                  method: .lidarChordSilhouette, rawPointsPath: nil,
+                  rejectionReason: fit.rejectionReason)
+    }
+
+    // MARK: - Historical multi-sample aggregation (trimmed mean)
 
     /// Combine the hold-steady capture's repeated sub-measurements into one
     /// result: keep the 3 samples closest to the median diameter (with 5

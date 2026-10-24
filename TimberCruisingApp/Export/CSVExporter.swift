@@ -61,7 +61,8 @@ public enum CSVExporter {
 
     /// Emit one row per Tree, in `treeNumber` order, including soft-deleted
     /// rows (with `deleted_at` populated) so the CSV is a lossless dump.
-    public static func treesCSV(trees: [Tree]) -> String {
+    public static func treesCSV(trees: [Tree], species: [SpeciesConfig] = []) -> String {
+        let speciesByCode = Dictionary(species.map { ($0.code, $0) }, uniquingKeysWith: { first, _ in first })
         let header = [
             "id", "plot_id", "tree_number", "tree_name", "species_code", "status",
             "dbh_cm", "dbh_method", "dbh_capture_mode",
@@ -74,7 +75,8 @@ public enum CSVExporter {
             "crown_class", "damage_codes",
             "is_multistem", "parent_tree_id",
             "notes", "photo_path", "raw_scan_path",
-            "created_at", "updated_at", "deleted_at"
+            "created_at", "updated_at", "deleted_at", "dbh_measurement_id", "height_measurement_id",
+            "species_common_name", "species_scientific_name"
         ].joined(separator: ",")
         var lines: [String] = [header]
         let sorted = trees.sorted {
@@ -121,6 +123,9 @@ public enum CSVExporter {
             cells.append(iso8601(t.createdAt))
             cells.append(iso8601(t.updatedAt))
             cells.append(t.deletedAt.map(iso8601) ?? "")
+            cells.append(quote(t.dbhMeasurementId ?? "")); cells.append(quote(t.heightMeasurementId ?? ""))
+            cells.append(quote(speciesByCode[t.speciesCode]?.commonName ?? ""))
+            cells.append(quote(speciesByCode[t.speciesCode]?.scientificName ?? ""))
             lines.append(cells.joined(separator: ","))
         }
         return join(lines)

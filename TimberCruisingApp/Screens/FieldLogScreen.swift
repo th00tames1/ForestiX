@@ -114,6 +114,9 @@ public struct FieldLogScreen: View {
     /// dismissal animation.
     @State private var pendingRescan: FieldLogRescan?
     @State private var rescan: FieldLogRescan?
+    @State private var rescanTarget: FieldStudyTarget?
+    @State private var rescanScopeFailure: String?
+    @State private var rescanPreparation: Task<Void,Never>?
     /// "Edit plot", tapped in the plot mini-map's enlarged view from a
     /// re-measure launched here (FIELD REPORT 12). The scan screens only
     /// OFFER Edit when a host hands them somewhere to go, and this host used
@@ -347,7 +350,7 @@ public struct FieldLogScreen: View {
                             }
                             Button {
                                 shareURL = history.exportBundle(
-                                    logRule: settings.logRule)
+                                    logRule: settings.logRule, country: settings.country)
                             } label: {
                                 Label("All tables (zip of 5 CSVs)", systemImage: "doc.zipper")
                             }
@@ -372,7 +375,7 @@ public struct FieldLogScreen: View {
                 .environmentObject(settings)
         }
         .sheet(item: $inspecting, onDismiss: {
-            rescan = pendingRescan
+            if let request = pendingRescan { prepareRescan(request) }
             pendingRescan = nil
         }) { row in
             FieldLogDetailSheet(
@@ -398,6 +401,8 @@ public struct FieldLogScreen: View {
             }
         }
         #endif
+        .modifier(FieldScopeFailureAlert(message: $rescanScopeFailure))
+        .onDisappear { rescanPreparation?.cancel() }
         // EVERY swipe asks, and names what it is about to take.
         //
         // This used to confirm only for a row carrying several readings and
@@ -1046,6 +1051,24 @@ public struct FieldLogScreen: View {
 
     // MARK: - Measure again
 
+    private func prepareRescan(_ request: FieldLogRescan) {
+        rescanPreparation?.cancel()
+        rescanPreparation = Task { @MainActor in
+            do {
+                let study = environment.fieldStudy
+                await study.awaitPendingWrites(); try Task.checkCancellation()
+                let target: FieldStudyTarget?
+                if study.configuration.enabled {
+                    guard study.loaded,study.error == nil else { throw FieldStudyError.missing("field-study archive") }
+                    target = try FieldResultTargetBinding.resolve(resultIds: request.sourceEntryIds.map(\.uuidString),
+                        resultStore: "quick_history",studyId: study.configuration.studyId,records: study.measurements,targets: study.activeTargets)
+                } else { target = nil }
+                rescanTarget = target; rescan = request
+            } catch is CancellationError { }
+            catch { rescanScopeFailure = error.localizedDescription }
+        }
+    }
+
     #if os(iOS)
     /// The scan the cruiser asked to re-run, wired so the reading lands on
     /// the tree it was launched from. Accept goes through
@@ -1058,7 +1081,8 @@ public struct FieldLogScreen: View {
             DBHScanScreen(
                 viewModel: DBHScanViewModel(calibration: .identity),
                 onAccept: { result, meta in
-                    history.replaceReading(QuickMeasureEntry(
+                    let reading = QuickMeasureEntry(
+                        id: meta.measurementId.flatMap(UUID.init(uuidString:)) ?? UUID(),
                         kind: .dbh,
                         value: Double(result.diameterCm),
                         sigma: result.method == .manualVisual
@@ -1097,22 +1121,33 @@ public struct FieldLogScreen: View {
                         // re-measure would take the mark off a truth
                         // `TruthUnitRepair` had already re-based, and a mark
                         // that a re-measure can erase is not a durable one.
-                        truthUnit: meta.truth != nil ? nil : request.truthUnit))
+                        truthUnit: meta.truth != nil ? nil : request.truthUnit)
+                    do {
+                        let replacements = try history.captureReplacementSnapshots(reading,replacing: true)
+                        try meta.fieldReceipt?.prepare(recordId: reading.id,store: "quick_history",value: reading.value,replacements: replacements)
+                        let oldIds = try history.saveCapturedReading(reading,replacing: true,expectedReplacements: replacements)
+                        meta.fieldReceipt?.confirm(recordId: reading.id,store: "quick_history",superseded: oldIds)
+                    } catch { return false }
                     rescan = nil
                     return true
                 },
                 projectID: nil,
                 quickTreeNumber: request.treeNumber,
+                quickPlotID: request.plotID,
+                fieldTarget: rescanTarget,
+                fieldTargetLocked: true,
+                allowsFieldTargetSelection: false,
                 // Seed the species chip from the row being re-measured, as
                 // Android does — otherwise the cruiser retypes a code the
                 // accept handler would have restored behind their back.
                 initialSpeciesCode: request.speciesCode,
-                onEditPlot: { rescanPlotSetup = true })
+                onEditPlot: nil)
         case .height:
             HeightScanScreen(
                 viewModel: HeightScanViewModel(calibration: .identity),
                 onAccept: { result, meta in
-                    history.replaceReading(QuickMeasureEntry(
+                    let reading = QuickMeasureEntry(
+                        id: meta.measurementId.flatMap(UUID.init(uuidString:)) ?? UUID(),
                         kind: .height,
                         value: Double(result.heightM),
                         sigma: result.sigmaHm.map(Double.init),
@@ -1143,7 +1178,13 @@ public struct FieldLogScreen: View {
                         // re-measure would take the mark off a truth
                         // `TruthUnitRepair` had already re-based, and a mark
                         // that a re-measure can erase is not a durable one.
-                        truthUnit: meta.truth != nil ? nil : request.truthUnit))
+                        truthUnit: meta.truth != nil ? nil : request.truthUnit)
+                    do {
+                        let replacements = try history.captureReplacementSnapshots(reading,replacing: true)
+                        try meta.fieldReceipt?.prepare(recordId: reading.id,store: "quick_history",value: reading.value,replacements: replacements)
+                        let oldIds = try history.saveCapturedReading(reading,replacing: true,expectedReplacements: replacements)
+                        meta.fieldReceipt?.confirm(recordId: reading.id,store: "quick_history",superseded: oldIds)
+                    } catch { return false }
                     rescan = nil
                     return true
                 },
@@ -1168,10 +1209,14 @@ public struct FieldLogScreen: View {
                 },
                 projectID: nil,
                 treeNumber: request.treeNumber,
+                quickPlotID: request.plotID,
+                fieldTarget: rescanTarget,
+                fieldTargetLocked: true,
+                allowsFieldTargetSelection: false,
                 // Seed the species chip from the row being re-measured, as
                 // Android does.
                 initialSpeciesCode: request.speciesCode,
-                onEditPlot: { rescanPlotSetup = true })
+                onEditPlot: nil)
                 .environmentObject(history)
                 .environmentObject(settings)
         }
@@ -1313,7 +1358,7 @@ public struct FieldLogScreen: View {
         HStack(spacing: ForestixSpace.xs) {
             Image(systemName: "exclamationmark.triangle")
                 .foregroundStyle(ForestixPalette.confidenceWarn)
-            Text("Log nearly full. Export soon to free space.")
+            Text("Large log. Export a backup. Older measurements are retained.")
                 .font(ForestixType.caption)
                 .foregroundStyle(ForestixPalette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1546,6 +1591,7 @@ public struct FieldLogRescan: Identifiable, Equatable {
     /// re-based" mark, so a re-measure that dropped it would put a repaired
     /// truth back in front of the repair.
     public let truthUnit: String?
+    public var sourceEntryIds: [UUID] = []
 }
 
 // MARK: - New tree
@@ -2833,7 +2879,7 @@ private struct FieldLogDetailForm: View {
                     // come back without the unit that says so.
                     truth: current?.truth,
                     truthSource: current?.truthSource,
-                    truthUnit: current?.truthUnit))
+                    truthUnit: current?.truthUnit,sourceEntryIds: row.entries.map(\.id)))
             }
         }
     }
@@ -3100,13 +3146,6 @@ private struct FieldLogDetailForm: View {
         // and the same false claim the cruise form used to make. A reading with
         // no capture behind it (`isTypedReading`) has no grade, and the row
         // says so with the em dash it uses for every ungraded measurement.
-        TreeFormRows.confidence(
-            label: kind == .dbh ? TreeFormWords.dbhConfidence
-                                : TreeFormWords.heightConfidence,
-            rawTier: entry.flatMap { $0.isTypedReading ? nil : $0.confidenceRaw },
-            identifier: "\(identifier)ConfidenceChip") {
-            explaining = explainer
-        }
     }
 
     /// The diameter and height editors, opened from their own rows.

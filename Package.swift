@@ -171,7 +171,8 @@ let package = Package(
         .testTarget(
             name: "ExportTests",
             dependencies: ["Export", "Models", "Geo", "Common", "InventoryEngine"],
-            path: "Tests/ExportTests"
+            path: "Tests/ExportTests",
+            resources: [.copy("Fixtures")]
         ),
         .testTarget(
             name: "SensorsTests",
@@ -202,6 +203,7 @@ let package = Package(
             ],
             path: "Tests/UIFlowTests"
         ),
+        .testTarget(name: "CaptureRuntimeTests",dependencies: ["UI","Persistence","Sensors","Models","Common"],path: "Tests/CaptureRuntimeTests"),
         .testTarget(
             name: "UISnapshotTests",
             dependencies: [

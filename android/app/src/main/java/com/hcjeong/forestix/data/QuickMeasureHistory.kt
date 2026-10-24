@@ -74,17 +74,32 @@ class QuickMeasureHistory private constructor(
 
     // MARK: Mutations -------------------------------------------------------
 
+    /** Query Room, not a potentially stale or capacity-limited UI cache. */
+    suspend fun durableResultProofs(id:String,including:List<String> = emptyList()):List<com.hcjeong.forestix.data.fieldstudy.FieldExportApplicationResult> = withContext(Dispatchers.IO){
+        dao.resultSaveRowsForIds((listOf(id)+including).distinctBy{it.lowercase()}).map{row->
+            com.hcjeong.forestix.data.fieldstudy.FieldResultSaveIntent.quickProof(row.id,row.kind,row.value,row.measurementId)
+                ?:throw com.hcjeong.forestix.data.fieldstudy.FieldStudyException("invalid","Quick proof kind")}
+    }
+
     fun append(entry: QuickMeasureEntry) {
         scope.launch {
             dao.upsertEntry(EntryRow.from(entry))
-            // Enforce capacity: trim oldest beyond cap.
-            val all = dao.allEntries()
-            if (all.size > capacity) {
-                all.drop(capacity).forEach { dao.deleteEntry(it.id) }
-            }
+            // The advisory threshold must never delete original field rows.
             _entries.value = dao.allEntries().map { it.toDomain() }
             recomputeCapacity()
         }
+    }
+    /** Capture acceptance awaits the Room transaction; failures retain the
+     * on-screen result and do not stamp accepted-save timing. */
+    suspend fun captureReplacementSnapshots(entry:QuickMeasureEntry,replacing:Boolean):List<com.hcjeong.forestix.data.fieldstudy.FieldQuickReplacementSnapshot> = withContext(Dispatchers.IO){
+        if(!replacing)emptyList()else QuickCaptureReplacement.snapshots(QuickCaptureReplacement.rows(dao.allEntries(),EntryRow.from(entry),true,defaultPlotID()?.toString()))
+    }
+    suspend fun saveCapturedReading(entry:QuickMeasureEntry,replacing:Boolean=false,
+        expectedReplacements:List<com.hcjeong.forestix.data.fieldstudy.FieldQuickReplacementSnapshot>?=null):List<String> = withContext(Dispatchers.IO){
+        val superseded=dao.saveCapturedEntry(EntryRow.from(entry.identifyingMeasurement()),replacing,defaultPlotID()?.toString(),capacity,expectedReplacements)
+        _entries.value=dao.allEntries().map{it.toDomain()};recomputeCapacity()
+        // Preserve old photographs as replacement provenance.
+        superseded.map{it.id}
     }
 
     fun delete(id: UUID) {
@@ -165,7 +180,7 @@ class QuickMeasureHistory private constructor(
         for (row in dao.allEntries()) {
             val e = row.toDomain()
             val value = attachments[e.id] ?: continue
-            if (e.truth != null) continue
+            if (!e.allowsLegacyInference || e.truth != null) continue
             dao.upsertEntry(
                 EntryRow.from(e.settingTruth(value, TruthSource.CAPTURE.raw)))
             changed++
@@ -197,7 +212,7 @@ class QuickMeasureHistory private constructor(
         for (row in dao.allEntries()) {
             val e = row.toDomain()
             val r = repairs[e.id] ?: continue
-            if (e.truthUnit != null) continue
+            if (!e.allowsLegacyInference || e.truthUnit != null) continue
             val stored = e.truth ?: continue
             if (abs(stored - r.before) > truthValueEpsilon) continue
             dao.upsertEntry(
@@ -232,18 +247,10 @@ class QuickMeasureHistory private constructor(
                     it.treeNumber == tree && (it.plotID ?: default) == plot
             }
             superseded.forEach { old ->
-                old.photoPath?.let { name ->
-                    File(File(appContext.filesDir, "measure-photos"), name).delete()
-                }
                 dao.deleteEntry(old.id.toString())
             }
             dao.upsertEntry(EntryRow.from(entry))
-            // Same cap as `append` — a replacement that adds a row (the tree
-            // had no reading of this kind yet) can still push past it.
-            val all = dao.allEntries()
-            if (all.size > capacity) {
-                all.drop(capacity).forEach { dao.deleteEntry(it.id) }
-            }
+            // Retain all unrelated rows, including those beyond the UI warning threshold.
             _entries.value = dao.allEntries().map { it.toDomain() }
             recomputeCapacity()
         }
@@ -492,6 +499,9 @@ class QuickMeasureHistory private constructor(
 
     // MARK: Export ----------------------------------------------------------
 
+    /// Native persisted rows, not the capped Compose cache. Read transaction only.
+    suspend fun fieldStudySnapshot():FieldQuickExportSnapshot = withContext(Dispatchers.IO){dao.fieldStudySnapshot()}
+
     suspend fun exportCSV(): Uri? = withContext(Dispatchers.IO) {
         val entries = _entries.value
         if (entries.isEmpty()) return@withContext null
@@ -499,10 +509,11 @@ class QuickMeasureHistory private constructor(
         writeExport("quick-measure-${stamp()}.csv", bytes)
     }
 
-    suspend fun exportBundle(logRule: LogRule): Uri? = withContext(Dispatchers.IO) {
+    suspend fun exportBundle(logRule: LogRule, country: com.hcjeong.forestix.common.Country = com.hcjeong.forestix.common.Country.UNITED_STATES): Uri? = withContext(Dispatchers.IO) {
         val entries = _entries.value
         if (entries.isEmpty()) return@withContext null
-        val bytes = QuickMeasureExport.buildBundleZip(entries, _plots.value, logRule)
+        val bytes = QuickMeasureExport.buildBundleZip(entries, _plots.value, logRule,
+            includeBoardFeet = country != com.hcjeong.forestix.common.Country.INTERNATIONAL)
         writeExport("quick-measure-bundle-${stamp()}.zip", bytes)
     }
 

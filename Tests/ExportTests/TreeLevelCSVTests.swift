@@ -8,6 +8,15 @@ import Models
 
 final class TreeLevelCSVTests: XCTestCase {
 
+    func testRegisteredSpeciesNamesAreExportedAlongsideStableCode() throws {
+        let s = try SpeciesRegistration.make(commonName: "Synthetic \"oak\", A", scientificName: "Testus alpha", existing: [])
+        var t = try XCTUnwrap(ExportFixtures.trees().first); t.speciesCode = s.code
+        let csv = CSVExporter.treesCSV(trees: [t], species: [s.unconfigured])
+        XCTAssertTrue(csv.contains("species_common_name,species_scientific_name"))
+        XCTAssertTrue(csv.contains("\"Synthetic \"\"oak\"\", A\",Testus alpha"))
+        XCTAssertTrue(csv.contains(s.code))
+    }
+
     func testTreeCsvHeaderAndRowCount() {
         let trees = ExportFixtures.trees()
         let csv = CSVExporter.treesCSV(trees: trees)
@@ -41,15 +50,12 @@ final class TreeLevelCSVTests: XCTestCase {
     func testSoftDeletedTreeHasDeletedAtPopulated() {
         let trees = ExportFixtures.trees()
         let csv = CSVExporter.treesCSV(trees: trees)
-        // Exactly one tree in the fixture is soft-deleted, so the last
-        // column of exactly one data row should be a non-empty ISO date.
+        // deleted_at precedes the two identity and two species-name columns.
         let lines = csv.components(separatedBy: "\r\n")
             .filter { !$0.isEmpty }
             .dropFirst()  // header
         let populated = lines.filter { line in
-            // Last cell — look for a trailing cell of form "...,2023..."
-            // where the trailing cell is the ISO 8601 timestamp.
-            line.range(of: #",\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"#,
+            line.range(of: #",\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z,,,,$"#,
                        options: .regularExpression) != nil
         }
         XCTAssertEqual(populated.count, 1,

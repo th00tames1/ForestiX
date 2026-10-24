@@ -21,7 +21,7 @@
 // ship, both carry the `export_status` column that says which rule put the row
 // where it is, and the on-disk log is not touched by any of it.
 //
-// THE JOIN, AND WHY IT IS A HEURISTIC. A research row identifies itself by
+// THE LEGACY JOIN, AND WHY IT IS A HEURISTIC. An unidentified row uses
 // `timestamp_iso`, `measure_type`, `tree_id` (a tree NUMBER, not a reading id)
 // and `measured_value`. There is NO reading id in the schema and no plot
 // column, so a row cannot be joined to the reading it was written for; it can
@@ -147,6 +147,8 @@ object ResearchExport {
         val createdAt: Long,
         val truth: Double?,
         val truthUnit: String?,
+        val id: String? = null,
+        val measurementId: String? = null,
     )
 
     /// Every row is in exactly one of the first four counts, so [total] is the
@@ -182,6 +184,7 @@ object ResearchExport {
     fun classify(records: List<List<String>>, readings: List<Reading>): Classified? {
         val header = records.firstOrNull() ?: return null
         val idx = Index(header)
+        val identifiedIds=records.drop(1).map{cell(it,idx.measurementId).lowercase()}.filter{it.isNotEmpty()}.toSet()
         // Live readings that name a tree, grouped by the only key a row can
         // offer. A reading with no tree number can never be matched to a row
         // and is simply not in the index. Readings are held by INDEX, not by
@@ -189,6 +192,7 @@ object ResearchExport {
         // is taken" — see [claim].
         val groups = HashMap<GroupKey, MutableList<Int>>()
         readings.forEachIndexed { i, r ->
+            if(r.measurementId!=null||r.id?.lowercase() in identifiedIds)return@forEachIndexed
             val tree = r.treeNumber ?: return@forEachIndexed
             groups.getOrPut(GroupKey(r.kind, tree)) { ArrayList() }.add(i)
         }
@@ -206,6 +210,7 @@ object ResearchExport {
                 Row(
                     index = i,
                     cells = cells,
+                    measurementId = cell(cells,idx.measurementId).takeIf{it.isNotEmpty()}?.lowercase(),
                     key = tree?.let { GroupKey(cell(cells, idx.type), it) },
                     measured = TruthInput.parse(cell(cells, idx.measured)),
                     stamp = TruthBackfill.parseIso(cell(cells, idx.timestamp)),
@@ -214,11 +219,23 @@ object ResearchExport {
         }
 
         val claimed = claim(rows, readings, groups)
+        val identityCounts=rows.mapNotNull{it.measurementId}.groupingBy{it}.eachCount()
 
         val kept = ArrayList<List<String>>()
         val heldBack = ArrayList<List<String>>()
         val counts = Counts()
         for (row in rows) {
+            val identity=row.measurementId
+            if(identity!=null){
+                val matches=readings.filter{r->r.id?.lowercase()==identity&&
+                    (r.measurementId==null||r.measurementId.equals(r.id,true))&&
+                    r.kind==cell(row.cells,idx.type)&&row.measured?.let{abs(it-r.value)<=VALUE_EPSILON}==true}
+                val uuid=runCatching{java.util.UUID.fromString(identity).toString()==identity}.getOrDefault(false)
+                val live=uuid&&matches.size==1&&identityCounts[identity]==1
+                kept.add(row.cells+if(live)Status.LIVE.raw else Status.UNCLASSIFIED.raw)
+                if(live)counts.live++ else counts.unclassified++
+                continue
+            }
             when (val v = verdict(row, claimed, readings, groups, idx)) {
                 is Verdict.Plain -> {
                     // Plain is only ever LIVE or UNCLASSIFIED — the other three
@@ -247,6 +264,7 @@ object ResearchExport {
     private class Row(
         val index: Int,
         val cells: List<String>,
+        val measurementId: String?,
         val key: GroupKey?,
         val measured: Double?,
         val stamp: Long?,
@@ -275,6 +293,7 @@ object ResearchExport {
         val error = header.indexOf("error")
         val unit = header.indexOf("truth_unit")
         val timestamp = header.indexOf("timestamp_iso")
+        val measurementId = header.indexOf("measurement_id")
     }
 
     private fun cell(row: List<String>, i: Int): String =
@@ -303,6 +322,7 @@ object ResearchExport {
         class Pair(val row: Int, val reading: Int, val delta: Double)
         val pairs = ArrayList<Pair>()
         for (row in rows) {
+            if(row.measurementId!=null)continue
             val key = row.key ?: continue
             val measured = row.measured ?: continue
             val candidates = groups[key] ?: continue
@@ -426,7 +446,7 @@ object ResearchExport {
     fun notes(c: Counts): String {
         val sb = StringBuilder(summary(c)).append("\n\n")
         sb.append("export_status values\n")
-        sb.append("  live              a reading with this kind, tree and value is in the field log\n")
+        sb.append("  live              exact UUID/value is present; legacy matches also agree on truth\n")
         sb.append("  corrected         matched, but the field log's ground truth differs; true_value,\n")
         sb.append("                    error and truth_unit here are the field log's, and the row as\n")
         sb.append("                    recorded is in $HELD_BACK_FILE_NAME as superseded-truth\n")
@@ -436,7 +456,9 @@ object ResearchExport {
         sb.append("  superseded        the tree still has a LATER live reading of this kind and this\n")
         sb.append("                    value is not it: a retake or a delete-and-remeasure\n")
         sb.append("  superseded-truth  the as-recorded copy of a corrected row\n\n")
-        sb.append("The research log carries no reading id and no plot, so rows are matched on\n")
+        sb.append("Rows with measurement_id use exact UUID matching only and retain their original cells.\n")
+        sb.append("Missing, malformed or duplicate IDs remain unclassified; no time/value fallback is used.\n")
+        sb.append("Legacy rows carry no reading id and no plot, so only those rows are matched on\n")
         sb.append("measure_type, tree_id, measured_value and timestamp_iso only. That join is a\n")
         sb.append("heuristic: superseded is asserted only on the positive evidence above, and\n")
         sb.append("everything else stays unclassified rather than being guessed into a bucket.\n")
@@ -478,7 +500,7 @@ object ResearchExport {
     fun readings(entries: List<QuickMeasureEntry>): List<Reading> =
         entries.map {
             Reading(it.kind.raw, it.treeNumber, it.value, it.createdAt,
-                it.truth, it.truthUnit)
+                it.truth, it.truthUnit,it.id.toString(),it.measurementId)
         }
 
     /// What one export produced: the file to share (null when nothing was

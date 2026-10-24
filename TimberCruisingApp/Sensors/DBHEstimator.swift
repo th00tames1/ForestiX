@@ -1345,8 +1345,8 @@ public enum DBHEstimator {
 
         // The neighbouring rows grade boundary consistency only. The displayed
         // guide span and the committed value use this measurement row's actual
-        // boundaries, full-span median and the same correction as Adjust/AI.
-        guard let (diameterCm, sampledDepth) = BoundaryAlignment.fullSpanSample(
+        // boundaries, central-80% median and the same correction as Adjust/AI.
+        guard let (diameterCm, sampledDepth) = BoundaryAlignment.sampledDepth(
             width: walkLength, left: Double(extent.left), right: Double(extent.right), focal: focal,
             depthAt: { idx in
                 let (x, y) = pixelCoords(axis: guideAxis, idx: idx)
@@ -1834,9 +1834,9 @@ public enum DBHEstimator {
     /// it is the same at every size.
     static let guideStripDepthBudgetM: Float = 0.80
 
-    /// Historical middle-half sampler's inversion. Live full-span measurement
-    /// uses `BoundaryAlignment.fullSpanDiameterCm`; do not pair this coefficient
-    /// with a full-span median. Retained for old synthetic/legacy calculations.
+    /// Historical middle-half sampler's inversion. Live central-80% measurement
+    /// uses `BoundaryAlignment.sampledDiameterCm`; do not pair this coefficient
+    /// with the live median. Retained for old synthetic/legacy calculations.
     /// A stem's diameter from the width of its silhouette.
     ///
     /// THE EDGES ARE TANGENT POINTS, NOT THE ENDS OF A DIAMETER. Sight lines
@@ -1970,7 +1970,7 @@ public enum DBHEstimator {
     }
 
     /// Diameter from the manual or AI-assisted span in depth-grid coordinates.
-    /// Uses the full-span valid-depth median, the focal component along the
+    /// Uses the central-80% valid-depth median, the focal component along the
     /// guide axis, and the cylindrical surface-corrected tangent relation.
     /// The central-half depth helpers above remain preview-quality probes.
     public static func bracketChordFit(
@@ -1988,15 +1988,15 @@ public enum DBHEstimator {
         let widthPx = g.widthPx
         let iLo = g.iLo, iHi = g.iHi
 
-        // Both guide-placement modes use full-span median and its paired
-        // cylindrical surface correction (estimator epoch 7).
+        // Both guide-placement modes use central-80% median and its paired
+        // cylindrical surface correction (estimator epoch 9).
         let isColumn: Bool, fixed: Int
         switch guideAxis { case .row(let y): isColumn = false; fixed = y
         case .col(let x): isColumn = true; fixed = x }
         let walkWidth = isColumn ? frame.height : frame.width
         let walkHeight = isColumn ? frame.width : frame.height
         guard fixed >= 0, fixed < walkHeight,
-              let (diameterCm,z) = BoundaryAlignment.fullSpanSample(
+              let (diameterCm,z) = BoundaryAlignment.sampledDepth(
                 width:walkWidth,left:lo*Double(walkWidth),right:hi*Double(walkWidth),
                 focal:Double(frame.intrinsics[isColumn ? 1:0,isColumn ? 1:0]),
                 depthAt: { x in Double(frame.depth(atX:isColumn ? fixed:x,y:isColumn ? x:fixed)) })

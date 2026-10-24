@@ -100,7 +100,7 @@ data class SettingsSnapshot(
     /// exists and a cruiser who prefers automatic edges gets it back on the
     /// next scan without hunting for a Settings row. Mirror of iOS
     /// tc.dbhEdgeAdjustDefault.
-    val dbhEdgeAdjustDefault: Boolean = true,
+    val dbhEdgeAdjustDefault: Boolean = false,
     /// HALF the bracket width, as a fraction of the view's walk axis, so a
     /// bracket set on one tree opens at the same width on the next.
     ///
@@ -269,7 +269,7 @@ class AppSettings(private val context: Context) {
             logRule = LogRule.fromRaw(p[Keys.logRule] ?: "scribner"),
             dbhMeasurementMethod = DBHMeasurementMethod.fromRaw(p[Keys.dbhMethod]),
             dbhChordAlgorithm = p[Keys.dbhChordAlgorithm] ?: "silhouette",
-            dbhEdgeAdjustDefault = p[Keys.dbhEdgeAdjustDefault] ?: true,
+            dbhEdgeAdjustDefault = p[Keys.dbhEdgeAdjustDefault] ?: false,
             dbhBracketHalfWidth = clampBracketHalfWidth(
                 p[Keys.dbhBracketHalfWidth] ?: DEFAULT_BRACKET_HALF_WIDTH),
             // Anything unrecognised falls back to the satellite default.

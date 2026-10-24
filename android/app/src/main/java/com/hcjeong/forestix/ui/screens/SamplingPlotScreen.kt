@@ -79,6 +79,7 @@ import com.hcjeong.forestix.ar.Vec3
 
 @Composable
 fun SamplingPlotScreen(nav: NavController) {
+    val back = com.hcjeong.forestix.ui.rememberSafeBack(nav)
     val env = LocalAppEnvironment.current
     val context = LocalContext.current
     val controller = ArSessionHub.controller
@@ -174,7 +175,7 @@ fun SamplingPlotScreen(nav: NavController) {
         OutsideFlashOverlay(isOutside)
         if (!placed) CenterCrosshair(Modifier.align(Alignment.Center))
 
-        MeasureBackButton { nav.popBackStack() }
+        MeasureBackButton(onClick = back)
 
         // Top radius slider — full-width card below the floating back row
         // (16 top inset + 44 button + 8 gap ⇒ top 68), iOS topControls.
@@ -312,7 +313,7 @@ fun SamplingPlotScreen(nav: NavController) {
                         env.history.append(entry)
                         ArSessionHub.linkQuickEntry(entry.id)
                     }
-                    nav.popBackStack()
+                    back()
                 }
             }
         }

@@ -7,6 +7,20 @@
 
 package com.hcjeong.forestix.ui.screens.height
 
+import com.hcjeong.forestix.ui.screens.FieldStudyCameraTargets
+import com.hcjeong.forestix.ui.screens.FieldTargetSwitchPresentation
+import com.hcjeong.forestix.ui.screens.switchFieldQuickTarget
+import com.hcjeong.forestix.data.fieldstudy.FieldTargetSwitchCoordinator
+import com.hcjeong.forestix.ui.screens.rememberFieldCaptureCoordinator
+import com.hcjeong.forestix.ui.screens.FieldCaptureWriteWarning
+import com.hcjeong.forestix.ui.screens.FieldScanIdentityBadge
+import com.hcjeong.forestix.ui.screens.FieldReferencePeek
+import com.hcjeong.forestix.data.fieldstudy.FieldAIProvenance
+import com.hcjeong.forestix.data.fieldstudy.FieldRawStatus
+import com.hcjeong.forestix.data.fieldstudy.FieldStudyKind
+import com.hcjeong.forestix.data.fieldstudy.FieldInventoryReplacementSnapshot
+import androidx.activity.compose.BackHandler
+
 // MONOTONIC, unlike the `System.currentTimeMillis()` the raw-capture trail
 // stamps its samples with: the pose-speed gate divides by an elapsed time, and
 // a wall clock that a network sync steps backwards would read as a jump.
@@ -24,6 +38,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -75,6 +90,9 @@ import com.hcjeong.forestix.sensors.HeightEstimator
 import com.hcjeong.forestix.sensors.HeightMethod
 import com.hcjeong.forestix.sensors.HeightResult
 import com.hcjeong.forestix.sensors.RawCaptureStore
+import com.hcjeong.forestix.sensors.RawCaptureEvidence
+import com.hcjeong.forestix.sensors.RawCapturedResult
+import com.hcjeong.forestix.sensors.RawCameraJPEG
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hcjeong.forestix.ui.PendingTreeNumber
 import com.hcjeong.forestix.ui.Routes
@@ -94,7 +112,6 @@ import com.hcjeong.forestix.ui.screens.MeasureValuePill
 import com.hcjeong.forestix.ui.screens.PlotPinCentreCard
 import com.hcjeong.forestix.ui.screens.rememberPlotPinCentreOffer
 import com.hcjeong.forestix.ui.screens.RawCaptureBadge
-import com.hcjeong.forestix.ui.screens.RawCaptureOffNotice
 import com.hcjeong.forestix.ui.screens.RawCaptureStatus
 import com.hcjeong.forestix.ui.screens.RawCaptureStrings
 import com.hcjeong.forestix.ui.screens.ResearchFieldsRow
@@ -254,9 +271,12 @@ fun HeightScanScreen(
     treeOverride: Int? = null,
     chainedFromDiameter: Boolean = false,
 ) {
+    val back = com.hcjeong.forestix.ui.rememberSafeBack(nav)
     val env = LocalAppEnvironment.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val fieldTargetSwitch=remember(scope){FieldTargetSwitchCoordinator(scope)}
+    FieldTargetSwitchPresentation(fieldTargetSwitch)
     // Shared app-scoped AR session (world coordinates survive navigation,
     // and the sampling plot's anchor renders here as a subdued overlay).
     val controller = ArSessionHub.controller
@@ -280,6 +300,17 @@ fun HeightScanScreen(
     // the active project's VIO drift fraction when launched from the
     // Add-Tree flow (iOS injects it into HeightScanViewModel).
     val calibration by env.activeScanCalibration.collectAsStateWithLifecycle()
+    val fieldCapture = rememberFieldCaptureCoordinator(FieldStudyKind.HEIGHT, calibration, mapOf(
+        "application.project_id" to (CruiseCapture.target?.projectId?.toString() ?: ""),
+        "application.plot_id" to (CruiseCapture.target?.plotId?.toString()
+            ?: pendingLock?.plotID?.toString() ?: env.history.activePlotID.value?.toString().orEmpty()),
+        "application.tree_number" to pendingTree.toString(),
+    ),targetOverride=pendingLock?.fieldTarget,useGlobalTarget=CruiseCapture.isActive&&pendingLock?.fieldTargetLocked!=true,uiFlow=pendingLock?.uiFlow,scopeOverride=pendingLock?.fieldScope)
+    var accepting by remember { mutableStateOf(false) }
+    DisposableEffect(pendingLock?.fieldTarget?.id){
+        onDispose{pendingLock?.fieldTarget?.id?.let{id->if(env.fieldStudy.state.value.selectedTargetId==id)env.fieldStudy.selectTarget(null)}}
+    }
+    BackHandler(enabled = accepting) { /* Wait for the durable application save. */ }
     val type = Forestix.type
 
     var stage by remember { mutableStateOf(Stage.ANCHOR) }
@@ -415,8 +446,8 @@ fun HeightScanScreen(
     // them, so an old bundle without them still re-runs unchanged.
     var baseAimFrame by remember { mutableStateOf<ArDepthFrame?>(null) }
     var topAimFrame by remember { mutableStateOf<ArDepthFrame?>(null) }
-    var baseAimRgb by remember { mutableStateOf<ByteArray?>(null) }
-    var topAimRgb by remember { mutableStateOf<ByteArray?>(null) }
+    var baseAimRgb by remember { mutableStateOf<RawCameraJPEG?>(null) }
+    var topAimRgb by remember { mutableStateOf<RawCameraJPEG?>(null) }
     // Keep the shared controller's raw-depth arm on for the whole height
     // session while recording, so acquireDepthFrame() at the base/top tap
     // carries the native u16 grid to serialize. Nothing else in the height
@@ -495,14 +526,13 @@ fun HeightScanScreen(
     // degrades gracefully. The JPEG is written to a throwaway cache file (the
     // only sink captureCameraJpeg offers), read into memory, then deleted — so
     // nothing lingers and there is no temp-file lifecycle to race.
-    fun captureAim(): Pair<ArDepthFrame?, ByteArray?> {
+    fun captureAim(): Pair<ArDepthFrame?, RawCameraJPEG?> {
         if (!rawCaptureArmed) return null to null
         val frame = controller.acquireDepthFrame()
         val rgb = try {
             val tmp = File.createTempFile("height_aim_", ".jpg", context.cacheDir)
-            val bytes = if (controller.captureCameraJpeg(tmp)) tmp.readBytes() else null
-            tmp.delete()
-            bytes
+            try { controller.captureCameraJpegMetadata(tmp)?.let { RawCameraJPEG(tmp.readBytes(),it) } }
+            finally { tmp.delete() }
         } catch (_: Throwable) { null }
         return frame to rgb
     }
@@ -819,7 +849,7 @@ fun HeightScanScreen(
     // main thread). Records anchor / base / top geometry, d_h, calibration,
     // and the 5 Hz pose trail; the store re-runs HeightEstimator.estimate
     // from disk for the reproducibility self-check.
-    fun recordRawHeight(r: HeightResult, anchor: Vec3, aBase: Float, aTop: Float) {
+    fun recordRawHeight(id: String, r: HeightResult, anchor: Vec3, aBase: Float, aTop: Float) {
         if (!rawCaptureArmed) return
         // A missing pose used to abort recording in silence. Say which piece
         // is absent — the operator can retake immediately instead of
@@ -836,6 +866,7 @@ fun HeightScanScreen(
                 if (standing == null) "standing" else null,
             ).joinToString("/")
             lastCaptureFailure = "no $missing pose (tracking lost)"
+            fieldCapture.raw(id, FieldRawStatus.FAILED, lastCaptureFailure)
             postRawStatus(RawCaptureStatus(
                 RawCaptureStrings.notSaved(lastCaptureFailure), false))
             return
@@ -850,8 +881,8 @@ fun HeightScanScreen(
         val ctx = RawCaptureStore.CaptureContext(
             mode = if (cruise != null) "cruise" else "quick",
             projectId = cruise?.projectId?.toString(),
-            plotId = cruise?.plotId?.toString() ?: env.history.activePlotID.value?.toString(),
-            treeNumber = cruise?.treeNumber ?: pendingTree,
+            plotId = cruise?.plotId?.toString() ?: pendingLock?.plotID?.toString() ?: env.history.activePlotID.value?.toString(),
+            treeNumber = pendingTree,
             // Same freshness gate as the accept path — a bundle must not
             // claim a position the app would refuse to draw.
             gps = freshFixOrNull(
@@ -870,18 +901,22 @@ fun HeightScanScreen(
         val dropped = trackingDropped
         // Schema-2 aim captures (base/top depth + RGB). Snapshot the temp files
         // now and hand them off; recordHeight copies them into the bundle.
-        val baseAim = RawCaptureStore.HeightAim(baseAimFrame, baseAimRgb)
-        val topAim = RawCaptureStore.HeightAim(topAimFrame, topAimRgb)
-        // Mint the id NOW so Accept has something to attach truth to even if
-        // the write is still running (RawCaptureStore queues edits per id).
-        val id = RawCaptureStore.newBundleId()
+        val baseAim = RawCaptureStore.HeightAim(baseAimFrame, baseAimRgb?.data,baseAimRgb?.metadata)
+        val topAim = RawCaptureStore.HeightAim(topAimFrame, topAimRgb?.data,topAimRgb?.metadata)
+        // Anchor, computed result and bundle keep the same attempt ID.
         lastRawCaptureId = id
         // Aim depth frames are the schema-2 payload; when the recorder was
         // disarmed mid-session (or ARCore gave no depth) they are absent and
         // the bundle silently degrades to schema-1 — flag that, it is exactly
         // the failure the DBH→Height chain used to produce.
         val aimsMissing = baseAimFrame?.rawDepthMm == null || topAimFrame?.rawDepthMm == null
-        scope.launch {
+        val evidence = RawCaptureEvidence(id,resultSeconds = SystemClock.elapsedRealtimeNanos()/1e9,
+            displayedResult = RawCapturedResult(r.heightM.toDouble().takeIf { it.isFinite() },
+                r.sigmaHm?.toDouble()?.takeIf { it.isFinite() && it >= 0 },r.confidence.raw,r.method.raw,HeightEstimator.canAccept(r)),
+            scalars = mapOf("alpha_base_rad" to aBase.toDouble(),"alpha_top_rad" to aTop.toDouble(),
+                "anchor_x" to anchor.x.toDouble(),"anchor_y" to anchor.y.toDouble(),"anchor_z" to anchor.z.toDouble(),
+                "standing_x" to standing.x.toDouble(),"standing_y" to standing.y.toDouble(),"standing_z" to standing.z.toDouble()))
+        env.fieldStudy.launchCaptureEvidence {
             val outcome = RawCaptureStore.recordHeight(
                 context = context,
                 id = id,
@@ -898,7 +933,12 @@ fun HeightScanScreen(
                 ctx = ctx,
                 baseAim = baseAim,
                 topAim = topAim,
+                captureEvidence = evidence,
             )
+            fieldCapture.raw(id, if (outcome.saved) FieldRawStatus.SAVED else FieldRawStatus.FAILED,
+                if (outcome.saved && aimsMissing) "missing_aim_depth_frames" else
+                    outcome.error ?: outcome.replayStatus?.takeUnless { it == "pass" }?.let { "original_input_replay_$it" },outcome.replayValue)
+            if (fieldCapture.currentId != id) return@launchCaptureEvidence
             if (outcome.saved) {
                 lastCaptureFailure = null
                 postRawStatus(
@@ -963,12 +1003,16 @@ fun HeightScanScreen(
     }
 
     fun captureHeight() {
+        if (stage != Stage.ANCHOR && !fieldCapture.continueCapture()) return
         when (stage) {
             Stage.ANCHOR -> {
+                val id = fieldCapture.tryBegin(rawCaptureArmed, aiEnabled = false) ?: return
                 // Gated anchor (locked spec): DepthPoint or ray-facing Plane
                 // within 4 m only. No valid hit → the "+" is INERT — the
                 // status line already shows the locked "Move closer" copy.
-                val hit = controller.screenCenterAnchorHit(ANCHOR_MAX_M) ?: return
+                val hit = controller.screenCenterAnchorHit(ANCHOR_MAX_M) ?: run {
+                    fieldCapture.refuse(id, "no_anchor_hit"); return
+                }
                 // BOTH walk-panel reference values come from the camera pose,
                 // and they are read BEFORE the anchor is placed so a refusal
                 // leaves nothing behind to clean up.
@@ -991,6 +1035,7 @@ fun HeightScanScreen(
                 val d0 = controller.horizontalDistanceTo(hit)
                 if (standing == null || d0 == null) {
                     failure = CAMERA_NOT_READY
+                    fieldCapture.refuse(id, "no_camera_pose")
                     return
                 }
                 // Pin the trunk with a REAL ARCore anchor rather than keeping
@@ -1000,7 +1045,9 @@ fun HeightScanScreen(
                 // every one of those corrections straight into d_h. Refusing
                 // when the anchor can't be created is the honest branch — the
                 // fallback would be exactly the raw point we are replacing.
-                if (!ArSessionHub.placeHeightAnchor(hit)) { failure = ANCHOR_NOT_PLACED; return }
+                if (!ArSessionHub.placeHeightAnchor(hit)) {
+                    failure = ANCHOR_NOT_PLACED; fieldCapture.refuse(id, "anchor_not_placed"); return
+                }
                 failure = null
                 anchorPt = hit
                 anchorLost = false
@@ -1027,6 +1074,7 @@ fun HeightScanScreen(
             }
             Stage.WALKING -> { stage = Stage.AIM_BASE }
             Stage.AIM_BASE -> {
+                val id = fieldCapture.currentId ?: return
                 val sighting = controller.heightCameraSnapshot()
                 val a = sighting?.elevationRad
                 val s = sighting?.position
@@ -1036,14 +1084,21 @@ fun HeightScanScreen(
                 // measure d_h to, so this refuses rather than reusing a stale
                 // point that would still produce a confident-looking number.
                 val anchor = ArSessionHub.heightAnchorWorld()
-                if (anchor == null) { anchorLost = true; failure = ANCHOR_LOST; return }
+                if (anchor == null) {
+                    anchorLost = true; failure = ANCHOR_LOST
+                    fieldCapture.stageRefused(id, "base", "anchor_lost"); return
+                }
                 anchorPt = anchor
                 // A pose that has already run away leaves d_h frozen at a
                 // distance from a world frame nothing stands behind. Same
                 // shape of refusal as the lost anchor, same reason: the stale
                 // number would still produce a confident-looking height.
-                if (poseJumped) { failure = POSE_JUMPED; return }
-                if (a == null || s == null) { failure = CAMERA_NOT_READY; return }
+                if (poseJumped) {
+                    failure = POSE_JUMPED; fieldCapture.stageRefused(id, "base", "pose_jumped"); return
+                }
+                if (a == null || s == null) {
+                    failure = CAMERA_NOT_READY; fieldCapture.stageRefused(id, "base", "no_camera_pose"); return
+                }
                 // Lock the standing pose on the first aim; both angles must
                 // come from the same spot (the §7.2 formula assumes it).
                 failure = null; alphaBase = a
@@ -1076,19 +1131,25 @@ fun HeightScanScreen(
                 stage = Stage.AIM_TOP
             }
             Stage.AIM_TOP -> {
+                val id = fieldCapture.currentId ?: return
                 val sighting = controller.heightCameraSnapshot()
                 val aTop = sighting?.elevationRad
                 // Same rule as the base aim: the live anchor pose or nothing.
                 val anchor = ArSessionHub.heightAnchorWorld()
-                if (anchor == null) { anchorLost = true; failure = ANCHOR_LOST; return }
+                if (anchor == null) {
+                    anchorLost = true; failure = ANCHOR_LOST
+                    fieldCapture.stageRefused(id, "top", "anchor_lost"); return
+                }
                 anchorPt = anchor
                 // Same refusal as the base aim — see it.
-                if (poseJumped) { failure = POSE_JUMPED; return }
+                if (poseJumped) {
+                    failure = POSE_JUMPED; fieldCapture.stageRefused(id, "top", "pose_jumped"); return
+                }
                 // Rebuilt against the anchor just re-read above, so `standing`
                 // and `anchor` are in ONE world frame — see `standingOffset`.
                 val standing = standingNow(); val aBase = alphaBase
                 if (aTop == null || standing == null || aBase == null) {
-                    failure = CAMERA_NOT_READY; return
+                    failure = CAMERA_NOT_READY; fieldCapture.stageRefused(id, "top", "no_camera_pose"); return
                 }
                 failure = null; alphaTop = aTop
                 // Sampled HERE, immediately after the angle and BEFORE the
@@ -1145,6 +1206,8 @@ fun HeightScanScreen(
                     unitSystem = settings.unitSystem,
                 )
                 result = r
+                fieldCapture.finish(id, r.heightM.toDouble(), r.sigmaHm?.toDouble(), HeightEstimator.canAccept(r),
+                    r.rejectionReason, FieldAIProvenance())
                 // THE SHUTTER — here, at the instant the treetop sighting
                 // produced a height and while the phone is still up on the
                 // crown, NOT at Accept (see `heldPhoto`). A height that is not
@@ -1162,7 +1225,7 @@ fun HeightScanScreen(
                 }
                 // Raw-capture: serialize this compute for offline replay
                 // (every compute, accepted or rejected). Off the main thread.
-                recordRawHeight(r, anchor, aBase, aTop)
+                recordRawHeight(id, r, anchor, aBase, aTop)
                 stage = if (r.confidence == ConfidenceTier.RED) Stage.REJECTED else Stage.COMPUTED
             }
             else -> {}
@@ -1171,6 +1234,8 @@ fun HeightScanScreen(
 
     fun resetCrown() { crownStep = CrownStep.NONE; cL = null; cR = null; cT = null; cB = null; crownW = null; crownH = null }
     fun resetAll() {
+        if (accepting) return
+        fieldCapture.currentId?.let { fieldCapture.abandon(it, "retake") }
         // The held frame captions the measurement being thrown away — keeping
         // it would put the OLD aim on the NEW height.
         discardHeldPhoto()
@@ -1204,13 +1269,17 @@ fun HeightScanScreen(
         // aims, out-of-range H, degenerate geometry). The TIER is deliberately
         // not part of this — a red fit is committable, with its reason shown
         // inline, and stays red everywhere it is recorded.
-        if (!HeightEstimator.canAccept(r)) return
+        if (accepting || !HeightEstimator.canAccept(r)) return
+        val measurementId = fieldCapture.currentId ?: return
+        var acceptedResearchFields: Map<String, String>? = null
+        var acceptedCrown: QuickMeasureEntry? = null
         // (No Activity cast here any more — the photo is taken at the top
         // sighting, by `captureHeldPhoto`, and Accept only reads `heldPhoto`.)
         // Cruise tally session (v3): the height leg folds into the Tree row
         // the DBH leg created, then the chain returns to the cruise map —
         // no quick-history entry, no continuation sheet.
         val cruise = CruiseCapture.target
+        val cruiseTreeId = CruiseCapture.heightResultTreeId
         // Snapshot the typed "True H" BEFORE anything async: the truth must
         // survive regardless of whether the bundle write has finished (the
         // store queues edits against the synchronously-minted id) — the old
@@ -1248,10 +1317,11 @@ fun HeightScanScreen(
             if (pendingLock?.replaceExisting == true) lockedPlotID
             else lockedPlotID ?: env.history.activePlotID.value
         truthSaveFailure = null
-        scope.launch {
+        val rawIdAtAccept = lastRawCaptureId
+        suspend fun attachAcceptedRaw() {
             // Stamp operator_accepted on the bundle this Accept confirms
             // (safe while the writer is still running — the store parks it).
-            val rid = lastRawCaptureId
+            val rid = rawIdAtAccept
             if (rid != null) RawCaptureStore.markAccepted(context, rid)
             // Attach the typed ground truth. The input is cleared ONLY once
             // the value is durable (in the manifest, or queued for the
@@ -1327,7 +1397,9 @@ fun HeightScanScreen(
                     }
                 }
             }
-            lastRawCaptureId = null
+            if (lastRawCaptureId == rid) lastRawCaptureId = null
+        }
+        val saveResult: suspend () -> Unit = {
             // The chrome-less snapshot of the AR surface (camera feed + the
             // rendered measurement geometry) was already taken, at the moment
             // the top sighting produced the height (see `heldPhoto`) — Accept
@@ -1352,36 +1424,49 @@ fun HeightScanScreen(
                 // pop, so a failed fold looked identical to a success and the
                 // tree peek quietly kept showing DBH alone. Keep the result on
                 // screen and name the failure instead; Accept can be retried.
-                val folded = runCatching {
-                    CruiseCapture.recordHeight(env, r, photoPath = photo, fix = fix)
-                }.getOrDefault(false)
+                val treeId = cruiseTreeId ?: error("The cruise tree is unavailable. Retry Accept.")
+                val folded = CruiseCapture.recordHeight(env, r, photoPath = photo, fix = fix, treeId = treeId,
+                    measurementId=fieldCapture.recordedMeasurementId(measurementId),resultMeasurementId=measurementId,
+                    beforeSave={tree,previous->fieldCapture.prepareResultSave(measurementId,tree.id.toString(),"cruise",tree.heightM!!.toDouble(),
+                        inventoryReplacement=previous?.takeIf{fieldCapture.recordedMeasurementId(measurementId)!=null}?.let(FieldInventoryReplacementSnapshot::from))})
                 if (folded) {
+                    val superseded = env.fieldStudy.state.value.measurements.filter {
+                        it.id != measurementId && it.kind == FieldStudyKind.HEIGHT && it.resultStore == "cruise" &&
+                            it.resultRecordId?.equals(treeId.toString(),true)==true &&
+                            it.selection == com.hcjeong.forestix.data.fieldstudy.FieldSelectionStatus.ACCEPTED
+                    }.map { it.id }
+                    fieldCapture.resultSaved(measurementId, treeId.toString(), "cruise", superseded)
                     // The tree row owns the file now — release it WITHOUT
                     // deleting, so this screen's own disposal (the pop below)
                     // can't take the photo off a saved tree. A failed fold
                     // keeps it held: Accept can be tapped again and the same
                     // crown-moment frame goes with it.
                     heldPhoto = null
+                    runCatching { attachAcceptedRaw() }
+                    acceptedResearchFields?.let { fields -> runCatching { ResearchLog.record(context, fields) } }
                     // One pop, two destinations by construction: in the
                     // diameter → height chain (F10) the tally is directly
                     // underneath, so this drops back onto it already aiming
                     // at the next tree; from the tree peek / heights sheet
                     // Height was pushed from the map, so this returns there
                     // in cruise mode with the new pin and an updated tally.
-                    nav.popBackStack()
+                    back()
                 } else {
                     // Name the tree this SESSION is measuring, not
                     // `CruiseCapture.target` — in the chain the tally has
                     // already advanced its target to the next number, and
                     // `savedTreeName` is tracked beside the row id for exactly
                     // that reason.
-                    failure = "Height NOT saved to " +
+                    val reason = "Height NOT saved to " +
                         TreeLabel.title(CruiseCapture.savedTreeName, pendingTree) +
                         " — the tree row couldn't be updated. Tap Accept again."
+                    failure = reason
+                    fieldCapture.resultSaveFailed(measurementId, reason)
                 }
             } else {
                 val reading =
                     QuickMeasureEntry(
+                        id = java.util.UUID.fromString(measurementId),
                         kind = MeasureKind.HEIGHT, value = r.heightM.toDouble(),
                         // σ null = no uncertainty was derivable. It stays
                         // null in the history rather than becoming a 0 that
@@ -1439,25 +1524,27 @@ fun HeightScanScreen(
                 // A re-measure launched from the field log TAKES THE PLACE of
                 // the reading it was launched from — appending would leave the
                 // superseded number invisible in the log but still in the CSV.
-                if (pendingLock?.replaceExisting == true) {
-                    env.history.replaceReading(reading)
-                } else {
-                    env.history.append(reading)
-                }
+                val replacements=env.history.captureReplacementSnapshots(reading,pendingLock?.replaceExisting==true)
+                fieldCapture.prepareResultSave(measurementId,reading.id.toString(),"quick_history",reading.value,replacements)
+                val superseded = env.history.saveCapturedReading(reading, pendingLock?.replaceExisting == true,replacements)
+                fieldCapture.resultSaved(measurementId, reading.id.toString(), "quick_history", superseded)
                 // The reading owns the file now — release it WITHOUT deleting,
                 // so the disposal the pop below triggers can't take the photo
                 // off a saved reading.
                 heldPhoto = null
+                acceptedCrown?.let { env.history.append(it) }
+                runCatching { attachAcceptedRaw() }
+                acceptedResearchFields?.let { fields -> runCatching { ResearchLog.record(context, fields) } }
                 // Quick measure saved — no continuation prompt (iOS parity);
+                fieldCapture.displayRecord.value?.targetId?.let{id->if(env.fieldStudy.state.value.selectedTargetId==id)env.fieldStudy.selectTarget(null)}
                 // return to the map once the save completes.
-                nav.popBackStack()
+                back()
             }
         }
         if (cruise == null && crownStep == CrownStep.DONE) {
             val w = crownW; val ch = crownH
             if (w != null && ch != null) {
-                env.history.append(
-                    QuickMeasureEntry(
+                acceptedCrown = QuickMeasureEntry(
                         kind = MeasureKind.CROWN, value = w, secondaryValue = ch,
                         sigma = null, confidenceRaw = "green", method = "ar.crown.dh",
                         treeNumber = pendingTree,
@@ -1466,7 +1553,6 @@ fun HeightScanScreen(
                         // Same plot as the height this crown was measured
                         // inside — see `targetPlotID`.
                         plotID = targetPlotID,
-                    )
                 )
             }
         }
@@ -1514,7 +1600,7 @@ fun HeightScanScreen(
             // The tree this capture is ALREADY locked to, not a box the
             // cruiser had to retype. Same value the raw-capture bundle and the
             // saved reading carry, so the three join.
-            fields["tree_id"] = "${CruiseCapture.target?.treeNumber ?: pendingTree}"
+            fields["tree_id"] = pendingTree.toString()
             // `ownedTrue`, never the bare re-parse — see the owner gate. A
             // stale number here is the worst of the two: the CSV is what the
             // accuracy study reads, and this tree's row would carry an earlier
@@ -1527,9 +1613,19 @@ fun HeightScanScreen(
                 fields["error"] = String.format(Locale.US, "%.2f", r.heightM - t)
                 fields["truth_unit"] = truthUnitAtAccept.raw
             }
-            ResearchLog.record(context, fields)
+            fields["measurement_id"] = measurementId
+            fields["save_event"] = "saved"
+            acceptedResearchFields = fields
             // The field is NOT cleared here any more — the accept coroutine
             // above clears it only once the truth is durably applied.
+        }
+        accepting = true
+        scope.launch {
+            try { saveResult() }
+            catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (cause: Exception) {
+                fieldCapture.resultSaveFailed(measurementId, cause.message ?: "Storage unavailable. Retry Accept.")
+            } finally { accepting = false }
         }
     }
 
@@ -1601,7 +1697,15 @@ fun HeightScanScreen(
             plotOverlay = ArSessionHub.PlotOverlay.SUBDUED,
         )
         crosshairLabel?.let { label -> HeightAimCrosshair(label) }
-        if (!hidingChromeForCapture) MeasureBackButton { nav.popBackStack() }
+        if(!hidingChromeForCapture&&!manualOpen&&!crownActive){
+            FieldStudyCameraTargets(controller,canSelect=stage==Stage.ANCHOR&&!CruiseCapture.isActive&&pendingLock?.fieldTargetLocked!=true,capture=fieldCapture,
+                onSelect=if(CruiseCapture.isActive||pendingLock?.fieldTargetLocked==true)null else {id,label->
+                    fieldTargetSwitch.request(id,label,researchTrueText.isNotEmpty()||metaNote.isNotEmpty()||metaDamage.isNotEmpty()||metaSpecies!=null){
+                        switchFieldQuickTarget(env,nav,id,pendingLock?.plotID?:env.history.activePlotID.value,Routes.HEIGHT,uiFlow=fieldCapture.uiFlow)
+                    }
+                })
+        }
+        if (!hidingChromeForCapture) MeasureBackButton { if (!accepting) back() }
 
         // Plot mini-map — top-right, same row as the GPS badge: the active
         // cruise plot (ring + YOU + measured trees) or the quick sampling
@@ -1625,7 +1729,7 @@ fun HeightScanScreen(
                     CruiseRoutes.editPlot(c.projectId.toString(), c.plotId.toString()))
             }
         } ?: { nav.navigate(Routes.SAMPLING) }
-        if (!hidingChromeForCapture) ScanPlotMiniMap(onEditPlot = onEditPlot)
+        if (!hidingChromeForCapture) ScanPlotMiniMap(onEditPlot = if(pendingLock?.fieldTarget==null&&pendingLock?.fieldTargetLocked!=true)onEditPlot else null)
 
         // Same top strip as the Diameter scan — one row, inset past the
         // system status bar, with the mini-map's width reserved on the
@@ -1654,6 +1758,12 @@ fun HeightScanScreen(
                 storageLow = storageLow,
                 status = rawCaptureStatus,
             )
+            Column(Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top=162.dp),horizontalAlignment=Alignment.CenterHorizontally,
+                verticalArrangement=Arrangement.spacedBy(4.dp)){
+                FieldScanIdentityBadge(fieldCapture,FieldStudyKind.HEIGHT)
+                FieldReferencePeek(fieldCapture,FieldStudyKind.HEIGHT)
+                FieldCaptureWriteWarning(fieldCapture)
+            }
         }
 
         // The developer internals HUD is NOT drawn here any more — same
@@ -1697,7 +1807,7 @@ fun HeightScanScreen(
             } else if (chainedFromDiameter) {
                 {
                     MeasureCircleButton(icon = Icons.Filled.SkipNext, caption = "Skip") {
-                        nav.popBackStack()
+                        if (!accepting) back()
                     }
                 }
             } else {
@@ -1870,6 +1980,7 @@ fun HeightScanScreen(
                     ) {
                         val m = typedM
                         if (m != null && m >= HeightEstimator.MIN_H_M) {
+                            val id = fieldCapture.tryBegin(rawRequested = false, aiEnabled = false, typed = true) ?: return@ForestixProminentButton
                             val r = HeightResult(
                                 heightM = m, dHm = 0f, alphaTopRad = 0f, alphaBaseRad = 0f,
                                 // A typed height has NO propagated uncertainty —
@@ -1881,12 +1992,15 @@ fun HeightScanScreen(
                                 method = HeightMethod.MANUAL_ENTRY, rejectionReason = null,
                             )
                             result = r
+                            fieldCapture.finish(id, m.toDouble(), null, HeightEstimator.canAccept(r), r.rejectionReason,
+                                FieldAIProvenance(reason = "typed_measurement"))
                             failure = null
                             manualOpen = false
                             // A typed height is NOT any recorded compute's
                             // reading — release the bundle id so the accept
                             // can't mark an unrelated capture as accepted.
                             lastRawCaptureId = null
+                            stage = Stage.COMPUTED
                             // iOS submitManualEntry goes straight to
                             // .accepted — record and continue.
                             acceptResult(r)
@@ -2024,7 +2138,6 @@ fun HeightScanScreen(
                             }
                             // Developer mode on but the recorder off: nothing
                             // is being kept for the corpus.
-                            if (!settings.rawCaptureEnabled) RawCaptureOffNotice()
                         }
                     }
                 }
@@ -2061,23 +2174,23 @@ fun HeightScanScreen(
                     ) {
                         // Crown control: start it, or restart it once done.
                         if (crownStep == CrownStep.NONE) {
-                            ForestixWhiteButton("Measure crown", modifier = Modifier.fillMaxWidth()) {
+                            ForestixWhiteButton("Measure crown", modifier = Modifier.fillMaxWidth(), enabled = !accepting) {
                                 crownStep = CrownStep.LEFT
                             }
                         } else if (crownStep == CrownStep.DONE) {
-                            ForestixWhiteButton("Redo crown", modifier = Modifier.fillMaxWidth()) {
+                            ForestixWhiteButton("Redo crown", modifier = Modifier.fillMaxWidth(), enabled = !accepting) {
                                 resetCrown()
                             }
                         }
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            ForestixWhiteButton("Retake", modifier = Modifier.weight(1f)) { resetAll() }
-                            ForestixWhiteButton("Details", modifier = Modifier.weight(1f)) {
+                            ForestixWhiteButton("Retake", modifier = Modifier.weight(1f), enabled = !accepting) { resetAll() }
+                            ForestixWhiteButton("Details", modifier = Modifier.weight(1f), enabled = !accepting) {
                                 showMetadata = true
                             }
                             ForestixProminentButton(
                                 "Accept",
                                 modifier = Modifier.weight(1f),
-                                enabled = result?.let { HeightEstimator.canAccept(it) } == true,
+                                enabled = !accepting && result?.let { HeightEstimator.canAccept(it) } == true,
                             ) {
                                 result?.let { acceptResult(it) }
                             }
@@ -2103,14 +2216,14 @@ fun HeightScanScreen(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        ForestixWhiteButton("Retake", modifier = Modifier.weight(1f)) { resetAll() }
-                        ForestixWhiteButton("Manual", modifier = Modifier.weight(1f)) {
+                        ForestixWhiteButton("Retake", modifier = Modifier.weight(1f), enabled = !accepting) { resetAll() }
+                        ForestixWhiteButton("Manual", modifier = Modifier.weight(1f), enabled = !accepting) {
                             resetAll(); manualOpen = true; manualText = ""
                         }
                         ForestixProminentButton(
                             "Accept",
                             modifier = Modifier.weight(1f),
-                            enabled = result?.let { HeightEstimator.canAccept(it) } == true,
+                            enabled = !accepting && result?.let { HeightEstimator.canAccept(it) } == true,
                         ) {
                             result?.let { acceptResult(it) }
                         }

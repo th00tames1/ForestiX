@@ -55,6 +55,7 @@ fun ForestixScaffold(
     content: @Composable (PaddingValues) -> Unit,
 ) {
     val colors = Forestix.colors
+    val back = com.hcjeong.forestix.ui.rememberSafeBack(nav)
     Scaffold(
         containerColor = colors.canvas,
         topBar = {
@@ -67,7 +68,7 @@ fun ForestixScaffold(
                     )
                 },
                 navigationIcon = {
-                    IconButton(onClick = { nav.popBackStack() }) {
+                    IconButton(onClick = back) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = colors.primary)
                     }
                 },

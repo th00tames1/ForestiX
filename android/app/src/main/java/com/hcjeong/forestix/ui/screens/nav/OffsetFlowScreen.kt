@@ -344,6 +344,7 @@ fun OffsetFlowScreen(
     nav: NavController,
     onDone: (PlotCenterResult) -> Unit = {},
 ) {
+    val back = com.hcjeong.forestix.ui.rememberSafeBack(nav)
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val colors = Forestix.colors
@@ -411,7 +412,7 @@ fun OffsetFlowScreen(
             modifier = Modifier.fillMaxSize(),
         )
 
-        MeasureBackButton { nav.popBackStack() }
+        MeasureBackButton(onClick = back)
 
         Column(
             verticalArrangement = Arrangement.spacedBy(ForestixSpace.md),

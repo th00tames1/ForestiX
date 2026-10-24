@@ -11,16 +11,33 @@ struct ContentView: View {
     // branded splash paints immediately and the environment is constructed
     // on the next run-loop turn.
     @State private var environment: AppEnvironment?
+    @State private var startupError: String?
+    @State private var startupAttempt = 0
+    #if DEBUG && targetEnvironment(simulator)
+    @State private var injectedStartupFailure = false
+    #endif
 
     var body: some View {
         Group {
             if let environment {
                 RootView(environment: environment)
+            } else if let startupError {
+                VStack(spacing: 18) {
+                    Image(systemName: "externaldrive.badge.exclamationmark").font(.largeTitle)
+                    Text("Unable to open saved data").font(.headline)
+                    Text("Measurement is unavailable until storage opens. No temporary store has been substituted. Do not delete or reinstall the app to troubleshoot this error.")
+                        .multilineTextAlignment(.center)
+                    Text(startupError).font(.caption).foregroundStyle(.secondary)
+                    Button("Retry") { self.startupError = nil; startupAttempt += 1 }
+                        .buttonStyle(.borderedProminent).accessibilityIdentifier("startup.retry")
+                }.padding(32)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("startup.storageFailure")
             } else {
                 LaunchSplash()
             }
         }
-        .task {
+        .task(id: startupAttempt) {
             guard environment == nil else { return }
             // One `Task.yield()` is NOT enough here: the continuation can
             // resume before Core Animation commits the splash frame, and
@@ -30,22 +47,35 @@ struct ContentView: View {
             // sleep lets the run loop finish a frame or two first; the
             // splash is static, so the main thread stalling AFTER it has
             // painted is invisible.
-            try? await Task.sleep(for: .milliseconds(120))
+            do { try await Task.sleep(for: .milliseconds(120)) } catch { return }
             // The splash stays up for a MINIMUM of 3 s — long enough to
             // cover the map home's first tile load, so the logo hands off
             // to imagery instead of a canvas-coloured flash of grid.
             let start = ContinuousClock.now
             let built: AppEnvironment
             do {
+                #if DEBUG && targetEnvironment(simulator)
+                // Fault injection exists only in simulator Debug builds. It
+                // never changes a physical device's files or release startup.
+                let fault = ProcessInfo.processInfo.environment["FORESTIX_UI_TEST_STARTUP_FAILURE"]
+                if fault == "always" || (fault == "once" && !injectedStartupFailure) {
+                    injectedStartupFailure = true
+                    throw NSError(domain: "ForestiX.SyntheticPreflight",code: 1,
+                        userInfo: [NSLocalizedDescriptionKey:"Synthetic storage-opening failure"])
+                }
+                #endif
                 built = try AppEnvironment.live()
             } catch {
-                assertionFailure("Failed to initialise live AppEnvironment: \(error)")
-                built = AppEnvironment.preview()
+                // Never make field measurements appear saved in a preview /
+                // in-memory environment after a real persistent-store error.
+                startupError = error.localizedDescription
+                return
             }
             let remaining: Duration = .seconds(3) - start.duration(to: .now)
             if remaining > .zero {
-                try? await Task.sleep(for: remaining)
+                do { try await Task.sleep(for: remaining) } catch { return }
             }
+            guard !Task.isCancelled else { return }
             environment = built
         }
     }

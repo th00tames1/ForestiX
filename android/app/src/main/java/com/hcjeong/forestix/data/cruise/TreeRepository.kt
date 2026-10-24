@@ -15,8 +15,12 @@ import java.util.UUID
 
 interface TreeRepository {
     suspend fun create(t: Tree): Tree
+    suspend fun createIfNumberFree(t:Tree):Tree = throw com.hcjeong.forestix.data.fieldstudy.FieldStudyException("conflict","Conditional inventory creation is unavailable")
     suspend fun read(id: UUID, includeDeleted: Boolean = false): Tree?
+    suspend fun readCurrent(id:UUID,includeDeleted:Boolean=false):Tree?=read(id,includeDeleted)
     suspend fun update(t: Tree): Tree
+    suspend fun replaceIfUnchanged(next:Tree,expected:Tree):Tree = throw com.hcjeong.forestix.data.fieldstudy.FieldStudyException("conflict","Conditional inventory writes are unavailable")
+    suspend fun deleteIfUnchanged(expected:Tree):Unit = throw com.hcjeong.forestix.data.fieldstudy.FieldStudyException("conflict","Conditional inventory undo is unavailable")
 
     /// Soft delete: sets `deletedAt` (and `updatedAt`) to the given
     /// epoch-millis instant (default now).
@@ -39,10 +43,12 @@ interface TreeRepository {
 }
 
 class RoomTreeRepository(private val dao: TreeDao) : TreeRepository {
+    override suspend fun createIfNumberFree(t:Tree):Tree=dao.createIfNumberFree(t)
+    override suspend fun replaceIfUnchanged(next:Tree,expected:Tree):Tree=dao.replaceIfUnchanged(next,expected)
+    override suspend fun deleteIfUnchanged(expected:Tree){dao.deleteIfUnchanged(expected)}
 
     override suspend fun create(t: Tree): Tree {
-        dao.upsert(TreeMapper.apply(t))
-        return t
+        return dao.writeWithMeasurementIdentity(t,false)
     }
 
     override suspend fun read(id: UUID, includeDeleted: Boolean): Tree? {
@@ -52,9 +58,7 @@ class RoomTreeRepository(private val dao: TreeDao) : TreeRepository {
     }
 
     override suspend fun update(t: Tree): Tree {
-        dao.byId(t.id) ?: throw CruiseDataError.NotFound(t.id.toString())
-        dao.upsert(TreeMapper.apply(t))
-        return t
+        return dao.writeWithMeasurementIdentity(t,true)
     }
 
     override suspend fun delete(id: UUID, at: Long) {

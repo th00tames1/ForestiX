@@ -7,6 +7,7 @@ package com.hcjeong.forestix.data
 
 import com.hcjeong.forestix.sensors.LogRule
 import com.hcjeong.forestix.sensors.VolumeConversion
+import com.hcjeong.forestix.common.SpeciesNameLookup
 import java.io.ByteArrayOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -64,6 +65,8 @@ object QuickMeasureExport {
             // live-vs-superseded — so it must be able to see which timestamps
             // are claims about the past.
             "time_source",
+            "measurement_id",
+            "species_common_name", "species_scientific_name",
         )
         val sb = StringBuilder()
         sb.append(headers.joinToString(",") { csv(it) }).append("\r\n")
@@ -99,6 +102,9 @@ object QuickMeasureExport {
                 e.positionRecordedSource ?: "",
                 e.truthRecordedSource ?: "",
                 e.timeRecordedSource,
+                e.measurementId ?: "",
+                e.speciesCode?.let { SpeciesNameLookup.record(it)?.commonName } ?: "",
+                e.speciesCode?.let { SpeciesNameLookup.record(it)?.scientificName } ?: "",
             ).joinToString(",") { csv(it) }
             sb.append(row).append("\r\n")
         }
@@ -111,6 +117,7 @@ object QuickMeasureExport {
         entries: List<QuickMeasureEntry>,
         plots: List<QuickMeasurePlot>,
         logRule: LogRule,
+        includeBoardFeet: Boolean = true,
     ): ByteArray {
         // -- Samples.csv --
         val samples = StringBuilder("id,name,unit,acres,type,baf_ft2_ac,radius_ft,created\r\n")
@@ -128,7 +135,7 @@ object QuickMeasureExport {
         }
 
         // -- Trees.csv (plot x treeNumber) --
-        val trees = StringBuilder("plot_id,plot,tree_number,tree_name,species,damage,note\r\n")
+        val trees = StringBuilder("plot_id,plot,tree_number,tree_name,species,damage,note,species_common_name,species_scientific_name\r\n")
         val byPlotTree = entries.groupBy { "${it.plotID ?: ""}|${it.treeNumber ?: -1}" }
         for ((_, group) in byPlotTree.toSortedMap()) {
             val any = group.first()
@@ -144,6 +151,8 @@ object QuickMeasureExport {
                 listOf(
                     any.plotID?.toString() ?: "", plotName,
                     any.treeNumber?.toString() ?: "", name, species, dmg, note,
+                    SpeciesNameLookup.record(species)?.commonName ?: "",
+                    SpeciesNameLookup.record(species)?.scientificName ?: "",
                 ).joinToString(",") { csv(it) }
             ).append("\r\n")
         }
@@ -155,7 +164,7 @@ object QuickMeasureExport {
         // blank when there is no truth. time_source qualifies "timestamp" and
         // is never blank — "device" for the clock, "typed" for a time set by
         // hand.
-        val stems = StringBuilder("id,plot_id,tree_number,timestamp,dbh_cm,truth_cm,sigma_mm,position,confidence,method,capture_mode,truth_source,time_source\r\n")
+        val stems = StringBuilder("id,plot_id,tree_number,timestamp,dbh_cm,truth_cm,sigma_mm,position,confidence,method,capture_mode,truth_source,time_source,measurement_id\r\n")
         for (e in entries.filter { it.kind == MeasureKind.DBH }) {
             stems.append(
                 listOf(
@@ -166,14 +175,14 @@ object QuickMeasureExport {
                     e.position?.raw ?: "", e.confidenceRaw, e.method,
                     e.captureMode ?: "",
                     e.truthRecordedSource ?: "",
-                    e.timeRecordedSource,
+                    e.timeRecordedSource,e.measurementId ?: "",
                 ).joinToString(",") { csv(it) }
             ).append("\r\n")
         }
 
         // -- Heights.csv (per Height) --
         // "truth_source" then "time_source" appended LAST — see Stems.csv.
-        val heights = StringBuilder("id,plot_id,tree_number,timestamp,height_m,truth_m,sigma_m,confidence,method,truth_source,time_source\r\n")
+        val heights = StringBuilder("id,plot_id,tree_number,timestamp,height_m,truth_m,sigma_m,confidence,method,truth_source,time_source,measurement_id\r\n")
         for (e in entries.filter { it.kind == MeasureKind.HEIGHT }) {
             heights.append(
                 listOf(
@@ -183,7 +192,7 @@ object QuickMeasureExport {
                     e.sigma?.let { fmt(it) } ?: "",
                     e.confidenceRaw, e.method,
                     e.truthRecordedSource ?: "",
-                    e.timeRecordedSource,
+                    e.timeRecordedSource,e.measurementId ?: "",
                 ).joinToString(",") { csv(it) }
             ).append("\r\n")
         }
@@ -211,7 +220,7 @@ object QuickMeasureExport {
             val heightsM = dbhTrees.mapNotNull { it.second }
             val meanH = if (heightsM.isEmpty()) "" else String.format(Locale.US, "%.2f", heightsM.sum() / heightsM.size)
             var bfTotal = 0.0
-            for ((dbh, hOpt) in dbhTrees) {
+            if (includeBoardFeet) for ((dbh, hOpt) in dbhTrees) {
                 val h = hOpt ?: continue
                 val bf = VolumeConversion.boardFeet(dbh, h, logRule) ?: continue
                 bfTotal += bf
@@ -225,7 +234,7 @@ object QuickMeasureExport {
                     String.format(Locale.US, "%.2f", qmd),
                     meanH,
                     if (bfTotal > 0) String.format(Locale.US, "%.0f", bfTotal) else "",
-                    bfPerAcre, logRule.name.lowercase(),
+                    bfPerAcre, if (includeBoardFeet) logRule.name.lowercase() else "",
                 ).joinToString(",") { csv(it) }
             ).append("\r\n")
         }

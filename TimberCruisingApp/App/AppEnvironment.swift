@@ -7,8 +7,11 @@
 // CRUD screens. Phase 2+ will extend this with sensor/AR services.
 
 import Foundation
+import Combine
 import Models
 import Persistence
+import CoreData
+import Sensors
 
 @MainActor
 public final class AppEnvironment: ObservableObject {
@@ -23,9 +26,12 @@ public final class AppEnvironment: ObservableObject {
     public let volumeEquationRepository: any VolumeEquationRepository
     public let hdFitRepository: any HeightDiameterFitRepository
     public let settings: AppSettings
+    public let speciesCatalog: SpeciesCatalogStore
+    private var speciesObservation: AnyCancellable?
     /// Local, project-less DBH / Height log surfaced on the Quick Measure
     /// home. Independent of Core Data — see QuickMeasureHistory.swift.
     public let quickMeasureHistory: QuickMeasureHistory
+    public let fieldStudy: FieldStudyStore
 
     /// Raw Core Data stack — exposed for Phase 7 backup/restore, which
     /// needs to migrate the persistent store file as a whole unit.
@@ -46,7 +52,8 @@ public final class AppEnvironment: ObservableObject {
         hdFitRepository: any HeightDiameterFitRepository,
         settings: AppSettings,
         quickMeasureHistory: QuickMeasureHistory? = nil,
-        coreDataStack: CoreDataStack? = nil
+        coreDataStack: CoreDataStack? = nil,
+        fieldStudy: FieldStudyStore? = nil
     ) {
         self.projectRepository = projectRepository
         self.stratumRepository = stratumRepository
@@ -58,15 +65,27 @@ public final class AppEnvironment: ObservableObject {
         self.volumeEquationRepository = volumeEquationRepository
         self.hdFitRepository = hdFitRepository
         self.settings = settings
+        self.speciesCatalog = SpeciesCatalogStore(repository: speciesRepository)
         self.quickMeasureHistory = quickMeasureHistory ?? QuickMeasureHistory()
         self.coreDataStack = coreDataStack
+        let persistent = coreDataStack?.container.persistentStoreCoordinator.persistentStores
+            .contains(where: { $0.type == NSSQLiteStoreType }) ?? false
+        self.fieldStudy = fieldStudy ?? (persistent ? FieldStudyStore() : FieldStudyStore.ephemeral())
+        self.fieldStudy.attachInventoryUndoRepository(treeRepository)
+        let quickJournal = self.quickMeasureHistory.fieldStudyJournalURL
+        self.fieldStudy.attachResultSaveReader { intent in
+            if intent.expected.store == "quick_history" { return try FieldQuickResultProofReader.read(url: quickJournal,recordIds: [intent.expected.id]+intent.replacementSnapshots.map { $0.result.id }) }
+            return try intent.proof(tree: treeRepository.readCurrent(id: UUID(uuidString: intent.expected.id)!,includeDeleted: true))
+        }
+        speciesObservation = speciesCatalog.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
     }
 
     /// Wrap a shared Core Data stack with its default repositories.
     public convenience init(
         stack: CoreDataStack,
         settings: AppSettings,
-        quickMeasureHistory: QuickMeasureHistory? = nil
+        quickMeasureHistory: QuickMeasureHistory? = nil,
+        fieldStudy: FieldStudyStore? = nil
     ) {
         self.init(
             projectRepository: CoreDataProjectRepository(stack: stack),
@@ -80,7 +99,8 @@ public final class AppEnvironment: ObservableObject {
             hdFitRepository: CoreDataHeightDiameterFitRepository(stack: stack),
             settings: settings,
             quickMeasureHistory: quickMeasureHistory,
-            coreDataStack: stack
+            coreDataStack: stack,
+            fieldStudy: fieldStudy
         )
     }
 
@@ -90,6 +110,10 @@ public final class AppEnvironment: ObservableObject {
     public static func live() throws -> AppEnvironment {
         let stack = try CoreDataStack()
         let env = AppEnvironment(stack: stack, settings: AppSettings.live())
+        Task.detached(priority: .utility) {
+            let issues = RawCaptureStore.recoverPendingOperatorEdits().map { FieldArchiveIssue(file: $0.file,reason: $0.reason) }
+            await env.fieldStudy.reportInfrastructureIssues(issues)
+        }
         do {
             _ = try SeedDataLoader.bootstrapIfNeeded(
                 speciesRepo: env.speciesRepository,
@@ -104,6 +128,7 @@ public final class AppEnvironment: ObservableObject {
         // exports older than a week so Documents/ doesn't silently
         // accumulate months of stale files.
         QuickMeasureHistory.sweepOldExports()
+        env.speciesCatalog.refresh()
         return env
     }
 
@@ -115,7 +140,8 @@ public final class AppEnvironment: ObservableObject {
             return AppEnvironment(
                 stack: stack,
                 settings: AppSettings.ephemeral(),
-                quickMeasureHistory: QuickMeasureHistory.ephemeral())
+                quickMeasureHistory: QuickMeasureHistory.ephemeral(),
+                fieldStudy: FieldStudyStore.ephemeral())
         } catch {
             fatalError("AppEnvironment.preview(): in-memory stack failed: \(error)")
         }

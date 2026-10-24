@@ -192,7 +192,7 @@ object RegionalSpecies {
     fun nameForCode(code: String): String {
         val trimmed = code.trim()
         if (trimmed.isEmpty()) return code
-        return canonicalNames[trimmed.uppercase(Locale.US)] ?: code
+        return SpeciesNameLookup.record(trimmed)?.commonName ?: canonicalNames[trimmed.uppercase(Locale.US)] ?: code
     }
 
     /// Code → common name, built once from all regional presets. First

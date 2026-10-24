@@ -173,18 +173,11 @@ fun ScanMetadataSheet(
 /// ScanMetadataSheet.speciesOptions.
 @Composable
 internal fun rememberSpeciesOptions(): List<Pair<String, String>> {
-    val settings by LocalAppEnvironment.current.settings.state.collectAsStateWithLifecycle()
-    return remember(settings.country, settings.region) {
-        val country = settings.country
-        val base = if (country.hasRegions) {
-            // US: scoped by the selected timber region.
-            val region = Region.fromRaw(settings.region) ?: Region.ALL
-            RegionalSpecies.defaultSpecies(region)
-        } else {
-            // Metric countries (incl. Korea scaffold): single national preset.
-            CountrySpecies.defaultSpecies(country)
-        }
-        base + ("OT" to "Other")
+    val env = LocalAppEnvironment.current
+    val settings by env.settings.state.collectAsStateWithLifecycle()
+    val catalog by env.speciesCatalog.state.collectAsStateWithLifecycle()
+    return remember(settings.country, settings.region, catalog) {
+        env.speciesCatalog.options(settings.country, Region.fromRaw(settings.region)).map { it.code to it.commonName }
     }
 }
 
@@ -219,6 +212,7 @@ internal fun SpeciesPickerField(
     val options = rememberSpeciesOptions()
     var menuOpen by remember { mutableStateOf(false) }
     var typedCodeOpen by remember { mutableStateOf(false) }
+    var browseOpen by remember { mutableStateOf(false) }
 
     val selectedLabel: AnnotatedString = speciesCode?.let { code ->
         options.firstOrNull { it.first == code }
@@ -231,7 +225,7 @@ internal fun SpeciesPickerField(
             // this control (`TreeFormSpeciesRows`): a code nothing answers to
             // reads "Not in this region's list" there. The capture sheets show
             // the bare code on purpose — the cruiser typed it a moment ago.
-            ?: AnnotatedString(code)
+            ?: AnnotatedString(RegionalSpecies.nameForCode(code))
     } ?: AnnotatedString(unspecifiedLabel)
 
     Box(modifier) {
@@ -272,6 +266,7 @@ internal fun SpeciesPickerField(
             )
         }
         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+            DropdownMenuItem(text = { Text("Browse species…") }, onClick = { menuOpen = false; browseOpen = true })
             DropdownMenuItem(
                 text = { Text("— Unspecified —") },
                 onClick = {
@@ -295,6 +290,7 @@ internal fun SpeciesPickerField(
         }
     }
 
+    if (browseOpen) SpeciesSettingsSheet(onDismiss = { browseOpen = false }, onSelect = { onSpeciesCode(it.code) })
     if (typedCodeOpen) {
         var typed by remember { mutableStateOf(speciesCode.orEmpty()) }
         AlertDialog(
@@ -381,7 +377,7 @@ private fun capitalizedTag(raw: String): String =
 internal fun speciesPickerLabel(name: String, code: String, dim: Color): AnnotatedString =
     buildAnnotatedString {
         append(name)
-        withStyle(SpanStyle(color = dim, fontSize = 12.sp)) {
+        if (!code.startsWith("USR-")) withStyle(SpanStyle(color = dim, fontSize = 12.sp)) {
             append(" · $code")
         }
     }

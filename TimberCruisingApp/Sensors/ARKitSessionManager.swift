@@ -721,20 +721,41 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
         guard hasLiveFrame else { return nil }
         return session.currentFrame?.capturedImage
     }
+    public func currentCameraInputSnapshot() -> RawCameraInput? {
+        guard hasLiveFrame,let frame = session.currentFrame else { return nil }
+        let buffer = frame.capturedImage; let k = frame.camera.intrinsics
+        return RawCameraInput(buffer: buffer,metadata: .init(role: "inference_source",file: nil,
+            width: CVPixelBufferGetWidth(buffer),height: CVPixelBufferGetHeight(buffer),cameraFrameSeconds: frame.timestamp,
+            imageSensorSeconds: nil,timeSource: "ar_frame_image_association",intrinsics: (0..<3).flatMap { c in (0..<3).map { r in Double(k[c,r]) } },
+            cameraPose: RawCaptureMatrix.flat(frame.camera.transform),viewToImage: nil,coordinateSpace: "camera_pixels_native",
+            sourceFrameId: "ar_frame_time_bits:"+String(frame.timestamp.bitPattern,radix: 16)))
+    }
 
     public func currentCameraImageJPEG(quality: Double = 0.8) -> Data? {
+        currentCameraImageJPEGSnapshot(quality: quality)?.data
+    }
+
+    /// Image bytes and geometry come from the SAME ARFrame. No ARKit pool buffer escapes.
+    public func currentCameraImageJPEGSnapshot(quality: Double = 0.8) -> RawCameraJPEG? {
         // Same rule as the anchor reads: a pre-run frame's captured image is
         // a photograph of wherever the cruiser was standing before the
         // pause, and it would be filed as this capture's reference RGB.
-        guard hasLiveFrame,
-              let pixelBuffer = session.currentFrame?.capturedImage else { return nil }
+        guard hasLiveFrame,let frame = session.currentFrame else { return nil }
+        let pixelBuffer = frame.capturedImage
         let ci = CIImage(cvPixelBuffer: pixelBuffer)
         let qualityKey = CIImageRepresentationOption(
             rawValue: kCGImageDestinationLossyCompressionQuality as String)
-        return Self.jpegContext.jpegRepresentation(
+        guard let data = Self.jpegContext.jpegRepresentation(
             of: ci,
             colorSpace: Self.jpegColorSpace,
-            options: [qualityKey: quality])
+            options: [qualityKey: quality]) else { return nil }
+        let k = frame.camera.intrinsics
+        return RawCameraJPEG(data: data,metadata: .init(role: "reference",file: nil,
+            width: CVPixelBufferGetWidth(pixelBuffer),height: CVPixelBufferGetHeight(pixelBuffer),
+            cameraFrameSeconds: frame.timestamp,imageSensorSeconds: nil,timeSource: "ar_frame_image_association",
+            intrinsics: (0..<3).flatMap { c in (0..<3).map { r in Double(k[c,r]) } },
+            cameraPose: RawCaptureMatrix.flat(frame.camera.transform),viewToImage: nil,coordinateSpace: "camera_pixels_native",
+            sourceFrameId: "ar_frame_time_bits:"+String(frame.timestamp.bitPattern,radix: 16)))
     }
 
     /// True if every frame observed since the last `run()` reported
@@ -1006,7 +1027,9 @@ public final class ARKitSessionManager: ObservableObject {
     public func worldAnchorExists(id: UUID) -> Bool { false }
     public func trackedWorldAnchorPosition(id: UUID) -> SIMD3<Float>? { nil }
     public func currentCameraPixelBuffer() -> CVPixelBuffer? { nil }
+    public func currentCameraInputSnapshot() -> RawCameraInput? { nil }
     public func currentCameraImageJPEG(quality: Double = 0.8) -> Data? { nil }
+    public func currentCameraImageJPEGSnapshot(quality: Double = 0.8) -> RawCameraJPEG? { nil }
     public var trackingStayedNormal: Bool { false }
     public func beginTrackingWatch() {}
     public var trackingStayedNormalSinceWatch: Bool { false }

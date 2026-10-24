@@ -90,7 +90,7 @@ final class FullSpanGeometryTests: XCTestCase {
             XCTAssertEqual(auto.diameterCm, manual.diameterCm, accuracy: 1e-10)
             XCTAssertEqual(auto.effectiveTapDepth, 1)
             let span = column ? 30.0 : 40.0, focal = column ? 150.0 : 100.0
-            XCTAssertEqual(auto.diameterCm, try XCTUnwrap(BoundaryAlignment.fullSpanDiameterCm(
+            XCTAssertEqual(auto.diameterCm, try XCTUnwrap(BoundaryAlignment.sampledDiameterCm(
                 spanPx: span, medianDepthM: 1, focalPx: focal)), accuracy: 1e-10)
             let result = try XCTUnwrap(DBHEstimator.chordEstimate(input: DBHScanInput(
                 frames: [f], tapPixel: SIMD2(60,45), guideAxis: axis,

@@ -11,6 +11,9 @@
 
 package com.hcjeong.forestix.ui
 
+import com.hcjeong.forestix.data.fieldstudy.FieldStudyTarget
+import com.hcjeong.forestix.data.fieldstudy.FieldUIFlowClock
+
 /// Single-slot handoff between the map home and the scan screens. Every field
 /// is nullable on purpose: null means "no lock — let the scan screen pick its
 /// own" (today's behaviour for flows launched outside the map home).
@@ -46,6 +49,10 @@ object PendingTreeNumber {
         /// because a row being re-measured can belong to a plot that is not
         /// the active one and the replacement has to find it there.
         val plotID: java.util.UUID? = null,
+        val fieldTarget: FieldStudyTarget? = null,
+        val fieldTargetLocked: Boolean = false,
+        val uiFlow:FieldUIFlowClock? = null,
+        val fieldScope:com.hcjeong.forestix.data.fieldstudy.FieldMeasurementScope? = null,
     )
 
     @Volatile
@@ -60,6 +67,10 @@ object PendingTreeNumber {
         truthSource: String? = null,
         truthUnit: String? = null,
         plotID: java.util.UUID? = null,
+        fieldTarget: FieldStudyTarget? = null,
+        fieldTargetLocked: Boolean = false,
+        uiFlow:FieldUIFlowClock? = null,
+        fieldScope:com.hcjeong.forestix.data.fieldstudy.FieldMeasurementScope? = null,
     ) {
         // TRIMMED before it is stored, exactly as iOS does in
         // MapHomeScreen.lockChooserTree(). The name is a join key: a split
@@ -68,10 +79,19 @@ object PendingTreeNumber {
         // A gloved thumb or a paste that leaves a leading space must not
         // create " Plot3-T07" here and "Plot3-T07" there.
         lock = Lock(number, name?.trim()?.takeIf { it.isNotEmpty() }, speciesCode,
-                    replaceExisting, truth, truthSource, truthUnit, plotID)
+                    replaceExisting, truth, truthSource, truthUnit, plotID, fieldTarget, fieldTargetLocked, uiFlow,fieldScope)
     }
 
     /// Read-and-clear, so a stale lock can never leak into a later,
     /// unrelated capture session.
     fun consume(): Lock? = lock.also { lock = null }
+    fun clearFieldTarget(id:String){if(lock?.fieldTarget?.id==id)lock=null}
+
+    /** Identity-owned handoff: failed navigation may clear only its own payload. */
+    fun stage(payload:Lock):Lock {
+        val staged=payload.copy(name=payload.name?.trim()?.takeIf{it.isNotEmpty()},
+            fieldTarget=payload.fieldTarget?.let{it.copy(attributes=it.attributes.toMap())})
+        lock=staged;return staged
+    }
+    fun clearStaged(staged:Lock){if(lock===staged)lock=null}
 }

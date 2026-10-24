@@ -37,10 +37,14 @@ import com.hcjeong.forestix.sensors.ProjectCalibration
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class AppEnvironment private constructor(
     val settings: AppSettings,
+    val speciesCatalog: com.hcjeong.forestix.data.SpeciesCatalogStore,
     val history: QuickMeasureHistory,
+    val fieldStudy: com.hcjeong.forestix.data.fieldstudy.FieldStudyStore,
     // Timber-cruising store (iOS CoreDataStack analogue) + repositories.
     val cruiseDatabase: CruiseDatabase,
     val projectRepository: ProjectRepository,
@@ -96,6 +100,7 @@ class AppEnvironment private constructor(
                     com.hcjeong.forestix.data.QUICK_MEASURE_MIGRATION_6_7,
                     com.hcjeong.forestix.data.QUICK_MEASURE_MIGRATION_7_8,
                     com.hcjeong.forestix.data.QUICK_MEASURE_MIGRATION_8_9,
+                    com.hcjeong.forestix.data.QUICK_MEASURE_MIGRATION_9_10,
                 )
                 .build()
             val history = QuickMeasureHistory.get(app, db.dao())
@@ -111,6 +116,7 @@ class AppEnvironment private constructor(
                     CruiseDatabase.MIGRATION_6_7,
                     CruiseDatabase.MIGRATION_7_8,
                     CruiseDatabase.MIGRATION_8_9,
+                    CruiseDatabase.MIGRATION_9_10,
                 )
                 .build()
             val speciesConfigRepository = RoomSpeciesConfigRepository(cruiseDb.speciesConfigDao())
@@ -140,16 +146,26 @@ class AppEnvironment private constructor(
                 }
             }
 
+            val treeRepository = RoomTreeRepository(cruiseDb.treeDao())
+            val rawIssues=withContext(Dispatchers.IO){com.hcjeong.forestix.sensors.RawCaptureStore.recoverPendingOperatorEdits(app)}
             return AppEnvironment(
                 settings = settings,
+                speciesCatalog = com.hcjeong.forestix.data.SpeciesCatalogStore(speciesConfigRepository,
+                    runCatching { com.hcjeong.forestix.data.cruise.SeedData.bundledSpecies(app) + com.hcjeong.forestix.data.cruise.SeedData.bundledMetricSpecies(app) }.getOrDefault(emptyList())).also { it.refresh() },
                 history = history,
+                fieldStudy = com.hcjeong.forestix.data.fieldstudy.FieldStudyStore(java.io.File(app.filesDir,"field-study"),treeRepository){intent->
+                    if(intent.expected.store=="quick_history")history.durableResultProofs(intent.expected.id,intent.replacements.map{it.result.id})
+                    else intent.proof(treeRepository.readCurrent(java.util.UUID.fromString(intent.expected.id),true))
+                }.also{
+                    it.reportInfrastructureIssues(rawIssues.map{issue->com.hcjeong.forestix.data.fieldstudy.FieldArchiveIssue(issue.file,issue.reason)})
+                    it.loadModelFingerprint{app.assets.open("models/yolo26_alignment.onnx")}},
                 cruiseDatabase = cruiseDb,
                 projectRepository = RoomProjectRepository(cruiseDb.projectDao()),
                 stratumRepository = RoomStratumRepository(cruiseDb.stratumDao()),
                 cruiseDesignRepository = RoomCruiseDesignRepository(cruiseDb.cruiseDesignDao()),
                 plannedPlotRepository = RoomPlannedPlotRepository(cruiseDb.plannedPlotDao()),
                 plotRepository = RoomPlotRepository(cruiseDb.plotDao()),
-                treeRepository = RoomTreeRepository(cruiseDb.treeDao()),
+                treeRepository = treeRepository,
                 speciesConfigRepository = speciesConfigRepository,
                 volumeEquationRepository = volumeEquationRepository,
                 heightDiameterFitRepository = RoomHeightDiameterFitRepository(

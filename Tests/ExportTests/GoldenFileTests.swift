@@ -27,8 +27,18 @@ final class GoldenFileTests: XCTestCase {
     }
 
     func testTreesCsvGoldenHash() {
-        let csv = CSVExporter.treesCSV(trees: ExportFixtures.trees())
+        let enriched = CSVExporter.treesCSV(trees: ExportFixtures.trees())
+        XCTAssertTrue(enriched.contains(",species_common_name,species_scientific_name\r\n"))
+        // These fixtures have no injected species catalogue. Strip only the
+        // two new empty name cells to retain the previous byte-for-byte guard.
+        let csv = enriched.replacingOccurrences(of: ",species_common_name,species_scientific_name\r\n", with: "\r\n")
+            .replacingOccurrences(of: ",,,,\r\n", with: ",,\r\n")
         XCTAssertFalse(csv.isEmpty)
+        // Only the two appended optional UUID columns may change the legacy
+        // fixture. All existing value/unit/metadata bytes remain identical.
+        let legacy = csv.replacingOccurrences(of: ",dbh_measurement_id,height_measurement_id\r\n",with: "\r\n")
+            .replacingOccurrences(of: ",,\r\n",with: "\r\n")
+        XCTAssertEqual(sha(Data(legacy.utf8)),"3e3d4eae60a4cfbd36ffbde1b56c8d08f0da7edacb853674f088a876a1797c25")
         // Recompute if export semantics change.
         // print("trees.csv:", sha(Data(csv.utf8)))
         XCTAssertEqual(
@@ -99,7 +109,7 @@ enum Golden {
     // Changed when `tree_name` was added after `tree_number` — the cruiser
     // names the tree in the measure chooser now, and the name travels with
     // the row.
-    static let treesCSV: String = "3e3d4eae60a4cfbd36ffbde1b56c8d08f0da7edacb853674f088a876a1797c25"
+    static let treesCSV: String = "55688ffe46462cf8c6ba947701d89e74d5172339025f73786ae92acad8332e64"
     static let plotsCSV: String = "c2dd5e1ff6330ace9fb4b9ffe7ac605b1f51ce76368b4966ff06775bd712340c"
     static let standSummaryCSV: String = "5fbb5dbbeb1c36a7df3b12ec89c3c9741396d9b8514fc7b22b42f91774b2ff12"
     static let cruiseGeoJSON: String = "e275756156b3c9ed87d373e163398c9187d653ed26ae32ca1fb8028001f65ce4"

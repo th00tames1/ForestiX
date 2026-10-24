@@ -27,6 +27,9 @@ class BreastHeightGuideTest {
         assertEquals(BreastHeightGuideHeight.METERS_137, BreastHeightGuideHeight.fromRaw("invalid"))
         assertEquals("4.5 ft", BreastHeightGuideHeight.fromRaw(null).imperialLabel)
         assertEquals(BreastHeightGuideHeight.METERS_137, BreastHeightGuide(ArController()).height)
+        assertEquals(1.40, BreastHeightGuideHeight.METERS_140.meters, 0.0)
+        assertEquals("1.40 m", BreastHeightGuideHeight.METERS_140.label(UnitSystem.METRIC))
+        assertEquals("4.59 ft", BreastHeightGuideHeight.METERS_140.label(UnitSystem.IMPERIAL))
         for (height in BreastHeightGuideHeight.entries) {
             assertEquals(height, BreastHeightGuideHeight.fromRaw(height.raw))
         }

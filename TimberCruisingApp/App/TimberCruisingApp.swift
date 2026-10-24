@@ -7,10 +7,15 @@
 // Log side circles. It also hosts the first-run RegionPicker.
 
 import SwiftUI
+import Sensors
+#if canImport(UIKit)
+import UIKit
+#endif
 
 public struct RootView: View {
 
     @StateObject private var environment: AppEnvironment
+    @Environment(\.scenePhase) private var scenePhase
 
     public init(environment: AppEnvironment) {
         _environment = StateObject(wrappedValue: environment)
@@ -21,6 +26,7 @@ public struct RootView: View {
             .environmentObject(environment)
             .environmentObject(environment.settings)
             .environmentObject(environment.quickMeasureHistory)
+            .environment(\.fieldStudyStore,environment.fieldStudy)
             // Field High-Contrast ships two appearances sharing one
             // identity; "light" is the default. Driving the scheme here
             // (where AppSettings is observed) flips the trait-dynamic
@@ -30,6 +36,12 @@ public struct RootView: View {
                 openPlotLink(url)
             }
             #if os(iOS)
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
+                trimInferenceCache()
+            }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .background { trimInferenceCache() }
+            }
             // UIKit scene delivery retains cold-launch URLs until the live
             // environment and this view have finished initialising.
             .onReceive(PortraitSceneState.shared.$pendingURL.compactMap { $0 }.receive(on: RunLoop.main)) { url in
@@ -38,6 +50,15 @@ public struct RootView: View {
             }
             #endif
     }
+
+    #if os(iOS)
+    private func trimInferenceCache() {
+        #if canImport(OnnxRuntimeBindings)
+        Task.detached(priority: .utility) { YoloBoundaryAligner.trimCached() }
+        #endif
+    }
+    #endif
+
 
     private func openPlotLink(_ url: URL) {
         guard let link = URLRouter.parse(url) else { return }

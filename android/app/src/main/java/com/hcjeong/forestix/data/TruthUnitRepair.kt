@@ -249,6 +249,7 @@ object TruthUnitRepair {
         val unitless = HashMap<GroupKey, MutableList<Double>>()
         val stamped = HashMap<GroupKey, MutableList<Double>>()
         for (s in summaries) {
+            if(!s.allowsLegacyInference){if(s.truthValue!=null)plan.kept.unverifiable++;continue}
             val value = s.truthValue ?: continue
             if (!value.isFinite() || value <= 0) continue
             val q = Quantity.ofRawKind(s.kind)
@@ -270,6 +271,7 @@ object TruthUnitRepair {
         }
 
         for (e in entries) {
+            if(!e.allowsLegacyInference){if(e.truth!=null)plan.kept.unverifiable++;continue}
             val truth = e.truth ?: continue
             if (!truth.isFinite() || truth <= 0) continue
             val q = Quantity.of(e.kind)

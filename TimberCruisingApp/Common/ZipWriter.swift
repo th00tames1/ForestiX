@@ -248,7 +248,7 @@ public final class ZipStreamWriter {
     /// payload as the next local file header — silently losing that entry and
     /// everything after it in the archive. A size that is written into the
     /// format may not have a fallback; it is counted or the write throws.
-    public func add(name: String, fileURL: URL) throws {
+    public func add(name: String, fileURL: URL, onChunk: ((Data) throws -> Void)? = nil) throws {
         // Best-effort early bail so an oversized file isn't copied before it
         // is rejected. An UNREADABLE attribute is not an error here — the
         // authoritative size is the byte count below.
@@ -275,6 +275,7 @@ public final class ZipStreamWriter {
                 }
                 crc = ZipWriter.crc32Update(crc, chunk)
                 try write(chunk)
+                try onChunk?(chunk)
             }
         } catch let e as ZipError {
             throw e

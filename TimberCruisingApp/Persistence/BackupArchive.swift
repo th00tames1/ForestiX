@@ -227,6 +227,7 @@ public enum BackupArchive {
             .appendingPathComponent("tcproj-restore-\(UUID().uuidString)",
                                     isDirectory: true)
         try fm.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tmpDir) }
         let sqliteURL = tmpDir.appendingPathComponent("imported.sqlite")
         try sqliteBlob.write(to: sqliteURL)
 
@@ -276,6 +277,15 @@ public enum BackupArchive {
         let dstHDFitRepo   = CoreDataHeightDiameterFitRepository(stack: targetStack)
 
         let finalProjectId = idMapping.mappedId(manifest.projectId)
+
+        // Fail before inserting a project if an imported registered identity
+        // would relabel existing measurements. Legacy presets remain untouched.
+        let localSpecies = Dictionary(try dstSpeciesRepo.list().map { ($0.code, SpeciesRecord($0)) }, uniquingKeysWith: { first, _ in first })
+        for s in try srcSpeciesRepo.list() where s.code.hasPrefix("USR-") {
+            if let old = localSpecies[s.code], old != SpeciesRecord(s) {
+                throw SpeciesRegistrationError.conflictingCode
+            }
+        }
 
         let newProj = Project(
             id: finalProjectId,
@@ -402,8 +412,6 @@ public enum BackupArchive {
                 updatedAt: fit.updatedAt)
             _ = try dstHDFitRepo.create(copy)
         }
-
-        try? fm.removeItem(at: tmpDir)
 
         return RestoreResult(
             importedProjectId: finalProjectId,

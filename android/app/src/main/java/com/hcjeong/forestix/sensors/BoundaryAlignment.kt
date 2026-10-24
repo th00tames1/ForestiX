@@ -11,26 +11,49 @@ object BoundaryAlignment {
     fun median(a:List<Double>):Double { val s=a.filter { it.isFinite() }.sorted();return if(s.isEmpty()) Double.NaN else (s[(s.size-1)/2]+s[s.size/2])/2 }
     fun mad(a:List<Double>):Double { val m=median(a);return median(a.map { abs(it-m) }) }
     fun valid(a:List<Double>)=a.filter { it.isFinite() && it>0.001 && it<=8 }
+    // Central width selected by the 10%-step RMSE comparison on both platforms.
+    // The silhouette width stays unchanged; only the depth sample is narrowed.
+    const val SAMPLING_FRACTION = 0.8
+    val SAMPLED_DEPTH_OFFSET_FACTOR = 1.0 - sqrt(1.0 - (SAMPLING_FRACTION / 2).pow(2))
+    fun sampledDiameterCm(spanPx:Double,medianDepthM:Double,focalPx:Double):Double? =
+        surfaceCorrectedDiameterCm(spanPx,medianDepthM,focalPx,SAMPLED_DEPTH_OFFSET_FACTOR)
     // Uniform-lateral circular approximation, not a fitted sensor multiplier.
     // Raw depth pixels remain unchanged. Keep identical to the Swift geometry.
     val FULL_SPAN_DEPTH_OFFSET_FACTOR = 1.0 - sqrt(0.75)
     fun fullSpanDiameterCm(spanPx:Double,medianDepthM:Double,focalPx:Double):Double? {
+        return surfaceCorrectedDiameterCm(spanPx,medianDepthM,focalPx,FULL_SPAN_DEPTH_OFFSET_FACTOR)
+    }
+    private fun surfaceCorrectedDiameterCm(spanPx:Double,medianDepthM:Double,focalPx:Double,offsetFactor:Double):Double? {
         if(!spanPx.isFinite() || !medianDepthM.isFinite() || !focalPx.isFinite() ||
             spanPx<=0 || medianDepthM<=0 || focalPx<=1) return null
         val k=spanPx/(2*focalPx);val q=k*(k+sqrt(1+k*k))
-        val cm=200*medianDepthM*q/(1+FULL_SPAN_DEPTH_OFFSET_FACTOR*q)
+        val cm=200*medianDepthM*q/(1+offsetFactor*q)
         return cm.takeIf { it.isFinite() && it>0 }
     }
     /** Integer pixel centres inside the continuous guide interval, endpoints included. */
     fun fullSpanSample(width:Int,left:Double,right:Double,focal:Double,depthAt:(Int)->Double):Pair<Double,Double>? {
+        return sample(width,left,right,focal,1.0,depthAt)
+    }
+    /** Pixel centres in the central 80% of the continuous guide interval. */
+    fun sampledDepth(width:Int,left:Double,right:Double,focal:Double,depthAt:(Int)->Double):Pair<Double,Double>? =
+        sample(width,left,right,focal,SAMPLING_FRACTION,depthAt)
+    private fun sample(width:Int,left:Double,right:Double,focal:Double,fraction:Double,depthAt:(Int)->Double):Pair<Double,Double>? {
         if(width<=0 || !left.isFinite() || !right.isFinite() || left<0 || right>=width || right<=left) return null
-        val lo=ceil(left).toInt();val hi=floor(right).toInt();if(hi<lo)return null
-        val samples=valid((lo..hi).map(depthAt));if(samples.size<3)return null
+        val margin=(right-left)*(1-fraction)/2
+        val tolerance=if(fraction<1)8*Math.ulp(1.0)*max(1.0,max(abs(left),abs(right))) else 0.0
+        val lo=max(0,ceil(left+margin-tolerance).toInt());val hi=min(width-1,floor(right-margin+tolerance).toInt());if(hi<lo)return null
+        val samples=(lo..hi).map(depthAt).filter { it.isFinite() && it>=0.001 && it<=8 };if(samples.size<3)return null
         val z=median(samples);if(z !in 0.3..5.0)return null
-        val cm=fullSpanDiameterCm(right-left,z,focal) ?: return null
+        val cm=surfaceCorrectedDiameterCm(right-left,z,focal,1-sqrt(1-(fraction/2).pow(2))) ?: return null
         return cm to z
     }
     fun diameter(g:Grid,left:Double,right:Double):Pair<Double,Double>? {
+        if(g.width<=0 || g.height<=0 || g.depth.size!=g.width*g.height || g.row !in 0 until g.height) return null
+        return sampledDepth(g.width,left,right,g.focal) { g.at(it,g.row) }
+    }
+    // Keep established background/occlusion support checks separate from
+    // the selected sample used for the returned diameter.
+    private fun boundarySupportSample(g:Grid,left:Double,right:Double):Pair<Double,Double>? {
         if(g.width<=0 || g.height<=0 || g.depth.size!=g.width*g.height || g.row !in 0 until g.height) return null
         return fullSpanSample(g.width,left,right,g.focal) { g.at(it,g.row) }
     }
@@ -48,8 +71,9 @@ object BoundaryAlignment {
         pts.add(min(g.width-1.0,g.right+0.25*span) to min(g.height-1.0,g.row+0.25*g.height));return pts
     }
     fun correct(g:Grid,scale:Double,mask:(Int,Int)->Boolean,rowSegments:(Int)->List<Pair<Double,Double>>):Result? {
-        val base=diameter(g,g.left,g.right)?.first ?: return null
-        fun retained(why:String)=Result(g.left,g.right,base,why,why)
+        val base=boundarySupportSample(g,g.left,g.right)?.first ?: return null
+        val originalDiameter=diameter(g,g.left,g.right)?.first ?: return null
+        fun retained(why:String)=Result(g.left,g.right,originalDiameter,why,why)
         val span=g.right-g.left;val core=(0 until g.width).filter { it>=g.left+0.25*span && it<=g.right-0.25*span }
         if(core.isEmpty())return retained("empty_core")
         val near=(max(0,g.row-2) until min(g.height,g.row+3)).toList()
@@ -84,8 +108,9 @@ object BoundaryAlignment {
                 else proposed[side]=old+0.5*(b-old)
             }
         }
+        val supportDepth=boundarySupportSample(g,proposed[0],proposed[1])?.second ?: return retained("incoherent_result")
+        if(supportDepth>zc+base/200+3*noise)return retained("incoherent_result")
         val answer=diameter(g,proposed[0],proposed[1]) ?: return retained("incoherent_result")
-        if(answer.second>zc+base/200+3*noise)return retained("incoherent_result")
         return Result(proposed[0],proposed[1],answer.first,reasons[0],reasons[1])
     }
 }

@@ -110,9 +110,6 @@ fun LocaleSetupSheet(onDismiss: () -> Unit) {
             // MARK: - Country step
             Column(verticalArrangement = Arrangement.spacedBy(ForestixSpace.xs)) {
                 Text("Which country?", style = type.bodyBold, color = colors.textPrimary)
-                Text(
-                    "Sets your units and volume standard. Change it any time in Settings.",
-                    style = type.caption, color = colors.textSecondary)
             }
             Column(verticalArrangement = Arrangement.spacedBy(ForestixSpace.sm)) {
                 Country.entries.forEach { c ->
@@ -146,10 +143,6 @@ fun LocaleSetupSheet(onDismiss: () -> Unit) {
             Column(verticalArrangement = Arrangement.spacedBy(ForestixSpace.xs)) {
                 Text("Which forest do you cruise?", style = type.bodyBold,
                     color = colors.textPrimary)
-                Text(
-                    "Loads the right species list and log rule for your region. " +
-                        "Change it any time in Settings.",
-                    style = type.caption, color = colors.textSecondary)
             }
             Column(verticalArrangement = Arrangement.spacedBy(ForestixSpace.sm)) {
                 Region.entries.forEach { r ->

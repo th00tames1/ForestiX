@@ -6,6 +6,7 @@ import Foundation
 public enum BreastHeightGuideHeight: String, CaseIterable, Sendable {
     case meters130 = "1.30"
     case meters137 = "1.37"
+    case meters140 = "1.40"
 
     public static func fromRaw(_ raw: String?) -> Self {
         raw.flatMap(Self.init(rawValue:)) ?? .meters137
@@ -15,12 +16,21 @@ public enum BreastHeightGuideHeight: String, CaseIterable, Sendable {
         switch self {
         case .meters130: return 1.30
         case .meters137: return Units.breastHeightM
+        case .meters140: return 1.40
         }
     }
 
     public var metricLabel: String { "\(rawValue) m" }
     public var imperialLabel: String {
-        self == .meters130 ? "4.27 ft" : "4.5 ft"
+        switch self {
+        case .meters130: return "4.27 ft"
+        case .meters137: return "4.5 ft"
+        case .meters140: return "4.59 ft"
+        }
+    }
+
+    public func label(imperial: Bool) -> String {
+        imperial ? imperialLabel : metricLabel
     }
 
     /// AR world Y is gravity-aligned: only elevation changes, regardless of

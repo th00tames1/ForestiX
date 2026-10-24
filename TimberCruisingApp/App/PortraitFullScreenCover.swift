@@ -48,6 +48,7 @@ private struct PortraitCoverModifier<Item: Identifiable, Cover: View>: ViewModif
             PortraitCoverPresenter(item: $item, onDismiss: onDismiss) { value in
                 AnyView(cover(value).id(value.id)
                     .environmentObject(environment).environmentObject(settings).environmentObject(history)
+                    .environment(\.fieldStudyStore,environment.fieldStudy)
                     .preferredColorScheme(settings.appearance == "dark" ? .dark : .light)
                     .tint(ForestixPalette.primary))
             }.frame(width: 0, height: 0)

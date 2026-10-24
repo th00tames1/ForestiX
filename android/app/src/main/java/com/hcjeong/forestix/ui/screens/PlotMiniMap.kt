@@ -433,8 +433,7 @@ private fun PlotMiniMapCard(
         miniTreeDots(trees, plotCenterLat, plotCenterLon)
     }
 
-    val okColor = Forestix.colors.confidenceOk
-    val warnColor = Forestix.colors.confidenceWarn
+    val treeColor = Forestix.colors.primary
 
     val headerText =
         if (plotNumber != null) "PLOT $plotNumber · ${trees.size}" else "PLOT"
@@ -487,7 +486,7 @@ private fun PlotMiniMapCard(
             // longer claiming a spot on the boundary.
             treeDots.dots.forEach { t ->
                 val p = enToPoint(t.eastM, t.northM, mToPx, extent, c) ?: return@forEach
-                val tint = if (t.warn) warnColor else okColor
+                val tint = treeColor
                 if (p.beyond) {
                     drawCircle(
                         tint, radius = 2.5.dp.toPx(), center = p.at,
@@ -734,8 +733,7 @@ private fun PlotPreviewDiagram(
     modifier: Modifier,
 ) {
     val colors = Forestix.colors
-    val okColor = colors.confidenceOk
-    val warnColor = colors.confidenceWarn
+    val treeColor = colors.primary
     val ink = colors.textPrimary
     val casing = colors.surface
     val measurer = rememberTextMeasurer()
@@ -779,7 +777,7 @@ private fun PlotPreviewDiagram(
             val dotR = 4.dp.toPx()
             dots.forEach { t ->
                 val p = enToPoint(t.eastM, t.northM, mToPx, extent, c) ?: return@forEach
-                val tint = if (t.warn) warnColor else okColor
+                val tint = treeColor
                 if (p.beyond) {
                     drawCircle(casing, radius = dotR + 1.5.dp.toPx(), center = p.at, style = Stroke(width = 2.dp.toPx()))
                     drawCircle(tint, radius = dotR, center = p.at, style = Stroke(width = 1.5.dp.toPx()))

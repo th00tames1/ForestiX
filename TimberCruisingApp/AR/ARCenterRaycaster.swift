@@ -314,6 +314,29 @@ public final class ARCenterRaycaster: ObservableObject {
         return SIMD3<Float>(c.x, c.y, c.z)
     }
 
+    /// Read-only geometry for geographic target labels. No raycast hit,
+    /// measurement anchor, depth buffer or session configuration is changed.
+    /// The yaw is true-north referenced only under gravityAndHeading alignment.
+    public func fieldTargetCameraGeometry() -> (position: SIMD3<Float>, headingTrueDegrees: Double, horizontalFieldOfViewDegrees: Double)? {
+        guard let view = arview, let frame = view.session.currentFrame,
+              view.session.configuration?.worldAlignment == .gravityAndHeading,
+              case .normal = frame.camera.trackingState,
+              abs(ProcessInfo.processInfo.systemUptime-frame.timestamp) <= 0.5,
+              view.bounds.width > 1, view.bounds.height > 1,
+              let left = rayDirection(at: CGPoint(x: 0,y: view.bounds.midY)),
+              let right = rayDirection(at: CGPoint(x: view.bounds.width,y: view.bounds.midY))
+        else { return nil }
+        let transform = frame.camera.transform
+        let forward = SIMD2<Float>(-transform.columns.2.x,-transform.columns.2.z)
+        let l = SIMD2<Float>(left.x,left.z), r = SIMD2<Float>(right.x,right.z)
+        guard simd_length(forward) > 0.05, simd_length(l) > 0.05, simd_length(r) > 0.05 else { return nil }
+        let fov = Double(acos(min(1,max(-1,simd_dot(simd_normalize(l),simd_normalize(r))))))*180/Double.pi
+        guard fov > 0, fov < 179 else { return nil }
+        let heading = (Double(atan2(forward.x,-forward.y))*180/Double.pi+360).truncatingRemainder(dividingBy: 360)
+        let p = transform.columns.3
+        return (SIMD3(p.x,p.y,p.z),heading,fov)
+    }
+
     /// Where a world point lands on the AR view, in AR-VIEW coordinates —
     /// the inverse direction of every other call here, and the way 2D chrome
     /// is pinned to a world position without a world-space text renderer.
@@ -772,6 +795,7 @@ public final class ARCenterRaycaster: ObservableObject {
     public func rayDirection(at screenPoint: CGPoint) -> SIMD3<Float>? { nil }
     public func projectToScreen(_ world: SIMD3<Float>) -> CGPoint? { nil }
     public var cameraWorldPosition: SIMD3<Float>? { nil }
+    public func fieldTargetCameraGeometry() -> (position: SIMD3<Float>, headingTrueDegrees: Double, horizontalFieldOfViewDegrees: Double)? { nil }
     public var cameraPitchDeg: Double? { nil }
 }
 

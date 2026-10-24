@@ -20,7 +20,7 @@
 // ship, both carry the `export_status` column that says which rule put the row
 // where it is, and the on-disk log is not touched by any of it.
 //
-// THE JOIN, AND WHY IT IS A HEURISTIC. A research row identifies itself by
+// THE LEGACY JOIN, AND WHY IT IS A HEURISTIC. An unidentified row uses
 // `timestamp_iso`, `measure_type`, `tree_id` (a tree NUMBER, not a reading id)
 // and `measured_value`. There is NO reading id in the schema and no plot
 // column, so a row cannot be joined to the reading it was written for; it can
@@ -63,8 +63,8 @@ public enum ResearchExport {
 
     /// What one exported row is, relative to the field log.
     public enum Status: String, Sendable {
-        /// A live reading of this kind, tree and value is in the field log,
-        /// and its ground truth agrees with the row's.
+        /// Exact measurement UUID and value are present in the field log;
+        /// legacy rows additionally require the heuristic GT agreement.
         case live = "live"
         /// Matched to a live reading whose GROUND TRUTH differs — the cruiser
         /// typed a truth, then corrected it. This row carries the corrected
@@ -129,15 +129,18 @@ public enum ResearchExport {
         public let createdAt: Date
         public let truth: Double?
         public let truthUnit: String?
+        public let id: UUID?
+        public let measurementId: String?
 
         public init(kind: String, treeNumber: Int?, value: Double,
-                    createdAt: Date, truth: Double?, truthUnit: String?) {
+                    createdAt: Date, truth: Double?, truthUnit: String?, id: UUID? = nil, measurementId: String? = nil) {
             self.kind = kind
             self.treeNumber = treeNumber
             self.value = value
             self.createdAt = createdAt
             self.truth = truth
             self.truthUnit = truthUnit
+            self.id = id; self.measurementId = measurementId
         }
     }
 
@@ -175,6 +178,7 @@ public enum ResearchExport {
                                 readings: [Reading]) -> Classified? {
         guard let header = records.first else { return nil }
         let idx = Index(header: header)
+        let identifiedIDs = Set(records.dropFirst().map { cell($0,idx.measurementId).lowercased() }.filter { !$0.isEmpty })
         // Live readings that name a tree, grouped by the only key a row can
         // offer. A reading with no tree number can never be matched to a row
         // and is simply not in the index. Readings are held by INDEX, not by
@@ -182,6 +186,7 @@ public enum ResearchExport {
         // is taken" — see `claim`.
         var groupIndices: [GroupKey: [Int]] = [:]
         for (i, r) in readings.enumerated() {
+            guard r.measurementId == nil, !identifiedIDs.contains(r.id?.uuidString.lowercased() ?? "") else { continue }
             guard let tree = r.treeNumber else { continue }
             groupIndices[GroupKey(kind: r.kind, tree: tree), default: []].append(i)
         }
@@ -200,16 +205,31 @@ public enum ResearchExport {
             rows.append(Row(
                 index: i,
                 cells: cells,
+                measurementId: cell(cells,idx.measurementId).isEmpty ? nil : cell(cells,idx.measurementId).lowercased(),
                 key: tree.map { GroupKey(kind: cell(cells, idx.type), tree: $0) },
                 measured: TruthInput.parse(cell(cells, idx.measured)),
                 stamp: TruthBackfill.parseISO(cell(cells, idx.timestamp))))
         }
 
         let claimed = claim(rows: rows, readings: readings, groups: groupIndices)
+        let identityCounts = Dictionary(grouping: rows.compactMap(\.measurementId),by: { $0 }).mapValues(\.count)
 
         var out = Classified(header: header + [statusColumn],
                              kept: [], heldBack: [], counts: Counts())
         for row in rows {
+            if let identity = row.measurementId {
+                // Exact UUID only. Keep original GT/error cells untouched;
+                // typed corrections are separate observations, not rebasing.
+                let matches = readings.filter { r in
+                    r.id?.uuidString.lowercased() == identity &&
+                    (r.measurementId == nil || r.measurementId.flatMap(UUID.init(uuidString:)) == r.id) &&
+                    r.kind == cell(row.cells,idx.type) && row.measured.map { abs($0-r.value) <= valueEpsilon } == true
+                }
+                let live = UUID(uuidString: identity) != nil && matches.count == 1 && identityCounts[identity] == 1
+                out.kept.append(row.cells+[live ? Status.live.rawValue : Status.unclassified.rawValue])
+                if live { out.counts.live += 1 } else { out.counts.unclassified += 1 }
+                continue
+            }
             switch verdict(for: row, claimed: claimed, readings: readings,
                            groups: groupIndices, idx: idx) {
             case .plain(let status):
@@ -237,6 +257,7 @@ public enum ResearchExport {
     private struct Row {
         let index: Int
         let cells: [String]
+        let measurementId: String?
         let key: GroupKey?
         let measured: Double?
         let stamp: Date?
@@ -263,6 +284,7 @@ public enum ResearchExport {
     private struct Index {
         let type: Int?, tree: Int?, measured: Int?, truth: Int?
         let error: Int?, unit: Int?, timestamp: Int?
+        let measurementId: Int?
         init(header: [String]) {
             type = header.firstIndex(of: "measure_type")
             tree = header.firstIndex(of: "tree_id")
@@ -271,6 +293,7 @@ public enum ResearchExport {
             error = header.firstIndex(of: "error")
             unit = header.firstIndex(of: "truth_unit")
             timestamp = header.firstIndex(of: "timestamp_iso")
+            measurementId = header.firstIndex(of: "measurement_id")
         }
     }
 
@@ -303,6 +326,7 @@ public enum ResearchExport {
         }
         var pairs: [Pair] = []
         for row in rows {
+            guard row.measurementId == nil else { continue }
             guard let key = row.key, let measured = row.measured,
                   let candidates = groups[key] else { continue }
             // Rows carry the measurement at two (sometimes three) decimals, so
@@ -426,7 +450,7 @@ public enum ResearchExport {
     public static func notes(_ c: Counts) -> String {
         var out = summary(c) + "\n\n"
         out += "export_status values\n"
-        out += "  live              a reading with this kind, tree and value is in the field log\n"
+        out += "  live              exact UUID/value is present; legacy matches also agree on truth\n"
         out += "  corrected         matched, but the field log's ground truth differs; true_value,\n"
         out += "                    error and truth_unit here are the field log's, and the row as\n"
         out += "                    recorded is in \(heldBackFileName) as superseded-truth\n"
@@ -436,7 +460,9 @@ public enum ResearchExport {
         out += "  superseded        the tree still has a LATER live reading of this kind and this\n"
         out += "                    value is not it: a retake or a delete-and-remeasure\n"
         out += "  superseded-truth  the as-recorded copy of a corrected row\n\n"
-        out += "The research log carries no reading id and no plot, so rows are matched on\n"
+        out += "Rows with measurement_id use exact UUID matching only and retain their original cells.\n"
+        out += "Missing, malformed or duplicate IDs remain unclassified; no time/value fallback is used.\n"
+        out += "Legacy rows carry no reading id and no plot, so only those rows are matched on\n"
         out += "measure_type, tree_id, measured_value and timestamp_iso only. That join is a\n"
         out += "heuristic: superseded is asserted only on the positive evidence above, and\n"
         out += "everything else stays unclassified rather than being guessed into a bucket.\n"
@@ -472,7 +498,7 @@ public enum ResearchExport {
         history.entries.map {
             Reading(kind: $0.kind.rawValue, treeNumber: $0.treeNumber,
                     value: $0.value, createdAt: $0.createdAt,
-                    truth: $0.truth, truthUnit: $0.truthUnit)
+                    truth: $0.truth, truthUnit: $0.truthUnit,id: $0.id,measurementId: $0.measurementId)
         }
     }
 

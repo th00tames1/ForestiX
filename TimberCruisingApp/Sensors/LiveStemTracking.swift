@@ -41,6 +41,22 @@ public struct LiveStemMask: Sendable {
         return runs.isEmpty ? nil : LiveStemMask(width: width, height: height, runs: runs)
     }
 
+    /// Auto bracket placement on the horizontal guide, independent of depth
+    /// and neighbouring-row checks. Depth is measured by the Adjust estimator.
+    /// Never bridges a hole or another instance.
+    public static func guideExtent(score: Float, contains: (Double, Double) -> Bool) -> StemExtent? {
+        guard score.isFinite, score >= 0.25 else { return nil }
+        let samples = 512, centre = 256
+        guard contains((Double(centre) + 0.5) / Double(samples), 0.5) else { return nil }
+        var left = centre, right = centre
+        while left > 0 && contains((Double(left - 1) + 0.5) / Double(samples), 0.5) { left -= 1 }
+        while right + 1 < samples && contains((Double(right + 1) + 0.5) / Double(samples), 0.5) { right += 1 }
+        let span = Double(right + 1 - left) / Double(samples)
+        guard left > 0, right < samples - 1, span >= 0.02, span <= 0.95 else { return nil }
+        return StemExtent(leftFraction: Double(left) / Double(samples),
+                          rightFraction: Double(right + 1) / Double(samples), score: score, maskPixels: 1)
+    }
+
     /// Measure the selected instance on the horizontal screen guide. Five nearby
     /// scan lines must agree; holes, clipped trunks and disconnected objects fail closed.
     public static func centreExtent(score: Float, contains: (Double, Double) -> Bool) -> StemExtent? {
@@ -67,9 +83,98 @@ public struct LiveStemMask: Sendable {
 }
 
 public struct LiveStemObservation: Sendable {
+    /// Legacy one-shot depth-validated candidate. Live Auto uses guideExtent
+    /// for bounds and evaluates current depth through Adjust's estimator.
     public let extent: StemExtent?
     public let mask: LiveStemMask?
-    public init(extent: StemExtent?, mask: LiveStemMask?) { self.extent = extent; self.mask = mask }
+    public let guideExtent: StemExtent?
+    public init(extent: StemExtent?, mask: LiveStemMask?, guideExtent: StemExtent? = nil) {
+        self.extent = extent; self.mask = mask; self.guideExtent = guideExtent
+    }
+    /// A failed depth/occlusion check keeps the visual guide, never a measurement.
+    public static func validatingGuide(_ guide: StemExtent?, mask: LiveStemMask?,
+                                       depthResult: BoundaryAlignment.Result?) -> LiveStemObservation {
+        let supported = ["accepted", "below_rgb_resolution"]
+        let approved = mask != nil && guide != nil &&
+            (depthResult.map { supported.contains($0.leftReason) && supported.contains($0.rightReason) } ?? false)
+        return LiveStemObservation(extent: approved ? guide : nil, mask: mask, guideExtent: guide)
+    }
+}
+
+/// Mask registration policy. Live Auto uses displayMask for bracket availability,
+/// then the same current-depth estimator as Adjust (not allowMeasurement).
+public enum LiveStemResultPolicy {
+    public static let previewMaxAgeSeconds = 1.5
+    public struct Decision {
+        public let displayMask: Bool
+        public let allowMeasurement: Bool
+    }
+    public static func evaluate(age: Double, travelMeters: Double, facingDot: Double,
+                                mappingCompatible: Bool = true, upDot: Double = 1) -> Decision {
+        let valid = mappingCompatible && age.isFinite && age >= 0 &&
+            travelMeters.isFinite && travelMeters >= 0 && facingDot.isFinite
+        return Decision(
+            displayMask: valid && upDot.isFinite && age <= previewMaxAgeSeconds && travelMeters < 0.05 &&
+                facingDot > 0.996194698 && upDot > 0.996194698,
+            allowMeasurement: valid && age <= 0.45 && travelMeters < 0.02 && facingDot > 0.9994)
+    }
+}
+
+/// Mask and Auto bracket availability, not a depth/capture lock.
+/// Callers still invalidate this preview when its camera mapping/pose changes.
+public struct LiveStemMaskPreview: Sendable {
+    public static let holdSeconds = 0.6
+    public private(set) var current: LiveStemMask?
+    public private(set) var guideExtent: StemExtent?
+    private var lastSeen = -Double.infinity
+    private var sourceTime = -Double.infinity
+
+    public init() {}
+    public mutating func reset() { current = nil; guideExtent = nil; lastSeen = -.infinity; sourceTime = -.infinity }
+    /// Exact visible mask span; no temporal confirmation or source-depth approval.
+    /// Callers must still validate mask registration and run Adjust depth checks.
+    public func bracketForDepth(at time: Double) -> StemExtent? {
+        guard current != nil, let guide = guideExtent, time.isFinite,
+              time >= lastSeen, time - lastSeen <= Self.holdSeconds,
+              time >= sourceTime, time - sourceTime <= LiveStemResultPolicy.previewMaxAgeSeconds,
+              guide.leftFraction.isFinite, guide.rightFraction.isFinite,
+              guide.leftFraction >= 0, guide.rightFraction <= 1,
+              (0.02...0.95).contains(guide.widthFraction),
+              guide.score.isFinite, guide.score >= 0.25 else { return nil }
+        return guide
+    }
+    /// A previous frame, a smoothed/different span, or display alone cannot arm capture.
+    public func matchesMeasurement(_ extent: StemExtent?, at time: Double) -> Bool {
+        guard current != nil, let guideExtent, let extent, time.isFinite, time == sourceTime else { return false }
+        return guideExtent.leftFraction == extent.leftFraction && guideExtent.rightFraction == extent.rightFraction
+    }
+    public func guidance(measurementReady: Bool) -> String? {
+        if measurementReady { return nil }
+        if current == nil { return "Finding stem…" }
+        return guideExtent == nil ? "Aim at the trunk centre." : "Stem found — checking depth…"
+    }
+    @discardableResult
+    public mutating func update(_ observation: LiveStemObservation?, at time: Double,
+                                receivedAt: Double? = nil) -> LiveStemMask? {
+        let received = receivedAt ?? time
+        guard time.isFinite, received.isFinite, received >= time, received >= lastSeen,
+              time >= sourceTime, received - time <= LiveStemResultPolicy.previewMaxAgeSeconds
+        else { reset(); return nil }
+        // Hold starts when a real mask arrives, not when slow inference began.
+        // Its original camera timestamp still imposes a hard stale-image limit.
+        if let mask = observation?.mask {
+            current = mask; guideExtent = observation?.guideExtent; lastSeen = received; sourceTime = time
+        }
+        return expire(at: received)
+    }
+    @discardableResult
+    public mutating func expire(at time: Double) -> LiveStemMask? {
+        guard time.isFinite, time >= lastSeen, time - lastSeen <= Self.holdSeconds,
+              time - sourceTime <= LiveStemResultPolicy.previewMaxAgeSeconds else {
+            reset(); return nil
+        }
+        return current
+    }
 }
 
 /// Identical temporal policy on both platforms. It does NOT repeatedly feed a

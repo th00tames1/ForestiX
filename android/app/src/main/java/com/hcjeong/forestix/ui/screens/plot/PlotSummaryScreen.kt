@@ -72,8 +72,9 @@ import kotlinx.coroutines.launch
 fun PlotSummaryScreen(
     nav: NavController,
     plotId: String,
-    onClosed: () -> Unit = { nav.popBackStack() },
+    onClosed: (() -> Unit)? = null,
 ) {
+    val back = com.hcjeong.forestix.ui.rememberSafeBack(nav)
     val env = LocalAppEnvironment.current
     val settings by env.settings.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
@@ -287,7 +288,7 @@ fun PlotSummaryScreen(
                             // Navigation is the caller's job (iOS parity):
                             // popping here would undo an onClosed() that
                             // just pushed the stand summary.
-                            onClosed()
+                            (onClosed ?: back)()
                         }
                     }
                 }
@@ -295,7 +296,7 @@ fun PlotSummaryScreen(
                 ForestixProminentButton(
                     label = "Done",
                     modifier = Modifier.fillMaxWidth(),
-                ) { nav.popBackStack() }
+                ) { back() }
             }
 
             // Destructive "Delete plot" (map-peek spec item 4) — cascades to
@@ -335,7 +336,7 @@ fun PlotSummaryScreen(
                         } catch (_: Exception) {
                             // Storage error — stay on the summary; retry later.
                         }
-                        nav.popBackStack()
+                        back()
                     }
                 }) { Text("Delete") }
             },

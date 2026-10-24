@@ -8,6 +8,7 @@ package com.hcjeong.forestix.ui.screens.dbh
 
 import android.os.SystemClock
 import android.view.HapticFeedbackConstants
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -15,7 +16,9 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import com.hcjeong.forestix.sensors.LiveStemMask
-import com.hcjeong.forestix.sensors.LiveStemTracker
+import com.hcjeong.forestix.sensors.LiveStemMaskPreview
+import com.hcjeong.forestix.sensors.LiveStemResultPolicy
+import com.hcjeong.forestix.sensors.LiveAutoCadence
 import com.hcjeong.forestix.sensors.YoloBoundaryAligner
 import com.hcjeong.forestix.sensors.StemExtent
 import kotlinx.coroutines.withContext
@@ -103,6 +106,10 @@ import com.hcjeong.forestix.data.clampBracketHalfWidth
 import com.hcjeong.forestix.data.QuickMeasureEntry
 import com.hcjeong.forestix.data.ResearchLog
 import com.hcjeong.forestix.data.StemPosition
+import com.hcjeong.forestix.data.fieldstudy.FieldAIProvenance
+import com.hcjeong.forestix.data.fieldstudy.FieldRawStatus
+import com.hcjeong.forestix.data.fieldstudy.FieldStudyKind
+import com.hcjeong.forestix.data.fieldstudy.FieldInventoryReplacementSnapshot
 import com.hcjeong.forestix.sensors.ArDepthFrame
 import com.hcjeong.forestix.sensors.ChordAlgorithm
 import com.hcjeong.forestix.sensors.ConfidenceTier
@@ -111,6 +118,14 @@ import com.hcjeong.forestix.sensors.DBHResult
 import com.hcjeong.forestix.sensors.DBHMethod
 import com.hcjeong.forestix.sensors.GuideAxis
 import com.hcjeong.forestix.sensors.RawCaptureStore
+import com.hcjeong.forestix.sensors.RawCaptureEvidence
+import com.hcjeong.forestix.sensors.RawCapturedResult
+import com.hcjeong.forestix.sensors.RawCameraJPEG
+import com.hcjeong.forestix.sensors.RawAIRecordSource
+import com.hcjeong.forestix.sensors.RawAIWriteRequest
+import com.hcjeong.forestix.sensors.YoloTrackedCapture
+import com.hcjeong.forestix.sensors.AIBoundaryProvenance
+import androidx.compose.runtime.rememberUpdatedState
 import com.hcjeong.forestix.ui.MeasurePhotoStore
 import com.hcjeong.forestix.ui.PendingTreeNumber
 import com.hcjeong.forestix.ui.Routes
@@ -118,6 +133,16 @@ import com.hcjeong.forestix.data.cruise.TreeLabel
 import com.hcjeong.forestix.ui.screens.cruise.CruiseCapture
 import com.hcjeong.forestix.ui.screens.cruise.CruiseRoutes
 import com.hcjeong.forestix.ui.screens.ScanMetadataSheet
+import com.hcjeong.forestix.ui.screens.FieldStudyCameraTargets
+import com.hcjeong.forestix.ui.screens.FieldTargetSwitchPresentation
+import com.hcjeong.forestix.ui.screens.switchFieldQuickTarget
+import com.hcjeong.forestix.data.fieldstudy.FieldTargetSwitchCoordinator
+import com.hcjeong.forestix.ui.screens.rememberFieldCaptureCoordinator
+import com.hcjeong.forestix.ui.screens.switchFieldCruiseTarget
+import com.hcjeong.forestix.ui.screens.restartCruiseCapture
+import com.hcjeong.forestix.ui.screens.FieldCaptureWriteWarning
+import com.hcjeong.forestix.ui.screens.FieldScanIdentityBadge
+import com.hcjeong.forestix.ui.screens.FieldReferencePeek
 import com.hcjeong.forestix.ui.screens.GpsFixChip
 import com.hcjeong.forestix.ui.screens.MeasureBackButton
 import com.hcjeong.forestix.ui.screens.MeasureCircleButton
@@ -132,7 +157,6 @@ import com.hcjeong.forestix.ui.screens.PLOT_GROUND_NOT_SEEN
 import com.hcjeong.forestix.ui.screens.PlotPinCentreCard
 import com.hcjeong.forestix.ui.screens.rememberPlotPinCentreOffer
 import com.hcjeong.forestix.ui.screens.RawCaptureBadge
-import com.hcjeong.forestix.ui.screens.RawCaptureOffNotice
 import com.hcjeong.forestix.ui.screens.RawCaptureStatus
 import com.hcjeong.forestix.ui.screens.RawCaptureStrings
 import com.hcjeong.forestix.ui.screens.ResearchFieldsRow
@@ -156,14 +180,15 @@ import java.util.Locale
 
 private enum class Stage { AIMING, CAPTURING, RESULT }
 
-private fun liveAutoFrameCompatible(source: ArDepthFrame?, current: ArDepthFrame?): Boolean {
+private fun liveMaskFrameCompatible(source: ArDepthFrame?, current: ArDepthFrame?): Boolean {
     if (source == null || current == null || source.width != current.width || source.height != current.height ||
-        current.depthAgeNanos > 250_000_000L ||
         source.depthFromViewAffine == null || current.depthFromViewAffine == null ||
         !source.depthFromViewAffine.contentEquals(current.depthFromViewAffine)) return false
     val travel = (12..14).sumOf { i -> val d = (current.pose[i] - source.pose[i]).toDouble(); d * d }
     val facing = (8..10).sumOf { i -> (current.pose[i] * source.pose[i]).toDouble() }
-    return travel < 0.0004 && facing > 0.9994
+    val up = (4..6).sumOf { i -> (current.pose[i] * source.pose[i]).toDouble() }
+    val decision = LiveStemResultPolicy.evaluate(0.0, kotlin.math.sqrt(travel), facing, upDot = up)
+    return decision.displayMask
 }
 
 /// THE HORIZON LINE'S TRAVEL. iOS `guideLinePointsPerDegree` /
@@ -293,6 +318,7 @@ private const val TRUTH_NO_BUNDLE_OWNER = "no-bundle"
 /// dialog, and goes straight to Height on the same tree.
 @Composable
 fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
+    val back = com.hcjeong.forestix.ui.rememberSafeBack(nav)
     val env = LocalAppEnvironment.current
     val context = LocalContext.current
     val hapticView = LocalView.current
@@ -300,6 +326,8 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // and the sampling plot's anchor renders here as a subdued overlay).
     val controller = ArSessionHub.controller
     val scope = rememberCoroutineScope()
+    val fieldTargetSwitch=remember(scope){FieldTargetSwitchCoordinator(scope)}
+    FieldTargetSwitchPresentation(fieldTargetSwitch)
     // Map-home tree lock ("Measure this tree again" / chooser rows) hands the
     // tree number — and the name and species the cruiser typed in the chooser
     // — over via PendingTreeNumber. Consume it once so the accepted reading
@@ -360,11 +388,13 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // number and the name the instant the save lands, so recomputing it at
     // render time would name the NEXT tree instead of the one Undo removes.
     var undoToast by remember { mutableStateOf<String?>(null) }
+    var undoFailed by remember { mutableStateOf(false) }
+    var accepting by remember { mutableStateOf(false) }
     var undoEpoch by remember { mutableStateOf(0) }
     LaunchedEffect(undoEpoch) {
         if (undoToast != null) {
             delay(3_000)
-            undoToast = null
+            if(!accepting&&!undoFailed)undoToast = null
         }
     }
     val colors = Forestix.colors
@@ -375,10 +405,24 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     val pinCentreOffer = rememberPlotPinCentreOffer(controller)
 
     val settings by env.settings.state.collectAsStateWithLifecycle()
+    val studyState by env.fieldStudy.state.collectAsStateWithLifecycle()
+    val recordAIInputs = settings.developerMode && settings.rawCaptureEnabled && studyState.configuration.preserveAiInputs
+    val currentRecordAIInputs by rememberUpdatedState(recordAIInputs)
     // Project calibration — identity for plain quick-measure (iOS parity),
     // the active project's wall/cylinder fits when launched from the
     // Add-Tree flow (iOS injects it into DBHScanViewModel).
     val calibration by env.activeScanCalibration.collectAsStateWithLifecycle()
+    val fieldCapture = rememberFieldCaptureCoordinator(FieldStudyKind.DBH, calibration, mapOf(
+        "application.project_id" to (CruiseCapture.target?.projectId?.toString() ?: ""),
+        "application.plot_id" to (CruiseCapture.target?.plotId?.toString()
+            ?: pendingLock?.plotID?.toString() ?: env.history.activePlotID.value?.toString().orEmpty()),
+        "application.tree_number" to (cruiseTreeNumber ?: pendingTree).toString(),
+    ),targetOverride=if(CruiseCapture.isActive)CruiseCapture.target?.fieldTarget else pendingLock?.fieldTarget,
+        useGlobalTarget=CruiseCapture.isActive&&pendingLock?.fieldTargetLocked!=true,uiFlow=pendingLock?.uiFlow,scopeOverride=pendingLock?.fieldScope)
+    DisposableEffect(pendingLock?.fieldTarget?.id){
+        onDispose{pendingLock?.fieldTarget?.id?.let{id->if(env.fieldStudy.state.value.selectedTargetId==id)env.fieldStudy.selectTarget(null)}}
+    }
+    BackHandler(enabled = accepting) { /* Wait for the durable application save. */ }
     // The DBH scan requires the ARCore Depth API (manual typed entry is the
     // only depth-free path left). Block when a previous session's DEFINITIVE
     // negative verdict is cached (tc.depthUnsupported — then no probe
@@ -539,7 +583,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // the bracket is live on the first frame at a known width. The settings
     // snapshot is loaded synchronously in `AppSettings.loadSnapshot`, so
     // these `remember`s see the cruiser's stored width, not the defaults.
-    var adjustMode by remember { mutableStateOf(true) }
+    var adjustMode by remember { mutableStateOf(false) }
     var adjustLeftFrac by remember {
         mutableStateOf(0.5f - clampBracketHalfWidth(settings.dbhBracketHalfWidth))
     }
@@ -549,19 +593,31 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
 
     // Explicit Auto mode. All inference stays off the main thread, one frame
     // at a time; the same silhouette drives the mask and the measuring handles.
-    var segmentationOn by remember { mutableStateOf(false) }
+    var segmentationOn by remember { mutableStateOf(true) }
+    var lastSuccessfulInferenceId by remember { mutableStateOf<String?>(null) }
+    var liveMaskInferenceId by remember { mutableStateOf<String?>(null) }
+    var userAdjustedBoundary by remember { mutableStateOf(false) }
+    var lastInferenceHadMask by remember { mutableStateOf(false) }
+    var boundaryInferenceId by remember { mutableStateOf<String?>(null) }
+    var latestAIRecordSource by remember { mutableStateOf<RawAIRecordSource?>(null) }
+    var liveAIRecordSource by remember { mutableStateOf<RawAIRecordSource?>(null) }
+    var boundaryAIRecordSource by remember { mutableStateOf<RawAIRecordSource?>(null) }
+    LaunchedEffect(recordAIInputs) { if (!recordAIInputs) { latestAIRecordSource = null; liveAIRecordSource = null; boundaryAIRecordSource = null } }
     var autoAlignmentBusy by remember { mutableStateOf(false) }
-    var autoAlignmentMessage by remember { mutableStateOf<String?>(null) }
+    var autoAlignmentMessage by remember { mutableStateOf<String?>("Finding stem…") }
     var displayedAutoMessage by remember { mutableStateOf<String?>(null) }
     var autoSafetyNotice by remember { mutableStateOf<String?>(null) }
     var deviceIsHot by remember { mutableStateOf(false) }
+    var inferenceThermallyLimited by remember { mutableStateOf(false) }
     DisposableEffect(context) {
         val power = context.getSystemService(android.content.Context.POWER_SERVICE) as? android.os.PowerManager
         var listener: android.os.PowerManager.OnThermalStatusChangedListener? = null
         if (android.os.Build.VERSION.SDK_INT >= 29 && power != null) {
             deviceIsHot = power.currentThermalStatus >= android.os.PowerManager.THERMAL_STATUS_SEVERE
+            inferenceThermallyLimited = power.currentThermalStatus >= android.os.PowerManager.THERMAL_STATUS_LIGHT
             listener = android.os.PowerManager.OnThermalStatusChangedListener { status ->
                 deviceIsHot = status >= android.os.PowerManager.THERMAL_STATUS_SEVERE
+                inferenceThermallyLimited = status >= android.os.PowerManager.THERMAL_STATUS_LIGHT
             }
             power.addThermalStatusListener(context.mainExecutor, listener)
         }
@@ -580,10 +636,12 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             kotlinx.coroutines.delay(125)
         }
     }
-    var segmentedExtent by remember { mutableStateOf<StemExtent?>(null) }
     var liveStemMask by remember { mutableStateOf<LiveStemMask?>(null) }
-    var liveAutoFrame by remember { mutableStateOf<ArDepthFrame?>(null) }
-    val liveAutoTracker = remember { LiveStemTracker() }
+    var liveStemGuideExtent by remember { mutableStateOf<StemExtent?>(null) }
+    val liveMaskPreview = remember { LiveStemMaskPreview() }
+    var liveMaskFrame by remember { mutableStateOf<ArDepthFrame?>(null) }
+    fun liveAutoHasBracket(now: Double = SystemClock.elapsedRealtime() / 1000.0): Boolean =
+        liveMaskPreview.bracketForDepth(now) != null
     val lifecycleOwner = LocalLifecycleOwner.current
     var resumed by remember(lifecycleOwner) {
         mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
@@ -597,62 +655,108 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     }
     LaunchedEffect(segmentationOn, adjustMode, depthBlocked, stage, manualOpen, bhGuide.stage, resumed) {
         if (stage == Stage.CAPTURING || stage == Stage.RESULT) return@LaunchedEffect
-        liveAutoTracker.reset(); segmentedExtent = null; liveStemMask = null; liveAutoFrame = null
+        liveStemMask = null
+        liveMaskPreview.reset(); liveMaskFrame = null
+        liveAIRecordSource = null; liveMaskInferenceId = null
+        liveStemGuideExtent = null
         autoAlignmentBusy = false
         if (!segmentationOn || adjustMode || depthBlocked || manualOpen ||
             bhGuide.stage == BreastHeightGuide.Stage.AIMING || !resumed) return@LaunchedEffect
+        var lastDiagnostic = Double.NEGATIVE_INFINITY
+        val debugDiagnostics = context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0
         while (currentCoroutineContext().isActive) {
             val started = SystemClock.elapsedRealtime() / 1000.0
             val seedWidth = controller.viewWidthPx; val seedHeight = controller.viewHeightPx
             val depth = controller.acquireDepthFrame()
-            val camera = if (depth != null && depth.depthAgeNanos <= 250_000_000L) controller.acquireCameraLetterboxInput(640) else null
+            // RGB only places the bracket. Current depth is evaluated by Adjust.
+            val recording = currentRecordAIInputs
+            val camera = if (depth != null) controller.acquireCameraLetterboxInput(640,recording) else null
             if (depth == null || camera == null) {
-                segmentedExtent = liveAutoTracker.update(null, started)
-                if (!liveAutoTracker.isFresh(started)) { liveStemMask = null; liveAutoFrame = null }
-                autoAlignmentMessage = "Finding stem…"
-                delay(125); continue
+                liveStemMask = liveMaskPreview.update(null, started)
+                liveStemGuideExtent = liveMaskPreview.guideExtent
+                if (liveStemMask == null) { liveMaskFrame = null; liveAIRecordSource = null; liveMaskInferenceId = null }
+                autoAlignmentMessage = liveMaskPreview.guidance(false)
+                delay(LiveAutoCadence.IDLE_MILLIS); continue
             }
             autoAlignmentBusy = true
             if (camera.frameTimestampNanos != depth.frameTimestampNanos) {
-                camera.close(); autoAlignmentBusy = false; delay(125); continue
+                camera.close(); autoAlignmentBusy = false; delay(LiveAutoCadence.IDLE_MILLIS); continue
             }
+            val inferenceId = java.util.UUID.randomUUID().toString()
             val outcome = try {
                 withContext(Dispatchers.Default) {
                     runCatching {
                         val prepared = camera.convert() ?: error("Camera input unavailable")
-                        YoloBoundaryAligner.shared(context).track(prepared.first, prepared.second, depth,
-                            seedWidth.toFloat(), seedHeight.toFloat(), camera.imageFromViewAffine)
+                        YoloBoundaryAligner.withShared(context) { model ->
+                            if (recording) model.trackWithCapture(prepared.first,prepared.second,depth,seedWidth.toFloat(),seedHeight.toFloat(),
+                                camera.imageFromViewAffine,inferenceId,camera.imageMetadata,started)
+                            else YoloTrackedCapture(model.track(prepared.first, prepared.second, depth,
+                                seedWidth.toFloat(), seedHeight.toFloat(), camera.imageFromViewAffine))
+                        }
                     }
                 }
             } finally { camera.close(); autoAlignmentBusy = false }
             currentCoroutineContext().ensureActive()
             val now = SystemClock.elapsedRealtime() / 1000.0
             val current = controller.acquireDepthFrame()
-            if (now - started > 0.45 || !liveAutoFrameCompatible(depth, current) ||
-                seedWidth != controller.viewWidthPx || seedHeight != controller.viewHeightPx) {
-                liveAutoTracker.reset(); segmentedExtent = null; liveStemMask = null; liveAutoFrame = null
+            val sameViewport = seedWidth == controller.viewWidthPx && seedHeight == controller.viewHeightPx
+            val timing = LiveStemResultPolicy.evaluate(now - started, 0.0, 1.0, sameViewport)
+            val displayAllowed = timing.displayMask && liveMaskFrameCompatible(depth, current)
+            if (liveMaskFrame != null && !liveMaskFrameCompatible(liveMaskFrame, current)) {
+                liveMaskPreview.reset(); liveMaskFrame = null; liveStemMask = null
+                liveAIRecordSource = null; liveMaskInferenceId = null
+            }
+            if (!sameViewport) {
+                liveStemMask = null
+                liveMaskPreview.reset(); liveMaskFrame = null
+                liveAIRecordSource = null; liveMaskInferenceId = null
+                liveStemGuideExtent = null
                 autoAlignmentMessage = "Finding stem…"
             } else if (outcome.isSuccess) {
-                val observation = outcome.getOrNull()
-                segmentedExtent = liveAutoTracker.update(observation?.extent, started)
-                if (liveAutoTracker.lastGood == started && observation?.mask != null) liveStemMask = observation.mask
-                else if (!liveAutoTracker.isFresh(now)) liveStemMask = null
-                segmentedExtent?.let {
-                    adjustLeftFrac = it.leftFraction.toFloat(); adjustRightFrac = it.rightFraction.toFloat()
-                    if (liveAutoTracker.lastGood == started) liveAutoFrame = depth
+                lastSuccessfulInferenceId = inferenceId
+                val tracked = outcome.getOrNull()
+                val observation = tracked?.observation
+                lastInferenceHadMask = observation?.mask != null
+                latestAIRecordSource = if (currentRecordAIInputs) tracked?.source else null
+                if (debugDiagnostics && now - lastDiagnostic >= 1.0) {
+                    lastDiagnostic = now
+                    android.util.Log.d("ForestiXAuto", "${((now-started)*1000).toInt()}ms mask=${observation?.mask != null} guide=${observation?.guideExtent != null} display=$displayAllowed")
                 }
-                autoAlignmentMessage = if (liveAutoTracker.isFresh(now)) null else "Finding stem…"
+                if (displayAllowed) {
+                    liveMaskPreview.update(observation, started, now)
+                    if (observation?.mask != null) {
+                        liveMaskFrame = depth
+                        liveMaskInferenceId = inferenceId
+                        liveAIRecordSource = latestAIRecordSource
+                    }
+                }
+                liveStemMask = liveMaskPreview.expire(now)
+                liveStemGuideExtent = liveMaskPreview.guideExtent
+                if (liveStemMask == null) { liveMaskFrame = null; liveAIRecordSource = null; liveMaskInferenceId = null }
+                liveMaskPreview.bracketForDepth(now)?.let {
+                    adjustLeftFrac = it.leftFraction.toFloat(); adjustRightFrac = it.rightFraction.toFloat()
+                    boundaryInferenceId = liveMaskInferenceId; boundaryAIRecordSource = liveAIRecordSource
+                }
+                // The ordinary depth loop below reports readiness, not AI confidence.
+                if (!liveAutoHasBracket(now)) autoAlignmentMessage = liveMaskPreview.guidance(false)
             } else {
-                liveAutoTracker.reset(); segmentedExtent = null; liveStemMask = null; liveAutoFrame = null
+                liveStemMask = null
+                liveMaskPreview.reset(); liveMaskFrame = null
+                liveAIRecordSource = null; liveMaskInferenceId = null
+                liveStemGuideExtent = null
                 autoAlignmentMessage = outcome.exceptionOrNull()?.message ?: "AI unavailable. Use Adjust."
                 delay(750)
             }
             val elapsed = SystemClock.elapsedRealtime() / 1000.0 - started
-            delay(maxOf(20L, ((0.125 - elapsed) * 1000).toLong()))
+            delay(LiveAutoCadence.delayMillis(elapsed,inferenceThermallyLimited))
         }
     }
     // Auto never falls back silently to a different depth-walk measurement.
     val segmentationDroveTheBracket = segmentationOn && !adjustMode
+    fun fieldAI(applied: Boolean = false) = AIBoundaryProvenance.snapshot(segmentationDroveTheBracket,applied,
+        lastSuccessfulInferenceId,lastInferenceHadMask,boundaryInferenceId,userAdjustedBoundary)
+    fun aiSource(ai:FieldAIProvenance):RawAIRecordSource? = listOfNotNull(boundaryAIRecordSource,liveAIRecordSource,latestAIRecordSource)
+        .firstOrNull { it.inferenceId == ai.inferenceId }
     var adjustPreview by remember { mutableStateOf<DBHEstimator.DbhPreview?>(null) }
 
     // ADJUST live-readout settling (field round 10 — the diameter that jumps
@@ -773,6 +877,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     var lastRawCaptureId by remember { mutableStateOf<String?>(null) }
     // Visible outcome of the last capture attempt (saved / NOT saved).
     var rawCaptureStatus by remember { mutableStateOf<RawCaptureStatus?>(null) }
+    var rawAIRecordingWarning by remember { mutableStateOf<String?>(null) }
     var rawStatusEpoch by remember { mutableStateOf(0) }
     // Reason the last capture failed to record (null = the last capture
     // saved). Accept reads it so a typed truth is never attached to — or
@@ -834,17 +939,21 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // of every burst regardless of tier (accepted / rejected / ADJUST alike).
     // `rgb` is the reference JPEG grabbed at BURST START.
     fun recordRawDbh(
+        id: String,
         frames: List<ArDepthFrame>,
         tapX: Double, tapY: Double, axisRow: Boolean,
         bracket: RawCaptureStore.BracketSpec?,
-        rgb: ByteArray?,
+        rgb: RawCameraJPEG?,
+        displayed: DBHResult?,
+        ai: FieldAIProvenance,
+        aiSource: RawAIRecordSource?,
+        recordAI: Boolean,
     ) {
-        if (!rawCaptureArmed) return
         val cruise = CruiseCapture.target
         val ctx = RawCaptureStore.CaptureContext(
             mode = if (cruise != null) "cruise" else "quick",
             projectId = cruise?.projectId?.toString(),
-            plotId = cruise?.plotId?.toString() ?: env.history.activePlotID.value?.toString(),
+            plotId = cruise?.plotId?.toString() ?: pendingLock?.plotID?.toString() ?: env.history.activePlotID.value?.toString(),
             treeNumber = cruise?.treeNumber ?: pendingTree,
             // Same freshness gate as the accept path — a bundle must not
             // claim a position the app would refuse to draw.
@@ -852,11 +961,14 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 com.hcjeong.forestix.positioning.LocationService.lastGlobalFix,
                 System.currentTimeMillis()),
         )
-        // Mint the id NOW so Accept has something to attach truth to even if
-        // the write is still running (RawCaptureStore queues edits per id).
-        val id = RawCaptureStore.newBundleId()
+        // The attempt, result row and raw bundle share the ID minted at tap.
         lastRawCaptureId = id
-        scope.launch {
+        val evidence = RawCaptureEvidence(id,resultSeconds = SystemClock.elapsedRealtimeNanos()/1e9,
+            displayedResult = RawCapturedResult(displayed?.diameterCm?.toDouble()?.takeIf { it.isFinite() },
+                displayed?.sigmaRmm?.toDouble()?.takeIf { it.isFinite() && it >= 0 },displayed?.confidence?.raw,
+                displayed?.method?.raw,displayed != null && displayed.confidence != ConfidenceTier.RED),ai = ai)
+        val aiRequest = RawAIWriteRequest.make(recordAI,ai,aiSource)
+        env.fieldStudy.launchCaptureEvidence {
             val outcome = RawCaptureStore.recordDbh(
                 context = context,
                 id = id,
@@ -867,8 +979,20 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 algorithmRaw = settings.dbhChordAlgorithm,
                 unitSystem = if (settings.unitSystem == UnitSystem.METRIC) "metric" else "imperial",
                 ctx = ctx,
-                rgb = rgb,
+                rgb = rgb?.data,
+                referenceImageMetadata = rgb?.metadata,
+                captureEvidence = evidence,
+                aiRequest = aiRequest,
             )
+            fieldCapture.raw(id, if (outcome.saved) FieldRawStatus.SAVED else FieldRawStatus.FAILED,
+                outcome.error ?: outcome.aiEvidenceStatus?.takeUnless { it in listOf("saved","not_requested","no_inference") }?.let { "ai_input_$it: ${outcome.aiEvidenceReason.orEmpty()}" }
+                    ?: outcome.replayStatus?.takeUnless { it == "pass" }?.let { "original_input_replay_$it" },outcome.replayValue)
+            if (fieldCapture.currentId != id) return@launchCaptureEvidence
+            rawAIRecordingWarning = when(outcome.aiEvidenceStatus) {
+                null,"not_requested","no_inference" -> null
+                "saved" -> outcome.aiEvidenceReason?.let { "AI input metadata: $it" }
+                else -> "AI input NOT saved: ${outcome.aiEvidenceStatus} (${outcome.aiEvidenceReason.orEmpty()})"
+            }
             if (outcome.saved) {
                 lastCaptureFailure = null
                 postRawStatus(RawCaptureStatus(RawCaptureStrings.saved(outcome.frameCount), true))
@@ -931,13 +1055,12 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // pointing elsewhere — or the frame was gone and rgb_file came back null.
     // Written to a throwaway cache file (the only sink captureCameraJpeg
     // offers), read into memory, deleted.
-    fun captureReferenceJpeg(): ByteArray? {
+    fun captureReferenceJpeg(): RawCameraJPEG? {
         if (!rawCaptureArmed) return null
         return try {
             val tmp = java.io.File.createTempFile("dbh_ref_", ".jpg", context.cacheDir)
-            val bytes = if (controller.captureCameraJpeg(tmp)) tmp.readBytes() else null
-            tmp.delete()
-            bytes
+            try { controller.captureCameraJpegMetadata(tmp)?.let { RawCameraJPEG(tmp.readBytes(),it) } }
+            finally { tmp.delete() }
         } catch (_: Throwable) { null }
     }
 
@@ -1273,12 +1396,19 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 lastFrameAt = SystemClock.elapsedRealtime()
                 val w = controller.viewWidthPx.toFloat()
                 val cy = controller.viewHeightPx / 2f
-                val liveLock = !segmentationOn || (liveAutoTracker.isFresh(SystemClock.elapsedRealtime() / 1000.0) &&
-                    liveAutoFrameCompatible(liveAutoFrame, f))
-                if (segmentationOn && !liveAutoFrameCompatible(liveAutoFrame, f) && liveAutoFrame != null) {
-                    liveAutoTracker.reset(); segmentedExtent = null; liveStemMask = null; liveAutoFrame = null
+                if (liveMaskFrame != null && !liveMaskFrameCompatible(liveMaskFrame, f)) {
+                    liveMaskPreview.reset(); liveMaskFrame = null
+                    liveAIRecordSource = null; liveMaskInferenceId = null
                 }
-                adjustPreview = if (w > 1f && liveLock) {
+                liveStemMask = liveMaskPreview.expire(SystemClock.elapsedRealtime() / 1000.0)
+                liveStemGuideExtent = liveMaskPreview.guideExtent
+                if (liveStemMask == null) { liveMaskFrame = null; liveAIRecordSource = null; liveMaskInferenceId = null }
+                val maskBracket = liveMaskPreview.bracketForDepth(SystemClock.elapsedRealtime() / 1000.0)
+                if (segmentationDroveTheBracket && maskBracket != null) {
+                    adjustLeftFrac = maskBracket.leftFraction.toFloat()
+                    adjustRightFrac = maskBracket.rightFraction.toFloat()
+                }
+                adjustPreview = if (w > 1f && (!segmentationDroveTheBracket || maskBracket != null)) {
                     DBHEstimator.constrainedEstimate(
                         f, adjustLeftFrac * w, adjustRightFrac * w, cy, calibration,
                     )
@@ -1327,6 +1457,10 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             // ever. ADJUST is the default path, so this is the common case.
             val nowMs = SystemClock.elapsedRealtime()
             depthSilent = nowMs - lastFrameAt >= DEPTH_SILENT_MS
+            if (segmentationDroveTheBracket && liveStemMask != null) {
+                autoAlignmentMessage = liveMaskPreview.guidance(
+                    liveAutoHasBracket() && !depthSilent && adjustPreview?.locked == true)
+            }
             if (!depthSilent && adjustPreview?.locked == true) lastLockAt = nowMs
             // Same rule as the auto loop — a refusal outlives its own truth
             // the moment the bracket resolves.
@@ -1341,16 +1475,24 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         stage == Stage.AIMING && !manualOpen && !depthBlocked && !hidingChromeForCapture
     val depthGuidanceActive = stage == Stage.AIMING && !manualOpen && !groundPlacementActive &&
         !depthBlocked && controller.supportsDepth && !hidingChromeForCapture
-    // Replace the old no-lock banner, not an assertion of absolute accuracy.
-    // A silent depth stream must not inherit the last frame's held lock.
+    // Initial acquisition help only. Latch for the screen lifetime, not for a
+    // particular tree, Auto/Adjust selection or retake. Hide on the ready tick
+    // itself, before the effect commits the latch. Never accept a stale fit.
+    var initialDepthAcquired by remember { mutableStateOf(false) }
+    val depthLockedNow = if (useBracketForDepth) adjustPreview?.locked == true else preview?.locked == true
+    val acquiredNow = hasAcquiredInitialDepth(initialDepthAcquired, depthGuidanceActive, depthLockedNow, depthSilent)
+    LaunchedEffect(acquiredNow) {
+        if (acquiredNow) initialDepthAcquired = true
+    }
     val showDepthMotionHint = shouldShowDepthMotionHint(
         active = depthGuidanceActive,
         stalled = acquisitionStalled,
         depthSilent = depthSilent,
-        locked = if (useBracketForDepth) adjustPreview?.locked == true else preview?.locked == true,
+        locked = depthLockedNow,
         specificError = if (useBracketForDepth) bracketTwoSurfaces && adjustShown == null
             else preview?.edgesClipped == true,
         failure = failure != null || captureRefusal != null,
+        initialDepthAcquired = acquiredNow,
     )
 
     // Border chip (D — cruise tally only): live distance to the plot
@@ -1435,8 +1577,32 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         }
     }
 
+    fun recordRefusedAI(id:String,reason:String,ai:FieldAIProvenance,source:RawAIRecordSource?=aiSource(ai),requested:Boolean=recordAIInputs) {
+        if(!requested||source==null)return
+        val request=RawAIWriteRequest.make(true,ai,source)
+        val cruise=CruiseCapture.target
+        val ctx=RawCaptureStore.CaptureContext(if(cruise==null)"quick"else"cruise",cruise?.projectId?.toString(),
+            cruise?.plotId?.toString()?:pendingLock?.plotID?.toString()?:env.history.activePlotID.value?.toString(),cruise?.treeNumber?:pendingTree,
+            freshFixOrNull(com.hcjeong.forestix.positioning.LocationService.lastGlobalFix,System.currentTimeMillis()))
+        val evidence=RawCaptureEvidence(id,resultSeconds=SystemClock.elapsedRealtimeNanos()/1e9,
+            displayedResult=RawCapturedResult(null,null,null,null,false),ai=ai,attemptFailureReason=reason)
+        env.fieldStudy.launchCaptureEvidence {
+            val outcome=RawCaptureStore.recordRefusedAttempt(context,id,calibration,if(settings.unitSystem==UnitSystem.METRIC)"metric"else"imperial",ctx,evidence,request)
+            fieldCapture.raw(id,if(outcome.saved)FieldRawStatus.SAVED else FieldRawStatus.FAILED,
+                if(outcome.saved)"attempt_input_only: $reason"else outcome.error)
+            if(fieldCapture.currentId==id){
+                if(outcome.saved)postRawStatus(RawCaptureStatus("AI attempt input saved",true))
+                else rawAIRecordingWarning="AI attempt input NOT saved: ${outcome.error.orEmpty()}"
+            }
+        }
+    }
+
     fun capture() {
-        if (stage == Stage.CAPTURING) return
+        if (accepting || stage == Stage.CAPTURING) return
+        val id = fieldCapture.tryBegin(rawCaptureArmed, segmentationDroveTheBracket) ?: return
+        rawAIRecordingWarning = null
+        val ai = fieldAI()
+        val source = aiSource(ai); val recordAI = recordAIInputs
         // Require a locked live fit before starting the burst — mirrors the
         // iOS armed + non-red gate, so a capture can't run on an unresolved
         // trunk and immediately reject.
@@ -1447,6 +1613,8 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         // distance at all.
         if (preview?.locked != true) {
             captureRefusal = refusalFor(preview)
+            fieldCapture.refuse(id, captureRefusal ?: "capture_unavailable", ai)
+            recordRefusedAI(id,captureRefusal ?: "capture_unavailable",ai,source,recordAI)
             return
         }
         captureRefusal = null
@@ -1464,7 +1632,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             // tap/axis) so the burst can be serialized for offline replay.
             var recFrames: List<ArDepthFrame>? = null
             var recTapX = 0.0; var recTapY = 0.0; var recAxisRow = false
-            var recRgb: ByteArray? = null
+            var recRgb: RawCameraJPEG? = null
             run measurement@{
                 val frames = captureDepthFrames()
                 if (frames.isEmpty()) return@measurement
@@ -1495,15 +1663,24 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 } else samples.add(sub)
             }
             sampleProgress = 0
+            if (!fieldCapture.continueCapture()) {
+                fieldCapture.refuse(id,"protocol_settings_changed",ai);stage=Stage.AIMING;return@launch
+            }
             val rec = recFrames
             if (rec != null) {
-                recordRawDbh(rec, recTapX, recTapY, recAxisRow, bracket = null, rgb = recRgb)
+                recordRawDbh(id, rec, recTapX, recTapY, recAxisRow, bracket = null, rgb = recRgb,
+                    displayed = samples.firstOrNull() ?: firstRed,ai = ai,aiSource = source,recordAI = recordAI)
             } else if (rawCaptureArmed) {
                 lastCaptureFailure = "no depth frame available for this capture"
+                fieldCapture.raw(id, FieldRawStatus.FAILED, lastCaptureFailure)
+                recordRefusedAI(id,lastCaptureFailure ?: "no_depth",ai,source,recordAI)
                 postRawStatus(RawCaptureStatus(
                     RawCaptureStrings.notSaved(lastCaptureFailure), false))
             }
             val agg = samples.firstOrNull()
+            val fieldResult = agg ?: firstRed
+            fieldCapture.finish(id, fieldResult?.diameterCm?.toDouble(), fieldResult?.sigmaRmm?.toDouble(),
+                agg != null, fieldResult?.rejectionReason ?: if (agg == null) "no_valid_depth_result" else null, ai)
             // THE SHUTTER — here, at the instant the burst finished and the
             // diameter is computed, with the cruiser still holding the phone
             // on the stem, and BEFORE Stage.RESULT puts the panel up. NOT at
@@ -1533,17 +1710,30 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // ADJUST captures one frame with the handle positions latched at tap time.
     // Its geometry and estimator are shared with raw recording and replay.
     fun captureAdjust() {
-        if (stage == Stage.CAPTURING) return
-        if (segmentationOn && (!liveAutoTracker.isFresh(SystemClock.elapsedRealtime() / 1000.0) ||
-            !liveAutoFrameCompatible(liveAutoFrame, controller.acquireDepthFrame()))) {
-            captureRefusal = "No stem lock yet — keep the crosshair on the trunk, or use Adjust."
-            return
+        if (accepting || stage == Stage.CAPTURING) return
+        val id = fieldCapture.tryBegin(rawCaptureArmed, segmentationDroveTheBracket) ?: return
+        rawAIRecordingWarning = null
+        if (segmentationDroveTheBracket) {
+            if (!liveMaskFrameCompatible(liveMaskFrame, controller.acquireDepthFrame())) {
+                liveMaskPreview.reset(); liveMaskFrame = null
+                liveStemMask = null; liveStemGuideExtent = null
+            }
+            val bracket = liveMaskPreview.bracketForDepth(SystemClock.elapsedRealtime() / 1000.0)
+            if (bracket == null) {
+                captureRefusal = "Keep the crosshair on the trunk, or use Adjust."
+                val ai=fieldAI();fieldCapture.refuse(id, "no_ai_bracket", ai);recordRefusedAI(id,"no_ai_bracket",ai)
+                return
+            }
+            adjustLeftFrac = bracket.leftFraction.toFloat()
+            adjustRightFrac = bracket.rightFraction.toFloat()
         }
         // Same silence, same fix. `constrainedEstimate` returns null rather
         // than an unlocked preview, so the bracket can only ever report the
         // lock sentence — it has no tap depth to name a direction from.
         if (adjustPreview?.locked != true) {
             captureRefusal = refusalFor(adjustPreview)
+            val ai=fieldAI(applied=true);fieldCapture.refuse(id, captureRefusal ?: "capture_unavailable", ai)
+            recordRefusedAI(id,captureRefusal ?: "capture_unavailable",ai)
             return
         }
         captureRefusal = null
@@ -1555,6 +1745,8 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         // handle fractions are: the feed keeps running during the burst and
         // the flag has to describe the capture, not the tick it is read on.
         resultFromSegmentation = segmentationDroveTheBracket
+        val ai = fieldAI(applied = true)
+        val source = aiSource(ai); val recordAI = recordAIInputs
         lastCaptureFailure = null
         truthSaveFailure = null
         val lockedLeftFrac = adjustLeftFrac
@@ -1566,7 +1758,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             // latched view-space bracket for offline replay.
             var recFrames: List<ArDepthFrame>? = null
             var recBracket: RawCaptureStore.BracketSpec? = null
-            var recRgb: ByteArray? = null
+            var recRgb: RawCameraJPEG? = null
             run measurement@{
                 val frames = captureDepthFrames()
                 if (frames.isEmpty()) return@measurement
@@ -1592,15 +1784,24 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 else subs.add(measured)
             }
             sampleProgress = 0
+            if (!fieldCapture.continueCapture()) {
+                fieldCapture.refuse(id,"protocol_settings_changed",ai);stage=Stage.AIMING;return@launch
+            }
             val rf = recFrames; val rb = recBracket
             if (rf != null && rb != null) {
-                recordRawDbh(rf, tapX = 0.0, tapY = 0.0, axisRow = false, bracket = rb, rgb = recRgb)
+                recordRawDbh(id, rf, tapX = 0.0, tapY = 0.0, axisRow = false, bracket = rb, rgb = recRgb,
+                    displayed = subs.firstOrNull() ?: firstRed,ai = ai,aiSource = source,recordAI = recordAI)
             } else if (rawCaptureArmed) {
                 lastCaptureFailure = "no depth frame available for this capture"
+                fieldCapture.raw(id, FieldRawStatus.FAILED, lastCaptureFailure)
+                recordRefusedAI(id,lastCaptureFailure ?: "no_depth",ai,source,recordAI)
                 postRawStatus(RawCaptureStatus(
                     RawCaptureStrings.notSaved(lastCaptureFailure), false))
             }
             val agg = subs.firstOrNull()
+            val fieldResult = agg ?: firstRed
+            fieldCapture.finish(id, fieldResult?.diameterCm?.toDouble(), fieldResult?.sigmaRmm?.toDouble(),
+                agg != null, fieldResult?.rejectionReason ?: if (agg == null) "no_valid_depth_result" else null, ai)
             // THE SHUTTER — same moment and same rule as the auto burst
             // above: the frame with the bracket still on the stem, taken
             // before the result panel is composed.
@@ -1628,6 +1829,9 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     // Shared by the result row's Accept and the manual-entry Save (iOS
     // submitManualEntry goes straight to .accepted).
     fun acceptResult(r: DBHResult) {
+        if (accepting) return
+        val measurementId = fieldCapture.currentId ?: return
+        var acceptedResearchFields: Map<String, String>? = null
         // Auto-capture (map home): the photo was taken at the end of the
         // burst, by `captureHeldPhoto` — Accept attaches `heldPhoto` and the
         // latest GPS fix from the badge's running location service, and needs
@@ -1670,10 +1874,11 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             if (pendingLock?.replaceExisting == true) lockedPlotID
             else lockedPlotID ?: env.history.activePlotID.value
         truthSaveFailure = null
-        scope.launch {
+        val rawIdAtAccept = lastRawCaptureId
+        suspend fun attachAcceptedRaw() {
             // Stamp operator_accepted on the bundle this Accept confirms
             // (safe while the writer is still running — the store parks it).
-            val rid = lastRawCaptureId
+            val rid = rawIdAtAccept
             if (rid != null) RawCaptureStore.markAccepted(context, rid)
             // Attach the typed ground truth. The input is cleared ONLY once
             // the value is durable (in the manifest, or queued for the
@@ -1749,7 +1954,9 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     }
                 }
             }
-            lastRawCaptureId = null
+            if (lastRawCaptureId == rid) lastRawCaptureId = null
+        }
+        val saveResult: suspend () -> Unit = {
             // The chrome-less snapshot of the AR surface (camera feed + the
             // rendered measurement geometry) was already taken, at the moment
             // the burst finished (see `heldPhoto`) — Accept only attaches it.
@@ -1774,38 +1981,48 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 // plot — the quick-measure history (and its map pins) never
                 // sees cruise readings. A storage failure must not crash
                 // the AR screen; the missing pin surfaces it on the map.
-                val savedTreeId = runCatching {
-                    CruiseCapture.recordDbh(
+                val savedTreeId = CruiseCapture.recordDbh(
                         env, r,
                         speciesCode = metaSpecies,
                         damageCodes = metaDamage,
                         note = metaNote,
                         photoPath = photo,
                         fix = fix,
+                        measurementId=fieldCapture.recordedMeasurementId(measurementId),fieldTarget=fieldCapture.displayRecord.value?.targetSnapshot,resultMeasurementId=measurementId,
+                        beforeSave={tree,previous->fieldCapture.prepareResultSave(measurementId,tree.id.toString(),"cruise",tree.dbhCm.toDouble(),
+                            inventoryReplacement=previous?.takeIf{fieldCapture.recordedMeasurementId(measurementId)!=null}?.let(FieldInventoryReplacementSnapshot::from))},
                         captureMode = when {
                             r.method == DBHMethod.MANUAL_VISUAL -> "typed"
                             resultFromSegmentation -> "segmented"
                             resultFromAdjust -> "manual"
                             else -> "auto"
                         },
-                    )
-                }.getOrNull()
+                    ) ?: error("The cruise tree could not be saved. Retry Accept.")
+                val superseded=env.fieldStudy.state.value.measurements.filter{
+                    it.id!=measurementId&&it.kind==FieldStudyKind.DBH&&it.resultStore=="cruise"&&
+                        it.resultRecordId?.equals(savedTreeId.toString(),true)==true&&it.selection==com.hcjeong.forestix.data.fieldstudy.FieldSelectionStatus.ACCEPTED
+                }.map{it.id}
+                fieldCapture.resultSaved(measurementId, savedTreeId.toString(), "cruise",superseded)
                 // The tree row owns the file now — release it WITHOUT
                 // deleting, so the tally reset below (and this screen's own
                 // disposal) can't take the photo off a saved tree. If the row
                 // never reached the database there is nothing holding the
                 // file and the tally moves on regardless, so delete it here
                 // rather than leave an orphan in the photo store.
-                if (savedTreeId != null) heldPhoto = null else discardHeldPhoto()
+                heldPhoto = null
+                runCatching { attachAcceptedRaw() }
+                acceptedResearchFields?.let { fields -> runCatching { ResearchLog.record(context, fields) } }
                 // A. QUICK-TALLY LOOP: no pop, no continuation — bump the
                 // session to the plot's next tree number and reset this
                 // screen to aiming, with the Undo toast (F) offering a 3 s
                 // take-back.
                 val measuredTreeNumber = cruise.treeNumber
+                val measuredFieldTarget = fieldCapture.displayRecord.value?.targetSnapshot
+                val measuredFieldScope = fieldCapture.displayRecord.value?.measurementScope
                 // The label BEFORE the advance — the toast names the tree that
                 // was just written, which is the one Undo would take back.
                 val measuredTreeTitle = cruise.treeTitle
-                CruiseCapture.advanceTally(env, saved = savedTreeId != null)
+                CruiseCapture.advanceTally(env, saved = true)
                 cruiseTreeNumber = CruiseCapture.target?.treeNumber
                 cruiseTreeTitle = CruiseCapture.target?.treeTitle
                 pendingTree = CruiseCapture.target?.treeNumber ?: pendingTree
@@ -1815,7 +2032,14 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 metaDamage = emptyList()
                 metaNote = ""
                 stage = Stage.AIMING
+                userAdjustedBoundary = false
+                lastSuccessfulInferenceId = null
+                lastInferenceHadMask = false; boundaryInferenceId = null
+                latestAIRecordSource = null; liveAIRecordSource = null; boundaryAIRecordSource = null
+                liveMaskInferenceId = null
+                liveMaskPreview.reset(); liveMaskFrame = null; liveStemMask = null; liveStemGuideExtent = null
                 undoToast = measuredTreeTitle
+                undoFailed = false
                 undoEpoch += 1
                 // F10 — DIAMETER → HEIGHT CHAIN, on by default. Push Height
                 // for the tree just written, ON TOP of this tally (so its
@@ -1823,12 +2047,14 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 // the next tree). `savedTreeId == null` means the row never
                 // reached the database, and a height would have nothing to
                 // fold into, so the chain is skipped and the loop continues.
-                if (settings.measureHeightAfterDiameter && savedTreeId != null) {
+                if (settings.measureHeightAfterDiameter) {
+                    PendingTreeNumber.set(number=measuredTreeNumber,name=cruise.treeName,plotID=cruise.plotId,fieldTarget=measuredFieldTarget,fieldTargetLocked=true,fieldScope=measuredFieldScope)
                     nav.navigate("height?tree=$measuredTreeNumber&chained=true")
                 }
             } else {
                 val reading =
                     QuickMeasureEntry(
+                        id = java.util.UUID.fromString(measurementId),
                         kind = MeasureKind.DBH, value = r.diameterCm.toDouble(),
                         // A TYPED diameter has no propagated uncertainty —
                         // there is no geometry to propagate. Recording 0
@@ -1906,28 +2132,32 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 // A re-measure launched from the field log TAKES THE PLACE of
                 // the reading it was launched from — appending would leave the
                 // superseded number invisible in the log but still in the CSV.
-                if (pendingLock?.replaceExisting == true) {
-                    env.history.replaceReading(reading)
-                } else {
-                    env.history.append(reading)
-                }
+                val replacements=env.history.captureReplacementSnapshots(reading,pendingLock?.replaceExisting==true)
+                fieldCapture.prepareResultSave(measurementId,reading.id.toString(),"quick_history",reading.value,replacements)
+                val superseded = env.history.saveCapturedReading(reading, pendingLock?.replaceExisting == true,replacements)
+                fieldCapture.resultSaved(measurementId, reading.id.toString(), "quick_history", superseded)
                 // The reading owns the file now — release it WITHOUT deleting,
                 // so the disposal the navigation below triggers can't take the
                 // photo off a saved reading.
                 heldPhoto = null
+                runCatching { attachAcceptedRaw() }
+                acceptedResearchFields?.let { fields -> runCatching { ResearchLog.record(context, fields) } }
                 // Full-measurement chain (quick-measure world): skip the
                 // continuation dialog, go straight to Height on this tree.
                 // Navigate AFTER the append (this scope dies with the
                 // screen) and pop DBH so Height's continuation DONE
                 // returns to the map.
                 if (chainToHeight) {
+                    PendingTreeNumber.set(number=pendingTree,name=reading.treeName,speciesCode=reading.speciesCode,
+                        plotID=reading.plotID,fieldTarget=fieldCapture.displayRecord.value?.targetSnapshot,fieldTargetLocked=true,fieldScope=fieldCapture.displayRecord.value?.measurementScope)
                     nav.navigate("height?tree=$pendingTree") {
                         popUpTo(Routes.DBH_PATTERN) { inclusive = true }
                     }
                 } else {
+                    fieldCapture.displayRecord.value?.targetId?.let{id->if(env.fieldStudy.state.value.selectedTargetId==id)env.fieldStudy.selectTarget(null)}
                     // Quick measure saved — no continuation prompt (iOS
                     // parity); return to the map once the save completes.
-                    nav.popBackStack()
+                    back()
                 }
             }
         }
@@ -1972,28 +2202,37 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 fields["error"] = String.format(Locale.US, "%.2f", r.diameterCm - t)
                 fields["truth_unit"] = truthUnitAtAccept.raw
             }
-            ResearchLog.record(context, fields)
+            fields["measurement_id"] = measurementId
+            fields["save_event"] = "saved"
+            acceptedResearchFields = fields
             // The field is NOT cleared here any more — the accept coroutine
             // above clears it only once the truth is durably applied.
+        }
+        accepting = true
+        scope.launch {
+            try { saveResult() }
+            catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (cause: Exception) {
+                fieldCapture.resultSaveFailed(measurementId, cause.message ?: "Storage unavailable. Retry Accept.")
+            } finally { accepting = false }
         }
     }
 
     // F. Undo toast action: delete the just-saved tree row + its photo and
     // step the auto number back (hard delete — the tally never happened).
     fun undoTally() {
-        val activity = context as? android.app.Activity
+        if(accepting||stage!=Stage.AIMING)return
+        val title=undoToast
+        undoFailed=false
+        accepting=true
         scope.launch {
-            val deleted = CruiseCapture.undoLastTally(env)
-            if (deleted != null) {
-                val name = deleted.photoPath
-                if (name != null && activity != null) {
-                    runCatching { MeasurePhotoStore.delete(activity, name) }
-                }
-                cruiseTreeNumber = CruiseCapture.target?.treeNumber
-                cruiseTreeTitle = CruiseCapture.target?.treeTitle
-                pendingTree = CruiseCapture.target?.treeNumber ?: pendingTree
-            }
-            undoToast = null
+            try {
+                CruiseCapture.undoLastTally(env)
+                undoToast = null
+                restartCruiseCapture(nav,if(chainToHeight)"dbh?chain=true" else Routes.DBH,fieldCapture.uiFlow)
+            }catch(e:kotlinx.coroutines.CancellationException){throw e}
+            catch(e:Exception){undoFailed=true;undoToast=title;fieldTargetSwitch.reportError("Undo not completed: ${e.message?:"Storage unavailable"}")}
+            finally{accepting=false}
         }
     }
 
@@ -2010,11 +2249,13 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
 
     // Shared by the right-hand button and the heat-reduction timeout.
     fun enterAdjustMode() {
-        segmentationOn = false; liveStemMask = null; segmentedExtent = null
-        liveAutoTracker.reset()
+        val guide = liveStemGuideExtent
+        segmentationOn = false; liveStemMask = null
+        liveStemGuideExtent = null
+        liveMaskPreview.reset(); liveMaskFrame = null
         val half = clampBracketHalfWidth(settings.dbhBracketHalfWidth)
-        adjustLeftFrac = 0.5f - half
-        adjustRightFrac = 0.5f + half
+        adjustLeftFrac = guide?.leftFraction?.toFloat() ?: (0.5f - half)
+        adjustRightFrac = guide?.rightFraction?.toFloat() ?: (0.5f + half)
         env.settings.setDbhEdgeAdjustDefault(true)
         adjustPreview = null
         adjustShown = null; adjustHeld = null
@@ -2098,6 +2339,16 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             // overlay so the cruiser can see the boundary while measuring.
             plotOverlay = ArSessionHub.PlotOverlay.SUBDUED,
         )
+        if(!depthBlocked&&!hidingChromeForCapture&&!manualOpen&&!groundPlacementActive&&stage==Stage.AIMING){
+            FieldStudyCameraTargets(controller,canSelect=!accepting&&(CruiseCapture.isActive||pendingLock?.fieldTargetLocked!=true),capture=fieldCapture,
+                onSelect=if(!CruiseCapture.isActive&&pendingLock?.fieldTargetLocked==true)null else {id,label->
+                    fieldTargetSwitch.request(id,label,researchTrueText.isNotEmpty()||metaNote.isNotEmpty()||metaDamage.isNotEmpty()||metaSpecies!=null||bhGuide.stage!=BreastHeightGuide.Stage.OFF){
+                        val route=if(chainToHeight)"dbh?chain=true" else Routes.DBH
+                        if(CruiseCapture.isActive)switchFieldCruiseTarget(env,nav,id,route,fieldCapture.uiFlow)
+                        else switchFieldQuickTarget(env,nav,id,pendingLock?.plotID?:env.history.activePlotID.value,route,uiFlow=fieldCapture.uiFlow)
+                    }
+                })
+        }
 
         // TAP THE GROUND AT THE FOOT OF THE TREE. The base used to be placed
         // by lining the CROSSHAIR up on the ground and pressing a button —
@@ -2163,13 +2414,14 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 Canvas(Modifier.fillMaxSize()) {
                     val dx = size.width / mask.width; val dy = size.height / mask.height
                     for (run in mask.runs) {
-                        drawRect(colors.confidenceOk.copy(alpha = 0.18f),
+                        // Translucent detection feedback only, not a capture lock.
+                        drawRect(Color.Green.copy(alpha = 0.18f),
                             Offset(run.start * dx, run.row * dy), Size((run.end - run.start) * dx, dy))
                     }
                 }
             }
         }
-        if ((adjustMode || (segmentationDroveTheBracket && segmentedExtent != null)) && stage == Stage.AIMING && !groundPlacementActive) {
+        if ((adjustMode || (segmentationDroveTheBracket && liveStemGuideExtent != null)) && stage == Stage.AIMING && !groundPlacementActive) {
             Box(
                 Modifier
                     .fillMaxSize()
@@ -2204,8 +2456,15 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         var draggingLeft = true
                         detectDragGestures(
                             onDragStart = { pos ->
+                                userAdjustedBoundary = true
+                                boundaryInferenceId = null; boundaryAIRecordSource = null
+                                liveStemGuideExtent?.let {
+                                    adjustLeftFrac = it.leftFraction.toFloat(); adjustRightFrac = it.rightFraction.toFloat()
+                                }
                                 segmentationOn = false; adjustMode = true
-                                liveAutoTracker.reset(); liveStemMask = null; segmentedExtent = null
+                                liveStemMask = null
+                                liveMaskPreview.reset(); liveMaskFrame = null
+                                liveStemGuideExtent = null
                                 val w = size.width.toFloat().coerceAtLeast(1f)
                                 draggingLeft =
                                     kotlin.math.abs(pos.x - adjustLeftFrac * w) <=
@@ -2234,7 +2493,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             )
         }
 
-        if (!hidingChromeForCapture) MeasureBackButton { nav.popBackStack() }
+        if (!hidingChromeForCapture) MeasureBackButton { if (!accepting) back() }
 
         // Plot mini-map — top-right, same row as the GPS badge: the active
         // cruise plot (ring + YOU + measured trees) or the quick sampling
@@ -2262,7 +2521,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     CruiseRoutes.editPlot(c.projectId.toString(), c.plotId.toString()))
             }
         } ?: { nav.navigate(Routes.SAMPLING) }
-        if (!hidingChromeForCapture) ScanPlotMiniMap(onEditPlot = onEditPlot)
+        if (!hidingChromeForCapture) ScanPlotMiniMap(onEditPlot = if(pendingLock?.fieldTarget==null&&pendingLock?.fieldTargetLocked!=true)onEditPlot else null)
 
         // Top strip: GPS pill leading, the cruise tally target ("Tree #8", or
         // the cruiser's name for it) centred in what is left.
@@ -2327,6 +2586,16 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 storageLow = storageLow,
                 status = rawCaptureStatus,
             )
+            Column(Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top=162.dp),horizontalAlignment=Alignment.CenterHorizontally,
+                verticalArrangement=Arrangement.spacedBy(4.dp)){
+                FieldScanIdentityBadge(fieldCapture,FieldStudyKind.DBH)
+                FieldReferencePeek(fieldCapture,FieldStudyKind.DBH)
+                FieldCaptureWriteWarning(fieldCapture)
+                rawAIRecordingWarning?.let { message ->
+                    Text(message,color=Color.White,fontSize=11.sp,modifier=Modifier
+                        .background(Color.Red.copy(alpha=.8f),RoundedCornerShape(6.dp)).padding(6.dp))
+                }
+            }
         }
 
         // D. Border chip — small dark-glass pill directly UNDER the
@@ -2516,9 +2785,10 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 // placement from one that had bled into the bank behind the
                 // tree, and had no reason to reach for the handles. A bracket
                 // that measures and cannot be seen is worse than no bracket.
-                if (adjustMode || (segmentationDroveTheBracket && segmentedExtent != null)) {
-                    val lx = size.width * adjustLeftFrac
-                    val rx = size.width * adjustRightFrac
+                if (adjustMode || (segmentationDroveTheBracket && liveStemGuideExtent != null)) {
+                    val guide = if (segmentationDroveTheBracket) liveStemGuideExtent else null
+                    val lx = size.width * (guide?.leftFraction?.toFloat() ?: adjustLeftFrac)
+                    val rx = size.width * (guide?.rightFraction?.toFloat() ?: adjustRightFrac)
                     drawRect(
                         Color.White.copy(alpha = 0.10f),
                         topLeft = Offset(lx, cy - 44.dp.toPx()),
@@ -2557,7 +2827,9 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             // During the capture burst it holds green and gains a
             // determinate progress arc (3 dp, confidenceOk) sweeping
             // 0→360° across the 5 frames.
-            val ringLocked = if (adjustMode) adjustPreview?.locked == true else locked
+            val ringLocked = if (useBracketForDepth) {
+                adjustPreview?.locked == true && (!segmentationDroveTheBracket || liveAutoHasBracket())
+            } else locked
             val burstRunning = stage == Stage.CAPTURING
             val arcProgress by animateFloatAsState(
                 targetValue = if (burstRunning) maxOf(1, sampleProgress) / captureFrameTotal.toFloat() else 0f,
@@ -2710,7 +2982,14 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 } else {
                     {
                         MeasureCircleButton(icon = Icons.Filled.AutoAwesome, caption = "Auto") {
-                            liveAutoTracker.reset(); segmentedExtent = null; liveStemMask = null
+                            userAdjustedBoundary = false
+                            lastSuccessfulInferenceId = null
+                            lastInferenceHadMask = false; boundaryInferenceId = null
+                            latestAIRecordSource = null; liveAIRecordSource = null; boundaryAIRecordSource = null
+                            liveMaskInferenceId = null
+                            liveStemMask = null
+                            liveMaskPreview.reset(); liveMaskFrame = null
+                            liveStemGuideExtent = null
                             adjustMode = false; segmentationOn = true
                             autoAlignmentMessage = "Finding stem…"
                         }
@@ -2901,6 +3180,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     ) {
                         val cm = typedCm
                         if (cm != null && cm > 0f) {
+                            val id = fieldCapture.tryBegin(rawRequested = false, aiEnabled = false, typed = true) ?: return@ForestixProminentButton
                             val r = DBHResult(
                                 diameterCm = cm, centerX = 0f, centerZ = 0f,
                                 arcCoverageDeg = 0f, rmseMm = 0f, sigmaRmm = 0f,
@@ -2908,6 +3188,8 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                                 method = DBHMethod.MANUAL_VISUAL, rejectionReason = null,
                             )
                             result = r
+                            fieldCapture.finish(id, cm.toDouble(), null, true, null,
+                                FieldAIProvenance(reason = "typed_measurement"))
                             resultFromAdjust = false
                             resultFromSegmentation = false
                             failure = null
@@ -3042,12 +3324,18 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                             // Developer mode on but the recorder off: nothing
                             // is being kept for the corpus. Say it here, where
                             // the truth is typed.
-                            if (!settings.rawCaptureEnabled) RawCaptureOffNotice()
                         }
                     }
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    ForestixWhiteButton("Retake", modifier = Modifier.weight(1f)) {
+                    ForestixWhiteButton("Retake", modifier = Modifier.weight(1f), enabled = !accepting) {
+                        fieldCapture.currentId?.let { fieldCapture.abandon(it, "retake") }
+                        userAdjustedBoundary = false
+                        lastSuccessfulInferenceId = null
+                        lastInferenceHadMask = false; boundaryInferenceId = null
+                        latestAIRecordSource = null; liveAIRecordSource = null; boundaryAIRecordSource = null
+                        liveMaskInferenceId = null
+                        liveMaskPreview.reset(); liveMaskFrame = null; liveStemMask = null; liveStemGuideExtent = null
                         result = null; failure = null; stage = Stage.AIMING
                         // The held frame captions the measurement being thrown
                         // away — keeping it would put the OLD aim on the NEW
@@ -3057,13 +3345,13 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         // reading's accept flag or ground truth.
                         lastRawCaptureId = null
                     }
-                    ForestixWhiteButton("Details", modifier = Modifier.weight(1f)) {
+                    ForestixWhiteButton("Details", modifier = Modifier.weight(1f), enabled = !accepting) {
                         showMetadata = true
                     }
                     ForestixProminentButton(
                         "Accept",
                         modifier = Modifier.weight(1f),
-                        enabled = r.confidence != ConfidenceTier.RED,
+                        enabled = !accepting && r.confidence != ConfidenceTier.RED,
                     ) { acceptResult(r) }
                 }
                 }
@@ -3104,7 +3392,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         textAlign = TextAlign.Center,
                     )
                 }
-                MeasureBackButton { nav.popBackStack() }
+                MeasureBackButton(onClick = back)
             }
         }
 

@@ -119,6 +119,8 @@ public final class TreeEntity: NSManagedObject {
     // means UNKNOWN: rows written before the field existed carry it, and so
     // does a hand-typed diameter, which no estimator produced.
     @NSManaged public var dbhEstimatorEpoch: NSNumber?
+    @NSManaged public var dbhMeasurementId: String?
+    @NSManaged public var heightMeasurementId: String?
     @NSManaged public var dbhIsIrregular: Bool
 
     @NSManaged public var heightM: NSNumber?

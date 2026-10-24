@@ -72,6 +72,7 @@ private enum class DistMode { LIVE, TWO_POINT }
 
 @Composable
 fun DistanceMeasureScreen(nav: NavController) {
+    val back = com.hcjeong.forestix.ui.rememberSafeBack(nav)
     val env = LocalAppEnvironment.current
     val context = LocalContext.current
     val settings by env.settings.state.collectAsStateWithLifecycle()
@@ -198,7 +199,7 @@ fun DistanceMeasureScreen(nav: NavController) {
         // No 3D markers — the points + line are a 2D overlay below.
         ArCameraView(controller, emptyList(), preferDepth = true, modifier = Modifier.fillMaxSize())
 
-        MeasureBackButton { nav.popBackStack() }
+        MeasureBackButton(onClick = back)
 
         CenterCrosshair(Modifier.align(Alignment.Center))
 

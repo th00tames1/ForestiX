@@ -6,27 +6,28 @@ import OnnxRuntimeBindings
 import CoreImage
 import ImageIO
 import CoreVideo
+import Common
 
 /// YOLO26n alignment with a cached inference session. Run on a worker queue.
 public final class YoloBoundaryAligner: @unchecked Sendable {
-    private static let cacheLock = NSLock()
-    nonisolated(unsafe) private static var cached: YoloBoundaryAligner?
+    private static let cache = IdleResourceCache<YoloBoundaryAligner>()
     private let imageContext = CIContext()
     private let inferenceLock = NSLock()
-    public static func shared() throws -> YoloBoundaryAligner {
-        cacheLock.lock(); defer { cacheLock.unlock() }
-        if let cached { return cached }
-        let model = try YoloBoundaryAligner(); cached = model; return model
+    private let workspace: YoloInferenceWorkspace
+    public static func withShared<Result>(_ operation: (YoloBoundaryAligner) throws -> Result) throws -> Result {
+        try cache.withResource(create: { try YoloBoundaryAligner() },operation)
     }
+    public static func trimCached() { cache.trim() }
     let environment: ORTEnv
     let session: ORTSession
     private init() throws {
-        guard let url = Bundle.module.url(forResource:"yolo26_alignment",withExtension:"onnx",subdirectory:"Models") ?? Bundle.module.url(forResource:"yolo26_alignment",withExtension:"onnx") else {
+        guard let url = YoloModelIdentity.bundledURL else {
             throw NSError(domain:"ForestiX",code:1,userInfo:[NSLocalizedDescriptionKey:"AI model is unavailable. Use Adjust."])
         }
         environment = try ORTEnv(loggingLevel:.warning)
         let options = try ORTSessionOptions();try options.setIntraOpNumThreads(2)
         session = try ORTSession(env:environment,modelPath:url.path,sessionOptions:options)
+        workspace = YoloInferenceWorkspace()
     }
     public func align(buffer: CVPixelBuffer, frame: ARDepthFrame, viewSize: CGSize,
                       leftFraction: Double, rightFraction: Double) throws -> StemExtent? {
@@ -39,25 +40,22 @@ public final class YoloBoundaryAligner: @unchecked Sendable {
         try infer(buffer: buffer, frame: frame, viewSize: viewSize,
                   leftFraction: 0.25, rightFraction: 0.75, live: true)
     }
+    private final class CaptureSink {
+        let id: String; let image: RawCapturedImage?; let started: Double
+        var source: (any RawAIRecordSource)?
+        init(id: String,image: RawCapturedImage?,started: Double) { self.id = id; self.image = image; self.started = started }
+    }
+    public func trackWithCapture(buffer: CVPixelBuffer,frame: ARDepthFrame,viewSize: CGSize,
+                                 id: String,sourceImage: RawCapturedImage?,started: Double) throws -> YoloTrackedCapture {
+        let sink = CaptureSink(id: id,image: sourceImage,started: started)
+        let observation = try infer(buffer: buffer,frame: frame,viewSize: viewSize,leftFraction: 0.25,rightFraction: 0.75,live: true,capture: sink)
+        return YoloTrackedCapture(observation: observation,source: sink.source)
+    }
 
     private func infer(buffer: CVPixelBuffer, frame: ARDepthFrame, viewSize: CGSize,
-                       leftFraction: Double, rightFraction: Double, live: Bool) throws -> LiveStemObservation? {
+                       leftFraction: Double, rightFraction: Double, live: Bool,capture: CaptureSink? = nil) throws -> LiveStemObservation? {
         inferenceLock.lock(); defer { inferenceLock.unlock() }
-        guard let map = frame.viewMapping,
-              let geometry = DBHEstimator.bracketDepthGeometry(frame:frame,
-                leftFraction:leftFraction,rightFraction:rightFraction,viewSize:viewSize)
-        else { return nil }
-        let a = map.viewToDepth(x:leftFraction*viewSize.width,y:viewSize.height/2)
-        let b = map.viewToDepth(x:rightFraction*viewSize.width,y:viewSize.height/2)
-        let col: Bool
-        switch geometry.axis { case .row: col = false; case .col: col = true }
-        let w = col ? frame.height : frame.width, h = col ? frame.width : frame.height
-        let lo = geometry.left * Double(w), hi = geometry.right * Double(w)
-        let y: Int
-        switch geometry.axis { case .row(let row): y = row; case .col(let column): y = column }
-        let depths = (0..<h).flatMap { yy in (0..<w).map { xx in Double(frame.depth(atX:col ? yy:xx,y:col ? xx:yy)) } }
-        var grid = BoundaryAlignment.Grid(width:w,height:h,row:y,depth:depths,left:lo,right:hi,focal:Double(frame.intrinsics[col ? 1:0,col ? 1:0]))
-        guard hi > lo, abs((col ? b.y:b.x)-(col ? a.y:a.x)) > 0.000001 else { return nil }
+        guard let map = frame.viewMapping else { return nil }
         let rw = CVPixelBufferGetWidth(buffer), rh = CVPixelBufferGetHeight(buffer)
         let turns = [-Double(frame.cameraPoseWorld[1,1]),Double(frame.cameraPoseWorld[0,1]),Double(frame.cameraPoseWorld[1,1]),-Double(frame.cameraPoseWorld[0,1])].enumerated().min(by:{$0.element<$1.element})!.offset
         let uw = turns % 2 == 0 ? rw:rh, uh = turns % 2 == 0 ? rh:rw
@@ -67,26 +65,23 @@ public final class YoloBoundaryAligner: @unchecked Sendable {
             var x = x, y = y, width = Double(rw), height = Double(rh)
             for _ in 0..<turns { let old = x; x = height-1-y; y = old; swap(&width,&height) };return (x,y)
         }
-        let resize = 640.0/Double(max(uw,uh)), nw = Int(Double(uw)*resize+0.5), nh = Int(Double(uh)*resize+0.5)
-        let px = Int(((640-Double(nw))/2-0.1).rounded()), py = Int(((640-Double(nh))/2-0.1).rounded())
-        let orientation: CGImagePropertyOrientation = [.up,.right,.down,.left][turns]
-        var ci = CIImage(cvPixelBuffer:buffer).oriented(orientation)
-        ci = ci.transformed(by:CGAffineTransform(translationX:-ci.extent.minX,y:-ci.extent.minY))
-        ci = ci.transformed(by:CGAffineTransform(scaleX:Double(nw)/Double(uw),y:Double(nh)/Double(uh)))
-        var rgba = [UInt8](repeating:0,count:nw*nh*4)
-        imageContext.render(ci,toBitmap:&rgba,rowBytes:nw*4,bounds:CGRect(x:0,y:0,width:nw,height:nh),format:.RGBA8,colorSpace:CGColorSpaceCreateDeviceRGB())
-        var image = [Float](repeating:114.0/255.0,count:3*640*640)
-        for yy in 0..<nh { for xx in 0..<nw { for c in 0..<3 {
-            image[c*640*640+(yy+py)*640+xx+px] = Float(rgba[((nh-1-yy)*nw+xx)*4+c])/255.0
-        } } }
-        let data = image.withUnsafeBufferPointer { NSMutableData(bytes:$0.baseAddress,length:$0.count*4) }
-        let input = try ORTValue(tensorData:data,elementType:.float,shape:[1,3,640,640])
+        let preparation = YoloImagePreparation.Geometry(rawWidth: rw,rawHeight: rh,quarterTurns: turns)
+        YoloImagePreparation.prepare(buffer,geometry: preparation,context: imageContext,workspace: workspace)
+        let inputHash = capture == nil ? nil : YoloImagePreparation.inputHash(workspace)
+        let input = try ORTValue(tensorData:workspace.inputData,elementType:.float,shape:[1,3,640,640])
         let out = try session.run(withInputs:["images":input],outputNames:["output0","output1"],runOptions:nil)
-        func array(_ key: String) throws -> [Float] {
-            guard let value = out[key] else { return [] }
-            return (try value.tensorData() as Data).withUnsafeBytes { Array($0.bindMemory(to:Float.self)) }
+        let selected: YoloAlignmentMask.Mask?
+        if let head = out["output0"],let prototypes = out["output1"] {
+            selected = workspace.decodeMask(head: try head.tensorData(),prototypes: try prototypes.tensorData(),width: uw,height: uh)
+        } else { selected = nil }
+        func record(_ observation: LiveStemObservation?) {
+            guard let capture,let inputHash else { return }
+            capture.source = YoloOwnedInference(id: capture.id,buffer: buffer,geometry: preparation,inputHash: inputHash,
+                frame: frame,sourceImage: capture.image,mask: selected,observation: observation,viewSize: viewSize,
+                started: capture.started,completed: ProcessInfo.processInfo.systemUptime,
+                modelSHA: try? YoloModelIdentity.sha256(),runtimeVersion: ORTVersion())
         }
-        guard let mask = YoloAlignmentMask.select(head:try array("output0"),prototypes:try array("output1"),width:uw,height:uh) else { return nil }
+        guard let mask = selected else { record(nil); return nil }
         func raw(_ x: Int,_ y: Int) -> Bool {
             let p = upright(Double(x),Double(y));return mask.contains(x:Int(p.0),y:Int(p.1))
         }
@@ -101,14 +96,26 @@ public final class YoloBoundaryAligner: @unchecked Sendable {
         }
         let overlay = live ? LiveStemMask.sample(viewWidth: viewSize.width,
                                                  viewHeight: viewSize.height, contains: inView) : nil
+        let guide = live ? LiveStemMask.guideExtent(score: mask.score, contains: inView) : nil
         if live {
-            guard let candidate = LiveStemMask.centreExtent(score: mask.score, contains: inView),
-                  let g = DBHEstimator.bracketDepthGeometry(frame: frame,
-                    leftFraction: candidate.leftFraction, rightFraction: candidate.rightFraction, viewSize: viewSize)
-            else { return LiveStemObservation(extent: nil, mask: overlay) }
-            grid = BoundaryAlignment.Grid(width: w, height: h, row: y, depth: depths,
-                left: g.left * Double(w), right: g.right * Double(w), focal: grid.focal)
+            // Auto only places the bracket. Current depth is evaluated later
+            // by the exact same preview/capture path as Adjust.
+            let result = LiveStemObservation(extent: nil, mask: overlay, guideExtent: guide)
+            record(result); return result
         }
+        guard let geometry = DBHEstimator.bracketDepthGeometry(frame:frame,
+            leftFraction:leftFraction,rightFraction:rightFraction,viewSize:viewSize) else { return nil }
+        let a = map.viewToDepth(x:leftFraction*viewSize.width,y:viewSize.height/2)
+        let b = map.viewToDepth(x:rightFraction*viewSize.width,y:viewSize.height/2)
+        let col: Bool
+        switch geometry.axis { case .row: col = false; case .col: col = true }
+        let w = col ? frame.height : frame.width, h = col ? frame.width : frame.height
+        let lo = geometry.left * Double(w), hi = geometry.right * Double(w)
+        let y: Int
+        switch geometry.axis { case .row(let row): y = row; case .col(let column): y = column }
+        let depths = (0..<h).flatMap { yy in (0..<w).map { xx in Double(frame.depth(atX:col ? yy:xx,y:col ? xx:yy)) } }
+        let grid = BoundaryAlignment.Grid(width:w,height:h,row:y,depth:depths,left:lo,right:hi,focal:Double(frame.intrinsics[col ? 1:0,col ? 1:0]))
+        guard hi > lo, abs((col ? b.y:b.x)-(col ? a.y:a.x)) > 0.000001 else { return nil }
         let mw = col ? rh:rw, mh = col ? rw:rh
         let offsetX = col ? oy:ox, offsetY = col ? ox:oy
         func line(_ row: Int) -> [Bool] {
@@ -128,12 +135,7 @@ public final class YoloBoundaryAligner: @unchecked Sendable {
                 }
             };return out
         })
-        guard let result else { return live ? LiveStemObservation(extent: nil, mask: overlay) : nil }
-        if live {
-            let supported = ["accepted", "below_rgb_resolution"]
-            guard supported.contains(result.leftReason), supported.contains(result.rightReason)
-            else { return LiveStemObservation(extent: nil, mask: overlay) }
-        }
+        guard let result else { return nil }
         let aa = col ? a.y:a.x, bb = col ? b.y:b.x
         let p0 = leftFraction+(result.left-aa)/(bb-aa)*(rightFraction-leftFraction)
         let p1 = leftFraction+(result.right-aa)/(bb-aa)*(rightFraction-leftFraction)

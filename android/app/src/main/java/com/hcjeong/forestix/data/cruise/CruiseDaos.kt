@@ -13,6 +13,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import kotlinx.coroutines.flow.Flow
 import java.util.UUID
 
@@ -120,6 +121,41 @@ interface PlotDao {
 
 @Dao
 interface TreeDao {
+    @Query("SELECT COUNT(*) FROM TreeEntity WHERE plotId = :plot AND treeNumber = :number")
+    suspend fun countNumber(plot:UUID,number:Int):Int
+    @Transaction
+    suspend fun createIfNumberFree(t:Tree):Tree {
+        val t=com.hcjeong.forestix.data.fieldstudy.FieldTreeMeasurementIdentity.prepare(t)
+        if(t.treeNumber<=0||t.deletedAt!=null)throw com.hcjeong.forestix.data.fieldstudy.FieldStudyException("conflict","Invalid new inventory row")
+        val existing=byId(t.id)?.let(TreeMapper::toStruct)
+        if(existing!=null){
+            if(existing!=t)throw com.hcjeong.forestix.data.fieldstudy.FieldStudyException("conflict","Inventory UUID already exists")
+            return existing
+        }
+        if(countNumber(t.plotId,t.treeNumber)!=0)throw com.hcjeong.forestix.data.fieldstudy.FieldStudyException("conflict","Inventory number is no longer free")
+        upsert(TreeMapper.apply(t));return byId(t.id)?.let(TreeMapper::toStruct)?:error("Inventory write missing")
+    }
+    @Transaction
+    suspend fun replaceIfUnchanged(next:Tree,expected:Tree):Tree {
+        val current=byId(expected.id)?.let(TreeMapper::toStruct)
+        if(next.id!=expected.id||next.plotId!=expected.plotId||next.treeNumber!=expected.treeNumber||next.deletedAt!=null||expected.deletedAt!=null||current!=expected)
+            throw com.hcjeong.forestix.data.fieldstudy.FieldStudyException("conflict","Inventory row changed; reopen the target")
+        upsert(TreeMapper.apply(com.hcjeong.forestix.data.fieldstudy.FieldTreeMeasurementIdentity.prepare(next,expected)))
+        return byId(next.id)?.let(TreeMapper::toStruct)?:error("Inventory write missing")
+    }
+    @Transaction
+    suspend fun deleteIfUnchanged(expected:Tree){
+        val current=byId(expected.id)?.let(TreeMapper::toStruct)
+        if(expected.deletedAt!=null||current!=expected)throw com.hcjeong.forestix.data.fieldstudy.FieldStudyException("conflict","Inventory row changed; undo refused")
+        if(deleteById(expected.id)!=1)error("Inventory undo missing")
+    }
+    @Transaction
+    suspend fun writeWithMeasurementIdentity(t:Tree,requireExisting:Boolean):Tree {
+        val current=byId(t.id)?.let(TreeMapper::toStruct)
+        if(requireExisting&&current==null)throw CruiseDataError.NotFound(t.id.toString())
+        val next=com.hcjeong.forestix.data.fieldstudy.FieldTreeMeasurementIdentity.prepare(t,current)
+        upsert(TreeMapper.apply(next));return byId(t.id)?.let(TreeMapper::toStruct)?:error("Inventory write missing")
+    }
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(e: TreeEntity)
 

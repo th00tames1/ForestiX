@@ -48,7 +48,7 @@ sealed class CruiseDataError(override val message: String) : Exception(message) 
         VolumeEquationEntity::class,
         HeightDiameterFitEntity::class,
     ],
-    version = 9,
+    version = 10,
     exportSchema = false,
 )
 @TypeConverters(CruiseConverters::class)
@@ -64,6 +64,13 @@ abstract class CruiseDatabase : RoomDatabase() {
     abstract fun heightDiameterFitDao(): HeightDiameterFitDao
 
     companion object {
+        /// Additive only. Historical results keep null; no identity backfill.
+        val MIGRATION_9_10 = object : Migration(9,10) {
+            override fun migrate(db:SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE TreeEntity ADD COLUMN dbhMeasurementId TEXT")
+                db.execSQL("ALTER TABLE TreeEntity ADD COLUMN heightMeasurementId TEXT")
+            }
+        }
         /// Database filename — the Room analogue of iOS
         /// `CoreDataStack.defaultStoreURL()`'s "TimberCruising.sqlite".
         const val NAME = "timber-cruising.db"

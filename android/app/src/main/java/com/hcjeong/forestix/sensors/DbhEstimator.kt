@@ -267,8 +267,8 @@ object DBHEstimator {
     /// fraction of the radius: 1 - sqrt(15)/4. iOS `medianDepthOffsetFactor`.
     val MEDIAN_DEPTH_OFFSET_FACTOR = 1.0 - sqrt(15.0) / 4.0
 
-    /// Historical middle-half inversion, not the live full-span estimator.
-    /// Live measurement uses BoundaryAlignment.fullSpanDiameterCm instead.
+    /// Historical middle-half inversion, not the live central-80% estimator.
+    /// Live measurement uses BoundaryAlignment.sampledDiameterCm instead.
     /// A stem's diameter from the width of its silhouette — iOS
     /// `DBHEstimator.silhouetteDiameterCm` parity, same derivation, same
     /// constants. Keep the two in step.
@@ -582,7 +582,7 @@ object DBHEstimator {
         /// translucent cylinder overlay on the SAME fit the bar is drawn
         /// from. Null when unavailable.
         val centerWorld: Vec3? = null,
-        /// Spatial depth statistic used by the full-span silhouette geometry.
+        /// Spatial depth statistic used by the central-80% silhouette geometry.
         /// Legacy depth-band fits leave this null and retain their tap depth.
         val sampledDepthM: Double? = null,
     )
@@ -820,7 +820,7 @@ object DBHEstimator {
         if (extentL < 0 || extentR < 0) return FrameScan(null, clippedRows, ownWidths)
         // Neighbouring rows grade edge consistency only. Read the same actual
         // measurement-row span shown by the overlay, exactly as Adjust/AI do.
-        val sampled = BoundaryAlignment.fullSpanSample(
+        val sampled = BoundaryAlignment.sampledDepth(
             axisExtent(frame, axis), extentL.toDouble(), extentR.toDouble(), focal,
         ) { idx -> val (x,y)=pixelCoords(axis,idx);frame.depthAt(x,y).toDouble() }
             ?: return FrameScan(null, clippedRows, ownWidths)
@@ -1226,7 +1226,7 @@ object DBHEstimator {
     /// manifest stores: view-independent, byte-identical to the iOS bracket
     /// schema, so replaying a bundle needs neither view size nor guide_y.
     ///
-    /// Both platforms use the guide-axis focal component and the full-span
+    /// Both platforms use the guide-axis focal component and the central-80%
     /// median with the corresponding cylindrical surface correction.
     data class BracketFit(val diameterCm: Double, val spanPx: Int, val depthM: Double)
 
@@ -1239,13 +1239,13 @@ object DBHEstimator {
             is GuideAxis.Col -> frame.fy
         }
         if (focal <= 1.0) return null
-        // Epoch 7: shared full-span median and paired surface correction.
+        // Epoch 9: shared central-80% median and matching surface correction.
         val col = guideAxis is GuideAxis.Col
         val width = if (col) frame.height else frame.width
         val height = if (col) frame.width else frame.height
         val fixed = when (guideAxis) { is GuideAxis.Row -> guideAxis.y; is GuideAxis.Col -> guideAxis.x }
         if (fixed !in 0 until height) return null
-        val (rawCm,z) = BoundaryAlignment.fullSpanSample(width,g.lo*width,g.hi*width,focal) { x ->
+        val (rawCm,z) = BoundaryAlignment.sampledDepth(width,g.lo*width,g.hi*width,focal) { x ->
             frame.depthAt(if(col)fixed else x,if(col)x else fixed).toDouble()
         } ?: return null
         if (rawCm !in PLAUSIBLE_DIAMETER_CM) return null

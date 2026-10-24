@@ -390,6 +390,23 @@ class ArController {
         return (yaw + 360.0) % 360.0
     }
 
+    data class FieldTargetCameraGeometry(val position:Vec3,val worldYawDegrees:Double,
+        val horizontalFieldOfViewDegrees:Double,val timestampNanos:Long)
+    /** Advisory labels only: never changes ARCore state or measurement inputs. */
+    fun fieldTargetCameraGeometry():FieldTargetCameraGeometry?{
+        val f=trackingFrame()?:return null
+        val age=android.os.SystemClock.elapsedRealtimeNanos()-f.timestamp
+        if(age<0||age>500_000_000L||viewWidthPx<=1||viewHeightPx<=1)return null
+        val yaw=cameraWorldYawDeg()?:return null
+        val projection=FloatArray(16);f.camera.getProjectionMatrix(projection,0,.01f,150f)
+        val xScale=projection[0].toDouble()
+        if(!xScale.isFinite()||xScale<=0)return null
+        val fov=Math.toDegrees(2*kotlin.math.atan(1/xScale))
+        if(fov<=0||fov>=179)return null
+        val t=f.camera.pose.translation
+        return FieldTargetCameraGeometry(Vec3(t[0],t[1],t[2]),yaw,fov,f.timestamp)
+    }
+
     /// Horizontal (XZ) distance from the current camera to a world point —
     /// the live walk-off distance d_h from a trunk anchor.
     fun horizontalDistanceTo(p: Vec3): Float? {
@@ -522,13 +539,15 @@ class ArController {
             // Negate column 1 (Y) and column 2 (Z) — OpenCV -> ARCore frame.
             for (i in 4..7) pose[i] = -pose[i]
             for (i in 8..11) pose[i] = -pose[i]
-            return ArDepthFrame(
+            val output = ArDepthFrame(
                 w, h, depth, conf, fx, fy, cx, cy, pose,
                 fxImg = fxImg, fyImg = fyImg, depthFromViewAffine = depthFromView,
                 rawDepthMm = rawMm,
                 frameTimestampNanos = f.timestamp,
                 depthAgeNanos = (f.androidCameraTimestamp - image.timestamp).coerceAtLeast(0L),
             )
+            if(captureRawDepth)com.hcjeong.forestix.sensors.RawFrameClockRegistry.register(output,f.androidCameraTimestamp,image.timestamp)
+            return output
         } finally {
             image.close()
         }
@@ -560,7 +579,7 @@ class ArController {
     ///
     /// Captures the camera image immediately; RGB preparation can then run
     /// on a worker without acquiring a different AR frame.
-    fun acquireCameraLetterboxInput(size: Int): CameraLetterboxInput? {
+    fun acquireCameraLetterboxInput(size: Int,captureMetadata:Boolean=false): CameraLetterboxInput? {
         val f = trackingFrame() ?: return null
         val vw = viewWidthPx.toFloat(); val vh = viewHeightPx.toFloat()
         if (vw <= 1 || vh <= 1) return null
@@ -572,13 +591,17 @@ class ArController {
             val affine = floatArrayOf((out[2]-out[0])/vw,(out[4]-out[0])/vh,out[0],
                 (out[3]-out[1])/vw,(out[5]-out[1])/vh,out[1])
             if (!affine.all { it.isFinite() }) { image.close(); null }
-            else CameraLetterboxInput(image,size,affine,f.timestamp)
+            else {
+                val metadata=if(captureMetadata)cameraImageMetadata(f,image,affine.map{it.toDouble()})else null
+                CameraLetterboxInput(image,size,affine,f.timestamp,metadata)
+            }
         } catch (_: Throwable) { image.close(); null }
     }
 
     /** Retains the captured camera image while preprocessing runs off the UI thread. */
     class CameraLetterboxInput(private val image: android.media.Image,private val size:Int,
-        val imageFromViewAffine:FloatArray,val frameTimestampNanos:Long):AutoCloseable {
+        val imageFromViewAffine:FloatArray,val frameTimestampNanos:Long,
+        val imageMetadata:com.hcjeong.forestix.sensors.RawCapturedImage?=null):AutoCloseable {
         private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
         override fun close() { if(closed.compareAndSet(false,true))image.close() }
         fun convert():Pair<FloatArray,com.hcjeong.forestix.sensors.Letterbox>? {
@@ -638,24 +661,49 @@ class ArController {
         acquireCameraLetterboxInput(size)?.use { it.convert() }
 
     fun captureCameraJpeg(dest: java.io.File, quality: Int = 80): Boolean {
-        val f = frame ?: return false
+        return captureCameraJpegMetadata(dest,quality)!=null
+    }
+    private fun cameraImageMetadata(f:Frame,image:android.media.Image,affine:List<Double>?):com.hcjeong.forestix.sensors.RawCapturedImage {
+        val p=FloatArray(16);f.camera.pose.toMatrix(p,0)
+        val k=f.camera.imageIntrinsics;val focal=k.focalLength;val center=k.principalPoint
+        return com.hcjeong.forestix.sensors.RawCapturedImage("inference_source",null,image.width,image.height,f.timestamp/1e9,image.timestamp/1e9,
+            "arcore_camera_image_timestamp",listOf(focal[0].toDouble(),0.0,0.0,0.0,focal[1].toDouble(),0.0,
+                center[0].toDouble(),center[1].toDouble(),1.0),p.map{it.toDouble()},affine,
+            sourceFrameId="arcore_frame_ns:${f.timestamp}",imageSensorId="camera_image_ns:${image.timestamp}")
+    }
+    /** Same camera image bytes, with geometry/times latched before closing the image. */
+    fun captureCameraJpegMetadata(dest: java.io.File, quality: Int = 80): com.hcjeong.forestix.sensors.RawCapturedImage? {
+        val f = frame ?: return null
         return try {
             val image = f.acquireCameraImage()
             try {
-                if (image.format != android.graphics.ImageFormat.YUV_420_888) return false
+                if (image.format != android.graphics.ImageFormat.YUV_420_888) return null
                 val w = image.width
                 val h = image.height
                 val nv21 = yuv420ToNv21(image, w, h)
                 val yuv = android.graphics.YuvImage(nv21, android.graphics.ImageFormat.NV21, w, h, null)
-                java.io.FileOutputStream(dest).use { out ->
+                val written=java.io.FileOutputStream(dest).use { out ->
                     yuv.compressToJpeg(android.graphics.Rect(0, 0, w, h), quality, out)
                 }
-                true
+                if(!written)return null
+                val p=FloatArray(16);f.camera.pose.toMatrix(p,0)
+                val k=f.camera.imageIntrinsics;val focal=k.focalLength;val center=k.principalPoint
+                val vw=viewWidthPx.toFloat();val vh=viewHeightPx.toFloat()
+                val affine=if(vw>1&&vh>1)runCatching{
+                    val xy=FloatArray(6)
+                    f.transformCoordinates2d(Coordinates2d.VIEW,floatArrayOf(0f,0f,vw,0f,0f,vh),Coordinates2d.IMAGE_PIXELS,xy)
+                    listOf((xy[2]-xy[0])/vw,(xy[4]-xy[0])/vh,xy[0],(xy[3]-xy[1])/vw,(xy[5]-xy[1])/vh,xy[1])
+                        .map{it.toDouble()}.takeIf{it.all{n->n.isFinite()}}
+                }.getOrNull()else null
+                com.hcjeong.forestix.sensors.RawCapturedImage("reference",null,w,h,f.timestamp/1e9,image.timestamp/1e9,
+                    "arcore_camera_image_timestamp",listOf(focal[0].toDouble(),0.0,0.0,0.0,focal[1].toDouble(),0.0,
+                        center[0].toDouble(),center[1].toDouble(),1.0),p.map{it.toDouble()},affine,
+                    sourceFrameId="arcore_frame_ns:${f.timestamp}",imageSensorId="camera_image_ns:${image.timestamp}")
             } finally {
                 image.close()
             }
         } catch (_: Throwable) {
-            false
+            null
         }
     }
 

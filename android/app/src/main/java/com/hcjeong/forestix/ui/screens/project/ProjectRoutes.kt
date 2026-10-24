@@ -9,9 +9,7 @@ package com.hcjeong.forestix.ui.screens.project
 object ProjectFlowRoutes {
     const val STRATUM_DRAW = "stratumDraw/{projectId}"
     const val EXPORT = "export/{projectId}"
-    const val CALIBRATION = "calibration/{projectId}"
 
     fun stratumDraw(projectId: String) = "stratumDraw/$projectId"
     fun export(projectId: String) = "export/$projectId"
-    fun calibration(projectId: String) = "calibration/$projectId"
 }

@@ -203,6 +203,8 @@ object RawCaptureStore {
         try{RawCaptureWriteGuard.claim(dir,id,"dbh")}catch(e:Exception){
             return@withContext RecordOutcome(null,0,e.message?:"Raw writer claim failed",queuedTruthLost=pendingTruthOf(context,id))}
         try {
+            require(raw.map{it.depthInputPolicy}.distinct().size==1){"Mixed measurement depth policies"}
+            if(raw.any{it.depthInputPolicy!=DbhMeasurementDepth.LEGACY_FULL})require(captureEvidence!=null){"Qualified depth requires original evidence"}
             // 1) Raw depth grids.
             val storedGrids=raw.mapIndexed { i, f -> RawDepthGridIO.write(f,dir,"depth_$i.bin") }
             // 2) One reference RGB, captured by the caller at burst start.
@@ -296,6 +298,7 @@ object RawCaptureStore {
                 fo.put("cx", f.cx); fo.put("cy", f.cy)
                 fo.put("tap_px", JSONArray().put(effTapX).put(effTapY))
                 fo.put("axis", effAxisStr)
+                fo.put("depth_input_policy",f.depthInputPolicy)
                 fo.put("camera_pose", floatArr(f.pose))
                 fo.put("view_to_depth", floatArr(f.depthFromViewAffine ?: IDENTITY_AFFINE))
                 framesArr.put(fo)
@@ -313,10 +316,46 @@ object RawCaptureStore {
             manifest.put("dbh", dbhBlock)
             manifest.put("height", JSONObject.NULL)
             manifest.put("measurement_id",id)
+            manifest.getJSONObject("settings").put("dbh_depth_input_policy",raw.first().depthInputPolicy)
+            manifest.getJSONObject("settings").put("dbh_depth_calibration_epoch",DbhMeasurementDepth.calibrationEpoch(raw.first().depthInputPolicy))
+            val depthComparisons=ArrayList<DbhDepthComparisonIO.Input>()
             var evidence = captureEvidence
             if(evidence!=null){
                 require(evidence.measurementId==id&&frames.size<=32){"Capture evidence identity/count"}
-                evidence=evidence.copy(frames=frames.mapIndexed{i,f->RawCaptureEvidenceIO.writeFrame(f,"dbh_$i",dir)})
+                if(frames.any{it.depthInputPolicy!=DbhMeasurementDepth.LEGACY_FULL})evidence=evidence.copy(version=2)
+                evidence=evidence.copy(frames=frames.mapIndexed{i,f->
+                    val recorded=RawCaptureEvidenceIO.writeFrame(f,"dbh_$i",dir)
+                    val axis=if(effAxisStr=="row")GuideAxis.Row(Math.round(effTapY).toInt())else GuideAxis.Col(Math.round(effTapX).toInt())
+                    val p=if(bracketGeom==null)DBHEstimator.livePreview(f,effTapX,effTapY,axis,cal,algorithm)else null
+                    val left=bracketGeom?.leftFrac?:p?.stripLeftFraction?.toDouble()
+                    val right=bracketGeom?.rightFrac?:p?.stripRightFraction?.toDouble()
+                    val support=if(left!=null&&right!=null)DbhRawDepthSupport.assess(f,axis,left,right)else null
+                    val comparison=buildMap<String,String>{
+                        put("raw_comparison_policy","diagnostic_only_v1")
+                        put("raw_comparison_status",support?.status?:"boundary_unavailable")
+                        support?.let{s->
+                            put("raw_supported_pixels",s.supportedPixels.toString());put("raw_sampled_pixels",s.sampledPixels.toString())
+                            s.pairedDifferenceM?.let{put("raw_full_paired_difference_m",it.toString())}
+                            s.rawMedianM?.let{put("raw_supported_median_m",it.toString())}
+                            s.fullPairedMedianM?.let{put("full_supported_median_m",it.toString())}
+                        }
+                        if(DbhMeasurementDepth.usesRaw(f.depthInputPolicy)&&left!=null&&right!=null){
+                            val extent=if(axis is GuideAxis.Col)f.height else f.width
+                            val selected=DbhMeasurementDepth.measurementProfile(f,axis,left*extent,right*extent)
+                            put("measurement_depth_status",selected.status)
+                            put("measurement_supported_pixels",selected.supportedPixels.toString())
+                            put("measurement_candidate_pixels",selected.candidatePixels.toString())
+                            put("measurement_axis_samples",selected.supportedAxisSamples.toString())
+                            selected.medianM?.let{put("measurement_sample_depth_m",it.toString())}
+                            selected.diameterCm?.let{put("measurement_raw_diameter_cm",it.toString())}
+                            selected.rawInformationAgeNanos?.let{put("raw_information_age_ns",it.toString())}
+                        }
+                    }
+                    val geometry=if(left!=null&&right!=null)DbhDepthComparisonIO.Geometry(axis,left,right)else null
+                    val annotated=DbhDepthComparisonIO.annotate(recorded.copy(depthDiagnostics=recorded.depthDiagnostics+comparison),geometry)
+                    depthComparisons.add(DbhDepthComparisonIO.Input(f,annotated,geometry))
+                    annotated
+                })
                 evidence=evidence.copy(images=listOfNotNull(RawCaptureEvidenceIO.attachImage(referenceImageMetadata,rgb,
                     if(haveRgb)"rgb_0.jpg"else null,"dbh_reference",dir)))
                 val aiRecorded=aiRequest?.write(dir)
@@ -332,6 +371,7 @@ object RawCaptureStore {
             val rerun = try { RawCaptureReplay.rerunDbh(dir, manifest)?.value } catch (_: Throwable) { null }
             manifest.put("replay_selfcheck",
                 selfCheckJson(liveRes?.diameterCm?.toDouble(), rerun, null))
+            writeDepthComparison(dir,id,manifest,depthComparisons,cal)
 
             val foldedTruth = writeManifest(id, dir, manifest)
             RecordOutcome(id, raw.size, null, queuedTruthSaved = foldedTruth,replayValue=evidence?.replayValue,replayStatus=evidence?.replayStatus,
@@ -345,7 +385,9 @@ object RawCaptureStore {
     }
 
     suspend fun recordRefusedAttempt(context:Context,id:String,cal:ProjectCalibration,units:String,ctx:CaptureContext,
-                                    evidence:RawCaptureEvidence,aiRequest:RawAIWriteRequest):RecordOutcome {
+                                evidence:RawCaptureEvidence,aiRequest:RawAIWriteRequest,
+                                snapshot:ArDepthFrame?=null,reference:RawCameraJPEG?=null,
+                                comparisonBracket:BracketSpec?=null):RecordOutcome {
         try{return withContext(Dispatchers.IO){
         var ownsWrite=false
         try{
@@ -353,7 +395,13 @@ object RawCaptureStore {
             val free=freeSpaceBytes(context);if(free<MIN_FREE_BYTES)return@withContext RecordOutcome(null,0,lowStorageReason(free))
             val dir=bundleDir(context,id);RawCaptureWriteGuard.claim(dir,id,"attempt_only");ownsWrite=true
             val recorded=aiRequest.write(dir)
-            val stored=evidence.copy(aiInference=recorded.inference,aiEvidenceStatus=recorded.status,aiEvidenceReason=recorded.reason)
+            val images=reference?.let { listOfNotNull(RawCaptureEvidenceIO.attachImage(it.metadata,it.data,null,"shutter_reference",dir)) }
+            val comparisonGeometry=snapshot?.let{f->comparisonBracket?.let{deriveBracket(f,it)}}?.let{
+                DbhDepthComparisonIO.Geometry(it.axis,it.leftFrac,it.rightFrac)}
+            val stored=evidence.copy(aiInference=recorded.inference,aiEvidenceStatus=recorded.status,aiEvidenceReason=recorded.reason,
+                version=if(snapshot?.depthInputPolicy?.let(DbhMeasurementDepth::usesRaw)==true)2 else evidence.version,
+                frames=snapshot?.let{listOf(DbhDepthComparisonIO.annotate(RawCaptureEvidenceIO.writeFrame(it,"shutter_refused",dir),comparisonGeometry))}?:evidence.frames,
+                images=images?:evidence.images)
             val manifest=JSONObject().put("schema",SCHEMA).put("platform","android").put("device",Build.MODEL)
                 .put("app_commit",appCommit(context)).put("created_at",iso8601()).put("kind","dbh").put("measurement_id",id)
                 .put("context",contextJson(ctx)).put("settings",settingsJson("not_measured",units,"attempt_only",cal))
@@ -361,13 +409,30 @@ object RawCaptureStore {
                 .put("truth",truthJson(null,null,null)).put("gps",gpsJson(ctx.gps)).put("dbh",JSONObject.NULL).put("height",JSONObject.NULL)
                 .put("capture_evidence",JSONObject(stored.json().toString()))
                 .put("replay_selfcheck",JSONObject().put("status","not_applicable").put("rerun_value",JSONObject.NULL).put("delta",JSONObject.NULL))
+            if(snapshot!=null){
+                writeDepthComparison(dir,id,manifest,listOf(DbhDepthComparisonIO.Input(snapshot,stored.frames.single(),comparisonGeometry)),cal)
+            }
             val truth=writeManifest(id,dir,manifest)
-            if(recorded.status=="saved")RecordOutcome(id,0,null,queuedTruthSaved=truth)
+            if(recorded.status=="saved"||((snapshot!=null||evidence.depthDiagnostics!=null)&&recorded.status in listOf("not_requested","no_inference")))RecordOutcome(id,if(snapshot==null)0 else 1,null,queuedTruthSaved=truth)
             else RecordOutcome(null,0,"AI attempt input ${recorded.status}: ${recorded.reason?:"unavailable"}")
         }catch(e:Exception){val reason=e.message?:"Attempt evidence write failed"
             RecordOutcome(null,0,reason+if(ownsWrite)" · partial raw files retained"else"",
                 queuedTruthLost=if(ownsWrite)preserveFailedBundle(context,id,reason)else pendingTruthOf(context,id))}
         }}finally{aiRequest.cancel()}
+    }
+
+    /** Experimental comparison must not stop the original input/result from
+     * being saved. Failure is explicit, never a different measurement. */
+    internal fun writeDepthComparison(dir:File,id:String,manifest:JSONObject,inputs:List<DbhDepthComparisonIO.Input>,cal:ProjectCalibration){
+        if(inputs.isEmpty())return
+        try{
+            val descriptor=DbhDepthComparisonIO.write(dir,id,inputs,cal)
+            manifest.put("dbh_depth_comparison",JSONObject(descriptor.toString()))
+            manifest.put("dbh_depth_comparison_status","saved")
+        }catch(e:Exception){
+            manifest.put("dbh_depth_comparison_status","failed")
+            manifest.put("dbh_depth_comparison_error",e.javaClass.simpleName)
+        }
     }
 
     // MARK: - Height recording

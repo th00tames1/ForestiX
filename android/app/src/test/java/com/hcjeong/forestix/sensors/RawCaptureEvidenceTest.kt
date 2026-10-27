@@ -4,6 +4,7 @@ import org.junit.Assert.*
 import org.junit.Test
 import java.nio.file.Files
 import java.util.UUID
+import kotlinx.serialization.json.*
 
 class RawCaptureEvidenceTest {
     private fun frame():ArDepthFrame {
@@ -77,6 +78,68 @@ class RawCaptureEvidenceTest {
             val e=RawCaptureEvidence(UUID.randomUUID().toString(),resultSeconds=124.0,
                 displayedResult=RawCapturedResult(20.0,null,"yellow","synthetic",true),images=listOf(m))
             assertEquals(e,RawCaptureEvidence.parse(e.json().toString()))
+        }finally{dir.deleteRecursively()}
+    }
+    @Test fun auxiliaryRawDepthAndRealConfidenceRoundTripWithoutChangingFullInput(){
+        val dir=Files.createTempDirectory("forestix-aux-raw-").toFile()
+        try{
+            val raw=DbhRawDepthEvidence(4,3,ShortArray(12){(it*6000).toShort()},
+                byteArrayOf(0,1,2,127,128.toByte(),160.toByte(),200.toByte(),255.toByte(),0,0,1,2),
+                1000000000,1000000000,1100000000)
+            val original=frame()
+            val input=ArDepthFrame(4,3,original.depth,original.confidence,original.fx,original.fy,original.cx,original.cy,
+                original.pose,rawDepthEvidence=raw,depthDiagnostics=mapOf("raw_acquisition_status" to "available"))
+            val descriptor=RawCaptureEvidenceIO.writeFrame(input,"dbh_0",dir)
+            val evidence=RawCaptureEvidence(UUID.randomUUID().toString(),resultSeconds=2.0,
+                displayedResult=RawCapturedResult(null,null,null,null,false),frames=listOf(descriptor),
+                depthDiagnostics=buildJsonObject{put("status","synthetic_trace")})
+            val parsed=RawCaptureEvidence.parse(evidence.json().toString());assertEquals(evidence,parsed)
+            val restored=RawCaptureEvidenceIO.readFrame(parsed.frames.single(),dir)
+            assertArrayEquals(raw.millimeters,restored.rawDepthEvidence!!.millimeters)
+            assertArrayEquals(raw.confidence,restored.rawDepthEvidence.confidence)
+            assertArrayEquals(input.confidence,restored.confidence)
+            assertArrayEquals(input.depth.map{it.toRawBits()}.toIntArray(),restored.depth.map{it.toRawBits()}.toIntArray())
+            assertEquals(input.depthDiagnostics,restored.depthDiagnostics)
+            val proof=descriptor.auxiliaryRawDepth!!.confidence
+            java.io.File(dir,proof.file).writeBytes(ByteArray(12))
+            assertThrows(IllegalArgumentException::class.java){RawCaptureEvidenceIO.readFrame(descriptor,dir)}
+        }finally{dir.deleteRecursively()}
+    }
+    @Test fun originalReplayKeepsKnownStaleAgeAndRejectsWrongIdentity(){
+        val dir=Files.createTempDirectory("forestix-stale-replay-").toFile()
+        try{
+            val id=UUID.randomUUID().toString();val m=RawCaptureEvidenceIO.writeFrame(frame(),"dbh_0",dir)
+                .copy(depthAgeNanoseconds="13318058552")
+            val e=RawCaptureEvidence(id,resultSeconds=2.0,displayedResult=RawCapturedResult(null,null,null,null,false),frames=listOf(m))
+            val restored=RawCaptureReplay.restoreOriginalDbhFrames(dir,id,e,listOf(4 to 3)).single()
+            assertEquals(13_318_058_552L,restored.depthAgeNanos);assertFalse(DbhDepthInputPolicy.acceptsFrame(restored))
+            assertThrows(IllegalArgumentException::class.java){RawCaptureReplay.restoreOriginalDbhFrames(dir,"wrong-id",e,listOf(4 to 3))}
+            assertThrows(IllegalArgumentException::class.java){RawCaptureReplay.restoreOriginalDbhFrames(dir,id,e,listOf(3 to 4))}
+        }finally{dir.deleteRecursively()}
+    }
+    @Test fun recordedClockViolationCannotBeReplayedAsFreshOrMalformedAgeSilentlyDefaulted(){
+        val dir=Files.createTempDirectory("forestix-clock-replay-").toFile()
+        try{
+            val m=RawCaptureEvidenceIO.writeFrame(frame(),"dbh_0",dir).copy(depthAgeNanoseconds="0",
+                cameraSensorId="android_camera_ns:20000000000",depthSensorId="depth_image_ns:6666556484")
+            assertFalse(DbhDepthInputPolicy.acceptsFrame(RawCaptureEvidenceIO.readFrame(m,dir)))
+            assertThrows(NumberFormatException::class.java){RawCaptureEvidenceIO.readFrame(m.copy(depthAgeNanoseconds="broken"),dir)}
+        }finally{dir.deleteRecursively()}
+    }
+    @Test fun explicitQualifiedPolicyRoundTripsAndCannotBeReadAsVersionOneOrUnknownPolicy(){
+        val dir=Files.createTempDirectory("forestix-qualified-source-").toFile()
+        try{
+            val original=frame();val raw=DbhRawDepthEvidence(4,3,ShortArray(12){1000},ByteArray(12){255.toByte()},1_000_000_000,2_000_000_000,2_000_000_000)
+            val f=ArDepthFrame(4,3,original.depth,original.confidence,original.fx,original.fy,original.cx,original.cy,original.pose,
+                rawDepthEvidence=raw,depthInputPolicy=DbhMeasurementDepth.QUALIFIED_RAW)
+            val descriptor=RawCaptureEvidenceIO.writeFrame(f,"dbh_0",dir)
+            val e=RawCaptureEvidence(UUID.randomUUID().toString(),resultSeconds=2.0,
+                displayedResult=RawCapturedResult(null,null,null,null,false),frames=listOf(descriptor),version=2)
+            val restored=RawCaptureEvidenceIO.readFrame(RawCaptureEvidence.parse(e.json().toString()).frames.single(),dir)
+            assertEquals(DbhMeasurementDepth.QUALIFIED_RAW,restored.depthInputPolicy)
+            assertArrayEquals(raw.confidence,restored.rawDepthEvidence!!.confidence)
+            assertThrows(IllegalArgumentException::class.java){RawCaptureEvidence.parse(e.copy(version=1).json().toString())}
+            assertThrows(IllegalArgumentException::class.java){RawCaptureEvidenceIO.readFrame(descriptor.copy(depthInputPolicy="unknown"),dir)}
         }finally{dir.deleteRecursively()}
     }
 }

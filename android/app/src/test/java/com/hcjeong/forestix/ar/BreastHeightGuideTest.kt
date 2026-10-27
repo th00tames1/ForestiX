@@ -35,13 +35,14 @@ class BreastHeightGuideTest {
         }
     }
 
-    @Test fun aimingUsesOnlyASmallBaseDotAndResetClearsIt() {
+    @Test fun aimingUsesLargerCyanBaseDotAndResetClearsIt() {
         val guide = BreastHeightGuide(ArController())
         assertTrue(guide.markers().isEmpty())
         guide.arm()
         guide.updateGhost(Vec3(2f, -4f, 6f))
         assertEquals(1, guide.markers().size)
-        assertEquals(MarkerShape.Sphere(0.015f), guide.markers().single().shape)
+        assertEquals(MarkerShape.Sphere(0.0225f), guide.markers().single().shape)
+        assertArrayEquals(floatArrayOf(0f, 1f, 1f, 0.95f), guide.markers().single().colorRGBA, 0f)
         assertNull(guide.heightWorldPoint())
         guide.clearBase()
         assertTrue(guide.markers().isEmpty())
@@ -74,6 +75,8 @@ class BreastHeightGuideTest {
                 val markers = BreastHeightGuide.placementMarkers(ground, height)
                 assertEquals(3, markers.size)
                 assertEquals(ground, markers[0].worldPosition)
+                assertEquals(MarkerShape.Sphere(0.0225f), markers[0].shape)
+                assertArrayEquals(floatArrayOf(0f, 1f, 1f, 0.95f), markers[0].colorRGBA, 0f)
                 val riser = markers[1]
                 val h = height.meters.toFloat()
                 assertEquals(ground.x, riser.worldPosition.x, 0f)
@@ -83,6 +86,7 @@ class BreastHeightGuideTest {
                 assertEquals(h, cylinder.heightM, 0f)
                 assertEquals(0.004f, cylinder.radiusM, 0f)
                 assertFalse(riser.scalesWithDistance)
+                assertArrayEquals(floatArrayOf(1f, 1f, 1f, 0.9f), riser.colorRGBA, 0f)
                 val ring = markers[2]
                 assertEquals(ground.y + h, ring.worldPosition.y, 0.000001f)
                 assertEquals(MarkerShape.Torus(0.35f, 0.01f), ring.shape)

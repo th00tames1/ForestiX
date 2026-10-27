@@ -25,6 +25,54 @@ class CapturePersistenceChecks:Instrumentation(){
         super.onCreate(arguments);start()
     }
     override fun onStart(){
+        if(checkSelection=="raw_ray_replay"){
+            val result=Bundle()
+            try{RawRayDepthReplayChecks.run(targetContext);result.putBoolean("all_passed",true)
+                result.putString("checks","actual_sparse_ray_result,versioned_save,exact_raw_replay,missing_or_corrupt_source_refused,failed_attempt_preserved,no_user_data_access")
+            }catch(e:Throwable){result.putBoolean("all_passed",false);result.putString("failure",e.stackTraceToString())}
+            finish(if(result.getBoolean("all_passed"))Activity.RESULT_OK else Activity.RESULT_CANCELED,result)
+            return
+        }
+        if(checkSelection=="dbh_candidate_comparison"){
+            val result=Bundle()
+            try{DbhCandidateComparisonChecks.run(targetContext);result.putBoolean("all_passed",true)
+                result.putString("checks","five_same_input_candidates,version_one_compatibility,shadow_only_no_result_mutation,refused_attempt_comparison,original_byte_replay,CSV_integrity,diagnostic_failure_preserves_primary,whole_bundle_ZIP_inclusion,no_user_data_access")
+            }catch(e:Throwable){result.putBoolean("all_passed",false);result.putString("failure",e.stackTraceToString())}
+            finish(if(result.getBoolean("all_passed"))Activity.RESULT_OK else Activity.RESULT_CANCELED,result)
+            return
+        }
+        if(checkSelection=="qualified_depth_replay"){
+            val result=Bundle()
+            try{QualifiedDepthReplayChecks.run(targetContext);result.putBoolean("all_passed",true)
+                result.putString("checks","qualified_Raw_not_dense,versioned_original_input,exact_native_replay,missing_or_corrupt_original_fail_closed,refused_input_preservation,no_user_data_access")
+            }catch(e:Throwable){result.putBoolean("all_passed",false);result.putString("failure",e.stackTraceToString())}
+            finish(if(result.getBoolean("all_passed"))Activity.RESULT_OK else Activity.RESULT_CANCELED,result)
+            return
+        }
+        if(checkSelection=="camera_input_lease"){
+            val result=Bundle()
+            try{CameraInputLeaseChecks.run();result.putBoolean("all_passed",true)
+                result.putString("checks","real_offscreen_YUV_image,bit_identical_RGB_tensor,closed_before_inference,once_only_close,failed_preparation_release,no_camera_AR_or_user_data_access")
+            }catch(e:Throwable){result.putBoolean("all_passed",false);result.putString("failure",e.stackTraceToString())}
+            finish(if(result.getBoolean("all_passed"))Activity.RESULT_OK else Activity.RESULT_CANCELED,result)
+            return
+        }
+        if(checkSelection=="dbh_depth_quality"){
+            val result=Bundle()
+            try{DbhDepthQualityChecks.run(targetContext);result.putBoolean("all_passed",true)
+                result.putString("checks","actual_Android_JSON_and_recorder,raw_u16_and_real_confidence_roundtrip,unchanged_measurement,stale_age_preserved,malformed_and_wrong_ID_fail_closed,refusal_trace_only,no_user_data_access")
+            }catch(e:Throwable){result.putBoolean("all_passed",false);result.putString("failure",e.stackTraceToString())}
+            finish(if(result.getBoolean("all_passed"))Activity.RESULT_OK else Activity.RESULT_CANCELED,result)
+            return
+        }
+        if(checkSelection=="connected_capture_deadline"){
+            val result=Bundle()
+            try{ConnectedCaptureDeadlineChecks.run();result.putBoolean("all_passed",true)
+                result.putString("checks","ARM_native_like_timeout,input_ownership,no_overlapping_workers,late_output_discarded,recovery_after_native_finishes,no_user_data_access")
+            }catch(e:Throwable){result.putBoolean("all_passed",false);result.putString("failure",e.stackTraceToString())}
+            finish(if(result.getBoolean("all_passed"))Activity.RESULT_OK else Activity.RESULT_CANCELED,result)
+            return
+        }
         if(checkSelection=="navigation_safety"){
             val result=Bundle()
             try{NavigationSafetyChecks.run(this);result.putBoolean("all_passed",true)

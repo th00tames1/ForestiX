@@ -21,10 +21,14 @@ data class RawCapturedFile(val file:String,val bytes:Int,val sha256:String){
         return f.readBytes().also{require(RawCaptureEvidenceIO.hash(it)==sha256){"Evidence checksum"}}
     }
 }
+data class RawCapturedAuxDepth(val width:Int,val height:Int,val depth:RawCapturedFile,val confidence:RawCapturedFile,
+    val depthSensorNanos:String,val confidenceSensorNanos:String,val cameraSensorNanos:String)
 data class RawCapturedFrame(val role:String,val width:Int,val height:Int,val depth:RawCapturedFile,val confidence:RawCapturedFile,
     val cameraFrameSeconds:Double?,val depthSensorSeconds:Double?,val depthTimeSource:String,val cameraPose:List<Double>,
     val intrinsics:List<Double>,val viewToDepth:List<Double>?,val viewportRevision:String?=null,
-    val sourceFrameId:String?=null,val depthSensorId:String?=null,val depthAgeNanoseconds:String?=null,val cameraSensorId:String?=null)
+    val sourceFrameId:String?=null,val depthSensorId:String?=null,val depthAgeNanoseconds:String?=null,val cameraSensorId:String?=null,
+    val auxiliaryRawDepth:RawCapturedAuxDepth?=null,val depthDiagnostics:Map<String,String> = emptyMap(),
+    val depthInputPolicy:String=DbhMeasurementDepth.LEGACY_FULL)
 data class RawCapturedImage(val role:String,val file:RawCapturedFile?,val width:Int,val height:Int,
     val cameraFrameSeconds:Double?,val imageSensorSeconds:Double?,val timeSource:String,val intrinsics:List<Double>,
     val cameraPose:List<Double>,val viewToImage:List<Double>?,val coordinateSpace:String="camera_pixels_native",
@@ -36,7 +40,8 @@ data class RawCaptureEvidence(val measurementId:String,val clock:String="elapsed
     val displayedResult:RawCapturedResult,val ai:FieldAIProvenance=FieldAIProvenance(),val frames:List<RawCapturedFrame> = emptyList(),
     val scalars:Map<String,Double> = emptyMap(),val replayValue:Double?=null,val replayDelta:Double?=null,
     val replayStatus:String="not_run",val version:Int=1,val images:List<RawCapturedImage>?=null,
-    val aiInference:JsonObject?=null,val aiEvidenceStatus:String?=null,val aiEvidenceReason:String?=null,val attemptFailureReason:String?=null){
+    val aiInference:JsonObject?=null,val aiEvidenceStatus:String?=null,val aiEvidenceReason:String?=null,val attemptFailureReason:String?=null,
+    val depthDiagnostics:JsonObject?=null){
     fun noteReplay(value:Double?):RawCaptureEvidence {
         val replay=value?.takeIf{it.isFinite()&&it>0};val delta=displayedResult.value?.let{v->replay?.minus(v)}
         return copy(replayValue=replay,replayDelta=delta,replayStatus=when{delta==null->"no_result";delta==0.0->"pass";else->"mismatch"})
@@ -49,6 +54,7 @@ data class RawCaptureEvidence(val measurementId:String,val clock:String="elapsed
         number("replay_value",replayValue);number("replay_delta",replayDelta);put("replay_status",replayStatus)
         aiInference?.let{put("ai_inference",it)};text("ai_evidence_status",aiEvidenceStatus);text("ai_evidence_reason",aiEvidenceReason)
         text("attempt_failure_reason",attemptFailureReason)
+        depthDiagnostics?.let{put("depth_diagnostics",it)}
         images?.let{values->put("images",JsonArray(values.map{imageJson(it)}))}
         put("frames",JsonArray(frames.map{frameJson(it)}))
     }
@@ -67,6 +73,13 @@ data class RawCaptureEvidence(val measurementId:String,val clock:String="elapsed
             f.viewToDepth?.let{put("view_to_depth",numbers(it))};text("viewport_revision",f.viewportRevision)
             text("source_frame_id",f.sourceFrameId);text("depth_sensor_id",f.depthSensorId)
             text("depth_age_nanoseconds",f.depthAgeNanoseconds);text("camera_sensor_id",f.cameraSensorId)
+            f.auxiliaryRawDepth?.let{r->put("auxiliary_raw_depth",buildJsonObject{
+                put("format","u16mm");put("confidence_format","u8_score_0_255");put("coordinate_space","depth_pixels_native")
+                put("width",r.width);put("height",r.height);put("depth",proofJson(r.depth));put("confidence",proofJson(r.confidence))
+                put("depth_sensor_ns",r.depthSensorNanos);put("confidence_sensor_ns",r.confidenceSensorNanos);put("camera_sensor_ns",r.cameraSensorNanos)
+            })}
+            if(f.depthDiagnostics.isNotEmpty())put("depth_diagnostics",buildJsonObject{f.depthDiagnostics.forEach{(k,v)->put(k,v)}})
+            put("depth_input_policy",f.depthInputPolicy)
         }
         internal fun proofJson(f:RawCapturedFile)=buildJsonObject{put("file",f.file);put("bytes",f.bytes);put("sha256",f.sha256)}
         internal fun proof(o:JsonObject)=RawCapturedFile(o.getValue("file").jsonPrimitive.content,o.getValue("bytes").jsonPrimitive.int,o.getValue("sha256").jsonPrimitive.content)
@@ -80,7 +93,13 @@ data class RawCaptureEvidence(val measurementId:String,val clock:String="elapsed
         internal fun frame(o:JsonObject)=RawCapturedFrame(o.s("role"),o.getValue("width").jsonPrimitive.int,o.getValue("height").jsonPrimitive.int,
             proof(o.getValue("depth").jsonObject),proof(o.getValue("confidence").jsonObject),o.d("camera_frame_seconds"),o.d("depth_sensor_seconds"),
             o.s("depth_time_source"),o.array("camera_pose"),o.array("intrinsics"),o["view_to_depth"]?.takeUnless{it==JsonNull}?.jsonArray?.map{it.jsonPrimitive.double},
-            o.os("viewport_revision"),o.os("source_frame_id"),o.os("depth_sensor_id"),o.os("depth_age_nanoseconds"),o.os("camera_sensor_id"))
+            o.os("viewport_revision"),o.os("source_frame_id"),o.os("depth_sensor_id"),o.os("depth_age_nanoseconds"),o.os("camera_sensor_id"),
+            o["auxiliary_raw_depth"]?.takeUnless{it==JsonNull}?.jsonObject?.let{r->
+                require(r.s("format")=="u16mm"&&r.s("confidence_format")=="u8_score_0_255"&&r.s("coordinate_space")=="depth_pixels_native")
+                RawCapturedAuxDepth(r.getValue("width").jsonPrimitive.int,r.getValue("height").jsonPrimitive.int,
+                    proof(r.getValue("depth").jsonObject),proof(r.getValue("confidence").jsonObject),r.s("depth_sensor_ns"),r.s("confidence_sensor_ns"),r.s("camera_sensor_ns"))
+            },o["depth_diagnostics"]?.takeUnless{it==JsonNull}?.jsonObject?.mapValues{it.value.jsonPrimitive.content}?:emptyMap(),
+            o.os("depth_input_policy")?:DbhMeasurementDepth.LEGACY_FULL)
         internal fun image(o:JsonObject)=RawCapturedImage(o.s("role"),o["file"]?.takeUnless{it==JsonNull}?.let{proof(it.jsonObject)},
             o.getValue("width").jsonPrimitive.int,o.getValue("height").jsonPrimitive.int,o.d("camera_frame_seconds"),o.d("image_sensor_seconds"),
             o.s("time_source"),o.array("intrinsics"),o.array("camera_pose"),o["view_to_image"]?.takeUnless{it==JsonNull}?.jsonArray?.map{it.jsonPrimitive.double},
@@ -95,8 +114,12 @@ data class RawCaptureEvidence(val measurementId:String,val clock:String="elapsed
                 o.d("replay_value"),o.d("replay_delta"),o.s("replay_status"),o.getValue("version").jsonPrimitive.int,
                 images=o["images"]?.takeUnless{it==JsonNull}?.jsonArray?.map{image(it.jsonObject)},
                 aiInference=o["ai_inference"]?.takeUnless{it==JsonNull}?.jsonObject,aiEvidenceStatus=o.os("ai_evidence_status"),
-                aiEvidenceReason=o.os("ai_evidence_reason"),attemptFailureReason=o.os("attempt_failure_reason"))
-                .also{require(it.version==1&&it.frames.size<=32&&it.frames.map{f->f.role}.toSet().size==it.frames.size);it.ai.validate()}
+                aiEvidenceReason=o.os("ai_evidence_reason"),attemptFailureReason=o.os("attempt_failure_reason"),
+                depthDiagnostics=o["depth_diagnostics"]?.takeUnless{it==JsonNull}?.jsonObject)
+                .also{require(it.version in 1..2&&it.frames.size<=32&&it.frames.map{f->f.role}.toSet().size==it.frames.size)
+                    require(it.frames.all{f->DbhMeasurementDepth.recognized(f.depthInputPolicy)})
+                    require(it.version>=2||it.frames.all{f->f.depthInputPolicy==DbhMeasurementDepth.LEGACY_FULL})
+                    it.ai.validate()}
         }
     }
 }
@@ -128,9 +151,17 @@ object RawCaptureEvidenceIO {
             listOf(f.fx,0.0,0.0,0.0,f.fy,0.0,f.cx,f.cy,1.0),f.depthFromViewAffine?.map{it.toDouble()},
             sourceFrameId=f.frameTimestampNanos.takeIf{it>0}?.let{"arcore_frame_ns:$it"},
             depthSensorId=clock?.depthSensorNanos?.let{"depth_image_ns:$it"},depthAgeNanoseconds=f.depthAgeNanos.toString(),
-            cameraSensorId=clock?.androidCameraNanos?.let{"android_camera_ns:$it"})
+            cameraSensorId=clock?.androidCameraNanos?.let{"android_camera_ns:$it"},
+            auxiliaryRawDepth=f.rawDepthEvidence?.let{r->
+                val raw=ByteBuffer.allocate(r.millimeters.size*2).order(ByteOrder.LITTLE_ENDIAN)
+                r.millimeters.forEach{raw.putShort(it)}
+                RawCapturedAuxDepth(r.width,r.height,write(raw.array(),"aux_raw_$role.u16",directory),
+                    write(r.confidence,"aux_raw_$role.conf.u8",directory),r.timestampNanos.toString(),
+                    r.confidenceTimestampNanos.toString(),r.cameraTimestampNanos.toString())
+            },depthDiagnostics=f.depthDiagnostics,depthInputPolicy=f.depthInputPolicy)
     }
     fun readFrame(m:RawCapturedFrame,directory:File):ArDepthFrame {
+        require(DbhMeasurementDepth.recognized(m.depthInputPolicy)){"Unsupported DBH depth input policy"}
         require(m.width in 1..4096&&m.height in 1..4096&&m.width.toLong()*m.height<=4*1024*1024&&
             m.cameraPose.size==16&&m.intrinsics.size==9&&(m.cameraPose+m.intrinsics).all{it.isFinite()}&&
             (m.viewToDepth?.let{it.size==6&&it.all{n->n.isFinite()}}?:true)){"Original frame geometry"}
@@ -140,9 +171,26 @@ object RawCaptureEvidenceIO {
         val timestamp=m.sourceFrameId?.removePrefix("arcore_frame_ns:")?.toLongOrNull()?:m.cameraFrameSeconds?.times(1e9)?.toLong()?:0L
         val depthTime=m.depthSensorId?.removePrefix("depth_image_ns:")?.toLongOrNull()?:m.depthSensorSeconds?.times(1e9)?.toLong()
         val cameraTime=m.cameraSensorId?.removePrefix("android_camera_ns:")?.toLongOrNull()
+        val recordedAge=m.depthAgeNanoseconds?.toLong()?:0L
+        // A known sensor-clock violation must not turn into age=0 during
+        // replay; missing historical clocks remain explicitly unknown.
+        val age=if(cameraTime!=null&&depthTime!=null&&!DbhDepthInputPolicy.acceptsSensorTimes(cameraTime,depthTime)&&
+            recordedAge in 0..DbhDepthInputPolicy.MAX_DEPTH_AGE_NANOS)
+            Long.MAX_VALUE else recordedAge
+        val auxiliary=m.auxiliaryRawDepth?.let{r->
+            require(r.width in 1..4096&&r.height in 1..4096&&r.width.toLong()*r.height<=4*1024*1024){"Auxiliary raw dimensions"}
+            val raw=r.depth.read(directory);val scores=r.confidence.read(directory);val n=r.width*r.height
+            require(raw.size==n*2&&scores.size==n){"Auxiliary raw bytes"}
+            val b=ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN)
+            val cameraNanos=r.cameraSensorNanos.toLong()
+            require(cameraTime==null||cameraTime==cameraNanos){"Raw/current frame camera identity mismatch"}
+            DbhRawDepthEvidence(r.width,r.height,ShortArray(n){b.short},scores,r.depthSensorNanos.toLong(),
+                r.confidenceSensorNanos.toLong(),cameraNanos)
+        }
         val output=ArDepthFrame(m.width,m.height,depth,confidence,m.intrinsics[0],m.intrinsics[4],m.intrinsics[6],m.intrinsics[7],
             m.cameraPose.map{it.toFloat()}.toFloatArray(),depthFromViewAffine=m.viewToDepth?.map{it.toFloat()}?.toFloatArray(),
-            frameTimestampNanos=timestamp,depthAgeNanos=m.depthAgeNanoseconds?.toLongOrNull()?:0L)
+            frameTimestampNanos=timestamp,depthAgeNanos=age,rawDepthEvidence=auxiliary,depthDiagnostics=m.depthDiagnostics,
+            depthInputPolicy=m.depthInputPolicy)
         if(cameraTime!=null&&depthTime!=null)RawFrameClockRegistry.register(output,cameraTime,depthTime)
         return output
     }

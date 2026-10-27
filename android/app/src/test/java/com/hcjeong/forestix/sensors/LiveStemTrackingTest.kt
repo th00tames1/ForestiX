@@ -84,10 +84,17 @@ class LiveStemTrackingTest {
         preview.reset(); assertNull(preview.guideExtent)
         assertEquals("Finding stem…", preview.guidance(false))
     }
-    @Test fun maskWithoutCentreIntersectionClearsOldGuide() {
+    @Test fun centreIntersectionMissKeepsOnlyHalfSecondBracketWithoutRefreshingClock() {
         val preview = LiveStemMaskPreview()
         preview.update(LiveStemObservation(null, mask(), stem()), 100.0)
         preview.update(LiveStemObservation(null, mask()), 100.1)
+        assertEquals(stem(),preview.guideExtent)
+        assertEquals(100.0,preview.guideSourceTime,0.0)
+        assertEquals(0.5,LiveStemMaskPreview.HOLD_SECONDS,0.0)
+        assertFalse(preview.matchesMeasurement(stem(),100.0))
+        assertEquals(stem(),preview.bracketForDepth(100.5))
+        assertNull(preview.bracketForDepth(100.5001))
+        assertNotNull(preview.expire(100.51))
         assertNull(preview.guideExtent)
         assertEquals("Aim at the trunk centre.", preview.guidance(false))
     }

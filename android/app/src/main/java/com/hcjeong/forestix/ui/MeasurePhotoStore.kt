@@ -140,6 +140,39 @@ object MeasurePhotoStore {
         File(directory(context), name).delete()
     }
 
+    /** Render the exact shutter input, never PixelCopy a later AR frame. */
+    suspend fun saveSnapshot(context:Context,reference:com.hcjeong.forestix.sensors.RawCameraJPEG,
+        mask:com.hcjeong.forestix.sensors.LiveStemMask?,guide:com.hcjeong.forestix.sensors.StemExtent,
+        viewWidth:Int,viewHeight:Int):String? = withContext(Dispatchers.IO) {
+        val source=BitmapFactory.decodeByteArray(reference.data,0,reference.data.size)?:return@withContext null
+        var target:Bitmap?=null;var output:File?=null;var keep=false
+        try {
+            val m=reference.metadata.viewToImage?:return@withContext null
+            if(m.size!=6||!m.all{it.isFinite()}||viewWidth<=1||viewHeight<=1)return@withContext null
+            val imageFromView=android.graphics.Matrix().apply {setValues(floatArrayOf(m[0].toFloat(),m[1].toFloat(),m[2].toFloat(),
+                m[3].toFloat(),m[4].toFloat(),m[5].toFloat(),0f,0f,1f))}
+            val viewFromImage=android.graphics.Matrix()
+            if(!imageFromView.invert(viewFromImage))return@withContext null
+            val scale=minOf(1f,1600f/maxOf(viewWidth,viewHeight))
+            target=Bitmap.createBitmap(maxOf(1,(viewWidth*scale).toInt()),maxOf(1,(viewHeight*scale).toInt()),Bitmap.Config.ARGB_8888)
+            val canvas=android.graphics.Canvas(target)
+            canvas.drawColor(android.graphics.Color.BLACK);canvas.scale(scale,scale)
+            canvas.drawBitmap(source,viewFromImage,android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG))
+            val paint=android.graphics.Paint().apply {color=android.graphics.Color.argb(46,0,255,0)}
+            mask?.let { val dx=viewWidth.toFloat()/it.width;val dy=viewHeight.toFloat()/it.height
+                for(run in it.runs)canvas.drawRect(run.start*dx,run.row*dy,run.end*dx,(run.row+1)*dy,paint) }
+            paint.color=android.graphics.Color.WHITE;paint.strokeWidth=2f/scale
+            val left=(guide.leftFraction*viewWidth).toFloat();val right=(guide.rightFraction*viewWidth).toFloat();val y=viewHeight/2f
+            canvas.drawLine(left,y,right,y,paint)
+            for(x in listOf(left,right))canvas.drawLine(x,y-7f/scale,x,y+7f/scale,paint)
+            val name="m-${UUID.randomUUID()}.jpg";output=file(context,name)
+            FileOutputStream(output).use { check(target.compress(Bitmap.CompressFormat.JPEG,80,it)) }
+            if(!isActive)return@withContext null
+            keep=true;name
+        } catch(error:Exception){Log.w(TAG,"Snapshot photo could not be saved",error);null}
+        finally {if(!keep)output?.delete();source.recycle();target?.recycle()}
+    }
+
     /// Load a stored photo, downsampled for a `targetPx` long edge. The one
     /// loader every viewer uses, so a photo that is on disk cannot render on
     /// one screen and fail on another.

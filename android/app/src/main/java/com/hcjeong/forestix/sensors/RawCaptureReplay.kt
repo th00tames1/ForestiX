@@ -19,15 +19,30 @@ import java.io.File
 import kotlin.math.tan
 
 object RawCaptureReplay {
+    /** Independent shadow comparison; does not change production replay or
+     * enter the calibration/winner registry with experimental algorithms. */
+    fun replayDepthComparison(dir:File,manifest:JSONObject)=manifest.optJSONObject("dbh_depth_comparison")?.let{
+        DbhDepthComparisonIO.replay(dir,manifest.getString("measurement_id"),
+            kotlinx.serialization.json.Json.parseToJsonElement(it.toString()) as kotlinx.serialization.json.JsonObject)
+            .also{report->DbhDepthComparisonIO.requireOriginalAssociation(report,
+                RawCaptureEvidence.parse(manifest.getJSONObject("capture_evidence").toString()))}
+    }
     fun rerunCapturedDbh(dir:File,manifest:JSONObject):Double? {
-        val text=manifest.optJSONObject("capture_evidence")?.toString()?:return null
-        val e=RawCaptureEvidence.parse(text)
+        if(!manifest.has("capture_evidence")||manifest.isNull("capture_evidence"))return null
+        return rerunDbh(dir,manifest,modernDbhFrames(dir,manifest))?.value
+    }
+    private fun modernDbhFrames(dir:File,manifest:JSONObject):List<ArDepthFrame> {
+        val e=RawCaptureEvidence.parse(manifest.getJSONObject("capture_evidence").toString())
         val descriptors=manifest.optJSONObject("dbh")?.optJSONArray("frames")
-        require(e.measurementId==manifest.optString("measurement_id")&&e.frames.isNotEmpty()&&
-            descriptors!=null&&e.frames.size==descriptors.length()&&
-            e.frames.withIndex().all{(i,f)->val d=descriptors.optJSONObject(i)
-                f.role=="dbh_$i"&&d!=null&&f.width==d.optInt("width")&&f.height==d.optInt("height")}){"Recorded DBH input identity"}
-        return rerunDbh(dir,manifest,e.frames.map{RawCaptureEvidenceIO.readFrame(it,dir)})?.value
+        require(descriptors!=null){"Recorded DBH descriptors"}
+        require(e.frames.withIndex().all{(i,f)->descriptors.optJSONObject(i)?.optString("depth_input_policy",DbhMeasurementDepth.LEGACY_FULL)==f.depthInputPolicy}){"Recorded input policy identity"}
+        val dimensions=(0 until descriptors.length()).map{val d=descriptors.getJSONObject(it);d.getInt("width") to d.getInt("height")}
+        return restoreOriginalDbhFrames(dir,manifest.optString("measurement_id"),e,dimensions)
+    }
+    internal fun restoreOriginalDbhFrames(dir:File,id:String,e:RawCaptureEvidence,dimensions:List<Pair<Int,Int>>):List<ArDepthFrame> {
+        require(e.measurementId==id&&e.frames.size in 1..32&&e.frames.size==dimensions.size&&
+            e.frames.withIndex().all{(i,f)->f.role=="dbh_$i"&&f.width==dimensions[i].first&&f.height==dimensions[i].second}){"Recorded DBH input identity"}
+        return e.frames.map{RawCaptureEvidenceIO.readFrame(it,dir)}
     }
     fun rerunCapturedHeight(manifest:JSONObject):Double? {
         val text=manifest.optJSONObject("capture_evidence")?.toString()?:return null
@@ -74,9 +89,15 @@ object RawCaptureReplay {
     /// cannot stand in for the original burst. Historical confidence is
     /// derived only when confidence_file was never recorded.
     fun reconstructDbhFrames(dir: File, manifest: JSONObject): List<ArDepthFrame> {
+        // Prefer the exact, checksummed input, including known depth age.
+        // Malformed modern evidence must NEVER fall back to age=0 legacy bytes.
+        val original=if(manifest.has("capture_evidence")&&!manifest.isNull("capture_evidence"))
+            runCatching{modernDbhFrames(dir,manifest)}.getOrElse{return emptyList()} else null
         val dbh = manifest.optJSONObject("dbh") ?: return emptyList()
         val frames = dbh.optJSONArray("frames") ?: return emptyList()
         if(frames.length() !in 1..32)return emptyList()
+        if(original==null&&(0 until frames.length()).any{frames.optJSONObject(it)?.optString("depth_input_policy",DbhMeasurementDepth.LEGACY_FULL)!=DbhMeasurementDepth.LEGACY_FULL})
+            return emptyList() // New policy cannot be replayed as age-free dense input.
         val out = ArrayList<ArDepthFrame>(frames.length())
         for (i in 0 until frames.length()) {
             val fo = frames.optJSONObject(i) ?: return emptyList()
@@ -97,7 +118,9 @@ object RawCaptureReplay {
                 ),
             )
         }
-        return out
+        // The legacy bundle completeness audit remains intact. Once it
+        // passes, calculate with the exact original, not age-free legacy input.
+        return original?:out
     }
 
     // MARK: - DBH re-run (shared production entry points)

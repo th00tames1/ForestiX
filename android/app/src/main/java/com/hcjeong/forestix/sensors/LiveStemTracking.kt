@@ -109,25 +109,34 @@ object LiveStemResultPolicy {
 /** Mask and Auto bracket availability, not a depth/capture lock.
  * Callers invalidate it separately when the camera mapping/pose changes. */
 class LiveStemMaskPreview {
-    companion object { const val HOLD_SECONDS = 0.6 }
+    companion object {
+        const val HOLD_SECONDS = 0.5
+        fun validGuide(guide:StemExtent?):StemExtent? = guide?.takeIf {
+            it.leftFraction.isFinite() && it.rightFraction.isFinite() && it.leftFraction >= 0 && it.rightFraction <= 1 &&
+                it.widthFraction in 0.02..0.95 && it.score.isFinite() && it.score >= 0.25f
+        }
+    }
     var current: LiveStemMask? = null; private set
     var guideExtent: StemExtent? = null; private set
     private var lastSeen = Double.NEGATIVE_INFINITY
     private var sourceTime = Double.NEGATIVE_INFINITY
-    fun reset() { current = null; guideExtent = null; lastSeen = Double.NEGATIVE_INFINITY; sourceTime = Double.NEGATIVE_INFINITY }
+    var guideSourceTime = Double.NEGATIVE_INFINITY; private set
+    private var guideSeen = Double.NEGATIVE_INFINITY
+    fun reset() {
+        current = null; guideExtent = null; lastSeen = Double.NEGATIVE_INFINITY; sourceTime = Double.NEGATIVE_INFINITY
+        guideSeen = Double.NEGATIVE_INFINITY; guideSourceTime = Double.NEGATIVE_INFINITY
+    }
     /** Exact visible span, without temporal confirmation or source-depth approval.
      * Caller still validates mask registration and runs the Adjust depth checks. */
     fun bracketForDepth(time: Double): StemExtent? {
         val guide = guideExtent ?: return null
-        if (current == null || !time.isFinite() || time < lastSeen || time - lastSeen > HOLD_SECONDS ||
-            time < sourceTime || time - sourceTime > LiveStemResultPolicy.PREVIEW_MAX_AGE_SECONDS ||
-            !guide.leftFraction.isFinite() || !guide.rightFraction.isFinite() ||
-            guide.leftFraction < 0 || guide.rightFraction > 1 || guide.widthFraction !in 0.02..0.95 ||
-            !guide.score.isFinite() || guide.score < 0.25f) return null
+        if (current == null || !time.isFinite() || time < guideSeen || time - guideSeen > HOLD_SECONDS ||
+            time < guideSourceTime || time - guideSourceTime > LiveStemResultPolicy.PREVIEW_MAX_AGE_SECONDS ||
+            validGuide(guide) == null) return null
         return guide
     }
     fun matchesMeasurement(extent: StemExtent?, time: Double): Boolean =
-        current != null && guideExtent != null && extent != null && time.isFinite() && time == sourceTime &&
+        current != null && guideExtent != null && extent != null && time.isFinite() && time == sourceTime && time == guideSourceTime &&
             guideExtent!!.leftFraction == extent.leftFraction && guideExtent!!.rightFraction == extent.rightFraction
     fun guidance(measurementReady: Boolean): String? = when {
         measurementReady -> null
@@ -142,7 +151,10 @@ class LiveStemMaskPreview {
         }
         // Keep the source clock as a hard limit; a miss never refreshes either clock.
         observation?.mask?.let {
-            current = it; guideExtent = observation.guideExtent; lastSeen = receivedAt; sourceTime = time
+            current = it; lastSeen = receivedAt; sourceTime = time
+            validGuide(observation.guideExtent)?.let { guide ->
+                guideExtent = guide; guideSeen = receivedAt; guideSourceTime = time
+            }
         }
         return expire(receivedAt)
     }
@@ -150,6 +162,10 @@ class LiveStemMaskPreview {
         if (!time.isFinite() || time < lastSeen || time - lastSeen > HOLD_SECONDS ||
             time - sourceTime > LiveStemResultPolicy.PREVIEW_MAX_AGE_SECONDS) {
             reset(); return null
+        }
+        if (time < guideSeen || time - guideSeen > HOLD_SECONDS ||
+            time - guideSourceTime > LiveStemResultPolicy.PREVIEW_MAX_AGE_SECONDS) {
+            guideExtent = null; guideSeen = Double.NEGATIVE_INFINITY; guideSourceTime = Double.NEGATIVE_INFINITY
         }
         return current
     }

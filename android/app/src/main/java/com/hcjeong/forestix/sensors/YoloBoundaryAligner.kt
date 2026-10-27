@@ -3,14 +3,16 @@ package com.hcjeong.forestix.sensors
 import android.content.Context
 import ai.onnxruntime.*
 import com.hcjeong.forestix.common.IdleResourceCache
+import com.hcjeong.forestix.common.SingleFlightGate
 import kotlin.math.*
 
 /** Cached YOLO26n graph; the placement is reviewed before capture. */
 class YoloBoundaryAligner private constructor(context:Context) {
     companion object {
         private val cache=IdleResourceCache<YoloBoundaryAligner>{runCatching{it.session.close()}}
+        private val executionGate=SingleFlightGate()
         fun <R> withShared(context:Context,operation:(YoloBoundaryAligner)->R):R =
-            cache.withResource({YoloBoundaryAligner(context.applicationContext)},operation)
+            executionGate.run { cache.withResource({YoloBoundaryAligner(context.applicationContext)},operation) }
         fun trimCached(){cache.trim()}
     }
     private val env=OrtEnvironment.getEnvironment()

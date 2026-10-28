@@ -11,11 +11,12 @@ import Common
 /// YOLO26n alignment with a cached inference session. Run on a worker queue.
 public final class YoloBoundaryAligner: @unchecked Sendable {
     private static let cache = IdleResourceCache<YoloBoundaryAligner>()
+    private static let executionGate = SingleFlightGate()
     private let imageContext = CIContext()
     private let inferenceLock = NSLock()
     private let workspace: YoloInferenceWorkspace
     public static func withShared<Result>(_ operation: (YoloBoundaryAligner) throws -> Result) throws -> Result {
-        try cache.withResource(create: { try YoloBoundaryAligner() },operation)
+        try executionGate.run { try cache.withResource(create: { try YoloBoundaryAligner() },operation) }
     }
     public static func trimCached() { cache.trim() }
     let environment: ORTEnv

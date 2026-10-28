@@ -56,6 +56,7 @@ public struct RawCapturedFrame: Codable, Sendable, Equatable {
     public var depthSensorId: String? = nil
     public var depthAgeNanoseconds: String? = nil
     public var cameraSensorId: String? = nil
+    public var depthInputPolicy: String? = nil
     enum CodingKeys: String, CodingKey {
         case role,width,height,depth,confidence,intrinsics
         case cameraFrameSeconds = "camera_frame_seconds", depthSensorSeconds = "depth_sensor_seconds"
@@ -63,6 +64,7 @@ public struct RawCapturedFrame: Codable, Sendable, Equatable {
         case viewportRevision = "viewport_revision"
         case sourceFrameId = "source_frame_id",depthSensorId = "depth_sensor_id"
         case depthAgeNanoseconds = "depth_age_nanoseconds",cameraSensorId = "camera_sensor_id"
+        case depthInputPolicy = "depth_input_policy"
     }
 }
 
@@ -155,7 +157,8 @@ public enum RawCaptureEvidenceIO {
     static func writeFrame(_ f: ARDepthFrame,role: String,directory: URL) throws -> RawCapturedFrame {
         guard f.width > 0, f.height > 0, f.width <= 4096, f.height <= 4096,
               f.depth.count <= 4*1024*1024, f.depth.count == f.width*f.height,
-              f.confidence.count == f.depth.count, f.confidence.allSatisfy({ $0 <= 2 }) else {
+              f.confidence.count == f.depth.count, f.confidence.allSatisfy({ $0 <= 2 }),
+              DBHMeasurementDepth.recognized(f.dbhDepthInputPolicy) else {
             throw FieldStudyError.invalid("original raw frame")
         }
         let words = f.depth.map { $0.bitPattern.littleEndian }
@@ -168,13 +171,15 @@ public enum RawCaptureEvidenceIO {
             cameraPose: RawCaptureMatrix.flat(f.cameraPoseWorld),
             intrinsics: (0..<3).flatMap { c in (0..<3).map { r in Double(f.intrinsics[c,r]) } },
             viewToDepth: f.viewMapping?.flattened,viewportRevision: f.viewportRevision.map(String.init),
-            sourceFrameId: "ar_frame_time_bits:"+String(f.timestamp.bitPattern,radix: 16))
+            sourceFrameId: "ar_frame_time_bits:"+String(f.timestamp.bitPattern,radix: 16),
+            depthInputPolicy: f.dbhDepthInputPolicy == DBHMeasurementDepth.legacy ? nil : f.dbhDepthInputPolicy)
     }
     public static func readFrame(_ meta: RawCapturedFrame,directory: URL) throws -> ARDepthFrame {
         guard meta.width > 0,meta.height > 0,meta.width <= 4096,meta.height <= 4096,
               meta.width*meta.height <= 4*1024*1024,meta.cameraPose.count == 16,meta.intrinsics.count == 9,
               (meta.cameraPose+meta.intrinsics).allSatisfy(\.isFinite),
-              meta.viewToDepth.map({ $0.count == 6 && $0.allSatisfy(\.isFinite) }) ?? true else {
+              meta.viewToDepth.map({ $0.count == 6 && $0.allSatisfy(\.isFinite) }) ?? true,
+              DBHMeasurementDepth.recognized(meta.depthInputPolicy ?? DBHMeasurementDepth.legacy) else {
             throw FieldStudyError.invalid("original frame geometry")
         }
         let count = meta.width*meta.height
@@ -189,6 +194,7 @@ public enum RawCaptureEvidenceIO {
         return ARDepthFrame(width: meta.width,height: meta.height,depth: depth,confidence: Array(confidence),intrinsics: k,
             cameraPoseWorld: RawCaptureMatrix.pose(meta.cameraPose),timestamp: meta.cameraFrameSeconds ?? 0,
             viewMapping: m.map { .init(a: $0[0],b: $0[1],tx: $0[2],c: $0[3],d: $0[4],ty: $0[5]) },
-            viewportRevision: meta.viewportRevision.flatMap(UInt64.init))
+            viewportRevision: meta.viewportRevision.flatMap(UInt64.init),
+            dbhDepthInputPolicy: meta.depthInputPolicy ?? DBHMeasurementDepth.legacy)
     }
 }

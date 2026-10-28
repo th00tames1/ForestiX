@@ -123,11 +123,15 @@ public struct RawCaptureManifest: Codable, Sendable {
         /// elevation of the AR camera's forward axis, on both platforms.
         /// Optional so bundles written before the field existed still decode.
         public var heightAngleSource: String?
+        public var dbhDepthInputPolicy: String? = nil
+        public var dbhDepthCalibrationEpoch: Int? = nil
         enum CodingKeys: String, CodingKey {
             case algorithm, units
             case captureMode = "capture_mode"
             case calibration
             case heightAngleSource = "height_angle_source"
+            case dbhDepthInputPolicy = "dbh_depth_input_policy"
+            case dbhDepthCalibrationEpoch = "dbh_depth_calibration_epoch"
         }
         public init(algorithm: String, units: String, captureMode: String, calibration: Calibration,
                     heightAngleSource: String? = "camera_pose") {
@@ -331,6 +335,7 @@ public struct RawCaptureManifest: Codable, Sendable {
             public var height: Int
             public var format: String       // "f32m" | "u16mm"
             public var confidenceFile: String?
+            public var depthInputPolicy: String?
             public var fx: Double
             public var fy: Double
             public var cx: Double
@@ -342,6 +347,7 @@ public struct RawCaptureManifest: Codable, Sendable {
             enum CodingKeys: String, CodingKey {
                 case depthFile = "depth_file"
                 case confidenceFile = "confidence_file"
+                case depthInputPolicy = "depth_input_policy"
                 case width, height, format, fx, fy, cx, cy
                 case tapPx = "tap_px"
                 case axis
@@ -351,12 +357,13 @@ public struct RawCaptureManifest: Codable, Sendable {
             public init(depthFile: String, width: Int, height: Int, format: String,
                         fx: Double, fy: Double, cx: Double, cy: Double,
                         tapPx: [Double], axis: String, cameraPose: [Double], viewToDepth: [Double],
-                        confidenceFile: String? = nil) {
+                        confidenceFile: String? = nil, depthInputPolicy: String? = nil) {
                 self.depthFile = depthFile; self.width = width; self.height = height
                 self.format = format; self.fx = fx; self.fy = fy; self.cx = cx; self.cy = cy
                 self.tapPx = tapPx; self.axis = axis
                 self.cameraPose = cameraPose; self.viewToDepth = viewToDepth
                 self.confidenceFile = confidenceFile
+                self.depthInputPolicy = depthInputPolicy
             }
         }
 
@@ -538,8 +545,20 @@ public enum RawCaptureError: Error, LocalizedError, Sendable {
 
 public enum RawCaptureStore {
 
+    #if DEBUG
+    /// Scoped to a synthetic test call; never a persisted app preference.
+    /// Release builds have no override and always use the user's container.
+    @TaskLocal static var testingRootDirectory: URL?
+    #endif
+
     /// Documents/raw-captures — the whole bundle tree.
     public static var rootDirectory: URL {
+        #if DEBUG
+        if let dir = testingRootDirectory {
+            try? FileManager.default.createDirectory(at:dir,withIntermediateDirectories:true)
+            return dir
+        }
+        #endif
         let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("raw-captures", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -1043,7 +1062,9 @@ public enum RawCaptureFrame {
     public static func reconstruct(from meta: RawCaptureManifest.DBHBundle.Frame,
                                    depth: [Float], confidence: [UInt8]? = nil) -> ARDepthFrame {
         var conf = confidence ?? [UInt8](repeating: 0, count: depth.count)
-        if confidence == nil { for i in 0..<depth.count where validDepth(depth[i]) { conf[i] = 2 } }
+        if confidence == nil && (meta.depthInputPolicy ?? DBHMeasurementDepth.legacy) == DBHMeasurementDepth.legacy {
+            for i in 0..<depth.count where validDepth(depth[i]) { conf[i] = 2 }
+        }
         let m = meta.viewToDepth
         let mapping: DepthViewMapping? = m.count == 6 && m.allSatisfy({ $0.isFinite })
             ? .init(a: m[0], b: m[1], tx: m[2], c: m[3], d: m[4], ty: m[5]) : nil
@@ -1056,7 +1077,8 @@ public enum RawCaptureFrame {
                                                     cx: meta.cx, cy: meta.cy),
             cameraPoseWorld: RawCaptureMatrix.pose(meta.cameraPose),
             timestamp: 0,
-            viewMapping: mapping)
+            viewMapping: mapping,
+            dbhDepthInputPolicy: meta.depthInputPolicy ?? DBHMeasurementDepth.legacy)
     }
 }
 

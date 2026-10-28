@@ -21,6 +21,12 @@ import AR
 import simd
 
 public struct DBHScanScreen: View {
+    /// A tally advances without rebuilding this screen. Give its next tree
+    /// a fresh Auto window, but do not reset it for a preview/lock dropout.
+    private struct AutoSafetyRun: Equatable {
+        let adjustActive: Bool
+        let treeNumber: Int?
+    }
 
     @StateObject private var viewModel: DBHScanViewModel
     @StateObject private var fieldCapture = FieldCaptureCoordinator()
@@ -721,7 +727,7 @@ public struct DBHScanScreen: View {
                     }
                     if bhGuideChromeVisible { bhGuideButton }
                     if isAiming {
-                        liveValueStrip
+                        liveValueSlot
                         MeasureShutterRow(
                             showsShutter: showsCaptureButton,
                             capture: captureTap,
@@ -848,7 +854,8 @@ public struct DBHScanScreen: View {
                 }
             }
         }
-        .task(id: viewModel.edgeAdjustActive) {
+        .task(id: AutoSafetyRun(adjustActive: viewModel.edgeAdjustActive,
+                                treeNumber: captureTreeNumber)) {
             guard !viewModel.edgeAdjustActive else { return }
             autoSafetyNotice = nil
             let started = ProcessInfo.processInfo.systemUptime
@@ -1213,9 +1220,9 @@ public struct DBHScanScreen: View {
     }
 
     /// Whether the floating "+" capture button is rendered. It stays on
-    /// screen for the whole aiming phase — a no-op until the crosshair
-    /// arms (`viewModel.tap` requires `.armed`) — so the control layout is
-    /// stable while the cruiser lines up.
+    /// screen for the whole aiming phase, so its layout never depends on
+    /// preview lock. Auto validates a fresh frozen input after the tap;
+    /// Adjust retains its existing current-depth capture checks.
     private var showsCaptureButton: Bool {
         switch viewModel.state {
         case .idle, .aligning, .armed: return true
@@ -1888,6 +1895,20 @@ public struct DBHScanScreen: View {
     /// cruiser never reads a value the burst would later reject. Phase
     /// 14.4 made the published preview match the burst's quality bar —
     /// the value on screen is the value you can record.
+    /// Reserve both value rows even when depth temporarily has no result.
+    /// Hidden sizing content follows the real typography without showing a
+    /// placeholder value or moving Set ground when either row disappears.
+    private var liveValueSlot: some View {
+        VStack(spacing: 4) {
+            MeasureValuePill("DBH", size: .large)
+                .hidden().accessibilityHidden(true)
+            MeasureValuePill("Distance", dimmed: true)
+                .hidden().accessibilityHidden(true)
+        }
+        .frame(maxWidth: .infinity)
+        .overlay { liveValueStrip }
+    }
+
     @ViewBuilder
     private var liveValueStrip: some View {
         if let cm = viewModel.previewDbhCm {
@@ -2671,17 +2692,30 @@ public struct DBHScanScreen: View {
         // previous burst's file behind on disk.
         discardHeldPhoto()
         hidingChromeForCapture = true
-        try? await Task.sleep(for: .milliseconds(80))
+        let capturedGeneration = viewModel.resultGeneration
+        let capturedID = viewModel.measurementId
+        if viewModel.resultCaptureMode != "segmented" {
+            try? await Task.sleep(for: .milliseconds(80))
+        }
         // THE SCREEN CAN BE LEFT INSIDE THAT SLEEP (the cruiser backs out,
         // the host dismisses the cover). This task is unstructured, so it
         // would still run: it would photograph whatever replaced this screen
         // and write a file that no reading and no `onDisappear` would ever
         // delete — an orphan in the photo store. Nothing is captured instead.
-        guard !hasLeftScreen else {
+        guard !hasLeftScreen, viewModel.resultGeneration == capturedGeneration,
+              viewModel.measurementId == capturedID else {
             hidingChromeForCapture = false
             return
         }
-        let shot = MeasurePhotoStore.captureWindow()
+        let shot: HeldMeasurePhoto?
+        if viewModel.resultCaptureMode == "segmented" {
+            if let reference = viewModel.snapshotReference, let guide = viewModel.snapshotGuide {
+                shot = MeasurePhotoStore.captureSnapshot(reference,mask: viewModel.snapshotMask,
+                    guide: guide,viewport: viewModel.snapshotViewSize)
+            } else { shot = nil } // Never substitute a later live photograph.
+        } else {
+            shot = MeasurePhotoStore.captureWindow()
+        }
         // Held IMMEDIATELY, before the bytes are on disk: an Accept tapped
         // while the JPEG is still encoding must attach this frame, not
         // nothing. The store keeps writing under this name regardless of who

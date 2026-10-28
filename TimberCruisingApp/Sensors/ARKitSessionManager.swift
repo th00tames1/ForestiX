@@ -167,6 +167,9 @@ public struct ARDepthFrame: Sendable {
     public let viewMapping: DepthViewMapping?
     /// Live-only stamp; raw replay does not depend on the current app viewport.
     public let viewportRevision: UInt64?
+    /// Missing in historical bundles: never reinterpret derived validity as
+    /// an original LiDAR confidence observation.
+    public let dbhDepthInputPolicy: String
 
     public init(
         width: Int,
@@ -177,7 +180,8 @@ public struct ARDepthFrame: Sendable {
         cameraPoseWorld: simd_float4x4,
         timestamp: TimeInterval,
         viewMapping: DepthViewMapping? = nil,
-        viewportRevision: UInt64? = nil
+        viewportRevision: UInt64? = nil,
+        dbhDepthInputPolicy: String = DBHMeasurementDepth.legacy
     ) {
         precondition(depth.count == width * height)
         precondition(confidence.count == width * height)
@@ -190,6 +194,7 @@ public struct ARDepthFrame: Sendable {
         self.timestamp = timestamp
         self.viewMapping = viewMapping
         self.viewportRevision = viewportRevision
+        self.dbhDepthInputPolicy = dbhDepthInputPolicy
     }
 
     @inlinable
@@ -731,6 +736,27 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
             sourceFrameId: "ar_frame_time_bits:"+String(frame.timestamp.bitPattern,radix: 16)))
     }
 
+    /// Shutter-only acquisition. Convert depth and copy RGB from ONE ARFrame;
+    /// do not combine a published (older) depth frame with current camera RGB.
+    public func captureDBHSnapshot() -> DBHCameraSnapshot? {
+        guard hasLiveFrame, let frame = session.currentFrame,
+              case .normal = frame.camera.trackingState,
+              ProcessInfo.processInfo.systemUptime - frame.timestamp <= 0.25 else { return nil }
+        let vp = viewport.withLock { $0 }
+        guard let depth = Self.convert(frame: frame, viewportSize: vp.size,
+            orientation: vp.orientation, viewportRevision: vp.revision), let map = depth.viewMapping else { return nil }
+        let buffer = frame.capturedImage, k = frame.camera.intrinsics
+        let width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer)
+        let sx = Double(width) / Double(depth.width), sy = Double(height) / Double(depth.height)
+        let image = RawCapturedImage(role: "inference_source", file: nil, width: width, height: height,
+            cameraFrameSeconds: frame.timestamp, imageSensorSeconds: nil, timeSource: "ar_frame_image_association",
+            intrinsics: (0..<3).flatMap { c in (0..<3).map { r in Double(k[c,r]) } },
+            cameraPose: RawCaptureMatrix.flat(frame.camera.transform),
+            viewToImage: [map.a*sx, map.b*sx, map.tx*sx, map.c*sy, map.d*sy, map.ty*sy],
+            coordinateSpace: "camera_pixels_native", sourceFrameId: "ar_frame_time_bits:"+String(frame.timestamp.bitPattern,radix: 16))
+        return DBHCameraSnapshot(frame: depth, buffer: buffer, image: image)
+    }
+
     public func currentCameraImageJPEG(quality: Double = 0.8) -> Data? {
         currentCameraImageJPEGSnapshot(quality: quality)?.data
     }
@@ -988,7 +1014,8 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
                                      orientation: orientation,
                                      depthWidth: width,
                                      depthHeight: height),
-            viewportRevision: viewportRevision
+            viewportRevision: viewportRevision,
+            dbhDepthInputPolicy: DBHMeasurementDepth.sensorConfidence
         )
     }
 }
@@ -1028,6 +1055,7 @@ public final class ARKitSessionManager: ObservableObject {
     public func trackedWorldAnchorPosition(id: UUID) -> SIMD3<Float>? { nil }
     public func currentCameraPixelBuffer() -> CVPixelBuffer? { nil }
     public func currentCameraInputSnapshot() -> RawCameraInput? { nil }
+    public func captureDBHSnapshot() -> DBHCameraSnapshot? { nil }
     public func currentCameraImageJPEG(quality: Double = 0.8) -> Data? { nil }
     public func currentCameraImageJPEGSnapshot(quality: Double = 0.8) -> RawCameraJPEG? { nil }
     public var trackingStayedNormal: Bool { false }

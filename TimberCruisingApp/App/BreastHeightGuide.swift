@@ -230,8 +230,9 @@ public final class BreastHeightGuide: ObservableObject {
     public func markers() -> [ARSceneMarker] {
         guard let base = drawPoint else { return [] }
         let white = SIMD4<Float>(1, 1, 1, stage == .placed ? 0.9 : 0.45)
+        let cyan = SIMD4<Float>(0, 1, 1, 0.95)
         var markers = [ARSceneMarker(id: Self.baseSphereId, worldPosition: base,
-                                    shape: .sphere(radiusM: 0.015), colorRGBA: white)]
+                                    shape: .sphere(radiusM: 0.0225), colorRGBA: cyan)]
         if stage == .placed {
             let h = Float(height.meters)
             markers.append(ARSceneMarker(id: Self.riserId,

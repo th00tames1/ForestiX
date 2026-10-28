@@ -63,8 +63,8 @@ public struct ProjectCalibration: Sendable, Equatable {
     /// The published diameter for a raw one — the ONLY place the cylinder
     /// coefficients may be applied, so the staleness check cannot be
     /// forgotten at one of the call sites.
-    public func appliedToRawCm(_ rawCm: Double) -> Double {
-        guard !calibrationIsStale else { return rawCm }
+    public func appliedToRawCm(_ rawCm: Double, expectedEpoch:Int = DBHEstimator.estimatorEpoch) -> Double {
+        guard (dbhCorrectionAlpha == 0 && dbhCorrectionBeta == 1) || dbhCalibrationEpoch == expectedEpoch else { return rawCm }
         return Double(dbhCorrectionAlpha) + Double(dbhCorrectionBeta) * rawCm
     }
     /// §7.2 VIO drift fraction — σ_d = vioDriftFraction · d_h. Default 0.02.
@@ -175,14 +175,16 @@ public enum DBHEstimator {
     /// still rejected. The floor stays at 2.5 cm.
     public static let plausibleDiameterCm: ClosedRange<Double> = 2.5...300.0
 
-    /// How far the phone may be from the trunk for the tap's depth sample to
-    /// be usable, in METRES. A property of the depth camera, not a preference:
-    /// closer than half a metre the sensor has nothing to triangulate, further
-    /// than three the per-pixel depth noise swamps a stem's curvature. Named
-    /// so the guard and the recovery sentence read it from one place.
+    /// DBH input admission range in metres, shared by Auto, Adjust and hints.
+    /// Being in range is necessary, not a guarantee of accurate scene depth.
     /// `Float` because the depth map is — `medianDepth` returns one, and a
     /// Double range here would only add a conversion at the guard.
-    public static let usableTapDepthM: ClosedRange<Float> = 0.5...3.0
+    public static let usableTapDepthM: ClosedRange<Float> = 0.5...5.0
+
+    public static func isUsableDepthM(_ depth: Double) -> Bool {
+        depth.isFinite && depth >= Double(usableTapDepthM.lowerBound)
+            && depth <= Double(usableTapDepthM.upperBound)
+    }
 
     /// §7.9 tier thresholds, named once so the cruiser-facing confidence
     /// explainer can QUOTE the numbers the checks apply instead of carrying a
@@ -222,6 +224,7 @@ public enum DBHEstimator {
     /// a `.red` `DBHResult` carrying `rejectionReason`.
     public static func estimate(input: DBHScanInput) -> DBHResult? {
         guard input.frames.count == 1 || input.frames.count >= 5 else { return nil }
+        guard DBHMeasurementDepth.acceptsWindow(input.frames) else { return nil }
 
         // Step 2: depth + confidence at tap (last frame, 5×5 median).
         guard let lastFrame = input.frames.last else { return nil }
@@ -432,7 +435,7 @@ public enum DBHEstimator {
 
         // Step 10: apply cylinder calibration.
         let dbhRawCm = 2 * r * 100
-        let dbhCm = cal.appliedToRawCm(dbhRawCm)
+        let dbhCm = cal.appliedToRawCm(dbhRawCm,expectedEpoch:DBHMeasurementDepth.calibrationEpoch(input.frames[0].dbhDepthInputPolicy))
 
         // Step 11: build the DBHResult.
         return DBHResult(
@@ -877,7 +880,7 @@ public enum DBHEstimator {
     ) -> PreviewFit? {
         guard let rawTapDepth = medianDepth(around: tapPixel, frame: frame, radius: 2)
         else { return nil }
-        guard (0.5...3.0).contains(rawTapDepth) else { return nil }
+        guard usableTapDepthM.contains(rawTapDepth) else { return nil }
 
         // Phase 18.1 — depth-window anchoring. The 5×5 median is stable
         // *within* a frame but fluctuates 5–10 cm frame-to-frame because
@@ -1291,14 +1294,10 @@ public enum DBHEstimator {
         discontinuityThresholdM: Float = 0.30
     ) -> PreviewFit? {
         _ = discontinuityThresholdM  // chord uses silhouetteJumpM, kept for sig parity
-        // Guard 1 — tap depth must be in the LiDAR-usable range. Phase
-        // 19 widened this from 0.5–3.0 m to 0.3–5.0 m to match the
-        // sensor's actual envelope; chord widths stay reliable across
-        // that whole band because a wider field-of-view gives more
-        // pixels to median over.
+        // Tap and sampled surface depth share the DBH admission range.
         guard let dTap = medianDepth(around: tapPixel, frame: frame, radius: 2)
         else { return nil }
-        guard (0.3...5.0).contains(dTap) else { return nil }
+        guard usableTapDepthM.contains(dTap) else { return nil }
 
         let focal: Double
         switch guideAxis {
@@ -1346,14 +1345,11 @@ public enum DBHEstimator {
         // The neighbouring rows grade boundary consistency only. The displayed
         // guide span and the committed value use this measurement row's actual
         // boundaries, central-80% median and the same correction as Adjust/AI.
-        guard let (diameterCm, sampledDepth) = BoundaryAlignment.sampledDepth(
-            width: walkLength, left: Double(extent.left), right: Double(extent.right), focal: focal,
-            depthAt: { idx in
-                let (x, y) = pixelCoords(axis: guideAxis, idx: idx)
-                return Double(frame.depth(atX: x, y: y))
-            }) else { return nil }
+        guard let (diameterCm, sampledDepth) = DBHMeasurementDepth.sample(
+            frame:frame,axis:guideAxis,left:Double(extent.left),right:Double(extent.right),
+            focal:focal) else { return nil }
         let diameterM = diameterCm / 100.0
-        guard plausibleDiameterCm.contains(diameterCm) else { return nil }
+        guard isUsableDepthM(sampledDepth), plausibleDiameterCm.contains(diameterCm) else { return nil }
 
         // Confidence: width consistency. Tight CoV ⇒ green; otherwise
         // yellow (renders as a silent / "gray" chip in the HUD per
@@ -1422,12 +1418,13 @@ public enum DBHEstimator {
     /// `.yellow` when they spread, `.red` only when too few frames
     /// produced a chord at all.
     public static func chordEstimate(input: DBHScanInput) -> DBHResult? {
+        guard DBHMeasurementDepth.acceptsWindow(input.frames) else { return nil }
         if input.frames.count == 1, let frame = input.frames.first {
             guard let fit = chordPreviewFit(
                 frame: frame, tapPixel: input.tapPixel, guideAxis: input.guideAxis,
                 discontinuityThresholdM: input.projectCalibration.depthDiscontinuityM)
             else { return nil }
-            return singleFrameResult(fit, calibration: input.projectCalibration)
+            return singleFrameResult(fit, calibration: input.projectCalibration, inputPolicy:frame.dbhDepthInputPolicy)
         }
         guard input.frames.count >= 5 else { return nil }
 
@@ -1469,7 +1466,7 @@ public enum DBHEstimator {
         // ends up identical to what a trained Cylinder calibration on
         // a chord-method burst would expect.
         let cal = input.projectCalibration
-        let dbhCm = cal.appliedToRawCm(medianRawCm)
+        let dbhCm = cal.appliedToRawCm(medianRawCm,expectedEpoch:DBHMeasurementDepth.calibrationEpoch(input.frames[0].dbhDepthInputPolicy))
 
         // Median centre across frames for the persisted XZ — robust to
         // a frame or two with bad depth.
@@ -1508,6 +1505,7 @@ public enum DBHEstimator {
         calibration cal: ProjectCalibration
     ) -> DBHResult? {
         guard frames.count == 1 || frames.count >= 5 else { return nil }
+        guard DBHMeasurementDepth.acceptsWindow(frames) else { return nil }
         let tapAlong = tapAlongAxis(tapPixel, axis: guideAxis)
 
         var diameters: [Double] = []
@@ -1515,7 +1513,7 @@ public enum DBHEstimator {
         var centersZ: [Double] = []
         for frame in frames {
             guard let dTap = medianDepth(around: tapPixel, frame: frame, radius: 2),
-                  (0.3...5.0).contains(dTap) else { continue }
+                  usableTapDepthM.contains(dTap) else { continue }
             let strip = extractGuideStemStrip(
                 frame: frame, axis: guideAxis, tapAlongAxis: tapAlong,
                 dTap: dTap, deltaDepth: guideStripDepthBudgetM,
@@ -1561,7 +1559,7 @@ public enum DBHEstimator {
         let cov = mean > 0 ? (hi - lo) / mean : 1
         let tier: ConfidenceTier = frames.count > 1 && cov <= TierThresholds.frameSpreadGreen ? .green : .yellow
 
-        let dbhCm = cal.appliedToRawCm(medianRawCm)
+        let dbhCm = cal.appliedToRawCm(medianRawCm,expectedEpoch:DBHMeasurementDepth.calibrationEpoch(frames[0].dbhDepthInputPolicy))
 
         let sortedCx = centersX.sorted()
         let sortedCz = centersZ.sorted()
@@ -1996,13 +1994,12 @@ public enum DBHEstimator {
         let walkWidth = isColumn ? frame.height : frame.width
         let walkHeight = isColumn ? frame.width : frame.height
         guard fixed >= 0, fixed < walkHeight,
-              let (diameterCm,z) = BoundaryAlignment.sampledDepth(
-                width:walkWidth,left:lo*Double(walkWidth),right:hi*Double(walkWidth),
-                focal:Double(frame.intrinsics[isColumn ? 1:0,isColumn ? 1:0]),
-                depthAt: { x in Double(frame.depth(atX:isColumn ? fixed:x,y:isColumn ? x:fixed)) })
+              let (diameterCm,z) = DBHMeasurementDepth.sample(
+                frame:frame,axis:guideAxis,left:lo*Double(walkWidth),right:hi*Double(walkWidth),
+                focal:Double(frame.intrinsics[isColumn ? 1:0,isColumn ? 1:0]))
         else { return nil }
         let diameterM = diameterCm / 100.0
-        guard plausibleDiameterCm.contains(diameterCm) else { return nil }
+        guard isUsableDepthM(z), plausibleDiameterCm.contains(diameterCm) else { return nil }
 
         // Centre for the cylinder overlay + distance HUD — bracket
         // midpoint back-projected at its depth, pushed one radius behind
@@ -2051,10 +2048,11 @@ public enum DBHEstimator {
         rightFraction: Double,
         calibration cal: ProjectCalibration
     ) -> DBHResult? {
+        guard DBHMeasurementDepth.acceptsWindow(frames) else { return nil }
         if frames.count == 1, let frame = frames.first {
             guard let fit = bracketChordFit(frame: frame, guideAxis: guideAxis,
                 leftFraction: leftFraction, rightFraction: rightFraction) else { return nil }
-            return singleFrameResult(fit, calibration: cal)
+            return singleFrameResult(fit, calibration: cal, inputPolicy:frame.dbhDepthInputPolicy)
         }
         guard frames.count >= 5 else { return nil }
 
@@ -2090,7 +2088,7 @@ public enum DBHEstimator {
         let cov = mean > 0 ? (hi - lo) / mean : 1
         let tier: ConfidenceTier = cov <= TierThresholds.frameSpreadGreen ? .green : .yellow
 
-        let dbhCm = cal.appliedToRawCm(medianRawCm)
+        let dbhCm = cal.appliedToRawCm(medianRawCm,expectedEpoch:DBHMeasurementDepth.calibrationEpoch(frames[0].dbhDepthInputPolicy))
 
         let sortedCx = centersX.sorted()
         let sortedCz = centersZ.sorted()
@@ -2113,8 +2111,8 @@ public enum DBHEstimator {
 
     /// Preserve within-frame quality checks; one frame has no temporal spread.
     private static func singleFrameResult(_ fit: PreviewFit,
-                                          calibration: ProjectCalibration) -> DBHResult {
-        DBHResult(diameterCm: Float(calibration.appliedToRawCm(fit.diameterCm)),
+                                          calibration: ProjectCalibration, inputPolicy:String = DBHMeasurementDepth.legacy) -> DBHResult {
+        DBHResult(diameterCm: Float(calibration.appliedToRawCm(fit.diameterCm,expectedEpoch:DBHMeasurementDepth.calibrationEpoch(inputPolicy))),
                   centerXZ: SIMD2<Float>(Float(fit.centerWorldXZ.x), Float(fit.centerWorldXZ.y)),
                   arcCoverageDeg: Float(fit.arcDeg), rmseMm: Float(fit.rmseMm),
                   sigmaRmm: 0, nInliers: fit.inlierCount, confidence: fit.tier,

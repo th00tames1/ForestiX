@@ -46,6 +46,7 @@
 
 import Foundation
 import SwiftUI
+import Sensors
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -145,6 +146,11 @@ public enum MeasurePhotoStore {
         let image = renderer.image { _ in
             window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
         }
+        return holdImage(image)
+    }
+
+    @MainActor
+    private static func holdImage(_ image: UIImage) -> HeldMeasurePhoto {
         let name = "m-\(UUID().uuidString).jpg"
         let frame = RenderedFrame(image: image)
         writes.begin(name)
@@ -159,6 +165,39 @@ public enum MeasurePhotoStore {
             }
         }
         return HeldMeasurePhoto(name: name, written: written)
+    }
+
+    /// Auto photos use the owned shutter RGB and final bounds, not a later live frame.
+    @MainActor
+    public static func captureSnapshot(_ reference: RawCameraJPEG, mask: LiveStemMask?,
+                                       guide: StemExtent, viewport: CGSize) -> HeldMeasurePhoto? {
+        guard let image = UIImage(data: reference.data), let m = reference.metadata.viewToImage,
+              m.count == 6,m.allSatisfy(\.isFinite),abs(m[0]*m[4]-m[1]*m[3]) > 1e-9,
+              viewport.width > 1,viewport.height > 1 else { return nil }
+        let format = UIGraphicsImageRendererFormat.preferred()
+        format.scale = min(renderScale,1600/max(viewport.width,viewport.height)); format.opaque = true
+        format.preferredRange = .standard
+        let renderer = UIGraphicsImageRenderer(size: viewport,format: format)
+        let photo = renderer.image { context in
+            let cg = context.cgContext
+            UIColor.black.setFill(); cg.fill(CGRect(origin: .zero,size: viewport))
+            cg.saveGState()
+            cg.concatenate(CGAffineTransform(a: m[0],b: m[3],c: m[1],d: m[4],tx: m[2],ty: m[5]).inverted())
+            image.draw(in: CGRect(x: 0,y: 0,width: reference.metadata.width,height: reference.metadata.height))
+            cg.restoreGState()
+            if let mask {
+                UIColor.green.withAlphaComponent(0.18).setFill()
+                let dx = viewport.width/CGFloat(mask.width),dy = viewport.height/CGFloat(mask.height)
+                for run in mask.runs { cg.fill(CGRect(x: CGFloat(run.start)*dx,y: CGFloat(run.row)*dy,
+                    width: CGFloat(run.end-run.start)*dx,height: dy)) }
+            }
+            cg.setStrokeColor(UIColor.white.cgColor);cg.setLineWidth(2)
+            let left = guide.leftFraction*viewport.width,right = guide.rightFraction*viewport.width,y = viewport.height/2
+            cg.move(to: CGPoint(x: left,y: y));cg.addLine(to: CGPoint(x: right,y: y))
+            for x in [left,right] {cg.move(to: CGPoint(x: x,y: y-7));cg.addLine(to: CGPoint(x: x,y: y+7))}
+            cg.strokePath()
+        }
+        return holdImage(photo)
     }
 
     /// The rendered frame on its way to the write queue. A `UIImage` from

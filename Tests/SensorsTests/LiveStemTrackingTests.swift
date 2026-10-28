@@ -89,10 +89,17 @@ final class LiveStemTrackingTests: XCTestCase {
         preview.reset(); XCTAssertNil(preview.guideExtent)
         XCTAssertEqual(preview.guidance(measurementReady: false), "Finding stem…")
     }
-    func testMaskWithoutCentreIntersectionClearsOldGuide() {
+    func testCentreIntersectionMissKeepsOnlyHalfSecondBracketWithoutRefreshingItsClock() {
         var preview = LiveStemMaskPreview()
         preview.update(LiveStemObservation(extent: nil, mask: mask(), guideExtent: stem()), at: 100)
         preview.update(LiveStemObservation(extent: nil, mask: mask()), at: 100.1)
+        XCTAssertEqual(preview.guideExtent, stem())
+        XCTAssertEqual(preview.guideSourceTime, 100)
+        XCTAssertEqual(LiveStemMaskPreview.holdSeconds, 0.5)
+        XCTAssertFalse(preview.matchesMeasurement(stem(), at: 100))
+        XCTAssertEqual(preview.bracketForDepth(at: 100.5), stem())
+        XCTAssertNil(preview.bracketForDepth(at: 100.5001))
+        XCTAssertNotNil(preview.expire(at: 100.51)) // New mask may stay visible, old bracket may not.
         XCTAssertNil(preview.guideExtent)
         XCTAssertEqual(preview.guidance(measurementReady: false), "Aim at the trunk centre.")
     }

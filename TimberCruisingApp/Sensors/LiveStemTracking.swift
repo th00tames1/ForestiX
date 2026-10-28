@@ -123,29 +123,38 @@ public enum LiveStemResultPolicy {
 /// Mask and Auto bracket availability, not a depth/capture lock.
 /// Callers still invalidate this preview when its camera mapping/pose changes.
 public struct LiveStemMaskPreview: Sendable {
-    public static let holdSeconds = 0.6
+    public static let holdSeconds = 0.5
     public private(set) var current: LiveStemMask?
     public private(set) var guideExtent: StemExtent?
     private var lastSeen = -Double.infinity
     private var sourceTime = -Double.infinity
+    public private(set) var guideSourceTime = -Double.infinity
+    private var guideSeen = -Double.infinity
 
     public init() {}
-    public mutating func reset() { current = nil; guideExtent = nil; lastSeen = -.infinity; sourceTime = -.infinity }
+    public mutating func reset() {
+        current = nil; guideExtent = nil; lastSeen = -.infinity; sourceTime = -.infinity
+        guideSeen = -.infinity; guideSourceTime = -.infinity
+    }
+    public static func validGuide(_ guide: StemExtent?) -> StemExtent? {
+        guard let guide,guide.leftFraction.isFinite,guide.rightFraction.isFinite,
+              guide.leftFraction >= 0,guide.rightFraction <= 1,
+              (0.02...0.95).contains(guide.widthFraction),guide.score.isFinite,guide.score >= 0.25 else { return nil }
+        return guide
+    }
     /// Exact visible mask span; no temporal confirmation or source-depth approval.
     /// Callers must still validate mask registration and run Adjust depth checks.
     public func bracketForDepth(at time: Double) -> StemExtent? {
         guard current != nil, let guide = guideExtent, time.isFinite,
-              time >= lastSeen, time - lastSeen <= Self.holdSeconds,
-              time >= sourceTime, time - sourceTime <= LiveStemResultPolicy.previewMaxAgeSeconds,
-              guide.leftFraction.isFinite, guide.rightFraction.isFinite,
-              guide.leftFraction >= 0, guide.rightFraction <= 1,
-              (0.02...0.95).contains(guide.widthFraction),
-              guide.score.isFinite, guide.score >= 0.25 else { return nil }
+              time >= guideSeen, time - guideSeen <= Self.holdSeconds,
+              time >= guideSourceTime, time - guideSourceTime <= LiveStemResultPolicy.previewMaxAgeSeconds,
+              Self.validGuide(guide) != nil else { return nil }
         return guide
     }
     /// A previous frame, a smoothed/different span, or display alone cannot arm capture.
     public func matchesMeasurement(_ extent: StemExtent?, at time: Double) -> Bool {
-        guard current != nil, let guideExtent, let extent, time.isFinite, time == sourceTime else { return false }
+        guard current != nil, let guideExtent, let extent, time.isFinite,
+              time == sourceTime, time == guideSourceTime else { return false }
         return guideExtent.leftFraction == extent.leftFraction && guideExtent.rightFraction == extent.rightFraction
     }
     public func guidance(measurementReady: Bool) -> String? {
@@ -163,7 +172,12 @@ public struct LiveStemMaskPreview: Sendable {
         // Hold starts when a real mask arrives, not when slow inference began.
         // Its original camera timestamp still imposes a hard stale-image limit.
         if let mask = observation?.mask {
-            current = mask; guideExtent = observation?.guideExtent; lastSeen = received; sourceTime = time
+            current = mask; lastSeen = received; sourceTime = time
+            // A one-frame hole in the centre intersection is not a new width.
+            // Keep only the last real bracket, on its OWN non-refreshing clock.
+            if let guide = Self.validGuide(observation?.guideExtent) {
+                guideExtent = guide; guideSeen = received; guideSourceTime = time
+            }
         }
         return expire(at: received)
     }
@@ -172,6 +186,10 @@ public struct LiveStemMaskPreview: Sendable {
         guard time.isFinite, time >= lastSeen, time - lastSeen <= Self.holdSeconds,
               time - sourceTime <= LiveStemResultPolicy.previewMaxAgeSeconds else {
             reset(); return nil
+        }
+        if time < guideSeen || time - guideSeen > Self.holdSeconds ||
+            time - guideSourceTime > LiveStemResultPolicy.previewMaxAgeSeconds {
+            guideExtent = nil; guideSeen = -.infinity; guideSourceTime = -.infinity
         }
         return current
     }
